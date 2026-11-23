@@ -73,8 +73,11 @@ fn run() ! Error {
     try check(url1.starts_with("http://127.0.0.1:"), "the instance starts inside the program, on 127.0.0.1")
     var app = try App.start(url1.copy(), token1.copy())
     _ = try app.until("core.conn", "state", String("live"), 10000)
-    let added = try app.until("event", "kind", String("device.added"), 5000)
-    try check(str_at(at(added, "device"), "name") == some(String("This computer")), "the core connects with this launch's token, as this computer")
+    // Its device.added comes in the catch-up, which the app hears of with synced.
+    let synced = try app.until("synced", "", String(), 5000)
+    app.send(Obj.new().s("t", String("core.get")).s("id", String("g_1")).s("what", String("devices")).done())
+    let devices = try app.until("core.data", "id", String("g_1"), 5000)
+    try check("{at(at(synced, "held"), "kinds")}".contains("device.added") and "{at(devices, "items")}".contains("This computer"), "the core connects with this launch's token, as this computer")
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("acp.list")).done())
     _ = try app.until("result", "id", String("q_1"), 5000)
     try check(true, "and the instance answers it")

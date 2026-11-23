@@ -13,6 +13,7 @@ module tests.protocol.core_conn
 import std.env
 import std.fs
 import std.json.{Json, parse}
+import std.net.{Waker}
 import std.process.{Child, Command, Stdio, exit}
 import std.random.{Random}
 import std.time.{Instant}
@@ -37,10 +38,13 @@ fn check(passed: bool, what: str) ! Error {
 }
 
 // The app's side of a running connection: what it sends the core, and what
-// the core tells it.
+// the core tells it. As in the app, each send wakes the core's loop, which
+// otherwise waits for the socket, its requests and its timers.
 struct App {
     to_core: Sender<String>
     from_core: Receiver<String>
+    wakers: Receiver<Waker>
+    waker: Waker?
     thread: Thread?
 }
 
@@ -51,13 +55,21 @@ impl App {
         let inbox = Receiver<String>()
         let to_core = inbox.sender()
         let from_core = Receiver<String>()
-        let conn = Conn.new(some("http://{base}"), token, service.copy(), try Cache.open(cache.copy()), inbox, from_core.sender())
+        let wakers = Receiver<Waker>()
+        var conn = Conn.new(some("http://{base}"), token, service.copy(), try Cache.open(cache.copy()), inbox, from_core.sender())
+        conn.wakers_to = some(wakers.sender())
         let t = unsafe { Thread.spawn(conn) }
-        return App { to_core: to_core, from_core: from_core, thread: some(t) }
+        return App { to_core: to_core, from_core: from_core, wakers: wakers, waker: none, thread: some(t) }
+    }
+
+    fn tell(mut self, text: own String) {
+        self.to_core.send(text)
+        while let w = self.wakers.next() { self.waker = some(w) }
+        if let w = self.waker { w.wake() }
     }
 
     fn send(mut self, frame: Json) {
-        self.to_core.send("{frame}")
+        self.tell("{frame}")
     }
 
     // Reads what the core says until a frame whose `t` is `t` and, if `field` isn't
@@ -75,7 +87,7 @@ impl App {
     }
 
     fn stop(mut self) {
-        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        self.tell(String(#"{"t":"core.stop"}"#))
         if let t = self.thread.take() {
             t.join()
         }
@@ -120,10 +132,19 @@ fn run(server: mut Child, data: String) ! Error {
     _ = try app.until("core.conn", "state", "connecting", 5000)
     let live = try app.until("core.conn", "state", "live", 10000)
     try check(str_at(live, "state") == some(String("live")), "it connects, says hello and is welcomed")
-    let added = try app.until("event", "kind", "device.added", 5000)
-    try check(int_at(added, "seq") == some(1), "it catches up from its cursor")
-    _ = try app.until("synced", "", "", 5000)
-    println("ok    and says synced")
+    // Catching up, the app hears of no event one by one, but of each kind with synced.
+    var heard = 0
+    var synced = Json.Null
+    while synced == Json.Null {
+        let m = unsafe { app.from_core.wait_for(5000 * 1000000) } else { fail "no synced came in 5 s" }
+        let f = try parse(m)
+        let t = str_at(f.copy(), "t") ?? String()
+        if t == "event" { heard += 1 }
+        if t == "synced" { synced = f }
+    }
+    try check(heard == 0 and "{at(at(synced, "held"), "kinds")}" == #"["device.added"]"#, "it catches up from its cursor, and the app hears of it once, with synced")
+    app.send(Obj.new().s("t", String("core.get")).s("id", String("g_0")).s("what", String("devices")).done())
+    try check("{at(try app.until("core.data", "id", "g_0", 5000), "items")}".contains("Desk PC"), "and the cache has what it held")
 
     // --- Whether the instance is behind the newest release ---
     app.send(Obj.new().s("t", String("release")).s("version", String("99.0.0")).done())
@@ -168,7 +189,7 @@ fn run(server: mut Child, data: String) ! Error {
     let conversation = str_at(at(conv, "value"), "conversation") ?? String()
     app.send(Obj.new().s("t", String("core.get")).s("id", String("g_1")).s("what", String("conversations")).done())
     let listed_convs = try app.until("core.data", "id", "g_1", 5000)
-    try check("{at(listed_convs, "items")}".contains("Builds"), "the cache keeps the conversation the events made")
+    try check("{at(listed_convs, "items")}".contains("Builds") and "{at(listed_convs, "items")}".contains(#""last":"#), "the cache keeps the conversation the events made, with when its newest message is from")
     app.send(Obj.new().s("t", String("cmd")).s("id", String("q_p")).s("name", String("acp.list")).done())
     let programs = try app.until("result", "id", "q_p", 5000)
     try check("{at(at(programs, "value"), "programs")}".contains("\"name\":\"fake\""), "acp.list gives the agent programs installed")

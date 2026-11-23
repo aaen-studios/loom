@@ -39,7 +39,9 @@ const TABLES: [str; 7] = ["agents", "conversations", "messages", "devices", "run
 
 // What each list the app reads is, in order.
 const AGENTS: str = "SELECT json FROM agents ORDER BY rowid"
-const CONVERSATIONS: str = "SELECT json FROM conversations ORDER BY last DESC, rowid DESC"
+// Each conversation with `last`, when its newest message is from, which orders them, so
+// the app keeps the order as messages come without reading the list again.
+const CONVERSATIONS: str = "SELECT json_set(json, '$.last', last) FROM conversations ORDER BY last DESC, rowid DESC"
 const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
 const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
 // What a tool block shows of each call: its call, run, title and status, its block in
@@ -710,6 +712,8 @@ fn applies_events_with_the_cursor() ! Error {
     _ = try c.apply(ev(3, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_1")).s("title", String("CI")).done()).done()))
     let cs = try c.conversations()
     assert(cs.len() == 1 and str_at(cs[0].copy(), "title") == some(String("CI")) and str_at(cs[0].copy(), "agent") == some(String("a_1")))
+    // With when its newest message is from, which orders the list.
+    assert(int_at(cs[0].copy(), "last") == some(20))
     let (ms, more) = try c.messages(String("c_1"), none, 50)
     assert(ms.len() == 1 and not more)
     // A message that's gone goes from the cache too.

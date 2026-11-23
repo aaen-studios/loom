@@ -12,10 +12,11 @@ module core.conn
 import std.bytes
 import std.crypto.{Ed25519Key, Ed25519PublicKey}
 import std.http.{Header, Request, get}
-import std.http.websocket.{Message, WebSocket, Waker, open}
+import std.http.websocket.{Message, WebSocket, open}
 import std.http.websocket
 import std.keyring
 import std.json.{Json, parse}
+import std.net.{Event, Net, Waker}
 import std.random.{Random}
 import std.thread.{Task}
 import std.time.{Instant}
@@ -37,8 +38,11 @@ import std.fs
 
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
-const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
-const TICK_MS: u32 = 10
+// Without a Net to wait on (a test that runs a Conn itself), the loop looks this often.
+const TICK_NS: u64 = 10000000
+// With one, it waits for the socket, a request, a command, the app or its next timer,
+// and looks anyway after this long.
+const MOST_WAIT_MS: i64 = 60000
 const FOLLOW_AGAIN_NS: u64 = 2000000000    // how long before asking a new place that didn't answer again
 
 // The id the core gives its own conversation.create commands, before the send's cid.
@@ -145,7 +149,11 @@ pub struct Conn {
     transfers: List<Transfer>
     pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
     pub tz: String?          // the system's time zone, an IANA name, as the app found it
-    pub wakers_to: Sender<Waker>?    // where each new connection's Waker goes, for the app's sends to wake it
+    pub wakers_to: Sender<Waker>?    // where the loop's Waker goes, for the app's sends to wake it
+    net: Net?             // what the loop waits on, once the app has its Waker
+    waker: Waker?         // the Net's, which the socket, requests and commands wake
+    held: List<String>    // the kinds of catch-up events the app wasn't told of, until synced
+    held_ended: List<Json>    // and the runs they ended, with their agent and status
     device: Device?       // this device as a tool for agents; none if its key couldn't be kept
     follow_to: String     // where the instance moved, while the core checks it's the same one there
     following: Request?   // GET <follow_to>/api/info, for its key
@@ -219,6 +227,10 @@ impl Conn {
             updater: none,
             tz: none,
             wakers_to: none,
+            net: none,
+            waker: none,
+            held: List<String>(),
+            held_ended: List<Json>(),
             device: device,
             follow_to: String(),
             following: none,
@@ -358,7 +370,8 @@ impl Conn {
             ok => {},
             err(_) => {},    // receive says how it ended
         }
-        if let to = mut self.wakers_to { to.send(ws.waker()) }
+        // Each message, and the end, wakes the loop.
+        if let w = self.waker { ws.wake_on(w) }
         self.ws = some(ws)
         self.state = State.Connecting
         self.tell_state(0, String())
@@ -608,6 +621,19 @@ impl Conn {
             }
             // Tool calls as old as the events the instance still keeps go, once a day.
             if let err(e) = self.cache.prune_calls(now() - CALLS_KEPT_MS) { self.tell_error("cache", "{e}") }
+            // What catching up held from the app, on this connection and any before
+            // that ended first, comes with it.
+            if self.held.len() > 0 {
+                var kinds = List<Json>()
+                for k in self.held {
+                    kinds.push(Json.Str(k.copy()))
+                }
+                let ended = Json.Array(self.held_ended.copy())
+                self.tell(merge(f, Obj.new().j("held", Obj.new().j("kinds", Json.Array(kinds)).j("ended", ended).done()).done()))
+                self.held = List<String>()
+                self.held_ended = List<Json>()
+                return
+            }
         } else if t == "instance.update" {
             // A restart for it is near: the core tries again every second until it's back.
             if str_at(f, "state") == some(String("restarting")) { self.restarting = some(unsafe { Instant.now() }) }
@@ -620,8 +646,12 @@ impl Conn {
                 self.notify(f)
             }
             var ended = String()
+            var ended_agent = String()
             if str_at(f, "kind") == some(String("run.finished")) {
-                if let ok(some(r)) = self.cache.run(str_at(f, "run") ?? String()) { ended = str_at(r, "message") ?? String() }
+                if let ok(some(r)) = self.cache.run(str_at(f, "run") ?? String()) {
+                    ended = str_at(r.copy(), "message") ?? String()
+                    ended_agent = str_at(r, "agent") ?? String()
+                }
             }
             match self.cache.apply(f) {
                 ok(applied) => if not applied { return },
@@ -646,6 +676,12 @@ impl Conn {
             // A quiet routine's reply never comes as message.created: its streaming goes
             // when its run ends.
             if ended.len() > 0 { self.forget_streaming(ended) }
+            // Catching up, the app hears of it at synced, with every other: the cache has
+            // it, and one refresh then is far less work for the app than one a batch.
+            if not self.synced {
+                self.hold(f, ended_agent)
+                return
+            }
         } else if t == "snapshot" {
             match self.cache.replace(f) {
                 ok => {},
@@ -655,6 +691,9 @@ impl Conn {
                     return
                 },
             }
+            // The app reads the cache again at synced.
+            if not self.held.contains(String("snapshot")) { self.held.push(String("snapshot")) }
+            return
         } else if t == "device.call" {
             self.device_call(f)
             return
@@ -766,6 +805,16 @@ impl Conn {
         if let i = self.resetting.position(|x| x == id) { _ = self.resetting.remove(i) }
     }
 
+    // Keeps a catch-up event's kind for synced, and for a run.finished, how the last run
+    // of its agent (`agent`, from the cache) ended.
+    fn hold(mut self, e: Json, agent: String) {
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if not self.held.contains(kind.copy()) { self.held.push(kind.copy()) }
+        if kind != "run.finished" or agent.len() == 0 { return }
+        if let i = self.held_ended.position(|x| str_at(x.copy(), "agent") == some(agent.copy())) { _ = self.held_ended.remove(i) }
+        self.held_ended.push(Obj.new().s("agent", agent).s("run", str_at(e.copy(), "run") ?? String()).s("status", str_at(e, "status") ?? String()).done())
+    }
+
     // Forgets how far each of message `id`'s streaming blocks had come.
     fn forget_streaming(mut self, id: String) {
         let prefix = "{id}/"
@@ -871,7 +920,7 @@ impl Conn {
                 if let token = self.token.copy() {
                     if self.pending == none {
                         let base = self.reach(server.copy())
-                        self.pending = some(Pending.logout(server, base, token))
+                        self.pend(Pending.logout(server, base, token))
                     }
                 }
             }
@@ -1147,7 +1196,8 @@ impl Conn {
             return
         }
         let base = self.reach(server.copy())
-        self.pending = some(Pending.start(kind, server, base, id, self.with_tz(request_body(kind, m))))
+        let body = self.with_tz(request_body(kind, m))
+        self.pend(Pending.start(kind, server, base, id, body))
     }
 
     /// The instance made a code to add a device: the app gets the result with `qr`, the
@@ -1212,7 +1262,8 @@ impl Conn {
         }
         let body = merge(request_body(Kind.Login, m), Obj.new().s("code", code).done())
         let base = self.reach(server.copy())
-        self.pending = some(Pending.start(if reset { Kind.Reset } else { Kind.Join }, server, base, id, self.with_tz(body)))
+        let sent = self.with_tz(body)
+        self.pend(Pending.start(if reset { Kind.Reset } else { Kind.Join }, server, base, id, sent))
     }
 
     /// The app scanned a QR code (its text in `qr`) on a device that isn't signed in: the
@@ -1235,7 +1286,8 @@ impl Conn {
             let device = at(m, "device")
             if device != Json.Null { body = body.j("device", device) }
             let base = self.reach(server.copy())
-            self.pending = some(Pending.start(Kind.Link, server, base, id, self.with_tz(body.done())))
+            let given = self.with_tz(body.done())
+            self.pend(Pending.start(Kind.Link, server, base, id, given))
             return
         }
         let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
@@ -1251,7 +1303,8 @@ impl Conn {
         if device != Json.Null { body = body.j("device", device) }
         let server = address(l.server.copy())
         let base = self.reach(server.copy())
-        self.pending = some(Pending.start(Kind.Link, server, base, id, self.with_tz(body.done())))
+        let given = self.with_tz(body.done())
+        self.pend(Pending.start(Kind.Link, server, base, id, given))
     }
 
     /// Takes a login, setup or logout that has ended.
@@ -1323,7 +1376,7 @@ impl Conn {
         }
         if up {
             match Transfer.upload(server, token, id.copy(), str_at(m, "path") ?? String()) {
-                ok(t) => self.transfers.push(t),
+                ok(t) => self.carry(t),
                 err(why) => self.tell(refused(id, "unreadable", why)),
             }
             return
@@ -1360,7 +1413,13 @@ impl Conn {
             self.tell(at_path(id, dest))
             return
         }
-        self.transfers.push(Transfer.download(server, token, id, sha, thumb, dest))
+        self.carry(Transfer.download(server, token, id, sha, thumb, dest))
+    }
+
+    // A transfer on its way, which wakes the loop as it ends.
+    fn carry(mut self, t: own Transfer) {
+        if let w = self.waker { t.wake_on(w) }
+        self.transfers.push(t)
     }
 
     /// Moves the update check along, and tells the app what it found.
@@ -1641,7 +1700,19 @@ impl Conn {
             return
         }
         self.follow_to = to.copy()
-        self.following = some(get("{to}/api/info", List<Header>(), 30000, 65536))
+        self.following = some(self.woken(get("{to}/api/info", List<Header>(), 30000, 65536)))
+    }
+
+    /// `r`, which wakes the loop as it finishes.
+    fn woken(self, r: own Request) -> Request {
+        if let w = self.waker { r.wake_on(w) }
+        return r
+    }
+
+    /// A login, setup or logout on its way, which wakes the loop as it ends.
+    fn pend(mut self, p: own Pending) {
+        if let w = self.waker { p.wake_on(w) }
+        self.pending = some(p)
     }
 
     /// Takes the new place's /api/info, once it has come: the same key, and the app goes
@@ -1652,7 +1723,7 @@ impl Conn {
                 if unsafe { Instant.now() }.nanos_since(since) < FOLLOW_AGAIN_NS { return }
             }
             self.follow_at = none
-            self.following = some(get("{self.follow_to}/api/info", List<Header>(), 30000, 65536))
+            self.following = some(self.woken(get("{self.follow_to}/api/info", List<Header>(), 30000, 65536)))
             return
         }
         let ready = match self.following {
@@ -1705,6 +1776,71 @@ impl Conn {
         self.connect()
     }
 
+    /// When the app takes the loop's Waker (`wakers_to`), so its sends wake it, the loop
+    /// waits on a Net of its own, which everything else it waits for wakes too.
+    fn wait_on_net(mut self) {
+        let to = self.wakers_to.take() else return
+        var sender = to
+        let net = match Net.new() {
+            ok(n) => n,
+            err(e) => {
+                eprintln("loom: the core's loop looks every 10 ms: {e}")
+                return
+            },
+        }
+        let w = match net.waker() {
+            ok(w) => w,
+            err(e) => {
+                eprintln("loom: the core's loop looks every 10 ms: {e}")
+                return
+            },
+        }
+        self.net = some(net)
+        self.waker = some(w)
+        sender.send(w)
+        if let u = mut self.updater { u.waker = some(w) }
+        if let d = mut self.device { d.waker = some(w) }
+    }
+
+    /// How long the loop may wait, in ms, before something with a time of its own is
+    /// due: trying to connect again, asking a new place again, the next update check, an
+    /// install's next look, or "update everything" giving up on its servers.
+    fn next_ms(self) -> i64 {
+        var ms = MOST_WAIT_MS
+        if self.state == State.Offline {
+            var left: i64 = 0
+            if let since = self.retry_at {
+                let waited = unsafe { Instant.now() }.nanos_since(since) / 1000000
+                if waited < self.wait { left = i64.wrap(self.wait - waited) }
+            }
+            if left < ms { ms = left }
+        }
+        if self.following == none and self.follow_to.len() > 0 {
+            var left: i64 = 0
+            if let since = self.follow_at {
+                let gone = unsafe { Instant.now() }.nanos_since(since)
+                if gone < FOLLOW_AGAIN_NS { left = i64.wrap((FOLLOW_AGAIN_NS - gone) / 1000000 + 1) }
+            }
+            if left < ms { ms = left }
+        }
+        if let u = self.updater {
+            if let left = u.due_ms() {
+                if left < ms { ms = left }
+            }
+        }
+        if let h = self.hub {
+            if let left = h.due_ms() {
+                if left < ms { ms = left }
+            }
+        }
+        if let d = self.device {
+            if let left = d.due_ms(now()) {
+                if left < ms { ms = left }
+            }
+        }
+        return ms
+    }
+
     /// Starts again if it's time.
     fn tick(mut self) {
         if self.state != State.Offline { return }
@@ -1738,19 +1874,20 @@ fn only_last_reads(waiting: List<String>) -> List<String> {
 impl Task for Conn {
     fn run(own self) {
         var c = self
+        c.wait_on_net()
         c.begin()
+        var events = List<Event>()
         loop {
-            // Connected, and with the app's sends waking the socket, the loop waits on
-            // the socket, so a frame is taken the moment it comes; otherwise on the inbox.
-            let on_socket = c.ws != none and c.wakers_to != none
-            c.read(if on_socket { TICK_MS } else { 0 })
+            c.read(0)
             c.poll()
             c.poll_transfers()
             c.poll_update()
             c.poll_device()
             c.poll_follow()
             c.tick()
-            let first = if on_socket { c.inbox.next() } else { unsafe { c.inbox.wait_for(TICK_NS) } }
+            // With a Net, the app's sends wake it, so the inbox is only looked at; without
+            // one, the loop waits on the inbox, a tick at a time.
+            let first = if c.net != none { c.inbox.next() } else { unsafe { c.inbox.wait_for(TICK_NS) } }
             if let m = first {
                 var waiting = List<String>()
                 waiting.push(m)
@@ -1762,7 +1899,13 @@ impl Task for Conn {
                     if not going { break }
                 }
                 if not going { break }
+                // What the app said may have started something: look again before waiting.
+                continue
             }
+            // The socket, each request, command and install, and the app's sends wake the
+            // Net, so the loop waits for them, or its next timer, rather than looking every
+            // 10 ms (15.6 on Windows).
+            if let n = c.net { n.poll(c.next_ms(), mut events) }
         }
         c.stop_relaying()
     }
@@ -1832,4 +1975,30 @@ fn a_read_asked_again_is_answered_once() {
     let other = String(#"{"id":"app.agents","t":"core.get","what":"agents"}"#)
     let kept = only_last_reads([read.copy(), send.copy(), other.copy(), read.copy()])
     assert(kept.len() == 3 and kept[2] == send and kept[1] == other and kept[0] == read)
+}
+
+fn event_text(seq: i64, kind: str, rest: own Obj) -> String {
+    return "{rest.s("t", String("event")).i("seq", seq).s("kind", String(kind)).done()}"
+}
+
+@test
+fn catch_up_comes_to_the_app_as_one_synced() ! Error {
+    let inbox = Receiver<String>()
+    var told = Receiver<String>()
+    var c = Conn.new(none, none, String("loom-test"), try Cache.open(String(":memory:")), inbox, told.sender())
+    c.frame(event_text(1, "conversation.created", Obj.new().j("conversation", Obj.new().s("id", String("c_1")).s("agent", String("a_1")).i("at", 1).done())))
+    c.frame(event_text(2, "run.started", Obj.new().s("run", String("r_1")).s("conversation", String("c_1")).s("agent", String("a_1")).s("message", String("msg_2"))))
+    c.frame(event_text(3, "run.finished", Obj.new().s("run", String("r_1")).s("status", String("failed"))))
+    assert(told.next() == none)
+    c.frame(String(#"{"t":"synced","seq":3,"runs":[]}"#))
+    let synced = try parse(told.next() ?? String())
+    assert(str_at(synced.copy(), "t") == some(String("synced")) and told.next() == none)
+    let held = at(synced, "held")
+    assert("{at(held.copy(), "kinds")}" == #"["conversation.created","run.started","run.finished"]"#)
+    assert("{at(held, "ended")}" == #"[{"agent":"a_1","run":"r_1","status":"failed"}]"#)
+    // Live, each event goes on as it comes, and the next synced holds nothing.
+    c.frame(event_text(4, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_1")).s("title", String("x")).done())))
+    assert((told.next() ?? String()).contains(#""seq":4"#))
+    c.frame(String(#"{"t":"synced","seq":4,"runs":[]}"#))
+    assert(told.next() == some(String(#"{"t":"synced","seq":4,"runs":[]}"#)))
 }

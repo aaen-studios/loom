@@ -5,6 +5,7 @@ module core.login
 // then looks at on each turn, so the socket and the app's messages are never
 // held up while a password is hashed.
 import std.http.{Header, Request, post}
+import std.net.{Waker}
 import std.json.{Json, parse}
 import shared.obj.{Obj, at, str_at}
 
@@ -74,6 +75,11 @@ impl Pending {
     /// Whether it has ended, so `outcome` won't wait.
     pub fn done(self) -> bool {
         return self.req.done()
+    }
+
+    /// Wakes `w`'s Net as it ends.
+    pub fn wake_on(self, w: Waker) {
+        self.req.wake_on(w)
     }
 
     /// How it ended.

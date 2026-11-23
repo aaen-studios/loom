@@ -2404,7 +2404,15 @@ pub struct Model {
     pub login_error: Option<String>,
     pub logging_in: bool,
     pub agents: Rc<Vec<Agent>>,
+    /// Newest first, as the core orders them: by when each one's newest message is from.
     pub conversations: Vec<Conversation>,
+    /// That time, by conversation id, so a message keeps the order without reading the
+    /// list again.
+    conversation_last: HashMap<String, i64>,
+    /// The list has come, so a chat with no conversation is known to be empty.
+    conversations_known: bool,
+    /// The conversation `messages` are of, once they've come.
+    messages_for: Option<String>,
     pub runs: Vec<Run>,
     pub tools: Rc<Tools>,
     pub approvals: Vec<Approval>,
@@ -2820,7 +2828,9 @@ impl Model {
                     self.messages.clear();
                     continue;
                 };
-                out.push(json!({"t": "core.get", "id": "app.messages", "what": "messages", "conversation": conversation, "limit": 200}));
+                // Named by its conversation, so a page that comes after the chat changed
+                // isn't shown in it.
+                out.push(json!({"t": "core.get", "id": format!("app.messages:{conversation}"), "what": "messages", "conversation": conversation, "limit": 200}));
             } else if l == List::Tools {
                 // Only the calls the shown chat's blocks name, and the runs going on: a
                 // heavy user has tens of thousands of calls, and this comes at each one.
@@ -2861,6 +2871,38 @@ impl Model {
                     && c.routine.is_none()
             })
             .map(|c| c.id.clone())
+    }
+
+    /// Whether the chat shown is as the cache has it: it has no conversation yet, or its
+    /// messages have come. Until then an empty chat may only be waiting for them, so the
+    /// window doesn't show the empty chat's hero for the moment that takes.
+    pub fn chat_known(&self) -> bool {
+        match self.conversation() {
+            None => self.conversations_known,
+            Some(c) => self.messages_for.as_deref() == Some(c.as_str()),
+        }
+    }
+
+    /// Puts conversation `id` where a message from `at` leaves it, as the core orders
+    /// them, rather than reading the list again. False for one the list doesn't have yet.
+    fn bump(&mut self, id: &str, at: i64) -> bool {
+        if !self.conversations.iter().any(|c| c.id == id) {
+            return false;
+        }
+        let last = self.conversation_last.entry(id.to_string()).or_insert(0);
+        if at <= *last {
+            return true;
+        }
+        *last = at;
+        let before = self.conversation();
+        let lasts = &self.conversation_last;
+        // Stable, so the ones it doesn't pass keep their order.
+        self.conversations
+            .sort_by_key(|c| std::cmp::Reverse(lasts.get(&c.id).copied().unwrap_or(0)));
+        if self.conversation() != before {
+            self.dirty.insert(List::Messages);
+        }
+        true
     }
 
     /// The task the chat shows, if it shows one.
@@ -3167,6 +3209,7 @@ impl Model {
             }
             "synced" => {
                 self.synced = true;
+                self.caught_up(f);
                 self.routines_stale = true;
                 self.defaults_stale = true;
                 self.rules_stale = true;
@@ -3324,6 +3367,58 @@ impl Model {
         true
     }
 
+    /// What catching up brought, which the core tells at `synced` rather than an event
+    /// at a time (core/README.md): each kind of event it held marks what it changes to be
+    /// read again, with the lists `synced` reads anyway; an agent whose last run failed
+    /// shows it; and the text of replies that ended meanwhile goes.
+    fn caught_up(&mut self, f: &Value) {
+        let going: HashSet<&str> = f
+            .get("runs")
+            .and_then(Value::as_array)
+            .map(|rs| {
+                rs.iter()
+                    .filter_map(|r| r.get("message")?.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.live.retain(|m, _| going.contains(m.as_str()));
+        let Some(held) = f.get("held") else {
+            return;
+        };
+        for e in held
+            .get("ended")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if s(e, "status") == "failed" {
+                self.failed.insert(s(e, "agent"), Instant::now());
+            } else {
+                self.failed.remove(&s(e, "agent"));
+            }
+        }
+        for kind in held
+            .get("kinds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let (family, _) = kind.split_once('.').unwrap_or((kind, ""));
+            match family {
+                "table" => self.tables_stale = true,
+                "device" => {
+                    self.dirty.insert(List::Devices);
+                }
+                "agent" if self.editing.is_some() => self.revisions_stale = true,
+                "proposal" => self.proposals_stale = true,
+                "plugin" if kind != "plugin.data" => self.plugins_stale = true,
+                "user" | "people" if self.people_open => self.people_stale = true,
+                _ => {}
+            }
+        }
+    }
+
     fn event(&mut self, f: &Value) {
         let kind = s(f, "kind");
         let (family, _) = kind.split_once('.').unwrap_or((kind.as_str(), ""));
@@ -3402,7 +3497,15 @@ impl Model {
                         self.unread.insert(agent);
                     }
                 }
-                self.dirty.insert(List::Conversations);
+                // A message moves its conversation up, as the core orders them: done here,
+                // rather than reading the whole list again at each one. A deleted message
+                // doesn't move it back, in the core either.
+                if kind != "message.deleted" {
+                    let at = message.get("at").and_then(Value::as_i64).unwrap_or(0);
+                    if !self.bump(&conversation, at) {
+                        self.dirty.insert(List::Conversations);
+                    }
+                }
             }
             "run" => {
                 self.dirty.insert(List::Runs);
@@ -4488,6 +4591,16 @@ impl Model {
             }
             List::Conversations => {
                 let before = self.conversation();
+                self.conversations_known = true;
+                self.conversation_last = items
+                    .iter()
+                    .map(|c| {
+                        (
+                            s(c, "id"),
+                            c.get("last").and_then(Value::as_i64).unwrap_or(0),
+                        )
+                    })
+                    .collect();
                 self.conversations = items
                     .iter()
                     .map(|c| Conversation {
@@ -4567,6 +4680,18 @@ impl Model {
                 self.place_queued();
             }
             List::Messages => {
+                // A page asked for before the chat changed is another conversation's.
+                let current = self.conversation();
+                if let Some(of) = f
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .and_then(|id| id.strip_prefix("app.messages:"))
+                {
+                    if current.as_deref() != Some(of) {
+                        return;
+                    }
+                }
+                self.messages_for = current;
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
                 let messages: Vec<Message> = items
                     .iter()
@@ -6702,8 +6827,91 @@ mod tests {
         assert_eq!(m.messages[0].blocks[0].text, "one, pinned");
         m.take(&event("message.deleted", json!("msg_2")));
         assert_eq!(ids(&m), vec!["msg_1"]);
-        // None of it asked the core for the page again.
+        // None of it asked the core for the page again, or for the conversations.
         assert!(!m.dirty.contains(&List::Messages));
+        assert!(!m.dirty.contains(&List::Conversations));
+    }
+
+    fn conversations(items: Value) -> Value {
+        json!({"t": "core.data", "what": "conversations", "items": items})
+    }
+
+    #[test]
+    fn a_message_moves_its_conversation_up_without_reading_the_list() {
+        let mut m = Model::new();
+        m.take(&conversations(json!([
+            {"id": "c_new", "agent": "a_1", "at": 5, "last": 50},
+            {"id": "c_old", "agent": "a_1", "at": 1, "last": 10},
+            {"id": "c_b", "agent": "a_2", "at": 2, "last": 5},
+        ])));
+        m.select(Some("a_1".into()));
+        m.dirty.clear();
+        assert_eq!(m.conversation().as_deref(), Some("c_new"));
+        let message = |conversation: &str, at: i64| json!({"t": "event", "kind": "message.created", "conversation": conversation, "message": {"id": format!("m_{at}"), "conversation": conversation, "role": "person", "at": at, "blocks": []}});
+        // Another agent's chat moves up; the one shown stays.
+        m.take(&message("c_b", 60));
+        let order = |m: &Model| {
+            m.conversations
+                .iter()
+                .map(|c| c.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&m), vec!["c_b", "c_new", "c_old"]);
+        assert!(m.dirty.is_empty());
+        // A message in the agent's older chat makes it the newest, and the chat shows it.
+        m.take(&message("c_old", 70));
+        assert_eq!(order(&m), vec!["c_old", "c_b", "c_new"]);
+        assert_eq!(m.conversation().as_deref(), Some("c_old"));
+        assert!(m.dirty.contains(&List::Messages) && !m.dirty.contains(&List::Conversations));
+        // One the list doesn't have yet reads the list again.
+        m.dirty.clear();
+        m.take(&message("c_unknown", 80));
+        assert!(m.dirty.contains(&List::Conversations));
+    }
+
+    #[test]
+    fn switching_agents_waits_for_the_chat_rather_than_showing_it_empty() {
+        let mut m = Model::new();
+        assert!(!m.chat_known());
+        m.take(&conversations(json!([
+            {"id": "c_1", "agent": "a_1", "at": 1, "last": 1},
+            {"id": "c_2", "agent": "a_2", "at": 1, "last": 1},
+        ])));
+        m.select(Some("a_1".into()));
+        let asked = m.fetches();
+        assert!(asked.iter().any(|f| f["id"] == "app.messages:c_1"));
+        assert!(!m.chat_known());
+        let page = |id: &str, text: &str| json!({"t": "core.data", "id": id, "what": "messages", "items": [{"id": "m", "role": "person", "at": 1, "blocks": [{"kind": "text", "text": text}]}]});
+        m.take(&page("app.messages:c_1", "one"));
+        assert!(m.chat_known());
+        // Switched on before the first agent's page came: it isn't shown in the second's chat.
+        m.select(Some("a_2".into()));
+        assert!(!m.chat_known() && m.messages.is_empty());
+        m.take(&page("app.messages:c_1", "one"));
+        assert!(!m.chat_known() && m.messages.is_empty());
+        m.take(&page("app.messages:c_2", "two"));
+        assert!(m.chat_known() && m.messages[0].blocks[0].text == "two");
+        // An agent with no chat yet is known to be empty at once.
+        m.select(Some("a_3".into()));
+        assert!(m.chat_known());
+    }
+
+    #[test]
+    fn what_catching_up_held_comes_with_synced() {
+        let mut m = Model::new();
+        m.live
+            .insert("msg_done".into(), vec![Block::text("text", "said".into())]);
+        m.live.insert(
+            "msg_going".into(),
+            vec![Block::text("text", "saying".into())],
+        );
+        m.dirty.clear();
+        m.take(&json!({"t": "synced", "seq": 9, "runs": [{"run": "r_2", "message": "msg_going", "agent": "a_2"}], "held": {"kinds": ["device.added", "run.finished", "plugin.updated"], "ended": [{"agent": "a_1", "run": "r_1", "status": "failed"}]}}));
+        assert_eq!(m.mood("a_1"), Mood::Failed);
+        assert!(m.dirty.contains(&List::Devices) && m.dirty.contains(&List::Runs));
+        assert!(m.plugins_stale);
+        // A reply that ended while catching up leaves no text behind; one still going keeps it.
+        assert!(!m.live.contains_key("msg_done") && m.live.contains_key("msg_going"));
     }
 
     #[test]
@@ -7546,12 +7754,12 @@ mod tests {
         _ = m.fetches();
         // Another conversation's are none of the shown chat's business.
         m.take(&json!({"t": "core.filled", "conversation": "c_2"}));
-        assert!(!m.fetches().iter().any(|f| f["id"] == "app.messages"));
+        assert!(!m.fetches().iter().any(|f| f["what"] == "messages"));
         m.take(&json!({"t": "core.filled", "conversation": "c_1"}));
         let asked = m.fetches();
         assert!(asked
             .iter()
-            .any(|f| f["id"] == "app.messages" && f["conversation"] == "c_1"));
+            .any(|f| f["id"] == "app.messages:c_1" && f["conversation"] == "c_1"));
     }
 
     #[test]

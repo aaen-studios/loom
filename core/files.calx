@@ -7,6 +7,7 @@ module core.files
 // files/, by their SHA-256, so each is fetched once.
 import std.fs
 import std.http.{Header, Request, get, post}
+import std.net.{Waker}
 import std.http.server.{content_type}
 import std.json.{Json, parse}
 import std.url
@@ -82,6 +83,11 @@ impl Transfer {
 
     pub fn done(self) -> bool {
         return self.req.done()
+    }
+
+    /// Wakes `w`'s Net as it ends.
+    pub fn wake_on(self, w: Waker) {
+        self.req.wake_on(w)
     }
 
     /// How it ended, as the app's `core.file`.

@@ -21,6 +21,7 @@ module core.install
 // fails, what failed and what to do next. It never has a code.
 import std.http.{Request}
 import std.json.{Json, parse}
+import std.net.{Waker}
 import std.process.{Child, Stdio}
 import std.text.utf8.{decode_lossy_unicode}
 import shared.client
@@ -55,6 +56,7 @@ pub struct Install {
     next_check: i64
     answered: Json    // what /api/version said last
     why: String    // why it didn't answer, last
+    waker: Waker?    // the core's loop's, which its commands and requests wake
 }
 
 fn progress(call: String, step: str, status: str, said: String) -> Json {
@@ -105,8 +107,8 @@ pub fn counted(counts: Json) -> String {
 impl Install {
     /// Starts the install the person signed, with `ssh` (the program and its first
     /// arguments). Its first progress, or its result when it couldn't start.
-    pub fn start(call: String, host: own Host, plan: own Json, ssh: own List<String>) -> (Install, Json) {
-        var i = Install { call: call.copy(), host: host, plan: plan, ssh: ssh, step: String("install"), child: none, out: List<u8>(), address: String(), code: String(), version: String(), via: String(), lines: List<String>(), ok: false, asking: none, check_from: 0, next_check: 0, answered: Json.Null, why: String() }
+    pub fn start(call: String, host: own Host, plan: own Json, ssh: own List<String>, waker: Waker?) -> (Install, Json) {
+        var i = Install { call: call.copy(), host: host, plan: plan, ssh: ssh, step: String("install"), child: none, out: List<u8>(), address: String(), code: String(), version: String(), via: String(), lines: List<String>(), ok: false, asking: none, check_from: 0, next_check: 0, answered: Json.Null, why: String(), waker: waker }
         let command = install_command(i.plan.copy())
         if let why = i.run(command, INSTALL_MS) {
             i.lines.push("Installing loom on {i.host.name} failed: ssh didn't start on this computer: {why}. Nothing was done.")
@@ -122,6 +124,13 @@ impl Install {
         return self.step == "done"
     }
 
+    /// How long until it next asks the new server whether it's set up, in ms; none
+    /// while it waits on a command or a request, which wake the core's loop.
+    pub fn due_ms(self, now_ms: i64) -> i64? {
+        if self.step != "check" or self.asking != none { return none }
+        return some(if self.next_check > now_ms { self.next_check - now_ms } else { 0 })
+    }
+
     fn result(self) -> Json {
         return Obj.new().s("t", String("device.result")).s("call", self.call.copy()).b("ok", self.ok).s("output", self.lines.join("\n")).done()
     }
@@ -129,7 +138,10 @@ impl Install {
     // Runs `command` on the host, for the step: why it couldn't start, or none.
     fn run(mut self, command: String, timeout_ms: u64) -> String? {
         match hosts.ssh_command(self.ssh.copy(), self.host.target.copy(), command).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Stdout).timeout(timeout_ms).spawn() {
-            ok(child) => self.child = some(child),
+            ok(child) => {
+                if let w = self.waker { child.wake_on(w) }
+                self.child = some(child)
+            },
             err(e) => return some("{e}"),
         }
         return none
@@ -254,7 +266,9 @@ impl Install {
     fn check(mut self, out: mut List<Json>, now_ms: i64) {
         if self.asking == none {
             if now_ms < self.next_check { return }
-            self.asking = some(client.ask_version(self.address.copy(), 5000))
+            let r = client.ask_version(self.address.copy(), 5000)
+            if let w = self.waker { r.wake_on(w) }
+            self.asking = some(r)
             return
         }
         var r = self.asking.take() else return

@@ -7204,7 +7204,9 @@ ACTA_KEY=secret:ACTA_KEY",
         view.update(cx, |v, _| v.inputs = Some(inputs));
         let list = AnyView::from(view);
 
-        let empty = self.rows.is_empty();
+        // A chat whose messages are on their way from the cache, as just after switching
+        // agents, isn't the empty chat: the hero would show for that moment.
+        let empty = self.rows.is_empty() && self.model.chat_known();
         // A task or a branch shows its strip over the list, even before it has messages.
         let in_task = self.model.task_open().is_some() || self.model.open_branch.is_some();
         // While the agent answers, the button stops it, unless there's something to send: that waits in the queue.

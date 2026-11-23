@@ -14,6 +14,7 @@ import std.bytes
 import std.fs
 import std.hash.{sha256}
 import std.http.{Header, Request, get}
+import std.net.{Waker}
 import std.json.{Json}
 import std.random.{Random}
 import std.time.{Instant}
@@ -54,6 +55,7 @@ pub struct Updater {
     pub looks: u64        // looks that fetched the manifest, for tests
     pub fetched: u64      // looks that fetched a manifest that changed, and its signature, for tests
     random: Random
+    pub waker: Waker?     // the core's loop's, which its requests wake as they finish
 }
 
 fn answer() -> Obj {
@@ -69,7 +71,7 @@ fn conditional(etag: String) -> List<Header> {
 
 impl Updater {
     pub fn new(version: own String, kind: own String, url: own String, dir: own String) -> Updater {
-        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY), release: none, etag: String(), settled: List<u8>(), body: List<u8>(), body_etag: String(), looks: 0, fetched: 0, random: Random.system() }
+        return Updater { version: version, kind: kind, url: url, dir: dir, step: Step.Waiting, next: some(unsafe { Instant.now() }), wait: FIRST_CHECK_NS, asked: false, asked_id: none, found: Json.Null, key: String(RELEASE_KEY), release: none, etag: String(), settled: List<u8>(), body: List<u8>(), body_etag: String(), looks: 0, fetched: 0, random: Random.system(), waker: none }
     }
 
     /// The updater with another release key, for tests.
@@ -107,11 +109,30 @@ impl Updater {
         }
     }
 
+    /// How long until the next look, in ms: 0 for one at once, none while a look is
+    /// under way, whose requests wake the core's loop (`waker`).
+    pub fn due_ms(self) -> i64? {
+        match self.step {
+            Step.Waiting => {},
+            _ => return none,
+        }
+        let since = self.next else return some(0)
+        let gone = unsafe { Instant.now() }.nanos_since(since)
+        if gone >= self.wait { return some(0) }
+        return some(i64.wrap((self.wait - gone) / 1000000 + 1))
+    }
+
+    // `r`, which wakes the core's loop as it finishes.
+    fn woken(self, r: own Request) -> Request {
+        if let w = self.waker { r.wake_on(w) }
+        return r
+    }
+
     fn look(mut self) {
         self.looks += 1
         // A look the app asked for reads the manifest whole, so it can say what it found.
         let etag = if self.asked { String() } else { self.etag.copy() }
-        self.step = Step.Manifest(get(self.url.copy(), conditional(etag), 60000, 1048576))
+        self.step = Step.Manifest(self.woken(get(self.url.copy(), conditional(etag), 60000, 1048576)))
     }
 
     /// Waits for the next look: about EVERY_NS, give or take JITTER_NS / 2.
@@ -168,7 +189,7 @@ impl Updater {
                 self.fetched += 1
                 self.body = mres.body.copy()
                 self.body_etag = etag
-                self.step = Step.Signature(get("{self.url}.sig", List<Header>(), 60000, 4096))
+                self.step = Step.Signature(self.woken(get("{self.url}.sig", List<Header>(), 60000, 4096)))
                 return none
             },
             Step.Signature(s) => {
@@ -210,7 +231,7 @@ impl Updater {
                 // Settled once the file has come and checks.
                 self.settled = manifest_bytes
                 self.etag = tag
-                self.step = Step.Download(get(url, List<Header>(), TIMEOUT_MS, MAX_DOWNLOAD))
+                self.step = Step.Download(self.woken(get(url, List<Header>(), TIMEOUT_MS, MAX_DOWNLOAD)))
                 return none
             },
             Step.Download(d) => {
