@@ -5384,12 +5384,15 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The control that collapses the sidebar to the rail (`rail` false), or opens it
     /// from the rail. On the rail it's loom's knot until the pointer comes onto the
-    /// rail, and then fades into the control; a click on either opens the sidebar.
+    /// rail, and then fades into the control; a click on either opens the sidebar. The
+    /// button keeps the rail from hearing the pointer while it's on the button, so its
+    /// own hover counts too.
     fn bar_button(&self, rail: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let shown = if rail {
             let key = SharedString::from(RAIL_HOVER);
-            motion::level(&key, motion::hovered(&key), 0.12)
+            let on = motion::hovered(&key) || motion::hovered(&motion::hover_key("bar-open"));
+            motion::level(&key, on, 0.12)
         } else {
             1.0
         };
