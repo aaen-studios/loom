@@ -1,5 +1,5 @@
 ---
-// A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads, an
+// A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads in their shapes, an
 // agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
 // colours and words are the app's (desktop/src/app.rs, design/tokens.toml); the script that plays
 // it is src/scripts/demo.ts. The approval's buttons answer it, a reply's steps open, and the
@@ -7,9 +7,9 @@
 import { brains } from '../lib/registry.mjs';
 
 const agents = [
-	{ name: 'Juniper', color: 'sky', on: true },
-	{ name: 'Moss', color: 'mint' },
-	{ name: 'Biscuit', color: 'apricot' },
+	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true },
+	{ name: 'Moss', color: 'mint', shape: 'heart' },
+	{ name: 'Biscuit', color: 'apricot', shape: 'star' },
 	{ name: 'Pip', color: 'lavender' },
 ];
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
@@ -42,7 +42,7 @@ const [claude] = await brains(['claude-acp']);
 			{
 				agents.map((a) => (
 					<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
-						<svg data-thread data-color={a.color} width="26" height="10" />
+						<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
 						<span class="agent-text">
 							<span class="agent-name">{a.name}</span>
 							<span class="agent-preview" />
@@ -301,6 +301,9 @@ const [claude] = await brains(['claude-acp']);
 		width: 26px;
 		height: 10px;
 		flex: none;
+	}
+	.agent svg[data-shape] {
+		height: 22px;
 	}
 	.agent-text {
 		display: grid;

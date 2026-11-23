@@ -231,10 +231,10 @@ enum Sample {
     """
 
     static let agents: [JSON] = [
-        ["id": "a_1", "name": "Builder", "color": "periwinkle", "acp_agent": "claude", "permission": "ask"],
-        ["id": "a_2", "name": "Scribe", "color": "mint", "acp_agent": "claude", "permission": "auto"],
+        ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask"],
+        ["id": "a_2", "name": "Scribe", "color": "mint", "shape": "heart", "acp_agent": "claude", "permission": "auto"],
         ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask"],
-        ["id": "a_4", "name": "Gardener", "color": "pink", "acp_agent": "gemini", "permission": "allow"],
+        ["id": "a_4", "name": "Gardener", "color": "pink", "shape": "star", "acp_agent": "gemini", "permission": "allow"],
     ]
 
     static let conversations: [JSON] = [

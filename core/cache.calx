@@ -228,7 +228,7 @@ impl Cache {
     }
 
     fn put_agent(self, a: Json) ! Error {
-        _ = try self.db.execute(String("INSERT OR REPLACE INTO agents (id, json) VALUES (?, ?)"), [t(str_at(a.copy(), "id") ?? String()), t("{a}")])
+        _ = try self.db.execute(String("INSERT INTO agents (id, json) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(str_at(a.copy(), "id") ?? String()), t("{a}")])
     }
 
     fn put_conversation(self, c: Json) ! Error {
@@ -408,6 +408,16 @@ fn pages_messages_oldest_first() ! Error {
     assert(page.len() == 2 and more and str_at(page[0].copy(), "id") == some(String("msg_4")))
     let (older, more_again) = try c.messages(String("c_1"), some(String("msg_4")), 10)
     assert(older.len() == 3 and not more_again and str_at(older[0].copy(), "id") == some(String("msg_1")))
+}
+
+@test
+fn a_changed_agent_keeps_its_place() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    _ = try c.apply(ev(1, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_1")).done()).done()))
+    _ = try c.apply(ev(2, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_2")).done()).done()))
+    _ = try c.apply(ev(3, "agent.updated", Obj.new().j("agent", Obj.new().s("id", String("a_1")).s("shape", String("yarn")).done()).done()))
+    let agents = try c.agents()
+    assert(str_at(agents[0].copy(), "id") == some(String("a_1")) and str_at(agents[0].copy(), "shape") == some(String("yarn")))
 }
 
 @test

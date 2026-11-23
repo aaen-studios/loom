@@ -10,3 +10,4 @@ Calx, imported by both [`server/`](../server/) and [`core/`](../core/), so the t
 - [`hosts.calx`](hosts.calx): what a host's name or ssh target may be, and the plan for installing loom on one, with the commands it runs there, which the instance shows and the device that reaches the host makes again from what was signed.
 - [`obj.calx`](obj.calx): building and reading the JSON objects frames are made of.
 - [`noise.calx`](noise.calx): over Noise (protocol.md, "Over Noise"): the handshake's name and prologue, sealing a message in pieces and joining them again, and the frame, request and response messages a phone and the bridge send.
+- [`shape.calx`](shape.calx): the shapes an agent's thread takes in the sidebar: the eight that come with loom, which `scripts/tokens.calx` writes into the design tokens, and smoothing a drawing the person makes, which the instance keeps on the agent.

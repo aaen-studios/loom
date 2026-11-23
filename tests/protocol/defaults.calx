@@ -114,6 +114,16 @@ fn run(i: Instance) ! Error {
     let named = try app.cmd("q_c2", "agent.update", Obj.new().s("agent", main_id.copy()).s("color", String("teal")).done())
     let not_one = try app.cmd("q_c3", "agent.update", Obj.new().s("agent", main_id.copy()).s("color", String("blue")).done())
     try check(str_at(at(at(own_colour, "value"), "agent"), "color") == some(String("#3a7bd5")) and str_at(at(at(named, "value"), "agent"), "color") == some(String("teal")) and str_at(at(not_one, "error"), "code") == some(String("bad_request")), "an agent's colour is one of loom's or its own as #rrggbb, and nothing else")
+    // Its shape in the sidebar: one of the eight, or one the person drew.
+    let yarn = try app.cmd("q_s1", "agent.update", Obj.new().s("agent", main_id.copy()).s("shape", String("yarn")).done())
+    let leaf = try app.cmd("q_s2", "agent.update", Obj.new().s("agent", main_id.copy()).s("shape", String("leaf")).done())
+    var stroke = List<Json>()
+    for k in 0..40 { stroke.push(Json.Array([Json.Int(i64(k) * 3), Json.Int(i64((k * 7) % 11))])) }
+    let drew = at(at(try app.cmd("q_s3", "agent.update", Obj.new().s("agent", main_id.copy()).j("drawing", Json.Array(stroke)).done()), "value"), "agent")
+    let plain = at(at(try app.cmd("q_s4", "agent.update", Obj.new().s("agent", main_id.copy()).s("shape", String()).done()), "value"), "agent")
+    let kept_points = match at(drew.copy(), "drawing") { Json.Array(p) => p.len(), _ => 0 }
+    try check(str_at(at(at(yarn, "value"), "agent"), "shape") == some(String("yarn")) and str_at(at(leaf, "error"), "code") == some(String("bad_request")), "an agent's shape is one of the eight")
+    try check(str_at(drew, "shape") == some(String("drawn")) and kept_points == 96 and str_at(plain.copy(), "shape") == none and at(plain, "drawing") != Json.Null, "or the person's drawing, smoothed to 96 points, which stays when the plain thread is picked")
     try check(str_at(main_agent.copy(), "acp_agent") == some(String("fake")) and str_at(main_agent, "permission") == none, "a new agent runs on the default brain, with no permission mode of its own")
     let first = try chat(mut app, "q_7", main_id.copy())
     let told = try say(mut app, first.copy(), "m_1", String("/context"))

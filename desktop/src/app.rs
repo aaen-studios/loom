@@ -200,6 +200,14 @@ pub struct Loom {
     wheel_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// An agent's own colour as #rrggbb, on its edit panel.
     color_in: Entity<InputState>,
+    /// Whether the shapes popup on an agent's edit panel is open, when a click outside last
+    /// closed it, whether a stroke is being drawn, the stroke so far in the pad's
+    /// pixels, and where the pad is on screen.
+    shape_open: bool,
+    shape_closed_at: Option<Instant>,
+    draw_drag: bool,
+    draw_stroke: Vec<(f32, f32)>,
+    draw_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     plus: Option<Plus>,
     /// The settings or server popup over the window, open at this page.
     popup: Option<Screen>,
@@ -965,6 +973,11 @@ ACTA_KEY=secret:ACTA_KEY",
             wheel_drag: false,
             wheel_bounds: Rc::new(std::cell::Cell::new(None)),
             color_in,
+            shape_open: false,
+            shape_closed_at: None,
+            draw_drag: false,
+            draw_stroke: Vec::new(),
+            draw_bounds: Rc::new(std::cell::Cell::new(None)),
             plus: None,
             popup: None,
             side: None,
@@ -2279,7 +2292,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .pb(px(space::M))
                         .border_b_1()
                         .border_color(p.line)
-                        .child(self.color_picker(cx)),
+                        .child(self.look_picker(width - 2.0 * space::L, cx)),
                 )
             });
         div()
@@ -4756,10 +4769,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .child(thread(
+                    .child(thread::strand(
                         format!("side-{}", a.id),
                         mood,
                         thread::color(&a.color, p.dark),
+                        a.outline(),
                         26.0,
                         10.0,
                         self.model.finished_at(&a.id),
@@ -5060,10 +5074,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                     })
                     .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .child(thread(
+                    .child(thread::strand(
                         format!("side-{}", a.id),
                         self.model.mood(&a.id),
                         thread::color(&a.color, p.dark),
+                        a.outline(),
                         26.0,
                         10.0,
                         self.model.finished_at(&a.id),
@@ -7885,9 +7900,32 @@ ACTA_KEY=secret:ACTA_KEY",
         row
     }
 
-    /// The agent's colours, under its thread at the top of its edit panel: loom's, and
-    /// its own, which opens a strip of every hue and a field for one as #rrggbb.
-    fn color_picker(&self, cx: &mut Context<Self>) -> Div {
+    /// The agent's colours and its shape, on one line `room` pixels wide under its
+    /// thread at the top of its edit panel: as many of loom's colours as fit, always
+    /// with the one it has, its own colour, a line, and at the end its shape.
+    fn look_picker(&self, room: f32, cx: &mut Context<Self>) -> Div {
+        // Each control is a square with a gap after it; the line sits in what's left
+        // over between the colours and the shape.
+        let slots = ((room + space::XS) / (control::ICON + space::XS)).floor() as usize;
+        let colors = slots.saturating_sub(2).clamp(4, THREAD_COLORS.len());
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(self.color_picker(colors, cx))
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(px(18.0))
+                    .flex_none()
+                    .bg(self.p.line_strong),
+            )
+            .child(self.shape_picker(cx))
+    }
+
+    /// The agent's colours: `fit` of loom's, the one it has among them, and its own,
+    /// which opens a strip of every hue and a field for one as #rrggbb.
+    fn color_picker(&self, fit: usize, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let color = self
             .model
@@ -7911,8 +7949,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
         };
-        let mut row = div().flex().flex_wrap().items_center().gap(px(space::XS));
-        for (i, (c, title)) in THREAD_COLORS.iter().enumerate() {
+        let mut row = div().flex().items_center().gap(px(space::XS));
+        // The first that fit, with the agent's own in place of the last when it's
+        // further along.
+        let mut shown: Vec<usize> = (0..fit).collect();
+        if let Some(at) = THREAD_COLORS.iter().position(|(c, _)| *c == color) {
+            if at >= fit {
+                shown[fit - 1] = at;
+            }
+        }
+        for i in shown {
+            let (c, title) = THREAD_COLORS[i];
             let c: &'static str = c;
             row = row.child(
                 swatch(("edit-swatch", i).into(), color == *c)
@@ -8063,6 +8110,256 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         row.child(own_slot)
     }
+
+    /// The agent's shape (PLAN.md, "Its shape"): a button with its thread in the shape
+    /// it has, moving as it does, which opens the shapes: the plain thread and the
+    /// eight that come with loom, and under them a pad that shows its drawing, picks
+    /// it with a click, and takes a new one in one stroke.
+    fn shape_picker(&self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let Some(agent) = self
+            .model
+            .editing
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .cloned()
+        else {
+            return div();
+        };
+        let tint = thread::color(&agent.color, p.dark);
+        let mood = self.model.mood(&agent.id);
+        let button = div()
+            .id("edit-shape")
+            .size(px(control::ICON))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::BUTTON))
+            .border_2()
+            .border_color(if self.shape_open {
+                p.ink_2
+            } else {
+                p.line_strong
+            })
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, None)
+            .child(thread::strand(
+                format!("pick-{}", agent.id),
+                mood,
+                tint,
+                agent.outline(),
+                control::ICON - 8.0,
+                6.0,
+                self.model.finished_at(&agent.id),
+            ))
+            .when(!self.shape_open, |d| d.tooltip(tip("Shape")))
+            .on_click(cx.listener(|this, _, _, cx| {
+                // The click that closed it, outside it, doesn't open it again.
+                if this
+                    .shape_closed_at
+                    .is_some_and(|at| at.elapsed().as_millis() < 300)
+                {
+                    return;
+                }
+                this.shape_open = !this.shape_open;
+                this.draw_stroke.clear();
+                cx.notify();
+            }));
+        let mut slot = div().relative().child(button);
+        if !self.shape_open {
+            return slot;
+        }
+        const TILE: f32 = 44.0;
+        const COLUMNS: usize = 3;
+        let wide = TILE * COLUMNS as f32 + space::XS * (COLUMNS - 1) as f32;
+        let mut shapes: Vec<(&'static str, &'static str)> = vec![("", "Plain thread")];
+        for (name, title) in crate::tokens::thread_shape::NAMES.iter().zip(SHAPE_TITLES) {
+            shapes.push((name, title));
+        }
+        let mut grid = div().w(px(wide)).flex().flex_wrap().gap(px(space::XS));
+        for (name, title) in shapes {
+            let picked = agent.shape == name;
+            grid = grid.child(
+                div()
+                    .id(SharedString::from(format!("edit-shape-{name}")))
+                    .size(px(TILE))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(radius::BUTTON))
+                    .border_2()
+                    .border_color(if picked { p.ink_2 } else { transparent_black() })
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child(thread::strand(
+                        format!("pick-{}-{name}", agent.id),
+                        Mood::Idle,
+                        tint,
+                        model::outline_of(name, &agent.drawing),
+                        TILE - 14.0,
+                        8.0,
+                        None,
+                    ))
+                    .tooltip(tip(title))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(f) = this.model.set_shape(name) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        // The pad: its drawing while nothing's being drawn, the stroke as it's drawn,
+        // and a pencil while there's neither.
+        const PAD_H: f32 = 96.0;
+        let bounds = self.draw_bounds.clone();
+        let stroke = self.draw_stroke.clone();
+        let drawing = agent.drawing.clone();
+        let picked = agent.shape == "drawn";
+        let empty = stroke.is_empty() && drawing.is_empty();
+        let add = |this: &mut Loom, at: Point<Pixels>, cx: &mut Context<Loom>| {
+            let Some(b) = this.draw_bounds.get() else {
+                return;
+            };
+            let (w, h) = (b.size.width.as_f32(), b.size.height.as_f32());
+            let (x, y) = ((at.x - b.origin.x).as_f32(), (at.y - b.origin.y).as_f32());
+            this.draw_stroke.push((x.clamp(0.0, w), y.clamp(0.0, h)));
+            cx.notify();
+        };
+        // A stroke becomes its drawing; a click alone picks the one it has.
+        let done = |this: &mut Loom, cx: &mut Context<Loom>| {
+            if !this.draw_drag {
+                return;
+            }
+            this.draw_drag = false;
+            let stroke = std::mem::take(&mut this.draw_stroke);
+            let f = if stroke.len() >= 8 {
+                this.model.set_drawing(&stroke)
+            } else if this
+                .model
+                .editing
+                .as_ref()
+                .and_then(|id| this.model.agent(id))
+                .is_some_and(|a| !a.drawing.is_empty())
+            {
+                this.model.set_shape("drawn")
+            } else {
+                None
+            };
+            if let Some(f) = f {
+                this.send(f);
+            }
+            cx.notify();
+        };
+        let pad = div()
+            .id("edit-draw-pad")
+            .relative()
+            .w(px(wide))
+            .h(px(PAD_H))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::BUTTON))
+            .bg(p.bubble)
+            .border_2()
+            .border_color(if picked { p.ink_2 } else { transparent_black() })
+            .cursor_crosshair()
+            .when(empty, |d| {
+                d.child(Icon::new(Ico::Pencil).text_color(p.ink_3))
+            })
+            .when(!empty, |d| d.tooltip(tip("Its drawing")))
+            .when(empty, |d| d.tooltip(tip("Draw one")))
+            .child(
+                canvas(
+                    move |b, _, _| bounds.set(Some(b)),
+                    move |b, _, window, _| {
+                        let (x0, y0) = (b.origin.x.as_f32(), b.origin.y.as_f32());
+                        let (w, h) = (b.size.width.as_f32(), b.size.height.as_f32());
+                        let (line, colour): (Vec<(f32, f32)>, Hsla) = if !stroke.is_empty() {
+                            (stroke.iter().map(|(x, y)| (x0 + x, y0 + y)).collect(), tint)
+                        } else {
+                            // Its drawing, as big as the pad holds it.
+                            let s = (h - 24.0) / 2.0;
+                            let pts = drawing
+                                .iter()
+                                .map(|(x, y)| (x0 + w / 2.0 + x * s, y0 + h / 2.0 + y * s))
+                                .collect();
+                            (pts, if picked { tint } else { tint.opacity(0.55) })
+                        };
+                        if line.len() < 2 {
+                            return;
+                        }
+                        let mut pb = PathBuilder::stroke(px(thread_stroke::LARGE));
+                        for (i, (x, y)) in line.into_iter().enumerate() {
+                            let at = point(px(x), px(y));
+                            if i == 0 {
+                                pb.move_to(at)
+                            } else {
+                                pb.line_to(at)
+                            }
+                        }
+                        if let Ok(path) = pb.build() {
+                            window.paint_path(path, colour);
+                        }
+                    },
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    this.draw_drag = true;
+                    this.draw_stroke.clear();
+                    add(this, e.position, cx)
+                }),
+            )
+            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                if this.draw_drag && e.pressed_button == Some(MouseButton::Left) {
+                    add(this, e.position, cx)
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| done(this, cx)),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| done(this, cx)),
+            );
+        let popup = div()
+            .occlude()
+            .mt(px(space::XS))
+            .p(px(space::S))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.shape_open = false;
+                this.draw_drag = false;
+                this.shape_closed_at = Some(Instant::now());
+                cx.notify();
+            }))
+            .child(grid)
+            .child(pad);
+        slot = slot.child(
+            div()
+                .absolute()
+                .top(px(control::ICON))
+                .right_0()
+                .child(deferred(anchored().anchor(Anchor::TopRight).child(popup))),
+        );
+        slot
+    }
+
     fn edit_agent(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div().flex().flex_col();
@@ -14409,6 +14706,12 @@ const COLORS: [&str; 7] = [
 /// What picking one of an agent's choices does: the frame for it, given the value, or
 /// None to follow the person's default.
 type Pick = Rc<dyn Fn(&mut Loom, Option<&str>) -> Option<Value>>;
+
+/// What each of the eight shapes is called on an agent's edit panel, in the order of
+/// `thread_shape::NAMES`.
+const SHAPE_TITLES: [&str; 8] = [
+    "Loop", "Coil", "Bow", "Heart", "Star", "Knot", "Snail", "Yarn",
+];
 
 /// Every colour an agent's thread can have (design/tokens.toml), with its name, for
 /// its edit panel. An agent can also have its own, as #rrggbb.

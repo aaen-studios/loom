@@ -80,8 +80,15 @@ struct AgentRow: View {
         let model = session.model
         let mood = model.mood(agent.id)
         HStack(spacing: Tokens.Space.m + 2) {
-            ThreadView(mood: mood, color: P.thread(agent.color), snapped: model.finished[agent.id])
-                .frame(width: 26, height: 14)
+            Group {
+                if let outline = agent.outline {
+                    ShapeView(points: outline, mood: mood, color: P.thread(agent.color), snapped: model.finished[agent.id])
+                } else {
+                    ThreadView(mood: mood, color: P.thread(agent.color), snapped: model.finished[agent.id])
+                        .frame(height: 14)
+                }
+            }
+            .frame(width: 26, height: 22)
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent.name)
                     .font(Fonts.ui(Tokens.PhoneSize.body, .medium))

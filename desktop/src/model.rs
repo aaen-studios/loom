@@ -51,11 +51,43 @@ impl List {
     }
 }
 
+/// The points a shape follows: one of the eight by its name, `drawing` for "drawn",
+/// or None for the plain thread.
+pub fn outline_of<'a>(shape: &str, drawing: &'a [(f32, f32)]) -> Option<&'a [(f32, f32)]> {
+    use crate::tokens::thread_shape;
+    if shape == "drawn" {
+        return (drawing.len() > 1).then_some(drawing);
+    }
+    let i = thread_shape::NAMES.iter().position(|n| *n == shape)?;
+    Some(thread_shape::ALL[i])
+}
+
+/// A drawing as the instance keeps it: `[[x, y], ...]`.
+fn drawing_of(a: &Value) -> Vec<(f32, f32)> {
+    a.get("drawing")
+        .and_then(Value::as_array)
+        .map(|ps| {
+            ps.iter()
+                .filter_map(|p| {
+                    let xy = p.as_array()?;
+                    Some((xy.first()?.as_f64()? as f32, xy.get(1)?.as_f64()? as f32))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Clone, Debug)]
 pub struct Agent {
     pub id: String,
     pub name: String,
     pub color: String,
+    /// The shape its thread takes in the sidebar: one of the eight that come with
+    /// loom (`thread_shape::NAMES`), "drawn" for its drawing, or "" for the plain thread.
+    pub shape: String,
+    /// The one the person drew, as the instance smoothed it: points along one
+    /// strand in a box from -1 to 1. Empty when there's none.
+    pub drawing: Vec<(f32, f32)>,
     /// Its own permission mode, or "" when it follows the person's default.
     pub permission: String,
     /// Its own answer to a message while it's busy (queue or steer), or "" when it
@@ -103,6 +135,11 @@ pub struct ConfigOption {
 }
 
 impl Agent {
+    /// The points its thread follows in the sidebar, or None for the plain thread.
+    pub fn outline(&self) -> Option<&[(f32, f32)]> {
+        outline_of(&self.shape, &self.drawing)
+    }
+
     /// The value option `id` is on: the agent's own pick, or the person's default for
     /// its program where the program offers it, or what the program starts on.
     pub fn chosen(&self, id: &str) -> String {
@@ -3988,6 +4025,8 @@ impl Model {
                         id: s(a, "id"),
                         name: s(a, "name"),
                         color: s(a, "color"),
+                        shape: s(a, "shape"),
+                        drawing: drawing_of(a),
                         permission: s(a, "permission"),
                         busy: s(a, "busy"),
                         program: s(a, "acp_agent"),
@@ -4634,6 +4673,33 @@ impl Model {
         let id = self.id("app.color");
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "color": color}}),
+        )
+    }
+
+    /// Gives the agent being edited one of the eight shapes, "drawn" for its drawing,
+    /// or "" for the plain thread.
+    pub fn set_shape(&mut self, shape: &str) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        if let Some(a) = self.agents.iter_mut().find(|a| a.id == agent) {
+            a.shape = shape.to_string();
+        }
+        let id = self.id("app.shape");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "shape": shape}}),
+        )
+    }
+
+    /// Gives the agent being edited the stroke the person drew, which the instance
+    /// smooths and keeps as its shape.
+    pub fn set_drawing(&mut self, stroke: &[(f32, f32)]) -> Option<Value> {
+        let agent = self.editing.clone()?;
+        if stroke.len() < 8 {
+            return None;
+        }
+        let points: Vec<Value> = stroke.iter().map(|(x, y)| json!([x, y])).collect();
+        let id = self.id("app.drawing");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "drawing": points}}),
         )
     }
 
@@ -7122,6 +7188,24 @@ mod tests {
         assert_eq!(tokens_text(1_200_000), "1.2M");
         let f = m.set_color("teal").unwrap();
         assert_eq!(f["args"]["color"], "teal");
+        let f = m.set_shape("yarn").unwrap();
+        assert_eq!(f["args"]["shape"], "yarn");
+        assert!(m.set_drawing(&[(1.0, 2.0); 3]).is_none());
+        let f = m.set_drawing(&[(1.0, 2.0); 9]).unwrap();
+        assert_eq!(f["args"]["drawing"][8], json!([1.0, 2.0]));
+    }
+
+    #[test]
+    fn a_shape_is_one_of_the_eight_or_its_drawing() {
+        let drawn = [(0.0, 0.0), (1.0, -1.0)];
+        assert_eq!(
+            outline_of("yarn", &drawn).map(<[_]>::len),
+            Some(crate::tokens::thread_shape::YARN.len())
+        );
+        assert_eq!(outline_of("drawn", &drawn), Some(&drawn[..]));
+        assert_eq!(outline_of("drawn", &[]), None);
+        assert_eq!(outline_of("", &drawn), None);
+        assert_eq!(outline_of("leaf", &drawn), None);
     }
 
     #[test]
