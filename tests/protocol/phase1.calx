@@ -204,6 +204,11 @@ fn run(server: Child, data: String) ! Error {
         if (str_at(f.copy(), "t") ?? String()) == "delta" and first_delta == Json.Null { first_delta = f.copy() }
     }
     try check(int_at(first_delta.copy(), "pos") == some(0) and (str_at(first_delta.copy(), "text") ?? String()).starts_with("one two "), "the reconnect gets the reply so far from position 0, before synced")
+    var going = String()
+    for f in back.frames {
+        if (str_at(f.copy(), "t") ?? String()) == "synced" { going = "{at(f, "runs")}" }
+    }
+    try check(going.contains("\"run\":\"{run_id}\"") and going.contains("\"conversation\":\"{conversation}\""), "and synced names the run still going")
     let created = try back.until("event", "message.created")
     let reply = reply_text(at(created.copy(), "message"))
     println("      the reply: {reply}")
@@ -211,6 +216,13 @@ fn run(server: Child, data: String) ! Error {
     try check(str_at(at(created, "message"), "status") == some(String("done")), "the finished reply says its turn ended done")
     let finished = try back.until("event", "run.finished")
     try check(str_at(finished, "status") == some(String("done")), "the run finishes done")
+    let later = try App.connect(base.copy(), token.copy(), back.seq)
+    var none_going = String("-")
+    for f in later.frames {
+        if (str_at(f.copy(), "t") ?? String()) == "synced" { none_going = "{at(f, "runs")}" }
+    }
+    try check(none_going == "[]", "and once it's over, synced names no run going")
+    later.close()
 
     // --- The same send again does nothing new ---
     let before = back.seq

@@ -129,6 +129,7 @@ pub struct Conn {
     ws: WebSocket?
     state: State
     failed: u32           // tries in a row that didn't reach welcome
+    resyncs: u32          // connections in a row the cache couldn't keep up with, before a synced
     retry_at: Instant?
     wait: u64             // how long after retry_at to try again
     pending: Pending?     // a login, setup or logout on its way
@@ -200,6 +201,7 @@ impl Conn {
             ws: none,
             state: State.SignedOut,
             failed: 0,
+            resyncs: 0,
             retry_at: none,
             wait: 0,
             pending: none,
@@ -583,6 +585,17 @@ impl Conn {
             self.flush()
         } else if t == "synced" {
             self.synced = true
+            // The runs still going, as the instance has them: a run.started or
+            // run.finished this cache never kept can't leave an agent shown working,
+            // or not, until the next one.
+            match self.cache.keep_runs(at(f, "runs")) {
+                ok => self.resyncs = 0,
+                err(e) => {
+                    self.tell_error("cache", "{e}")
+                    self.resync("the cache couldn't keep the runs going: {e}")
+                    return
+                },
+            }
         } else if t == "instance.update" {
             // A restart for it is near: the core tries again every second until it's back.
             if str_at(f, "state") == some(String("restarting")) { self.restarting = some(unsafe { Instant.now() }) }
@@ -601,8 +614,12 @@ impl Conn {
             match self.cache.apply(f) {
                 ok(applied) => if not applied { return },
                 err(e) => {
-                    // Not applied, so not in the cursor either: the next hello gets it again.
+                    // Not applied, so not in the cursor either. The next event would move
+                    // the cursor past it, losing it for good (a run.finished lost so left
+                    // its agent "Thinking"), so the connection starts again here, and the
+                    // hello gets it again.
                     self.tell_error("cache", "{e}")
+                    self.resync("the cache couldn't keep an event: {e}")
                     return
                 },
             }
@@ -620,7 +637,11 @@ impl Conn {
         } else if t == "snapshot" {
             match self.cache.replace(f) {
                 ok => {},
-                err(e) => self.tell_error("cache", "{e}"),
+                err(e) => {
+                    self.tell_error("cache", "{e}")
+                    self.resync("the cache couldn't keep the snapshot: {e}")
+                    return
+                },
             }
         } else if t == "device.call" {
             self.device_call(f)
@@ -736,22 +757,41 @@ impl Conn {
                 Got.Skip => {},
                 Got.Nothing => break,
                 Got.Ended(e) => {
-                    self.let_go()
+                    _ = self.let_go()
                     held = false
                     self.ended(e)
                     break
                 },
             }
         }
-        if held { self.let_go() }
+        // What the app heard of this burst was rolled back with it, and the cursor too:
+        // the connection starts again, and the hello gets it all again.
+        if held and not self.let_go() { self.resync(String("the cache couldn't save what came")) }
         if let err(e) = self.cache.truncate_if_big() { self.tell_error("cache", "{e}") }
     }
 
-    fn let_go(mut self) {
+    // Saves what came since the hold, giving whether it was saved.
+    fn let_go(mut self) -> bool {
         match self.cache.let_go() {
-            ok => {},
-            err(e) => self.tell_error("cache", "{e}"),
+            ok => return true,
+            err(e) => {
+                self.tell_error("cache", "{e}")
+                return false
+            },
         }
+    }
+
+    /// The cache couldn't keep what the instance sent: the socket closes and the core
+    /// connects again in a moment, from the cursor the cache did keep, so nothing is
+    /// lost and nothing read after it moves the cursor past it. A cache that keeps
+    /// failing, as one on a full disk, is tried again less and less often.
+    fn resync(mut self, why: String) {
+        if let ws = self.ws.take() {
+            ws.close()
+        }
+        self.failed = self.resyncs
+        self.resyncs += 1
+        self.retry_later(why)
     }
 
     /// A message from the app. Gives false when the core is stopping.

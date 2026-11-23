@@ -129,6 +129,7 @@ Every change the server makes for a person is an event with a sequence number, c
 
 - One design covers live updates, reconnecting, the offline cache and several devices at once.
 - Streamed text (`delta`) goes out live, with no number. The finished message is stored as one event. A device that connects in the middle of a reply gets the reply so far, then the rest live.
+- Whether an agent is working comes from the runs still going. Catching up ends with the list of them, so a device whose cache missed a run's start or end shows it as it is. An event the cache can't write starts the connection again, rather than letting the next one move the cursor past it.
 - Old events are pruned after a while. A device too far behind gets a fresh snapshot instead.
 
 ## Accounts and invites
@@ -314,7 +315,7 @@ A turn, from start to end:
 1. A message comes in. The instance stores it and sends it to the agent's session with `session/prompt`, starting the agent if it isn't running.
 2. The agent's updates stream out to the apps, as `delta`s and events.
 3. When the agent asks permission, the instance answers by itself or asks you, as the agent's permission mode says.
-4. When the turn ends, the instance stores the finished message as one event.
+4. When the turn ends, the instance stores the finished message as one event, then says the run finished. It says so however the turn ended, even when keeping the message failed, so no app shows the agent working after its turn.
 
 Each step is saved as it happens, so a restart resumes the session where it was. A turn can be stopped from the app, with `session/cancel`.
 

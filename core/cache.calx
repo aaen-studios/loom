@@ -391,6 +391,35 @@ impl Cache {
         try self.set_meta("cursor", "{int_at(s, "seq") ?? 0}")
     }
 
+    /// Makes the runs still going exactly `runs`, as `synced` names them: one the cache
+    /// missed the end of goes, with its questions, and one it missed the start of comes
+    /// in. Done in one step, so a crash leaves the runs as they were. A run it has
+    /// already keeps the run.started it came with.
+    pub fn keep_runs(self, runs: Json) ! Error {
+        let Json.Array(going) = runs else return
+        try self.step()
+        match self.put_runs(going) {
+            ok => {},
+            err(e) => {
+                self.undo()
+                fail e
+            },
+        }
+        try self.step_done()
+    }
+
+    fn put_runs(self, going: List<Json>) ! Error {
+        var ids = List<Json>()
+        for r in going {
+            let id = str_at(r.copy(), "run") ?? String()
+            ids.push(Json.Str(id.copy()))
+            _ = try self.db.execute(String("INSERT OR IGNORE INTO runs (id, conversation, json) VALUES (?, ?, ?)"), [t(id), t(str_at(r.copy(), "conversation") ?? String()), t("{r}")])
+        }
+        let kept = "{Json.Array(ids)}"
+        _ = try self.db.execute(String("DELETE FROM approvals WHERE run NOT IN (SELECT value FROM json_each(?))"), [t(kept.copy())])
+        _ = try self.db.execute(String("DELETE FROM runs WHERE id NOT IN (SELECT value FROM json_each(?))"), [t(kept)])
+    }
+
     /// Keeps older messages the app fetched with messages.list.
     pub fn put_messages(self, messages: Json) ! Error {
         if let Json.Array(ms) = messages {
@@ -605,6 +634,29 @@ fn keeps_runs_and_questions_until_they_end() ! Error {
     assert((try c.approvals()).len() == 0)
     _ = try c.apply(ev(6, "run.finished", Obj.new().s("run", String("run_1")).done()))
     assert((try c.runs()).len() == 0 and (try c.tools()).len() == 1)
+}
+
+@test
+fn synced_makes_the_runs_those_still_going() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    // One whose run.finished the cache missed, with its question, and one that's going.
+    _ = try c.apply(ev(1, "run.started", Obj.new().s("run", String("run_1")).s("conversation", String("c_1")).s("agent", String("a_1")).done()))
+    _ = try c.apply(ev(2, "approval.needed", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).done()))
+    _ = try c.apply(ev(3, "run.started", Obj.new().s("run", String("run_2")).s("conversation", String("c_2")).s("agent", String("a_2")).i("revision", 4).done()))
+    // And one whose run.started it missed.
+    let going = Json.Array([Obj.new().s("run", String("run_2")).s("conversation", String("c_2")).s("agent", String("a_2")).done(), Obj.new().s("run", String("run_3")).s("conversation", String("c_3")).s("agent", String("a_3")).s("message", String("msg_9")).done()])
+    try c.keep_runs(going)
+    let runs = try c.runs()
+    assert(runs.len() == 2)
+    assert(str_at(runs[0].copy(), "run") == some(String("run_2")) and int_at(runs[0].copy(), "revision") == some(4))
+    assert(str_at(runs[1].copy(), "run") == some(String("run_3")) and str_at(runs[1].copy(), "message") == some(String("msg_9")))
+    assert((try c.approvals()).len() == 0)
+    assert(try c.run(String("run_1")) == none)
+    // A synced without runs, from an older instance, changes nothing; none going keeps none.
+    try c.keep_runs(Json.Null)
+    assert((try c.runs()).len() == 2)
+    try c.keep_runs(Json.Array(List<Json>()))
+    assert((try c.runs()).len() == 0)
 }
 
 @test

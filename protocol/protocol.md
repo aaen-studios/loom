@@ -229,7 +229,7 @@ app                                               instance
  │◀───────────────────────── welcome (version, seq) │
  │◀──────────── event, event, … (everything after)  │   catch-up
  │◀──────────────────── delta (each run so far)     │   replies in progress
- │◀─────────────────────────────── synced (seq)     │
+ │◀───────────────────────── synced (seq, runs)     │
  │◀═════════════ events and deltas, live ══════════▶│   and the app's frames
 ```
 
@@ -237,7 +237,7 @@ app                                               instance
 2. The instance checks the token and the versions, and answers `welcome`, or closes with [4001 or 4002](#errors-and-close-codes).
 3. It sends every event after the app's cursor, in order ([The event log](#the-event-log)).
 4. For each of the person's runs still going, it sends what the reply has so far, as deltas from position 0 ([Messages and streaming](#messages-and-streaming)).
-5. It sends `synced`. From then on, events and deltas come as they happen.
+5. It sends `synced`, with the runs still going. From then on, events and deltas come as they happen.
 
 The app may send frames as soon as it has `welcome`. It doesn't wait for `synced`.
 
@@ -360,7 +360,7 @@ Only after a `welcome` with `reset: true`. Everything the app needs to start aga
 { "t": "snapshot", "seq": 1046, "agents": [ … ], "conversations": [ … ], "messages": [ … ] }
 ```
 
-Its `seq` is up to 5,000 events before the `welcome`'s, or the oldest kept, and the events after it follow as usual, applied over the snapshot. They bring what a snapshot doesn't carry: the runs still going, the questions still open and the newest tool calls. Each applies over the newer state as it would have when it came, so the cache ends as the instance is.
+Its `seq` is up to 5,000 events before the `welcome`'s, or the oldest kept, and the events after it follow as usual, applied over the snapshot. They bring what a snapshot doesn't carry: the questions still open and the newest tool calls. Each applies over the newer state as it would have when it came, so the cache ends as the instance is. The runs still going come with `synced`, including one that started before those events.
 
 ### `event`
 
@@ -387,8 +387,10 @@ See [Messages and streaming](#messages-and-streaming).
 Catch-up is over. Everything after this is live.
 
 ```json
-{ "t": "synced", "seq": 1046 }
+{ "t": "synced", "seq": 1046, "runs": [ { "run": "run_77", "conversation": "c_9", "agent": "a_2", "message": "msg_311", "answering": "msg_310" } ] }
 ```
+
+`runs` is every one of the person's runs still going, as `run.started` gave each (without `revision`). The app's cache makes its runs exactly these, so a run whose `run.started` or `run.finished` it never kept (the event was pruned, came before a snapshot's, or the cache couldn't write it) shows as it is: an agent shows it's working for as long as its turn goes, and stops once it's over.
 
 ### `ack`
 
@@ -662,7 +664,7 @@ A run is one turn of an agent, answering one message.
 | Kind | Fields | When |
 |---|---|---|
 | `run.started` | `run`, `conversation`, `agent`, `revision`, `message` (the reply's id), `answering` (the person's message id) | The agent was given the message |
-| `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output` and `total` tokens, where the agent program reports them with ACP's `usage`) | The turn is over, after `message.created` for its reply. Only the owner's agents run as the instance's own user, unless they're isolated. Anyone else's run in their sandbox ([Sandboxes](#sandboxes)), and on an instance without sandboxes their runs are `failed`, saying so |
+| `run.finished` | `run`, `status` (`done`, `cancelled`, `failed` or `limit`), `error` (for `failed`), `usage` (`input`, `output` and `total` tokens, where the agent program reports them with ACP's `usage`) | The turn is over, after `message.created` for its reply. It comes for every run that started, however it ended, even when its reply couldn't be kept. Only the owner's agents run as the instance's own user, unless they're isolated. Anyone else's run in their sandbox ([Sandboxes](#sandboxes)), and on an instance without sandboxes their runs are `failed`, saying so |
 | `queue.changed` | `conversation`, `queue` (the whole queue, first first) | A message waits for its agent, or one that waited was edited, reordered, dropped, steered or sent ([The queue](#the-queue)) |
 | `task.updated` | `task` (the whole task) | A task started, or its status changed ([Tasks](#tasks)) |
 | `table.changed` | `table`, `by` (the agent or device), `dropped`? (`true` when it's gone) | A shared table was made, written to, had rows deleted, or was dropped ([PLAN.md](../PLAN.md#shared-tables)) |
@@ -1076,7 +1078,7 @@ Then the reply so far, from `pos` 0, one delta per block. Block 0 is text the co
 ```
 ← {"t":"delta","run":"run_77","message":"msg_311","block":0,"kind":"text","pos":0,"text":"Let me check the last run on main."}
 ← {"t":"delta","run":"run_77","message":"msg_311","block":2,"kind":"text","pos":0,"text":"Yes. The last build on main"}
-← {"t":"synced","seq":1047}
+← {"t":"synced","seq":1047,"runs":[{"run":"run_77","conversation":"c_9","agent":"a_2","message":"msg_311","answering":"msg_310"}]}
 ```
 
 **7. The rest, live.**
