@@ -2033,6 +2033,21 @@ impl Store {
         return int((row ?? List<Value>())[0].copy())
     }
 
+    // The newest `per` messages of each of `user`'s conversations that aren't deleted,
+    // oldest first in each, as a JSON array's text: for a snapshot, in one query, and
+    // as the messages were stored, without reading them in and writing them out again.
+    pub fn newest_messages_text(self, user: String, per: i64) -> String ! Error {
+        var out = String("[")
+        var first = true
+        for r in try self.db.query(String("SELECT m.json FROM (SELECT json, conversation, rowid AS r, row_number() OVER (PARTITION BY conversation ORDER BY rowid DESC) AS n FROM messages WHERE user = ?1) m JOIN conversations c ON c.id = m.conversation AND c.user = ?1 AND c.deleted = 0 WHERE m.n <= ?2 ORDER BY c.at, m.conversation, m.r"), [t(user), Value.Int(per)]) {
+            if not first { out.push_str(",") }
+            first = false
+            out.push_str(text(r[0].copy()))
+        }
+        out.push_str("]")
+        return out
+    }
+
     // Up to `limit` messages of a conversation, newest last, before the
     // message `before` if it's given, and whether there are older ones.
     pub fn messages(self, user: String, conversation: String, before: String?, limit: usize) -> (List<Json>, bool) ! Error {

@@ -6072,16 +6072,11 @@ impl Instance {
         if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
     }
 
-    fn snapshot(i: Instance, user: String, seq: i64) -> Json ! Error {
-        let conversations = try i.store.conversations(user.copy())
-        var messages = List<Json>()
-        for c in conversations {
-            let (page, _) = try i.store.messages(user.copy(), str_at(c.copy(), "id") ?? String(), none, 50)
-            for m in page {
-                messages.push(m.copy())
-            }
-        }
-        return Obj.new().s("t", String("snapshot")).i("seq", seq).j("agents", Json.Array(try i.store.agents(user))).j("conversations", Json.Array(conversations)).j("messages", Json.Array(messages)).done()
+    // The snapshot frame's text, with the newest 50 messages of each conversation
+    // put in as they were stored, from one query.
+    fn snapshot(i: Instance, user: String, seq: i64) -> String ! Error {
+        let head = "{Obj.new().s("t", String("snapshot")).i("seq", seq).j("agents", Json.Array(try i.store.agents(user.copy()))).j("conversations", Json.Array(try i.store.conversations(user.copy()))).done()}"
+        return "{head[..head.len() - 1]},\"messages\":{try i.store.newest_messages_text(user, 50)}\}"
     }
 
     fn send(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
