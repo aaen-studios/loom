@@ -2001,24 +2001,30 @@ fn event_text(seq: i64, kind: str, rest: own Obj) -> String {
     return "{rest.s("t", String("event")).i("seq", seq).s("kind", String(kind)).done()}"
 }
 
+// The text of what the core told the app next, if anything.
+fn next_told(told: mut Receiver<ToApp>) -> String? {
+    let m = told.next() else return none
+    return m.text()
+}
+
 @test
 fn catch_up_comes_to_the_app_as_one_synced() ! Error {
     let inbox = Receiver<String>()
-    var told = Receiver<String>()
+    var told = Receiver<ToApp>()
     var c = Conn.new(none, none, String("loom-test"), try Cache.open(String(":memory:")), inbox, told.sender())
     c.frame(event_text(1, "conversation.created", Obj.new().j("conversation", Obj.new().s("id", String("c_1")).s("agent", String("a_1")).i("at", 1).done())))
     c.frame(event_text(2, "run.started", Obj.new().s("run", String("r_1")).s("conversation", String("c_1")).s("agent", String("a_1")).s("message", String("msg_2"))))
     c.frame(event_text(3, "run.finished", Obj.new().s("run", String("r_1")).s("status", String("failed"))))
-    assert(told.next() == none)
+    assert(next_told(mut told) == none)
     c.frame(String(#"{"t":"synced","seq":3,"runs":[]}"#))
-    let synced = try parse(told.next() ?? String())
-    assert(str_at(synced.copy(), "t") == some(String("synced")) and told.next() == none)
+    let synced = try parse(next_told(mut told) ?? String())
+    assert(str_at(synced.copy(), "t") == some(String("synced")) and next_told(mut told) == none)
     let held = at(synced, "held")
     assert("{at(held.copy(), "kinds")}" == #"["conversation.created","run.started","run.finished"]"#)
     assert("{at(held, "ended")}" == #"[{"agent":"a_1","run":"r_1","status":"failed"}]"#)
     // Live, each event goes on as it comes, and the next synced holds nothing.
     c.frame(event_text(4, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_1")).s("title", String("x")).done())))
-    assert((told.next() ?? String()).contains(#""seq":4"#))
+    assert((next_told(mut told) ?? String()).contains(#""seq":4"#))
     c.frame(String(#"{"t":"synced","seq":4,"runs":[]}"#))
-    assert(told.next() == some(String(#"{"t":"synced","seq":4,"runs":[]}"#)))
+    assert(next_told(mut told) == some(String(#"{"t":"synced","seq":4,"runs":[]}"#)))
 }

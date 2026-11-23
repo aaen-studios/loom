@@ -137,7 +137,8 @@ fn run(server: mut Child, data: String) ! Error {
     var heard = 0
     var synced = Json.Null
     while synced == Json.Null {
-        let m = unsafe { app.from_core.wait_for(5000 * 1000000) } else { fail "no synced came in 5 s" }
+        let got = unsafe { app.from_core.wait_for(5000 * 1000000) } else { fail "no synced came in 5 s" }
+        let m = got.text() else { continue }
         let f = try parse(m)
         let t = str_at(f.copy(), "t") ?? String()
         if t == "event" { heard += 1 }
