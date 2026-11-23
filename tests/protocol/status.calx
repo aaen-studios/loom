@@ -1,0 +1,185 @@
+module tests.protocol.status
+
+// A status token (protocol.md, "/api/scripts/*"): the person makes one in the
+// app, and a dashboard on the instance's computer reads their agents, routines
+// and the last 24 hours' routine runs with it, through GET /api/scripts/status.
+// Names, colours, shapes, counts, states and times only, never what anyone
+// said. It opens nothing else, and a script token doesn't open the status.
+//
+//     calx tests/protocol/status.calx
+import std.http.{Header, get, post}
+import std.json.{Json, parse}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check, fetch, upload}
+
+// A call to /api/scripts/OP: its status and its body. With `body`, a POST.
+fn call(base: String, token: String, op: str, body: Json?, extra: List<Header>) -> (u32, String) ! Error {
+    var headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
+    headers.extend(extra)
+    let url = "http://{base}/api/scripts/{op}"
+    var req = match body {
+        some(b) => post(url, headers, "{b}".to_bytes(), 60000, 1048576),
+        none => get(url, headers, 60000, 1048576),
+    }
+    let got = try req.wait()
+    return (got.status, String.from_utf8(got.body) ?? String())
+}
+
+fn json(text: String) -> Json {
+    return match parse(text) {
+        ok(v) => v,
+        err(_) => Json.Null,
+    }
+}
+
+fn code_of(text: String) -> String {
+    return str_at(at(json(text), "error"), "code") ?? String()
+}
+
+// The one in `list` whose `key` is `value`.
+fn find(list: Json, key: str, value: str) -> Json {
+    if let Json.Array(items) = list {
+        for x in items {
+            if str_at(x.copy(), key) == some(String(value)) { return x.copy() }
+        }
+    }
+    return Json.Null
+}
+
+fn count(list: Json) -> usize {
+    if let Json.Array(items) = list { return items.len() }
+    return 0
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    // What must never show: instructions, a prompt, what was said, a memory, a secret.
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Ada")).s("acp_agent", String("fake")).s("instructions", String("INSTRUCTIONS-zq81")).s("color", String("mint")).done())
+    let ada = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    _ = try app.cmd("q_2", "agent.update", Obj.new().s("agent", ada.copy()).s("shape", String("yarn")).done())
+    let other = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Bo")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("color", String("#123abc")).done())
+    let bo = str_at(at(at(other, "value"), "agent"), "id") ?? String()
+    var stroke = List<Json>()
+    for k in 0..12 {
+        stroke.push(Json.Array([Json.Float(f64(k) / 12.0), Json.Float(f64(k % 3) / 4.0)]))
+    }
+    _ = try app.cmd("q_4", "agent.update", Obj.new().s("agent", bo.copy()).j("drawing", Json.Array(stroke)).done())
+    _ = try app.cmd("q_5", "memory.put", Obj.new().s("text", String("MEMORY-zq82")).done())
+    _ = try app.cmd("q_6", "secret.put", Obj.new().s("name", String("api_key")).s("value", String("SECRET-zq83")).done())
+    let routine = try app.cmd("q_7", "routine.put", Obj.new().s("name", String("Morning brief")).s("agent", ada.copy()).s("prompt", String("PROMPT-zq84")).j("schedule", Obj.new().s("daily", String("07:00")).done()).done())
+    let routine_id = str_at(at(at(routine, "value"), "routine"), "id") ?? String()
+    _ = try app.cmd("q_8", "routine.put", Obj.new().s("name", String("Quiet one")).s("agent", ada.copy()).s("prompt", String("x")).b("on", false).j("schedule", Obj.new().s("daily", String("08:00")).done()).done())
+    _ = try app.cmd("q_9", "routine.run", Obj.new().s("id", routine_id.copy()).done())
+    let said = try app.reply()
+    try check("{said}".contains("PROMPT-zq84"), "the routine ran, and its agent said its prompt back")
+    // One whose agent says it failed, though its turn ended well.
+    let prices = try app.cmd("q_9b", "routine.put", Obj.new().s("name", String("Prices")).s("agent", ada.copy()).s("prompt", String(#"/mcp routine_failed {"why": "WHY-zq86"}"#)).j("schedule", Obj.new().s("daily", String("09:00")).done()).done())
+    let prices_id = str_at(at(at(prices, "value"), "routine"), "id") ?? String()
+    _ = try app.cmd("q_9c", "routine.run", Obj.new().s("id", prices_id.copy()).done())
+    loop {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        if str_at(r.copy(), "id") == some(prices_id.copy()) and str_at(at(r, "last"), "status") == some(String("failed")) { break }
+    }
+
+    // Made in the app, shown once.
+    let none_yet = try app.cmd("q_10", "scripts.get", Obj.new().done())
+    try check(at(at(none_yet, "value"), "status_since") == Json.Null, "there's no status token until the person makes one")
+    let on = try app.cmd("q_11", "scripts.status_on", Obj.new().done())
+    let token = str_at(at(on.copy(), "value"), "token") ?? String()
+    try check(token.starts_with("loom-status-") and int_at(at(on, "value"), "port") != none, "scripts.status_on gives a status token, once")
+    let got = try app.cmd("q_12", "scripts.get", Obj.new().done())
+    try check(int_at(at(got.copy(), "value"), "status_since") != none and bool_at(at(got, "value"), "on") == some(false), "scripts.get says there's one, and scripts stay off")
+
+    // Bo works on something long while the status is read.
+    let c = try app.cmd("q_13", "conversation.create", Obj.new().s("agent", bo.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("MESSAGE-zq85\n/sleep 4000")).done())
+    _ = try app.until("event", "run.started")
+
+    let (status, body) = try call(i.base.copy(), token.copy(), "status", none, List<Header>())
+    try check(status == 200, "the status token reads GET /api/scripts/status")
+    let j = json(body.copy())
+    let a = find(at(j.copy(), "agents"), "name", "Ada")
+    let b = find(at(j.copy(), "agents"), "name", "Bo")
+    try check(count(at(j.copy(), "agents")) == 2 and str_at(a.copy(), "id") == some(ada.copy()) and str_at(a.copy(), "color") == some(String("mint")) and str_at(a.copy(), "shape") == some(String("yarn")) and bool_at(a.copy(), "working") == some(false) and at(a, "drawing") == Json.Null, "each agent: its id, name, colour, shape and whether it's working")
+    try check(str_at(b.copy(), "color") == some(String("#123abc")) and str_at(b.copy(), "shape") == some(String("drawn")) and count(at(b.copy(), "drawing")) >= 8 and bool_at(b, "working") == some(true), "a drawn one with its drawing, working now")
+    let r = find(at(j.copy(), "routines"), "name", "Morning brief")
+    let q = find(at(j.copy(), "routines"), "name", "Quiet one")
+    try check(count(at(j.copy(), "routines")) == 3 and bool_at(r.copy(), "on") == some(true) and bool_at(q.copy(), "on") == some(false) and at(q, "last") == Json.Null, "each routine: its name, whether it's on")
+    try check(str_at(at(r.copy(), "last"), "status") == some(String("done")) and (int_at(at(r, "last"), "at") ?? 0) > 0, "and how its last run went, and when")
+    let run0 = at(j.copy(), "runs").at(0) ?? Json.Null
+    let run1 = at(j.copy(), "runs").at(1) ?? Json.Null
+    try check(count(at(j.copy(), "runs")) == 2 and str_at(run0.copy(), "routine") == some(String("Morning brief")) and str_at(run0.copy(), "status") == some(String("done")) and (int_at(run0.copy(), "at") ?? 0) > 0, "the last 24 hours' routine runs, oldest first, with when and how they went")
+    let p = find(at(j.copy(), "routines"), "name", "Prices")
+    try check(str_at(run1, "status") == some(String("failed")) and str_at(at(p, "last"), "status") == some(String("failed")), "a run its agent said failed is failed, as its routine says")
+    var leaked = List<String>()
+    for word in ["INSTRUCTIONS-zq81", "MEMORY-zq82", "SECRET-zq83", "PROMPT-zq84", "MESSAGE-zq85", "WHY-zq86", "routine_failed", "instructions", "prompt", "text", "error", "conversation"] {
+        if body.contains(word) { leaked.push(String(word)) }
+    }
+    if leaked.len() > 0 { fail "the status shows {leaked}: {body}" }
+    try check(true, "and never instructions, prompts, messages, memories, errors or secrets")
+
+    // Nothing else.
+    let (posted, why) = try call(i.base.copy(), token.copy(), "status", some(Obj.new().done()), List<Header>())
+    try check(posted == 403 and code_of(why) == "not_allowed", "a status token only GETs the status")
+    let (approvals, _) = try call(i.base.copy(), token.copy(), "approvals", none, List<Header>())
+    let (asked, _) = try call(i.base.copy(), token.copy(), "ask", some(Obj.new().s("agent", String("Ada")).s("text", String("hi")).done()), List<Header>())
+    let (ran, _) = try call(i.base.copy(), token.copy(), "routine", some(Obj.new().s("routine", String("Morning brief")).done()), List<Header>())
+    let (approved, _) = try call(i.base.copy(), token.copy(), "approve", some(Obj.new().s("call", String("x")).b("allow", true).done()), List<Header>())
+    let (imported, _) = try call(i.base.copy(), token.copy(), "import", some(Obj.new().s("from", String("openbot")).done()), List<Header>())
+    try check(approvals == 403 and asked == 403 and ran == 403 and approved == 403 and imported == 403, "nor any other script route")
+    let ws = match Session.connect(i.base.copy(), token.copy(), 0) {
+        ok(s) => {
+            s.close()
+            false
+        },
+        err(_) => true,
+    }
+    try check(ws, "nor /ws")
+    let (files, _, _) = try fetch(i.base.copy(), token.copy(), String("/files"))
+    let (up, _) = try upload(i.base.copy(), token.copy(), "x.txt", "text/plain", "x".to_bytes())
+    var tools_req = get("http://{i.base}/api/mcp/tools", [Header { name: String("Authorization"), value: "Bearer {token}" }], 30000, 1048576)
+    let tools = try tools_req.wait()
+    try check(files == 401 and up == 401 and tools.status == 401, "nor files, nor loom's tools")
+    let (proxied, through) = try call(i.base.copy(), token.copy(), "status", none, [Header { name: String("X-Forwarded-For"), value: String("203.0.113.9") }])
+    try check(proxied == 403 and code_of(through) == "not_here", "and only from the instance's computer, straight")
+
+    // A script token works as before, but doesn't read the status.
+    let script = str_at(at(try app.cmd("q_14", "scripts.on", Obj.new().done()), "value"), "token") ?? String()
+    let (full, refused) = try call(i.base.copy(), script.copy(), "status", none, List<Header>())
+    try check(full == 403 and code_of(refused) == "not_allowed", "a script token doesn't read the status")
+    let (listed, _) = try call(i.base.copy(), script, "approvals", none, List<Header>())
+    try check(listed == 200, "and does what it did")
+
+    // An agent can't make one; the person ends it.
+    _ = try app.reply()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String(#"/mcp run_command {"name":"scripts.status_on"}"#)).done())
+    let by_agent = try app.reply()
+    try check("{by_agent}".contains("run_command failed"), "an agent can't make a status token")
+    let again = str_at(at(try app.cmd("q_15", "scripts.status_on", Obj.new().done()), "value"), "token") ?? String()
+    let (old, _) = try call(i.base.copy(), token, "status", none, List<Header>())
+    let (fresh, _) = try call(i.base.copy(), again.copy(), "status", none, List<Header>())
+    try check(old == 401 and fresh == 200, "a new one ends the last")
+    _ = try app.cmd("q_16", "scripts.status_off", Obj.new().done())
+    let (after, _) = try call(i.base.copy(), again, "status", none, List<Header>())
+    let gone = try app.cmd("q_17", "scripts.get", Obj.new().done())
+    try check(after == 401 and at(at(gone, "value"), "status_since") == Json.Null, "scripts.status_off ends it")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nstatus: all good")
+}

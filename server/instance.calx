@@ -802,6 +802,10 @@ fn from_here(req: Request) -> bool {
 // "Routines say when there's nothing to say").
 const FAILURES_OFF: i64 = 5
 
+// The status's routine runs: those of the last 24 hours, at most this many.
+const STATUS_RUNS_MS: i64 = 86400000
+const STATUS_RUNS_MOST: i64 = 2000
+
 // How many agents may ask on the way to a run, with message_agent (PLAN.md,
 // "Agents talking to agents have limits").
 const CHAIN_MOST: usize = 4
@@ -2878,6 +2882,13 @@ impl Instance {
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
         let op = req.path.trim_prefix("/api/scripts/").copy()
         let hash = bytes.hex(sha256(token.to_bytes()))
+        // A status token reads the person's status and nothing else.
+        if token.len() > 0 {
+            if let whose = try i.store.status_token_user(hash.copy()) {
+                if op != "status" or req.method != "GET" { return some(http_error(403, "not_allowed", String("A status token only reads the status, with GET /api/scripts/status."))) }
+                return some(json_response(200, try i.status_of(whose)))
+            }
+        }
         var found = if token.len() > 0 { try i.store.script_token_user(hash.copy()) } else { none }
         // Or a token a script made itself from the data folder, for one route, for a while.
         if found == none and token.len() > 0 {
@@ -2891,6 +2902,8 @@ impl Instance {
         let user = found else {
             return some(http_error(401, "unauthorized", String("That isn't a script token. Your person turns scripts on in the app, which gives one.")))
         }
+        // The status is only for a status token, so one that can read it can do nothing else.
+        if op == "status" { return some(http_error(403, "not_allowed", String("The status is read with a status token, which your person makes in the app."))) }
         if op == "approvals" and req.method == "GET" {
             var out = List<Json>()
             for (call, a) in i.approvals {
@@ -2941,6 +2954,41 @@ impl Instance {
             return some(json_response(200, Obj.new().done()))
         }
         return some(http_error(404, "not_found", String("There's nothing here.")))
+    }
+
+    // GET /api/scripts/status, for a status token: the person's agents, routines
+    // and the last 24 hours' routine runs, as names, colours, shapes, counts,
+    // states and times only. Never what anyone said, a prompt, instructions,
+    // memories, an error's text or a secret.
+    fn status_of(i: Instance, user: String) -> Json ! Error {
+        var agents = List<Json>()
+        for a in try i.store.agents(user.copy()) {
+            let id = str_at(a.copy(), "id") ?? String()
+            var working = false
+            for (_, r) in i.runs {
+                if r.user == user and r.agent == id { working = true }
+            }
+            let s = str_at(a.copy(), "shape") ?? String()
+            var o = Obj.new().s("id", id).s("name", str_at(a.copy(), "name") ?? String()).s("color", str_at(a.copy(), "color") ?? String()).s("shape", s.copy())
+            if s == "drawn" { o = o.j("drawing", at(a, "drawing")) }
+            agents.push(o.b("working", working).done())
+        }
+        var kept = List<Json>()
+        var names = Map<String, String>()
+        for r in try i.store.routines(user.copy()) {
+            let id = str_at(r.copy(), "id") ?? String()
+            let name = str_at(r.copy(), "name") ?? String()
+            names.insert(id.copy(), name.copy())
+            let l = at(r.copy(), "last")
+            let last = if l == Json.Null { Json.Null } else { Obj.new().s("status", str_at(l.copy(), "status") ?? String()).i("at", int_at(l, "at") ?? 0).done() }
+            kept.push(Obj.new().s("id", id).s("name", name).b("on", bool_at(r, "on") ?? true).j("last", last).done())
+        }
+        var runs = List<Json>()
+        for (t, status, routine) in try i.store.routine_runs_since(user, now() - STATUS_RUNS_MS, STATUS_RUNS_MOST) {
+            let name = if let n = names.find(routine) { n.copy() } else { String() }
+            runs.push(Obj.new().i("at", t).s("status", status).s("routine", name).done())
+        }
+        return Obj.new().j("agents", Json.Array(agents)).j("routines", Json.Array(kept)).j("runs", Json.Array(runs)).done()
     }
 
     // POST /api/scripts/ask: a message to an agent, from the person's script,
@@ -5074,12 +5122,13 @@ impl Instance {
         try i.store.put_message(user.copy(), message.copy())
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id.copy()).j("message", message).done())
         let run_id = try i.store.new_id("run")
-        i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id })
+        i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id.copy() })
         let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else if by == "webhook" { String("by its webhook, with what it sent below the prompt") } else { String("now, as the person asked") }
         i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by)
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this. With nothing new to tell them, end with routine_quiet; if it can't be done, say why with routine_failed"
         try i.start_run(user, conversation, run_id.copy(), message_id, prompt, List<Json>(), from, String(), if by == "webhook" { "webhook" } else { "routine" })
+        try i.store.mark_run_routine(run_id.copy(), id)
         return Answer.Value(Obj.new().s("run", run_id).done())
     }
 
@@ -8266,6 +8315,7 @@ impl Instance {
         if let rr = i.routine_runs.remove(r.id.copy()) {
             // As its agent said it went: quiet, or failed with why.
             let (how, failed_why) = if quiet { (String("quiet"), error.copy()) } else if mark == "failed" and status == "done" { (String("failed"), some(why)) } else { (status.copy(), error.copy()) }
+            try i.store.routine_run_went(r.id.copy(), how.copy())
             try i.routine_done(rr, r.agent.copy(), r.conversation.copy(), how, failed_why, said)
         } else if not asked and (status == "done" or status == "failed") {
             // A reply to someone on none of their devices comes to their phone.
@@ -8712,8 +8762,9 @@ impl Instance {
         if name.starts_with("scripts.") {
             if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person turns scripts on or off, on one of their devices.")) }
             if name == "scripts.get" {
-                let since = try i.store.scripts_since(user)
-                return Answer.Value(Obj.new().b("on", since != none).j("since", if let turned_on = since { Json.Int(turned_on) } else { Json.Null }).i("port", i64(i.server.port)).done())
+                let since = try i.store.scripts_since(user.copy())
+                let status = try i.store.status_since(user)
+                return Answer.Value(Obj.new().b("on", since != none).j("since", if let turned_on = since { Json.Int(turned_on) } else { Json.Null }).i("port", i64(i.server.port)).j("status_since", if let made = status { Json.Int(made) } else { Json.Null }).done())
             }
             if name == "scripts.on" {
                 // A new token every time, shown this once: only its SHA-256 is kept.
@@ -8723,6 +8774,16 @@ impl Instance {
             }
             if name == "scripts.off" {
                 try i.store.drop_script_token(user)
+                return Answer.Value(empty)
+            }
+            // A status token, apart from scripts: it only reads GET /api/scripts/status.
+            if name == "scripts.status_on" {
+                let token = "loom-status-{bytes.hex(random_bytes(24))}"
+                try i.store.set_status_token(user, bytes.hex(sha256(token.to_bytes())))
+                return Answer.Value(Obj.new().s("token", token).i("port", i64(i.server.port)).done())
+            }
+            if name == "scripts.status_off" {
+                try i.store.drop_status_token(user)
                 return Answer.Value(empty)
             }
         }
