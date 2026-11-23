@@ -141,6 +141,11 @@ struct Message: Identifiable, Equatable, Sendable {
     var from: String?
 
     var isPerson: Bool { role == "person" }
+
+    /// What it says, its text blocks one after another, to copy or select.
+    var text: String {
+        blocks.filter { $0.kind == "text" && !$0.text.isEmpty }.map(\.text).joined(separator: "\n\n")
+    }
 }
 
 struct Tool: Equatable, Sendable {
@@ -465,8 +470,13 @@ final class Model {
             blocks[block].text += f["text"].text
         }
         live[message] = blocks
+        // Written a few times a second at most, not at each delta: every view that shows
+        // the agent's thread reads it, and each write draws them all again.
         if let r = runs.first(where: { $0.message == message }) {
-            lastDelta[r.agent] = .now
+            let now = Date.now
+            if lastDelta[r.agent].map({ now.timeIntervalSince($0) > 0.25 }) ?? true {
+                lastDelta[r.agent] = now
+            }
         }
     }
 

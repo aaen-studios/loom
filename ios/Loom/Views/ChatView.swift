@@ -10,6 +10,8 @@ struct ChatView: View {
     let agentId: String
     @State private var atBottom = true
     @State private var openThoughts: Set<String> = []
+    /// A message's text open to select from.
+    @State private var reading: Reading?
 
     var body: some View {
         let model = session.model
@@ -25,10 +27,29 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                     }
                     ForEach(messages) { m in
-                        if m.isPerson {
-                            PersonMessage(message: m)
-                        } else {
-                            Reply(message: m, agent: agent, openThoughts: $openThoughts)
+                        Group {
+                            if m.isPerson {
+                                PersonMessage(message: m)
+                            } else {
+                                Reply(message: m, agent: agent, openThoughts: $openThoughts)
+                            }
+                        }
+                        .contextMenu {
+                            // One menu a message rather than selectable text in each
+                            // paragraph, which made each row many times dearer to build.
+                            let text = m.text
+                            if !m.live && !text.isEmpty {
+                                Button {
+                                    UIPasteboard.general.string = text
+                                } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                }
+                                Button {
+                                    reading = Reading(text: text)
+                                } label: {
+                                    Label("Select text", systemImage: "selection.pin.in.out")
+                                }
+                            }
                         }
                     }
                     ForEach(approvals) { a in
@@ -95,6 +116,19 @@ struct ChatView: View {
         }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(Bindable(model).toOpen)
+        .sheet(item: $reading) { r in
+            NavigationStack {
+                SelectableText(text: r.text)
+                    .navigationTitle("Select text")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Done") { reading = nil }
+                        }
+                    }
+            }
+            .presentationDetents([.medium, .large])
+        }
         .onAppear {
             model.select(agentId)
             session.flush()
@@ -105,6 +139,32 @@ struct ChatView: View {
     private struct Follow: Equatable {
         var messages: [Message]
         var approvals: Int
+    }
+
+    private struct Reading: Identifiable {
+        let id = UUID()
+        var text: String
+    }
+}
+
+/// A message's text, to select any part of it.
+private struct SelectableText: UIViewRepresentable {
+    var text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let v = UITextView()
+        v.isEditable = false
+        v.isSelectable = true
+        v.backgroundColor = .clear
+        v.font = UIFont.preferredFont(forTextStyle: .body)
+        v.adjustsFontForContentSizeCategory = true
+        v.textColor = UIColor(P.ink)
+        v.textContainerInset = UIEdgeInsets(top: 16, left: 12, bottom: 16, right: 12)
+        return v
+    }
+
+    func updateUIView(_ v: UITextView, context: Context) {
+        if v.text != text { v.text = text }
     }
 }
 
@@ -155,8 +215,16 @@ struct Reply: View {
         let model = session.model
         VStack(alignment: .leading, spacing: Tokens.Space.s + 2) {
             HStack(spacing: Tokens.Space.s) {
-                ThreadView(mood: message.live ? model.mood(agent?.id ?? "") : .idle, color: P.thread(agent?.color ?? ""))
-                    .frame(width: 16, height: 10)
+                Group {
+                    if message.live {
+                        ThreadView(mood: model.mood(agent?.id ?? ""), color: P.thread(agent?.color ?? ""))
+                    } else {
+                        // A finished reply's thread is still: a line, with no timeline or
+                        // canvas of its own.
+                        StillThread().stroke(P.thread(agent?.color ?? ""), style: StrokeStyle(lineWidth: Tokens.ThreadStroke.small, lineCap: .round, lineJoin: .round))
+                    }
+                }
+                .frame(width: 16, height: 10)
                 Text(agent?.name ?? "Agent").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink)
                 Text(message.live ? "now" : When.time(message.at)).font(Fonts.caption).foregroundStyle(P.ink3)
             }
@@ -230,7 +298,6 @@ struct Thought: View {
                     .lineSpacing(3)
                     .padding(.leading, Tokens.Space.m)
                     .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 1) }
-                    .textSelection(.enabled)
             }
         }
         .animation(.easeOut(duration: 0.15), value: open)
@@ -271,13 +338,16 @@ struct ToolLine: View {
 struct FileView: View {
     @Environment(Session.self) private var session
     var file: FileRef
+    /// Its thumbnail, read and decoded off the main thread.
+    @State private var thumb: UIImage?
 
     var body: some View {
+        let path = file.isImage ? session.model.files["\(file.file).thumb"] : nil
         Button {
             session.send(session.model.open(file))
         } label: {
             if file.isImage {
-                if let path = session.model.files["\(file.file).thumb"], let image = UIImage(contentsOfFile: path) {
+                if let path, let image = thumb ?? Pictures.kept(path) {
                     Image(uiImage: image)
                         .resizable()
                         .scaledToFit()
@@ -305,6 +375,10 @@ struct FileView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(file.isImage ? "Picture, \(file.name)" : "\(file.name), \(When.size(file.size))")
+        .task(id: path) {
+            guard let path, Pictures.kept(path) == nil else { return }
+            thumb = await Pictures.load(path)
+        }
     }
 }
 
