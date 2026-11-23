@@ -11,7 +11,7 @@ module core.cache
 import std.json.{Json, parse}
 import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
-import shared.obj.{Obj, at, int_at, merge, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.checkpoint
 import std.fs
 import std.thread.{Task, sleep}
@@ -20,13 +20,14 @@ const SCHEMA: str = #"
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL, agent TEXT, chat INTEGER NOT NULL DEFAULT 0);
+    id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL, agent TEXT, chat INTEGER NOT NULL DEFAULT 0,
+    partial INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, conversation TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation, at);
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER, parent TEXT);
+CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER, parent TEXT, at INTEGER);
 CREATE INDEX IF NOT EXISTS calls_by_run ON calls (run);
 CREATE TABLE IF NOT EXISTS approvals (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
@@ -53,8 +54,8 @@ const TOOLS: str = "SELECT json_patch(json_object('call', call, 'run', run, 'tit
 // A cache from before calls and the conversations' agent column: what it had is moved over.
 const FROM_TOOLS: str = #"
 BEGIN;
-INSERT OR IGNORE INTO calls (call, run, title, status)
-    SELECT call, run, json_extract(json, '$.title'), json_extract(json, '$.status') FROM tools ORDER BY rowid;
+INSERT OR IGNORE INTO calls (call, run, title, status, at)
+    SELECT call, run, json_extract(json, '$.title'), json_extract(json, '$.status'), CAST(strftime('%s', 'now') AS INTEGER) * 1000 FROM tools ORDER BY rowid;
 DROP TABLE tools;
 COMMIT;
 "#
@@ -70,6 +71,26 @@ COMMIT;
 const BLOCK_COLUMN: str = "ALTER TABLE calls ADD COLUMN block INTEGER;"
 // A cache from before calls kept the subagent call they sit inside.
 const PARENT_COLUMN: str = "ALTER TABLE calls ADD COLUMN parent TEXT;"
+// A cache from before calls kept when they started: what's there counts from now, so
+// it goes CALLS_KEPT_MS after the update, not at once.
+const CALLS_AT_COLUMN: str = #"
+BEGIN;
+ALTER TABLE calls ADD COLUMN at INTEGER;
+UPDATE calls SET at = CAST(strftime('%s', 'now') AS INTEGER) * 1000;
+COMMIT;
+"#
+// A cache from before conversations said whether it has all their messages: none is
+// known to, so each fetches what it's missing when it's opened.
+const PARTIAL_COLUMN: str = #"
+BEGIN;
+ALTER TABLE conversations ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
+UPDATE conversations SET partial = 1;
+COMMIT;
+"#
+// How long the cache keeps a tool call: as long as the instance keeps events (protocol.md,
+// "The event log"), after which a new device couldn't have it either. A day between looks.
+pub const CALLS_KEPT_MS: i64 = 2592000000
+const PRUNE_EVERY_MS: i64 = 86400000
 // Each agent's chat, newest first, for `conversation_for` at a send.
 const CHATS_BY_AGENT: str = "CREATE INDEX IF NOT EXISTS chats_by_agent ON conversations (agent, last DESC) WHERE chat = 1;"
 const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
@@ -166,6 +187,12 @@ impl Cache {
         }
         if try db.query_one(String("SELECT 1 FROM pragma_table_info('calls') WHERE name = 'parent'"), List<Value>()) == none {
             try db.execute_script(String(PARENT_COLUMN))
+        }
+        if try db.query_one(String("SELECT 1 FROM pragma_table_info('calls') WHERE name = 'at'"), List<Value>()) == none {
+            try db.execute_script(String(CALLS_AT_COLUMN))
+        }
+        if try db.query_one(String("SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'partial'"), List<Value>()) == none {
+            try db.execute_script(String(PARTIAL_COLUMN))
         }
         try db.execute_script(String(CHATS_BY_AGENT))
         return Cache { db: db, stop_checkpoints: stop, big: big }
@@ -314,7 +341,11 @@ impl Cache {
     fn change(self, e: Json) ! Error {
         let kind = str_at(e, "kind") ?? String()
         if kind == "conversation.created" {
-            try self.put_conversation(at(e, "conversation"))
+            try self.put_conversation(at(e.copy(), "conversation"))
+            // One brought over with more messages than came as events.
+            if bool_at(e.copy(), "partial") == some(true) {
+                _ = try self.db.execute(String("UPDATE conversations SET partial = 1 WHERE id = ?"), [t(str_at(at(e, "conversation"), "id") ?? String())])
+            }
         } else if kind == "conversation.updated" {
             let c = at(e, "conversation")
             let id = str_at(c, "id") ?? String()
@@ -344,7 +375,7 @@ impl Cache {
             let call = str_at(e, "call") ?? String()
             let run = str_at(e, "run") ?? String()
             let block = if let b = int_at(e, "block") { Value.Int(b) } else { Value.Null }
-            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status, block, parent) VALUES (?, ?, ?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status")), block, maybe(str_at(e, "parent"))])
+            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status, block, parent, at) VALUES (?, ?, ?, ?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status")), block, maybe(str_at(e, "parent")), Value.Int(int_at(e, "at") ?? now())])
         } else if kind == "tool.updated" or kind == "tool.finished" {
             // Only what changed, set in place: no stored JSON read, merged and written back.
             let call = str_at(e, "call") ?? String()
@@ -404,7 +435,65 @@ impl Cache {
                 try self.put_message(m.copy())
             }
         }
+        // The conversations it left messages of out, which fetch them when they're
+        // opened. A snapshot from an instance from before `partial` may have, for any.
+        let partial = at(s.copy(), "partial")
+        if let Json.Array(_) = partial.copy() {
+            _ = try self.db.execute(String("UPDATE conversations SET partial = 1 WHERE id IN (SELECT value FROM json_each(?))"), [t("{partial}")])
+        } else {
+            _ = try self.db.execute(String("UPDATE conversations SET partial = 1"), List<Value>())
+        }
         try self.set_meta("cursor", "{int_at(s, "seq") ?? 0}")
+    }
+
+    /// Whether the instance may have messages of `conversation` older than the cache's:
+    /// a snapshot left them out, or they came in from another app.
+    pub fn partial(self, conversation: String) -> bool ! Error {
+        let row = try self.db.query_one(String("SELECT partial FROM conversations WHERE id = ?"), [t(conversation.copy())]) else return false
+        return int(row[0].copy()) != 0
+    }
+
+    /// The id of the oldest message of `conversation` the cache has, if any: where a
+    /// messages.list for the older ones starts.
+    pub fn oldest(self, conversation: String) -> String? ! Error {
+        let row = try self.db.query_one(String("SELECT id FROM messages WHERE conversation = ? ORDER BY at, rowid LIMIT 1"), [t(conversation.copy())]) else return none
+        return some(text(row[0].copy()))
+    }
+
+    /// Keeps a page of `conversation`'s older messages, from messages.list, and, when
+    /// `more` says there are none older, that the cache has them all now.
+    pub fn fill_older(self, conversation: String, messages: Json, more: bool) ! Error {
+        let began = try self.step()
+        match self.put_messages(messages) {
+            ok => {},
+            err(e) => {
+                self.undo(began)
+                fail e
+            },
+        }
+        if not more {
+            match self.db.execute(String("UPDATE conversations SET partial = 0 WHERE id = ?"), [t(conversation.copy())]) {
+                ok(_) => {},
+                err(e) => {
+                    self.undo(began)
+                    fail e
+                },
+            }
+        }
+        try self.step_done(began)
+    }
+
+    /// Forgets tool calls that started before `before` (Unix ms), but those of runs still
+    /// going, once a day: the app shows a call's title and how it ended from here, and a
+    /// heavy user makes ten thousand a day. Gives how many went.
+    pub fn prune_calls(self, before: i64) -> i64 ! Error {
+        let t_now = now()
+        if let last = try self.meta("calls_pruned") {
+            if t_now - (i64.parse(last) ?? 0) < PRUNE_EVERY_MS { return 0 }
+        }
+        let gone = try self.db.execute(String("DELETE FROM calls WHERE at < ? AND run NOT IN (SELECT id FROM runs)"), [Value.Int(before)])
+        try self.set_meta("calls_pruned", "{t_now}")
+        return i64.wrap(u64(gone))
     }
 
     /// Makes the runs still going exactly `runs`, as `synced` names them: one the cache
@@ -742,6 +831,78 @@ fn a_snapshot_replaces_everything_but_the_outbox() ! Error {
     assert((try c.outbox()).len() == 1)
     try c.sent(String("m_1"))
     assert((try c.outbox()).len() == 0)
+}
+
+@test
+fn a_snapshot_says_which_conversations_it_left_messages_of_out() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    let conversations = Json.Array([Obj.new().s("id", String("c_1")).i("at", 1).done(), Obj.new().s("id", String("c_2")).i("at", 2).done()])
+    let messages = Json.Array([Obj.new().s("id", String("msg_9")).s("conversation", String("c_1")).i("at", 9).done()])
+    try c.replace(Obj.new().s("t", String("snapshot")).i("seq", 5).j("conversations", conversations.copy()).j("messages", messages).j("partial", Json.Array([Json.Str(String("c_1"))])).done())
+    assert(try c.partial(String("c_1")) and not try c.partial(String("c_2")))
+    assert(try c.oldest(String("c_1")) == some(String("msg_9")) and try c.oldest(String("c_2")) == none)
+    // A page of older ones that isn't the last keeps it partial; the last doesn't.
+    try c.fill_older(String("c_1"), Json.Array([Obj.new().s("id", String("msg_5")).s("conversation", String("c_1")).i("at", 5).done()]), true)
+    assert(try c.partial(String("c_1")) and try c.oldest(String("c_1")) == some(String("msg_5")))
+    try c.fill_older(String("c_1"), Json.Array([Obj.new().s("id", String("msg_2")).s("conversation", String("c_1")).i("at", 2).done()]), false)
+    assert(not try c.partial(String("c_1")))
+    let (ms, more) = try c.messages(String("c_1"), none, 50)
+    assert(ms.len() == 3 and not more)
+    // One from an instance from before `partial` could have left out any.
+    try c.replace(Obj.new().s("t", String("snapshot")).i("seq", 6).j("conversations", conversations).done())
+    assert(try c.partial(String("c_1")) and try c.partial(String("c_2")))
+    // A conversation made since has them all, unless it came in from another app with more.
+    _ = try c.apply(ev(7, "conversation.created", Obj.new().j("conversation", Obj.new().s("id", String("c_3")).done()).done()))
+    _ = try c.apply(ev(8, "conversation.created", Obj.new().j("conversation", Obj.new().s("id", String("c_4")).done()).b("partial", true).done()))
+    assert(not try c.partial(String("c_3")) and try c.partial(String("c_4")))
+    // Its updates keep it as it is.
+    _ = try c.apply(ev(9, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_4")).s("title", String("Old")).done()).done()))
+    assert(try c.partial(String("c_4")))
+}
+
+@test
+fn old_tool_calls_go_but_not_a_running_ones() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    _ = try c.apply(ev(1, "run.started", Obj.new().s("run", String("run_2")).s("conversation", String("c_1")).done()))
+    _ = try c.apply(ev(2, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).i("at", 1000).done()))
+    _ = try c.apply(ev(3, "tool.started", Obj.new().s("run", String("run_2")).s("call", String("tc_2")).i("at", 1000).done()))
+    _ = try c.apply(ev(4, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_3")).i("at", 5000).done()))
+    // Older than 2000 and not going: only tc_1. Then not again for a day.
+    assert(try c.prune_calls(2000) == 1)
+    assert(try c.tools_text(String(#"["tc_1","tc_2","tc_3"]"#), String("[]")) == #"[{"call":"tc_2","run":"run_2","title":null,"status":null},{"call":"tc_3","run":"run_1","title":null,"status":null}]"#)
+    _ = try c.apply(ev(5, "run.finished", Obj.new().s("run", String("run_2")).done()))
+    assert(try c.prune_calls(2000) == 0)
+    // A day later it looks again.
+    try c.set_meta("calls_pruned", "{now() - PRUNE_EVERY_MS - 1}")
+    assert(try c.prune_calls(2000) == 1)
+    assert((try c.tools()).len() == 1)
+}
+
+@test
+fn a_cache_from_before_partial_fetches_what_it_may_miss() ! Error {
+    // Before conversations said whether the cache has all their messages, and before
+    // calls kept when they started.
+    let dir = try fs.temp_dir()
+    let path = "{dir}/cache.db"
+    let old = try Database.open(path.copy())
+    try old.execute_script(String(#"
+CREATE TABLE conversations (id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL, agent TEXT, chat INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER, parent TEXT);
+INSERT INTO conversations VALUES ('c_1', '{"id":"c_1","agent":"a_1","at":10}', 10, 'a_1', 1);
+INSERT INTO calls VALUES ('tc_1', 'r_1', 'ls', 'done', 0, NULL);
+"#))
+    try old.close()
+    {
+        let c = try Cache.open(path.copy())
+        assert(try c.partial(String("c_1")))
+        // Its calls count from the update, so none is old yet.
+        assert(try c.prune_calls(now() - 60000) == 0)
+        assert((try c.tools()).len() == 1)
+    }
+    match fs.remove_dir_all(dir) {
+        ok => {},
+        err(_) => {},
+    }
 }
 
 @test

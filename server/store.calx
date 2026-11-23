@@ -130,12 +130,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     conversation TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_by_conversation ON tasks (conversation);
 CREATE INDEX IF NOT EXISTS tasks_by_user ON tasks (user, agent, status);
+CREATE INDEX IF NOT EXISTS tasks_newest ON tasks (user, at);
 CREATE TABLE IF NOT EXISTS queue (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     pos INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sent (
     device TEXT NOT NULL, cid TEXT NOT NULL, message TEXT NOT NULL, run TEXT NOT NULL,
-    PRIMARY KEY (device, cid));
+    at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (device, cid));
 CREATE TABLE IF NOT EXISTS events (
     user TEXT NOT NULL REFERENCES users(id), seq INTEGER NOT NULL, json TEXT NOT NULL,
     at INTEGER NOT NULL, PRIMARY KEY (user, seq));
@@ -430,6 +431,18 @@ impl Store {
         if not saved { try s.db.execute_script(String("ALTER TABLE status_tokens ADD COLUMN path TEXT NOT NULL DEFAULT ''; ALTER TABLE status_tokens ADD COLUMN agent TEXT NOT NULL DEFAULT '';")) }
         // A person's routine runs by when they started, which the status reads for the last 24 hours.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_routine ON runs (user, at) WHERE routine != '';"))
+        // Client ids from before they kept when they came count from now, so they're
+        // pruned as old a while after the update, not at once.
+        var dated = false
+        for r in try s.db.query(String("PRAGMA table_info(sent)")) {
+            if text(r[1].copy()) == "at" { dated = true }
+        }
+        if not dated {
+            try s.db.execute_script(String("ALTER TABLE sent ADD COLUMN at INTEGER NOT NULL DEFAULT 0;"))
+            _ = try s.db.execute(String("UPDATE sent SET at = ?"), [Value.Int(now())])
+        }
+        // What prune_rows looks for, by age.
+        try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_at ON runs (at); CREATE INDEX IF NOT EXISTS sent_by_at ON sent (at); CREATE INDEX IF NOT EXISTS usage_by_at ON usage (at);"))
         // Settings kept before they were sealed are sealed once.
         for r in try s.db.query(String("SELECT name, env FROM acp_settings")) {
             let env = text(r[1].copy())
@@ -1278,13 +1291,20 @@ impl Store {
         return some(j)
     }
 
-    // A person's tasks, newest first, but not those of agents that were deleted.
-    pub fn tasks(self, user: String) -> List<Json> ! Error {
+    // Up to `limit` of a person's tasks, newest first, after the task `before` if it's
+    // given, but not those of agents that were deleted, and whether there are older ones.
+    pub fn tasks(self, user: String, before: String?, limit: usize) -> (List<Json>, bool) ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT k.json FROM tasks k JOIN agents a ON a.id = k.agent AND a.deleted = 0 WHERE k.user = ? ORDER BY k.at DESC, k.rowid DESC"), [t(user)]) {
+        let cut = if let b = before { Value.Text(b.copy()) } else { Value.Null }
+        let rows = try self.db.query(String("SELECT k.json FROM tasks k JOIN agents a ON a.id = k.agent AND a.deleted = 0 WHERE k.user = ?1 AND (?2 IS NULL OR (k.at, k.rowid) < (SELECT at, rowid FROM tasks WHERE id = ?2 AND user = ?1)) ORDER BY k.at DESC, k.rowid DESC LIMIT ?3"), [t(user), cut, Value.Int(i64.wrap(u64(limit + 1)))])
+        let more = rows.len() > limit
+        var n: usize = 0
+        for r in rows {
+            if n == limit { break }
+            n += 1
             if let ok(j) = parse(text(r[0].copy())) { out.push(j) }
         }
-        return out
+        return (out, more)
     }
 
     // How many of `agent`'s tasks are running.
@@ -2215,19 +2235,58 @@ impl Store {
         return int((row ?? List<Value>())[0].copy())
     }
 
-    // The newest `per` messages of each of `user`'s conversations that aren't deleted,
-    // oldest first in each, as a JSON array's text: for a snapshot, in one query, and
-    // as the messages were stored, without reading them in and writing them out again.
-    pub fn newest_messages_text(self, user: String, per: i64) -> String ! Error {
+    // Messages for a snapshot, as a JSON array's text, as they were stored, without
+    // reading them in and writing them out again: up to the newest `per` of each of
+    // `user`'s conversations that aren't deleted, the conversation with the newest
+    // message first, while they come to no more than `budget` bytes. A conversation
+    // gets its newest messages or none, never a gap. With them, the conversations
+    // that have messages the array leaves out, which the app fetches with
+    // messages.list (protocol.md, "snapshot").
+    pub fn snapshot_messages(self, user: String, per: i64, budget: i64) -> (String, List<String>) ! Error {
+        // First only the sizes, so a big account's messages aren't all read in to be
+        // left out: 1000 conversations' newest 50 were a 40 MB frame.
+        let sizes = "SELECT w.conversation, w.r, w.n, w.total, length(CAST(m.json AS BLOB)) FROM (SELECT rowid AS r, conversation, row_number() OVER (PARTITION BY conversation ORDER BY rowid DESC) AS n, count(*) OVER (PARTITION BY conversation) AS total, max(rowid) OVER (PARTITION BY conversation) AS newest FROM messages WHERE user = ?1) w JOIN conversations c ON c.id = w.conversation AND c.user = ?1 AND c.deleted = 0 JOIN messages m ON m.rowid = w.r WHERE w.n <= ?2 ORDER BY w.newest DESC, w.n"
+        var taken = List<Json>()
+        var partial = List<String>()
+        var used: i64 = 1    // the brackets, less the first message's comma
+        var current = String()
+        var total: i64 = 0
+        var got: i64 = 0
+        var open = true
+        var started = false
+        for r in try self.db.query(String(sizes), [t(user), Value.Int(per)]) {
+            let conversation = text(r[0].copy())
+            if not started or conversation != current {
+                if started and got < total { partial.push(current.copy()) }
+                started = true
+                current = conversation.copy()
+                total = int(r[3].copy())
+                got = 0
+                open = true
+            }
+            if not open { continue }
+            // Each message and the comma before it.
+            let size = int(r[4].copy()) + 1
+            if used + size > budget {
+                open = false
+                continue
+            }
+            used += size
+            got += 1
+            taken.push(Json.Int(int(r[1].copy())))
+        }
+        if started and got < total { partial.push(current) }
         var out = String("[")
         var first = true
-        for r in try self.db.query(String("SELECT m.json FROM (SELECT json, conversation, rowid AS r, row_number() OVER (PARTITION BY conversation ORDER BY rowid DESC) AS n FROM messages WHERE user = ?1) m JOIN conversations c ON c.id = m.conversation AND c.user = ?1 AND c.deleted = 0 WHERE m.n <= ?2 ORDER BY c.at, m.conversation, m.r"), [t(user), Value.Int(per)]) {
-            if not first { out.push_str(",") }
-            first = false
-            out.push_str(text(r[0].copy()))
+        if taken.len() > 0 {
+            for r in try self.db.query(String("SELECT json FROM messages WHERE rowid IN (SELECT value FROM json_each(?)) ORDER BY rowid"), [t("{Json.Array(taken)}")]) {
+                if not first { out.push_str(",") }
+                first = false
+                out.push_str(text(r[0].copy()))
+            }
         }
         out.push_str("]")
-        return out
+        return (out, partial)
     }
 
     // Up to `limit` messages of a conversation, newest last, before the
@@ -2301,7 +2360,17 @@ impl Store {
     }
 
     pub fn remember_sent(self, device: String, cid: String, message: String, run: String) ! Error {
-        _ = try self.db.execute(String("INSERT INTO sent (device, cid, message, run) VALUES (?, ?, ?, ?)"), [t(device), t(cid), t(message), t(run)])
+        _ = try self.db.execute(String("INSERT INTO sent (device, cid, message, run, at) VALUES (?, ?, ?, ?, ?)"), [t(device), t(cid), t(message), t(run), Value.Int(now())])
+    }
+
+    // Removes up to `most` each of the runs that started before `before` (ms) and are
+    // over, the client ids of messages sent before it, and the tokens turns used before
+    // it: none of them is read once it's that old. Gives how many of each went.
+    pub fn prune_rows(self, before: i64, most: i64) -> (i64, i64, i64) ! Error {
+        let runs = try self.db.execute(String("DELETE FROM runs WHERE rowid IN (SELECT rowid FROM runs WHERE at < ? AND status != 'running' LIMIT ?)"), [Value.Int(before), Value.Int(most)])
+        let sent = try self.db.execute(String("DELETE FROM sent WHERE rowid IN (SELECT rowid FROM sent WHERE at < ? LIMIT ?)"), [Value.Int(before), Value.Int(most)])
+        let usage = try self.db.execute(String("DELETE FROM usage WHERE rowid IN (SELECT rowid FROM usage WHERE at < ? LIMIT ?)"), [Value.Int(before), Value.Int(most)])
+        return (i64.wrap(u64(runs)), i64.wrap(u64(sent)), i64.wrap(u64(usage)))
     }
 
     // --- The event log ---
@@ -2727,6 +2796,127 @@ fn a_runs_calls_say_how_they_ended() {
     assert(calls[0].0 == "tc_1" and calls[0].1 == "done" and not calls[0].2)
     assert(calls[1].0 == "tc_3" and calls[1].1 == "" and calls[1].2)
     assert(calls[2].0 == "tc_4" and calls[2].1 == "" and not calls[2].2)
+}
+
+// A message of 100 bytes as it's stored, in conversation `c`.
+fn sized_message(c: String, n: i64) -> Json {
+    let m = Obj.new().s("id", "msg_{c}_{n}").s("conversation", c.copy()).s("role", String("person")).i("at", n).done()
+    // `,"t":""` adds 7, and the padding the rest.
+    let pad = 100 - "{m}".len() - 7
+    return Obj.new().s("id", "msg_{c}_{n}").s("conversation", c).s("role", String("person")).i("at", n).s("t", " ".repeat(pad)).done()
+}
+
+// The ids of the messages in a JSON array's text.
+fn message_ids(array: String) -> List<String> {
+    var out = List<String>()
+    if let ok(Json.Array(ms)) = parse(array) {
+        for m in ms {
+            out.push(str_at(m.copy(), "id") ?? String())
+        }
+    }
+    return out
+}
+
+// The ids of a page of tasks.
+fn task_ids(tasks: List<Json>) -> List<String> {
+    var out = List<String>()
+    for k in tasks {
+        out.push(str_at(k.copy(), "id") ?? String())
+    }
+    return out
+}
+
+@test
+fn a_snapshot_keeps_to_its_budget_newest_conversations_first() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    var ids = List<String>()
+    for name in ["one", "two", "three", "empty"] {
+        ids.push(str_at(s.add_conversation(a.id.copy(), String("a_1"), String(name))!, "id") ?? String())
+    }
+    // One's three messages, then two's five, then three's one, the newest of all.
+    for n in 1..4 {
+        s.put_message(a.id.copy(), sized_message(ids[0].copy(), i64(n)))!
+    }
+    for n in 4..9 {
+        s.put_message(a.id.copy(), sized_message(ids[1].copy(), i64(n)))!
+    }
+    s.put_message(a.id.copy(), sized_message(ids[2].copy(), 9))!
+    assert("{sized_message(ids[0].copy(), 1)}".len() == 100)
+    // Room for everything.
+    let (all, none_left) = s.snapshot_messages(a.id.copy(), 50, 10000)!
+    assert(none_left.len() == 0 and message_ids(all).len() == 9)
+    // Room for four: three's one, two's newest three, and none of one's.
+    let (some_of, left) = s.snapshot_messages(a.id.copy(), 50, 405)!
+    assert(left == [ids[1].copy(), ids[0].copy()])
+    assert(some_of.len() <= 405)
+    assert(message_ids(some_of) == ["msg_{ids[1]}_6", "msg_{ids[1]}_7", "msg_{ids[1]}_8", "msg_{ids[2]}_9"])
+    // At most `per` of each.
+    let (_, cut) = s.snapshot_messages(a.id.copy(), 2, 10000)!
+    assert(cut == [ids[1].copy(), ids[0].copy()])
+    // None at all: every conversation with messages is named, and the empty one isn't.
+    let (empty, every) = s.snapshot_messages(a.id.copy(), 50, 0)!
+    assert(empty == "[]" and every == [ids[2].copy(), ids[1].copy(), ids[0].copy()])
+}
+
+@test
+fn tasks_come_a_page_at_a_time_newest_first() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    s.put_agent(a.id.copy(), Obj.new().s("id", String("a_1")).done(), String("d_1"))!
+    s.put_agent(a.id.copy(), Obj.new().s("id", String("a_2")).done(), String("d_1"))!
+    for n in 1..6 {
+        s.put_task(a.id.copy(), Obj.new().s("id", "k_{n}").s("agent", String("a_1")).s("conversation", "c_{n}").s("status", String("done")).done())!
+    }
+    s.put_task(a.id.copy(), Obj.new().s("id", String("k_gone")).s("agent", String("a_2")).s("conversation", String("c_9")).s("status", String("done")).done())!
+    s.delete_agent(a.id.copy(), String("a_2"))!
+    // A change keeps a task's place.
+    s.put_task(a.id.copy(), Obj.new().s("id", String("k_2")).s("agent", String("a_1")).s("conversation", String("c_2")).s("status", String("failed")).done())!
+    let (first, more) = s.tasks(a.id.copy(), none, 2)!
+    assert(task_ids(first) == ["k_5", "k_4"] and more)
+    let (second, more_again) = s.tasks(a.id.copy(), some(String("k_4")), 2)!
+    assert(task_ids(second) == ["k_3", "k_2"] and more_again)
+    let (last, no_more) = s.tasks(a.id.copy(), some(String("k_2")), 2)!
+    assert(task_ids(last) == ["k_1"] and not no_more)
+    let (all, _) = s.tasks(a.id.copy(), none, 200)!
+    assert(all.len() == 5)
+}
+
+@test
+fn old_runs_sent_ids_and_usage_are_pruned_but_not_a_run_still_going() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    for id in ["run_old", "run_going", "run_new", "run_old2"] {
+        s.add_run(a.id.copy(), String(id), String("c_1"))!
+        s.remember_sent(String("d_1"), "m_{id}", "msg_{id}", String(id))!
+        s.add_usage(a.id.copy(), String("fake"), String(id), 1, 1, 2, false)!
+    }
+    // Three are old, one of them still going.
+    s.db.execute_script(String("UPDATE runs SET at = 1000 WHERE id != 'run_new'; UPDATE runs SET status = 'done' WHERE id != 'run_going'; UPDATE sent SET at = 1000 WHERE run != 'run_new'; UPDATE usage SET at = 1000 WHERE run != 'run_new';"))!
+    // Nothing is that old.
+    assert(s.prune_rows(500, 100)! == (0, 0, 0))
+    // At most one of each a pass.
+    assert(s.prune_rows(2000, 1)! == (1, 1, 1))
+    assert(s.prune_rows(2000, 100)! == (1, 2, 2))
+    assert(s.prune_rows(2000, 100)! == (0, 0, 0))
+    assert(s.count("SELECT count(*) FROM runs", List<Value>())! == 2)
+    assert(s.unfinished_runs()!.len() == 1)
+    assert(s.sent(String("d_1"), String("m_run_new"))! != none and s.sent(String("d_1"), String("m_run_old"))! == none)
+    assert(s.shared_used(a.id.copy(), String("fake"), 0)! == 0 and s.count("SELECT count(*) FROM usage", List<Value>())! == 1)
+}
+
+@test
+fn sent_ids_from_before_they_were_dated_count_from_the_update() {
+    let dir = fs.temp_dir()!
+    let path = "{dir}/loom.db"
+    let old = Database.open(path.copy())!
+    old.execute_script(String("CREATE TABLE sent (device TEXT NOT NULL, cid TEXT NOT NULL, message TEXT NOT NULL, run TEXT NOT NULL, PRIMARY KEY (device, cid)); INSERT INTO sent VALUES ('d_1', 'm_1', 'msg_1', 'run_1');"))!
+    old.close()!
+    let s = Store.open(path, PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+    assert(s.prune_rows(now() - 60000, 100)! == (0, 0, 0))
+    assert(s.sent(String("d_1"), String("m_1"))! == some((String("msg_1"), String("run_1"))))
+    s.close()!
+    fs.remove_dir_all(dir)!
 }
 
 @test

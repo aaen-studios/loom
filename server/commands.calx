@@ -66,7 +66,7 @@ const COMMANDS: [Command; 91] = [
     Command { name: "routine.stop", args: "id", does: "Stops the flow a routine has running: its steps that have not started never do." },
     Command { name: "flow.list", args: "", does: "The routine flows running, with how far each has got." },
     Command { name: "routine.delete", args: "id", does: "Deletes a routine." },
-    Command { name: "task.list", args: "", does: "Tasks, newest first." },
+    Command { name: "task.list", args: "before? (a task id), limit? (up to 200)", does: "Tasks, newest first, 50 at a time." },
     Command { name: "task.start", args: "agent, prompt, title?", does: "Starts a long job for an agent, in a conversation of its own." },
     Command { name: "task.pause", args: "id", does: "Pauses a running task." },
     Command { name: "task.resume", args: "id", does: "Carries a paused task on." },

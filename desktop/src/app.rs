@@ -3792,6 +3792,24 @@ ACTA_KEY=secret:ACTA_KEY",
                 }))
                 .into_any_element()
         };
+        if self.model.tasks_more && !rows.is_empty() {
+            rows.push(
+                div()
+                    .p(px(space::M))
+                    .flex()
+                    .justify_center()
+                    .child(
+                        self.small_button("older-tasks", "Older tasks", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(f) = this.model.load_older_tasks() {
+                                    this.send(f);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element(),
+            );
+        }
         if !rows.is_empty() {
             groups.push(self.group(None, rows));
         } else if !self.task_new {

@@ -1,0 +1,162 @@
+module tests.protocol.snapshot
+
+// A snapshot stays under a phone's frame (protocol.md, "snapshot"): with many
+// big conversations it carries the newest messages of the newest of them,
+// within its budget, and names the rest in `partial`. messages.list gives
+// those, and a real core fetches them when the app opens one, so an old
+// conversation fills. The instance runs with --test-keep-events 3, so a new
+// device gets reset: true and a snapshot.
+//
+//     calx tests/protocol/snapshot.calx
+import std.http.websocket.{Message, connect}
+import std.json.{Json, parse}
+import std.process.{exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session, ws_url}
+import shared.protocol.{MAX_FRAME, NEWEST}
+import core.cache.{Cache}
+import core.conn.{Conn}
+import tests.kit.{Instance, check}
+
+const CONVERSATIONS: usize = 24
+const TURNS: usize = 2
+const WORD: usize = 15000    // each prompt is one word this long, which the fake agent says back
+
+// The snapshot frame's text, as it came, for a new device of the person with `token`.
+fn snapshot_text(base: String, token: String) -> String ! Error {
+    let ws = try connect(ws_url(base))
+    try ws.send_text("{Obj.new().s("t", String("hello")).s("token", token).j("versions", Json.Array([Json.Int(i64(NEWEST))])).i("after", 0).done()}")
+    loop {
+        let m = try ws.receive(30000) else { fail "no snapshot came" }
+        if let Message.Text(text) = m {
+            if text.starts_with(#"{"t":"snapshot""#) {
+                ws.close()
+                return text
+            }
+        }
+    }
+}
+
+// The ids of the messages in a list.
+fn ids(messages: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(ms) = messages {
+        for m in ms {
+            out.push(str_at(m.copy(), "id") ?? String())
+        }
+    }
+    return out
+}
+
+// The app's side of a core: what it sends, and what the core tells it.
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<String>
+    thread: Thread?
+}
+
+impl App {
+    fn start(base: String, token: String) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<String>()
+        let conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-test-snapshot"), try Cache.open(String(":memory:")), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and whose `field` is
+    // `value`, if `field` isn't empty.
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let m = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() { t.join() }
+    }
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    var conversations = List<String>()
+    for n in 0..CONVERSATIONS {
+        let c = try app.cmd("q_c", "conversation.create", Obj.new().s("agent", agent.copy()).s("title", "Chat {n}").done())
+        let id = str_at(at(c, "value"), "conversation") ?? String()
+        for turn in 0..TURNS {
+            try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}_{turn}").s("conversation", id.copy()).s("text", "{n}{turn}{"x".repeat(WORD)}").done())
+            _ = try app.reply()
+        }
+        conversations.push(id)
+    }
+    app.close()
+    let all = CONVERSATIONS * TURNS * 2
+    println("      {all} messages of {WORD} bytes in {CONVERSATIONS} conversations")
+    // The instance looks every 200 ms.
+    unsafe { sleep(600000000) }
+
+    let text = try snapshot_text(i.base.copy(), i.token.copy())
+    println("      the snapshot is {text.len()} bytes")
+    try check(text.len() <= MAX_FRAME, "a snapshot of more than a frame's worth of messages stays within a frame")
+    let snapshot = try parse(text)
+    let carried = ids(at(snapshot.copy(), "messages"))
+    var partial = List<String>()
+    if let Json.Array(ps) = at(snapshot.copy(), "partial") {
+        for p in ps {
+            partial.push(p.as_str() ?? String())
+        }
+    }
+    println("      it carries {carried.len()} of {all} messages, and leaves out some of {partial.len()} conversations")
+    try check(carried.len() > 0 and carried.len() < all and partial.len() > 0, "it carries some messages and names the conversations it leaves some out of")
+    let newest = conversations[CONVERSATIONS - 1].copy()
+    let oldest = conversations[0].copy()
+    try check(not partial.contains(newest.copy()) and partial.contains(oldest.copy()), "the newest conversation is whole, the oldest named")
+
+    // messages.list gives what the snapshot left out.
+    var again = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let listed = at(try again.cmd("q_l", "messages.list", Obj.new().s("conversation", oldest.copy()).done()), "value")
+    try check(ids(at(listed.copy(), "messages")).len() == TURNS * 2 and bool_at(listed, "more") == some(false), "messages.list gives an old conversation's messages")
+    again.close()
+
+    // A real core: opening the old conversation says there's more, fetches it, and
+    // says when it's here.
+    var core = try App.start(i.base.copy(), i.token.copy())
+    _ = try core.until("synced", "", String(), 30000)
+    core.to_core.send("{Obj.new().s("t", String("core.get")).s("id", String("g_new")).s("what", String("messages")).s("conversation", newest).i("limit", 200).done()}")
+    let whole = try core.until("core.data", "id", String("g_new"), 5000)
+    try check(ids(at(whole.copy(), "items")).len() == TURNS * 2 and bool_at(whole, "more") == some(false), "the core has the newest conversation whole")
+    core.to_core.send("{Obj.new().s("t", String("core.get")).s("id", String("g_old")).s("what", String("messages")).s("conversation", oldest.copy()).i("limit", 200).done()}")
+    let first = try core.until("core.data", "id", String("g_old"), 5000)
+    try check(bool_at(first, "more") == some(true), "the core says an old conversation has more")
+    _ = try core.until("core.filled", "conversation", oldest.copy(), 10000)
+    core.to_core.send("{Obj.new().s("t", String("core.get")).s("id", String("g_old2")).s("what", String("messages")).s("conversation", oldest).i("limit", 200).done()}")
+    let filled = try core.until("core.data", "id", String("g_old2"), 5000)
+    try check(ids(at(filled.copy(), "items")).len() == TURNS * 2 and bool_at(filled, "more") == some(false), "and once it's fetched them, the conversation is whole")
+    core.stop()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--test-keep-events"), String("3")])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nsnapshot: all good")
+}

@@ -554,6 +554,9 @@ final class Model {
             dirty.formUnion(CoreList.allCases)
         case "core.data":
             data(f)
+        case "core.filled":
+            // Older messages of a conversation came: the shown one is read again.
+            if f["conversation"].text == conversation { dirty.insert(.messages) }
         case "core.queued":
             queued.append(Queued(f))
             placeQueued()
