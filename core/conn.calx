@@ -834,7 +834,7 @@ impl Conn {
             if let u = mut self.updater {
                 u.check(str_at(m, "id"))
             } else {
-                self.tell(Obj.new().s("t", String("core.update")).maybe("id", str_at(m, "id")).j("error", Obj.new().s("code", String("update")).s("message", String("This build doesn't update itself.")).done()).done())
+                self.tell(Obj.new().s("t", String("core.update")).maybe("id", str_at(m, "id")).j("error", Obj.new().s("code", String("not_here")).s("message", String("This build doesn't update itself.")).done()).done())
             }
             return true
         }

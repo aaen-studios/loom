@@ -2022,12 +2022,13 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Shows the newest notice from the model, and hides one that's been up its time.
     fn take_notice(&mut self, cx: &mut Context<Self>) {
-        if let Some(words) = self.model.checked.take() {
+        if let Some(words) = self.hub_mut().checked.take() {
             // Settings shows it; away from the window, a notification does.
             if !shell::window_shown(self.hwnd) {
                 shell::notify("loom", &words, None, self.prefs.sound);
             }
             self.update_said = Some(words);
+            cx.notify();
         }
         // Something that went wrong wins over good news that came with it.
         let bad = self.model.notices.pop().map(|w| (w, false));
@@ -13219,7 +13220,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.starts_at_login = shell::starts_at_login();
                 }
                 shell::TrayAction::CheckUpdates => {
-                    self.send(serde_json::json!({"t": "update.check", "id": "app.update"}));
+                    self.send_to(
+                        "",
+                        &serde_json::json!({"t": "update.check", "id": "app.update"}),
+                    );
                 }
                 shell::TrayAction::Quit => {
                     self.send(serde_json::json!({"t": "app.active", "active": false}));

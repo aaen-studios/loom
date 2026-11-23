@@ -174,7 +174,7 @@ impl Loom {
             shell::keep_awake(awake);
         }
         if self.prefs.auto_update && !working && !shell::window_shown(self.hwnd) {
-            if let Some((_, path)) = self.model.update.clone() {
+            if let Some((_, path)) = self.hub().update.clone() {
                 // Once: if the swap fails, the sidebar still offers it.
                 self.prefs.auto_update = false;
                 match shell::apply_update(std::path::Path::new(&path), true) {
@@ -469,14 +469,17 @@ impl Loom {
             .button("pref-check-update", "Check now", false)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.update_said = Some("Looking…".into());
-                this.send(serde_json::json!({"t": "update.check", "id": "app.update"}));
+                this.send_to(
+                    "",
+                    &serde_json::json!({"t": "update.check", "id": "app.update"}),
+                );
                 cx.notify();
             }));
         let status = self
             .update_said
             .clone()
             .or_else(|| {
-                self.model
+                self.hub()
                     .update
                     .as_ref()
                     .map(|(v, _)| format!("loom {v} is ready to restart into"))

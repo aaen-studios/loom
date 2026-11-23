@@ -3005,6 +3005,8 @@ impl Model {
                     self.update = Some((version, path.to_string()));
                 } else if asked {
                     self.checked = Some(match f.get("error") {
+                        // A build that doesn't update itself says so plainly.
+                        Some(e) if s(e, "code") == "not_here" => s(e, "message"),
                         Some(e) => format!("The update check didn't work: {}", s(e, "message")),
                         None => format!("loom {} is the newest.", s(f, "version")),
                     });
@@ -5755,6 +5757,28 @@ mod tests {
         // A core.server is kept for the app to hand the first core.
         m.take(&json!({"t": "core.server", "loom": "0.2.0", "latest": "0.2.1", "behind": true}));
         assert!(m.server_said.take().is_some());
+    }
+
+    #[test]
+    fn a_check_the_person_asked_for_says_what_it_found() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.update", "id": "app.update", "error": {"code": "not_here", "message": "This build doesn't update itself."}}));
+        assert_eq!(
+            m.checked.take().as_deref(),
+            Some("This build doesn't update itself.")
+        );
+        m.take(&json!({"t": "core.update", "id": "app.update", "error": {"code": "update", "message": "no network"}}));
+        assert_eq!(
+            m.checked.take().as_deref(),
+            Some("The update check didn't work: no network")
+        );
+        m.take(
+            &json!({"t": "core.update", "id": "app.update", "latest": true, "version": "0.2.4"}),
+        );
+        assert_eq!(
+            m.checked.take().as_deref(),
+            Some("loom 0.2.4 is the newest.")
+        );
     }
 
     #[test]
