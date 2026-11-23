@@ -221,7 +221,8 @@ CREATE INDEX IF NOT EXISTS shared_rows_by_table ON shared_rows (user, tbl);
 CREATE TABLE IF NOT EXISTS script_tokens (
     user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS status_tokens (
-    user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL);
+    user TEXT PRIMARY KEY REFERENCES users(id), hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL,
+    path TEXT NOT NULL DEFAULT '', agent TEXT NOT NULL DEFAULT '');
 CREATE TABLE IF NOT EXISTS imported (
     user TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, kind TEXT NOT NULL,
     id TEXT NOT NULL, loom TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, source, kind, id));
@@ -420,6 +421,13 @@ impl Store {
             if text(r[1].copy()) == "routine" { routined = true }
         }
         if not routined { try s.db.execute_script(String("ALTER TABLE runs ADD COLUMN routine TEXT NOT NULL DEFAULT ''; ALTER TABLE runs ADD COLUMN outcome TEXT NOT NULL DEFAULT '';")) }
+        // Status tokens from before one could be saved to a file get where it
+        // was saved and the agent that asked, empty for one made in the app.
+        var saved = false
+        for r in try s.db.query(String("PRAGMA table_info(status_tokens)")) {
+            if text(r[1].copy()) == "path" { saved = true }
+        }
+        if not saved { try s.db.execute_script(String("ALTER TABLE status_tokens ADD COLUMN path TEXT NOT NULL DEFAULT ''; ALTER TABLE status_tokens ADD COLUMN agent TEXT NOT NULL DEFAULT '';")) }
         // A person's routine runs by when they started, which the status reads for the last 24 hours.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_routine ON runs (user, at) WHERE routine != '';"))
         // Settings kept before they were sealed are sealed once.
@@ -1052,9 +1060,18 @@ impl Store {
     }
 
     // A person's status token, kept as its SHA-256: it only reads their status
-    // (GET /api/scripts/status), and a new one replaces the last.
-    pub fn set_status_token(self, user: String, hash: String) ! Error {
-        _ = try self.db.execute(String("INSERT INTO status_tokens (user, hash, at) VALUES (?, ?, ?) ON CONFLICT (user) DO UPDATE SET hash = excluded.hash, at = excluded.at"), [t(user), t(hash), Value.Int(now())])
+    // (GET /api/scripts/status), and a new one replaces the last. One an agent
+    // had saved to a file keeps the file's `path` and the agent's name, `agent`;
+    // one made in the app has both empty.
+    pub fn set_status_token(self, user: String, hash: String, path: String, agent: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO status_tokens (user, hash, at, path, agent) VALUES (?, ?, ?, ?, ?) ON CONFLICT (user) DO UPDATE SET hash = excluded.hash, at = excluded.at, path = excluded.path, agent = excluded.agent"), [t(user), t(hash), Value.Int(now()), t(path), t(agent)])
+    }
+
+    // Where the person's status token was saved and by which agent, empty for
+    // one made in the app, or none while there's none.
+    pub fn status_saved(self, user: String) -> (String, String)? ! Error {
+        let r = try self.db.query_one(String("SELECT path, agent FROM status_tokens WHERE user = ?"), [t(user)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy())))
     }
 
     pub fn drop_status_token(self, user: String) ! Error {
@@ -2499,6 +2516,27 @@ fn old_runs_get_the_routine_columns_and_the_status_reads_routine_runs_only() {
     s.routine_run_went(String("run_old"), String("failed"))!
     assert(s.routine_runs_since(String("u_1"), 2, 10)! == [(5, String("failed"), String("rt_1"))])
     assert(s.routine_runs_since(String("u_1"), 0, 1)!.len() == 1)
+    s.close()!
+    fs.remove_dir_all(dir)!
+}
+
+@test
+fn an_old_status_token_gets_where_it_was_saved_and_a_new_one_keeps_it() {
+    let dir = fs.temp_dir()!
+    let path = "{dir}/loom.db"
+    let old = Database.open(path.copy())!
+    old.execute_script(String("CREATE TABLE status_tokens (user TEXT PRIMARY KEY, hash TEXT NOT NULL UNIQUE, at INTEGER NOT NULL); INSERT INTO status_tokens VALUES ('u_1', 'h_1', 5);"))!
+    old.close()!
+    let s = Store.open(path, PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+    assert(s.status_saved(String("u_1"))! == some((String(), String())))
+    s.set_status_token(String("u_1"), String("h_2"), String("/srv/dash/token"), String("Ada"))!
+    assert(s.status_saved(String("u_1"))! == some((String("/srv/dash/token"), String("Ada"))))
+    assert(s.status_token_user(String("h_2"))! == some(String("u_1")) and s.status_token_user(String("h_1"))! == none)
+    // One made in the app again was saved nowhere.
+    s.set_status_token(String("u_1"), String("h_3"), String(), String())!
+    assert(s.status_saved(String("u_1"))! == some((String(), String())))
+    s.drop_status_token(String("u_1"))!
+    assert(s.status_saved(String("u_1"))! == none)
     s.close()!
     fs.remove_dir_all(dir)!
 }

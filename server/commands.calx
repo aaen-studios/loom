@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 90] = [
+const COMMANDS: [Command; 91] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -116,6 +116,7 @@ const COMMANDS: [Command; 90] = [
     Command { name: "instance.update", args: "now? (true stops what runs rather than waiting)", does: "Updates the instance to the newest signed release, and restarts it once nothing runs." },
     Command { name: "import.scan", args: "openbot?, grokbot? (folders to look in instead of where each app keeps its data)", does: "What OpenBot and Grok Bot keep on this computer, to import." },
     Command { name: "import.run", args: "from (openbot or grokbot), path? (a folder copied from that app)", does: "Brings agents, chats, memories, routines, skills, MCP servers and tables over from OpenBot or Grok Bot, without their secrets." },
+    Command { name: "token.make_to_file", args: "kind (status: it only reads the person's agents and routines), path (absolute, on loom's computer, outside loom's data folder, in a folder that's there), replace? (true writes over a file there and ends the person's token of that kind)", does: "Makes a token for the instance's owner and saves it to a new file only they can read, without you seeing it. You're told where it went." },
 ]
 
 // Whether an agent may run `name`, and how.
@@ -175,7 +176,8 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 90 and access(String("routine.runs")) == Access.Runs)
+    assert(catalog().len() == 91 and access(String("routine.runs")) == Access.Runs)
+    assert(access(String("token.make_to_file")) == Access.Asks(String("other")))
     assert(access(String("mcp.test")) == Access.Runs)
     assert(access(String("rule.list")) == Access.Runs and access(String("rule.check")) == Access.Runs)
     assert(access(String("rule.put")) == Access.Asks(String("other")) and access(String("rule.delete")) == Access.Asks(String("delete")))

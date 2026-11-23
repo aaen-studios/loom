@@ -59,6 +59,7 @@ import server.brains
 import server.egress
 import server.sandbox
 import server.stage
+import server.tokenfile
 import server.update
 import shared.checkpoint
 import server.searcher
@@ -685,6 +686,14 @@ fn tool_error(text: String) -> Json {
 // is taken off before the agent gets the result.
 fn rule_refusal(rule: str, text: String) -> Json {
     return merge(tool_error(text), Obj.new().s("loom_rule", String(rule)).done())
+}
+
+// Whether an approval waiting on `action` is answered only on one of the
+// person's devices, never by a script: a call to a device, which signs the
+// yes, and a token saved to a file (protocol.md, `token.make_to_file`).
+fn answered_on_a_device(action: Json) -> bool {
+    let name = str_at(action, "name") ?? String()
+    return name == "device.call" or name == "token.make_to_file"
 }
 
 // The hosts a device says it reaches (the `device` frame's `hosts`), as the
@@ -2988,7 +2997,7 @@ impl Instance {
             var out = List<Json>()
             for (call, a) in i.approvals {
                 if i.run_user(a.run.copy()) == user {
-                    out.push(Obj.new().s("call", call.copy()).s("agent", a.agent.copy()).s("agent_name", i.agent_name(user.copy(), a.agent.copy())).s("title", a.title.copy()).b("on_a_device", str_at(a.action.copy(), "name") == some(String("device.call"))).done())
+                    out.push(Obj.new().s("call", call.copy()).s("agent", a.agent.copy()).s("agent_name", i.agent_name(user.copy(), a.agent.copy())).s("title", a.title.copy()).b("on_a_device", answered_on_a_device(a.action.copy())).done())
                 }
             }
             return some(json_response(200, Obj.new().j("approvals", Json.Array(out)).done()))
@@ -3025,11 +3034,12 @@ impl Instance {
             var on_a_device = false
             if let a = i.approvals.find(call.copy()) {
                 run = a.run.copy()
-                on_a_device = str_at(a.action.copy(), "name") == some(String("device.call"))
+                on_a_device = answered_on_a_device(a.action.copy())
             }
             if run.len() == 0 or i.run_user(run) != user { return some(http_error(404, "not_found", String("There's no such approval, or it was answered already."))) }
-            // A call to one of the person's devices is answered on one of their devices, which signs it.
-            if on_a_device { return some(http_error(403, "on_a_device", String("That one is answered on one of your devices, which signs the yes."))) }
+            // A call to one of the person's devices is answered on one of their devices, which
+            // signs it, and so is a token saved to a file, which a script mustn't make for itself.
+            if on_a_device { return some(http_error(403, "on_a_device", String("That one is answered on one of your devices."))) }
             try i.answer_approval(call, allow, false, String("script"))
             return some(json_response(200, Obj.new().done()))
         }
@@ -3980,6 +3990,7 @@ impl Instance {
             if let why = try i.more_than_it_has(g.copy(), m) { return some(rule_refusal("no-more-than-its-own", why)) }
         }
         if name == "agent.delete" and str_at(a.copy(), "agent") == some(g.agent.copy()) { return some(rule_refusal("not-itself", String("An agent can't delete itself. Your person can, in the app."))) }
+        if name == "token.make_to_file" { return try i.ask_token_file(req, g, a) }
         match access {
             commands.Access.Never(why) => return some(rule_refusal("never", why)),
             commands.Access.Asks(kind) => {
@@ -4007,6 +4018,56 @@ impl Instance {
             if let Answer.Value(_) = result.copy() { i.log(g.user, g.agent.copy(), "agent", "Ran {name}", g.agent) }
         }
         return some(answer_text(result))
+    }
+
+    // Why `user`'s agent can't have a token of `kind` saved to `file`, or
+    // empty when it can (server/tokenfile.calx): asked when the agent asks,
+    // and again on the person's yes, since the folder may have changed.
+    fn token_file_refusal(i: Instance, user: String, kind: String, file: String, replace: bool) -> String ! Error {
+        if try i.store.role(user.copy()) != some(String("owner")) { return String("Only the instance's owner has a token saved to a file on its computer.") }
+        if kind == "scripts" { return String("Only a status token is saved to a file for now: kind is status.") }
+        if kind != "status" { return String("kind is status, the token that only reads your person's agents and routines.") }
+        if not replace and try i.store.status_since(user) != none { return String("Your person has a status token already. With replace: true, the new one ends it.") }
+        return tokenfile.refusal(file, i.data.copy(), replace)
+    }
+
+    // token.make_to_file, from an agent (protocol.md): a token for its person,
+    // saved to a file, which the agent never sees. It asks the person every
+    // time, on one of their devices, showing the kind, the path and the agent,
+    // and whether it ends the token they have. Nothing's made until they say yes.
+    fn ask_token_file(i: mut Instance, req: Request, g: Grant, a: Json) -> Json? ! Error {
+        let kind = (str_at(a.copy(), "kind") ?? String()).trim().copy()
+        let file = str_at(a.copy(), "path") ?? String()
+        let replace = bool_at(a, "replace") ?? false
+        let why = try i.token_file_refusal(g.user.copy(), kind.copy(), file.copy(), replace)
+        if why.len() > 0 { return some(rule_refusal("token-file", why)) }
+        var title = "Save a new {kind} token to {file}, as {i.agent_name(g.user.copy(), g.agent.copy())} asks"
+        if replace {
+            var ends = List<String>()
+            if try i.store.status_since(g.user.copy()) != none { ends.push("ending the {kind} token you have") }
+            if fs.is_file(file.copy()) { ends.push(String("writing over the file there")) }
+            if ends.len() > 0 { title.push_str(", {ends.join(" and ")}") }
+        }
+        let action = Obj.new().s("name", String("token.make_to_file")).j("args", Obj.new().s("kind", kind).s("path", file).b("replace", replace).done()).done()
+        return try i.ask_person(req, g, title, "other", action)
+    }
+
+    // The person's yes to token.make_to_file: the token is made, saved to the
+    // file, and kept only as its SHA-256, with where it went and who asked.
+    // The agent is told where it went, never what it is.
+    fn token_to_file(i: Instance, user: String, agent: String, args: Json) -> Json ! Error {
+        let kind = str_at(args.copy(), "kind") ?? String()
+        let file = str_at(args.copy(), "path") ?? String()
+        let replace = bool_at(args, "replace") ?? false
+        let why = try i.token_file_refusal(user.copy(), kind.copy(), file.copy(), replace)
+        if why.len() > 0 { return rule_refusal("token-file", why) }
+        let token = "loom-status-{bytes.hex(random_bytes(24))}"
+        let failed = tokenfile.save(file.copy(), token.copy(), replace)
+        if failed.len() > 0 { return tool_error(failed) }
+        let name = i.agent_name(user.copy(), agent.copy())
+        try i.store.set_status_token(user.copy(), bytes.hex(sha256(token.to_bytes())), file.copy(), name)
+        i.log(user, agent.copy(), "token", "Saved a new {kind} token to {file}", agent)
+        return tool_text("Saved to {file}.")
     }
 
     // A chat in words, for an agent to go on: its newest messages, up to and
@@ -8209,6 +8270,14 @@ impl Instance {
             try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, answer)
             return
         }
+        // A token saved to a file: made only on a yes from one of the person's
+        // devices, and the agent hears where it went, never what it is.
+        if name == "token.make_to_file" {
+            let result = if not allow { rule_refusal("person-said-no", String("Your person said no.")) } else if not by.starts_with("d_") { rule_refusal("on-a-device", String("That's answered on one of your person's devices.")) } else { try i.token_to_file(user.copy(), a.agent.copy(), at(a.action.copy(), "args")) }
+            i.answer_call(a.call.copy(), result.copy())
+            try i.tool_done(user, a.call, if allow { none } else { some(String("denied")) }, result)
+            return
+        }
         // One of loom's own tools a rule asked about: a yes runs it now, as the agent called it.
         if name == "tool.call" and allow {
             try i.run_asked_tool(user, a)
@@ -9077,8 +9146,11 @@ impl Instance {
             if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person turns scripts on or off, on one of their devices.")) }
             if name == "scripts.get" {
                 let since = try i.store.scripts_since(user.copy())
-                let status = try i.store.status_since(user)
-                return Answer.Value(Obj.new().b("on", since != none).j("since", if let turned_on = since { Json.Int(turned_on) } else { Json.Null }).i("port", i64(i.server.port)).j("status_since", if let made = status { Json.Int(made) } else { Json.Null }).done())
+                let status = try i.store.status_since(user.copy())
+                // Where an agent had it saved, and which agent, for the person to see.
+                let saved = try i.store.status_saved(user)
+                let (saved_to, saved_by) = saved ?? (String(), String())
+                return Answer.Value(Obj.new().b("on", since != none).j("since", if let turned_on = since { Json.Int(turned_on) } else { Json.Null }).i("port", i64(i.server.port)).j("status_since", if let made = status { Json.Int(made) } else { Json.Null }).s("status_path", saved_to).s("status_by", saved_by).done())
             }
             if name == "scripts.on" {
                 // A new token every time, shown this once: only its SHA-256 is kept.
@@ -9093,7 +9165,7 @@ impl Instance {
             // A status token, apart from scripts: it only reads GET /api/scripts/status.
             if name == "scripts.status_on" {
                 let token = "loom-status-{bytes.hex(random_bytes(24))}"
-                try i.store.set_status_token(user, bytes.hex(sha256(token.to_bytes())))
+                try i.store.set_status_token(user, bytes.hex(sha256(token.to_bytes())), String(), String())
                 return Answer.Value(Obj.new().s("token", token).i("port", i64(i.server.port)).done())
             }
             if name == "scripts.status_off" {

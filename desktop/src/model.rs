@@ -2411,6 +2411,9 @@ pub struct Model {
     /// routines' status (`GET /api/scripts/status`), once asked; and a new one, shown once.
     pub status_token: Option<bool>,
     pub new_status_token: Option<String>,
+    /// Where an agent had the status token saved on the instance's computer, and
+    /// which agent asked (`token.make_to_file`), for one saved to a file.
+    pub status_saved: Option<(String, String)>,
     /// What's typed in search, and what the newest search found.
     pub query: String,
     pub hits: Vec<Hit>,
@@ -3824,6 +3827,8 @@ impl Model {
                 .and_then(Value::as_str)
                 .map(String::from);
             self.status_token = Some(id.starts_with("app.status_on"));
+            // One made here was saved to no file.
+            self.status_saved = None;
         } else if id.starts_with("app.scripts_") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -3834,6 +3839,15 @@ impl Model {
                     f.pointer("/value/status_since")
                         .is_some_and(|v| !v.is_null()),
                 );
+                let text = |key: &str| {
+                    f.pointer(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string()
+                };
+                let (path, by) = (text("/value/status_path"), text("/value/status_by"));
+                self.status_saved =
+                    (self.status_token == Some(true) && !path.is_empty()).then_some((path, by));
             }
             let port = f
                 .pointer("/value/port")
@@ -7496,6 +7510,26 @@ mod tests {
         m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {}}));
         assert_eq!(m.status_token, Some(false));
         assert!(m.new_status_token.is_none());
+    }
+
+    #[test]
+    fn a_status_token_an_agent_saved_says_where_and_who_asked() {
+        let mut m = Model::new();
+        let f = m.load_scripts();
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"on": false, "since": null, "port": 8790, "status_since": 5, "status_path": "/srv/dash/token", "status_by": "Ada"}}));
+        assert_eq!(m.status_token, Some(true));
+        assert_eq!(
+            m.status_saved,
+            Some(("/srv/dash/token".to_string(), "Ada".to_string()))
+        );
+        assert!(m.new_status_token.is_none());
+        // A new one made in the app was saved nowhere.
+        let f = m.set_status_token(true);
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"token": "loom-status-cd", "port": 8790}}));
+        assert!(m.status_saved.is_none());
+        let f = m.load_scripts();
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"on": false, "since": null, "port": 8790, "status_since": 6, "status_path": "", "status_by": ""}}));
+        assert!(m.status_saved.is_none());
     }
 
     #[test]
