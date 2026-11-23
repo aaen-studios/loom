@@ -2551,6 +2551,16 @@ impl Model {
                     continue;
                 };
                 out.push(json!({"t": "core.get", "id": "app.messages", "what": "messages", "conversation": conversation, "limit": 200}));
+            } else if l == List::Tools {
+                // Only the calls the shown chat's blocks name, and the runs going on: a
+                // heavy user has tens of thousands of calls, and this comes at each one.
+                let calls: Vec<&str> = self
+                    .messages
+                    .iter()
+                    .flat_map(|m| m.blocks.iter().filter_map(|b| b.call.as_deref()))
+                    .collect();
+                let runs: Vec<&str> = self.runs.iter().map(|r| r.id.as_str()).collect();
+                out.push(json!({"t": "core.get", "id": "app.tools", "what": "tools", "calls": calls, "runs": runs}));
             } else {
                 out.push(
                     json!({"t": "core.get", "id": format!("app.{}", l.name()), "what": l.name()}),
@@ -3107,6 +3117,9 @@ impl Model {
                         } else {
                             self.finished.insert(r.agent.clone(), at);
                         }
+                        // What streamed, for a reply that never comes as message.created,
+                        // such as a quiet routine's.
+                        self.live.remove(&r.message);
                     }
                     self.dirty.insert(List::Tools);
                     self.dirty.insert(List::Approvals);
@@ -4193,6 +4206,8 @@ impl Model {
                 let messages: Vec<Message> = items.iter().map(|m| self.message_of(m)).collect();
                 self.messages = messages;
                 self.place_queued();
+                // The tool calls these messages name.
+                self.dirty.insert(List::Tools);
             }
         }
     }
