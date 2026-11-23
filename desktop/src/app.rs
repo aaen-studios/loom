@@ -576,9 +576,11 @@ impl Loom {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let prefs = Prefs::load(&data_dir());
         let dark = prefs.dark(system_dark(window));
-        crate::perf::once("core starting");
-        let (core, events) = Core::start(&core_config("", None));
-        crate::perf::once("core started");
+        let (core, events) = FIRST_CORE
+            .lock()
+            .ok()
+            .and_then(|mut c| c.take())
+            .unwrap_or_else(|| Core::start(&core_config("", None)));
         let (device_tx, device_rx) = std::sync::mpsc::channel();
 
         let composer = cx.new(|cx| {
@@ -875,13 +877,12 @@ ACTA_KEY=secret:ACTA_KEY",
 
         // The core's events come on its thread; this task brings them to the window.
         // It also looks at the tray, and notices the system waking: a tick that comes
-        // long after the last means the computer slept.
+        // long after the last means the computer slept. What comes wakes it (wake.rs);
+        // otherwise it looks four times a second.
         cx.spawn(async move |this, cx| {
             let mut last = Instant::now();
             loop {
-                cx.background_executor()
-                    .timer(Duration::from_millis(8))
-                    .await;
+                crate::wake::wait(cx.background_executor(), Duration::from_millis(250)).await;
                 let woke = last.elapsed() > Duration::from_secs(10);
                 last = Instant::now();
                 let alive = this.update(cx, |loom, cx| {
@@ -1300,6 +1301,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         }),
                     };
                     let _ = tx.send(frame);
+                    crate::wake::wake();
                 });
             }
             _ => self.send(answer(false, "This app has no such tool.")),
@@ -10102,7 +10104,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 &mut context,
                 &source,
                 panel_bounds(rect),
-                move |m| door.borrow_mut().push(m),
+                move |m| {
+                    door.borrow_mut().push(m);
+                    crate::wake::wake();
+                },
                 |what| eprintln!("loom: a panel was refused: {what}"),
             );
             let _ = this.update(cx, |this, cx| {
@@ -13660,11 +13665,8 @@ fn card_view(
 }
 
 /// One tool call: its title, and how it went.
-fn tool_line(p: Palette, b: &model::Block, tools: &[model::Tool]) -> Div {
-    let t = b
-        .call
-        .as_ref()
-        .and_then(|c| tools.iter().find(|t| &t.call == c));
+fn tool_line(p: Palette, b: &model::Block, tools: &model::Tools) -> Div {
+    let t = b.call.as_ref().and_then(|c| tools.get(c));
     let (title, mark, color) = match t {
         Some(t) => {
             let (mark, color) = match t.status.as_deref() {
@@ -13699,7 +13701,7 @@ struct ReplyDraw<'a> {
     m: &'a Message,
     tint: Hsla,
     open: &'a HashSet<String>,
-    tools: &'a [model::Tool],
+    tools: &'a model::Tools,
     files: &'a HashMap<String, String>,
     show: Show,
     this: &'a WeakEntity<Loom>,
@@ -13784,7 +13786,7 @@ impl ReplyDraw<'_> {
         let status = |b: &model::Block| {
             b.call
                 .as_ref()
-                .and_then(|c| tools.iter().find(|t| &t.call == c))
+                .and_then(|c| tools.get(c))
                 .and_then(|t| t.status.clone())
         };
         match self.show.tools {
@@ -14010,7 +14012,7 @@ fn reply(
     mood: Mood,
     head: bool,
     open: &HashSet<String>,
-    tools: &[model::Tool],
+    tools: &model::Tools,
     files: &HashMap<String, String>,
     show: Show,
     this: WeakEntity<Loom>,
@@ -15031,6 +15033,20 @@ fn local_mode() -> bool {
 /// The core's config (core/README.md, "Config"), for the server whose folder is `dir`
 /// ("" for the first), and for a new one, its address. Only the first updates the
 /// app, and only it can be the instance on this computer.
+/// The first server's core, started before the window is made, so it boots (and an
+/// instance in the app opens) while GPUI starts, rather than after.
+static FIRST_CORE: std::sync::Mutex<Option<(Core, std::sync::mpsc::Receiver<String>)>> =
+    std::sync::Mutex::new(None);
+
+pub fn start_first_core() {
+    crate::perf::once("core starting");
+    let started = Core::start(&core_config("", None));
+    crate::perf::once("core started");
+    if let Ok(mut c) = FIRST_CORE.lock() {
+        *c = Some(started);
+    }
+}
+
 fn core_config(dir: &str, server: Option<&str>) -> String {
     let folder = server_folder(dir);
     let _ = std::fs::create_dir_all(&folder);

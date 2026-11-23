@@ -26,6 +26,8 @@ serde_json = { version = "1.0.154", default-features = false, features = ["std"]
 tray-icon = "0.26.1"
 xcap = "0.9.10"
 wry = "0.57.3"
+async-channel = "2.5.0"
+futures-lite = "2.6.1"
 
 [features]
 # Frame timing in perf.log in the data folder (src/perf.rs), for measuring the app.

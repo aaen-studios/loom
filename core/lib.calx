@@ -97,11 +97,14 @@ impl Task for Local {
                 return
             },
         }
+        // Ready before the agent programs are looked for on the PATH, which takes a few
+        // ms: the core opens its cache and connects meanwhile, and the connection waits
+        // in the listening socket until the instance serves.
+        l.ready.send("{i.url()}\n{token}")
         match i.find_acp_agents() {
             ok => {},
             err(e) => eprintln("loom: finding ACP agents: {e}"),
         }
-        l.ready.send("{i.url()}\n{token}")
         match i.serve_until(l.stop) {
             ok => {},
             err(e) => eprintln("loom: the instance stopped: {e}"),

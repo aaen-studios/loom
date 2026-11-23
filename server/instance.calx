@@ -1095,7 +1095,11 @@ impl Instance {
         let lines = Receiver<Line>()
         let to = lines.sender()
         let (hash_to, hash_done) = hashing.start(config.hasher)
-        let dummy = config.hasher.hash(bytes.hex(random_bytes(16)))
+        // What a login with an unknown name checks against, so it takes as long as a
+        // wrong password. Made with the hasher's parameters, so checking it costs the
+        // same as checking a real hash, but not hashed itself: that's ~30 ms at each start.
+        let h = config.hasher
+        let dummy = "$argon2id$v=19$m={h.memory_kib},t={h.iterations},p={h.parallelism}${bytes.base64(random_bytes(h.salt_len)).replace("=", "")}${bytes.base64(random_bytes(h.hash_len)).replace("=", "")}"
         let (install_to, install_done) = installer.start()
         let (mcp_test_to, mcp_test_done) = mcptest.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
@@ -3194,10 +3198,7 @@ impl Instance {
         if name == "start_task" {
             let prompt = (str_at(args.copy(), "prompt") ?? String()).trim().copy()
             if prompt.len() == 0 { return some(tool_error(String("prompt is empty: give the task everything it needs."))) }
-            var running: i64 = 0
-            for task in try i.store.tasks(g.user.copy()) {
-                if str_at(task.copy(), "agent") == some(g.agent.copy()) and str_at(task, "status") == some(String("running")) { running += 1 }
-            }
+            let running = try i.store.tasks_running(g.user.copy(), g.agent.copy())
             if running >= TASKS_RUNNING_MOST { return some(tool_error("You have {TASKS_RUNNING_MOST} tasks running already. Wait for one to finish, or ask your person to cancel one.")) }
             let agent = try i.store.agent(g.user.copy(), g.agent.copy()) else return some(tool_error(String("You were deleted.")))
             let title = str_at(args, "title") ?? String()
@@ -3749,12 +3750,16 @@ impl Instance {
     // A chat in words, for an agent to go on: its newest messages, up to and
     // with `upto` when it's given, newest last. The oldest go first when it's long.
     fn transcript(i: Instance, user: String, conversation: String, upto: String?) -> String ! Error {
-        let (all, _) = try i.store.messages(user, conversation, none, 500)
+        // Only the last SIDE_MESSAGES are used: up to `upto` and it, or the newest.
+        let last = if let u = upto { try i.store.message(user.copy(), u) } else { none }
         var messages = List<Json>()
-        for m in all {
-            let id = str_at(m.copy(), "id") ?? String()
-            messages.push(m.copy())
-            if some(id) == upto.copy() { break }
+        if let m = last {
+            let (before, _) = try i.store.messages(user, conversation, str_at(m, "id"), SIDE_MESSAGES - 1)
+            messages = before
+            messages.push(m)
+        } else {
+            let (newest, _) = try i.store.messages(user, conversation, none, SIDE_MESSAGES)
+            messages = newest
         }
         var lines = List<String>()
         var skip = if messages.len() > SIDE_MESSAGES { messages.len() - SIDE_MESSAGES } else { 0 }
@@ -6142,10 +6147,7 @@ impl Instance {
             // One agent starting another's: within the same few at a time.
             if device.starts_with("a_") {
                 let agent_id = str_at(agent.copy(), "id") ?? String()
-                var running: i64 = 0
-                for task in try i.store.tasks(user.copy()) {
-                    if str_at(task.copy(), "agent") == some(agent_id.copy()) and str_at(task, "status") == some(String("running")) { running += 1 }
-                }
+                let running = try i.store.tasks_running(user.copy(), agent_id.copy())
                 if running >= TASKS_RUNNING_MOST { return Answer.Refused(String("busy"), "That agent has {TASKS_RUNNING_MOST} tasks running already.") }
                 let by_name = match try i.store.agent(user.copy(), device.copy()) {
                     some(a) => str_at(a, "name") ?? String("an agent"),
@@ -6374,12 +6376,9 @@ impl Instance {
     // Loom's summary of a conversation up to the message `answering` (left out
     // of it, since the prompt has it), for a program it moves to from `from`.
     fn summary_of(i: Instance, user: String, conversation: String, answering: String, from: String) -> String ! Error {
-        let (all, _) = try i.store.messages(user, conversation, none, 500)
-        var before = List<Json>()
-        for m in all {
-            if answering.len() > 0 and str_at(m.copy(), "id") == some(answering.copy()) { break }
-            before.push(m.copy())
-        }
+        // What came before the message being answered, when it's there.
+        let cut = if answering.len() > 0 and try i.store.message(user.copy(), answering.copy()) != none { some(answering.copy()) } else { none }
+        let (before, _) = try i.store.messages(user, conversation, cut, 500)
         return brains.summary(before, from)
     }
 
