@@ -21,7 +21,7 @@ import std.thread.{Task}
 import std.time.{Instant}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_MOVED, CLOSE_TOKEN, CLOSE_VERSION, NEWEST, moved_message}
-import core.cache.{Cache, now}
+import core.cache.{CALLS_KEPT_MS, Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import core.login.{Kind, Outcome, Pending, address, request_body}
@@ -46,6 +46,10 @@ const MAKING: str = "core.conversation:"
 // The ids of the commands the core sends about its instance's updates.
 const UPDATES: str = "core.updates:"
 const UPDATING: str = "core.update:"
+// The id of the messages.list the core sends for a conversation's older messages,
+// before the conversation's id, and how many it asks for at a time.
+const FILLING: str = "core.fill:"
+const FILL_PAGE: i64 = 100
 // How long after its instance said it's restarting the core tries again every second.
 const RESTART_NS: u64 = 120000000000
 
@@ -119,6 +123,7 @@ pub struct Conn {
     keyring: String       // the credential store's service the token is kept under
     cache: Cache          // what came from the instance, the cursor and the outbox
     lists: List<String>   // the ids of messages.list commands, whose results the cache keeps
+    filling: List<String> // the conversations the core is fetching older messages of itself
     making: List<String>  // the ids of conversation.create commands the core sent for a send
     linking: List<String> // the ids of link.create commands, whose results get the QR code's text
     inviting: List<String> // the ids of invite.create commands, whose results get the invite's link
@@ -191,6 +196,7 @@ impl Conn {
             keyring: service,
             cache: cache,
             lists: List<String>(),
+            filling: List<String>(),
             making: List<String>(),
             linking: List<String>(),
             inviting: List<String>(),
@@ -324,6 +330,7 @@ impl Conn {
         // Commands sent on an old socket get no result: the outbox asks again on welcome.
         self.making = List<String>()
         self.lists = List<String>()
+        self.filling = List<String>()
         self.linking = List<String>()
         self.inviting = List<String>()
         self.resetting = List<String>()
@@ -599,6 +606,8 @@ impl Conn {
                     return
                 },
             }
+            // Tool calls as old as the events the instance still keeps go, once a day.
+            if let err(e) = self.cache.prune_calls(now() - CALLS_KEPT_MS) { self.tell_error("cache", "{e}") }
         } else if t == "instance.update" {
             // A restart for it is near: the core tries again every second until it's back.
             if str_at(f, "state") == some(String("restarting")) { self.restarting = some(unsafe { Instant.now() }) }
@@ -679,6 +688,10 @@ impl Conn {
                 self.update_answer(id.starts_with(UPDATES), f)
                 return
             }
+            if id.starts_with(FILLING) {
+                self.filled(id[FILLING.len()..].copy(), f)
+                return
+            }
             if let i = self.linking.position(|x| x == id) {
                 _ = self.linking.remove(i)
                 self.linked(f)
@@ -705,8 +718,47 @@ impl Conn {
         self.to_app.send(text)
     }
 
+    /// Asks the instance for `conversation`'s messages older than the cache's oldest,
+    /// unless it's asking already. `filled` keeps them.
+    fn fill(mut self, conversation: String) {
+        if self.state != State.Live or self.filling.contains(conversation.copy()) { return }
+        let before = match self.cache.oldest(conversation.copy()) {
+            ok(b) => b,
+            err(e) => {
+                self.tell_error("cache", "{e}")
+                return
+            },
+        }
+        let args = Obj.new().s("conversation", conversation.copy()).maybe("before", before).i("limit", FILL_PAGE).done()
+        let cmd = Obj.new().s("t", String("cmd")).s("id", "{FILLING}{conversation}").s("name", String("messages.list")).j("args", args).done()
+        if self.put("{cmd}") { self.filling.push(conversation.copy()) }
+    }
+
+    /// The older messages of `conversation` came: the cache keeps them, and the app
+    /// hears `core.filled`, to read the conversation again. A conversation the instance
+    /// has no more of, or none at all, is whole.
+    fn filled(mut self, conversation: String, f: Json) {
+        if let i = self.filling.position(|x| x == conversation) { _ = self.filling.remove(i) }
+        // Refused: it stays as it was, and the next open asks again.
+        if bool_at(f.copy(), "ok") == some(false) { return }
+        let value = at(f, "value")
+        let more = bool_at(value.copy(), "more") ?? false
+        match self.cache.fill_older(conversation.copy(), at(value, "messages"), more) {
+            ok => {},
+            err(e) => {
+                self.tell_error("cache", "{e}")
+                return
+            },
+        }
+        self.tell(Obj.new().s("t", String("core.filled")).s("conversation", conversation).done())
+    }
+
     // Forgets a command that will get no result.
     fn forget_command(mut self, id: String) {
+        if id.starts_with(FILLING) {
+            let conversation = id[FILLING.len()..].copy()
+            if let i = self.filling.position(|x| x == conversation) { _ = self.filling.remove(i) }
+        }
         if let i = self.making.position(|x| x == id) { _ = self.making.remove(i) }
         if let i = self.lists.position(|x| x == id) { _ = self.lists.remove(i) }
         if let i = self.linking.position(|x| x == id) { _ = self.linking.remove(i) }
@@ -1045,14 +1097,22 @@ impl Conn {
     }
 
     // A list from the cache as a JSON array's text, and whether there's more of it.
-    fn read_cache(self, what: String, m: Json) -> (String, bool) ! Error {
+    fn read_cache(mut self, what: String, m: Json) -> (String, bool) ! Error {
         // Only the calls and runs the app names, when it names them.
         if what == "tools" and (m.get(String("calls")) != none or m.get(String("runs")) != none) {
             return (try self.cache.tools_text("{at(m, "calls")}", "{at(m, "runs")}"), false)
         }
         if let list = try self.cache.list_text(what) { return (list, false) }
-        let limit = int_at(m, "limit") ?? 50
-        return try self.cache.messages_text(str_at(m, "conversation") ?? String(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })
+        let limit = int_at(m.copy(), "limit") ?? 50
+        let conversation = str_at(m.copy(), "conversation") ?? String()
+        let (page, more) = try self.cache.messages_text(conversation.copy(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })
+        // The cache ran out of a conversation the instance has older messages of: they're
+        // fetched, and `core.filled` says when they're here.
+        if not more and try self.cache.partial(conversation.copy()) {
+            self.fill(conversation)
+            return (page, true)
+        }
+        return (page, more)
     }
 
     /// A value the cache keeps, or none if it has none or can't be read.

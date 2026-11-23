@@ -1,0 +1,71 @@
+module tests.protocol.prune
+
+// Old rows go (PLAN.md, "Storage"): finished runs, the client ids of sent
+// messages and the tokens turns used, once they're older than the events'
+// age and 35 days, a run still going never. The instance runs with
+// --test-keep-events 3, so it looks every 200 ms; the test dates rows back
+// in the database itself, as time would.
+//
+//     calx tests/protocol/prune.calx
+import std.process.{exit}
+import std.sqlite.{Database, Value}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+fn count(db: Database, sql: str) -> i64 ! Error {
+    let row = try db.query_one(String(sql), List<Value>()) else return 0
+    return match row[0].copy() {
+        Value.Int(n) => n,
+        _ => 0,
+    }
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Fake")).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    let other = str_at(at(try app.cmd("q_3", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    // Two turns that used tokens, and one still going in another conversation.
+    for n in ["m_1", "m_2"] {
+        try app.send(Obj.new().s("t", String("send")).s("cid", String(n)).s("conversation", chat.copy()).s("text", String("hello\n/tokens 10")).done())
+        _ = try app.until("event", "run.finished")
+    }
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", other.copy()).s("text", String("/sleep 20000\nlate")).done())
+    _ = try app.until("event", "run.started")
+
+    let db = try Database.open("{i.data}/loom.db")
+    try check(try count(db, "SELECT count(*) FROM runs") == 3 and try count(db, "SELECT count(*) FROM sent") == 3 and try count(db, "SELECT count(*) FROM usage") == 2, "each turn keeps its run, its message's client id and its usage")
+    // A year ago, all of them; the first turn's alone, two days ago, is too new to go.
+    _ = try db.execute(String("UPDATE runs SET at = at - 31536000000"), List<Value>())
+    _ = try db.execute(String("UPDATE sent SET at = at - 31536000000 WHERE cid != 'm_1'"), List<Value>())
+    _ = try db.execute(String("UPDATE sent SET at = at - 172800000 WHERE cid = 'm_1'"), List<Value>())
+    _ = try db.execute(String("UPDATE usage SET at = at - 31536000000"), List<Value>())
+    unsafe { sleep(800000000) }
+    try check(try count(db, "SELECT count(*) FROM runs") == 1 and try count(db, "SELECT count(*) FROM runs WHERE status = 'running'") == 1, "old runs go, but not one still going")
+    try check(try count(db, "SELECT count(*) FROM sent") == 1 and try count(db, "SELECT count(*) FROM sent WHERE cid = 'm_1'") == 1, "old sent messages' ids go, but not a newer one")
+    try check(try count(db, "SELECT count(*) FROM usage") == 0, "old usage goes")
+    try db.close()
+    // A resend of the newer one is still known, and nothing else changed.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("hello\n/tokens 10")).done())
+    _ = try app.until("ack", "")
+    let listed = at(try app.cmd("q_4", "messages.list", Obj.new().s("conversation", chat).done()), "value")
+    try check(at(listed, "messages").len() == 4, "and every message stays")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--test-keep-events"), String("3")])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nprune: all good")
+}

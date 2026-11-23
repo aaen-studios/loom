@@ -107,6 +107,13 @@ const UPDATE_STOP_MS: i64 = 15000
 // How long after the owner's instance starts it waits to tell them of an update
 // it made by itself, when none of their devices connects before.
 const UPDATE_TELL_MS: i64 = 120000
+// Finished runs, sent messages' client ids and turns' usage go with the events' age,
+// but never younger than ROWS_KEPT_MIN_MS, 35 days: a month's budget and an agent's
+// tokens this month count the usage, and its runs, of up to 31 days and a time zone.
+// At most ROWS_PRUNED_MOST of each a pass, so an old instance's first look doesn't hold
+// the loop.
+const ROWS_KEPT_MIN_MS: i64 = 3024000000
+const ROWS_PRUNED_MOST: i64 = 10000
 
 // How long events are kept (PLAN.md, "Sync"): `age_ms`, but always each
 // person's newest `keep`, looked at every `every_ms`. A device further behind
@@ -500,6 +507,13 @@ const EVENTS_PAGE: usize = 500
 // SNAPSHOT_REPLAY events over it, rather than every event it missed.
 const SNAPSHOT_PAST: i64 = 10000
 const SNAPSHOT_REPLAY: i64 = 5000
+// A snapshot carries each conversation's newest SNAPSHOT_MESSAGES messages while the
+// frame stays within SNAPSHOT_BYTES, well under a phone's MAX_FRAME over Noise.
+const SNAPSHOT_MESSAGES: i64 = 50
+const SNAPSHOT_BYTES: i64 = 786432
+// task.list gives this many tasks unless it's asked for another number, up to the most.
+const TASKS_PAGE: i64 = 50
+const TASKS_PAGE_MOST: i64 = 200
 const FIRES_A_PASS: i64 = 5    // routines fired in one pass of the loop, at most
 const ROUTINE_WAIT_MINUTES: i64 = 10    // how long a routine's run waits for its busy chat
 const IDLE_PROC_MS: i64 = 1800000    // an agent program unused this long, 30 minutes, is stopped
@@ -1176,6 +1190,17 @@ fn skill_file(skill: Json) -> String {
     return "---\nname: {str_at(skill.copy(), "name") ?? String()}\ndescription: {description}\n---\n\n{str_at(skill, "body") ?? String()}\n"
 }
 
+// Adds a file loom keeps in an agent's folder (a skill's, or its instructions) to
+// `files`, unless the same is there already: a skill saved writes every agent's
+// skills, and an agent's program starting writes its own. What's there is read from
+// here, a sandbox's folder too, since it's the same folder on both sides.
+fn keep_file(writes: mut List<(String, List<u8>)>, path: String, data: List<u8>) {
+    if let ok(had) = fs.read(path.copy()) {
+        if had == data { return }
+    }
+    writes.push((path.copy(), data.copy()))
+}
+
 fn valid_username(name: String) -> bool {
     if name.len() == 0 or name.len() > 32 { return false }
     for r in name.runes() {
@@ -1628,12 +1653,21 @@ impl Instance {
         try fs.write(path, data)
     }
 
-    fn put_dir(i: Instance, place: sandbox.Place?, path: String) ! Error {
+    // Makes the folders `dirs` and writes `files`, each a path and what goes there,
+    // together: in a sandbox, with one exec.
+    fn put_files(i: Instance, place: sandbox.Place?, dirs: List<String>, writes: List<(String, List<u8>)>) ! Error {
+        if dirs.len() == 0 and writes.len() == 0 { return }
         if let b = try i.box_of(place.copy()) {
-            try b.make_dir(place.copy() ?? sandbox.Place { user: String(), agent: String() }, path)
+            try b.write_all(place.copy() ?? sandbox.Place { user: String(), agent: String() }, dirs, writes)
             return
         }
-        try fs.make_dir_all(path)
+        for d in dirs {
+            try fs.make_dir_all(d.copy())
+        }
+        for (path, data) in writes {
+            if let cut = path.find_last("/") { try fs.make_dir_all(path[..cut].copy()) }
+            try fs.write(path.copy(), data.copy())
+        }
     }
 
     fn drop_file(i: Instance, place: sandbox.Place?, path: String) ! Error {
@@ -2524,7 +2558,8 @@ impl Instance {
         i.next_sweep = now() + 1000
     }
 
-    // Removes old events and old failed logins, when it's time to look again.
+    // Removes old events, old rows of runs, sent and usage, and old failed logins,
+    // when it's time to look again.
     fn prune(i: mut Instance) {
         let t = now()
         if t < i.next_prune { return }
@@ -2539,6 +2574,11 @@ impl Instance {
         match i.store.prune_events(t - i.events.age_ms, i.events.keep) {
             ok(gone) => if gone > 0 { println("loom: pruned {gone} old events") },
             err(e) => eprintln("loom: pruning events: {e}"),
+        }
+        let age = if i.events.age_ms > ROWS_KEPT_MIN_MS { i.events.age_ms } else { ROWS_KEPT_MIN_MS }
+        match i.store.prune_rows(t - age, ROWS_PRUNED_MOST) {
+            ok((runs, sent, usage)) => if runs + sent + usage > 0 { println("loom: pruned {runs} old runs, {sent} sent messages' ids and {usage} turns' usage") },
+            err(e) => eprintln("loom: pruning old rows: {e}"),
         }
     }
 
@@ -4431,9 +4471,15 @@ impl Instance {
             }
         }
         // Every device hears of the new conversations, and of the newest of
-        // each one's messages, as a snapshot gives them; older ones come with messages.list.
+        // each one's messages, as a snapshot gives them; older ones come with messages.list,
+        // and `partial` says there are some.
         for id in fresh {
-            if let c = try i.store.conversation(user.copy(), id.copy()) { try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done()) }
+            let more = if let got = newest.find(id.copy()) { got.len() > IMPORT_ANNOUNCED } else { false }
+            if let c = try i.store.conversation(user.copy(), id.copy()) {
+                var created = Obj.new().j("conversation", c)
+                if more { created = created.b("partial", true) }
+                try i.event(user.copy(), "conversation.created", created.done())
+            }
         }
         for (conversation, got) in newest {
             let from_k = if got.len() > IMPORT_ANNOUNCED { got.len() - IMPORT_ANNOUNCED } else { 0 }
@@ -6499,11 +6545,24 @@ impl Instance {
         if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
     }
 
-    // The snapshot frame's text, with the newest 50 messages of each conversation
-    // put in as they were stored, from one query.
+    // The snapshot frame's text: every agent and conversation, and the newest messages
+    // of each conversation, newest conversations first, put in as they were stored,
+    // within SNAPSHOT_BYTES. `partial` names the conversations it leaves messages of out.
     fn snapshot(i: Instance, user: String, seq: i64) -> String ! Error {
-        let head = "{Obj.new().s("t", String("snapshot")).i("seq", seq).j("agents", Json.Array(try i.store.agents(user.copy()))).j("conversations", Json.Array(try i.store.conversations(user.copy()))).done()}"
-        return "{head[..head.len() - 1]},\"messages\":{try i.store.newest_messages_text(user, 50)}\}"
+        let conversations = try i.store.conversations(user.copy())
+        // Room for every conversation's id in `partial`, in quotes and with a comma.
+        var ids: i64 = 0
+        for c in conversations {
+            ids += i64.wrap(u64((str_at(c.copy(), "id") ?? String()).len() + 3))
+        }
+        let head = "{Obj.new().s("t", String("snapshot")).i("seq", seq).j("agents", Json.Array(try i.store.agents(user.copy()))).j("conversations", Json.Array(conversations)).done()}"
+        let budget = SNAPSHOT_BYTES - i64.wrap(u64(head.len())) - ids - 64
+        let (messages, partial) = try i.store.snapshot_messages(user, SNAPSHOT_MESSAGES, budget)
+        var names = List<Json>()
+        for c in partial {
+            names.push(Json.Str(c.copy()))
+        }
+        return "{head[..head.len() - 1]},\"messages\":{messages},\"partial\":{Json.Array(names)}\}"
     }
 
     fn send(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
@@ -6642,7 +6701,11 @@ impl Instance {
     // task.list, task.start, task.pause, task.resume, task.cancel and task.retry.
     fn task_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
         if name == "task.list" {
-            return Answer.Value(Obj.new().j("tasks", Json.Array(try i.store.tasks(user))).done())
+            // A page at a time: a few thousand tasks were more than a phone's frame.
+            let limit = int_at(args.copy(), "limit") ?? TASKS_PAGE
+            if limit < 1 or limit > TASKS_PAGE_MOST { return Answer.Refused(String("bad_request"), "limit is from 1 to {TASKS_PAGE_MOST}.") }
+            let (tasks, more) = try i.store.tasks(user, str_at(args, "before"), usize.wrap(u64.wrap(limit)))
+            return Answer.Value(Obj.new().j("tasks", Json.Array(tasks)).b("more", more).done())
         }
         if name == "task.start" {
             let prompt = (str_at(args.copy(), "prompt") ?? String()).trim().copy()
@@ -7007,13 +7070,27 @@ impl Instance {
             command = c
             args = a
         }
-        try i.put_dir(place.copy(), folder.copy())
+        // Its folder, and its instructions and skills where they changed, together: in a
+        // sandbox, one exec rather than one for each file.
+        var writes = List<(String, List<u8>)>()
         let instructions = str_at(agent.copy(), "instructions") ?? String()
         if instructions.len() > 0 {
-            try i.put_kept(place.copy(), "{folder}/AGENTS.md", instructions.to_bytes())
-            try i.put_kept(place.copy(), "{folder}/CLAUDE.md", instructions.to_bytes())
+            let names: List<str> = ["AGENTS.md", "CLAUDE.md"]
+            for n in names {
+                keep_file(mut writes, "{folder}/{n}", instructions.to_bytes())
+            }
         }
-        i.write_skills(user.copy(), agent)
+        // Without the skills, if they can't be read: the folders loom made for them stay.
+        var skill_names: List<String>? = none
+        match i.skill_files(user.copy(), folder.copy()) {
+            ok((written, names)) => {
+                writes.extend(written)
+                skill_names = some(names)
+            },
+            err(e) => eprintln("loom: skills: {e}"),
+        }
+        try i.put_files(place.copy(), [folder.copy()], writes)
+        if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker)
         var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), key: key.copy(), stopped: false, used: now() }
         p.pending.insert(1, Pending.Init)
@@ -7194,10 +7271,12 @@ impl Instance {
         let folder = i.agent_folder(user.copy(), agent.copy())
         let place = i.place(user.copy(), agent.copy())
         let instructions = str_at(agent, "instructions") ?? String()
+        var writes = List<(String, List<u8>)>()
         let names: List<str> = ["AGENTS.md", "CLAUDE.md"]
         for n in names {
-            if let err(e) = i.put_file(place.copy(), "{folder}/{n}", instructions.to_bytes()) { eprintln("loom: agent {id}'s {n}: {e}") }
+            writes.push(("{folder}/{n}", instructions.to_bytes()))
         }
+        if let err(e) = i.put_files(place, List<String>(), writes) { eprintln("loom: agent {id}'s instructions: {e}") }
     }
 
     // Puts `user`'s skills in an agent's folder, as `.claude/skills/<name>/SKILL.md`,
@@ -7206,23 +7285,38 @@ impl Instance {
     fn write_skills(i: Instance, user: String, agent: Json) {
         let folder = i.agent_folder(user.copy(), agent.copy())
         let place = i.place(user.copy(), agent)
-        let skills = match i.store.skills(user.copy(), true) {
+        let (writes, names) = match i.skill_files(user.copy(), folder.copy()) {
             ok(s) => s,
             err(e) => {
                 eprintln("loom: skills: {e}")
                 return
             },
         }
+        if let err(e) = i.put_files(place.copy(), List<String>(), writes) { eprintln("loom: skills: {e}") }
+        i.drop_old_skills(place, folder, names)
+    }
+
+    // The files of `user`'s skills in the agent folder `folder` that aren't there as
+    // they should be already, each a path and what goes there, and every skill's name.
+    fn skill_files(i: Instance, user: String, folder: String) -> (List<(String, List<u8>)>, List<String>) ! Error {
         let root = "{folder}/.claude/skills"
+        var writes = List<(String, List<u8>)>()
         var names = List<String>()
-        for s in skills {
+        for s in try i.store.skills(user.copy(), true) {
             let name = str_at(s.copy(), "name") ?? String()
             if not valid_skill(name.copy()) { continue }
             names.push(name.copy())
             let dir = "{root}/{name}"
-            if let err(e) = i.put_kept(place.copy(), "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes()) { eprintln("loom: skill {name}: {e}") }
-            if let err(e) = i.put_kept(place.copy(), "{dir}/SKILL.md", skill_file(s).to_bytes()) { eprintln("loom: skill {name}: {e}") }
+            keep_file(mut writes, "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes())
+            keep_file(mut writes, "{dir}/SKILL.md", skill_file(s).to_bytes())
         }
+        return (writes, names)
+    }
+
+    // Takes the skill folders loom put in the agent folder `folder` out, but those of
+    // the skills `names`.
+    fn drop_old_skills(i: Instance, place: sandbox.Place?, folder: String, names: List<String>) {
+        let root = "{folder}/.claude/skills"
         let present = match fs.list(root.copy()) {
             ok(entries) => entries,
             err(_) => return,
@@ -7239,18 +7333,6 @@ impl Instance {
             }
             if let err(e) = i.drop_dir(place.copy(), dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
         }
-    }
-
-    // A file loom keeps in an agent's folder (a skill's, or its instructions), unless
-    // the same is there already: a skill saved writes every agent's skills, and an
-    // agent's program starting writes its own, which in a sandbox is a process for
-    // each file. What's there is read from here, a sandbox's folder too, since it's
-    // the same folder on both sides.
-    fn put_kept(i: Instance, place: sandbox.Place?, path: String, data: List<u8>) ! Error {
-        if let ok(had) = fs.read(path.copy()) {
-            if had == data { return }
-        }
-        try i.put_file(place, path, data)
     }
 
     // After a skill changes: every one of `user`'s agents' folders.

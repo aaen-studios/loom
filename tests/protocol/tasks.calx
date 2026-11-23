@@ -8,7 +8,7 @@ module tests.protocol.tasks
 //     calx tests/protocol/tasks.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check}
 
@@ -120,8 +120,33 @@ fn run(i: Instance) -> (i64, String, String) ! Error {
     let theirs = try wait_task(mut app, mark, by_agent.copy(), "done")
     try check(str_at(theirs, "result") == some(String("done by myself")), "and works on it")
 
-    let listed = try app.cmd("t_13", "task.list", Obj.new().done())
-    try check(at(at(listed, "value"), "tasks").len() == 5, "task.list lists every task")
+    let listed = at(try app.cmd("t_13", "task.list", Obj.new().done()), "value")
+    try check(at(listed.copy(), "tasks").len() == 5 and bool_at(listed.copy(), "more") == some(false), "task.list lists every task")
+    // A page at a time, newest first, each after the last one of the page before.
+    var paged = List<String>()
+    var before: String? = none
+    var pages: usize = 0
+    loop {
+        let page = at(try app.cmd("t_page", "task.list", Obj.new().maybe("before", before.copy()).i("limit", 2).done()), "value")
+        pages += 1
+        if let Json.Array(ks) = at(page.copy(), "tasks") {
+            for k in ks {
+                paged.push(str_at(k.copy(), "id") ?? String())
+            }
+        }
+        if bool_at(page, "more") != some(true) or pages > 5 { break }
+        before = some(paged[paged.len() - 1].copy())
+    }
+    var whole = List<String>()
+    if let Json.Array(ks) = at(listed, "tasks") {
+        for k in ks {
+            whole.push(str_at(k.copy(), "id") ?? String())
+        }
+    }
+    println("      task.list of {whole.len()} tasks is {"{listed}".len()} bytes")
+    try check(pages == 3 and paged == whole, "task.list pages through them, two at a time, in the same order")
+    let too_many = try app.cmd("t_page", "task.list", Obj.new().i("limit", 201).done())
+    try check(str_at(at(too_many, "error"), "code") == some(String("bad_request")), "and at most 200 a page")
     // --- A restart in the middle of one ---
     mark = app.frames.len()
     let cut = try start(mut app, "t_14", agent, "Cut short", "/sleep 20000\nnever")

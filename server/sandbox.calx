@@ -30,6 +30,8 @@ module server.sandbox
 import std.env
 import std.fs
 import std.process.{Command}
+import std.tar
+import std.time.{Timestamp}
 import server.egress
 
 // The image a sandbox runs, unless `loom serve --sandbox-image` names another:
@@ -152,6 +154,47 @@ fn a_closed_sandbox_has_no_network_but_the_relay() {
     assert(docker[1] == "none" and docker.contains(String("--cap-drop")))
     let open = isolation(String("podman"), 4000, false)
     assert(open[1] == "pasta:-T,4000")
+}
+
+// What `exec` runs to make `dirs` and write a tar stream's files in the sandbox `box`:
+// each folder with mkdir -p, then tar from its input, at the paths the archive names
+// from /. Files go as the sandbox's user, as `cat >` wrote them, not the archive's.
+fn write_all_args(box: String, dirs: List<String>) -> List<String> {
+    let script = String(#"for d in "$@"; do mkdir -p -- "$d" || exit 1; done; exec tar -x --no-same-owner -f - -C /"#)
+    var out: List<String> = [String("exec"), String("-i"), box.copy(), String("sh"), String("-c"), script, String("loom")]
+    out.extend(dirs)
+    return out
+}
+
+// `files`, each an absolute path and what goes there, as a tar stream for
+// `write_all_args`: each a file of its own, named from /, dated now, with no folder
+// entries, so the folders on the way are made as tar needs them and those that are
+// there keep their own modes and times.
+fn archive(files: List<(String, List<u8>)>) -> List<u8> {
+    var w = tar.Writer.new()
+    w.set_time(unsafe { Timestamp.now() })
+    for (path, data) in files {
+        w.add(path.trim_prefix("/").copy(), data.copy())
+    }
+    return w.finish()
+}
+
+@test
+fn files_go_in_with_one_exec() {
+    let args = write_all_args(String("loom-u_2"), [String("/srv/loom/sandboxes/u_2/agents/a_1")])
+    assert(args[0] == "exec" and args[1] == "-i" and args[2] == "loom-u_2" and args[3] == "sh" and args[4] == "-c" and args[6] == "loom")
+    assert(args[5].contains("mkdir -p --") and args[5].contains("tar -x --no-same-owner -f - -C /"))
+    assert(args.len() == 8 and args[7] == "/srv/loom/sandboxes/u_2/agents/a_1")
+    assert(write_all_args(String("loom-u_2"), List<String>()).len() == 7)
+    let bytes = archive([(String("/srv/loom/sandboxes/u_2/agents/a_1/AGENTS.md"), "Be brief.".to_bytes()), (String("/srv/loom/sandboxes/u_2/agents/a_1/.claude/skills/review/SKILL.md"), "---\nname: review\n---\n".to_bytes())])
+    let t = tar.Tar.open(bytes)!
+    let entries = t.entries()
+    assert(entries.len() == 2)
+    assert(entries[0].name == "srv/loom/sandboxes/u_2/agents/a_1/AGENTS.md" and entries[0].kind == tar.Kind.File and entries[0].mode == 0o644)
+    assert(t.read(0) == "Be brief.".to_bytes())
+    assert(entries[1].name == "srv/loom/sandboxes/u_2/agents/a_1/.claude/skills/review/SKILL.md" and t.read(1) == "---\nname: review\n---\n".to_bytes())
+    // Dated now, so what reads a file's time sees it's new.
+    assert(entries[0].modified.unix_ms > 1700000000000)
 }
 
 // The size of a folder, in bytes, from what `du -sk` says.
@@ -333,9 +376,13 @@ impl Sandboxes {
         if not out.status.success() { fail "writing {path} in the sandbox didn't work: {out.error_text().trim()}" }
     }
 
-    // Makes the folder `path` in `place`'s sandbox.
-    pub fn make_dir(self, place: Place, path: String) ! Error {
-        try self.run([String("exec"), place.name(), String("mkdir"), String("-p"), String("--"), path.copy()])
+    // Makes the folders `dirs` and writes `files`, each a path and what goes there, in
+    // `place`'s sandbox, all with one exec: a tar stream on its input, which tar there
+    // takes apart, rather than an exec for each file, which took 50-150 ms each.
+    pub fn write_all(self, place: Place, dirs: List<String>, files: List<(String, List<u8>)>) ! Error {
+        if dirs.len() == 0 and files.len() == 0 { return }
+        let out = try Command.new(self.runtime.copy()).args(write_all_args(place.name(), dirs)).input(archive(files)).output()
+        if not out.status.success() { fail "writing in the sandbox didn't work: {out.error_text().trim()}" }
     }
 
     // Removes the file `path` in `place`'s sandbox, or the folder, if it's empty.

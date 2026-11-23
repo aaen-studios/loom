@@ -2512,8 +2512,9 @@ pub struct Model {
     routine_runs_for: Option<String>,
     /// The routine flows running.
     pub flows: Vec<RunningFlow>,
-    /// The person's tasks, newest first.
+    /// The person's tasks, newest first, a page at a time, and whether there are older ones.
     pub tasks: Vec<Task>,
+    pub tasks_more: bool,
     /// The open conversation's pinned messages, the newest pin first, while the pins
     /// are open beside the chat, and whether they changed since.
     pub pins: Vec<Message>,
@@ -2961,9 +2962,17 @@ impl Model {
         out
     }
 
-    /// Asks for the person's tasks.
+    /// Asks for the person's newest tasks.
     pub fn load_tasks(&mut self) -> Value {
         json!({"t": "cmd", "id": "app.tasks", "name": "task.list"})
+    }
+
+    /// Asks for the next page of tasks, older than those shown.
+    pub fn load_older_tasks(&mut self) -> Option<Value> {
+        let last = self.tasks.last()?;
+        Some(
+            json!({"t": "cmd", "id": "app.tasks_older", "name": "task.list", "args": {"before": last.id}}),
+        )
     }
 
     /// task.start, task.pause, task.resume, task.cancel or task.retry.
@@ -3207,6 +3216,12 @@ impl Model {
             "core.release" => self.release = Some(s(f, "version")),
             "instance.update" => self.server_update = Some(ServerUpdate::of(f)),
             "core.data" => self.data(f),
+            // Older messages of a conversation came: the shown one is read again.
+            "core.filled" => {
+                if self.conversation().as_deref() == Some(s(f, "conversation").as_str()) {
+                    self.dirty.insert(List::Messages);
+                }
+            }
             "core.queued" => {
                 let mut q = Queued::of(f);
                 for file in &mut q.files {
@@ -3743,12 +3758,25 @@ impl Model {
             });
             return;
         }
-        if id == "app.tasks" {
-            self.tasks = f
+        if id == "app.tasks" || id == "app.tasks_older" {
+            let page: Vec<Task> = f
                 .pointer("/value/tasks")
                 .and_then(Value::as_array)
                 .map(|ts| ts.iter().map(Task::of).collect())
                 .unwrap_or_default();
+            if id == "app.tasks" {
+                self.tasks = page;
+            } else {
+                for t in page {
+                    if !self.tasks.iter().any(|k| k.id == t.id) {
+                        self.tasks.push(t);
+                    }
+                }
+            }
+            self.tasks_more = f
+                .pointer("/value/more")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             return;
         }
         if id.starts_with("app.task_cmd") {
@@ -7475,6 +7503,55 @@ mod tests {
             ]}),
         );
         assert_eq!(m.chat_program().as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn tasks_come_a_page_at_a_time() {
+        let mut m = Model::new();
+        assert!(m.load_older_tasks().is_none(), "nothing to go on from");
+        m.take(&json!({"t": "result", "id": "app.tasks", "ok": true, "value": {"more": true, "tasks": [
+            {"id": "k_3", "agent": "a_1", "conversation": "c_3", "title": "Three", "status": "done"},
+            {"id": "k_2", "agent": "a_1", "conversation": "c_2", "title": "Two", "status": "done"}
+        ]}}));
+        assert!(m.tasks_more);
+        let older = m.load_older_tasks().unwrap();
+        assert_eq!(older["name"], "task.list");
+        assert_eq!(older["args"]["before"], "k_2");
+        m.take(&json!({"t": "result", "id": older["id"], "ok": true, "value": {"more": false, "tasks": [
+            {"id": "k_1", "agent": "a_1", "conversation": "c_1", "title": "One", "status": "done"}
+        ]}}));
+        let ids: Vec<&str> = m.tasks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["k_3", "k_2", "k_1"]);
+        assert!(!m.tasks_more);
+        // Asked again from the start, it's the newest page again.
+        m.take(&json!({"t": "result", "id": "app.tasks", "ok": true, "value": {"more": true, "tasks": [
+            {"id": "k_3", "agent": "a_1", "conversation": "c_3", "title": "Three", "status": "done"}
+        ]}}));
+        assert_eq!(m.tasks.len(), 1);
+        assert!(m.tasks_more);
+    }
+
+    #[test]
+    fn older_messages_coming_read_the_shown_chat_again() {
+        let mut m = Model::new();
+        m.take(
+            &json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main"}]}),
+        );
+        m.take(
+            &json!({"t": "core.data", "what": "conversations", "items": [
+                {"id": "c_1", "agent": "a_1", "title": "Chat"}
+            ]}),
+        );
+        m.select(Some("a_1".into()));
+        _ = m.fetches();
+        // Another conversation's are none of the shown chat's business.
+        m.take(&json!({"t": "core.filled", "conversation": "c_2"}));
+        assert!(!m.fetches().iter().any(|f| f["id"] == "app.messages"));
+        m.take(&json!({"t": "core.filled", "conversation": "c_1"}));
+        let asked = m.fetches();
+        assert!(asked
+            .iter()
+            .any(|f| f["id"] == "app.messages" && f["conversation"] == "c_1"));
     }
 
     #[test]
