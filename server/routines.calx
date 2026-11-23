@@ -143,6 +143,27 @@ pub fn quiet_note(flow: bool) -> String {
     return "[loom: Your person sees nothing of this turn: not this message, nor what you answer. When there's something worth telling them, post it with routine_post: it goes in your chat with them as your message, and they're notified. With nothing new, just finish, or end with routine_quiet. If it can't be done, say why with routine_failed, which they're told.{on}]"
 }
 
+// Why a routine's time was skipped, as its runs keep it (PLAN.md, "Routines").
+// A run that finds its chat busy waits for the turn there to end, and is
+// skipped only when that takes too long, or when the routine runs again.
+pub const STILL_RUNNING: str = "It was still running from the time before."
+pub const MISSED: str = "It was missed while the instance was off."
+pub const BUSY_AT_NEXT: str = "Its chat was still busy at its next time."
+pub const RUN_AGAIN: str = "It was run again before its chat was free."
+pub const RESTARTED_WAITING: str = "The instance restarted before its chat was free."
+
+// Why a run that waited `minutes` for its busy chat was skipped.
+pub fn busy_for(minutes: i64) -> String {
+    return "Its chat was busy for {minutes} minutes."
+}
+
+// Why a run that waited for its chat gave way to the routine's next one: its
+// next time came (`by` is "schedule"), or it was run again by hand, a
+// webhook or a script.
+pub fn gave_way(by: String) -> String {
+    return String(if by == "schedule" { BUSY_AT_NEXT } else { RUN_AGAIN })
+}
+
 // How much of what a run's agent answered, and of each thing it posted, the
 // routine's runs keep, in bytes.
 pub const SAID_MOST: usize = 4000
@@ -193,6 +214,12 @@ fn a_run_is_quiet_unless_it_posts() {
     assert(outcome(String("done"), none_given.copy(), String("failed"), String("the shop was down"), true, false) == (String("failed"), some(String("the shop was down"))))
     assert(outcome(String("failed"), some(String("it crashed")), String("quiet"), String(), false, false) == (String("failed"), some(String("it crashed"))))
     assert(outcome(String("cancelled"), none_given.copy(), String(), String(), false, false) == (String("cancelled"), none_given))
+}
+
+@test
+fn a_skipped_run_says_why() {
+    assert(busy_for(10) == "Its chat was busy for 10 minutes.")
+    assert(gave_way(String("schedule")) == BUSY_AT_NEXT and gave_way(String("d_1")) == RUN_AGAIN and gave_way(String("webhook")) == RUN_AGAIN)
 }
 
 @test

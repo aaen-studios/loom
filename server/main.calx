@@ -527,7 +527,7 @@ fn run(a: Args) -> Said ! Error {
     }
     if cmd == "routine" and sub == "run" and a.words.len() == 3 {
         let v = try script(a.copy(), "routine", some(Obj.new().s("routine", a.words[2].copy()).done()))
-        return said(String("Started."), v)
+        return said(String(if bool_at(v.copy(), "waiting") == some(true) { "It starts once its chat is free." } else { "Started." }), v)
     }
     if cmd == "approvals" and a.words.len() == 1 {
         let v = try script(a.copy(), "approvals", none)

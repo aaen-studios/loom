@@ -74,8 +74,8 @@ fn run(i: Instance) ! Error {
     _ = try app.cmd("q_9", "routine.run", Obj.new().s("id", routine_id.copy()).done())
     let said = try app.reply()
     try check("{said}".contains("PROMPT-zq84"), "the routine ran, and its agent posted")
-    // Its post comes during its run, and a routine run in a chat that's busy is skipped,
-    // so the next waits for this one to end.
+    // Its post comes during its run, and a routine run in a chat that's busy waits for it,
+    // so the next is run once this one has ended.
     loop {
         let e = try app.until("event", "routine.updated")
         let r = at(e, "routine")

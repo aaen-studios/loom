@@ -307,6 +307,7 @@ pub struct Instance {
     minute_ms: i64
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
+    routines_waiting: List<WaitingRoutine>    // routine runs waiting for their chat, oldest first
     routine_marks: Map<String, (String, String)>    // a routine run -> how its agent said it went: quiet or failed, and why
     quiet_turns: Map<String, QuietTurn>    // a run the person doesn't see, a routine's or a step of its flow -> what it's for
     run_chains: Map<String, List<String>>    // a run message_agent started -> the agents that asked on the way, oldest first
@@ -420,6 +421,18 @@ struct RoutineRun {
     routine: String
 }
 
+// A routine's run that waits for its chat to be free (PLAN.md, "Routines"): a
+// turn of the person's, or of another routine's, goes on there.
+struct WaitingRoutine {
+    user: String
+    routine: String
+    run: String    // the run's id, given when it was due
+    by: String
+    came: String
+    at: i64    // when it was due
+    until: i64    // skipped if its chat is still busy then
+}
+
 // A routine's run, or a step of its flow, which the person doesn't see
 // (PLAN.md, "Routines"): neither its prompt nor its answer is kept in the
 // chat, only what its agent posts there with routine_post.
@@ -450,6 +463,7 @@ const EVENTS_PAGE: usize = 500
 const SNAPSHOT_PAST: i64 = 10000
 const SNAPSHOT_REPLAY: i64 = 5000
 const FIRES_A_PASS: i64 = 5    // routines fired in one pass of the loop, at most
+const ROUTINE_WAIT_MINUTES: i64 = 10    // how long a routine's run waits for its busy chat
 const IDLE_PROC_MS: i64 = 1800000    // an agent program unused this long, 30 minutes, is stopped
 const SIDE_TRANSCRIPT_MOST: usize = 24000
 
@@ -1152,11 +1166,13 @@ impl Instance {
             try store.finish_run(run.copy(), String("failed"))
             _ = try store.append(user, "run.finished", Obj.new().s("run", run).s("conversation", conversation).s("status", String("failed")).s("error", String("the instance restarted")).done())
         }
-        // And routines whose run that was, in their runs too.
+        // And routines whose run that was, in their runs too. A run that waited
+        // for its chat is skipped.
         try store.fail_running_routine_runs()
         for (user, r) in try store.every_routine() {
-            if str_at(at(r.copy(), "last"), "status") == some(String("running")) {
-                let last = merge(at(r.copy(), "last"), Obj.new().s("status", String("failed")).s("error", String("The instance restarted.")).done())
+            let was = str_at(at(r.copy(), "last"), "status") ?? String()
+            if was == "running" or was == "waiting" {
+                let last = merge(at(r.copy(), "last"), if was == "running" { Obj.new().s("status", String("failed")).s("error", String("The instance restarted.")).done() } else { Obj.new().s("status", String("skipped")).s("error", String(routines.RESTARTED_WAITING)).done() })
                 let after = merge(r.copy(), Obj.new().j("last", last).done())
                 try store.put_routine(user.copy(), after.copy())
                 _ = try store.append(user.copy(), "routine.updated", Obj.new().j("routine", after).done())
@@ -1190,7 +1206,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1874,6 +1890,14 @@ impl Instance {
                 match i.next_queued(user, conversation, status) {
                     ok => {},
                     err(e) => eprintln("loom: the queue: {e}"),
+                }
+            }
+            // A routine's run that waited for its chat goes once what the person
+            // queued there has gone first, or is skipped once it has waited long.
+            if not holding {
+                match i.routines_waited() {
+                    ok => {},
+                    err(e) => eprintln("loom: a routine that waited: {e}"),
                 }
             }
             // Then the routine flows a run's end moved along: a step's agent's
@@ -3464,14 +3488,16 @@ impl Instance {
             if text.len() == 0 or text.len() > POST_MOST { return some(tool_error("Give text, what your person should read, of up to {POST_MOST} bytes.")) }
             let routine_id = i.quiet_turns[run_id.copy()].routine.copy()
             let conversation = if let r = i.runs.find(run_id.copy()) { r.conversation.copy() } else { String() }
+            let r = try i.store.routine(g.user.copy(), routine_id.copy()) ?? Json.Null
+            let rname = str_at(r.copy(), "name") ?? String("A routine")
+            // The routine's name goes with the post, for the apps to say where it's
+            // from once the routine is renamed or deleted.
             let message_id = try i.store.new_id("msg")
             let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", text.copy()).done()])
-            let message = Obj.new().s("id", message_id).s("conversation", conversation.copy()).s("role", String("agent")).s("agent", g.agent.copy()).s("routine", routine_id.copy()).i("at", now()).s("status", String("done")).j("blocks", blocks).done()
+            let message = Obj.new().s("id", message_id).s("conversation", conversation.copy()).s("role", String("agent")).s("agent", g.agent.copy()).s("routine", routine_id).s("routine_name", rname.copy()).i("at", now()).s("status", String("done")).j("blocks", blocks).done()
             try i.store.put_message(g.user.copy(), message.copy())
             try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation.copy()).j("message", message).done())
             if let q = mut i.quiet_turns.find(run_id.copy()) { q.posted.push(text.copy()) }
-            let r = try i.store.routine(g.user.copy(), routine_id) ?? Json.Null
-            let rname = str_at(r.copy(), "name") ?? String("A routine")
             i.log(g.user.copy(), g.agent.copy(), "routine", "Posted for the routine {rname}", g.agent.copy())
             if bool_at(r, "notify") == some(true) {
                 i.log(g.user.copy(), g.agent.copy(), "notify", "Notified you: {rname}", g.agent.copy())
@@ -4963,7 +4989,7 @@ impl Instance {
     // and a flow's step are runs), what waits to start on the loop, an install,
     // a move, a login being checked, or a browser the person has taken over.
     fn update_busy(i: Instance) -> bool {
-        if i.runs.len() > 0 or i.resumes.len() > 0 or i.turns_ended.len() > 0 or i.flows_due.len() > 0 { return true }
+        if i.runs.len() > 0 or i.resumes.len() > 0 or i.turns_ended.len() > 0 or i.flows_due.len() > 0 or i.routines_waiting.len() > 0 { return true }
         return i.other_busy()
     }
 
@@ -5107,8 +5133,7 @@ impl Instance {
             // Missed by a whole gap, while the instance was off: it runs once
             // now, or waits for its next time, as the routine says.
             if routines.missed(s, tz, was, t, i.minute_ms) and bool_at(r.copy(), "catch_up") == some(false) {
-                let skipped = merge(timed, Obj.new().j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", String("It was missed while the instance was off.")).done()).done())
-                if let err(e) = i.routine_ran(user.copy(), skipped) { eprintln("loom: a routine: {e}") }
+                if let err(e) = i.routine_skipped(user.copy(), timed, String(), String("schedule"), t, String(routines.MISSED), true) { eprintln("loom: a routine: {e}") }
                 continue
             }
             match i.fire(user.copy(), timed, String("schedule"), String()) {
@@ -5122,18 +5147,112 @@ impl Instance {
     // Runs routine `r` now: its prompt goes to its agent, in the agent's chat,
     // with `came` after it, what a webhook sent, when there's any. `by` is
     // "schedule", "webhook", or the device or agent that ran it. Keeps the
-    // routine as it is after, and gives the run, or why there's none.
+    // routine as it is after, and gives the run, or why there's none. While a
+    // turn goes on in the chat, the run waits for it to end (`waiting`).
     fn fire(i: mut Instance, user: String, r: Json, by: String, came: String) -> Answer ! Error {
         let id = str_at(r.copy(), "id") ?? String()
-        let name = str_at(r.copy(), "name") ?? String("A routine")
         let agent_id = str_at(r.copy(), "agent") ?? String()
         let t = now()
         if try i.store.agent(user.copy(), agent_id.copy()) == none {
             try i.routine_ran(user, merge(r, Obj.new().j("last", Obj.new().i("at", t).s("status", String("failed")).s("error", String("Its agent was deleted.")).done()).done()))
             return Answer.Refused(String("not_found"), String("The routine's agent was deleted."))
         }
-        // It posts into the agent's chat, as the apps show it: its newest
-        // conversation. Or into a thread of its own, which is never the chat.
+        let conversation = try i.routine_chat(user.copy(), r.copy())
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        // Its run from the time before still goes on: this time is skipped,
+        // and kept in its runs, but its last run is still that one.
+        var going = false
+        for (_, rr) in i.routine_runs {
+            if rr.user == user and rr.routine == id { going = true }
+        }
+        if going {
+            try i.routine_skipped(user, r, conversation_id, by, t, String(routines.STILL_RUNNING), false)
+            return Answer.Refused(String("busy"), String("The routine is still running from the time before."))
+        }
+        // A run of it that waited for the chat gives way to this one.
+        if let k = i.routines_waiting.position(|w| w.user == user and w.routine == id) {
+            let w = i.routines_waiting.remove(k)
+            try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", w.run).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", w.by).i("at", w.at).s("status", String("skipped")).s("error", routines.gave_way(by.copy())).i("ended", t).done())
+        }
+        let run_id = try i.store.new_id("run")
+        // A turn goes on in the chat, the person's or another routine's: the
+        // run waits for it to end, and for what the person queued behind it.
+        if i.chat_busy(user.copy(), conversation_id.copy()) {
+            try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).s("status", String("waiting")).done())
+            try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("waiting")).s("run", run_id.copy()).done()).done()))
+            i.routines_waiting.push(WaitingRoutine { user: user.copy(), routine: id, run: run_id.copy(), by: by.copy(), came: came.copy(), at: t, until: t + ROUTINE_WAIT_MINUTES * i.minute_ms })
+            return Answer.Value(Obj.new().s("run", run_id).b("waiting", true).done())
+        }
+        try i.start_routine(user, r, conversation, run_id.copy(), by, came, t)
+        return Answer.Value(Obj.new().s("run", run_id).done())
+    }
+
+    // Whether a turn goes on in a conversation, or one just ended there and
+    // what waited behind it hasn't gone yet.
+    fn chat_busy(i: Instance, user: String, conversation: String) -> bool {
+        if i.answering(user.copy(), conversation.copy()) != none { return true }
+        for (u, c, _) in i.turns_ended {
+            if u == user and c == conversation { return true }
+        }
+        return false
+    }
+
+    // Routine runs that waited for their chat, oldest first: each goes once
+    // the chat is free, or is skipped once it has waited ROUTINE_WAIT_MINUTES.
+    fn routines_waited(i: mut Instance) ! Error {
+        if i.routines_waiting.len() == 0 or i.moving.len() > 0 or i.moved != Json.Null { return }
+        let t = now()
+        var k: usize = 0
+        while k < i.routines_waiting.len() {
+            let user = i.routines_waiting[k].user.copy()
+            let r = try i.store.routine(user.copy(), i.routines_waiting[k].routine.copy()) else {
+                // Deleted while it waited, with its runs.
+                _ = i.routines_waiting.remove(k)
+                continue
+            }
+            if try i.store.agent(user.copy(), str_at(r.copy(), "agent") ?? String()) == none {
+                let w = i.routines_waiting.remove(k)
+                try i.store.put_routine_run(user.copy(), w.routine.copy(), Obj.new().s("run", w.run.copy()).s("routine", w.routine.copy()).s("by", w.by).i("at", w.at).s("status", String("failed")).s("error", String("Its agent was deleted.")).i("ended", t).done())
+                try i.routine_ran(user, merge(r, Obj.new().j("last", Obj.new().i("at", w.at).s("status", String("failed")).s("error", String("Its agent was deleted.")).s("run", w.run).done()).done()))
+                continue
+            }
+            let conversation = try i.routine_chat(user.copy(), r.copy())
+            let conversation_id = str_at(conversation.copy(), "id") ?? String()
+            if i.chat_busy(user.copy(), conversation_id.copy()) {
+                if t < i.routines_waiting[k].until {
+                    k += 1
+                    continue
+                }
+                let w = i.routines_waiting.remove(k)
+                let why = routines.busy_for(ROUTINE_WAIT_MINUTES)
+                try i.store.put_routine_run(user.copy(), w.routine.copy(), Obj.new().s("run", w.run.copy()).s("routine", w.routine.copy()).s("conversation", conversation_id.copy()).s("by", w.by).i("at", w.at).s("status", String("skipped")).s("error", why.copy()).i("ended", t).done())
+                try i.routine_ran(user, merge(r, Obj.new().j("last", Obj.new().i("at", w.at).s("status", String("skipped")).s("error", why).done()).done()))
+                continue
+            }
+            let w = i.routines_waiting.remove(k)
+            try i.start_routine(user, r, conversation, w.run, w.by, w.came, w.at)
+        }
+    }
+
+    // A time routine `r` didn't run, and why: kept in its runs, as `by` would
+    // have run it at `t`, in `conversation` when it's known. It's the routine's
+    // `last` too when `newest` says no run of it goes on.
+    fn routine_skipped(i: Instance, user: String, r: Json, conversation: String, by: String, t: i64, why: String, newest: bool) ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        var kept = Obj.new().s("run", try i.store.new_id("run")).s("routine", id.copy())
+        if conversation.len() > 0 { kept = kept.s("conversation", conversation) }
+        try i.store.put_routine_run(user.copy(), id, kept.s("by", by).i("at", t).s("status", String("skipped")).s("error", why.copy()).i("ended", now()).done())
+        // Told either way, so the apps showing its runs read them again.
+        try i.routine_ran(user, if newest { merge(r, Obj.new().j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", why).done()).done()) } else { r.copy() })
+    }
+
+    // The conversation routine `r` posts into, made when it has none: its
+    // agent's chat, as the apps show it, its newest conversation. Or a thread
+    // of its own, which is never the chat.
+    fn routine_chat(i: Instance, user: String, r: Json) -> Json ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        let name = str_at(r.copy(), "name") ?? String("A routine")
+        let agent_id = str_at(r.copy(), "agent") ?? String()
         var conversation = Json.Null
         if str_at(r.copy(), "post") == some(String("thread")) {
             if let kept = try i.store.routine_thread(user.copy(), id.copy()) {
@@ -5154,22 +5273,21 @@ impl Instance {
                 try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
             }
         }
+        return conversation
+    }
+
+    // Starts routine `r`'s run `run_id`, due at `t`, in `conversation`, which
+    // is free. The run is quiet (PLAN.md, "Routines"): its prompt isn't kept in
+    // the chat, and neither is its answer, only what its agent posts with
+    // routine_post. OpenBot's names for routine_quiet and routine_failed, in
+    // a prompt imported before they were changed on the way, are loom's.
+    fn start_routine(i: mut Instance, user: String, r: Json, conversation: Json, run_id: String, by: String, came: String, t: i64) ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        let name = str_at(r.copy(), "name") ?? String("A routine")
+        let agent_id = str_at(r.copy(), "agent") ?? String()
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
-        var busy = false
-        for (_, run) in i.runs {
-            if run.user == user and run.conversation == conversation_id { busy = true }
-        }
-        if busy {
-            try i.routine_ran(user, merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("skipped")).s("error", String("It was still running from the time before.")).done()).done()))
-            return Answer.Refused(String("busy"), String("The routine is still running from the time before."))
-        }
-        // The run is quiet (PLAN.md, "Routines"): its prompt isn't kept in the
-        // chat, and neither is its answer, only what its agent posts with
-        // routine_post. OpenBot's names for routine_quiet and routine_failed, in
-        // a prompt imported before they were changed on the way, are loom's.
         var prompt = routines.loom_tools(str_at(r.copy(), "prompt") ?? String())
         if came.len() > 0 { prompt = "{prompt}\n\n{came}" }
-        let run_id = try i.store.new_id("run")
         i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id.copy() })
         i.quiet_turns.insert(run_id.copy(), QuietTurn { routine: id.copy(), posted: List<String>(), step: String(), of: String() })
         let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else if by == "webhook" { String("by its webhook, with what it sent below the prompt") } else { String("now, as the person asked") }
@@ -5179,8 +5297,7 @@ impl Instance {
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
         try i.start_run(user, conversation, run_id.copy(), String(), prompt, List<Json>(), from, routines.quiet_note(has_flow), if by == "webhook" { "webhook" } else { "routine" })
-        try i.store.mark_run_routine(run_id.copy(), id.copy())
-        return Answer.Value(Obj.new().s("run", run_id).done())
+        try i.store.mark_run_routine(run_id, id)
     }
 
     // Keeps routine `r` as it is now, and tells the person's devices.

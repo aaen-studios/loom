@@ -836,8 +836,8 @@ pub struct Routine {
     pub secret: String,
     /// When it runs next (Unix ms), or 0 while it's paused.
     pub next: i64,
-    /// How its last run went: running, done, quiet (nothing new), failed, skipped, or "" before
-    /// the first.
+    /// How its last run went: waiting (for its chat), running, done, quiet (nothing new),
+    /// failed, skipped, or "" before the first.
     pub last_status: String,
     pub last_at: i64,
     pub last_error: String,
@@ -984,7 +984,7 @@ impl Routine {
 pub struct RoutineRun {
     pub run: String,
     pub at: i64,
-    /// running, done, quiet, failed, limit or cancelled.
+    /// waiting (for its chat), running, done, quiet, failed, limit, cancelled or skipped.
     pub status: String,
     pub error: String,
     pub said: String,
@@ -1016,6 +1016,9 @@ impl RoutineRun {
     pub fn outcome(&self) -> String {
         match self.status.as_str() {
             "running" => "Running".into(),
+            "waiting" => "Waiting for the chat".into(),
+            "skipped" if self.error.is_empty() => "Skipped".into(),
+            "skipped" => format!("Skipped: {}", self.error),
             "quiet" => "Nothing new".into(),
             "done" if !self.posted.is_empty() => "Posted".into(),
             "done" => "Done".into(),
@@ -1601,6 +1604,10 @@ pub struct Message {
     pub queued: bool,
     /// For a message another agent sent with message_agent, that agent's name.
     pub from_agent: Option<String>,
+    /// For what a routine's agent posted with routine_post, the routine's id, and its
+    /// name: as it was when posted, or as it is now (`Model::shown`).
+    pub routine: String,
+    pub routine_name: String,
     /// Pinned in its conversation.
     pub pinned: bool,
     /// Files the reply names that are in its agent's folder, shown as chips.
@@ -1616,6 +1623,19 @@ impl Message {
     /// keeps everything it had in view, since there's no answer to fold its steps under.
     pub fn cut_short(&self) -> bool {
         !self.live && matches!(self.status.as_str(), "cancelled" | "failed" | "limit")
+    }
+
+    /// The line over a routine's post that says which routine it's from, or none for
+    /// any other message.
+    pub fn routine_line(&self) -> Option<String> {
+        if self.routine.is_empty() {
+            return None;
+        }
+        Some(if self.routine_name.trim().is_empty() {
+            "From a routine".into()
+        } else {
+            format!("From the routine {}", self.routine_name.trim())
+        })
     }
 
     /// A finished reply of an agent's with nothing to show: no words, thoughts, tool
@@ -2918,6 +2938,8 @@ impl Model {
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
             mentions: mentions_of(m),
             status: s(m, "status"),
+            routine: s(m, "routine"),
+            routine_name: s(m, "routine_name"),
             // `from` is a device, or the agent that sent it.
             from_agent: m
                 .get("from")
@@ -3956,6 +3978,8 @@ impl Model {
         } else if id.starts_with("app.routine_") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
+            } else if f.pointer("/value/waiting") == Some(&Value::Bool(true)) {
+                self.notices.push("It runs once the chat is free".into());
             }
             self.routines_stale = true;
         } else if id.starts_with("app.proposals") {
@@ -4402,6 +4426,8 @@ impl Model {
                     live: false,
                     queued: true,
                     from_agent: None,
+                    routine: String::new(),
+                    routine_name: String::new(),
                     mentions: Vec::new(),
                     status: String::new(),
                     pinned: false,
@@ -4420,6 +4446,17 @@ impl Model {
             .filter(|m| !m.is_empty_reply())
             .cloned()
             .collect();
+        // A routine's post says which routine it's from, by the name it has now, or else
+        // the one it had when posted. In the routine's own thread, the strip over the
+        // chat says so already.
+        let thread_of = self.branch_open().and_then(|c| c.routine.clone());
+        for m in out.iter_mut().filter(|m| !m.routine.is_empty()) {
+            if thread_of.as_deref() == Some(m.routine.as_str()) {
+                m.routine.clear();
+            } else if let Some(r) = self.routines.iter().find(|r| r.id == m.routine) {
+                m.routine_name = r.name.clone();
+            }
+        }
         let conversation = self.conversation();
         for r in &self.runs {
             // A routine's quiet run shows only what its agent posts, which comes as messages.
@@ -4439,6 +4476,8 @@ impl Model {
                 live: true,
                 queued: false,
                 from_agent: None,
+                routine: String::new(),
+                routine_name: String::new(),
                 mentions: Vec::new(),
                 status: String::new(),
                 pinned: false,
@@ -6007,6 +6046,8 @@ mod tests {
             live: false,
             queued: false,
             from_agent: None,
+            routine: String::new(),
+            routine_name: String::new(),
             mentions: Vec::new(),
             status: String::new(),
             pinned: false,
@@ -6042,6 +6083,8 @@ mod tests {
             live,
             queued: false,
             from_agent: None,
+            routine: String::new(),
+            routine_name: String::new(),
             mentions: Vec::new(),
             pinned: false,
             status: status.into(),
@@ -6351,6 +6394,8 @@ mod tests {
         let person = |text: &str, from: Option<&str>| Message {
             role: "person".into(),
             from_agent: from.map(str::to_string),
+            routine: String::new(),
+            routine_name: String::new(),
             ..turn(&[text], false, "")
         };
         let rows = [
@@ -6666,6 +6711,74 @@ mod tests {
         let shown = m.shown();
         assert_eq!(shown.len(), 1);
         assert_eq!(shown[0].id, "msg_3");
+    }
+
+    #[test]
+    fn a_routines_post_says_which_routine_its_from() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        let post = |id: &str, routine: &str, name: Option<&str>| {
+            let mut message = json!({"id": id, "conversation": "c_1", "role": "agent", "agent": "a_1", "routine": routine, "at": 2, "status": "done", "blocks": [{"kind": "text", "text": "26.4 is out."}]});
+            if let Some(n) = name {
+                message["routine_name"] = json!(n);
+            }
+            json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": message})
+        };
+        m.take(&post("msg_1", "rt_1", Some("Release watch")));
+        // Posted before posts kept their routine's name, by a routine that's gone since.
+        m.take(&post("msg_2", "rt_2", None));
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message":
+            {"id": "msg_3", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 3, "status": "done", "blocks": [{"kind": "text", "text": "Hi."}]}}));
+        let lines = |m: &Model| {
+            m.shown()
+                .iter()
+                .map(Message::routine_line)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&m),
+            vec![
+                Some("From the routine Release watch".to_string()),
+                Some("From a routine".to_string()),
+                None
+            ]
+        );
+        // Renamed since: the name it has now.
+        let list = m.load_routines();
+        m.take(&json!({"t": "result", "id": list["id"], "ok": true, "value": {"routines": [
+            {"id": "rt_1", "name": "Version check", "agent": "a_1", "prompt": "Check.", "schedule": {"every": 30}}]}}));
+        assert_eq!(
+            lines(&m)[0].as_deref(),
+            Some("From the routine Version check")
+        );
+    }
+
+    #[test]
+    fn a_routines_runs_say_how_each_went() {
+        let run = |v: Value| RoutineRun::of(&v);
+        assert_eq!(
+            run(json!({"run": "run_1", "status": "waiting"})).outcome(),
+            "Waiting for the chat"
+        );
+        assert_eq!(
+            run(json!({"run": "run_2", "status": "skipped", "error": "Its chat was busy for 10 minutes."})).outcome(),
+            "Skipped: Its chat was busy for 10 minutes."
+        );
+        assert_eq!(
+            run(json!({"run": "run_3", "status": "done", "posted": ["26.4 is out."]})).outcome(),
+            "Posted"
+        );
     }
 
     #[test]
