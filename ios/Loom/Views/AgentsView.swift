@@ -60,6 +60,9 @@ struct AgentsView: View {
         .sheet(isPresented: $settings) {
             SettingsView()
         }
+        .background {
+            Warmup(agent: model.synced && path.isEmpty ? model.agents.first?.id : nil)
+        }
         .onAppear(perform: openFromLaunch)
     }
 
@@ -69,6 +72,38 @@ struct AgentsView: View {
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-open"), i + 1 < args.count { path = [args[i + 1]] }
         if args.contains("-settings") { settings = true }
+    }
+}
+
+/// The chat screen drawn once, hidden, a moment after the agents are shown, so the
+/// first chat opened isn't the first time SwiftUI and UIKit build one: that made its
+/// push about twice as long as any later one's (LOO-228). It selects and fetches
+/// nothing, and goes again half a second later.
+private struct Warmup: View {
+    /// The agent whose chat it draws, once there's one and no chat is open.
+    var agent: String?
+    @State private var drawing: String?
+    @State private var done = false
+
+    var body: some View {
+        Group {
+            if let drawing {
+                NavigationStack { ChatView(agentId: drawing, warming: true) }
+                    .opacity(0)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        }
+        .task(id: agent != nil) {
+            guard agent != nil, !done else { return }
+            try? await Task.sleep(for: .milliseconds(300))
+            // A chat opened, or the connection went, in the meantime.
+            guard !Task.isCancelled, let agent else { return }
+            done = true
+            drawing = agent
+            try? await Task.sleep(for: .milliseconds(500))
+            drawing = nil
+        }
     }
 }
 
