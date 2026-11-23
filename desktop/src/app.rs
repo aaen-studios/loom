@@ -2132,10 +2132,10 @@ ACTA_KEY=secret:ACTA_KEY",
     fn make_preview(&mut self, id: String, path: String, cx: &mut Context<Self>) {
         self.previews.insert(id.clone(), None);
         let task = cx.background_executor().spawn(async move {
-            let mut small = image::open(&path).ok()?.thumbnail(128, 128).to_rgba8();
-            for px in small.pixels_mut() {
-                px.0.swap(0, 2);
-            }
+            let full = picture_pixels(&std::fs::read(&path).ok()?)?;
+            let small = image::DynamicImage::ImageRgba8(full)
+                .thumbnail(128, 128)
+                .into_rgba8();
             Some(Arc::new(RenderImage::new(vec![image::Frame::new(small)])))
         });
         cx.spawn(async move |this, cx| {
@@ -3864,7 +3864,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.page_decoding = true;
         self.page_tried = seq;
         let task = cx.background_executor().spawn(async move {
-            let bgra = frame_pixels(&jpeg)?;
+            let bgra = jpeg_pixels(&jpeg)?;
             Some(Arc::new(RenderImage::new(vec![image::Frame::new(bgra)])))
         });
         cx.spawn(async move |this, cx| {
@@ -13681,11 +13681,13 @@ const PICTURE_LEAST: f32 = 120.0;
 /// The place a picture takes while its size isn't known.
 const PICTURE_UNKNOWN: (f32, f32) = (240.0, 160.0);
 
-/// A frame of an agent's browser, a JPEG, as the BGRA pixels GPUI draws. Chrome on Linux
-/// writes each frame as three scans, one for each of Y, Cb and Cr, as Chrome on Windows
-/// doesn't; zune-jpeg 0.5.15, image's decoder, reads those as bright green stripes over
-/// a faint page (LOO-252), so frames go through jpeg-decoder, which reads both.
-fn frame_pixels(jpeg: &[u8]) -> Option<image::RgbaImage> {
+/// A JPEG as the BGRA pixels GPUI draws, turned as its EXIF says; None for what
+/// jpeg-decoder doesn't read (not a JPEG, or CMYK). Every JPEG loom shows comes through
+/// here: Chrome on Linux, and some other encoders, write a JPEG as three scans, one for
+/// each of Y, Cb and Cr, and zune-jpeg 0.5.15, image's decoder and so GPUI's, reads those
+/// as bright green stripes over a faint picture (LOO-252, LOO-255). jpeg-decoder reads
+/// both.
+fn jpeg_pixels(jpeg: &[u8]) -> Option<image::RgbaImage> {
     let mut decoder = jpeg_decoder::Decoder::new(jpeg);
     let pixels = decoder.decode().ok()?;
     let info = decoder.info()?;
@@ -13700,7 +13702,65 @@ fn frame_pixels(jpeg: &[u8]) -> Option<image::RgbaImage> {
         jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
         _ => return None,
     };
-    image::RgbaImage::from_raw(w, h, bgra)
+    let bgra = image::RgbaImage::from_raw(w, h, bgra)?;
+    // A phone's photo is kept as its camera saw it, with the way up in its EXIF.
+    match decoder
+        .exif_data()
+        .and_then(image::metadata::Orientation::from_exif_chunk)
+    {
+        Some(turn) if turn != image::metadata::Orientation::NoTransforms => {
+            let mut turned = image::DynamicImage::ImageRgba8(bgra);
+            turned.apply_orientation(turn);
+            Some(turned.into_rgba8())
+        }
+        _ => Some(bgra),
+    }
+}
+
+/// A picture file's pixels as GPUI draws them, BGRA: a JPEG through `jpeg_pixels`, any
+/// other kind through image.
+fn picture_pixels(bytes: &[u8]) -> Option<image::RgbaImage> {
+    if let Some(bgra) = jpeg_pixels(bytes) {
+        return Some(bgra);
+    }
+    let mut rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
+    for px in rgba.pixels_mut() {
+        px.0.swap(0, 2);
+    }
+    Some(rgba)
+}
+
+/// A JPEG file, for `PictureLoader`: None for any other kind of file, which GPUI's own
+/// loader takes.
+fn jpeg_file(path: &std::path::Path) -> Option<Arc<RenderImage>> {
+    let bgra = jpeg_pixels(&std::fs::read(path).ok()?)?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(bgra)])))
+}
+
+/// How the pictures in chats, the composer and the viewer load (`KeptImages`): GPUI's
+/// own loader, but with a JPEG file decoded by `jpeg_pixels`.
+enum PictureLoader {}
+
+impl Asset for PictureLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(
+        source: Resource,
+        cx: &mut App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        let path = match &source {
+            Resource::Path(path) => Some(path.clone()),
+            _ => None,
+        };
+        let gpui = ImageAssetLoader::load(source, cx);
+        async move {
+            match path.and_then(|p| jpeg_file(&p)) {
+                Some(image) => Ok(image),
+                None => gpui.await,
+            }
+        }
+    }
 }
 
 /// The size to draw a `w` × `h` picture at, at most `most_w` × `most_h`: scaled down to
@@ -14004,11 +14064,11 @@ thread_local! {
 
 /// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
 /// it has loaded, in memory and on the GPU, until the app ends; one that leaves this
-/// one loads again if it's drawn again.
+/// one goes from there too, and loads again if it's drawn again.
 struct KeptImages {
     most: usize,
     tick: u64,
-    items: HashMap<u64, (ImageCacheItem, u64)>,
+    items: HashMap<Resource, u64>,
 }
 
 impl KeptImages {
@@ -14019,15 +14079,22 @@ impl KeptImages {
             items: HashMap::new(),
         });
         cx.observe_release(&e, |c, cx| {
-            for (_, (item, _)) in c.items.drain() {
-                if let Some(Ok(image)) = item.get() {
-                    cx.drop_image(image, None);
-                }
+            for (resource, _) in c.items.drain() {
+                forget_picture(&resource, None, cx);
             }
         })
         .detach();
         e
     }
+}
+
+/// Lets a picture `KeptImages` had go: off the GPU and out of GPUI's cache, or its load
+/// stopped.
+fn forget_picture(resource: &Resource, window: Option<&mut Window>, cx: &mut App) {
+    if let Some(Ok(image)) = cx.fetch_asset::<PictureLoader>(resource) {
+        cx.drop_image(image, window);
+    }
+    cx.remove_asset::<PictureLoader>(resource);
 }
 
 impl ImageCache for KeptImages {
@@ -14037,32 +14104,20 @@ impl ImageCache for KeptImages {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Result<Arc<RenderImage>, ImageCacheError>> {
-        use std::hash::{Hash as _, Hasher as _};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        resource.hash(&mut h);
-        let key = h.finish();
         self.tick += 1;
-        let tick = self.tick;
-        if let std::collections::hash_map::Entry::Vacant(v) = self.items.entry(key) {
-            v.insert((ImageCacheItem::new(resource, cx), tick));
-            if self.items.len() > self.most {
-                let oldest = self
-                    .items
-                    .iter()
-                    .filter(|(k, _)| **k != key)
-                    .min_by_key(|(_, (_, t))| *t)
-                    .map(|(k, _)| *k);
-                if let Some(Ok(image)) = oldest
-                    .and_then(|k| self.items.remove(&k))
-                    .and_then(|(item, _)| item.get())
-                {
-                    cx.drop_image(image, Some(window));
-                }
+        if self.items.insert(resource.clone(), self.tick).is_none() && self.items.len() > self.most
+        {
+            let oldest = self
+                .items
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(r, _)| r.clone());
+            if let Some(oldest) = oldest {
+                self.items.remove(&oldest);
+                forget_picture(&oldest, Some(window), cx);
             }
         }
-        let entry = self.items.get_mut(&key)?;
-        entry.1 = tick;
-        entry.0.use_image(window)
+        window.use_asset::<PictureLoader>(resource, cx)
     }
 }
 
@@ -14985,7 +15040,7 @@ mod picture_tests {
 
 #[cfg(test)]
 mod frame_tests {
-    use super::frame_pixels;
+    use super::{jpeg_file, jpeg_pixels, picture_pixels, picture_size};
 
     /// The pixel at (x, y) of a frame, as red, green and blue.
     fn rgb(frame: &image::RgbaImage, x: u32, y: u32) -> [u8; 3] {
@@ -15015,31 +15070,107 @@ mod frame_tests {
                 (1264, 649),
             ),
         ] {
-            let frame = frame_pixels(jpeg).unwrap_or_else(|| panic!("the {name} frame decodes"));
-            assert_eq!(frame.dimensions(), size, "{name}");
-            let mut want = vec![
-                ("bar", 600, 60, [0x20, 0x21, 0x24]),
-                ("red", 70, 140, [255, 0, 0]),
-                ("green", 200, 140, [0, 255, 0]),
-                ("blue", 330, 140, [0, 0, 255]),
-                ("white", 460, 140, [255, 255, 255]),
-            ];
-            // Every third row of the page below the boxes, where the stripes were.
-            want.extend(
-                (260..size.1 - 8)
-                    .step_by(3)
-                    .map(|y| ("page", 1000, y, [0xfa, 0xfa, 0xf8])),
-            );
-            for (what, x, y, color) in want {
-                let got = rgb(&frame, x, y);
-                assert!(near(got, color), "{name}: {what} at ({x}, {y}) is {got:?}");
+            let frame = jpeg_pixels(jpeg).unwrap_or_else(|| panic!("the {name} frame decodes"));
+            shows_the_page(name, &frame, size);
+        }
+    }
+
+    /// Whether `frame` is the page in the test frames, `size` big.
+    fn shows_the_page(name: &str, frame: &image::RgbaImage, size: (u32, u32)) {
+        assert_eq!(frame.dimensions(), size, "{name}");
+        let mut want = vec![
+            ("bar", 600, 60, [0x20, 0x21, 0x24]),
+            ("red", 70, 140, [255, 0, 0]),
+            ("green", 200, 140, [0, 255, 0]),
+            ("blue", 330, 140, [0, 0, 255]),
+            ("white", 460, 140, [255, 255, 255]),
+        ];
+        // Every third row of the page below the boxes, where the stripes were.
+        want.extend(
+            (260..size.1 - 8)
+                .step_by(3)
+                .map(|y| ("page", 1000, y, [0xfa, 0xfa, 0xf8])),
+        );
+        for (what, x, y, color) in want {
+            let got = rgb(frame, x, y);
+            assert!(near(got, color), "{name}: {what} at ({x}, {y}) is {got:?}");
+        }
+    }
+
+    /// A screenshot an agent took with Chrome on Linux, sent in a chat: the picture in the
+    /// message, its thumbnail, the viewer's and the composer's all draw it whole.
+    #[test]
+    fn a_picture_in_a_chat_written_in_three_scans_shows_whole() {
+        let jpeg = include_bytes!("../testdata/frame-chrome-linux.jpg");
+        let dir = std::env::temp_dir().join(format!("loom-jpeg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Kept as a chat's file is, by its SHA-256 with no extension.
+        let path = dir.join("3a1f.thumb");
+        std::fs::write(&path, jpeg).unwrap();
+        let drawn = jpeg_file(&path).expect("a JPEG file loads as a JPEG");
+        let at = drawn.size(0);
+        let (w, h) = (at.width.0 as u32, at.height.0 as u32);
+        let pixels = image::RgbaImage::from_raw(w, h, drawn.as_bytes(0).unwrap().to_vec());
+        shows_the_page("in a chat", &pixels.unwrap(), (1280, 657));
+        assert_eq!(picture_size(&path.to_string_lossy()), Some((1280, 657)));
+        // Attached in the composer, for its chip.
+        shows_the_page("attached", &picture_pixels(jpeg).unwrap(), (1280, 657));
+        // Any other kind of picture is GPUI's loader's.
+        let png = dir.join("small.thumb");
+        image::RgbImage::new(4, 4)
+            .save_with_format(&png, image::ImageFormat::Png)
+            .unwrap();
+        assert!(jpeg_file(&png).is_none());
+        assert_eq!(
+            picture_pixels(&std::fs::read(&png).unwrap())
+                .unwrap()
+                .dimensions(),
+            (4, 4)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A phone's photo, kept on its side with EXIF saying to turn it, is drawn upright,
+    /// as GPUI's loader drew it.
+    #[test]
+    fn a_photo_is_turned_as_its_exif_says() {
+        use image::ImageEncoder as _;
+        // Red then blue, side by side, 16 pixels each, and "turn 90° clockwise".
+        let mut wide = image::RgbImage::from_pixel(32, 16, image::Rgb([255, 0, 0]));
+        for x in 16..32 {
+            for y in 0..16 {
+                wide.put_pixel(x, y, image::Rgb([0, 0, 255]));
             }
         }
+        let exif = vec![
+            0x49, 0x49, 0x2a, 0, 8, 0, 0, 0, 1, 0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 6, 0, 0, 0, 0, 0,
+            0, 0,
+        ];
+        let mut jpeg = Vec::new();
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg, 95);
+        encoder.set_exif_metadata(exif).unwrap();
+        encoder
+            .write_image(&wide, 32, 16, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        let upright = jpeg_pixels(&jpeg).unwrap();
+        assert_eq!(upright.dimensions(), (16, 32));
+        // Red on top, blue under it.
+        assert!(
+            near(rgb(&upright, 8, 4), [255, 0, 0]),
+            "{:?}",
+            rgb(&upright, 8, 4)
+        );
+        assert!(
+            near(rgb(&upright, 8, 28), [0, 0, 255]),
+            "{:?}",
+            rgb(&upright, 8, 28)
+        );
     }
 
     #[test]
     fn what_isnt_a_jpeg_is_skipped() {
-        assert!(frame_pixels(b"not a picture").is_none());
+        assert!(jpeg_pixels(b"not a picture").is_none());
+        assert!(picture_pixels(b"not a picture").is_none());
     }
 }
 
