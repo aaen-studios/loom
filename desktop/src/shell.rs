@@ -413,21 +413,143 @@ pub fn window_shown(_hwnd: isize) -> bool {
     true
 }
 
+/// The name of loom's entry in HKCU's Run key, which the setup removes on uninstall.
+const LOGIN_NAME: &str = "loom";
+
+/// Where the setup installs loom.exe: %LOCALAPPDATA%\Programs\loom (desktop/setup).
+/// macOS has no installed app yet, so there's none there.
+fn installed_exe() -> Option<std::path::PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|d| !d.is_empty())
+        .map(|d| std::path::Path::new(&d).join(r"Programs\loom\loom.exe"))
+}
+
+/// The program "Start at login" starts: the installed loom when there is one, so a dev
+/// build ticking it never puts itself in the installed loom's place, and otherwise
+/// this one, since the person asked.
+fn login_exe() -> Option<std::path::PathBuf> {
+    installed_exe()
+        .filter(|p| p.is_file())
+        .or_else(|| std::env::current_exe().ok())
+}
+
+/// The same program, however each path is spelt (case, 8.3 names).
+fn same_program(a: &std::path::Path, b: &std::path::Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy()),
+    }
+}
+
+/// Whether this build turns starting at login on by itself, on its first start: only a
+/// release (no "-dev" in its version, not a `perf` build), not started for a test (with
+/// LOOM_DATA or LOOM_SETUP_SANDBOX set), running from where the setup installs it.
+/// Anything else would put itself in the installed loom's place at the next login.
+fn turns_itself_on(
+    version: &str,
+    perf: bool,
+    test: bool,
+    exe: &std::path::Path,
+    installed: Option<&std::path::Path>,
+) -> bool {
+    !version.contains("-dev") && !perf && !test && installed.is_some_and(|i| same_program(exe, i))
+}
+
+/// The program a Run entry starts: what's in its quotes, or up to its ".exe".
+#[cfg(any(windows, test))]
+fn run_program(entry: &str) -> &str {
+    let entry = entry.trim();
+    if let Some(rest) = entry.strip_prefix('"') {
+        return rest.split('"').next().unwrap_or(rest);
+    }
+    match entry.to_ascii_lowercase().find(".exe") {
+        Some(i) => &entry[..i + 4],
+        None => entry,
+    }
+}
+
+/// loom's entry in HKCU's Run key, as written there.
+#[cfg(windows)]
+fn run_entry() -> Option<String> {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_SZ};
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let key = wide(r"Software\Microsoft\Windows\CurrentVersion\Run");
+    let name = wide(LOGIN_NAME);
+    let mut len = 0u32;
+    // SAFETY: NUL-terminated wide strings; this call only asks for the value's size.
+    let found = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut len,
+        )
+    };
+    if found != 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; (len as usize).div_ceil(2)];
+    // SAFETY: `buf` holds `len` bytes, which the call writes at most.
+    let read = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            key.as_ptr(),
+            name.as_ptr(),
+            RRF_RT_REG_SZ,
+            std::ptr::null_mut(),
+            buf.as_mut_ptr() as _,
+            &mut len,
+        )
+    };
+    if read != 0 {
+        return None;
+    }
+    let end = buf.iter().position(|&c| c == 0).unwrap_or(buf.len());
+    Some(String::from_utf16_lossy(&buf[..end]))
+}
+
 fn launcher() -> Option<auto_launch::AutoLaunch> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = login_exe()?;
+    // Quoted on Windows, as the setup writes it, for a path with a space in it.
+    let path = if cfg!(windows) {
+        format!("\"{}\"", exe.display())
+    } else {
+        exe.to_string_lossy().into_owned()
+    };
     auto_launch::AutoLaunchBuilder::new()
-        .set_app_name("loom")
-        .set_app_path(&exe.to_string_lossy())
+        .set_app_name(LOGIN_NAME)
+        .set_app_path(&path)
         .set_args(&["--background"])
+        // Under HKCU, as everything the setup writes, even when run as administrator.
+        .set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser)
         .build()
         .ok()
 }
 
-/// Whether loom starts when the person logs in.
+/// Whether loom starts when the person logs in: on Windows, whether the Run entry
+/// starts the program "Start at login" would put there, so an entry left by another
+/// build shows as off, and ticking it points it here.
 pub fn starts_at_login() -> bool {
-    launcher()
+    let enabled = launcher()
         .and_then(|l| l.is_enabled().ok())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    #[cfg(windows)]
+    let enabled = enabled
+        && match (run_entry(), login_exe()) {
+            (Some(entry), Some(exe)) => {
+                same_program(std::path::Path::new(run_program(&entry)), &exe)
+            }
+            _ => false,
+        };
+    enabled
 }
 
 pub fn set_start_at_login(on: bool) {
@@ -438,11 +560,28 @@ pub fn set_start_at_login(on: bool) {
     }
 }
 
-/// The first start turns starting at login on, as the plan has it; after that it's the
-/// person's choice, kept by the system.
+/// The first start of an installed release turns starting at login on, as the plan has
+/// it; after that it's the person's choice, kept by the system. Any other build leaves
+/// it alone, and leaves the first start to the installed loom.
 pub fn first_start(data: &str) {
     let marker = std::path::Path::new(data).join("started");
-    if !marker.exists() {
+    if marker.exists() {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let test = ["LOOM_DATA", "LOOM_SETUP_SANDBOX"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some());
+    let installed = installed_exe();
+    if turns_itself_on(
+        crate::VERSION,
+        cfg!(feature = "perf"),
+        test,
+        &exe,
+        installed.as_deref(),
+    ) {
         set_start_at_login(true);
         let _ = std::fs::write(marker, b"");
     }
@@ -671,6 +810,60 @@ pub fn screenshot() -> Result<(Vec<u8>, u32, u32), String> {
 
 #[cfg(test)]
 mod tests {
+    /// Only an installed release, started for real, turns starting at login on by itself.
+    #[test]
+    fn only_an_installed_release_turns_itself_on() {
+        use std::path::Path;
+        let installed = Path::new(r"C:\Users\x\AppData\Local\Programs\loom\loom.exe");
+        let on = |version, perf, test, exe: &str, installed: Option<&Path>| {
+            super::turns_itself_on(version, perf, test, Path::new(exe), installed)
+        };
+        let here = r"C:\Users\x\AppData\Local\Programs\loom\loom.exe";
+        assert!(on("0.3.0", false, false, here, Some(installed)));
+        // However the path is spelt.
+        assert!(on(
+            "0.3.0",
+            false,
+            false,
+            r"c:\users\X\appdata\local\programs\LOOM\LOOM.EXE",
+            Some(installed)
+        ));
+        // A dev build, a perf build, or one started for a test.
+        assert!(!on("0.2.0-dev", false, false, here, Some(installed)));
+        assert!(!on("0.3.0", true, false, here, Some(installed)));
+        assert!(!on("0.3.0", false, true, here, Some(installed)));
+        // A release somewhere else: a test folder, a download, a build folder.
+        let elsewhere = r"C:\Users\x\AppData\Local\Temp\loo233\loom-app.exe";
+        assert!(!on("0.3.0", false, false, elsewhere, Some(installed)));
+        assert!(!on(
+            "0.3.0",
+            false,
+            false,
+            r"C:\Users\x\Downloads\loom.exe",
+            Some(installed)
+        ));
+        // Where nothing is installed, as on macOS.
+        assert!(!on("0.3.0", false, false, here, None));
+    }
+
+    /// The program a Run entry starts, quoted as the setup writes it or not, as the
+    /// auto-launch crate does.
+    #[test]
+    fn reads_the_program_a_run_entry_starts() {
+        let exe = r"C:\Users\A B\AppData\Local\Programs\loom\loom.exe";
+        assert_eq!(super::run_program(&format!("\"{exe}\" --background")), exe);
+        assert_eq!(super::run_program(&format!("{exe} --background")), exe);
+        assert_eq!(super::run_program(&format!("  {exe}  ")), exe);
+        assert_eq!(
+            super::run_program(r"C:\loom\LOOM.EXE --x"),
+            r"C:\loom\LOOM.EXE"
+        );
+        assert_eq!(
+            super::run_program("/Applications/loom"),
+            "/Applications/loom"
+        );
+    }
+
     // Needs a screen, so CI leaves it out: `cargo test -- --ignored` runs it.
     #[test]
     #[ignore]
