@@ -42,6 +42,8 @@ use gpui::*;
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    /// loom: whether it has anything new to draw.
+    frame_demand: Arc<FrameDemand>,
 }
 
 impl TrackedWindow {
@@ -470,20 +472,23 @@ impl WindowsPlatform {
                         unsafe {
                             let visible = IsWindowVisible(hwnd.as_raw()).as_bool()
                                 && !IsIconic(hwnd.as_raw()).as_bool();
+                            // loom: a hidden or minimised window isn't told to paint at
+                            // every vblank. It has nothing to show, and the main thread
+                            // woke for it 240 times a second (68-90 ms of CPU a second,
+                            // minimised). Showing or restoring it paints it. Nor is a
+                            // shown one with nothing new to draw (`FrameDemand`): it woke
+                            // as often to find that out (28-42 ms of CPU a second).
+                            let paint = visible && hwnd.frame_demand.take();
                             if let Some(signal_at) = signal_at {
-                                if visible {
+                                if paint {
                                     hwnd.frame_signal.record(signal_at, signal_source);
                                 } else {
                                     // Hidden windows may not consume WM_PAINT until shown again.
                                     hwnd.frame_signal.take();
                                 }
                             }
-                            // loom: a hidden or minimised window isn't told to paint at
-                            // every vblank. It has nothing to show, and the main thread
-                            // woke for it 240 times a second (68-90 ms of CPU a second,
-                            // minimised). Showing or restoring it paints it.
-                            if visible {
-                                shown = true;
+                            shown |= visible;
+                            if paint {
                                 RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
                                     .ok()
                                     .log_err();
@@ -774,6 +779,7 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frame_demand: window.state.frame_demand.clone(),
         });
 
         Ok(Box::new(window))

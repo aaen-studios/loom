@@ -1,6 +1,7 @@
 //! The window: the sidebar of agents, and the chat with the one picked. The look
 //! follows design/explorations/round-4.html, with every value from design/tokens.toml.
 
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -444,6 +445,17 @@ pub struct Loom {
     wheel: ((f32, f32), f32, bool),
     /// The chat's list, as a view of its own (`ChatList`).
     chat_view: Option<Entity<ChatList>>,
+    /// The sidebar, whole or as the rail, as a view of its own (`SidebarView`), and what
+    /// it was last drawn from.
+    side_view: Option<Entity<SidebarView>>,
+    side_key: Option<SidebarKey>,
+    /// The pages whose rows are drawn as a list, only those on screen built
+    /// (`list_page`), by name, and the frames drawn, for knowing a page just opened.
+    lists: HashMap<&'static str, PageList>,
+    frames: u64,
+    /// The activity page's lines, and what they were made from: how many entries, the
+    /// times of the first and the last, and the day.
+    activity_lines: (ActivityKey, Rc<Vec<ActivityLine>>),
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
     page_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
     /// Whether the watched browser fills the panel beside the chat. Otherwise it's
@@ -1189,6 +1201,11 @@ ACTA_KEY=secret:ACTA_KEY",
             rows_dirty: false,
             wheel: ((0.0, 0.0), 0.0, false),
             chat_view: None,
+            side_view: None,
+            side_key: None,
+            lists: HashMap::new(),
+            frames: 0,
+            activity_lines: ((0, None, None, chrono::NaiveDate::MIN), Rc::default()),
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
             browser_shut: None,
@@ -5391,7 +5408,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The sidebar, whole or as a rail, its width easing between the two. What's in it is
     /// laid out at its own width and the sidebar reveals it, so nothing reflows while it
     /// moves.
-    fn sidebar(&mut self, railed: bool, cx: &mut Context<Self>) -> Div {
+    fn sidebar(&mut self, railed: bool, listening: bool, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let k = motion::level(
             &SharedString::from("sidebar-rail"),
@@ -5399,19 +5416,119 @@ ACTA_KEY=secret:ACTA_KEY",
             crate::rail::SLIDE,
         );
         let width = layout::SIDEBAR + (layout::RAIL - layout::SIDEBAR) * k;
+        // What's in it is a view of its own, drawn again only when what it shows changes
+        // (`SidebarKey`), its threads move or a hover in it fades: a frame that only
+        // changes the chat, such as a reply streaming, uses it as it was.
+        let key = self.sidebar_key(railed);
+        let view = match &self.side_view {
+            Some(v) => v.clone(),
+            None => {
+                let this = cx.entity().downgrade();
+                let v = cx.new(|_| SidebarView { this, railed });
+                self.side_view = Some(v.clone());
+                v
+            }
+        };
+        if self.side_key.as_ref() != Some(&key) {
+            view.update(cx, |v, cx| {
+                v.railed = railed;
+                cx.notify();
+            });
+            self.side_key = Some(key);
+        }
         div()
             .w(px(width))
             .h_full()
             .flex_none()
+            .relative()
             .overflow_hidden()
             .bg(p.side)
             .border_r_1()
             .border_color(p.line)
-            .child(if railed {
-                self.rail(cx)
+            // Its top drags the window. The view has this too, but what a view drawn from
+            // its cache had in its window's title bar isn't kept, so it's here as well,
+            // under the view, whose buttons keep the pointer from it.
+            .child(
+                div()
+                    .id("side-drag")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .w_full()
+                    .h(px(layout::TITLEBAR))
+                    .window_control_area(WindowControlArea::Drag),
+            )
+            // While a screen reader listens, it's built at every frame: a frame that uses
+            // the view as it was leaves what's in it out of what the screen reader is told.
+            .child(if listening {
+                AnyView::from(view).into_any_element()
             } else {
-                self.whole_sidebar(cx)
+                AnyView::from(view)
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element()
             })
+    }
+
+    /// What the sidebar shows, for drawing it again only when that changes.
+    fn sidebar_key(&self, railed: bool) -> SidebarKey {
+        let model = &self.model;
+        let behind = self.behind();
+        SidebarKey {
+            railed,
+            p: self.p,
+            agents: model
+                .agents
+                .iter()
+                .map(|a| SidebarAgent {
+                    id: a.id.clone(),
+                    name: a.name.clone(),
+                    color: a.color.clone(),
+                    pinned: a.pinned.is_some(),
+                    outline: a.outline().map(<[(f32, f32)]>::to_vec),
+                    mood: model.mood(&a.id),
+                    finished: model.finished_at(&a.id),
+                    preview: model.preview(a),
+                    unread: model.unread.contains(&a.id),
+                })
+                .collect(),
+            selected: model
+                .selected
+                .clone()
+                .filter(|_| self.screen == Screen::Chat),
+            query: model.query.clone(),
+            hits: model
+                .hits
+                .iter()
+                .map(|h| {
+                    (
+                        h.agent.clone(),
+                        h.snippet.clone(),
+                        h.marks.clone(),
+                        h.person,
+                        h.at,
+                    )
+                })
+                .collect(),
+            search: self.prefs.search || self.search_peek,
+            popup: self.popup,
+            servers: self
+                .servers()
+                .into_iter()
+                .map(|(dir, m)| SidebarServer {
+                    spool: spool_of(m),
+                    name: server_name(m, &dir),
+                    label: self.label(m, &dir),
+                    heard: !m.unread.is_empty(),
+                    behind: m.version.as_ref().is_some_and(|v| v.behind),
+                    dir,
+                })
+                .collect(),
+            here: self.here.clone(),
+            conn: self.conn_words(),
+            behind: behind.to_vec(),
+            behind_all: self.hub().behind_all,
+            update_open: !behind.is_empty() && self.update_pop_open(),
+        }
     }
 
     /// The control that collapses the sidebar to the rail (`rail` false), or opens it
@@ -7062,8 +7179,11 @@ ACTA_KEY=secret:ACTA_KEY",
             p,
             pad,
         };
-        // The list is a view of its own, drawn again only when what it shows changes:
-        // a frame that only moves a thread elsewhere uses it as it was.
+        // The list is a view of its own, built with the window, and each finished message
+        // in it another, drawn from its cache until what it shows changes (`RowView`): a
+        // frame that only moves a thread, here or elsewhere, lays out none of them again.
+        // The list itself isn't drawn from a cache: in a view built again, every view
+        // inside it is built again too.
         let view = match &self.chat_view {
             Some(v) => v.clone(),
             None => {
@@ -7074,24 +7194,15 @@ ACTA_KEY=secret:ACTA_KEY",
                     scroller,
                     this,
                     inputs: None,
+                    views: Rc::default(),
+                    pruned: None,
                 });
                 self.chat_view = Some(v.clone());
                 v
             }
         };
-        // While a screen reader listens, it's drawn at every frame: a frame that uses
-        // the list as it was leaves its messages out of what the screen reader is told.
-        let listening = window.is_a11y_active();
-        view.update(cx, |v, cx| {
-            let changed = !v.inputs.as_ref().is_some_and(|o| o.same(&inputs));
-            if changed {
-                v.inputs = Some(inputs);
-            }
-            if changed || listening {
-                cx.notify();
-            }
-        });
-        let list = AnyView::from(view).cached(StyleRefinement::default().size_full());
+        view.update(cx, |v, _| v.inputs = Some(inputs));
+        let list = AnyView::from(view);
 
         let empty = self.rows.is_empty();
         // A task or a branch shows its strip over the list, even before it has messages.
@@ -9627,21 +9738,8 @@ ACTA_KEY=secret:ACTA_KEY",
             };
             return self.settings_page("skills-page", title, None, groups);
         }
-        let new_skill = |this: &Self, cx: &mut Context<Self>, primary: bool| {
-            this.small_button("new-skill", "New skill", primary)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    for s in [&this.skill_name_in, &this.skill_desc_in] {
-                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                    }
-                    this.skill_body_in
-                        .update(cx, |s, cx| s.set_value("", window, cx));
-                    this.skill_open = Some(None);
-                    cx.notify();
-                }))
-                .into_any_element()
-        };
         if self.model.skills.is_empty() {
-            let action = new_skill(self, cx, true);
+            let action = self.new_skill_button(cx);
             let groups = vec![self.empty(
                 Ico::BookOpen,
                 "No skills yet",
@@ -9650,38 +9748,67 @@ ACTA_KEY=secret:ACTA_KEY",
             )];
             return self.settings_page("skills-page", "Skills", None, groups);
         }
-        let mut rows = Vec::new();
-        for k in self.model.skills.clone() {
-            let row = self.row(
-                Some(self.tile(Ico::BookOpen)),
-                k.name.clone(),
-                Some(k.description.clone()),
-                None,
-            );
-            rows.push(
-                self.link_row(SharedString::from(format!("skill-{}", k.name)), row)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        let (name, description, text) =
-                            (k.name.clone(), k.description.clone(), k.body.clone());
-                        this.skill_name_in
-                            .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
-                        this.skill_desc_in
-                            .update(cx, |s, cx| s.set_value(description, window, cx));
-                        this.skill_body_in
-                            .update(cx, |s, cx| s.set_value(text, window, cx));
-                        this.skill_open = Some(Some(name));
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        let action = new_skill(self, cx, false);
-        self.settings_page(
+        // Its title over the skills, each a row of the one group, as a list.
+        let n = self.model.skills.len();
+        self.list_page(
             "skills-page",
-            "Skills",
-            Some(action),
-            vec![self.group(None, rows)],
+            n + 1,
+            layout::SETTINGS,
+            |this, ix, cx| {
+                if ix == 0 {
+                    let action = Some(this.new_skill_button(cx));
+                    return this.list_head("Skills", action);
+                }
+                let n = this.model.skills.len();
+                match this.model.skills.get(ix - 1).cloned() {
+                    Some(k) => {
+                        let row = this.skill_row(k, cx);
+                        this.group_item(ix - 1, n, row)
+                    }
+                    None => div().into_any_element(),
+                }
+            },
+            cx,
         )
+    }
+
+    /// The skills page's New skill, the page's own button while it has none.
+    fn new_skill_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.small_button("new-skill", "New skill", self.model.skills.is_empty())
+            .on_click(cx.listener(|this, _, window, cx| {
+                for s in [&this.skill_name_in, &this.skill_desc_in] {
+                    s.update(cx, |s, cx| s.set_value("", window, cx));
+                }
+                this.skill_body_in
+                    .update(cx, |s, cx| s.set_value("", window, cx));
+                this.skill_open = Some(None);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
+    /// One skill, as a row of the skills page, which opens it to change.
+    fn skill_row(&self, k: model::Skill, cx: &mut Context<Self>) -> AnyElement {
+        let row = self.row(
+            Some(self.tile(Ico::BookOpen)),
+            k.name.clone(),
+            Some(k.description.clone()),
+            None,
+        );
+        self.link_row(SharedString::from(format!("skill-{}", k.name)), row)
+            .on_click(cx.listener(move |this, _, window, cx| {
+                let (name, description, text) =
+                    (k.name.clone(), k.description.clone(), k.body.clone());
+                this.skill_name_in
+                    .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
+                this.skill_desc_in
+                    .update(cx, |s, cx| s.set_value(description, window, cx));
+                this.skill_body_in
+                    .update(cx, |s, cx| s.set_value(text, window, cx));
+                this.skill_open = Some(Some(name));
+                cx.notify();
+            }))
+            .into_any_element()
     }
 
     /// What agents propose from past chats, and skills written from a task the person
@@ -10469,142 +10596,160 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.routine_open.is_some() {
             return self.routine_form(cx);
         }
-        let p = self.p;
-        let mut rows = Vec::new();
-        for r in self.model.routines.clone() {
-            let (agent, tint) = match self.model.agent(&r.agent) {
-                Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
-                None => ("a deleted agent".to_string(), p.ink_3),
-            };
-            let next = if !r.on || r.next == 0 {
-                "paused".to_string()
-            } else if day_of(r.next) == "Today" {
-                format!("next at {}", time_of(r.next))
-            } else {
-                format!("next {} at {}", day_of(r.next), time_of(r.next))
-            };
-            let last = match r.last_status.as_str() {
-                "" | "done" | "quiet" => String::new(),
-                "running" => " · running now".into(),
-                "waiting" => " · waiting for the chat".into(),
-                "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
-                _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
-            };
-            let mut sub = format!("{agent} · {} · {next}{last}", r.when);
-            // Its flow, while it runs: how far each step has got, and a Stop.
-            let running = self
-                .model
-                .flows
-                .iter()
-                .find(|f| f.routine == r.id)
-                .map(|f| {
-                    let steps: Vec<String> = f
-                        .steps
-                        .iter()
-                        .skip(1)
-                        .map(|(name, _, status)| format!("step {name} {status}"))
-                        .collect();
-                    (steps.join(" · "), f.stopped)
-                });
-            let mut controls = div().flex().gap(px(space::XS));
-            if let Some((text, stopped)) = running {
-                sub = text;
-                if !stopped {
-                    let routine = r.id.clone();
-                    controls = controls.child(
-                        self.small_button(format!("stop-flow-{}", r.id), "Stop", false)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                let f = this.model.stop_flow(&routine);
-                                this.send(f);
-                                cx.notify();
-                            })),
-                    );
-                }
-            }
-            // A routine with a thread of its own: the way there.
-            if r.post == "thread" && !r.conversation.is_empty() {
-                let conversation = r.conversation.clone();
-                let agent = r.agent.clone();
-                controls = controls.child(
-                    self.small_button(format!("thread-{}", r.id), "Thread", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            this.open_thread(&agent, &conversation, cx);
-                        })),
-                );
-            }
-            let lead = div()
-                .size(px(control::LEAD))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::ROW))
-                .border_1()
-                .border_color(p.line)
-                .bg(p.bg)
-                .text_color(if r.on { tint } else { p.ink_3 })
-                .child(Icon::new(Ico::Clock).small())
-                .into_any_element();
-            rows.push(
-                self.row(
-                    Some(lead),
-                    r.name.clone(),
-                    Some(sub),
-                    Some(controls.into_any_element()),
-                )
-                .id(SharedString::from(format!("routine-{}", r.id)))
-                .cursor_pointer()
-                .soft_hover(transparent_black(), p.hover, None)
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.routine_name_in
-                        .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-                    this.routine_at_in
-                        .update(cx, |s, cx| s.set_value(r.at.clone(), window, cx));
-                    this.routine_kind = if r.kind.is_empty() {
-                        "every".into()
-                    } else {
-                        r.kind.clone()
-                    };
-                    this.routine_prompt_in
-                        .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
-                    this.routine_agent = Some(r.agent.clone());
-                    this.routine_notify = r.notify;
-                    this.routine_on = r.on;
-                    this.routine_catch_up = r.catch_up;
-                    this.routine_thread = r.post == "thread";
-                    this.routine_webhook = !r.hook.is_empty();
-                    this.set_routine_flow(&r.flow, window, cx);
-                    if let Some(f) = this.model.load_routine_runs(Some(&r.id)) {
-                        this.send(f);
-                    }
-                    this.routine_open = Some(Some(r.id.clone()));
-                    cx.notify();
-                }))
-                .into_any_element(),
-            );
-        }
-        let empty = rows.is_empty();
-        let new = self
-            .small_button("new-routine", "New routine", empty)
-            .on_click(cx.listener(|this, _, window, cx| this.new_routine(window, cx)))
-            .into_any_element();
-        if empty {
+        if self.model.routines.is_empty() {
             let groups = vec![self.empty(
                 Ico::Clock,
                 "No routines yet",
                 "Something an agent does on a schedule, such as a summary each morning or a check every hour",
-                Some(new),
+                Some(self.new_routine_button(cx)),
             )];
             return self.settings_page("routines-page", "Routines", None, groups);
         }
-        self.settings_page(
+        // Its title over the routines, each a row of the one group, as a list.
+        let n = self.model.routines.len();
+        self.list_page(
             "routines-page",
-            "Routines",
-            Some(new),
-            vec![self.group(None, rows)],
+            n + 1,
+            layout::SETTINGS,
+            |this, ix, cx| {
+                if ix == 0 {
+                    let action = Some(this.new_routine_button(cx));
+                    return this.list_head("Routines", action);
+                }
+                let n = this.model.routines.len();
+                match this.model.routines.get(ix - 1).cloned() {
+                    Some(r) => {
+                        let row = this.routine_row(r, cx);
+                        this.group_item(ix - 1, n, row)
+                    }
+                    None => div().into_any_element(),
+                }
+            },
+            cx,
         )
+    }
+
+    /// One routine, as a row of the routines page: when it runs next and how its last
+    /// run went, or its flow's steps while it runs, which opens it to change.
+    fn routine_row(&self, r: model::Routine, cx: &mut Context<Self>) -> AnyElement {
+        let p = self.p;
+        let (agent, tint) = match self.model.agent(&r.agent) {
+            Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
+            None => ("a deleted agent".to_string(), p.ink_3),
+        };
+        let next = if !r.on || r.next == 0 {
+            "paused".to_string()
+        } else if day_of(r.next) == "Today" {
+            format!("next at {}", time_of(r.next))
+        } else {
+            format!("next {} at {}", day_of(r.next), time_of(r.next))
+        };
+        let last = match r.last_status.as_str() {
+            "" | "done" | "quiet" => String::new(),
+            "running" => " · running now".into(),
+            "waiting" => " · waiting for the chat".into(),
+            "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
+            _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
+        };
+        let mut sub = format!("{agent} · {} · {next}{last}", r.when);
+        // Its flow, while it runs: how far each step has got, and a Stop.
+        let running = self
+            .model
+            .flows
+            .iter()
+            .find(|f| f.routine == r.id)
+            .map(|f| {
+                let steps: Vec<String> = f
+                    .steps
+                    .iter()
+                    .skip(1)
+                    .map(|(name, _, status)| format!("step {name} {status}"))
+                    .collect();
+                (steps.join(" · "), f.stopped)
+            });
+        let mut controls = div().flex().gap(px(space::XS));
+        if let Some((text, stopped)) = running {
+            sub = text;
+            if !stopped {
+                let routine = r.id.clone();
+                controls = controls.child(
+                    self.small_button(format!("stop-flow-{}", r.id), "Stop", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            let f = this.model.stop_flow(&routine);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                );
+            }
+        }
+        // A routine with a thread of its own: the way there.
+        if r.post == "thread" && !r.conversation.is_empty() {
+            let conversation = r.conversation.clone();
+            let agent = r.agent.clone();
+            controls = controls.child(
+                self.small_button(format!("thread-{}", r.id), "Thread", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.open_thread(&agent, &conversation, cx);
+                    })),
+            );
+        }
+        let lead = div()
+            .size(px(control::LEAD))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.bg)
+            .text_color(if r.on { tint } else { p.ink_3 })
+            .child(Icon::new(Ico::Clock).small())
+            .into_any_element();
+        self.row(
+            Some(lead),
+            r.name.clone(),
+            Some(sub),
+            Some(controls.into_any_element()),
+        )
+        .id(SharedString::from(format!("routine-{}", r.id)))
+        .cursor_pointer()
+        .soft_hover(transparent_black(), p.hover, None)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.routine_name_in
+                .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
+            this.routine_at_in
+                .update(cx, |s, cx| s.set_value(r.at.clone(), window, cx));
+            this.routine_kind = if r.kind.is_empty() {
+                "every".into()
+            } else {
+                r.kind.clone()
+            };
+            this.routine_prompt_in
+                .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
+            this.routine_agent = Some(r.agent.clone());
+            this.routine_notify = r.notify;
+            this.routine_on = r.on;
+            this.routine_catch_up = r.catch_up;
+            this.routine_thread = r.post == "thread";
+            this.routine_webhook = !r.hook.is_empty();
+            this.set_routine_flow(&r.flow, window, cx);
+            if let Some(f) = this.model.load_routine_runs(Some(&r.id)) {
+                this.send(f);
+            }
+            this.routine_open = Some(Some(r.id.clone()));
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The routines page's New routine, the page's own button while it has none.
+    fn new_routine_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.small_button("new-routine", "New routine", self.model.routines.is_empty())
+            .on_click(cx.listener(|this, _, window, cx| this.new_routine(window, cx)))
+            .into_any_element()
     }
 
     /// The form for a new routine, or one being changed.
@@ -11981,6 +12126,109 @@ ACTA_KEY=secret:ACTA_KEY",
         div().flex_1().min_h_0().child(page)
     }
 
+    /// A page whose rows are drawn as a list, `count` of them, by `item`: only the rows
+    /// on screen are built each frame, however many there are. It reads as a page
+    /// laid out as `settings_page` lays one out, its column `width` wide at most, and
+    /// opens at its top.
+    fn list_page(
+        &mut self,
+        name: &'static str,
+        count: usize,
+        width: f32,
+        item: fn(&mut Loom, usize, &mut Context<Loom>) -> AnyElement,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let frames = self.frames;
+        // Every row is measured once as the page opens, so it scrolls as far and as fast as
+        // a page laid out whole: a list that knew only the rows near the screen would stop
+        // a quick scroll at the last of them.
+        let page = self.lists.entry(name).or_insert_with(|| PageList {
+            state: ListState::new(0, ListAlignment::Top, px(PAGE_OVERDRAW)).measure_all(),
+            count: 0,
+            drawn: 0,
+        });
+        // Just opened: at its top, as a page that's made anew is.
+        if page.drawn + 1 != frames {
+            page.state.reset(count);
+            page.count = count;
+        } else if page.count != count {
+            // Rows came or went: the list keeps its place.
+            let common = page.count.min(count);
+            page.state.splice(common..page.count, count - common);
+            page.count = count;
+        }
+        page.drawn = frames;
+        let state = page.state.clone();
+        let this = cx.entity().downgrade();
+        // The page's padding rides on its rows: a list measures how far it scrolls from
+        // its rows alone.
+        let rows = list(state, move |ix, _, cx| {
+            this.update(cx, |loom, cx| {
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .px(px(space::XL))
+                    .when(ix == 0, |d| d.pt(px(space::XL)))
+                    .when(ix + 1 == count, |d| d.pb(px(space::XXL)))
+                    .child(div().w_full().max_w(px(width)).child(item(loom, ix, cx)))
+                    .into_any_element()
+            })
+            .unwrap_or_else(|_| div().into_any_element())
+        })
+        .size_full();
+        div().flex_1().min_h_0().child(rows)
+    }
+
+    /// A list page's head: its title, and its action beside it, as `settings_page` has
+    /// them over its groups.
+    fn list_head(&self, title: &str, action: Option<AnyElement>) -> AnyElement {
+        let p = self.p;
+        div()
+            .pb(px(space::XL))
+            .child(
+                div()
+                    .min_h(px(control::BUTTON))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .child(
+                        div()
+                            .text_size(px(size::HEADING - 2.0))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(p.ink)
+                            .child(title.to_string()),
+                    )
+                    .children(action),
+            )
+            .into_any_element()
+    }
+
+    /// Row `i` of `n` in a group's box, on a list page: its piece of the box, as
+    /// `group` draws the whole box with a hairline between each row.
+    fn group_item(&self, i: usize, n: usize, row: AnyElement) -> AnyElement {
+        let p = self.p;
+        div()
+            .flex()
+            .flex_col()
+            .border_x_1()
+            .border_t_1()
+            .border_color(p.line)
+            .bg(self.card_fill())
+            .overflow_hidden()
+            .when(i == 0, |d| {
+                d.rounded_tl(px(radius::CARD)).rounded_tr(px(radius::CARD))
+            })
+            .when(i + 1 == n, |d| {
+                d.border_b_1()
+                    .rounded_bl(px(radius::CARD))
+                    .rounded_br(px(radius::CARD))
+            })
+            .child(row)
+            .into_any_element()
+    }
+
     /// The fill of a group's box: a step off the page.
     fn card_fill(&self) -> Hsla {
         if self.p.dark {
@@ -13054,145 +13302,166 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The activity page: what the selected agent did, and what was done to it, newest
     /// first.
     fn activity_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let mut list = div().flex().flex_col();
-        if self.model.activity.is_empty() {
-            list = list.child(
-                div()
-                    .text_size(px(size::SMALL))
-                    .pt(px(space::L))
-                    .text_color(p.ink_3)
-                    .child(
-                        "Nothing yet. What it runs, what it's allowed and what changes \
-                         show here as it works.",
-                    ),
-            );
-        }
-        let mut day = String::new();
-        for e in self.model.activity.clone() {
-            let this_day = day_of(e.at);
-            if this_day != day {
-                list = list.child(
-                    div()
-                        .pt(px(space::L))
-                        .pb(px(space::XS))
-                        .text_size(px(size::CAPTION))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.ink_3)
-                        .child(this_day.clone()),
-                );
-                day = this_day;
+        // Its entries under a line for each day, made again only when they change, or
+        // the day does, when Today becomes Yesterday.
+        let activity = &self.model.activity;
+        let key = (
+            activity.len(),
+            activity.first().map(|e| e.at),
+            activity.last().map(|e| e.at),
+            chrono::Local::now().date_naive(),
+        );
+        if self.activity_lines.0 != key {
+            let mut lines = Vec::new();
+            let mut day = String::new();
+            for (i, e) in activity.iter().enumerate() {
+                let this_day = day_of(e.at);
+                if this_day != day {
+                    lines.push(ActivityLine::Day(this_day.clone()));
+                    day = this_day;
+                }
+                lines.push(ActivityLine::Entry(i));
             }
-            let who = match e.by.as_str() {
-                "" => String::new(),
-                "auto" => "its permission mode".into(),
-                by => self.model.made_by(by),
-            };
-            let what = match e.kind.as_str() {
-                "tool" => "Ran",
-                "approval" => "Asked",
-                "message" => "Handed over",
-                "notify" => "Notified",
-                "memory" => "Remembered",
-                "routine" => "Routine",
-                "device" => "On a device",
-                _ => "Changed",
-            };
-            list = list.child(
-                // Its time and kind sit on its first line, however many lines it takes.
-                div()
-                    .flex()
-                    .items_start()
-                    .gap(px(space::M))
-                    .py(px(space::XS + 2.0))
-                    .border_b_1()
-                    .border_color(p.line)
-                    .child(
-                        div()
-                            .w(px(44.0))
-                            .flex_none()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(time_of(e.at)),
-                    )
-                    .child(
-                        div()
-                            .w(px(88.0))
-                            .flex_none()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(what),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .text_size(px(size::SMALL))
-                                    .text_color(p.ink)
-                                    .child(readable_name(&e.text)),
-                            )
-                            .when(
-                                matches!(e.status.as_str(), "started" | "failed" | "refused"),
-                                |d| {
-                                    let (said, colour) = match e.status.as_str() {
-                                        "started" => ("Not finished yet".to_string(), p.ink_3),
-                                        "refused" => (format!("Refused: {}", e.why), p.bad),
-                                        _ => (format!("Failed: {}", e.why), p.bad),
-                                    };
-                                    d.child(
-                                        div()
-                                            .text_size(px(size::CAPTION))
-                                            .text_color(colour)
-                                            .child(said),
-                                    )
-                                },
-                            ),
-                    )
-                    .when(!who.is_empty(), |d| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .child(who),
-                        )
-                    }),
-            );
+            self.activity_lines = (key, Rc::new(lines));
         }
-        let page = div()
-            .id("activity")
-            .size_full()
-            .overflow_y_scroll()
-            .flex()
-            .justify_center()
-            .items_start()
-            .pt(px(space::XL))
-            .px(px(space::XL))
-            .pb(px(space::XXL))
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(640.0))
-                    .flex()
-                    .flex_col()
-                    .child(
-                        div().flex().justify_end().child(
-                            self.button("export-activity", "Export as CSV", false)
+        // The export, then the entries, or a word that there are none yet.
+        let n = self.activity_lines.1.len().max(1);
+        self.list_page(
+            "activity-page",
+            n + 1,
+            ACTIVITY_WIDTH,
+            |this, ix, cx| {
+                if ix == 0 {
+                    return div()
+                        .flex()
+                        .justify_end()
+                        .child(
+                            this.button("export-activity", "Export as CSV", false)
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     if let Some(f) = this.model.export_activity() {
                                         this.send(f);
                                     }
                                     cx.notify();
                                 })),
-                        ),
+                        )
+                        .into_any_element();
+                }
+                let line = this.activity_lines.1.get(ix - 1).cloned();
+                this.activity_line(line)
+            },
+            cx,
+        )
+    }
+
+    /// A line of the activity page: a day's name over its entries, an entry, or, with
+    /// nothing to show, a word that there's nothing yet.
+    fn activity_line(&self, line: Option<ActivityLine>) -> AnyElement {
+        let p = self.p;
+        let e = match line {
+            None => {
+                return div()
+                    .text_size(px(size::SMALL))
+                    .pt(px(space::L))
+                    .text_color(p.ink_3)
+                    .child(
+                        "Nothing yet. What it runs, what it's allowed and what changes \
+                         show here as it works.",
                     )
-                    .child(list),
-            );
-        div().flex_1().min_h_0().child(page)
+                    .into_any_element()
+            }
+            Some(ActivityLine::Day(day)) => {
+                return div()
+                    .pt(px(space::L))
+                    .pb(px(space::XS))
+                    .text_size(px(size::CAPTION))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink_3)
+                    .child(day)
+                    .into_any_element()
+            }
+            Some(ActivityLine::Entry(i)) => match self.model.activity.get(i) {
+                Some(e) => e,
+                None => return div().into_any_element(),
+            },
+        };
+        let who = match e.by.as_str() {
+            "" => String::new(),
+            "auto" => "its permission mode".into(),
+            by => self.model.made_by(by),
+        };
+        let what = match e.kind.as_str() {
+            "tool" => "Ran",
+            "approval" => "Asked",
+            "message" => "Handed over",
+            "notify" => "Notified",
+            "memory" => "Remembered",
+            "routine" => "Routine",
+            "device" => "On a device",
+            _ => "Changed",
+        };
+        // Its time and kind sit on its first line, however many lines it takes.
+        div()
+            .flex()
+            .items_start()
+            .gap(px(space::M))
+            .py(px(space::XS + 2.0))
+            .border_b_1()
+            .border_color(p.line)
+            .child(
+                div()
+                    .w(px(44.0))
+                    .flex_none()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(time_of(e.at)),
+            )
+            .child(
+                div()
+                    .w(px(88.0))
+                    .flex_none()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(what),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .child(readable_name(&e.text)),
+                    )
+                    .when(
+                        matches!(e.status.as_str(), "started" | "failed" | "refused"),
+                        |d| {
+                            let (said, colour) = match e.status.as_str() {
+                                "started" => ("Not finished yet".to_string(), p.ink_3),
+                                "refused" => (format!("Refused: {}", e.why), p.bad),
+                                _ => (format!("Failed: {}", e.why), p.bad),
+                            };
+                            d.child(
+                                div()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(colour)
+                                    .child(said),
+                            )
+                        },
+                    ),
+            )
+            .when(!who.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(who),
+                )
+            })
+            .into_any_element()
     }
 
     /// Asks where to save the activity log `activity.export` gave, and saves it there.
@@ -15274,6 +15543,7 @@ mod when_tests {
 impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
+        self.frames += 1;
         let p = self.p;
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
@@ -15367,10 +15637,12 @@ impl Render for Loom {
         {
             crate::perf::count("want:app");
             window.request_animation_frame();
-        } else if threads_move && !self.thread_tick {
-            // Only agents' threads move, small ones beside their names: 30 frames a second
-            // is as smooth for them, and the window isn't drawn again at the screen's
-            // 144–240 Hz while an agent works in a chat that isn't open.
+        }
+        if threads_move && !self.thread_tick {
+            // Agents' threads move, small ones beside their names and the live reply's:
+            // 30 frames a second is as smooth for them, and the window isn't drawn again
+            // at the screen's 144–240 Hz while an agent works. The sidebar, drawn from a
+            // cache, is drawn again with them.
             self.thread_tick = true;
             crate::perf::count("want:threads");
             cx.spawn(async move |this, cx| {
@@ -15379,6 +15651,9 @@ impl Render for Loom {
                     .await;
                 let _ = this.update(cx, |loom, cx| {
                     loom.thread_tick = false;
+                    if let Some(v) = loom.side_view.clone() {
+                        v.update(cx, |_, cx| cx.notify());
+                    }
                     cx.notify();
                 });
             })
@@ -15517,7 +15792,7 @@ impl Render for Loom {
             .when(self.side_drag.is_some(), |d| {
                 d.child(self.side_dragger(cx)).cursor_col_resize()
             })
-            .child(self.sidebar(railed, cx))
+            .child(self.sidebar(railed, window.is_a11y_active(), cx))
             .child(
                 div()
                     .flex_1()
@@ -15551,15 +15826,24 @@ impl Render for Loom {
 }
 
 /// Drawn last of all, after every list has drawn its rows: while a switch is sliding
-/// or a hover fading, it asks for the next frame.
+/// or a hover fading, it asks for the next frame, with the cached views it's in built
+/// again.
 fn motion_ticker() -> impl IntoElement {
     canvas(
         |_, _, _| {},
         |_, _, window, _| {
             crate::perf::frame_end();
-            if crate::motion::moving() {
+            let moving = crate::motion::moving();
+            if moving.any {
                 crate::perf::count("want:motion");
                 window.request_animation_frame();
+            }
+            if !moving.views.is_empty() {
+                window.on_next_frame(move |_, cx| {
+                    for view in moving.views {
+                        cx.notify(view);
+                    }
+                });
             }
         },
     )
@@ -16080,6 +16364,141 @@ fn svg_icon(path: SharedString, size: f32, ink: Hsla) -> AnyElement {
 }
 
 #[cfg(test)]
+mod row_tests {
+    use super::{model, Message, Mood, Palette, Row, RowInputs, Show};
+    use crate::prefs::{Thoughts, Tools};
+    use std::collections::{HashMap, HashSet};
+    use std::rc::Rc;
+
+    fn reply(id: &str, text: &str, call: Option<&str>) -> Message {
+        let block = |kind: &str, text: &str, call: Option<&str>| model::Block {
+            kind: kind.into(),
+            text: text.into(),
+            call: call.map(String::from),
+            file: None,
+            card: None,
+            parent: None,
+        };
+        let mut blocks = vec![block("text", text, None)];
+        if let Some(c) = call {
+            blocks.insert(0, block("tool", "", Some(c)));
+        }
+        Message {
+            id: id.into(),
+            role: "agent".into(),
+            at: 1_700_000_000_000,
+            blocks,
+            live: false,
+            queued: false,
+            from_agent: None,
+            routine: String::new(),
+            routine_name: String::new(),
+            pinned: false,
+            mentions: Vec::new(),
+            status: "done".into(),
+        }
+    }
+
+    fn tool(call: &str, status: Option<&str>) -> model::Tool {
+        model::Tool {
+            call: call.into(),
+            run: "r1".into(),
+            title: "ls".into(),
+            status: status.map(String::from),
+            block: None,
+            parent: None,
+        }
+    }
+
+    thread_local! {
+        // The chat's files, made once, as the chat keeps them until they change.
+        static FILES: Rc<HashMap<String, String>> = Rc::new(HashMap::new());
+    }
+
+    fn inputs(rows: Vec<Message>, ix: usize, tools: Vec<model::Tool>) -> RowInputs {
+        let rows = Rc::new(rows.into_iter().map(Row::Message).collect::<Vec<_>>());
+        let tools = Rc::new(model::Tools::new(tools));
+        let called = match &rows[ix] {
+            Row::Message(m) => m
+                .blocks
+                .iter()
+                .filter_map(|b| b.call.as_ref())
+                .map(|c| tools.get(c).cloned())
+                .collect(),
+            Row::Approval(_) => Vec::new(),
+        };
+        RowInputs {
+            rows,
+            ix,
+            here: model::Flow::default(),
+            tools,
+            called,
+            files: FILES.with(Rc::clone),
+            gone_on: Vec::new(),
+            name: "Fake".into(),
+            tint: gpui_kit::hsla(0.6, 0.5, 0.5, 1.0),
+            mood: Mood::Idle,
+            open: HashSet::new(),
+            show: Show {
+                tools: Tools::Folded,
+                thoughts: Thoughts::Hidden,
+                text_scale: 1.0,
+                bubbles: false,
+                newest: false,
+                room: 720,
+            },
+            is_new: false,
+            column: 720.0,
+            p: Palette::new(false),
+            line: None,
+            when: Some("14:05".into()),
+        }
+    }
+
+    #[test]
+    fn a_finished_row_is_drawn_again_only_when_what_it_shows_changes() {
+        let a = reply("m1", "Hello", Some("c1"));
+        let b = reply("m2", "There", Some("c2"));
+        let was = inputs(
+            vec![a.clone(), b.clone()],
+            0,
+            vec![tool("c1", Some("done"))],
+        );
+        // The rows made again, the same: as it was, though another reply's tool changed.
+        let same = inputs(
+            vec![a.clone(), b.clone()],
+            0,
+            vec![tool("c1", Some("done")), tool("c2", None)],
+        );
+        assert!(was.same(&same));
+        // Its own tool call changed.
+        let failed = inputs(
+            vec![a.clone(), b.clone()],
+            0,
+            vec![tool("c1", Some("failed"))],
+        );
+        assert!(!was.same(&failed));
+        // Its words changed.
+        let edited = inputs(
+            vec![reply("m1", "Hello!", Some("c1")), b.clone()],
+            0,
+            vec![tool("c1", Some("done"))],
+        );
+        assert!(!was.same(&edited));
+        // A thought in it opened, and the time on hover moved on.
+        let mut opened = same.clone();
+        opened.open.insert("m1/1".into());
+        assert!(!was.same(&opened));
+        let mut later = same.clone();
+        later.when = Some("Yesterday 14:05".into());
+        assert!(!was.same(&later));
+        // Another row at its place.
+        let moved = inputs(vec![b, a], 1, vec![tool("c1", Some("done"))]);
+        assert!(!was.same(&moved));
+    }
+}
+
+#[cfg(test)]
 mod side_tests {
     use super::{control, layout, rail_update_bottom, side_width, CHAT_LEAST, SIDE_LEAST};
 
@@ -16126,6 +16545,108 @@ mod side_tests {
     }
 }
 
+/// How far past its edges a list page builds rows, so a scroll doesn't show them coming.
+const PAGE_OVERDRAW: f32 = 200.0;
+
+/// How wide the activity page's column is at most.
+const ACTIVITY_WIDTH: f32 = 640.0;
+
+/// What the activity page's lines were made from (`Loom::activity_lines`).
+type ActivityKey = (usize, Option<i64>, Option<i64>, chrono::NaiveDate);
+
+/// A line of the activity page.
+#[derive(Clone)]
+enum ActivityLine {
+    /// A day's name, over its entries.
+    Day(String),
+    /// The entry at this place in the activity.
+    Entry(usize),
+}
+
+/// A page whose rows are drawn as a list (`Loom::list_page`).
+struct PageList {
+    state: ListState,
+    count: usize,
+    /// The frame it was last drawn in.
+    drawn: u64,
+}
+
+/// A message search found, as the sidebar shows it: its agent, its snippet and the
+/// matched words in it, whether the person wrote it, and when.
+type SidebarHit = (String, String, Vec<std::ops::Range<usize>>, bool, i64);
+
+/// What the sidebar is drawn from (`Loom::sidebar_key`): everything it shows, but how
+/// far its threads and hovers have moved, which draw it again as they move.
+#[derive(PartialEq)]
+struct SidebarKey {
+    railed: bool,
+    p: Palette,
+    agents: Vec<SidebarAgent>,
+    /// The agent whose chat is on screen.
+    selected: Option<String>,
+    query: String,
+    hits: Vec<SidebarHit>,
+    search: bool,
+    popup: Option<Screen>,
+    servers: Vec<SidebarServer>,
+    here: String,
+    conn: String,
+    behind: Vec<model::Behind>,
+    behind_all: bool,
+    update_open: bool,
+}
+
+/// An agent, as the sidebar shows it.
+#[derive(PartialEq)]
+struct SidebarAgent {
+    id: String,
+    name: String,
+    color: String,
+    pinned: bool,
+    outline: Option<Vec<(f32, f32)>>,
+    mood: Mood,
+    finished: Option<Instant>,
+    preview: String,
+    unread: bool,
+}
+
+/// A server, as the sidebar shows it.
+#[derive(PartialEq)]
+struct SidebarServer {
+    dir: String,
+    spool: Spool,
+    name: String,
+    label: String,
+    heard: bool,
+    behind: bool,
+}
+
+/// The sidebar, whole or as the rail, as a view of its own.
+struct SidebarView {
+    this: WeakEntity<Loom>,
+    railed: bool,
+}
+
+impl Render for SidebarView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::perf::count("sidebar");
+        let railed = self.railed;
+        let id = cx.entity_id();
+        self.this
+            .update(cx, |loom, cx| {
+                motion::scoped(id, || {
+                    if railed {
+                        loom.rail(cx)
+                    } else {
+                        loom.whole_sidebar(cx)
+                    }
+                })
+            })
+            .map(IntoElement::into_any_element)
+            .unwrap_or_else(|_| div().into_any_element())
+    }
+}
+
 /// What the chat's list is drawn from (`chat_list`).
 #[derive(Clone)]
 struct ChatInputs {
@@ -16146,41 +16667,143 @@ struct ChatInputs {
     pad: Option<f32>,
 }
 
-impl ChatInputs {
-    /// Whether the list would be drawn the same from `o`. The rows, their flow, the
-    /// tools and the files are made anew whenever they change, so their pointers say.
-    fn same(&self, o: &Self) -> bool {
-        Rc::ptr_eq(&self.rows, &o.rows)
-            && Rc::ptr_eq(&self.flow, &o.flow)
-            && Rc::ptr_eq(&self.tools, &o.tools)
-            && Rc::ptr_eq(&self.files, &o.files)
-            && self.branches == o.branches
-            && self.name == o.name
-            && self.tint == o.tint
-            && self.mood == o.mood
-            && self.open == o.open
-            && self.show == o.show
-            && self.newest == o.newest
-            && self.new_line == o.new_line
-            && self.column == o.column
-            && self.p == o.p
-            && self.pad == o.pad
-    }
-}
-
 /// The chat's list, as a view of its own.
 struct ChatList {
     scroller: Entity<MessageScrollerState>,
     this: WeakEntity<Loom>,
     inputs: Option<ChatInputs>,
+    /// A view for each finished message it has drawn, by id (`RowView`).
+    views: Rc<RefCell<HashMap<String, Entity<RowView>>>>,
+    /// The rows `views` was last pruned to.
+    pruned: Option<Rc<Vec<Row>>>,
 }
 
 impl Render for ChatList {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(i) = self.inputs.clone() else {
             return div().into_any_element();
         };
-        chat_list(i, self.scroller.clone(), self.this.clone()).into_any_element()
+        // A message that's gone from the chat takes its view with it.
+        if !self.pruned.as_ref().is_some_and(|r| Rc::ptr_eq(r, &i.rows)) {
+            let here: HashSet<&str> = i
+                .rows
+                .iter()
+                .filter_map(|r| match r {
+                    Row::Message(m) => Some(m.id.as_str()),
+                    Row::Approval(_) => None,
+                })
+                .collect();
+            self.views.borrow_mut().retain(|id, v| {
+                let keep = here.contains(id.as_str());
+                if !keep {
+                    motion::forget_view(v.entity_id());
+                }
+                keep
+            });
+            self.pruned = Some(i.rows.clone());
+        }
+        crate::perf::count("list");
+        chat_list(
+            i,
+            self.scroller.clone(),
+            self.this.clone(),
+            cx.entity_id(),
+            self.views.clone(),
+        )
+        .into_any_element()
+    }
+}
+
+/// What one of the chat's rows is drawn from (`chat_row`).
+#[derive(Clone)]
+struct RowInputs {
+    rows: Rc<Vec<Row>>,
+    ix: usize,
+    here: model::Flow,
+    tools: Rc<model::Tools>,
+    /// The tool calls its blocks name, as they are: what it shows of `tools`.
+    called: Vec<Option<model::Tool>>,
+    files: Rc<HashMap<String, String>>,
+    /// The branches that go on from it.
+    gone_on: Vec<(String, String)>,
+    name: String,
+    tint: Hsla,
+    mood: Mood,
+    /// What's open in it, of the chat's open thoughts, folds and steps.
+    open: HashSet<String>,
+    show: Show,
+    /// The first reply that came while the chat was shut, with NEW over it.
+    is_new: bool,
+    column: f32,
+    p: Palette,
+    /// The time line over it, and its time on hover.
+    line: Option<String>,
+    when: Option<String>,
+}
+
+impl RowInputs {
+    fn row(&self) -> &Row {
+        &self.rows[self.ix]
+    }
+
+    /// Whether the row would be drawn the same from `o`.
+    fn same(&self, o: &Self) -> bool {
+        self.ix == o.ix
+            && (Rc::ptr_eq(&self.rows, &o.rows) || self.row() == o.row())
+            && self.here == o.here
+            && self.called == o.called
+            && Rc::ptr_eq(&self.files, &o.files)
+            && self.gone_on == o.gone_on
+            && self.name == o.name
+            && self.tint == o.tint
+            && self.mood == o.mood
+            && self.open == o.open
+            && self.show == o.show
+            && self.is_new == o.is_new
+            && self.column == o.column
+            && self.p == o.p
+            && self.line == o.line
+            && self.when == o.when
+    }
+}
+
+/// A finished message in the chat, as a view of its own: drawn from its cache, at the
+/// height it was last laid out at, until what it shows changes. So a frame that only
+/// moves the live reply's thread doesn't lay out every reply on screen again.
+struct RowView {
+    inputs: Option<RowInputs>,
+    this: WeakEntity<Loom>,
+    /// The height it was last laid out at, once it has been.
+    height: Rc<Cell<Option<Pixels>>>,
+}
+
+impl Render for RowView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(i) = &self.inputs else {
+            return div().into_any_element();
+        };
+        crate::perf::count("row");
+        let height = self.height.clone();
+        motion::scoped(cx.entity_id(), || chat_row(i, self.this.clone()))
+            .relative()
+            // Measures it as it's laid out, for drawing it from the cache. Should it come
+            // out another height than the cache had it at, it's laid out again.
+            .child(
+                canvas(
+                    move |bounds, window, _| {
+                        let was = height.replace(Some(bounds.size.height));
+                        if was.is_some_and(|h| h != bounds.size.height) {
+                            window.request_animation_frame();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .into_any_element()
     }
 }
 
@@ -16203,11 +16826,15 @@ fn smooth_step(this: WeakEntity<Loom>, last: Instant, window: &mut Window, cx: &
     window.on_next_frame(move |window, cx| smooth_step(this, now, window, cx));
 }
 
-/// The chat's messages, as its list draws them.
+/// The chat's messages, as its list draws them: each finished one from its own view in
+/// `views`, drawn from its cache while it's the same (`RowView`), and the reply being
+/// written and the approvals as they are, as part of the list's view, `list`.
 fn chat_list(
     i: ChatInputs,
     scroller: Entity<MessageScrollerState>,
     this: WeakEntity<Loom>,
+    list: EntityId,
+    views: Rc<RefCell<HashMap<String, Entity<RowView>>>>,
 ) -> MessageScroller {
     let ChatInputs {
         rows,
@@ -16226,255 +16853,97 @@ fn chat_list(
         p,
         pad,
     } = i;
-    MessageScroller::new("chat", scroller, move |ix, _, _| {
+    let now = chrono::Local::now();
+    MessageScroller::new("chat", scroller, move |ix, window, cx| {
         let Some(row) = rows.get(ix) else {
             return div().into_any_element();
         };
-        // Above the first reply that came while the chat was shut: a line, NEW
-        // in the agent's colour.
-        let is_new = matches!(row, Row::Message(m) if new_line.as_deref() == Some(m.id.as_str()));
-        let divider = div()
-            .w_full()
-            .max_w(px(column))
-            .flex()
-            .items_center()
-            .gap(px(space::S))
-            .pt(px(space::S))
-            .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
-            .child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(tint)
-                    .child("NEW"),
-            );
         let here = flow.get(ix).copied().unwrap_or_default();
-        let joined = here.joined;
-        // Across the chat where it paused, or on a new day: when it went on.
-        let time_line = match row {
-            Row::Message(m) if here.line => Some(
-                div()
-                    .w_full()
-                    .max_w(px(column))
-                    .flex()
-                    .justify_center()
-                    .pt(px(if ix == 0 { space::S } else { space::L }))
-                    .pb(px(space::XS))
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child(line_of(m.at, chrono::Local::now())),
-            ),
-            _ => None,
+        let m = match row {
+            Row::Message(m) => Some(m),
+            Row::Approval(_) => None,
         };
-        let inner = match row {
-            Row::Message(m) if m.role == "person" => person(
-                p,
-                m,
-                tint,
-                &files,
-                show.text_scale,
-                show.room,
-                joined,
-                this.clone(),
-            ),
-            Row::Message(m) => reply(
-                p,
-                m,
-                &name,
-                tint,
-                if m.live { mood } else { Mood::Idle },
-                here.head,
-                &open,
-                &tools,
-                &files,
-                Show {
-                    newest: newest.as_deref() == Some(m.id.as_str()),
-                    ..show
-                },
-                this.clone(),
-            ),
-            Row::Approval(a) => approval(p, a, this.clone()),
+        let inputs = RowInputs {
+            rows: rows.clone(),
+            ix,
+            here,
+            tools: tools.clone(),
+            called: m.map_or_else(Vec::new, |m| {
+                m.blocks
+                    .iter()
+                    .filter_map(|b| b.call.as_ref())
+                    .map(|c| tools.get(c).cloned())
+                    .collect()
+            }),
+            files: files.clone(),
+            gone_on: m
+                .and_then(|m| branches.get(&m.id).cloned())
+                .unwrap_or_default(),
+            name: name.clone(),
+            tint,
+            mood: if m.is_some_and(|m| m.live) {
+                mood
+            } else {
+                Mood::Idle
+            },
+            open: m.map_or_else(HashSet::new, |m| {
+                open.iter()
+                    .filter(|k| k.contains(m.id.as_str()))
+                    .cloned()
+                    .collect()
+            }),
+            show: Show {
+                newest: m.is_some_and(|m| newest.as_deref() == Some(m.id.as_str())),
+                ..show
+            },
+            is_new: m.is_some_and(|m| new_line.as_deref() == Some(m.id.as_str())),
+            column,
+            p,
+            // Across the chat where it paused, or on a new day: when it went on.
+            line: m.filter(|_| here.line).map(|m| line_of(m.at, now)),
+            // Its time, just outside its left edge while the pointer is over it.
+            when: m
+                .filter(|m| !m.live && !m.queued)
+                .map(|m| when_sent(m.at, now))
+                .filter(|w| !w.is_empty()),
         };
-        // A message's pin, just outside its corner: there while it's pinned, and
-        // on hover to pin it.
-        let pin = match row {
-            Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
-            _ => None,
+        let Some(m) = m.filter(|m| !m.live) else {
+            return motion::scoped(list, || chat_row(&inputs, this.clone())).into_any_element();
         };
-        // Under it, a link to each branch that goes on from it; and beside it, on
-        // hover, a way to branch there.
-        let gone_on = match row {
-            Row::Message(m) => branches.get(&m.id).cloned().unwrap_or_default(),
-            _ => Vec::new(),
-        };
-        let branch_at = pin.as_ref().map(|(id, _)| id.clone());
-        // Its time, just outside its left edge while the pointer is over it. Time
-        // lines show only where the chat paused.
-        let when = match row {
-            Row::Message(m) if !m.live && !m.queued => {
-                Some(when_sent(m.at, chrono::Local::now())).filter(|w| !w.is_empty())
-            }
-            _ => None,
-        };
-        let this = this.clone();
-        let to_branch = this.clone();
-        let mut links =
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.0))
-                .pt(px(if joined.below { 0.0 } else { space::XS }));
-        for (i, (id, title)) in gone_on.into_iter().enumerate() {
-            let this = this.clone();
-            links = links.child(
-                div()
-                    .id(SharedString::from(format!("branch-link-{ix}-{i}")))
-                    .flex()
-                    .items_center()
-                    .gap(px(space::XS))
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .cursor_pointer()
-                    .soft_ink(p.ink_3, p.ink)
-                    .child(Icon::new(Ico::GitBranch).xsmall())
-                    .child(title)
-                    .on_click(move |_, _, cx| {
-                        let _ = this.update(cx, |loom, cx| loom.open_branch(Some(id.clone()), cx));
-                    }),
-            );
-        }
-        // A right-click on a kept message: Copy, Pin and Branch from here.
-        let on_right = branch_at.clone().map(|id| {
-            let this = this.clone();
-            move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
-                let _ = this.update(cx, |loom, cx| {
-                    loom.open_ctx(e.position, Ctx::Message(id.clone()), cx)
-                });
-            }
-        });
-        // To a screen reader, a message is an item in the chat, named by who said
-        // what.
-        let (row_id, said) = match row {
-            Row::Message(m) => {
-                let who = if m.role == "person" {
-                    "You"
-                } else {
-                    name.as_str()
-                };
-                let words = model::spoken(&model::copy_text(m, &tools));
-                (format!("msg-{}", m.id), Some(format!("{who}: {words}")))
-            }
-            Row::Approval(_) => (format!("row-{ix}"), None),
-        };
-        div()
-            .id(SharedString::from(row_id))
-            .when_some(said, |d, said| d.role(Role::ListItem).aria_label(said))
-            .w_full()
-            .flex()
-            .flex_col()
-            .items_center()
-            .px(px(space::XL))
-            .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
-            .when(is_new, |d| d.child(divider))
-            .children(time_line)
-            .child(
-                div()
-                    .w_full()
-                    // The hover reaches the strip either side where its time and
-                    // buttons are, so moving on to them keeps them there.
-                    .max_w(px(column + 2.0 * HOVER_REACH))
-                    .mx(px(-HOVER_REACH))
-                    .px(px(HOVER_REACH))
-                    // Messages stand a little apart, and bubbles that join sit
-                    // close, as they do in a reply. The list's own gap under each
-                    // row is taken off (`with_row_style`), so it's here instead.
-                    .pt(px(if joined.above { 0.0 } else { space::XS }))
-                    .pb(px(if joined.below { space::XS } else { space::S }))
-                    .relative()
-                    .group("row")
-                    .when_some(when, |d, when| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .top(px(if joined.above { 0.0 } else { space::XS } + 4.0))
-                                .right(relative(1.0))
-                                .mr(px(-HOVER_REACH))
-                                .pr(px(space::M))
-                                .whitespace_nowrap()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .opacity(0.0)
-                                .group_hover("row", |s| s.opacity(1.0))
-                                .child(when),
-                        )
-                    })
-                    .child(inner)
-                    .child(links)
-                    .when_some(branch_at, |d, id| {
-                        d.child(
-                            div()
-                                .id(SharedString::from(format!("branch-row-{id}")))
-                                .role(Role::Button)
-                                .aria_label("Branch from here")
-                                .absolute()
-                                .top(px(space::XS + 28.0))
-                                .right(px(HOVER_REACH - 30.0))
-                                .size(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(radius::ROW))
-                                .cursor_pointer()
-                                .text_color(p.ink_3)
-                                .opacity(0.0)
-                                .group_hover("row", |s| s.opacity(1.0))
-                                .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
-                                .tooltip(tip("Branch from here"))
-                                .child(Icon::new(Ico::GitBranch).xsmall())
-                                .on_click(move |_, _, cx| {
-                                    let _ = to_branch.update(cx, |loom, _| {
-                                        let f = loom.model.branch(&id);
-                                        loom.send(f);
-                                    });
-                                }),
-                        )
-                    })
-                    .when_some(pin, |d, (id, pinned)| {
-                        d.child(
-                            div()
-                                .id(SharedString::from(format!("pin-row-{id}")))
-                                .role(Role::Button)
-                                .aria_label(if pinned { "Unpin" } else { "Pin" })
-                                .absolute()
-                                .top(px(space::XS))
-                                .right(px(HOVER_REACH - 30.0))
-                                .size(px(24.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(radius::ROW))
-                                .cursor_pointer()
-                                .text_color(if pinned { p.ink_2 } else { p.ink_3 })
-                                .when(!pinned, |d| {
-                                    d.opacity(0.0).group_hover("row", |s| s.opacity(1.0))
-                                })
-                                .soft_hover(
-                                    transparent_black(),
-                                    p.hover,
-                                    Some((if pinned { p.ink_2 } else { p.ink_3 }, p.ink)),
-                                )
-                                .tooltip(tip(if pinned { "Unpin" } else { "Pin" }))
-                                .child(Icon::new(Ico::Pin).xsmall())
-                                .on_click(move |_, _, cx| {
-                                    let _ = this.update(cx, |loom, _| {
-                                        let f = loom.model.pin(&id, !pinned);
-                                        loom.send(f);
-                                    });
-                                }),
-                        )
-                    }),
+        let view = views
+            .borrow_mut()
+            .entry(m.id.clone())
+            .or_insert_with(|| {
+                cx.new(|_| RowView {
+                    inputs: None,
+                    this: this.clone(),
+                    height: Rc::new(Cell::new(None)),
+                })
+            })
+            .clone();
+        let (same, height) = {
+            let v = view.read(cx);
+            (
+                v.inputs.as_ref().is_some_and(|o| o.same(&inputs)),
+                v.height.get(),
             )
-            .into_any_element()
+        };
+        if !same {
+            view.update(cx, |v, cx| {
+                v.inputs = Some(inputs);
+                v.height.set(None);
+                cx.notify();
+            });
+        }
+        // Drawn from its cache at the height it was laid out at, or, until it has been,
+        // built and measured. While a screen reader listens it's built at every frame: a
+        // frame that uses a row as it was leaves it out of what the screen reader is told.
+        match height.filter(|_| same && !window.is_a11y_active()) {
+            Some(h) => AnyView::from(view)
+                .cached(StyleRefinement::default().w_full().h(h))
+                .into_any_element(),
+            None => AnyView::from(view).into_any_element(),
+        }
     })
     .with_row_style(StyleRefinement::default().pb(px(0.0)))
     .with_bottom_fade(p.bg)
@@ -16484,4 +16953,254 @@ fn chat_list(
         s.padding.bottom = Some(px(pad).into());
         l.with_list_style(s)
     })
+}
+
+/// One of the chat's rows: a message, with its time line, its pin and its branches, or
+/// an approval.
+fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
+    let RowInputs {
+        ix,
+        here,
+        tools,
+        files,
+        name,
+        tint,
+        mood,
+        open,
+        show,
+        is_new,
+        column,
+        p,
+        ..
+    } = i;
+    let (ix, here, tint, mood, show, is_new, column, p) =
+        (*ix, *here, *tint, *mood, *show, *is_new, *column, *p);
+    let row = i.row();
+    // Above the first reply that came while the chat was shut: a line, NEW
+    // in the agent's colour.
+    let divider = div()
+        .w_full()
+        .max_w(px(column))
+        .flex()
+        .items_center()
+        .gap(px(space::S))
+        .pt(px(space::S))
+        .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
+        .child(
+            div()
+                .text_size(px(size::CAPTION))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(tint)
+                .child("NEW"),
+        );
+    let joined = here.joined;
+    // Across the chat where it paused, or on a new day: when it went on.
+    let time_line = i.line.clone().map(|line| {
+        div()
+            .w_full()
+            .max_w(px(column))
+            .flex()
+            .justify_center()
+            .pt(px(if ix == 0 { space::S } else { space::L }))
+            .pb(px(space::XS))
+            .text_size(px(size::CAPTION))
+            .text_color(p.ink_3)
+            .child(line)
+    });
+    let inner = match row {
+        Row::Message(m) if m.role == "person" => person(
+            p,
+            m,
+            tint,
+            files,
+            show.text_scale,
+            show.room,
+            joined,
+            this.clone(),
+        ),
+        Row::Message(m) => reply(
+            p,
+            m,
+            name,
+            tint,
+            mood,
+            here.head,
+            open,
+            tools,
+            files,
+            show,
+            this.clone(),
+        ),
+        Row::Approval(a) => approval(p, a, this.clone()),
+    };
+    // A message's pin, just outside its corner: there while it's pinned, and
+    // on hover to pin it.
+    let pin = match row {
+        Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
+        _ => None,
+    };
+    // Under it, a link to each branch that goes on from it; and beside it, on
+    // hover, a way to branch there.
+    let gone_on = i.gone_on.clone();
+    let branch_at = pin.as_ref().map(|(id, _)| id.clone());
+    // Its time, just outside its left edge while the pointer is over it. Time
+    // lines show only where the chat paused.
+    let when = i.when.clone();
+    let to_branch = this.clone();
+    let mut links =
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .pt(px(if joined.below { 0.0 } else { space::XS }));
+    for (i, (id, title)) in gone_on.into_iter().enumerate() {
+        let this = this.clone();
+        links = links.child(
+            div()
+                .id(SharedString::from(format!("branch-link-{ix}-{i}")))
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .cursor_pointer()
+                .soft_ink(p.ink_3, p.ink)
+                .child(Icon::new(Ico::GitBranch).xsmall())
+                .child(title)
+                .on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |loom, cx| loom.open_branch(Some(id.clone()), cx));
+                }),
+        );
+    }
+    // A right-click on a kept message: Copy, Pin and Branch from here.
+    let on_right = branch_at.clone().map(|id| {
+        let this = this.clone();
+        move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+            let _ = this.update(cx, |loom, cx| {
+                loom.open_ctx(e.position, Ctx::Message(id.clone()), cx)
+            });
+        }
+    });
+    // To a screen reader, a message is an item in the chat, named by who said
+    // what.
+    let (row_id, said) = match row {
+        Row::Message(m) => {
+            let who = if m.role == "person" {
+                "You"
+            } else {
+                name.as_str()
+            };
+            let words = model::spoken(&model::copy_text(m, tools));
+            (format!("msg-{}", m.id), Some(format!("{who}: {words}")))
+        }
+        Row::Approval(_) => (format!("row-{ix}"), None),
+    };
+    div()
+        .id(SharedString::from(row_id))
+        .when_some(said, |d, said| d.role(Role::ListItem).aria_label(said))
+        .w_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .px(px(space::XL))
+        .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
+        .when(is_new, |d| d.child(divider))
+        .children(time_line)
+        .child(
+            div()
+                .w_full()
+                // The hover reaches the strip either side where its time and
+                // buttons are, so moving on to them keeps them there.
+                .max_w(px(column + 2.0 * HOVER_REACH))
+                .mx(px(-HOVER_REACH))
+                .px(px(HOVER_REACH))
+                // Messages stand a little apart, and bubbles that join sit
+                // close, as they do in a reply. The list's own gap under each
+                // row is taken off (`with_row_style`), so it's here instead.
+                .pt(px(if joined.above { 0.0 } else { space::XS }))
+                .pb(px(if joined.below { space::XS } else { space::S }))
+                .relative()
+                .group("row")
+                .when_some(when, |d, when| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(if joined.above { 0.0 } else { space::XS } + 4.0))
+                            .right(relative(1.0))
+                            .mr(px(-HOVER_REACH))
+                            .pr(px(space::M))
+                            .whitespace_nowrap()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .opacity(0.0)
+                            .group_hover("row", |s| s.opacity(1.0))
+                            .child(when),
+                    )
+                })
+                .child(inner)
+                .child(links)
+                .when_some(branch_at, |d, id| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("branch-row-{id}")))
+                            .role(Role::Button)
+                            .aria_label("Branch from here")
+                            .absolute()
+                            .top(px(space::XS + 28.0))
+                            .right(px(HOVER_REACH - 30.0))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .cursor_pointer()
+                            .text_color(p.ink_3)
+                            .opacity(0.0)
+                            .group_hover("row", |s| s.opacity(1.0))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                            .tooltip(tip("Branch from here"))
+                            .child(Icon::new(Ico::GitBranch).xsmall())
+                            .on_click(move |_, _, cx| {
+                                let _ = to_branch.update(cx, |loom, _| {
+                                    let f = loom.model.branch(&id);
+                                    loom.send(f);
+                                });
+                            }),
+                    )
+                })
+                .when_some(pin, |d, (id, pinned)| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("pin-row-{id}")))
+                            .role(Role::Button)
+                            .aria_label(if pinned { "Unpin" } else { "Pin" })
+                            .absolute()
+                            .top(px(space::XS))
+                            .right(px(HOVER_REACH - 30.0))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .cursor_pointer()
+                            .text_color(if pinned { p.ink_2 } else { p.ink_3 })
+                            .when(!pinned, |d| {
+                                d.opacity(0.0).group_hover("row", |s| s.opacity(1.0))
+                            })
+                            .soft_hover(
+                                transparent_black(),
+                                p.hover,
+                                Some((if pinned { p.ink_2 } else { p.ink_3 }, p.ink)),
+                            )
+                            .tooltip(tip(if pinned { "Unpin" } else { "Pin" }))
+                            .child(Icon::new(Ico::Pin).xsmall())
+                            .on_click(move |_, _, cx| {
+                                let _ = this.update(cx, |loom, _| {
+                                    let f = loom.model.pin(&id, !pinned);
+                                    loom.send(f);
+                                });
+                            }),
+                    )
+                }),
+        )
 }

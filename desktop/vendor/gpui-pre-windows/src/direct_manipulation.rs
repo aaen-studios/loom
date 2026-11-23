@@ -26,10 +26,22 @@ pub(crate) struct DirectManipulationHandler {
     window: HWND,
     scale_factor: Rc<Cell<f32>>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    /// loom: the window's, so it's painted at every vblank while a gesture runs:
+    /// Direct Manipulation is pumped from each paint (`update`).
+    frame_demand: std::sync::Arc<FrameDemand>,
 }
 
+/// loom: how long a touchpad's touch keeps the window painting at every vblank, for a
+/// gesture to start, and how long after a gesture's last update or its end.
+const GESTURE_PUMP_MS: u64 = 1000;
+const GESTURE_END_MS: u64 = 100;
+
 impl DirectManipulationHandler {
-    pub fn new(window: HWND, scale_factor: f32) -> Result<Self> {
+    pub fn new(
+        window: HWND,
+        scale_factor: f32,
+        frame_demand: std::sync::Arc<FrameDemand>,
+    ) -> Result<Self> {
         unsafe {
             let manager: IDirectManipulationManager =
                 CoCreateInstance(&DirectManipulationManager, None, CLSCTX_INPROC_SERVER)?;
@@ -71,6 +83,7 @@ impl DirectManipulationHandler {
                     window,
                     Rc::clone(&scale_factor),
                     Rc::clone(&pending_events),
+                    frame_demand.clone(),
                 )
                 .into();
 
@@ -86,6 +99,7 @@ impl DirectManipulationHandler {
                 window,
                 scale_factor,
                 pending_events,
+                frame_demand,
             })
         }
     }
@@ -101,6 +115,8 @@ impl DirectManipulationHandler {
             if GetPointerType(pointer_id, &mut pointer_type).is_ok() && pointer_type == PT_TOUCHPAD
             {
                 self.viewport.SetContact(pointer_id).log_err();
+                self.frame_demand.pump_more(GESTURE_PUMP_MS);
+                self.frame_demand.want();
             }
         }
     }
@@ -143,6 +159,7 @@ struct DirectManipulationEventHandler {
     last_y_offset: Cell<f32>,
     scroll_phase: Cell<TouchPhase>,
     pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+    frame_demand: std::sync::Arc<FrameDemand>,
 }
 
 impl DirectManipulationEventHandler {
@@ -150,6 +167,7 @@ impl DirectManipulationEventHandler {
         window: HWND,
         scale_factor: Rc<Cell<f32>>,
         pending_events: Rc<RefCell<Vec<PlatformInput>>>,
+        frame_demand: std::sync::Arc<FrameDemand>,
     ) -> Self {
         Self {
             window,
@@ -160,6 +178,7 @@ impl DirectManipulationEventHandler {
             last_y_offset: Cell::new(0.0),
             scroll_phase: Cell::new(TouchPhase::Started),
             pending_events,
+            frame_demand,
         }
     }
 
@@ -215,6 +234,14 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
             return Ok(());
         }
 
+        // loom: painted at every vblank while the gesture runs or glides, and a little
+        // after it's over, for its last events.
+        if current == DIRECTMANIPULATION_RUNNING || current == DIRECTMANIPULATION_INERTIA {
+            self.frame_demand.pump_for(u64::MAX);
+        } else {
+            self.frame_demand.pump_for(GESTURE_END_MS);
+        }
+
         // A new gesture interrupted inertia, so end the old sequence.
         if current == DIRECTMANIPULATION_RUNNING && previous == DIRECTMANIPULATION_INERTIA {
             self.end_gesture();
@@ -265,6 +292,7 @@ impl IDirectManipulationViewportEventHandler_Impl for DirectManipulationEventHan
         content: windows_core::Ref<'_, IDirectManipulationContent>,
     ) -> windows_core::Result<()> {
         let content = content.as_ref().ok_or(E_POINTER)?;
+        self.frame_demand.pump_more(GESTURE_PUMP_MS);
 
         // Get the 6-element content transform: [scale, 0, 0, scale, tx, ty]
         let mut xform = [0.0f32; 6];
