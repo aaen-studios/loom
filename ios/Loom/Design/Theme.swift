@@ -50,6 +50,33 @@ enum P {
 
     nonisolated(unsafe) private static var threads: [String: Color] = [:]    // drawn on the main thread only
 
+    /// The person's bubble in an agent's chat: the bubble grey with a breath of the
+    /// agent's thread colour, 7% in light and 12% in dark, as the desktop's `person()`.
+    /// Kept per colour, as `thread` is.
+    static func personBubble(_ name: String) -> Color {
+        if let kept = personBubbles[name] { return kept }
+        let tint = UIColor(thread(name))
+        let light = UIColor(loom: L.bubble), dark = UIColor(loom: D.bubble)
+        let c = Color(UIColor { traits in
+            let isDark = traits.userInterfaceStyle == .dark
+            return mix(isDark ? dark : light, tint.resolvedColor(with: traits), isDark ? 0.12 : 0.07)
+        })
+        personBubbles[name] = c
+        return c
+    }
+
+    nonisolated(unsafe) private static var personBubbles: [String: Color] = [:]    // drawn on the main thread only
+
+    /// `a` moved `k` of the way to `b`, channel by channel in sRGB.
+    private static func mix(_ a: UIColor, _ b: UIColor, _ k: CGFloat) -> UIColor {
+        var (ar, ag, ab, aa): (CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0)
+        var (br, bg, bb, ba): (CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0)
+        a.getRed(&ar, green: &ag, blue: &ab, alpha: &aa)
+        b.getRed(&br, green: &bg, blue: &bb, alpha: &ba)
+        let l = { (x: CGFloat, y: CGFloat) in x + (y - x) * k }
+        return UIColor(red: l(ar, br), green: l(ag, bg), blue: l(ab, bb), alpha: l(aa, ba))
+    }
+
     private static func makeThread(_ name: String) -> Color {
         typealias TL = Tokens.ThreadColorLight
         typealias TD = Tokens.ThreadColorDark

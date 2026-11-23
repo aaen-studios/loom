@@ -9,6 +9,8 @@ struct MarkdownView: View {
     /// What a person typed keeps its line breaks.
     var keepBreaks = false
     var font: Font = Fonts.reply
+    /// The colour of its words: quieter for what a reply said on its way.
+    var ink: Color = P.ink
     /// Still being written, so it grows at the end.
     var live = false
 
@@ -18,7 +20,7 @@ struct MarkdownView: View {
             // Each part is its own view, compared before it's drawn again: as a reply is
             // written, only its last part changes.
             ForEach(parts.indices, id: \.self) { i in
-                PartView(part: parts[i], font: font).equatable()
+                PartView(part: parts[i], font: font, ink: ink).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -123,11 +125,12 @@ struct MarkdownView: View {
 private struct PartView: View, Equatable {
     var part: MarkdownView.Part
     var font: Font
+    var ink: Color
 
     var body: some View {
         switch part {
         case .paragraph(let s):
-            Text(MarkdownView.inline(s)).font(font).foregroundStyle(P.ink).lineSpacing(4)
+            Text(MarkdownView.inline(s)).font(font).foregroundStyle(ink).lineSpacing(4)
         case .heading(let level, let s):
             Text(MarkdownView.inline(s))
                 .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
@@ -136,7 +139,7 @@ private struct PartView: View, Equatable {
         case .item(let indent, let mark, let s):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
-                Text(MarkdownView.inline(s)).font(font).foregroundStyle(P.ink).lineSpacing(4)
+                Text(MarkdownView.inline(s)).font(font).foregroundStyle(ink).lineSpacing(4)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .quote(let s):
@@ -264,10 +267,11 @@ extension MarkdownView {
 }
 
 extension MarkdownView {
-    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, live: Bool = false) {
+    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false) {
         self.text = text
         self.keepBreaks = keepBreaks
         self.font = font
+        self.ink = ink
         self.live = live
     }
 }
