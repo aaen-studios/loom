@@ -195,6 +195,9 @@ impl Task for Worker {
                 },
                 some(In.Stop) => {
                     w.close()
+                    // One stopped before it ever started still waits for the browser
+                    // before it, so an instance that stops leaves neither running.
+                    if let t = w.before.take() { t.join() }
                     w.back.send(Back.Stopped(w.n))
                     return
                 },
