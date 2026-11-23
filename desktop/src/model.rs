@@ -2140,6 +2140,8 @@ pub struct Model {
     /// leaves the browser to close when the agent's turn ends.
     pub watch_follows: bool,
     pub frame: Option<PageFrame>,
+    /// A frame came since the window was last drawn.
+    pub page_moved: bool,
     rewatch: bool,
     /// Each conversation's queue, by conversation id.
     pub queues: HashMap<String, Vec<QueueItem>>,
@@ -3013,12 +3015,12 @@ impl Model {
             "browser.frame" => {
                 let agent = s(f, "agent");
                 if self.watching.as_deref() != Some(agent.as_str()) {
-                    return true;
+                    return false;
                 }
                 use base64::Engine as _;
-                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(s(f, "data"))
-                else {
-                    return true;
+                let data = f.get("data").and_then(Value::as_str).unwrap_or_default();
+                let Ok(jpeg) = base64::engine::general_purpose::STANDARD.decode(data) else {
+                    return false;
                 };
                 let seq = self.frame.as_ref().map_or(0, |p| p.seq) + 1;
                 let size = |k: &str| f.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32;
@@ -3028,6 +3030,9 @@ impl Model {
                     height: size("height"),
                     seq,
                 });
+                // Only the page is drawn again: the chat's rows are as they were.
+                self.page_moved = true;
+                return false;
             }
             "error" => {
                 let code = s(f, "code");
