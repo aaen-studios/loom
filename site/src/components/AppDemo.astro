@@ -338,21 +338,31 @@ const [claude] = await brains(['claude-acp']);
 	.agent svg[data-shape] {
 		height: 22px;
 	}
+	/* One line whatever the agent is doing, as in the app: what it's on sits quietly
+	   after its name, so a row never changes height. */
 	.agent-text {
-		display: grid;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
 		min-width: 0;
 	}
 	.agent-name {
+		flex: 1;
+		min-width: 0;
 		font-weight: var(--weight-medium);
 		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.agent-preview {
+		min-width: 0;
+		max-width: 55%;
 		font-size: var(--size-caption);
 		color: var(--ink-3);
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		line-height: 1.5;
 	}
 	.agent-preview:empty {
 		display: none;
