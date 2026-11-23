@@ -34,7 +34,7 @@ pub struct To {
 }
 
 impl To {
-    pub fn send(self: mut To, o: Out) {
+    pub fn send(self: mut To, o: own Out) {
         self.out.send(o)
         self.waker.wake()
     }

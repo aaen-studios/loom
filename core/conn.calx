@@ -706,11 +706,11 @@ impl Conn {
     /// an event does, and catching up is thousands of them. The cursor moves in the same
     /// transaction, so a crash before the end only means they come again.
     ///
-    /// The first receive waits up to `wait_ms` for something to come, or for the app's
+    /// The first receive waits up to `first_ms` for something to come, or for the app's
     /// next message to wake it.
-    fn read(mut self, wait_ms: u32) {
+    fn read(mut self, first_ms: u32) {
         var held = false
-        var wait = wait_ms
+        var wait = first_ms
         loop {
             let got = match self.ws {
                 some(ws) => match ws.receive(wait) {

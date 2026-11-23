@@ -84,7 +84,7 @@ pub struct BackTo {
 }
 
 impl BackTo {
-    pub fn send(self: mut BackTo, b: Back) {
+    pub fn send(self: mut BackTo, b: own Back) {
         self.to.send(b)
         self.waker.wake()
     }
