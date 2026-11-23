@@ -357,7 +357,7 @@ impl Loom {
         let style = self.pref_choice(
             "style",
             self.prefs.bubbles,
-            &[(true, "Bubbles"), (false, "Plain")],
+            &[(false, "Plain"), (true, "Bubbles")],
             |p, v| p.bubbles = v,
             cx,
         );

@@ -13225,9 +13225,11 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn person(
     p: Palette,
     m: &Message,
+    tint: Hsla,
     files: &HashMap<String, String>,
     scale: f32,
     room: i32,
@@ -13292,7 +13294,14 @@ fn person(
         None => cx.open_url(url),
     };
     // Its corners on the right smaller where it joins the person's messages either side.
+    // What the person wrote has a breath of the agent's colour, a little more in the dark;
+    // what a routine or another agent sent is plain grey.
     let c = model::corners(true, joined);
+    let bg = if m.from_agent.is_some() {
+        p.bubble
+    } else {
+        motion::mix(p.bubble, tint, if p.dark { 0.12 } else { 0.07 })
+    };
     out.when(!text.trim().is_empty(), |d| {
         d.child(
             div()
@@ -13303,7 +13312,7 @@ fn person(
                 .rounded_tr(px(c.tr))
                 .rounded_br(px(c.br))
                 .rounded_bl(px(c.bl))
-                .bg(p.bubble)
+                .bg(bg)
                 .text_size(px(size::BODY * scale))
                 .text_color(p.ink)
                 .when(m.queued, |d| d.opacity(0.6))
@@ -13913,9 +13922,9 @@ impl ReplyDraw<'_> {
                     |v| v.selectable(true),
                 ));
             group = group.child(if show.bubbles {
-                // A bubble with a breath of the agent's colour, its corner by the
-                // thread squared off as a speech bubble's tail, and smaller where it
-                // joins the next.
+                // A grey bubble, when the person picks bubbles over plain text, its
+                // corner by the thread squared off as a speech bubble's tail, and
+                // smaller where it joins the next.
                 let c = model::corners(false, model::Joined::at(k, run.len()));
                 div().flex().child(
                     words
@@ -13926,11 +13935,7 @@ impl ReplyDraw<'_> {
                         .rounded_tr(px(c.tr))
                         .rounded_br(px(c.br))
                         .rounded_bl(px(c.bl))
-                        .bg(motion::mix(
-                            p.bubble,
-                            self.tint,
-                            if p.dark { 0.12 } else { 0.07 },
-                        )),
+                        .bg(p.bubble),
                 )
             } else {
                 words
@@ -14248,11 +14253,19 @@ fn reply(
         }
         body = body.child(chips);
     }
+    // Its thread beside the name, or else level with the first line of words, plain or
+    // in a bubble.
+    let first_line = (size::REPLY * show.text_scale * line::REPLY - 10.0) / 2.0;
+    let thread_at = match (head, show.bubbles) {
+        (true, _) => 4.0,
+        (false, true) => 16.0,
+        (false, false) => first_line,
+    };
     div()
         .w_full()
         .flex()
         .gap(px(space::M))
-        .child(div().pt(px(if head { 4.0 } else { 16.0 })).child(thread(
+        .child(div().pt(px(thread_at)).child(thread(
             format!("msg-{}", m.id),
             mood,
             tint,
@@ -15588,6 +15601,7 @@ fn chat_list(
             Row::Message(m) if m.role == "person" => person(
                 p,
                 m,
+                tint,
                 &files,
                 show.text_scale,
                 show.room,

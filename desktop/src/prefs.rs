@@ -65,7 +65,8 @@ pub struct Prefs {
     pub system_mono: bool,
     pub tools: Tools,
     pub thoughts: Thoughts,
-    /// Whether an agent's replies show as bubbles, as the person's messages do.
+    /// Whether an agent's replies show as grey bubbles, rather than plain text in the
+    /// column.
     pub bubbles: bool,
     /// Whether Enter makes a new line and Ctrl+Enter sends, rather than Enter sending.
     pub ctrl_enter: bool,
@@ -98,7 +99,7 @@ impl Default for Prefs {
             system_mono: false,
             tools: Tools::Hidden,
             thoughts: Thoughts::Hidden,
-            bubbles: true,
+            bubbles: false,
             ctrl_enter: false,
             tray: true,
             notify: true,
@@ -164,7 +165,9 @@ impl Prefs {
                 ("open", _) | ("", Some(true)) => Thoughts::Open,
                 _ => d.thoughts,
             },
-            bubbles: b("bubbles", d.bubbles),
+            // Kept under a new name when replies became plain: the old `bubbles` was
+            // true in every file, for a tinted bubble that is now the person's.
+            bubbles: b("reply_bubbles", d.bubbles),
             ctrl_enter: b("ctrl_enter", d.ctrl_enter),
             tray: b("tray", d.tray),
             notify: b("notify", d.notify),
@@ -227,7 +230,7 @@ impl Prefs {
         );
         m.insert("system_font".into(), json!(self.system_font));
         m.insert("system_mono".into(), json!(self.system_mono));
-        m.insert("bubbles".into(), json!(self.bubbles));
+        m.insert("reply_bubbles".into(), json!(self.bubbles));
         m.insert("ctrl_enter".into(), json!(self.ctrl_enter));
         m.insert("tray".into(), json!(self.tray));
         m.insert("notify".into(), json!(self.notify));
@@ -391,11 +394,24 @@ mod tests {
     fn search_is_hidden_until_the_person_shows_it() {
         assert!(!Prefs::default().search);
         // A prefs file kept before search could be hidden still loads, with it hidden.
-        let older = serde_json::json!({"theme": "dark", "bubbles": false, "tray": false});
+        let older = serde_json::json!({"theme": "dark", "reply_bubbles": true, "tray": false});
         let p = Prefs::from_json(&older);
-        assert!(!p.search && p.theme == Theme::Dark && !p.bubbles && !p.tray);
+        assert!(!p.search && p.theme == Theme::Dark && p.bubbles && !p.tray);
         let shown = Prefs::from_json(&serde_json::json!({"search": true}));
         assert!(shown.search);
         assert_eq!(Prefs::from_json(&shown.to_json()), shown);
+    }
+
+    #[test]
+    fn replies_are_plain_until_the_person_picks_bubbles() {
+        assert!(!Prefs::default().bubbles);
+        // Every file kept before had `bubbles` on, for the tinted bubble replies had then.
+        let older = Prefs::from_json(&serde_json::json!({"bubbles": true}));
+        assert!(!older.bubbles);
+        let picked = Prefs {
+            bubbles: true,
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&picked.to_json()), picked);
     }
 }
