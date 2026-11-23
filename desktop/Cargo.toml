@@ -21,6 +21,9 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 gpui-kit = "=0.10.0"
 png = "0.18.1"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
+# The agent's browser's frames: Chrome on Linux writes them as a scan per color,
+# which image's JPEG decoder, zune-jpeg 0.5.15, draws as green stripes.
+jpeg-decoder = { version = "0.3.2", default-features = false }
 raw-window-handle = "0.6"
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 tray-icon = "0.26.1"

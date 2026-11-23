@@ -10,7 +10,9 @@ module tests.protocol.browser
 // skipped.
 //
 //     calx tests/protocol/browser.calx
+import std.bytes
 import std.fs
+import std.image.{Image}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import server.browser
@@ -160,7 +162,15 @@ fn run(i: Instance) ! Error {
     try check(bool_at(at(watched, "value"), "open") == some(true), "browser.watch says the browser is open")
     let frame = try app.until("browser.frame", "")
     let data = str_at(frame.copy(), "data") ?? String()
-    try check(str_at(frame.copy(), "agent") == some(agent.copy()) and data.starts_with("/9j/") and (int_at(frame, "width") ?? 0) > 0, "and frames of the page come, as JPEGs")
+    try check(str_at(frame.copy(), "agent") == some(agent.copy()) and data.starts_with("/9j/") and (int_at(frame.copy(), "width") ?? 0) > 0, "and frames of the page come, as JPEGs")
+    // Whole, and as big as the page they say: Chrome on Linux writes a scan for each
+    // color, which a decoder that reads only the first draws green (LOO-252).
+    let jpeg = bytes.from_base64(data) ?? List<u8>()
+    let pixels = match Image.decode(jpeg) {
+        ok(im) => im,
+        err(e) => fail "failed: a frame that isn't a picture: {e}",
+    }
+    try check(i64.wrap(pixels.width()) == (int_at(frame.copy(), "width") ?? 0) and i64.wrap(pixels.height()) == (int_at(frame, "height") ?? 0), "each a whole picture of the page, its size")
     let early = try app.cmd("q_w2", "browser.input", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done())
     try check(bool_at(early, "ok") == some(false), "the person's input waits for them to take over")
 

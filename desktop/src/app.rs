@@ -3864,13 +3864,8 @@ ACTA_KEY=secret:ACTA_KEY",
         self.page_decoding = true;
         self.page_tried = seq;
         let task = cx.background_executor().spawn(async move {
-            let decoded =
-                image::load_from_memory_with_format(&jpeg, image::ImageFormat::Jpeg).ok()?;
-            let mut rgba = decoded.to_rgba8();
-            for px in rgba.pixels_mut() {
-                px.0.swap(0, 2);
-            }
-            Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
+            let bgra = frame_pixels(&jpeg)?;
+            Some(Arc::new(RenderImage::new(vec![image::Frame::new(bgra)])))
         });
         cx.spawn(async move |this, cx| {
             let render = task.await;
@@ -13686,6 +13681,28 @@ const PICTURE_LEAST: f32 = 120.0;
 /// The place a picture takes while its size isn't known.
 const PICTURE_UNKNOWN: (f32, f32) = (240.0, 160.0);
 
+/// A frame of an agent's browser, a JPEG, as the BGRA pixels GPUI draws. Chrome on Linux
+/// writes each frame as three scans, one for each of Y, Cb and Cr, as Chrome on Windows
+/// doesn't; zune-jpeg 0.5.15, image's decoder, reads those as bright green stripes over
+/// a faint page (LOO-252), so frames go through jpeg-decoder, which reads both.
+fn frame_pixels(jpeg: &[u8]) -> Option<image::RgbaImage> {
+    let mut decoder = jpeg_decoder::Decoder::new(jpeg);
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (w, h) = (u32::from(info.width), u32::from(info.height));
+    let bgra: Vec<u8> = match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => pixels
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .flat_map(|&[r, g, b]| [b, g, r, 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+        _ => return None,
+    };
+    image::RgbaImage::from_raw(w, h, bgra)
+}
+
 /// The size to draw a `w` × `h` picture at, at most `most_w` × `most_h`: scaled down to
 /// fit both, its shape kept, and never up.
 fn fit(w: u32, h: u32, most_w: f32, most_h: f32) -> (f32, f32) {
@@ -14961,6 +14978,66 @@ mod picture_tests {
         assert_eq!(picture_size(&path.to_string_lossy()), Some((30, 50)));
         assert_eq!(picture_size(&dir.join("gone").to_string_lossy()), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod frame_tests {
+    use super::frame_pixels;
+
+    /// The pixel at (x, y) of a frame, as red, green and blue.
+    fn rgb(frame: &image::RgbaImage, x: u32, y: u32) -> [u8; 3] {
+        let [b, g, r, a] = frame.get_pixel(x, y).0;
+        assert_eq!(a, 255);
+        [r, g, b]
+    }
+
+    fn near(got: [u8; 3], want: [u8; 3]) -> bool {
+        got.iter().zip(want).all(|(&g, w)| g.abs_diff(w) <= 12)
+    }
+
+    /// Frames of the same page, a dark bar over red, green, blue and white boxes on
+    /// #fafaf8, from the screencast of Chrome for Testing 159 on Linux with --headless=new,
+    /// as a server runs it, in three scans, and of Chromium on Windows, in one.
+    #[test]
+    fn a_browser_frame_shows_the_page() {
+        for (name, jpeg, size) in [
+            (
+                "linux",
+                &include_bytes!("../testdata/frame-chrome-linux.jpg")[..],
+                (1280, 657),
+            ),
+            (
+                "windows",
+                &include_bytes!("../testdata/frame-chrome-windows.jpg")[..],
+                (1264, 649),
+            ),
+        ] {
+            let frame = frame_pixels(jpeg).unwrap_or_else(|| panic!("the {name} frame decodes"));
+            assert_eq!(frame.dimensions(), size, "{name}");
+            let mut want = vec![
+                ("bar", 600, 60, [0x20, 0x21, 0x24]),
+                ("red", 70, 140, [255, 0, 0]),
+                ("green", 200, 140, [0, 255, 0]),
+                ("blue", 330, 140, [0, 0, 255]),
+                ("white", 460, 140, [255, 255, 255]),
+            ];
+            // Every third row of the page below the boxes, where the stripes were.
+            want.extend(
+                (260..size.1 - 8)
+                    .step_by(3)
+                    .map(|y| ("page", 1000, y, [0xfa, 0xfa, 0xf8])),
+            );
+            for (what, x, y, color) in want {
+                let got = rgb(&frame, x, y);
+                assert!(near(got, color), "{name}: {what} at ({x}, {y}) is {got:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_isnt_a_jpeg_is_skipped() {
+        assert!(frame_pixels(b"not a picture").is_none());
     }
 }
 
