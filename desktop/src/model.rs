@@ -1749,6 +1749,30 @@ pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
         .unwrap_or_else(|| "Using a tool".to_string())
 }
 
+/// How a tool call went, as its line marks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Went {
+    Running,
+    Done,
+    Failed,
+    Denied,
+    /// Its turn ended first: cancelled, or never finished in a reply that's kept.
+    Stopped,
+}
+
+/// How a tool call went: as it finished, or for one nothing finished, running while
+/// its reply is written (`live`) and stopped once the reply is kept.
+pub fn tool_went(t: &Tool, live: bool) -> Went {
+    match t.status.as_deref() {
+        Some("done") => Went::Done,
+        Some("failed") => Went::Failed,
+        Some("denied") => Went::Denied,
+        Some("cancelled") => Went::Stopped,
+        _ if live => Went::Running,
+        _ => Went::Stopped,
+    }
+}
+
 /// Words that ask the person something, which stay in view though they came mid-turn.
 fn asks(text: &str) -> bool {
     text.trim_end().ends_with('?')
@@ -6690,6 +6714,26 @@ mod tests {
         assert!(!m.dirty.contains(&List::Tools));
         m.take(&runs(&[]));
         assert!(!m.dirty.contains(&List::Tools));
+    }
+
+    #[test]
+    fn a_call_its_turn_ended_first_is_stopped_not_running() {
+        let tool = |status: Option<&str>| Tool {
+            call: "tc_1".into(),
+            run: "run_1".into(),
+            title: "Watch the build".into(),
+            status: status.map(str::to_string),
+            block: Some(0),
+            parent: None,
+        };
+        assert_eq!(tool_went(&tool(None), true), Went::Running);
+        assert_eq!(tool_went(&tool(Some("done")), true), Went::Done);
+        assert_eq!(tool_went(&tool(Some("failed")), false), Went::Failed);
+        assert_eq!(tool_went(&tool(Some("denied")), false), Went::Denied);
+        // The instance ends a call nothing finished as its turn ends.
+        assert_eq!(tool_went(&tool(Some("cancelled")), false), Went::Stopped);
+        // And a kept reply from before it did still never shows one running.
+        assert_eq!(tool_went(&tool(None), false), Went::Stopped);
     }
 
     #[test]

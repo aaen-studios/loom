@@ -257,7 +257,7 @@ struct Reply: View {
         case .tools(let run):
             VStack(alignment: .leading, spacing: Tokens.Space.xs + 2) {
                 ForEach(run, id: \.self) { i in
-                    ToolLine(tool: session.model.tool(message.blocks[i].call))
+                    ToolLine(tool: session.model.tool(message.blocks[i].call), live: message.live)
                 }
             }
         case .block(let i):
@@ -283,7 +283,7 @@ struct Reply: View {
                 if openThoughts.contains(key) { openThoughts.remove(key) } else { openThoughts.insert(key) }
             }
         case "tool":
-            ToolLine(tool: session.model.tool(b.call))
+            ToolLine(tool: session.model.tool(b.call), live: message.live)
         case "plan":
             VStack(alignment: .leading, spacing: 4) {
                 ForEach(Array(b.plan.enumerated()), id: \.offset) { _, e in
@@ -383,6 +383,9 @@ struct Thought: View {
 /// A tool call, one quiet line: what it is, and how it went.
 struct ToolLine: View {
     var tool: Tool?
+    /// A reply still being written, where a call nothing finished yet is running. In a
+    /// kept reply its turn is over, so it stopped.
+    var live = false
 
     var body: some View {
         HStack(spacing: Tokens.Space.s) {
@@ -403,7 +406,9 @@ struct ToolLine: View {
         case "done": Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(P.ok)
         case "failed": Image(systemName: "xmark").font(.system(size: 10, weight: .semibold)).foregroundStyle(P.bad)
         case "denied": Text("denied").font(Fonts.caption).foregroundStyle(P.bad)
-        case nil where tool != nil: ProgressView().controlSize(.mini)
+        case "cancelled": Text("stopped").font(Fonts.caption).foregroundStyle(P.ink3)
+        case nil where tool != nil && live: ProgressView().controlSize(.mini)
+        case nil where tool != nil: Text("stopped").font(Fonts.caption).foregroundStyle(P.ink3)
         default: EmptyView()
         }
     }

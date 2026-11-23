@@ -88,6 +88,22 @@ fn a_permission_can_come_without_a_tool_call() ! Error {
 }
 
 @test
+fn a_call_can_be_left_open() ! Error {
+    let c = try start()
+    try prompt(c, "/open Watch the build\\n/askopen \{\\\"title\\\":\\\"Remove it\\\",\\\"command\\\":\\\"rm x\\\"\}\\nbye")
+    let open = try expect(c, "\"title\":\"Watch the build\"")
+    assert(open.contains("\"sessionUpdate\":\"tool_call\""))
+    _ = try expect(c, "\"status\":\"in_progress\"")
+    let ask = try expect(c, "session/request_permission")
+    assert(ask.contains("\"toolCallId\":\"tool_2\"") and ask.contains("\"command\":\"rm x\"") and ask.contains("\"title\":\"Remove it\""))
+    try answer(c, ask, "reject_once")
+    let said = try expect(c, "agent_message_chunk")
+    assert(said.contains("denied"), "got {said}")
+    _ = try expect(c, "\"stopReason\":\"end_turn\"")
+    c.kill()
+}
+
+@test
 fn a_denied_tool_fails() ! Error {
     let c = try start()
     try prompt(c, "/ask rm build")

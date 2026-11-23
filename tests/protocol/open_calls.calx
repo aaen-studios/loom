@@ -1,0 +1,168 @@
+module tests.protocol.open_calls
+
+// A tool call its agent program never finished ends with its turn (protocol.md,
+// "Tool calls"): tool.finished, `cancelled`, comes before the reply is kept and
+// run.finished, so the kept reply and a core's calls never show it running. One a
+// rule said no to, that the program never reported on, ends `denied`. And a run a
+// restart cut short has its open calls ended when the instance starts again.
+//
+//     calx tests/protocol/open_calls.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import core.cache.{Cache}
+import tests.kit.{Instance, check}
+
+// The seq of the first event of `kind` in what the app has read, for `call` when
+// it isn't "", or -1.
+fn seq_of(app: Session, kind: str, call: String) -> i64 {
+    for f in app.frames {
+        if str_at(f.copy(), "kind") != some(String(kind)) { continue }
+        if call.len() > 0 and str_at(f.copy(), "call") != some(call.copy()) { continue }
+        return int_at(f, "seq") ?? -1
+    }
+    return -1
+}
+
+// The seq of the first reply kept in what the app has read, or -1.
+fn reply_seq(app: Session) -> i64 {
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(at(f.copy(), "message"), "role") == some(String("agent")) { return int_at(f, "seq") ?? -1 }
+    }
+    return -1
+}
+
+// The first event of `kind` for `call` in what the app has read, or null.
+fn event_for(app: Session, kind: str, call: String) -> Json {
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) and str_at(f.copy(), "call") == some(call.copy()) { return f.copy() }
+    }
+    return Json.Null
+}
+
+// Whether `message` has a tool block for `call`.
+fn has_call(message: Json, call: String) -> bool {
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("tool")) and str_at(b, "call") == some(call.copy()) { return true }
+        }
+    }
+    return false
+}
+
+// A core's cache that has applied every event the app read: the calls the apps draw from.
+fn calls_of(app: Session, call: String) -> String ! Error {
+    let c = try Cache.open(String(":memory:"))
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("event")) { _ = try c.apply(f.copy()) }
+    }
+    return try c.tools_text("[\"{call}\"]", String("[]"))
+}
+
+fn send(app: Session, cid: str, conversation: String, text: str) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", String(text)).done())
+}
+
+// Until the turn's run.finished, giving it and the reply kept before it.
+fn turn_end(app: mut Session) -> (Json, Json) ! Error {
+    let reply = try app.reply()
+    let finished = try app.until("event", "run.finished")
+    return (reply, finished)
+}
+
+// What comes before the restart: a turn with a call never finished, one with a call
+// a rule denied, and one cut short in the middle of a call. Gives the call the
+// restart cut short, and the seq the app had.
+fn before_restart(i: Instance) -> (String, i64) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("allow")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let created = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let chat = str_at(at(created, "value"), "conversation") ?? String()
+
+    // A call its program starts and never says another word about.
+    try send(app, "m_1", chat.copy(), "/open Watch the build\nWatched it.")
+    let started = try app.until("event", "tool.started")
+    let call = str_at(started, "call") ?? String()
+    let (reply, finished) = try turn_end(mut app)
+    let closed = event_for(app, "tool.finished", call.copy())
+    try check(str_at(finished, "status") == some(String("done")) and str_at(closed.copy(), "status") == some(String("cancelled")), "a call nothing finished ends cancelled with its turn")
+    let at_close = int_at(closed, "seq") ?? -1
+    try check(at_close > 0 and at_close < reply_seq(app) and at_close < seq_of(app, "run.finished", String()), "before the reply is kept and run.finished")
+    try check(has_call(reply.copy(), call.copy()) and reply_text(reply) == "Watched it.", "the kept reply keeps the call, with its words")
+    try check(try calls_of(app, call.copy()) == "[\{\"call\":\"{call}\",\"run\":\"{str_at(started.copy(), "run") ?? String()}\",\"title\":\"Watch the build\",\"status\":\"cancelled\",\"block\":0\}]", "and a core's calls have it ended")
+    let listed = try app.cmd("q_3", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    var kept = Json.Null
+    if let Json.Array(ms) = at(at(listed, "value"), "messages") {
+        for m in ms {
+            if has_call(m.copy(), call.copy()) { kept = m.copy() }
+        }
+    }
+    try check(str_at(kept, "status") == some(String("done")), "the stored reply has the call")
+    // A device that comes later reads the same from the stored events.
+    let later = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    try check(str_at(event_for(later, "tool.finished", call.copy()), "status") == some(String("cancelled")), "and catching up from the start ends it too")
+    later.close()
+
+    // A permission request a rule denies, for a call its program never reports on.
+    let rule = try app.cmd("q_4", "rule.put", Obj.new().s("then", String("deny")).s("command", String("rm")).done())
+    try check(str_at(at(at(rule, "value"), "rule"), "id") != none, "a deny rule is kept")
+    try send(app, "m_2", chat.copy(), #"/askopen {"title":"Remove the folder","command":"rm -rf /tmp/x"}"#)
+    let asked = try app.until("event", "tool.started")
+    let denied_call = str_at(asked.copy(), "call") ?? String()
+    let answered = try app.until("event", "approval.answered")
+    try check(str_at(answered.copy(), "call") == some(denied_call.copy()) and str_at(answered, "by") == some(String("rule")), "the rule says no to the call")
+    let (denied_reply, denied_end) = try turn_end(mut app)
+    let denied = event_for(app, "tool.finished", denied_call.copy())
+    try check(reply_text(denied_reply.copy()) == "denied" and str_at(denied.copy(), "status") == some(String("denied")), "a call a rule said no to that its program never reported on ends denied")
+    try check((int_at(denied, "seq") ?? -1) < (int_at(denied_end, "seq") ?? -1) and has_call(denied_reply, denied_call.copy()), "before its run.finished, and its reply keeps it")
+    try check((try calls_of(app, denied_call.copy())).contains("\"status\":\"denied\""), "and a core's calls have it denied")
+
+    // A turn the restart cuts short in the middle of a call.
+    try send(app, "m_3", chat.copy(), "/open Wait for the deploy\n/sleep 30000")
+    let waiting = try app.until("event", "tool.started")
+    let cut = str_at(waiting, "call") ?? String()
+    let seq = app.seq
+    app.close()
+    return (cut, seq)
+}
+
+fn after_restart(i: Instance, cut: String, seq: i64) ! Error {
+    let app = try Session.connect(i.base.copy(), i.token.copy(), seq)
+    let closed = event_for(app, "tool.finished", cut.copy())
+    let ended = seq_of(app, "run.finished", String())
+    try check(str_at(closed.copy(), "status") == some(String("cancelled")) and ended > 0 and (int_at(closed, "seq") ?? -1) < ended, "a call the restart cut short ends cancelled before its run.finished")
+    app.close()
+}
+
+fn main() ! Error {
+    let first = try Instance.start()
+    var failure: String? = none
+    var cut = String()
+    var seq: i64 = 0
+    match before_restart(first.copy()) {
+        ok(got) => {
+            cut = got.0.copy()
+            seq = got.1
+        },
+        err(e) => failure = some("{e}"),
+    }
+    if let f = failure {
+        first.stop()
+        eprintln("\n{f}")
+        exit(1)
+    } else {
+        let i = try first.restart()
+        match after_restart(i.copy(), cut, seq) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        i.stop()
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nopen_calls: all good")
+}

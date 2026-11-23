@@ -29,7 +29,13 @@ module tests.fake_agent.main
 //                         titles it TITLE and completes it
 //     /askonly TITLE      asks permission for a command it never sent a tool_call
 //                         for, then completes or fails it by the answer
-//     /act KIND JSON      a tool call of KIND (execute, edit, fetch, ...) that asks
+//     /open TITLE         a tool call (kind execute) that starts and is never
+//                         reported on again
+//     /askopen JSON       asks permission for a command it never sent a tool_call
+//                         for, with JSON as its rawInput and its title from its
+//                         "title", and never reports on it whatever the answer;
+//                         says "allowed" or "denied"
+//     /act KIND JSON     a tool call of KIND (execute, edit, fetch, ...) that asks
 //                         permission first, with JSON as its rawInput, its
 //                         locations from the JSON's "path", and its title from its
 //                         "title" (or KIND); says "allowed" or "denied"
@@ -116,6 +122,8 @@ pub enum Step {
     Subagent(String, List<String>)    // its title, and its steps
     Named(String)
     AskOnly(String)
+    Open(String)
+    AskOpen(String)    // the rawInput as JSON
     Slow(u64)
     Sleep(u64)
     Stop(String)
@@ -179,6 +187,10 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Named(rest))
         } else if word == "/askonly" {
             steps.push(Step.AskOnly(rest))
+        } else if word == "/open" {
+            steps.push(Step.Open(rest))
+        } else if word == "/askopen" {
+            steps.push(Step.AskOpen(if rest.len() > 0 { rest } else { String(#"{}"#) }))
         } else if word == "/shell" {
             steps.push(Step.Shell(rest))
         } else if word == "/read" {
@@ -790,6 +802,23 @@ impl Agent {
                             tool_update(session.copy(), tool, "failed", String("cancelled"))
                             reason = String("cancelled")
                         },
+                    }
+                },
+                Step.Open(title) => {
+                    let tool = a.tool_call(session.copy(), String("execute"), title)
+                    tool_update(session.copy(), tool, "in_progress", String())
+                },
+                Step.AskOpen(input) => {
+                    let raw = match parse(input.copy()) {
+                        ok(j) => j,
+                        err(_) => Json.Null,
+                    }
+                    let title = (raw.get(String("title")) ?? Json.Null).as_str() ?? String("Run a command")
+                    let tool = a.new_tool()
+                    match a.ask(session.copy(), tool, String("execute"), title, raw) {
+                        some(true) => chunk(session.copy(), "agent_message_chunk", String("allowed")),
+                        some(false) => chunk(session.copy(), "agent_message_chunk", String("denied")),
+                        none => reason = String("cancelled"),
                     }
                 },
                 Step.Shell(input) => {
