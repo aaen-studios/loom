@@ -98,6 +98,26 @@ impl Link {
     fn call(self, name: String, arguments: Json) -> Json {
         return self.send("/api/mcp/call", Obj.new().s("name", name).j("arguments", arguments).done())
     }
+
+    // A tool call answered with the instance's own text, passed on as it came
+    // rather than read and written again (a screenshot is megabytes of it).
+    fn call_text(self, name: String, arguments: Json) -> String {
+        var req = post("{self.base}/api/mcp/call", self.headers(), "{Obj.new().s("name", name).j("arguments", arguments).done()}".to_bytes(), CALL_WAIT, MAX_ANSWER)
+        match req.wait() {
+            ok(r) => {
+                let text = String.from_utf8(r.body) ?? String()
+                if r.status != 200 { return "{failed("loom couldn't do that ({r.status}): {text}")}" }
+                // One line, an object, as the answer to its request must be.
+                if text.starts_with("\{") and text.find("\n") == none { return text }
+                return "{failed(String("loom's answer wasn't JSON"))}"
+            },
+            err(e) => return "{failed("loom didn't answer: {e}")}",
+        }
+    }
+}
+
+fn reply_text(id: Json, result: String) {
+    println("\{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}\}")
 }
 
 // --- Code Mode ---
@@ -110,6 +130,7 @@ struct Code {
     servers: Map<String, Server>
     trouble: List<String>    // servers that didn't start, and why
     runs: i64
+    folder: String    // the session's scripts, their prelude and Deno's cache, made at the first
 }
 
 impl Code {
@@ -183,12 +204,16 @@ impl Code {
             ok(d) => d,
             err(e) => return failed("Scripts can't run here: Deno couldn't be fetched ({e}). Use the tools some other way."),
         }
-        // A folder of its own for each script, its prelude and Deno's cache,
-        // removed once it's done.
-        let folder = match fs.temp_dir() {
-            ok(d) => d,
-            err(e) => return failed("Scripts can't run here: there's no folder for them ({e})."),
+        // One folder for the session's scripts, so Deno's cache of the prelude
+        // carries over from one script to the next. Each script's file goes
+        // once it's done, and the folder when the session ends.
+        if self.folder.len() == 0 {
+            self.folder = match fs.temp_dir() {
+                ok(d) => d,
+                err(e) => return failed("Scripts can't run here: there's no folder for them ({e})."),
+            }
         }
+        let folder = self.folder.copy()
         self.load(link)
         self.runs += 1
         let n = self.runs
@@ -202,7 +227,7 @@ impl Code {
             },
             err(e) => failed("Deno didn't start: {e}"),
         }
-        if let err(e) = fs.remove_dir_all(folder) { eprintln("loom mcp: {e}") }
+        if let err(e) = fs.remove_file("{folder}/run-{n}.ts") { eprintln("loom mcp: {e}") }
         return result
     }
 
@@ -259,7 +284,7 @@ impl Code {
 
     // A script's call to the tool at `path`: its value, or why it failed.
     fn call(self: mut Code, link: Link, path: String, args: Json) -> Json ! Error {
-        let t = codemode.find(self.tools.copy(), path.copy()) else { fail "There's no tool {path}. search_tools finds them." }
+        let t = codemode.find(self.tools, path.copy()) else { fail "There's no tool {path}. search_tools finds them." }
         if t.server == "loom" {
             let result = link.call(t.name.copy(), args)
             if is_error(result.copy()) { fail "{codemode.error_of(result)}" }
@@ -289,6 +314,9 @@ impl Code {
     fn stop(self: Code) {
         for (_, s) in self.servers {
             s.stop()
+        }
+        if self.folder.len() > 0 {
+            if let err(e) = fs.remove_dir_all(self.folder) { eprintln("loom mcp: {e}") }
         }
     }
 }
@@ -322,7 +350,7 @@ fn handle(link: Link, c: mut Code, m: Json) {
         } else if c.on and name == "run_code" {
             reply(id, c.run(link, arguments))
         } else {
-            reply(id, link.call(name, arguments))
+            reply_text(id, link.call_text(name, arguments))
         }
     } else {
         reply_error(id, -32601, "loom doesn't offer {method}")
@@ -334,7 +362,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0 }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0, folder: String() }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
