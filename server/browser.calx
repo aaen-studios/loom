@@ -26,6 +26,7 @@ import std.fs
 import std.http.{Header, get}
 import std.http.websocket.{Message, WebSocket, connect}
 import std.json.{Json, parse}
+import std.net.{Waker as LoopWaker}
 import std.process.{Child, Command, Stdio, which}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
@@ -75,6 +76,20 @@ pub enum Back {
     Stopped(u64)    // the thread numbered so is ending, with its browser stopped, for the loop to join
 }
 
+// Where a browser's thread sends what happens: each send wakes the loop, so a
+// tool's result is taken at once.
+pub struct BackTo {
+    pub to: Sender<Back>
+    pub waker: LoopWaker
+}
+
+impl BackTo {
+    pub fn send(self: mut BackTo, b: own Back) {
+        self.to.send(b)
+        self.waker.wake()
+    }
+}
+
 struct Worker {
     n: u64    // which thread it is, for Stopped
     key: String
@@ -83,7 +98,7 @@ struct Worker {
     guarded: bool
     proxy: u16    // the agent's egress on the instance's loopback, when its network is closed, or 0
     inbox: Receiver<In>
-    back: Sender<Back>
+    back: BackTo
     child: Child?
     page: WebSocket?
     port: String    // where its DevTools listen, for html_preview's tab
@@ -158,7 +173,7 @@ impl Task for Worker {
 // for itself go (server/chrome.calx). What it has to say comes to `back`. The thread ends once it's
 // sent Stop, with its browser stopped, and said Stopped with `n`. `reopen` is the page it was on when it
 // last closed, or "", which its first call that isn't browser_open opens again.
-pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: Sender<Back>) -> (Sender<In>, Thread) {
+pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, back: BackTo) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
     let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watched: false, casting: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false }) }

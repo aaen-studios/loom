@@ -13,6 +13,7 @@ module core.lib
 import std.crypto.{PasswordHasher}
 import std.fs
 import std.json.{Json, parse}
+import std.http.websocket.{Waker}
 import std.thread.{Task}
 import shared.obj.{Obj, bool_at, str_at}
 import core.cache.{Cache}
@@ -131,6 +132,8 @@ fn local_config(data: String, port: u16, version: String) -> Config {
 /// What the app holds between calls.
 struct Core {
     to_core: Sender<String>?
+    wakers: Receiver<Waker>    // each connection's, as it opens
+    waker: Waker?              // the newest, woken after each send so the core takes it at once
     conn: Thread?
     relay: Thread?
 }
@@ -144,6 +147,7 @@ struct Boot {
     cfg: Json
     inbox: Receiver<String>
     to_app: Sender<String>
+    wakers_to: Sender<Waker>
 }
 
 impl Task for Boot {
@@ -184,6 +188,7 @@ impl Task for Boot {
             },
         }
         var conn = Conn.new(server, token, service, cache, b.inbox, b.to_app)
+        conn.wakers_to = some(b.wakers_to)
         conn.tz = str_at(cfg.copy(), "tz")
         conn.local = str_at(cfg.copy(), "mode") == some(String("local"))
         // The first core gathers what's behind across the app, for the update icon.
@@ -256,10 +261,11 @@ fn core_start(config: *const u8, len: usize, on_event: extern "C" fn(*const u8, 
     let inbox = Receiver<String>()
     let to_core = inbox.sender()
     let from_core = Receiver<String>()
-    let conn_thread = unsafe { Thread.spawn(Boot { cfg: cfg, inbox: inbox, to_app: from_core.sender() }) }
+    let wakers = Receiver<Waker>()
+    let conn_thread = unsafe { Thread.spawn(Boot { cfg: cfg, inbox: inbox, to_app: from_core.sender(), wakers_to: wakers.sender() }) }
     let relay_thread = unsafe { Thread.spawn(Relay { sink: sink, from_core: from_core }) }
     unsafe {
-        return Box(Core { to_core: some(to_core), conn: some(conn_thread), relay: some(relay_thread) }).into_ptr().cast<u8>()
+        return Box(Core { to_core: some(to_core), wakers: wakers, waker: none, conn: some(conn_thread), relay: some(relay_thread) }).into_ptr().cast<u8>()
     }
 }
 
@@ -271,6 +277,8 @@ fn core_send(core: *u8, json: *const u8, len: usize) {
         if let to = mut c.value.to_core {
             to.send(text)
         }
+        while let w = c.value.wakers.next() { c.value.waker = some(w) }
+        if let w = c.value.waker { w.wake() }
     }
     unsafe { _ = c.into_ptr() }
 }

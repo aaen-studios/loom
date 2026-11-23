@@ -12,7 +12,7 @@ module core.conn
 import std.bytes
 import std.crypto.{Ed25519Key, Ed25519PublicKey}
 import std.http.{Header, Request, get}
-import std.http.websocket.{Message, WebSocket, open}
+import std.http.websocket.{Message, WebSocket, Waker, open}
 import std.http.websocket
 import std.keyring
 import std.json.{Json, parse}
@@ -37,6 +37,7 @@ import std.fs
 const FIRST_WAIT_MS: u64 = 500
 const LONGEST_WAIT_MS: u64 = 30000
 const TICK_NS: u64 = 10000000    // the loop wakes this often to read the socket
+const TICK_MS: u32 = 10
 const FOLLOW_AGAIN_NS: u64 = 2000000000    // how long before asking a new place that didn't answer again
 
 // The id the core gives its own conversation.create commands, before the send's cid.
@@ -137,6 +138,7 @@ pub struct Conn {
     transfers: List<Transfer>
     pub updater: Updater?    // looks for new releases of the app; none in tests and dev builds
     pub tz: String?          // the system's time zone, an IANA name, as the app found it
+    pub wakers_to: Sender<Waker>?    // where each new connection's Waker goes, for the app's sends to wake it
     device: Device?       // this device as a tool for agents; none if its key couldn't be kept
     follow_to: String     // where the instance moved, while the core checks it's the same one there
     following: Request?   // GET <follow_to>/api/info, for its key
@@ -207,6 +209,7 @@ impl Conn {
             transfers: List<Transfer>(),
             updater: none,
             tz: none,
+            wakers_to: none,
             device: device,
             follow_to: String(),
             following: none,
@@ -345,6 +348,7 @@ impl Conn {
             ok => {},
             err(_) => {},    // receive says how it ended
         }
+        if let to = mut self.wakers_to { to.send(ws.waker()) }
         self.ws = some(ws)
         self.state = State.Connecting
         self.tell_state(0, String())
@@ -701,11 +705,15 @@ impl Conn {
     /// is saved once, at the end, rather than once a frame: a commit costs far more than
     /// an event does, and catching up is thousands of them. The cursor moves in the same
     /// transaction, so a crash before the end only means they come again.
-    fn read(mut self) {
+    ///
+    /// The first receive waits up to `first_ms` for something to come, or for the app's
+    /// next message to wake it.
+    fn read(mut self, first_ms: u32) {
         var held = false
+        var wait = first_ms
         loop {
             let got = match self.ws {
-                some(ws) => match ws.receive(0) {
+                some(ws) => match ws.receive(wait) {
                     ok(some(Message.Text(text))) => Got.Text(text),
                     ok(some(Message.Binary(_))) => Got.Skip,
                     ok(none) => Got.Nothing,
@@ -713,6 +721,7 @@ impl Conn {
                 },
                 none => Got.Nothing,
             }
+            wait = 0
             match got {
                 Got.Text(text) => {
                     if not held {
@@ -1626,14 +1635,18 @@ impl Task for Conn {
         var c = self
         c.begin()
         loop {
-            c.read()
+            // Connected, and with the app's sends waking the socket, the loop waits on
+            // the socket, so a frame is taken the moment it comes; otherwise on the inbox.
+            let on_socket = c.ws != none and c.wakers_to != none
+            c.read(if on_socket { TICK_MS } else { 0 })
             c.poll()
             c.poll_transfers()
             c.poll_update()
             c.poll_device()
             c.poll_follow()
             c.tick()
-            if let m = unsafe { c.inbox.wait_for(TICK_NS) } {
+            let first = if on_socket { c.inbox.next() } else { unsafe { c.inbox.wait_for(TICK_NS) } }
+            if let m = first {
                 var waiting = List<String>()
                 waiting.push(m)
                 while let more = c.inbox.next() { waiting.push(more) }

@@ -1,6 +1,7 @@
 //! The Calx core, through its C boundary: JSON in with `send`, JSON out
-//! through a callback on the core's own thread, handed to the UI thread over
-//! a channel.
+//! through a callback on the core's own thread, parsed there and handed to the UI
+//! thread over
+//! a channel, so a burst of frames isn't parsed on the UI thread.
 
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -21,14 +22,16 @@ extern "C" fn on_event(json: *const u8, len: usize, ctx: *mut u8) {
     // SAFETY: the core passes `len` bytes at `json`, and the ctx we gave it,
     // which points at a Sender that lives as long as the Core.
     let bytes = unsafe { std::slice::from_raw_parts(json, len) };
-    let tx = unsafe { &*(ctx as *const Sender<String>) };
-    let _ = tx.send(String::from_utf8_lossy(bytes).into_owned());
+    let tx = unsafe { &*(ctx as *const Sender<serde_json::Value>) };
+    if let Ok(v) = serde_json::from_slice(bytes) {
+        let _ = tx.send(v);
+    }
     crate::wake::wake();
 }
 
 pub struct Core {
     handle: *mut u8,
-    _tx: Box<Sender<String>>,
+    _tx: Box<Sender<serde_json::Value>>,
 }
 
 // The handle is only used through the core's functions, which take any thread.
@@ -36,10 +39,10 @@ unsafe impl Send for Core {}
 
 impl Core {
     /// Starts the core. Its events come out of the receiver.
-    pub fn start(config: &str) -> (Core, Receiver<String>) {
+    pub fn start(config: &str) -> (Core, Receiver<serde_json::Value>) {
         let (tx, rx) = channel();
         let tx = Box::new(tx);
-        let ctx = &*tx as *const Sender<String> as *mut u8;
+        let ctx = &*tx as *const Sender<serde_json::Value> as *mut u8;
         // The Calx runtime starts once, however many cores (one for each server) start.
         static INIT: std::sync::Once = std::sync::Once::new();
         INIT.call_once(|| unsafe { calx_init() });

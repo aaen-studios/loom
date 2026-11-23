@@ -1,0 +1,43 @@
+module server.checkpoint
+
+// The instance's database is checkpointed on a thread of its own, with a
+// connection of its own: the loop's connection doesn't checkpoint by itself
+// (`Store.checkpoint_elsewhere`). SQLite's own checkpoint runs inside whichever
+// commit takes the write-ahead log past 1000 pages, and on the loop that held up
+// every person for 20-50 ms every ten turns or so. A passive checkpoint never
+// waits on the loop's writes, and the loop never waits on it.
+import std.sqlite.{Database}
+import std.thread.{Task}
+
+// How often it checkpoints, in nanoseconds: often enough that each one copies little.
+const EVERY_NS: u64 = 2000000000
+
+struct Worker {
+    path: String
+    stop: Receiver<bool>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        let db = match Database.open(w.path.copy()) {
+            ok(d) => d,
+            err(e) => {
+                eprintln("loom: checkpointing {w.path}: {e}")
+                return
+            },
+        }
+        loop {
+            if let _ = unsafe { w.stop.wait_for(EVERY_NS) } { return }
+            if let err(e) = db.query(String("PRAGMA wal_checkpoint(PASSIVE)")) { eprintln("loom: checkpointing {w.path}: {e}") }
+        }
+    }
+}
+
+/// Starts checkpointing the database at `path`. Sending to what it gives back stops it.
+pub fn start(path: String) -> (Thread, Sender<bool>) {
+    let stop = Receiver<bool>()
+    let to = stop.sender()
+    let t = unsafe { Thread.spawn(Worker { path: path.copy(), stop: stop }) }
+    return (t, to)
+}

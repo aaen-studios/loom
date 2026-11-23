@@ -1163,7 +1163,7 @@ fn step_line(step: &Value) -> Option<String> {
     Some(what)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub kind: String,
     pub text: String,
@@ -1531,7 +1531,7 @@ pub fn size_of(bytes: u64) -> String {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Message {
     pub id: String,
     pub role: String,
@@ -1930,7 +1930,7 @@ pub fn flow(rows: &[Option<&Message>], day: impl Fn(i64) -> i64) -> Vec<Flow> {
     out
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Tool {
     pub call: String,
     pub run: String,
@@ -1969,7 +1969,7 @@ impl std::ops::Deref for Tools {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Approval {
     pub call: String,
     pub run: String,
@@ -4180,17 +4180,20 @@ impl Model {
                     .collect();
             }
             List::Tools => {
-                self.tools = Rc::new(Tools::new(
-                    items
-                        .iter()
-                        .map(|t| Tool {
-                            call: s(t, "call"),
-                            run: s(t, "run"),
-                            title: s(t, "title"),
-                            status: t.get("status").and_then(Value::as_str).map(str::to_string),
-                        })
-                        .collect(),
-                ));
+                let list: Vec<Tool> = items
+                    .iter()
+                    .map(|t| Tool {
+                        call: s(t, "call"),
+                        run: s(t, "run"),
+                        title: s(t, "title"),
+                        status: t.get("status").and_then(Value::as_str).map(str::to_string),
+                    })
+                    .collect();
+                // A tool call in another chat asks again too: the chat keeps what it
+                // drew from when nothing it shows changed.
+                if self.tools.list != list {
+                    self.tools = Rc::new(Tools::new(list));
+                }
             }
             List::Approvals => {
                 self.approvals = items

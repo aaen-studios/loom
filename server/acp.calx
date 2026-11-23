@@ -7,7 +7,8 @@ module server.acp
 //
 // ACP is JSON-RPC 2.0 with one message a line (https://agentclientprotocol.com).
 import std.json.{Json, parse}
-import std.process.{Child, Command, Stdio}
+import std.net.{Waker as LoopWaker}
+import std.process.{Child, Command, Stdio, Waker}
 import std.thread.{Task}
 import shared.obj.{Obj, at, str_at}
 import shared.tools
@@ -25,11 +26,26 @@ pub enum Out {
     Stop
 }
 
+// The end the loop sends to an agent's thread with: each send wakes the
+// thread's read of the program, so it goes out at once.
+pub struct To {
+    out: Sender<Out>
+    waker: Waker
+}
+
+impl To {
+    pub fn send(self: mut To, o: own Out) {
+        self.out.send(o)
+        self.waker.wake()
+    }
+}
+
 struct Worker {
     agent: String
     child: Child
     outbox: Receiver<Out>
     lines: Sender<Line>
+    wake: LoopWaker    // the loop's, woken after each line
 }
 
 impl Task for Worker {
@@ -55,13 +71,16 @@ impl Task for Worker {
                     },
                 }
             }
-            if let line = w.child.read_line(10) {
+            // The loop's sends wake this read, so it can wait long.
+            if let line = w.child.read_line(1000) {
                 w.lines.send(Line { agent: w.agent.copy(), text: some(line), exit: none })
+                w.wake.wake()
                 continue
             }
             if w.child.ended() {
                 let out = w.child.wait()
                 w.lines.send(Line { agent: w.agent.copy(), text: none, exit: some(out.status.code ?? -1) })
+                w.wake.wake()
                 return
             }
         }
@@ -71,7 +90,7 @@ impl Task for Worker {
 // Starts an agent program in `dir`, and gives the end that sends to it.
 // Everything it writes comes to `lines`, tagged with `agent`. `env` is a JSON
 // object of the environment variables it gets on top of the instance's.
-pub fn start(agent: String, command: String, args: List<String>, env: Json, dir: String, lines: Sender<Line>) -> Sender<Out> ! Error {
+pub fn start(agent: String, command: String, args: List<String>, env: Json, dir: String, lines: Sender<Line>, wake: LoopWaker) -> To ! Error {
     var c = Command.new(command).args(args).dir(dir).stdin(Stdio.Pipe).stdout(Stdio.Pipe)
     if let Json.Object(vars) = env {
         for (k, v) in vars {
@@ -80,8 +99,8 @@ pub fn start(agent: String, command: String, args: List<String>, env: Json, dir:
     }
     let child = try c.spawn()
     let outbox = Receiver<Out>()
-    let to = outbox.sender()
-    _ = unsafe { Thread.spawn(Worker { agent: agent.copy(), child: child, outbox: outbox, lines: lines.copy() }) }
+    let to = To { out: outbox.sender(), waker: child.waker() }
+    _ = unsafe { Thread.spawn(Worker { agent: agent.copy(), child: child, outbox: outbox, lines: lines.copy(), wake: wake }) }
     return to
 }
 

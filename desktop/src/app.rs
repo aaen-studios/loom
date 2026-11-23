@@ -203,7 +203,7 @@ enum Plus {
 }
 
 /// One row of the chat's list.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Row {
     Message(Message),
     Approval(Approval),
@@ -221,7 +221,7 @@ pub struct Loom {
     /// What the last update check said.
     update_said: Option<String>,
     core: Core,
-    events: std::sync::mpsc::Receiver<String>,
+    events: std::sync::mpsc::Receiver<Value>,
     /// Its folder ("" for the first server).
     here: String,
     /// The other servers the app is signed in to, each with its own core.
@@ -421,11 +421,22 @@ pub struct Loom {
     page_image: Option<(u64, Arc<RenderImage>)>,
     /// Frames drawn before, let go of at the next render.
     old_pages: Vec<Arc<RenderImage>>,
+    /// Each attached picture's preview for the composer, small, by the attachment's id:
+    /// none while it's made. One that couldn't be made isn't here, and the picture
+    /// itself is shown.
+    previews: HashMap<String, Option<Arc<RenderImage>>>,
     page_decoding: bool,
     /// The newest frame a decode was started for.
     page_tried: u64,
     /// What the composer says while it's empty, as last set.
     composer_placeholder: String,
+    /// Counts the search box's changes, so only the last one, once typing pauses, asks.
+    search_gen: u64,
+    /// Counts the window's moves and resizes, so its place is kept once it stops.
+    place_gen: u64,
+    /// The core's frames changed what the chat shows: its rows are made again once,
+    /// before the next frame, however many frames came.
+    rows_dirty: bool,
     /// The chat's list, as a view of its own (`ChatList`).
     chat_view: Option<Entity<ChatList>>,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
@@ -481,7 +492,7 @@ struct Away {
     /// Its folder under the app's: "" for the first server, `servers/2` for another.
     dir: String,
     core: Core,
-    events: std::sync::mpsc::Receiver<String>,
+    events: std::sync::mpsc::Receiver<Value>,
     model: Model,
 }
 
@@ -874,11 +885,26 @@ ACTA_KEY=secret:ACTA_KEY",
             window,
             |this: &mut Loom, state, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event {
+                    // It asks once typing pauses, not at each letter: the instance ranks
+                    // every match of a short prefix, which takes it tens of milliseconds.
                     let query = state.read(cx).value().to_string();
-                    if let Some(frame) = this.model.search(&query) {
-                        this.send(frame);
-                    }
-                    cx.notify();
+                    this.search_gen += 1;
+                    let gen = this.search_gen;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(150))
+                            .await;
+                        let _ = this.update(cx, |loom, cx| {
+                            if loom.search_gen != gen {
+                                return;
+                            }
+                            if let Some(frame) = loom.model.search(&query) {
+                                loom.send(frame);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                 }
             },
         )
@@ -895,7 +921,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let woke = last.elapsed() > Duration::from_secs(10);
                 last = Instant::now();
                 let alive = this.update(cx, |loom, cx| {
-                    let got: Vec<String> =
+                    let got: Vec<Value> =
                         std::iter::from_fn(|| loom.events.try_recv().ok()).collect();
                     if woke {
                         loom.send(serde_json::json!({"t": "app.wake"}));
@@ -936,28 +962,26 @@ ACTA_KEY=secret:ACTA_KEY",
                         return;
                     }
                     let mut changed = false;
-                    for e in got {
-                        if let Ok(v) = serde_json::from_str::<Value>(&e) {
-                            if v.get("t").and_then(Value::as_str) == Some("core.device_ask") {
-                                loom.device_ask(&v, cx);
-                                continue;
-                            }
-                            if v.get("t").and_then(Value::as_str) == Some("core.notify") {
-                                let s = |k: &str| {
-                                    v.get(k)
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_string()
-                                };
-                                let about = shell::About {
-                                    server: loom.here.clone(),
-                                    agent: s("agent"),
-                                    conversation: s("conversation"),
-                                };
-                                loom.notify(&s("title"), &s("body"), about);
-                            }
-                            changed |= crate::perf::step("take", || loom.model.take(&v));
+                    for v in got {
+                        if v.get("t").and_then(Value::as_str) == Some("core.device_ask") {
+                            loom.device_ask(&v, cx);
+                            continue;
                         }
+                        if v.get("t").and_then(Value::as_str) == Some("core.notify") {
+                            let s = |k: &str| {
+                                v.get(k)
+                                    .and_then(Value::as_str)
+                                    .unwrap_or_default()
+                                    .to_string()
+                            };
+                            let about = shell::About {
+                                server: loom.here.clone(),
+                                agent: s("agent"),
+                                conversation: s("conversation"),
+                            };
+                            loom.notify(&s("title"), &s("body"), about);
+                        }
+                        changed |= crate::perf::step("take", || loom.model.take(&v));
                     }
                     loom.spread_release();
                     loom.route_updates(cx);
@@ -968,7 +992,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         loom.decode_frame(cx);
                     }
                     if changed {
-                        loom.refresh_rows(cx);
+                        loom.rows_dirty = true;
                         cx.notify();
                     }
                 });
@@ -987,8 +1011,23 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(p) = place {
             shell::put_window(hwnd, p, !background);
         }
-        cx.observe_window_bounds(window, |this: &mut Loom, _, _| this.keep_place())
+        // Kept once the window stops moving, not at each step of a drag.
+        cx.observe_window_bounds(window, |this: &mut Loom, _, cx| {
+            this.place_gen += 1;
+            let gen = this.place_gen;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(400))
+                    .await;
+                let _ = this.update(cx, |loom, _| {
+                    if loom.place_gen == gen {
+                        loom.keep_place();
+                    }
+                });
+            })
             .detach();
+        })
+        .detach();
         // The window, taskbar and shortcuts show the icon in loom's theme.
         shell::follow_theme(hwnd, dark);
         // Closing the window keeps loom in the tray, so routines and replies go on.
@@ -1111,9 +1150,13 @@ ACTA_KEY=secret:ACTA_KEY",
             keys: cx.focus_handle(),
             page_image: None,
             old_pages: Vec::new(),
+            previews: HashMap::new(),
             page_decoding: false,
             page_tried: 0,
             composer_placeholder: String::new(),
+            search_gen: 0,
+            place_gen: 0,
+            rows_dirty: false,
             chat_view: None,
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
@@ -1572,11 +1615,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let mut changed = false;
         let prefs = self.prefs.clone();
         for a in &mut self.away {
-            let got: Vec<String> = std::iter::from_fn(|| a.events.try_recv().ok()).collect();
-            for e in got {
-                let Ok(v) = serde_json::from_str::<Value>(&e) else {
-                    continue;
-                };
+            let got: Vec<Value> = std::iter::from_fn(|| a.events.try_recv().ok()).collect();
+            for v in got {
                 match v.get("t").and_then(Value::as_str) {
                     // This PC's tools answer the server on screen alone.
                     Some("core.device_ask") => {
@@ -2045,6 +2085,10 @@ ACTA_KEY=secret:ACTA_KEY",
             if path.is_file() {
                 let frame = self.model.attach(&path.to_string_lossy());
                 self.send(frame);
+                if let Some(a) = self.model.attachments.last().filter(|a| a.image()) {
+                    let (id, path) = (a.id.clone(), a.path.clone());
+                    self.make_preview(id, path, cx);
+                }
                 // Its name goes in the words where the cursor is, as a link to it once
                 // it's sent (`model::link_files`).
                 if let Some(a) = self.model.attachments.last() {
@@ -2054,6 +2098,34 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         }
         cx.notify();
+    }
+
+    /// A small copy of an attached picture, for its chip in the composer: a photo drawn
+    /// as itself there took about 48 MB of memory, and as much on the GPU, at 64 pixels.
+    fn make_preview(&mut self, id: String, path: String, cx: &mut Context<Self>) {
+        self.previews.insert(id.clone(), None);
+        let task = cx.background_executor().spawn(async move {
+            let mut small = image::open(&path).ok()?.thumbnail(128, 128).to_rgba8();
+            for px in small.pixels_mut() {
+                px.0.swap(0, 2);
+            }
+            Some(Arc::new(RenderImage::new(vec![image::Frame::new(small)])))
+        });
+        cx.spawn(async move |this, cx| {
+            let made = task.await;
+            let _ = this.update(cx, |loom, cx| {
+                match made {
+                    Some(r) if loom.previews.contains_key(&id) => {
+                        loom.previews.insert(id, Some(r));
+                    }
+                    _ => {
+                        loom.previews.remove(&id);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn unattach(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -2210,6 +2282,12 @@ ACTA_KEY=secret:ACTA_KEY",
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let mut rows: Vec<Row> = self.model.shown().into_iter().map(Row::Message).collect();
         rows.extend(self.model.shown_approvals().into_iter().map(Row::Approval));
+        // What another chat's frames change leaves this one's rows as they were: the
+        // list keeps them, so its cached drawing stays good. Compared from the end,
+        // where a reply that's streaming differs at once.
+        if rows.len() == self.rows.len() && rows.iter().rev().eq(self.rows.iter().rev()) {
+            return;
+        }
         let old = self.rows.clone();
         let same_start = rows.len() >= old.len()
             && old.iter().zip(rows.iter()).all(|(a, b)| match (a, b) {
@@ -6766,6 +6844,18 @@ ACTA_KEY=secret:ACTA_KEY",
             self.composer
                 .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
         }
+        // Previews of pictures that aren't attached any more leave the GPU.
+        let gone: Vec<String> = self
+            .previews
+            .keys()
+            .filter(|k| !self.model.attachments.iter().any(|a| &a.id == *k))
+            .cloned()
+            .collect();
+        for k in gone {
+            if let Some(Some(r)) = self.previews.remove(&k) {
+                let _ = window.drop_image(r);
+            }
+        }
         let mut attached = div().flex().flex_wrap().gap(px(space::S));
         for a in self.model.attachments.clone() {
             let id = a.id.clone();
@@ -6788,12 +6878,18 @@ ACTA_KEY=secret:ACTA_KEY",
                         .border_color(p.line)
                         .bg(p.bubble)
                         .when(going_up, |d| d.opacity(0.6))
-                        .child(
-                            img(std::path::PathBuf::from(&a.path))
+                        .child(match self.previews.get(&a.id) {
+                            Some(Some(small)) => img(ImageSource::Render(small.clone()))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                            Some(None) => div().into_any_element(),
+                            None => img(std::path::PathBuf::from(&a.path))
                                 .image_cache(&kept_images(cx).0)
                                 .size_full()
-                                .object_fit(ObjectFit::Cover),
-                        )
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                        })
                         .child(
                             div()
                                 .id(SharedString::from(format!("unattach-{}", a.id)))
@@ -11507,24 +11603,12 @@ ACTA_KEY=secret:ACTA_KEY",
                             return;
                         }
                         this.smooth.running = true;
-                        cx.spawn_in(window, async move |this, cx| loop {
-                            cx.background_executor().timer(crate::smooth::FRAME).await;
-                            let step = this
-                                .update(cx, |this, _| {
-                                    let step = this.smooth.step();
-                                    this.smooth.running = step.is_some();
-                                    step
-                                })
-                                .ok()
-                                .flatten();
-                            let Some(step) = step else {
-                                break;
-                            };
-                            let _ = cx.update(|window, cx| {
-                                window.dispatch_event(PlatformInput::Scroll(step), cx);
-                            });
-                        })
-                        .detach();
+                        // One step a frame the window shows, not on a timer of its own, so
+                        // each frame moves as far as the time it took says.
+                        let weak = cx.entity().downgrade();
+                        let first = Instant::now() - crate::smooth::FRAME;
+                        window
+                            .on_next_frame(move |window, cx| smooth_step(weak, first, window, cx));
                     });
                 });
             },
@@ -14477,6 +14561,9 @@ impl Render for Loom {
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
         self.finish_weaving(window, cx);
+        if std::mem::take(&mut self.rows_dirty) {
+            self.refresh_rows(cx);
+        }
         if let Some(address) = self.fill_server.take() {
             self.server_in
                 .update(cx, |s, cx| s.set_value(address, window, cx));
@@ -14550,17 +14637,9 @@ impl Render for Loom {
                 .checked_duration_since(Instant::now())
                 .is_some()
             || self.opened().elapsed().as_secs_f32() < 1.5
-            // An agent's page beside the chat, whose thread fidgets at its top.
-            || matches!(
-                self.side,
-                Some(
-                    Screen::EditAgent
-                        | Screen::Activity
-                        | Screen::Memory
-                        | Screen::Pins
-                        | Screen::Aside
-                )
-            ) && self.screen == Screen::Chat
+            // The agent's edit panel beside the chat, whose thread fidgets at its top.
+            // The other panels have no thread, so they draw only when something changes.
+            || self.side == Some(Screen::EditAgent) && self.screen == Screen::Chat
             // Someone typing to an agent, whose thread thinks along: only on the empty
             // chat's hero, where that thread is drawn.
             || self.screen == Screen::Chat
@@ -15072,7 +15151,7 @@ fn local_mode() -> bool {
 /// app, and only it can be the instance on this computer.
 /// The first server's core, started before the window is made, so it boots (and an
 /// instance in the app opens) while GPUI starts, rather than after.
-static FIRST_CORE: std::sync::Mutex<Option<(Core, std::sync::mpsc::Receiver<String>)>> =
+static FIRST_CORE: std::sync::Mutex<Option<(Core, std::sync::mpsc::Receiver<Value>)>> =
     std::sync::Mutex::new(None);
 
 pub fn start_first_core() {
@@ -15366,6 +15445,25 @@ impl Render for ChatList {
         };
         chat_list(i, self.scroller.clone(), self.this.clone()).into_any_element()
     }
+}
+
+/// Plays the wheel's next step, sized by the time since `last`, and the one after on
+/// the next frame, until it's played out (crate::smooth).
+fn smooth_step(this: WeakEntity<Loom>, last: Instant, window: &mut Window, cx: &mut App) {
+    let now = Instant::now();
+    let step = this
+        .update(cx, |this, _| {
+            let step = this.smooth.step(now - last);
+            this.smooth.running = step.is_some();
+            step
+        })
+        .ok()
+        .flatten();
+    let Some(step) = step else {
+        return;
+    };
+    window.dispatch_event(PlatformInput::Scroll(step), cx);
+    window.on_next_frame(move |window, cx| smooth_step(this, now, window, cx));
 }
 
 /// The chat's messages, as its list draws them.

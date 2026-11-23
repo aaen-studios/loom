@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS activity (
     status TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '',
     ended INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_by_agent ON activity (user, agent, id);
+CREATE INDEX IF NOT EXISTS activity_by_user ON activity (user, id);
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -350,11 +351,20 @@ impl Store {
 
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
+    // This connection stops checkpointing by itself: the instance's loop has
+    // server/checkpoint.calx do it on another thread.
+    pub fn checkpoint_elsewhere(self) ! Error {
+        try self.db.execute_script(String("PRAGMA wal_autocheckpoint = 0;"))
+    }
+
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
         // The key sits beside the database; one in memory gets a key of its own.
         let sealer = if path == ":memory:" { XChaCha20Poly1305.new(XChaCha20Poly1305.generate_key()) } else { try secret_key(if let cut = path.replace("\\", "/").find_last("/") { path[..cut].copy() } else { String(".") }) }
         let db = try Database.open(path)
-        try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
+        // A page cache of up to 64 MB, rather than SQLite's 2 MB: a snapshot or an export reads
+        // a few MB, which a small cache fetched from the system again each time. And the
+        // write-ahead log goes back to 64 MB after a burst.
+        try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA cache_size = -65536; PRAGMA journal_size_limit = 67108864;"))
         try db.execute_script(String(SCHEMA))
         let s = Store { db: db, hasher: hasher, sealer: sealer }
         // An activity log from before actions were recorded gets their columns.
@@ -2021,6 +2031,21 @@ impl Store {
     pub fn file_usage(self, user: String) -> i64 ! Error {
         let row = try self.db.query_one(String("SELECT coalesce(sum(size), 0) FROM files WHERE user = ?"), [t(user)])
         return int((row ?? List<Value>())[0].copy())
+    }
+
+    // The newest `per` messages of each of `user`'s conversations that aren't deleted,
+    // oldest first in each, as a JSON array's text: for a snapshot, in one query, and
+    // as the messages were stored, without reading them in and writing them out again.
+    pub fn newest_messages_text(self, user: String, per: i64) -> String ! Error {
+        var out = String("[")
+        var first = true
+        for r in try self.db.query(String("SELECT m.json FROM (SELECT json, conversation, rowid AS r, row_number() OVER (PARTITION BY conversation ORDER BY rowid DESC) AS n FROM messages WHERE user = ?1) m JOIN conversations c ON c.id = m.conversation AND c.user = ?1 AND c.deleted = 0 WHERE m.n <= ?2 ORDER BY c.at, m.conversation, m.r"), [t(user), Value.Int(per)]) {
+            if not first { out.push_str(",") }
+            first = false
+            out.push_str(text(r[0].copy()))
+        }
+        out.push_str("]")
+        return out
     }
 
     // Up to `limit` messages of a conversation, newest last, before the
