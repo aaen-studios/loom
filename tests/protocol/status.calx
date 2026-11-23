@@ -68,16 +68,25 @@ fn run(i: Instance) ! Error {
     _ = try app.cmd("q_4", "agent.update", Obj.new().s("agent", bo.copy()).j("drawing", Json.Array(stroke)).done())
     _ = try app.cmd("q_5", "memory.put", Obj.new().s("text", String("MEMORY-zq82")).done())
     _ = try app.cmd("q_6", "secret.put", Obj.new().s("name", String("api_key")).s("value", String("SECRET-zq83")).done())
-    let routine = try app.cmd("q_7", "routine.put", Obj.new().s("name", String("Morning brief")).s("agent", ada.copy()).s("prompt", String("PROMPT-zq84")).j("schedule", Obj.new().s("daily", String("07:00")).done()).done())
+    let routine = try app.cmd("q_7", "routine.put", Obj.new().s("name", String("Morning brief")).s("agent", ada.copy()).s("prompt", String("/mcp routine_post \{\"text\": \"PROMPT-zq84\"\}")).j("schedule", Obj.new().s("daily", String("07:00")).done()).done())
     let routine_id = str_at(at(at(routine, "value"), "routine"), "id") ?? String()
     _ = try app.cmd("q_8", "routine.put", Obj.new().s("name", String("Quiet one")).s("agent", ada.copy()).s("prompt", String("x")).b("on", false).j("schedule", Obj.new().s("daily", String("08:00")).done()).done())
     _ = try app.cmd("q_9", "routine.run", Obj.new().s("id", routine_id.copy()).done())
     let said = try app.reply()
-    try check("{said}".contains("PROMPT-zq84"), "the routine ran, and its agent said its prompt back")
+    try check("{said}".contains("PROMPT-zq84"), "the routine ran, and its agent posted")
+    // Its post comes during its run, and a routine run in a chat that's busy is skipped,
+    // so the next waits for this one to end.
+    loop {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        if str_at(r.copy(), "id") == some(routine_id.copy()) and str_at(at(r, "last"), "status") == some(String("done")) { break }
+    }
     // One whose agent says it failed, though its turn ended well.
     let prices = try app.cmd("q_9b", "routine.put", Obj.new().s("name", String("Prices")).s("agent", ada.copy()).s("prompt", String(#"/mcp routine_failed {"why": "WHY-zq86"}"#)).j("schedule", Obj.new().s("daily", String("09:00")).done()).done())
     let prices_id = str_at(at(at(prices, "value"), "routine"), "id") ?? String()
-    _ = try app.cmd("q_9c", "routine.run", Obj.new().s("id", prices_id.copy()).done())
+    // Sent, not waited on: its run can end before the command's result comes, and the
+    // wait for a result would pass over the routine.updated that says so.
+    try app.send(Obj.new().s("t", String("cmd")).s("id", String("q_9c")).s("name", String("routine.run")).j("args", Obj.new().s("id", prices_id.copy()).done()).done())
     loop {
         let e = try app.until("event", "routine.updated")
         let r = at(e, "routine")
