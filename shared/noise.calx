@@ -51,16 +51,24 @@ pub fn seal(t: mut NoiseTransport, message: List<u8>) -> List<List<u8>> {
     var out = List<List<u8>>()
     var start: usize = 0
     loop {
-        let end = if message.len() - start > PIECE { start + PIECE } else { message.len() }
-        var piece = List<u8>()
-        piece.reserve(end - start + 1)
-        piece.push(if end < message.len() { 1 } else { 0 })
-        piece.extend(message[start..end].copy())
-        out.push(t.encrypt(piece))
-        if end >= message.len() { break }
-        start = end
+        let (sealed, next) = seal_at(mut t, message, start)
+        out.push(sealed)
+        if next >= message.len() { break }
+        start = next
     }
     return out
+}
+
+// The piece of `message` from `start`, sealed, and where the next one starts:
+// `message.len()` after the last. For sending a big message a piece at a time,
+// without holding all of it sealed.
+pub fn seal_at(t: mut NoiseTransport, message: List<u8>, start: usize) -> (List<u8>, usize) {
+    let end = if message.len() - start > PIECE { start + PIECE } else { message.len() }
+    var piece = List<u8>()
+    piece.reserve(end - start + 1)
+    piece.push(if end < message.len() { 1 } else { 0 })
+    piece.extend(message[start..end])
+    return (t.encrypt(piece), end)
 }
 
 // What a piece that came gave.
@@ -72,23 +80,25 @@ pub enum Opened {
 
 // Joins the pieces of each message that comes.
 pub struct Joiner {
-    buf: List<u8>
+    buf: List<u8>?    // what's come of the message so far, taken out whole once it's done
 }
 
 impl Joiner {
     pub fn new() -> Joiner {
-        return Joiner { buf: List<u8>() }
+        return Joiner { buf: none }
     }
 
     pub fn take(mut self, t: mut NoiseTransport, sealed: List<u8>) -> Opened {
         let piece = t.decrypt(sealed) else return Opened.Bad
         if piece.len() == 0 or piece[0] > 1 { return Opened.Bad }
-        if self.buf.len() + piece.len() - 1 > LONGEST { return Opened.Bad }
-        self.buf.extend(piece[1..].copy())
-        if piece[0] == 1 { return Opened.More }
-        let whole = self.buf.copy()
-        self.buf = List<u8>()
-        return Opened.Whole(whole)
+        var buf = self.buf.take() ?? List<u8>()
+        if buf.len() + piece.len() - 1 > LONGEST { return Opened.Bad }
+        buf.extend(piece[1..])
+        if piece[0] == 1 {
+            self.buf = some(buf)
+            return Opened.More
+        }
+        return Opened.Whole(buf)
     }
 }
 

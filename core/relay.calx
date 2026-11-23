@@ -239,7 +239,7 @@ impl Task for Relay {
                             for name in ["Authorization", "Content-Type"] {
                                 if let v = req.header(String(name)) { headers = headers.s(name, v) }
                             }
-                            put(mut t, noise.with_head(noise.REQUEST, Obj.new().i("id", id).s("method", req.method.copy()).s("path", req.target.copy()).j("headers", headers.done()).done(), req.body.copy()))
+                            put(mut t, noise.with_head(noise.REQUEST, Obj.new().i("id", id).s("method", req.method.copy()).s("path", req.target.copy()).j("headers", headers.done()).done(), req.body))
                             t.calls.insert(id, req)
                         }
                     }
@@ -298,19 +298,23 @@ fn dial(t: mut Tunnel, p: Place, key: X25519PublicKey) {
 }
 
 // Sends a message to the PC, or keeps it until the handshake is done.
-fn put(t: mut Tunnel, message: List<u8>) {
+fn put(t: mut Tunnel, message: own List<u8>) {
     if let tr = mut t.t {
         if let ws = t.ws {
-            for piece in noise.seal(mut tr, message) {
+            var from: usize = 0
+            loop {
+                let (piece, next) = noise.seal_at(mut tr, message, from)
                 match ws.send_binary(piece) {
                     ok => {},
                     err(_) => {},
                 }
+                if next >= message.len() { break }
+                from = next
             }
         }
         return
     }
-    t.queued.push(message.copy())
+    t.queued.push(message)
 }
 
 // What came from the PC since the last turn.
@@ -339,9 +343,10 @@ fn pump(server: mut Server, t: mut Tunnel, p: mut Place, key: X25519PublicKey, l
                     // New tunnels start at the address that answered: away from home, the
                     // home network's would make each wait out its whole timeout first.
                     good = t.tried
-                    let waiting = t.queued.copy()
-                    t.queued = List<List<u8>>()
-                    for m in waiting { put(mut t, m.copy()) }
+                    while t.queued.len() > 0 {
+                        let m = t.queued.remove(0)
+                        put(mut t, m)
+                    }
                 },
                 err(_) => {
                     end(mut server, mut t, 4005u16, String("the Noise handshake failed"))

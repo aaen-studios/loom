@@ -144,8 +144,12 @@ fn let_go(p: mut Peer) {
 // Sends a message to the phone, sealed.
 fn say(server: Server, p: mut Peer, message: List<u8>) {
     if let t = mut p.t {
-        for piece in noise.seal(mut t, message) {
+        var from: usize = 0
+        loop {
+            let (piece, next) = noise.seal_at(mut t, message, from)
             _ = server.send_binary(p.socket, piece)
+            if next >= message.len() { break }
+            from = next
         }
     }
 }
@@ -260,6 +264,6 @@ fn relay(server: mut Server, p: mut Peer) {
     }
     p.calls = waiting
     for a in answers {
-        say(server, mut p, a.copy())
+        say(server, mut p, a)
     }
 }

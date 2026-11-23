@@ -230,12 +230,12 @@ pub fn serve_inside() ! Error {
         }
         var at: usize = 0
         while pending.len() - at >= 9 {
-            let len = usize(bytes.u32_be(pending.copy(), at + 5))
+            let len = usize(bytes.u32_be(pending, at + 5))
             if pending.len() - at - 9 < len { break }
             let kind = pending[at]
-            let conn = Conn.from_id(bytes.u32_be(pending.copy(), at + 1))
+            let conn = Conn.from_id(bytes.u32_be(pending, at + 1))
             if kind == DATA {
-                net.write(conn, pending[at + 9..at + 9 + len].copy())
+                net.write(conn, pending[at + 9..at + 9 + len])
             } else if kind == CLOSE {
                 net.close(conn)
             }
@@ -595,11 +595,11 @@ impl Task for Keeper {
             // Its frames.
             var at: usize = 0
             while input.len() - at >= 9 {
-                let len = usize(bytes.u32_be(input.copy(), at + 5))
+                let len = usize(bytes.u32_be(input, at + 5))
                 if input.len() - at - 9 < len { break }
                 let kind = input[at]
-                let id = bytes.u32_be(input.copy(), at + 1)
-                let data = input[at + 9..at + 9 + len].copy()
+                let id = bytes.u32_be(input, at + 1)
+                let data = input[at + 9..at + 9 + len]
                 at += 9 + len
                 let key = chan_key(id)
                 if kind == OPEN {
