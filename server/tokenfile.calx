@@ -1,0 +1,248 @@
+module server.tokenfile
+
+// A token loom saves to a file on its computer for its person, as an agent
+// asked and the person allowed (PLAN.md, "Scripts"; protocol.md,
+// `token.make_to_file`). The agent names the path and never sees the token:
+// loom makes it, writes it here, and answers "Saved to <path>".
+//
+// The path is absolute and goes straight to the file: no `..`, no link at the
+// file or at any folder on the way, nothing inside loom's own data folder, and
+// no file already there unless the person said to write over it. The file is
+// new and only its owner's to read (0o600) from the moment it exists, written
+// whole or not at all. On Windows, where only the owner's write bit counts,
+// it takes its folder's permissions, as every file made there does.
+import std.bytes
+import std.crypto.{random_bytes}
+import std.env.{os}
+import std.fs
+import std.fs.{FsError, Kind}
+import std.path
+
+const MODE: u32 = 0o600
+
+// `p` as it's compared: normalised, with `/` between names, without one at
+// the end, and in one case on Windows, whose names are the same in any case.
+fn key(p: String) -> String {
+    var k = path.normalize(p).replace("\\", "/")
+    while k.len() > 1 and k.ends_with("/") { k = k[..k.len() - 1].copy() }
+    if os() == "windows" { k = k.to_lower_root() }
+    return k
+}
+
+// Whether `p` is `folder` or inside it.
+fn inside(p: String, folder: String) -> bool {
+    let a = key(p)
+    let b = key(folder)
+    if b.len() == 0 { return false }
+    return a == b or a.starts_with(if b.ends_with("/") { b.copy() } else { "{b}/" })
+}
+
+// Why `file` can't take a new token, or empty when it can: `data` is loom's
+// data folder, and `replace` whether the person said to write over a file
+// that's there. Checked when the agent asks, and again on the person's yes.
+pub fn refusal(file: String, data: String, replace: bool) -> String {
+    if file.trim().len() == 0 { return String("path is the absolute path of the file to save the token to, on loom's computer.") }
+    if not path.is_absolute(file.copy()) { return "{file} isn't an absolute path. Give the whole path, from {if os() == "windows" { "the drive" } else { "/" }}." }
+    let parts = path.parts(file.copy())
+    for p in parts {
+        if p == ".." { return "{file} goes back up with `..`. Give the path straight to the file." }
+    }
+    if parts.len() < 2 { return "{file} names no file." }
+    // Never inside loom's own data folder: its database, keys and the agents'
+    // folders. By the path as it's written, and once the folders on the way
+    // are known, by where it really is.
+    var datas = List<String>()
+    match fs.absolute(data.copy()) {
+        ok(d) => datas.push(d),
+        err(_) => datas.push(data.copy()),
+    }
+    match fs.real_path(data.copy()) {
+        ok(d) => datas.push(d),
+        err(_) => {},
+    }
+    let in_data = "{file} is inside loom's own data folder. Pick a place outside it."
+    for d in datas {
+        if inside(file.copy(), d.copy()) { return in_data.copy() }
+    }
+    // Every folder on the way is a folder, not a link.
+    var on_the_way = parts[0].copy()
+    for k in 1..parts.len() - 1 {
+        on_the_way = path.join(on_the_way, parts[k].copy())
+        match fs.kind(on_the_way.copy()) {
+            ok(some(Kind.Dir)) => {},
+            ok(some(Kind.Link)) => return "{on_the_way} is a link. Loom doesn't write through links: give the path it leads to.",
+            ok(some(_)) => return "{on_the_way} isn't a folder.",
+            ok(none) => return "There's no folder {on_the_way}. Make it first: loom only writes into a folder that's there.",
+            err(e) => return "Loom can't look at {on_the_way}: {e}.",
+        }
+    }
+    match fs.real_path(on_the_way.copy()) {
+        ok(real) => {
+            let really = path.join(real, parts[parts.len() - 1].copy())
+            for d in datas {
+                if inside(really.copy(), d.copy()) { return in_data.copy() }
+            }
+        },
+        err(e) => return "Loom can't look at {on_the_way}: {e}.",
+    }
+    match fs.kind(file.copy()) {
+        ok(none) => {},
+        ok(some(Kind.File)) => {
+            if not replace { return "There's a file at {file} already. With replace: true, loom writes over it." }
+        },
+        ok(some(Kind.Link)) => return "{file} is a link. Loom doesn't write through links: give the path it leads to.",
+        ok(some(Kind.Dir)) => return "{file} is a folder. Give the path of the file in it.",
+        ok(some(_)) => return "{file} isn't a file.",
+        err(e) => return "Loom can't look at {file}: {e}.",
+    }
+    return String()
+}
+
+// What a failed write says: who couldn't write where, or why not.
+fn failed(e: FsError, file: String, folder: String) -> String {
+    if e == FsError.Denied { return "Loom can't write in {folder}: the user it runs as isn't allowed to. Nothing was saved." }
+    if e == FsError.Exists { return "There's a file at {file} already. With replace: true, loom writes over it." }
+    return "Loom couldn't save {file}: {e}. Nothing was saved."
+}
+
+// Makes `file` anew with `text`, only its owner's to read, and synced to the
+// disk: no file there, a link included, or it's refused. A write that fails
+// leaves nothing.
+fn make(file: String, text: String, folder: String) -> String {
+    let f = match fs.create_new(file.copy(), MODE) {
+        ok(f) => f,
+        err(e) => return failed(e, file, folder),
+    }
+    let parts: List<(u64, List<u8>)> = [(0u64, text.to_bytes())]
+    var why = String()
+    match f.write_parts(parts, true) {
+        ok => {},
+        err(e) => {
+            why = failed(e, file.copy(), folder.copy())
+        },
+    }
+    match f.close() {
+        ok => {},
+        err(e) => {
+            if why.len() == 0 { why = failed(e, file.copy(), folder.copy()) }
+        },
+    }
+    if why.len() > 0 {
+        match fs.remove_file(file) {
+            ok => {},
+            err(_) => {},
+        }
+    }
+    return why
+}
+
+// Saves `text` to `file`, which `refusal` passed: a new file, or with
+// `replace`, one that takes the old one's place whole, written beside it
+// and moved over it. Empty once it's saved, or why it wasn't, with nothing
+// left behind.
+pub fn save(file: String, text: String, replace: bool) -> String {
+    let folder = path.parent_dir(file.copy()) ?? String()
+    let name = path.file_name(file.copy()) ?? String()
+    if not replace { return make(file, text, folder) }
+    let beside = path.join(folder.copy(), ".{name}.loom-{bytes.hex(random_bytes(6))}")
+    let why = make(beside.copy(), text, folder.copy())
+    if why.len() > 0 { return why }
+    // Still a file, or nothing, where it goes: a link or a folder put there
+    // since isn't written over.
+    var moved = String()
+    match fs.kind(file.copy()) {
+        ok(none) => {},
+        ok(some(Kind.File)) => {},
+        ok(some(_)) => {
+            moved = "{file} isn't a file any more. Nothing was saved."
+        },
+        err(e) => {
+            moved = "Loom can't look at {file}: {e}. Nothing was saved."
+        },
+    }
+    if moved.len() == 0 {
+        match fs.rename_synced(beside.copy(), file.copy()) {
+            ok => return String(),
+            err(e) => {
+                moved = failed(e, file.copy(), folder.copy())
+            },
+        }
+    }
+    match fs.remove_file(beside) {
+        ok => {},
+        err(_) => {},
+    }
+    return moved
+}
+
+@test
+fn paths_that_go_anywhere_but_straight_to_a_new_file_outside_the_data_folder_are_refused() {
+    let dir = fs.temp_dir()!
+    let data = "{dir}/data"
+    fs.make_dir_all("{data}/agents/a_1")!
+    fs.make_dir_all("{dir}/out")!
+    assert(refusal(String("token.txt"), data.copy(), false).contains("isn't an absolute path"))
+    assert(refusal(String(""), data.copy(), false).contains("absolute path"))
+    assert(refusal("{dir}/out/../data/t", data.copy(), false).contains("`..`"))
+    assert(refusal("{data}/t", data.copy(), false).contains("data folder"))
+    assert(refusal("{data}/agents/a_1/t", data.copy(), true).contains("data folder"))
+    assert(refusal(data.copy(), data.copy(), true).contains("data folder"))
+    assert(refusal("{dir}/nowhere/t", data.copy(), false).contains("There's no folder"))
+    assert(refusal("{dir}/out", data.copy(), true).contains("is a folder"))
+    assert(refusal("{dir}/out/t", data.copy(), false) == "")
+    fs.write_text("{dir}/out/t", String("old"))!
+    assert(refusal("{dir}/out/t", data.copy(), false).contains("already"))
+    assert(refusal("{dir}/out/t", data.copy(), true) == "")
+    assert(refusal("{dir}/out/t/x", data.copy(), true).contains("isn't a folder"))
+    // A data folder named by a path with a link in it is still the data folder.
+    match fs.make_link("{dir}/data", "{dir}/data_link") {
+        ok => {
+            assert(refusal("{dir}/data_link/t", "{dir}/data_link", true).contains("data folder"))
+            assert(refusal("{data}/t", "{dir}/data_link", true).contains("data folder"))
+            fs.make_link("{dir}/out/t", "{dir}/out/to_t")!
+            assert(refusal("{dir}/out/to_t", data.copy(), true).contains("is a link"))
+            fs.make_link("{dir}/gone", "{dir}/out/dangling")!
+            assert(refusal("{dir}/out/dangling", data.copy(), true).contains("is a link"))
+            fs.make_link("{dir}/out", "{dir}/out_link")!
+            assert(refusal("{dir}/out_link/new", data.copy(), true).contains("is a link"))
+        },
+        err(_) => println("links can't be made here, so links weren't tried"),
+    }
+    fs.remove_dir_all(dir)!
+}
+
+@test
+fn a_token_is_saved_whole_only_its_owners_and_never_over_a_file_unless_asked() {
+    let dir = fs.temp_dir()!
+    let file = "{dir}/token"
+    assert(save(file.copy(), String("loom-status-1"), false) == "")
+    assert(fs.read_text(file.copy())! == some(String("loom-status-1")))
+    if os() != "windows" { assert(fs.metadata(file.copy())!.mode & 0o777 == MODE) }
+    assert(save(file.copy(), String("loom-status-2"), false).contains("already"))
+    assert(fs.read_text(file.copy())! == some(String("loom-status-1")))
+    if os() != "windows" { fs.set_mode(file.copy(), 0o644)! }
+    assert(save(file.copy(), String("loom-status-3"), true) == "")
+    assert(fs.read_text(file.copy())! == some(String("loom-status-3")))
+    if os() != "windows" { assert(fs.metadata(file.copy())!.mode & 0o777 == MODE) }
+    // Nothing is left beside it.
+    assert(fs.list(dir.copy())! == [String("token")])
+    // A folder loom's user can't write in says so, and leaves nothing.
+    if os() != "windows" {
+        fs.make_dir("{dir}/shut")!
+        fs.set_mode("{dir}/shut", 0o500)!
+        match fs.create_new("{dir}/shut/probe", MODE) {
+            ok(f) => {
+                // Run as root, which writes anywhere.
+                f.close()!
+                fs.remove_file("{dir}/shut/probe")!
+            },
+            err(_) => {
+                assert(save("{dir}/shut/t", String("x"), false).contains("isn't allowed"))
+                assert(save("{dir}/shut/t", String("x"), true).contains("isn't allowed"))
+                assert(fs.list("{dir}/shut")!.len() == 0)
+            },
+        }
+        fs.set_mode("{dir}/shut", 0o700)!
+    }
+    fs.remove_dir_all(dir)!
+}

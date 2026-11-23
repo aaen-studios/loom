@@ -1,0 +1,243 @@
+module tests.protocol.token_file
+
+// A token an agent has saved to a file (protocol.md, `token.make_to_file`):
+// the agent names a path on loom's computer, the person says yes on one of
+// their devices, and loom makes a status token and writes it there, only its
+// owner's to read, telling the agent only where it went. The token is never
+// in the agent's tools, the chat, the activity log, the events, the server's
+// output or the database. Without a yes, or with a no, nothing is made, a
+// script can't say yes, and paths that aren't straight to a new file outside
+// loom's data folder are refused, when the agent asks and again on the yes.
+//
+//     calx tests/protocol/token_file.calx
+import std.env.{os}
+import std.fs
+import std.http.{Header, get, post}
+import std.json.{Json}
+import std.process.{Stdio, exit}
+import std.text.utf8.{decode_lossy}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check, loom}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+// `/mcp run_command token.make_to_file` with these args, as the agent's message.
+fn make_to_file(kind: str, path: String, replace: bool) -> String {
+    let args = Obj.new().s("kind", String(kind)).s("path", path).b("replace", replace).done()
+    return "/mcp run_command {Obj.new().s("name", String("token.make_to_file")).j("args", args).done()}"
+}
+
+fn say(app: Session, conversation: String, cid: String, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation).s("text", text).done())
+}
+
+// How many approvals the app has been asked for so far.
+fn asked(app: Session) -> usize {
+    var n: usize = 0
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("approval.needed")) { n += 1 }
+    }
+    return n
+}
+
+// GET /api/scripts/status with `token`: its status.
+fn status_with(base: String, token: String) -> u32 ! Error {
+    var req = get("http://{base}/api/scripts/status", [Header { name: String("Authorization"), value: "Bearer {token}" }], 30000, 1048576)
+    return (try req.wait()).status
+}
+
+// The text of what's in `file`, or empty when there's nothing.
+fn read(file: String) -> String {
+    return match fs.read_text(file) {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+}
+
+// The instance as tests.kit starts it, with what it writes to standard error
+// going with its output, so the test reads both.
+fn start() -> Instance ! Error {
+    let data = try fs.temp_dir()
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let cmd = loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).stderr(Stdio.Stdout)
+    return try Instance.launch(data, cmd)
+}
+
+fn run(i: Instance, out: String) ! Error {
+    var logs = List<u8>()
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Ada")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let ada = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", ada.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    let file = "{out}/status-token"
+
+    // --- Refused when the agent asks, with nothing asked of the person ---
+    try fs.write_text("{out}/taken", String("someone's file"))
+    var n = 0
+    for (kind, path, replace, why) in [("status", String("status-token"), false, "absolute"), ("status", "{i.data}/status-token", true, "data folder"), ("status", "{i.data}/agents/status-token", true, "data folder"), ("status", "{out}/sub/../status-token", false, "`..`"), ("status", "{out}/nowhere/status-token", false, "no folder"), ("status", "{out}/taken", false, "already"), ("status", out.copy(), true, "folder"), ("scripts", file.copy(), false, "Only a status token"), ("admin", file.copy(), false, "kind is status")] {
+        n += 1
+        try say(app, chat.copy(), "m_{n}", make_to_file(kind, path.copy(), replace))
+        let said = try reply_in(mut app, chat.copy())
+        if not said.starts_with("run_command failed") or not said.contains(why) { fail "{kind} {path}: {said}" }
+    }
+    try check(asked(app) == 0 and read("{out}/taken") == "someone's file" and not fs.exists(file.copy()), "a relative path, the data folder, `..`, a missing folder, a file that's there, a folder and other kinds are refused at once, asking no one")
+    match fs.make_link("{out}/taken", "{out}/link") {
+        ok => {
+            try fs.make_dir("{out}/real")
+            try fs.make_link("{out}/real", "{out}/folder_link")
+            try say(app, chat.copy(), String("m_link"), make_to_file("status", "{out}/link", true))
+            let at_link = try reply_in(mut app, chat.copy())
+            try say(app, chat.copy(), String("m_link2"), make_to_file("status", "{out}/folder_link/status-token", false))
+            let through = try reply_in(mut app, chat.copy())
+            try check(at_link.contains("is a link") and through.contains("is a link") and read("{out}/taken") == "someone's file" and not fs.exists("{out}/real/status-token"), "and so are a link, and a folder that's a link")
+        },
+        err(_) => println("skip  links can't be made here, so a link wasn't tried"),
+    }
+
+    // --- Asks the person, every time; nothing happens until they say yes ---
+    try say(app, chat.copy(), String("m_ask"), make_to_file("status", file.copy(), false))
+    let card = try app.until("event", "approval.needed")
+    let call = str_at(card.copy(), "call") ?? String()
+    let title = str_at(card.copy(), "title") ?? String()
+    try check(title == "Save a new status token to {file}, as Ada asks" and bool_at(card.copy(), "can_always") == some(false) and str_at(at(card, "detail"), "path") == some(file.copy()), "the person is asked, with the kind, the exact path and the agent, and no always")
+    let none_yet = try app.cmd("q_3", "scripts.get", Obj.new().done())
+    try check(not fs.exists(file.copy()) and at(at(none_yet, "value"), "status_since") == Json.Null, "and nothing is made while it waits")
+    // A script can't say yes.
+    let script = str_at(at(try app.cmd("q_4", "scripts.on", Obj.new().done()), "value"), "token") ?? String()
+    let auth: List<Header> = [Header { name: String("Authorization"), value: "Bearer {script}" }]
+    var listed = get("http://{i.base}/api/scripts/approvals", auth.copy(), 30000, 1048576)
+    let waiting = try listed.wait()
+    var yes = post("http://{i.base}/api/scripts/approve", auth, "{Obj.new().s("call", call.copy()).b("allow", true).done()}".to_bytes(), 30000, 1048576)
+    let by_script = try yes.wait()
+    try check(by_script.status == 403 and (String.from_utf8(waiting.body) ?? String()).contains("\"on_a_device\":true") and not fs.exists(file.copy()), "a script can't say yes: it's answered on one of the person's devices")
+    _ = try app.cmd("q_5", "scripts.off", Obj.new().done())
+    try app.send(Obj.new().s("t", String("approve")).s("call", call).b("allow", false).done())
+    let told_no = try reply_in(mut app, chat.copy())
+    let after_no = try app.cmd("q_6", "scripts.get", Obj.new().done())
+    try check(told_no.contains("said no") and not fs.exists(file.copy()) and at(at(after_no, "value"), "status_since") == Json.Null, "a no makes nothing")
+
+    // --- A yes makes it, saved to the file, and the agent hears only where ---
+    try say(app, chat.copy(), String("m_yes"), make_to_file("status", file.copy(), false))
+    let card2 = try app.until("event", "approval.needed")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(card2, "call") ?? String()).b("allow", true).done())
+    let saved = try reply_in(mut app, chat.copy())
+    let token = read(file.copy())
+    try check(saved.contains("Saved to {file}.") and token.starts_with("loom-status-") and token.len() > 40, "a yes saves a new status token to the file, and the agent is told where it went")
+    if os() != "windows" { try check((try fs.metadata(file.copy())).mode & 0o777 == 0o600, "only its owner can read it") }
+    try check(try status_with(i.base.copy(), token.copy()) == 200, "the token reads the status, as a status token does")
+    let got = try app.cmd("q_7", "scripts.get", Obj.new().done())
+    try check(str_at(at(got.copy(), "value"), "status_path") == some(file.copy()) and str_at(at(got.copy(), "value"), "status_by") == some(String("Ada")) and int_at(at(got, "value"), "status_since") != none, "the server settings say where it was saved, and by which agent")
+
+    // --- Nowhere else ---
+    var leaks = List<String>()
+    if saved.contains(token.copy()) { leaks.push(String("the agent's reply")) }
+    for f in app.frames {
+        if "{f}".contains(token.copy()) { leaks.push(String("an event or result")) }
+    }
+    let history = try app.cmd("q_8", "messages.list", Obj.new().s("conversation", chat.copy()).i("limit", 100).done())
+    if "{history}".contains(token.copy()) { leaks.push(String("the chat's history")) }
+    let activity = try app.cmd("q_9", "activity.list", Obj.new().i("limit", 500).done())
+    if "{activity}".contains(token.copy()) { leaks.push(String("the activity log")) }
+    try check("{activity}".contains("Saved a new status token to"), "the activity log says it was saved, and where")
+    let csv = try app.cmd("q_10", "activity.export", Obj.new().done())
+    if "{csv}".contains(token.copy()) { leaks.push(String("the activity export")) }
+    logs.extend(i.server.read(500))
+    if decode_lossy(logs.copy(), 0, logs.len()).contains(token.copy()) { leaks.push(String("the server's output")) }
+    for name in ["loom.db", "loom.db-wal"] {
+        let p = "{i.data}/{name}"
+        if fs.exists(p.copy()) {
+            let kept = try fs.read(p)
+            if decode_lossy(kept.copy(), 0, kept.len()).contains(token.copy()) { leaks.push("the database's {name}") }
+        }
+    }
+    if leaks.len() > 0 { fail "the token is in {leaks}" }
+    try check(true, "and it's nowhere else: not the reply, the events, the history, the activity log, the server's output or the database")
+
+    // --- One they have is ended only with replace ---
+    try say(app, chat.copy(), String("m_again"), make_to_file("status", "{out}/second", false))
+    let again = try reply_in(mut app, chat.copy())
+    try check(again.contains("has a status token already") and not fs.exists("{out}/second"), "without replace, the person's token isn't ended")
+    // A path that was fine when asked is refused on the yes if it changed since.
+    let before = asked(app)
+    try say(app, chat.copy(), String("m_later"), make_to_file("status", "{out}/later", true))
+    let card3 = try app.until("event", "approval.needed")
+    try fs.make_dir("{out}/later")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(card3, "call") ?? String()).b("allow", true).done())
+    let changed = try reply_in(mut app, chat.copy())
+    try check(asked(app) == before + 1 and changed.contains("is a folder") and try status_with(i.base.copy(), token.copy()) == 200, "a path that changed before the yes is refused then, and the token stays")
+    try say(app, chat.copy(), String("m_replace"), make_to_file("status", file.copy(), true))
+    let card4 = try app.until("event", "approval.needed")
+    try check(str_at(card4.copy(), "title") == some("Save a new status token to {file}, as Ada asks, ending the status token you have and writing over the file there"), "with replace, the person is told it ends their token and writes over the file")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(card4, "call") ?? String()).b("allow", true).done())
+    let replaced = try reply_in(mut app, chat.copy())
+    let fresh = read(file.copy())
+    try check(replaced.contains("Saved to {file}.") and fresh.starts_with("loom-status-") and fresh != token and try status_with(i.base.copy(), token.copy()) == 401 and try status_with(i.base.copy(), fresh.copy()) == 200, "a yes writes the new one over the file, and the old token ends")
+    if os() != "windows" { try check((try fs.metadata(file.copy())).mode & 0o777 == 0o600, "still only its owner's") }
+    var left = List<String>()
+    for name in try fs.list(out.copy()) {
+        if name.starts_with(".") { left.push(name.copy()) }
+    }
+    try check(left.len() == 0, "and nothing is left beside it")
+
+    // --- A folder loom's user can't write in ---
+    if os() != "windows" {
+        try fs.make_dir("{out}/shut")
+        try fs.set_mode("{out}/shut", 0o500)
+        let root = match fs.create_new("{out}/shut/probe", 0o600) {
+            ok(f) => {
+                try f.close()
+                try fs.remove_file("{out}/shut/probe")
+                true
+            },
+            err(_) => false,
+        }
+        if root {
+            println("skip  run as root, which writes anywhere, so an unwritable folder wasn't tried")
+        } else {
+            try say(app, chat.copy(), String("m_shut"), make_to_file("status", "{out}/shut/status-token", true))
+            let card5 = try app.until("event", "approval.needed")
+            try app.send(Obj.new().s("t", String("approve")).s("call", str_at(card5, "call") ?? String()).b("allow", true).done())
+            let shut = try reply_in(mut app, chat.copy())
+            try check(shut.contains("can't write in") and (try fs.list("{out}/shut")).len() == 0 and try status_with(i.base.copy(), fresh.copy()) == 200, "a folder loom's user can't write in says so, leaves nothing, and keeps the token")
+        }
+        try fs.set_mode("{out}/shut", 0o700)
+    } else {
+        println("skip  Windows has no folder its user can't write in by mode, so an unwritable folder wasn't tried")
+    }
+
+    // --- Revoke, as usual ---
+    _ = try app.cmd("q_11", "scripts.status_off", Obj.new().done())
+    let gone = try app.cmd("q_12", "scripts.get", Obj.new().done())
+    try check(try status_with(i.base.copy(), fresh) == 401 and at(at(gone.copy(), "value"), "status_since") == Json.Null and str_at(at(gone, "value"), "status_path") == some(String()), "Revoke ends it")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try start()
+    let out = try fs.temp_dir()
+    let failure: String? = match run(inst.copy(), out.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    match fs.remove_dir_all(out) {
+        ok => {},
+        err(_) => {},
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ntoken_file: all good")
+}

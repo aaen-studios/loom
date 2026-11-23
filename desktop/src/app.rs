@@ -3313,11 +3313,17 @@ ACTA_KEY=secret:ACTA_KEY",
                         cx.notify();
                     })),
             );
+            // One an agent had saved to a file says where, and which agent asked.
+            let about = match &self.model.status_saved {
+                Some((path, by)) if made && by.is_empty() => format!("Saved to {path}"),
+                Some((path, by)) if made => format!("Saved to {path} by {by}"),
+                _ => "Only reads your agents and routines".to_string(),
+            };
             rows.push(
                 self.row(
                     None,
                     "Status token",
-                    Some("Only reads your agents and routines".into()),
+                    Some(about),
                     Some(control.into_any_element()),
                 )
                 .into_any_element(),
