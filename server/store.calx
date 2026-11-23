@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS activity (
     status TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '',
     ended INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS activity_by_agent ON activity (user, agent, id);
+CREATE INDEX IF NOT EXISTS activity_by_user ON activity (user, id);
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -350,11 +351,20 @@ impl Store {
 
     // Opens (or makes) the database at `path`. `hasher` hashes passwords;
     // tests pass a cheap one.
+    // This connection stops checkpointing by itself: the instance's loop has
+    // server/checkpoint.calx do it on another thread.
+    pub fn checkpoint_elsewhere(self) ! Error {
+        try self.db.execute_script(String("PRAGMA wal_autocheckpoint = 0;"))
+    }
+
     pub fn open(path: String, hasher: PasswordHasher) -> Store ! Error {
         // The key sits beside the database; one in memory gets a key of its own.
         let sealer = if path == ":memory:" { XChaCha20Poly1305.new(XChaCha20Poly1305.generate_key()) } else { try secret_key(if let cut = path.replace("\\", "/").find_last("/") { path[..cut].copy() } else { String(".") }) }
         let db = try Database.open(path)
-        try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;"))
+        // A page cache of up to 64 MB, rather than SQLite's 2 MB: a snapshot or an export reads
+        // a few MB, which a small cache fetched from the system again each time. And the
+        // write-ahead log goes back to 64 MB after a burst.
+        try db.execute_script(String("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA cache_size = -65536; PRAGMA journal_size_limit = 67108864;"))
         try db.execute_script(String(SCHEMA))
         let s = Store { db: db, hasher: hasher, sealer: sealer }
         // An activity log from before actions were recorded gets their columns.
