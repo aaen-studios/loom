@@ -477,8 +477,8 @@ impl Conn {
     /// A delta: goes to the app when it adds to what's there, is dropped when it's there
     /// already, and a gap means something was lost, so the connection starts again.
     fn delta(mut self, f: Json, text: own String) {
-        let key = "{str_at(f.copy(), "message") ?? String()}/{int_at(f.copy(), "block") ?? 0}"
-        let pos = usize.try_from(int_at(f.copy(), "pos") ?? 0) ?? 0
+        let key = "{str_at(f, "message") ?? String()}/{int_at(f, "block") ?? 0}"
+        let pos = usize.try_from(int_at(f, "pos") ?? 0) ?? 0
         let piece = str_at(f, "text") ?? String()
         let have = self.have.get(key.copy()) ?? 0
         if pos > have {
