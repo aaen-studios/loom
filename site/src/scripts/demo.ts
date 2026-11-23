@@ -3,7 +3,8 @@
 // finishes. While the turn runs, one quiet line under the reply says the step it's on; once it's
 // done, its last words are the answer and the steps before them fold under one line that opens
 // (desktop/src/model.rs, parts). The moods, what the sidebar says after an agent's name on its
-// one line ("Thinking", the tool's title, "Wants to …") and the wording are the app's. Clicking
+// one line ("Thinking", the tool's title, "Wants to …"), or under the pointer on a pinned agent's
+// tile, and the wording are the app's. Clicking
 // Allow once, Always allow or Deny answers the approval; left alone, it's allowed after a moment.
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
@@ -47,7 +48,7 @@ export function play(app: HTMLElement) {
 	const threads = threadsIn(app);
 	yarnsIn(app);
 	const byAgent = new Map<string, Thread>();
-	for (const row of app.querySelectorAll<HTMLElement>('.agent')) {
+	for (const row of app.querySelectorAll<HTMLElement>('[data-agent]')) {
 		const svg = row.querySelector<SVGSVGElement>('svg[data-thread]')!;
 		const th = threads.find((t) => t.svg === svg);
 		if (th) byAgent.set(row.dataset.agent!, th);
@@ -58,10 +59,12 @@ export function play(app: HTMLElement) {
 	for (const reply of msgs.querySelectorAll<HTMLElement>('.reply')) foldOf(reply);
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const tpl = (id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
+	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.
 	const preview = (agent: string, text: string, mood: Mood) => {
-		const row = app.querySelector<HTMLElement>(`.agent[data-agent="${agent}"]`);
+		const row = app.querySelector<HTMLElement>(`[data-agent="${agent}"]`);
 		const p = row?.querySelector<HTMLElement>('.agent-preview');
 		if (p) p.textContent = text;
+		if (row?.classList.contains('tile')) row.title = text ? `${agent} · ${text}` : agent;
 		byAgent.get(agent)?.set(mood);
 	};
 

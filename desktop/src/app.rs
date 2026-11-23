@@ -5052,14 +5052,102 @@ ACTA_KEY=secret:ACTA_KEY",
         list
     }
 
+    /// A pinned agent atop the sidebar: a tile with its thread drawn large in its shape and
+    /// its name under it. It's what the agent's row would be: the thread moves as the agent
+    /// works, a dot shows a reply not seen yet, and what it's on shows under the pointer. A
+    /// click opens its chat, a right-click its menu, and it drags into a new place.
+    fn pinned_tile(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let selected =
+            self.model.selected.as_deref() == Some(a.id.as_str()) && self.screen == Screen::Chat;
+        let unread = self.model.unread.contains(&a.id);
+        let preview = self.model.preview(a);
+        let id = a.id.clone();
+        let bg = if selected { p.active } else { p.raised };
+        div()
+            .id(SharedString::from(format!("tile-{}", a.id)))
+            .relative()
+            .size(px(TILE))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(space::XS))
+            .px(px(space::S))
+            .rounded(px(radius::CARD))
+            .cursor_pointer()
+            .bg(bg)
+            .when(!selected, move |d| d.soft_hover(bg, p.raised_2, None))
+            .tooltip(tip_text(if preview.is_empty() {
+                a.name.clone()
+            } else {
+                format!("{} · {preview}", a.name)
+            }))
+            .on_mouse_down(MouseButton::Right, {
+                let id = id.clone();
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.agent_menu_at(id.clone(), e.position, cx);
+                })
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+            .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
+            .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.raised_2))
+            .on_drop(self.drop_agent(&a.id, cx))
+            // The same key as its row's would be, so pinning or unpinning it while it
+            // works carries on its motion.
+            .child(thread::strand_in(
+                format!("side-{}", a.id),
+                self.model.mood(&a.id),
+                thread::color(&a.color, p.dark),
+                a.outline(),
+                TILE_THREAD,
+                16.0,
+                self.model.finished_at(&a.id),
+            ))
+            .child(
+                div()
+                    .w_full()
+                    .text_center()
+                    .text_size(px(size::SMALL))
+                    .font_weight(if unread {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
+                    .text_color(if selected || unread { p.ink } else { p.ink_2 })
+                    .truncate()
+                    .child(a.name.clone()),
+            )
+            .when(unread, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(space::S))
+                        .right(px(space::S))
+                        .size(px(6.0))
+                        .rounded_full()
+                        .bg(p.ink),
+                )
+            })
+    }
+
     /// The whole sidebar: the knot and the wordmark, the + and the collapse, search when
-    /// it's shown, the agents, and at the foot the server, the update icon and the gear.
+    /// it's shown, the pinned agents as tiles, the rest of them each on one line, and at
+    /// the foot the server, the update icon and the gear.
     fn whole_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
         let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        // The pinned agents, as tiles over the rest.
+        let mut tiles = Vec::new();
         let agents = self.model.agents.clone();
         for a in agents.iter() {
+            if a.pinned.is_some() {
+                tiles.push(self.pinned_tile(a, cx));
+                continue;
+            }
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
             let mood = self.model.mood(&a.id);
@@ -5142,16 +5230,24 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .child(preview),
                                 )
                             }),
-                    )
-                    .when(a.pinned.is_some(), |d| {
-                        d.child(
-                            div()
-                                .flex_none()
-                                .text_color(p.ink_3)
-                                .child(Icon::new(Ico::Pin).xsmall()),
-                        )
-                    }),
+                    ),
             );
+        }
+        if !tiles.is_empty() {
+            list = div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .justify_center()
+                        .gap(px(space::XS))
+                        .px(px(space::S))
+                        .children(tiles),
+                )
+                .child(list);
         }
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
@@ -15505,6 +15601,10 @@ pub(crate) const CHAT_LEAST: f32 = 420.0;
 
 /// An agent's square on the rail, and the + over them.
 const RAIL_ROW: f32 = 40.0;
+/// A pinned agent's tile: three across the sidebar, inside its sides, a little apart.
+const TILE: f32 = ((layout::SIDEBAR - 2.0 * space::S - 2.0 * space::XS) / 3.0) as i32 as f32;
+/// The box a tile draws the agent's thread in.
+const TILE_THREAD: (f32, f32) = (52.0, 36.0);
 /// The key the folded rail keeps the pointer's being on it under.
 const RAIL_HOVER: &str = "rail-hover";
 

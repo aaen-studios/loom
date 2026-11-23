@@ -458,6 +458,7 @@ fn shape_points(
     k: f32,
     t: f32,
     since_snap: f32,
+    room: f32,
 ) -> Vec<(f32, f32)> {
     let n = base.len();
     let mut along = vec![0.0f32; n];
@@ -466,7 +467,6 @@ fn shape_points(
         along[i] = along[i - 1] + ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
     }
     let len = along[n - 1].max(1.0);
-    let room = SHAPE_ROOM;
     // A failed thread hangs: its far end lowest, whichever way the shape goes there.
     let failed = weight(Mood::Failed, from, to, k);
     let push = |mood: Mood, u: f32| {
@@ -505,11 +505,27 @@ pub fn strand(
     h: f32,
     snapped: Option<Instant>,
 ) -> AnyElement {
+    strand_in(key, mood, tint, pts, (w, STRAND_H), h, snapped)
+}
+
+/// An agent's thread in a box `size` wide and high: a row's (`strand`), or a pinned
+/// agent's tile, where it's drawn large. A box taller than a row's draws the thread
+/// thicker, and lets its moods bend it as much more as the box is taller.
+pub fn strand_in(
+    key: impl Into<SharedString>,
+    mood: Mood,
+    tint: Hsla,
+    pts: Option<&[(f32, f32)]>,
+    size: (f32, f32),
+    h: f32,
+    snapped: Option<Instant>,
+) -> AnyElement {
     let key = key.into();
+    let (w, box_h) = size;
     let Some(pts) = pts.filter(|p| p.len() > 1) else {
         return div()
             .w(px(w))
-            .h(px(STRAND_H))
+            .h(px(box_h))
             .flex_none()
             .flex()
             .items_center()
@@ -517,7 +533,12 @@ pub fn strand(
             .into_any_element();
     };
     let pts = finer(pts);
-    let stroke = thread_stroke::SMALL;
+    let stroke = if box_h > STRAND_H {
+        thread_stroke::LARGE
+    } else {
+        thread_stroke::SMALL
+    };
+    let room = SHAPE_ROOM * (box_h / STRAND_H).max(1.0);
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -537,7 +558,7 @@ pub fn strand(
                 sx = sx.max(x.abs());
                 sy = sy.max(y.abs());
             }
-            let pad = 2.0 * stroke + SHAPE_ROOM;
+            let pad = 2.0 * stroke + room;
             let scale = ((bw - pad) / (2.0 * sx.max(0.1))).min((bh - pad) / (2.0 * sy.max(0.1)));
             let base: Vec<(f32, f32)> = pts
                 .iter()
@@ -547,7 +568,7 @@ pub fn strand(
                 .map(|at| at.elapsed().as_secs_f32())
                 .unwrap_or(f32::MAX);
             let mut pb = PathBuilder::stroke(px(stroke));
-            for (i, (x, y)) in shape_points(&base, from, to, k, t, since_snap)
+            for (i, (x, y)) in shape_points(&base, from, to, k, t, since_snap, room)
                 .into_iter()
                 .enumerate()
             {
@@ -564,7 +585,7 @@ pub fn strand(
         },
     )
     .w(px(w))
-    .h(px(STRAND_H))
+    .h(px(box_h))
     .flex_none()
     .into_any_element()
 }
@@ -802,7 +823,7 @@ fn weave_layer(
 
 #[cfg(test)]
 mod tests {
-    use super::{bend, color, hex, wheel_hex, wheel_pick, wheel_place, WHEEL_FULL};
+    use super::{bend, color, hex, wheel_hex, wheel_pick, wheel_place, SHAPE_ROOM, WHEEL_FULL};
     use crate::model::Mood;
 
     const MOODS: [Mood; 6] = [
@@ -856,7 +877,8 @@ mod tests {
                 .collect();
             for mood in MOODS {
                 for t in [0.0, 1.3, 2.7, 4.1] {
-                    let moved = super::shape_points(&base, mood, mood, 1.0, t, f32::MAX);
+                    let moved =
+                        super::shape_points(&base, mood, mood, 1.0, t, f32::MAX, SHAPE_ROOM);
                     assert_eq!(moved.len(), base.len());
                     for w in moved.windows(2) {
                         let d = ((w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).sqrt();
