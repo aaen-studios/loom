@@ -940,6 +940,16 @@ impl Store {
         return out
     }
 
+    // `user`'s agents on `program` whose options aren't `options` (JSON text),
+    // found without reading every agent: what a new session's options change.
+    pub fn agents_to_tell(self, user: String, program: String, options: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM agents WHERE user = ? AND deleted = 0 AND json_extract(json, '$.acp_agent') = ? AND json_extract(json, '$.options') IS NOT json(?) ORDER BY rowid"), [t(user), t(program), t(options)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
     pub fn delete_agent(self, user: String, id: String) ! Error {
         _ = try self.db.execute(String("UPDATE agents SET deleted = 1 WHERE id = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         // Its own rules go with it.
@@ -968,6 +978,14 @@ impl Store {
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
         let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(conversation_of(r))
+    }
+
+    // The conversation of `user`'s newest turn that wasn't a routine's: the
+    // chat they last wrote in, most likely.
+    pub fn last_chat(self, user: String) -> Json? ! Error {
+        let row = try self.db.query_one(String("SELECT r.conversation FROM runs r JOIN conversations c ON c.id = r.conversation WHERE r.user = ? AND r.routine = '' AND c.deleted = 0 ORDER BY r.rowid DESC LIMIT 1"), [t(user.copy())])
+        let r = row else return none
+        return try self.conversation(user, text(r[0].copy()))
     }
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {

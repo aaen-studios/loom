@@ -363,7 +363,7 @@ fn serve(a: Args) ! Error {
         exit(2)
     }
     let source = if a.release.len() > 0 { update.Source { manifest: a.release.copy(), key: a.release_key.copy() } } else { update.Source.official() }
-    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false }
+    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false, mcp: String() }
     var i = try open_waiting(config)
     if a.backups.len() > 0 {
         // Backups inside the instance's folder would go into the next one.

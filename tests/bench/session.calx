@@ -1,0 +1,251 @@
+module tests.bench.session
+
+// Times what comes before an agent's first word: starting its program, a new
+// session, the first message after the person's app connects, and Code Mode's
+// scripts and `loom mcp` itself. It builds the server and the fake agent with
+// --release, starts the server in a folder of its own, and says how long each
+// part took, as the median of its rounds.
+//
+//     calx run --release tests/bench/session.calx -- [ROUNDS] [--deno PATH]
+//
+// ROUNDS (10 by default) is how many times each part runs. --deno gives a Deno
+// of codemode.DENO_VERSION to copy into the instance, so the scripts don't wait
+// for it to be fetched.
+import std.env
+import std.fs
+import std.json.{Json}
+import std.stats
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, post_json, reply_text}
+import server.codemode
+import tests.kit.{calx, device, remove_scratch}
+
+const WAIT: u64 = 600000
+
+fn ms(a: Instant, b: Instant) -> f64 {
+    return f64.nearest(b.nanos_since(a)) / 1000000.0
+}
+
+fn cpu_ms(c: Child) -> f64 {
+    let u = unsafe { c.usage() }
+    return f64.nearest(u.cpu_ns) / 1000000.0
+}
+
+fn median(list: List<f64>) -> f64 {
+    return stats.median(list) ?? 0.0
+}
+
+fn shown(list: List<f64>) -> String {
+    var parts = List<String>()
+    for v in list { parts.push("{v:.1}") }
+    return parts.join(" ")
+}
+
+fn new_agent(app: mut Session, name: String) -> (String, String) ! Error {
+    let made = try app.cmd("a", "agent.create", Obj.new().s("name", name).s("acp_agent", String("fake")).s("instructions", String("")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let conv = try app.cmd("c", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    return (agent, str_at(at(conv, "value"), "conversation") ?? String())
+}
+
+// Sends `text` and gives the ms to its first word and to its turn's end.
+fn timed(app: mut Session, conversation: String, cid: String, text: String) -> (f64, f64) ! Error {
+    let t0 = unsafe { Instant.now() }
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation).s("text", text).done())
+    _ = try app.until("delta", "", 120000)
+    let t1 = unsafe { Instant.now() }
+    _ = try app.until("event", "run.finished", 600000)
+    let t2 = unsafe { Instant.now() }
+    app.frames = List<Json>()
+    return (ms(t0, t1), ms(t0, t2))
+}
+
+// The agent's newest reply in `conversation`.
+fn reply_of(app: mut Session, conversation: String) -> String ! Error {
+    let page = try app.cmd("r", "messages.list", Obj.new().s("conversation", conversation).i("limit", 1).done())
+    if let Json.Array(list) = at(at(page, "value"), "messages") {
+        if list.len() > 0 { return reply_text(list[list.len() - 1].copy()) }
+    }
+    return String()
+}
+
+fn run(server: Child, base: String, token: String, rounds: i64, bin: String, small: String) ! Error {
+    var app = try Session.connect(base.copy(), token.copy(), 0)
+    var n: i64 = 0
+
+    // --- An agent's first message, its program not running ---
+    var cold_word = List<f64>()
+    var cold_end = List<f64>()
+    var last = String()
+    for r in 0..rounds {
+        n += 1
+        let (_, conversation) = try new_agent(mut app, "Cold {r}")
+        let (w, e) = try timed(mut app, conversation.copy(), "cold{r}", String("hi"))
+        cold_word.push(w)
+        cold_end.push(e)
+        last = conversation
+    }
+    println("cold       first word {median(cold_word):.1} ms, done {median(cold_end):.1} ms  [{shown(cold_word)}]")
+
+    // --- The first message after the person's app connects, its program stopped ---
+    var after_word = List<f64>()
+    for r in 0..rounds {
+        // Changing the program's settings stops its programs that aren't answering.
+        n += 1
+        _ = try app.cmd("s", "acp.settings", Obj.new().s("name", String("fake")).j("env", Obj.new().s("BENCH", "{r}").done()).done())
+        app.close()
+        app = try Session.connect(base.copy(), token.copy(), 0)
+        unsafe { sleep(1500000000) }
+        let (w, _) = try timed(mut app, last.copy(), "back{r}", String("hi"))
+        after_word.push(w)
+    }
+    println("connected  first word {median(after_word):.1} ms, 1.5 s after the app connected  [{shown(after_word)}]")
+
+    // --- New sessions, with 50 agents on the program ---
+    while n < 50 {
+        n += 1
+        _ = try new_agent(mut app, "Filler {n}")
+    }
+    n += 1
+    let (agent, warm) = try new_agent(mut app, String("Sessions"))
+    _ = try timed(mut app, warm.copy(), String("warm"), String("hi"))
+    // Server CPU over many turns, as Windows counts it in 15.6 ms ticks.
+    let many = rounds * 10
+    var fresh = List<f64>()
+    var chats = List<String>()
+    for _ in 0..many {
+        let conv = try app.cmd("n", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+        chats.push(str_at(at(conv, "value"), "conversation") ?? String())
+    }
+    let c0 = cpu_ms(server)
+    var j: i64 = 0
+    for conversation in chats {
+        j += 1
+        let (_, e) = try timed(mut app, conversation, "new{j}", String("hi"))
+        fresh.push(e)
+    }
+    let c1 = cpu_ms(server)
+    var kept = List<f64>()
+    for k in 0..many {
+        let (_, e) = try timed(mut app, warm.copy(), "same{k}", String("hi"))
+        kept.push(e)
+    }
+    let c2 = cpu_ms(server)
+    let m = f64.nearest(many)
+    println("sessions   a turn in a new session {median(fresh):.2} ms (server CPU {(c1 - c0) / m:.2} ms), in the same one {median(kept):.2} ms ({(c2 - c1) / m:.2} ms), 50 agents")
+
+    // --- Code Mode: scripts through the session's one loom mcp ---
+    n += 1
+    let (coder, coding) = try new_agent(mut app, String("Coder"))
+    // In ask, the default, the person says yes to each script first.
+    _ = try app.cmd("p", "agent.update", Obj.new().s("agent", coder).s("permission", String("auto")).done())
+    _ = try timed(mut app, coding.copy(), String("cm0"), String(#"/mcpkeep search_tools {"query":"notify"}"#))
+    var scripts = List<f64>()
+    for r in 0..rounds + 1 {
+        // A model takes a while to write each script.
+        unsafe { sleep(1000000000) }
+        let (_, e) = try timed(mut app, coding.copy(), "cm{r + 1}", "/mcpkeep run_code {Obj.new().s("code", "return {r} * 2;").done()}")
+        let said = try reply_of(mut app, coding.copy())
+        if not said.contains("Returned:\n{r * 2}") { fail "the script didn't run: {said}" }
+        scripts.push(e)
+    }
+    let first = scripts.remove(0)
+    println("code mode  first script {first:.1} ms, then {median(scripts):.1} ms, each a second after the last  [{shown(scripts)}]")
+    app.close()
+
+    // --- loom mcp, from its start to its answer to initialize ---
+    println("loom mcp   {try mcp_start(bin, rounds * 3):.1} ms the server's own program")
+    if small.len() > 0 { println("           {try mcp_start(small, rounds * 3):.1} ms the program of loom mcp alone (the desktop app's)") }
+}
+
+// The median ms from starting `program mcp` to its answer to initialize.
+fn mcp_start(program: String, times: i64) -> f64 ! Error {
+    var took = List<f64>()
+    for _ in 0..times {
+        let t0 = unsafe { Instant.now() }
+        var c = try Command.new(program.copy()).arg(String("mcp")).env(String("LOOM_URL"), String("http://127.0.0.1:9")).env(String("LOOM_MCP_TOKEN"), String("x")).env(String("LOOM_CODE_MODE"), String("1")).stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).spawn()
+        try c.write_text("\{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":\{\}\}\n")
+        if c.read_line(10000) == none { fail "{program} mcp didn't answer" }
+        took.push(ms(t0, unsafe { Instant.now() }))
+        c.close_input()
+        _ = c.wait()
+    }
+    return median(took)
+}
+
+fn build(source: str, out: String) ! Error {
+    let built = try Command.new(calx()).arg(String("build")).arg(String("--release")).arg(String(source)).arg(String("-o")).arg(out).output()
+    if not built.status.success() {
+        eprintln(built.error_text())
+        exit(1)
+    }
+}
+
+fn main() ! Error {
+    let args = env.args()
+    var rounds: i64 = 10
+    var deno = String()
+    var k: usize = 0
+    while k < args.len() {
+        if args[k] == "--deno" and k + 1 < args.len() {
+            deno = args[k + 1].copy()
+            k += 2
+            continue
+        }
+        rounds = i64.parse(args[k].copy()) ?? rounds
+        k += 1
+    }
+    let data = try fs.temp_dir()
+    let exe = if env.os() == "windows" { ".exe" } else { "" }
+    let bin = "{data}/loom-bench{exe}"
+    let fake = "{data}/fake-agent{exe}"
+    println("building the server and the fake agent (--release)")
+    try build("server/main.calx", bin.copy())
+    try build("tests/fake_agent/main.calx", fake.copy())
+    var small = String()
+    if fs.exists(String("server/mcp_main.calx")) {
+        small = "{data}/loom-mcp{exe}"
+        try build("server/mcp_main.calx", small.copy())
+    }
+    let home = "{data}/instance"
+    let added = try Command.new(bin.copy()).arg(String("acp")).arg(String("add")).arg(String("fake")).arg(fake).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    if deno.len() > 0 {
+        let folder = "{home}/acp/.deno/{codemode.DENO_VERSION}"
+        try fs.make_dir_all(folder.copy())
+        try fs.copy(deno, "{folder}/deno{exe}")
+    }
+    var server = try Command.new(bin.copy()).arg(String("serve")).arg(String("--port")).arg(String("0")).arg(String("--allow-root")).arg(String("--data")).arg(home.copy()).arg(String("--test-fast-hashes")).stdout(Stdio.Pipe).own_group().spawn()
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        server.kill()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill()
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("bench")).s("password", String("correct horse")).j("device", device("Bench")).done())
+    if status != 200 {
+        server.kill()
+        fail "setup failed: {owner}"
+    }
+    let failure: String? = match run(server, base, str_at(owner, "token") ?? String(), rounds, bin, small) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    // Stopped as the instance stops, so its agent programs and their loom mcp stop too.
+    server.stop()
+    if server.wait_timeout(10000) == none { server.kill() }
+    _ = server.wait()
+    remove_scratch(home)
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+}

@@ -51,6 +51,7 @@ module tests.fake_agent.main
 //     /image              sends back a small PNG
 //     /link PATH          sends back a link to the file at PATH (resource_link)
 //     /session            says its session id: "session ID"
+//     /uptime             says how long ago the program started: "up MS ms"
 //     /usage USED SIZE    reports its context as USED tokens of a SIZE window (usage_update)
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
@@ -69,6 +70,8 @@ module tests.fake_agent.main
 //                         arguments, and says "TOOL: RESULT", or "TOOL failed:
 //                         RESULT" for an error. /mcp list says the tools' names,
 //                         and /mcp hints each one's name and annotations, a line each
+//     /mcpkeep TOOL JSON  the same, through one loom mcp the session keeps, started
+//                         at its first /mcpkeep, as a real agent keeps its servers
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Diagnostics go to standard error.
@@ -134,8 +137,10 @@ pub enum Step {
     Image
     Link(String)
     Session
+    Uptime
     Context
     Mcp(String, String)
+    McpKeep(String, String)
     Env(String)
     Net(String)
     Servers
@@ -209,14 +214,16 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Crash)
         } else if word == "/files" {
             steps.push(Step.Files)
-        } else if word == "/mcp" {
+        } else if word == "/mcp" or word == "/mcpkeep" {
             let (tool, args) = match rest.find(" ") {
                 some(at) => (rest[..at].copy(), rest[at + 1..].copy()),
                 none => (rest.copy(), String(#"{}"#)),
             }
-            steps.push(Step.Mcp(tool, args))
+            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else { Step.McpKeep(tool, args) })
         } else if word == "/context" {
             steps.push(Step.Context)
+        } else if word == "/uptime" {
+            steps.push(Step.Uptime)
         } else if word == "/session" {
             steps.push(Step.Session)
         } else if word == "/servers" {
@@ -359,6 +366,10 @@ struct Agent {
     backlog: List<Json>
     // Each session's config options' values, by option id: "model" and "effort".
     config: Map<String, Map<String, String>>
+    // The loom mcp each session keeps for /mcpkeep, and its next request's id.
+    kept: Map<String, Child>
+    kept_id: i64
+    born: Instant    // when it started, for /uptime
 }
 
 // The config options a session offers (ACP's session config options): a model
@@ -634,6 +645,33 @@ impl Agent {
     // server the session was given, says initialize, then tools/call (or
     // tools/list for "list"). Gives what to say.
     fn call_loom(a: Agent, session: String, tool: String, args: String) -> String {
+        let child = match a.start_loom(session) {
+            ok(ch) => ch,
+            err(e) => return "{e}",
+        }
+        let said = a.talk_to(child, 2, tool.copy(), args)
+        child.kill()
+        return said
+    }
+
+    // The same through the loom mcp the session keeps, started and initialized
+    // at its first call.
+    fn call_kept(a: mut Agent, session: String, tool: String, args: String) -> String {
+        let child = match a.kept.remove(session.copy()) {
+            some(ch) => ch,
+            none => match a.start_loom(session.copy()) {
+                ok(ch) => ch,
+                err(e) => return "{e}",
+            },
+        }
+        a.kept_id += 1
+        let said = a.talk_to(child, a.kept_id, tool, args)
+        a.kept.insert(session.copy(), child)
+        return said
+    }
+
+    // Starts the loom mcp the session was given, and says initialize.
+    fn start_loom(a: Agent, session: String) -> Child ! Error {
         var found = Json.Null
         var servers = Json.Null
         if let s = a.mcp.find(session.copy()) { servers = s.copy() }
@@ -642,7 +680,7 @@ impl Agent {
                 if (s.get(String("name")) ?? Json.Null).as_str() == some(String("loom")) { found = s.copy() }
             }
         }
-        if found == Json.Null { return String("no loom MCP server in this session") }
+        if found == Json.Null { fail "no loom MCP server in this session" }
         var c = Command.new((found.get(String("command")) ?? Json.Null).as_str() ?? String())
         if let Json.Array(list) = found.get(String("args")) ?? Json.Null {
             for x in list {
@@ -656,20 +694,18 @@ impl Agent {
         }
         let child = match c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).spawn() {
             ok(ch) => ch,
-            err(e) => return "loom mcp didn't start: {e}",
+            err(e) => fail "loom mcp didn't start: {e}",
         }
-        let said = a.talk_to(child, tool.copy(), args)
-        child.kill()
-        return said
+        let init = String(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"#)
+        if let err(e) = child.write_text("{init}\n") { fail "loom mcp: {e}" }
+        if child.wait_for_line(String("\"id\":1"), 60000) == none { fail "loom mcp didn't answer initialize" }
+        let initialized = String(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+        if let err(e) = child.write_text("{initialized}\n") { fail "loom mcp: {e}" }
+        return child
     }
 
-    fn talk_to(a: Agent, child: Child, tool: String, args: String) -> String {
+    fn talk_to(a: Agent, child: Child, n: i64, tool: String, args: String) -> String {
         _ = a
-        let init = String(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"#)
-        if let err(e) = child.write_text("{init}\n") { return "loom mcp: {e}" }
-        if child.wait_for_line(String("\"id\":1"), 60000) == none { return String("loom mcp didn't answer initialize") }
-        let initialized = String(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
-        if let err(e) = child.write_text("{initialized}\n") { return "loom mcp: {e}" }
         let arguments = match parse(args.copy()) {
             ok(j) => j,
             err(_) => return "the arguments aren't JSON: {args}",
@@ -679,12 +715,12 @@ impl Agent {
         p.insert("arguments", arguments)
         var m = LinkedMap<String, Json>()
         m.insert("jsonrpc", js(String("2.0")))
-        m.insert("id", int(2))
+        m.insert("id", int(n))
         let listing = tool == "list" or tool == "hints"
         m.insert("method", js(if listing { String("tools/list") } else { String("tools/call") }))
         m.insert("params", Json.Object(p))
         if let err(e) = child.write_text("{Json.Object(m)}\n") { return "loom mcp: {e}" }
-        let line = child.wait_for_line(String("\"id\":2"), 300000) else return String("loom mcp didn't answer in 5 minutes")
+        let line = child.wait_for_line("\"id\":{n},", 300000) else return String("loom mcp didn't answer in 5 minutes")
         let answer = match parse(line) {
             ok(j) => j,
             err(_) => return String("loom mcp's answer isn't JSON"),
@@ -890,6 +926,7 @@ impl Agent {
                 },
                 Step.Files => chunk(session.copy(), "agent_message_chunk", if got.len() == 0 { String("no files") } else { got.join(", ") }),
                 Step.Session => chunk(session.copy(), "agent_message_chunk", "session {session}"),
+                Step.Uptime => chunk(session.copy(), "agent_message_chunk", "up {unsafe { Instant.now() }.nanos_since(a.born) / 1000000} ms"),
                 Step.Env(name) => chunk(session.copy(), "agent_message_chunk", "{name}={env.variable(name.copy()) ?? String()}"),
                 Step.Net(target) => chunk(session.copy(), "agent_message_chunk", reach(target)),
                 Step.Servers => chunk(session.copy(), "agent_message_chunk", a.servers(session.copy())),
@@ -911,6 +948,7 @@ impl Agent {
                 },
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
+                Step.McpKeep(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_kept(session.copy(), tool, args)),
                 Step.Link(path) => {
                     var content = LinkedMap<String, Json>()
                     content.insert("type", js(String("resource_link")))
@@ -1046,7 +1084,7 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     let given = env.args()
     let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() } }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)

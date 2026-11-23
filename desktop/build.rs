@@ -14,6 +14,34 @@ fn main() {
         out.join("libloomcore.a")
     };
     let calx = env::var("CALX").unwrap_or_else(|_| "calx".into());
+    // `loom mcp` alone, a small program of its own (server/mcp_main.calx), which the
+    // app carries and writes into its folder for the instance's agent sessions: it
+    // starts in half the time the app does (LOO-222).
+    let mcp = out.join(if cfg!(windows) {
+        "loom-mcp.exe"
+    } else {
+        "loom-mcp"
+    });
+    let mut build_mcp = Command::new(&calx);
+    build_mcp.current_dir(&root).arg("build");
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        build_mcp.arg("--release");
+    }
+    let built = build_mcp
+        .arg("server/mcp_main.calx")
+        .arg("-o")
+        .arg(&mcp)
+        .status()
+        .expect("calx isn't on PATH");
+    assert!(built.success(), "calx build server/mcp_main.calx failed");
+    let bytes = std::fs::read(&mcp).expect("the built loom mcp isn't there");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hash::hash(&bytes, &mut hasher);
+    println!("cargo:rustc-env=LOOM_MCP_PROGRAM={}", mcp.display());
+    println!(
+        "cargo:rustc-env=LOOM_MCP_HASH={:016x}",
+        std::hash::Hasher::finish(&hasher)
+    );
     let mut cmd = Command::new(calx);
     cmd.current_dir(&root).arg("build").arg("--staticlib");
     if env::var("PROFILE").as_deref() == Ok("release") {

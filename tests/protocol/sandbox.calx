@@ -95,7 +95,7 @@ const ADDS: str = #"
 // there. Its own words don't match what it looks for.
 const IN_THE_BOX: str = #"
 for p in /proc/[0-9]*; do
-  if tr '\000' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'run-[0-9]*[.]ts'; then
+  if tr '\000' ' ' < "$p/cmdline" 2>/dev/null | grep -q 'wait[.]js'; then
     if [ "$(cat "$p/cgroup")" = "$(cat /proc/1/cgroup)" ]; then echo same; else echo other; fi
     exit 0
   fi

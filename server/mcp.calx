@@ -146,7 +146,10 @@ struct Code {
     trouble: List<String>    // servers that didn't start, and why
     runs: i64
     warm: Request?    // loom's own tools, asked for as the session starts
-    folder: String    // the session's scripts, their prelude and Deno's cache, made at the first
+    folder: String    // the session's prelude and Deno's cache, made at the first
+    spare: Child?    // a Deno waiting for the next script (codemode.wait)
+    spare_at: Instant?    // when it started
+    done: Child?    // the last script's Deno, ended once its result has gone
 }
 
 // Starts one of the person's MCP servers and lists its tools.
@@ -230,6 +233,8 @@ impl Code {
     }
 
     fn search(self: mut Code, link: Link, args: Json) -> Json {
+        // A script is likely next: a Deno starts waiting for it.
+        self.ready_spare(link)
         self.load(link)
         let limit = int_at(args.copy(), "limit") ?? 10
         let most: usize = if limit < 1 { 1 } else if limit > 30 { 30 } else { usize.wrap(limit) }
@@ -261,31 +266,78 @@ impl Code {
             ok(d) => d,
             err(e) => return failed("Scripts can't run here: Deno couldn't be fetched ({e}). Use the tools some other way."),
         }
-        // One folder for the session's scripts, so Deno's cache of the prelude
-        // carries over from one script to the next. Each script's file goes
-        // once it's done, and the folder when the session ends.
-        if self.folder.len() == 0 {
-            self.folder = match fs.temp_dir() {
-                ok(d) => d,
-                err(e) => return failed("Scripts can't run here: there's no folder for them ({e})."),
-            }
-        }
-        let folder = self.folder.copy()
+        if let err(e) = self.make_folder() { return failed("Scripts can't run here: there's no folder for them ({e}).") }
         self.load(link)
         self.runs += 1
         let n = self.runs
-        let result = match codemode.start(deno, folder.copy(), n, script) {
-            ok(child) => {
-                var c = child
-                let r = self.drive(link, mut c, n, limit_ms)
-                c.kill_tree()
-                _ = c.wait()
-                r
+        // The Deno waiting already, or one started now.
+        var c = match self.take_spare() {
+            some(waiting) => waiting,
+            none => match codemode.wait(deno, self.folder.copy()) {
+                ok(child) => child,
+                err(e) => return failed("Deno didn't start: {e}"),
             },
-            err(e) => failed("Deno didn't start: {e}"),
         }
-        if let err(e) = fs.remove_file("{folder}/run-{n}.ts") { eprintln("loom mcp: {e}") }
+        let line = codemode.run_line(script)
+        let result = match c.write_text(line) {
+            ok => self.drive(link, mut c, n, limit_ms),
+            err(e) => failed("Deno didn't take the script: {e}"),
+        }
+        // Ended by `tidy`, once the result has gone to the agent.
+        self.done = some(c)
         return result
+    }
+
+    // After a script's result has gone: its Deno is ended, and the next
+    // script's starts, while the agent reads the result.
+    fn tidy(self: mut Code, link: Link) {
+        if let c = self.done.take() {
+            var ended = c
+            ended.kill_tree()
+            _ = ended.wait()
+        }
+        self.ready_spare(link)
+    }
+
+    // One folder for the session, so Deno's cache carries over from one
+    // script to the next. It goes when the session ends.
+    fn make_folder(self: mut Code) ! Error {
+        if self.folder.len() == 0 { self.folder = try fs.temp_dir() }
+    }
+
+    // Starts a Deno waiting for the next script, unless one is, where Deno
+    // has been fetched (never fetching it for this).
+    fn ready_spare(self: mut Code, link: Link) {
+        if not self.on or self.spare != none { return }
+        if self.deno.len() == 0 {
+            let got = match link.fetch("/api/mcp/deno?here", 30000) {
+                ok(g) => g,
+                err(_) => return,
+            }
+            let path = str_at(got, "path") else return
+            self.deno = path
+        }
+        if let err(_) = self.make_folder() { return }
+        match codemode.wait(self.deno.copy(), self.folder.copy()) {
+            ok(child) => {
+                self.spare = some(child)
+                self.spare_at = some(unsafe { Instant.now() })
+            },
+            err(e) => eprintln("loom mcp: Deno didn't start: {e}"),
+        }
+    }
+
+    // The waiting Deno, while it surely still waits: one near its own end
+    // of waiting, or ended, is let go.
+    fn take_spare(self: mut Code) -> Child? {
+        var c = self.spare.take() else return none
+        let since = self.spare_at ?? unsafe { Instant.now() }
+        self.spare_at = none
+        let waited_ms = unsafe { Instant.now() }.nanos_since(since) / 1000000
+        if c.try_wait() == none and i64.wrap(waited_ms) < codemode.WAIT_IDLE_MS - 30000 { return some(c) }
+        c.kill_tree()
+        _ = c.wait()
+        return none
     }
 
     // Reads the script's lines, answering its calls, until it ends, runs out
@@ -305,7 +357,7 @@ impl Code {
             let text = line else {
                 if not c.ended() { continue }
                 let out = c.wait()
-                let why = codemode.places_fixed(out.error_text().trim().copy(), n)
+                let why = codemode.said_of(out.error_text().trim().copy(), n)
                 return failed(codemode.told(logged, true, if why.len() > 0 { why } else { "Deno stopped: {out.status}" }))
             }
             let m = match parse(text.copy()) {
@@ -328,7 +380,7 @@ impl Code {
             }
             if kind == "end" {
                 if at(m.copy(), "ok") == Json.Bool(true) { return said(codemode.told(logged, false, codemode.shown(at(m, "value")))) }
-                return failed(codemode.told(logged, true, codemode.places_fixed(str_at(m, "error") ?? String(), n)))
+                return failed(codemode.told(logged, true, codemode.said_of(str_at(m, "error") ?? String(), n)))
             }
             // A line it logged, or one it wrote itself.
             let line_text = if kind == "log" { str_at(m, "text") ?? String() } else { text }
@@ -368,9 +420,16 @@ impl Code {
         return value
     }
 
-    fn stop(self: Code) {
+    fn stop(self: mut Code) {
         for (_, s) in self.servers {
             s.stop()
+        }
+        for c in [self.spare.take(), self.done.take()] {
+            if let child = c {
+                var left = child
+                left.kill_tree()
+                _ = left.wait()
+            }
         }
         if self.folder.len() > 0 {
             if let err(e) = fs.remove_dir_all(self.folder) { eprintln("loom mcp: {e}") }
@@ -406,6 +465,7 @@ fn handle(link: Link, c: mut Code, m: Json) {
             reply(id, c.search(link, arguments))
         } else if c.on and name == "run_code" {
             reply(id, c.run(link, arguments))
+            c.tidy(link)
         } else {
             reply_text(id, link.call_text(name, arguments))
         }
@@ -419,7 +479,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0, folder: String(), warm: some(link.ask_tools()) }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
