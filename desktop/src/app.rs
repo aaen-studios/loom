@@ -935,6 +935,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         }
                     }
                     loom.tray_actions(cx);
+                    // loom was started again: the person wants this one (single.rs).
+                    if crate::single::asked_to_show() {
+                        shell::show_window(loom.hwnd, true);
+                        crate::perf::once("shown for another start");
+                    }
                     loom.tick_prefs(cx);
                     loom.notification_clicks(cx);
                     loom.take_notice(cx);

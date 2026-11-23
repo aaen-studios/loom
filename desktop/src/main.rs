@@ -16,6 +16,7 @@ mod place;
 mod prefs;
 mod rail;
 mod shell;
+mod single;
 mod smooth;
 mod thread;
 #[path = "../../design/generated/tokens.rs"]
@@ -104,9 +105,22 @@ fn main() {
         panel_test::run(out.into());
         return;
     }
+    // One loom to a data folder: started again, it shows the loom running and ends.
+    let background = std::env::args().any(|a| a == "--background");
+    let data = app::data_dir();
+    match single::claim(std::path::Path::new(&data), !background, single::WAIT) {
+        single::Start::First(owner) => single::keep(owner),
+        single::Start::Running => return,
+    }
     app::start_first_core();
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
+        // A loom started while this one stops runs as soon as this one has let go.
+        cx.on_app_quit(|_| {
+            single::let_go();
+            async {}
+        })
+        .detach();
         let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             eprintln!("loom: the fonts didn't load: {e}");
