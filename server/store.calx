@@ -20,6 +20,7 @@ import std.hash.{sha256}
 import std.json.{Json, parse}
 import std.regex.{Regex}
 import std.sqlite.{Database, Value}
+import std.thread.{Task, sleep}
 import std.time.{Timestamp}
 import shared.obj.{Obj, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
@@ -410,14 +411,25 @@ impl Store {
         }
         // Messages stored before search came are indexed once.
         if try s.meta("search") == none {
-            try s.begin()
-            for r in try s.db.query(String("SELECT user, json FROM messages")) {
-                try s.index_message(text(r[0].copy()), try parse(text(r[1].copy())))
+            let began = try s.begin()
+            match s.index_all() {
+                ok => {},
+                err(e) => {
+                    s.rollback(began)
+                    fail e
+                },
             }
-            try s.set_meta("search", String("1"))
-            try s.commit()
+            try s.commit(began)
         }
         return s
+    }
+
+    // Indexes every message for search, for a database from before search came.
+    fn index_all(self) ! Error {
+        for r in try self.db.query(String("SELECT user, json FROM messages")) {
+            try self.index_message(text(r[0].copy()), try parse(text(r[1].copy())))
+        }
+        try self.set_meta("search", String("1"))
     }
 
     // `plain`, sealed under the instance's key and bound to `aad`, as text:
@@ -461,33 +473,79 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(String(key))])
     }
 
-    // Work that lands together or not at all: a savepoint, which is a transaction of its
-    // own, or part of the one `hold` keeps.
-    pub fn begin(self) ! Error {
-        _ = try self.db.execute(String("SAVEPOINT work"))
+    // Work that lands together or not at all: a savepoint, in a transaction of its own
+    // or in the one `hold` keeps. Gives whether it began the transaction, which
+    // `commit` and `rollback` take; every error path after it calls `rollback`, so no
+    // transaction is left open holding the write lock.
+    //
+    // A transaction of its own takes the write lock as it begins (BEGIN IMMEDIATE), as
+    // `hold` does: one that took it at its first write, after reading, failed at once
+    // with "database is locked" whenever another connection (a `loom` command) had
+    // written since, or was writing, whatever the busy timeout, since SQLite can't
+    // wait there without risking a deadlock. Taken first, it waits as long as the busy
+    // timeout.
+    pub fn begin(self) -> bool ! Error {
+        var began = false
+        if not self.db.in_transaction() {
+            _ = try self.db.execute(String("BEGIN IMMEDIATE"))
+            began = true
+        }
+        match self.db.execute(String("SAVEPOINT work")) {
+            ok(_) => {},
+            err(e) => {
+                if began { self.abandon() }
+                fail e
+            },
+        }
+        return began
     }
 
-    pub fn commit(self) ! Error {
-        _ = try self.db.execute(String("RELEASE work"))
+    pub fn commit(self, began: bool) ! Error {
+        match self.db.execute(String("RELEASE work")) {
+            ok(_) => {},
+            err(e) => {
+                self.rollback(began)
+                fail e
+            },
+        }
+        if not began { return }
+        match self.db.commit() {
+            ok => {},
+            err(e) => {
+                self.abandon()
+                fail e
+            },
+        }
     }
 
-    pub fn rollback(self) {
-        if self.db.in_transaction() {
-            match self.db.execute(String("ROLLBACK TO work")) {
-                ok(_) => match self.db.execute(String("RELEASE work")) {
-                    ok(_) => {},
-                    err(e) => eprintln("loom: rollback failed: {e}"),
-                },
+    pub fn rollback(self, began: bool) {
+        if not self.db.in_transaction() { return }
+        match self.db.execute(String("ROLLBACK TO work")) {
+            ok(_) => match self.db.execute(String("RELEASE work")) {
+                ok(_) => {},
                 err(e) => eprintln("loom: rollback failed: {e}"),
-            }
+            },
+            err(e) => eprintln("loom: rollback failed: {e}"),
+        }
+        if began { self.abandon() }
+    }
+
+    // Rolls back whatever transaction is open: what a request that failed part way
+    // left, outside `hold`, which would keep the write lock from every other
+    // connection until the next frame.
+    pub fn abandon(self) {
+        if not self.db.in_transaction() { return }
+        match self.db.rollback() {
+            ok => {},
+            err(e) => eprintln("loom: rollback failed: {e}"),
         }
     }
 
     // Keeps every write from here on in one transaction until `let_go`, so the writes
     // of one frame, or of one burst of agent lines, are saved once rather than each on
-    // its own.
+    // its own. It takes the write lock at once, as `begin` does.
     pub fn hold(self) ! Error {
-        if not self.db.in_transaction() { try self.db.begin() }
+        if not self.db.in_transaction() { _ = try self.db.execute(String("BEGIN IMMEDIATE")) }
     }
 
     pub fn let_go(self) ! Error {
@@ -1217,11 +1275,17 @@ impl Store {
             let id = (item.get(String("id")) ?? Json.Null).as_str() ?? String()
             if not order.contains(id.copy()) { order.push(id) }
         }
-        try self.begin()
+        let began = try self.begin()
         for (k, id) in order.enumerate() {
-            _ = try self.db.execute(String("UPDATE queue SET pos = ? WHERE user = ? AND conversation = ? AND id = ?"), [Value.Int(i64.wrap(u64(k))), t(user.copy()), t(conversation.copy()), t(id.copy())])
+            match self.db.execute(String("UPDATE queue SET pos = ? WHERE user = ? AND conversation = ? AND id = ?"), [Value.Int(i64.wrap(u64(k))), t(user.copy()), t(conversation.copy()), t(id.copy())]) {
+                ok(_) => {},
+                err(e) => {
+                    self.rollback(began)
+                    fail e
+                },
+            }
         }
-        try self.commit()
+        try self.commit(began)
     }
 
     pub fn put_message(self, user: String, message: Json) ! Error {
@@ -1458,11 +1522,22 @@ impl Store {
     }
 
     fn remember_note(self, user: String, agent: String, what: String, by: String, at: i64, site: String) -> i64 ! Error {
-        try self.begin()
+        let began = try self.begin()
+        let id = match self.add_note(user, agent, what, by, at, site) {
+            ok(id) => id,
+            err(e) => {
+                self.rollback(began)
+                fail e
+            },
+        }
+        try self.commit(began)
+        return id
+    }
+
+    fn add_note(self, user: String, agent: String, what: String, by: String, at: i64, site: String) -> i64 ! Error {
         _ = try self.db.execute(String("INSERT INTO memories (user, agent, text, by, at, site) VALUES (?, ?, ?, ?, ?, ?)"), [t(user.copy()), t(agent.copy()), t(what.copy()), t(by), Value.Int(at), t(site)])
         let id = self.db.last_insert_id()
         _ = try self.db.execute(String("INSERT INTO memories_fts (rowid, text, user, agent) VALUES (?, ?, ?, ?)"), [Value.Int(id), t(what), t(user), t(agent)])
-        try self.commit()
         return id
     }
 
@@ -1591,10 +1666,21 @@ impl Store {
             sql.push_str(" AND (agent = ? OR agent = '')")
             args.push(t(a))
         }
-        try self.begin()
+        let began = try self.begin()
+        let gone = match self.forget_note(sql, args, id) {
+            ok(g) => g,
+            err(e) => {
+                self.rollback(began)
+                fail e
+            },
+        }
+        try self.commit(began)
+        return gone
+    }
+
+    fn forget_note(self, sql: String, args: List<Value>, id: i64) -> bool ! Error {
         let gone = try self.db.execute(sql, args) > 0
         if gone { _ = try self.db.execute(String("DELETE FROM memories_fts WHERE rowid = ?"), [Value.Int(id)]) }
-        try self.commit()
         return gone
     }
 
@@ -1919,11 +2005,11 @@ impl Store {
         for r in try self.db.query(String("SELECT id FROM agents WHERE user = ?"), [t(user.copy())]) {
             agents.push(text(r[0].copy()))
         }
-        try self.begin()
+        let began = try self.begin()
         match self.remove_rows(user) {
-            ok => try self.commit(),
+            ok => try self.commit(began),
             err(e) => {
-                self.rollback()
+                self.rollback(began)
                 fail "{e}"
             },
         }
@@ -2313,6 +2399,89 @@ fn record_in(path: String) -> List<Json> {
     let entries = s.activity(String("u_1"), none, none, 10)!
     s.close()!
     return entries
+}
+
+// Writes to the store at `path` from a connection of its own, as a `loom` command
+// does while the instance runs, and says how it went.
+struct OtherProcess {
+    path: String
+    said: Sender<String>
+}
+
+impl Task for OtherProcess {
+    fn run(own self) {
+        let s = match Store.open(self.path.copy(), PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 }) {
+            ok(s) => s,
+            err(e) => {
+                self.said.send("{e}")
+                return
+            },
+        }
+        let how = match s.begin() {
+            ok(began) => match s.set_meta(String("other"), String("1")) {
+                ok => match s.commit(began) {
+                    ok => String("ok"),
+                    err(e) => "{e}",
+                },
+                err(e) => {
+                    s.rollback(began)
+                    "{e}"
+                },
+            },
+            err(e) => "{e}",
+        }
+        self.said.send(how)
+        match s.close() {
+            ok => {},
+            err(_) => {},
+        }
+    }
+}
+
+@test
+fn a_held_frame_waits_for_another_connection_rather_than_failing() {
+    // A connection that had read in its transaction couldn't write once another had
+    // written since: "database is locked", at once, whatever the busy timeout.
+    let dir = fs.temp_dir()!
+    let path = "{dir}/loom.db"
+    let s = Store.open(path.copy(), PasswordHasher { memory_kib: 64, iterations: 1, parallelism: 1 })!
+    s.hold()!
+    _ = s.meta(String("mine"))!
+    var said = Receiver<String>()
+    let other = unsafe { Thread.spawn(OtherProcess { path: path.copy(), said: said.sender() }) }
+    unsafe { sleep(300000000) }
+    s.set_meta(String("mine"), String("1"))!
+    s.let_go()!
+    other.join()
+    assert((said.wait() ?? String()) == "ok")
+    assert(s.meta(String("other"))! == some(String("1")) and s.meta(String("mine"))! == some(String("1")))
+    s.close()!
+    fs.remove_dir_all(dir)!
+}
+
+@test
+fn work_that_fails_leaves_no_transaction_open() {
+    let s = test_store()
+    let began = s.begin()!
+    assert(began)
+    s.set_meta(String("half"), String("1"))!
+    s.rollback(began)
+    assert(not s.db.in_transaction() and s.meta(String("half"))! == none)
+    // Inside a held transaction it's a savepoint: undone alone, and the hold goes on.
+    s.hold()!
+    s.set_meta(String("kept"), String("1"))!
+    let inner = s.begin()!
+    assert(not inner)
+    s.set_meta(String("half"), String("1"))!
+    s.rollback(inner)
+    assert(s.db.in_transaction())
+    s.let_go()!
+    assert(s.meta(String("kept"))! == some(String("1")) and s.meta(String("half"))! == none)
+    // A failed request's leftover is rolled back.
+    _ = s.begin()!
+    s.set_meta(String("left"), String("1"))!
+    s.abandon()
+    assert(not s.db.in_transaction() and s.meta(String("left"))! == none)
 }
 
 @test
