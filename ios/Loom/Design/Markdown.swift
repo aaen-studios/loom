@@ -9,11 +9,16 @@ struct MarkdownView: View {
     /// What a person typed keeps its line breaks.
     var keepBreaks = false
     var font: Font = Fonts.reply
+    /// Still being written, so it grows at the end.
+    var live = false
 
     var body: some View {
+        let parts = live && !keepBreaks ? MarkdownView.growing(text) : MarkdownView.parse(text, keepBreaks: keepBreaks)
         VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(MarkdownView.parse(text, keepBreaks: keepBreaks).enumerated()), id: \.offset) { _, part in
-                view(part)
+            // Each part is its own view, compared before it's drawn again: as a reply is
+            // written, only its last part changes.
+            ForEach(parts.indices, id: \.self) { i in
+                PartView(part: parts[i], font: font).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -29,41 +34,65 @@ struct MarkdownView: View {
         case rule
     }
 
-    @ViewBuilder
-    private func view(_ part: Part) -> some View {
-        switch part {
-        case .paragraph(let s):
-            Text(inline(s)).font(font).foregroundStyle(P.ink).lineSpacing(4).textSelection(.enabled)
-        case .heading(let level, let s):
-            Text(inline(s))
-                .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
-                .foregroundStyle(P.ink)
-                .padding(.top, 4)
-        case .item(let indent, let mark, let s):
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
-                Text(inline(s)).font(font).foregroundStyle(P.ink).lineSpacing(4).textSelection(.enabled)
-            }
-            .padding(.leading, CGFloat(indent) * 16)
-        case .quote(let s):
-            Text(inline(s))
-                .font(font).foregroundStyle(P.ink2).lineSpacing(4)
-                .padding(.leading, 12)
-                .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 2) }
-        case .code(let language, let s):
-            CodeBlock(language: language, text: s)
-        case .raw(let s):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(s).font(Fonts.code).foregroundStyle(P.ink2).fixedSize()
-            }
-        case .rule:
-            Rectangle().fill(P.line).frame(height: 1).padding(.vertical, 4)
+    /// The parts of a reply that may be growing as it's written. What's before its last
+    /// blank line outside a code block is parsed once and kept, and only what follows
+    /// it is parsed again: a blank line there ends every part, so the parts come out
+    /// the same as parsing the whole.
+    static func growing(_ text: String) -> [Part] {
+        let bytes = text.utf8
+        // A carriage return would put a line's end inside a character.
+        if bytes.contains(13) { return parse(text) }
+        var parts: [Part] = []
+        var from = bytes.startIndex
+        if let g = grown, bytes.count >= g.bytes, text.hasPrefix(g.text) {
+            parts = g.parts
+            from = bytes.index(bytes.startIndex, offsetBy: g.bytes)
         }
+        // The last place in what's left that follows a blank line outside a fence.
+        var split: String.Index?
+        var fence: Substring?
+        var lineStart = from
+        var blank = true
+        var i = from
+        while i < bytes.endIndex {
+            if bytes[i] == 10 {
+                let line = text[lineStart..<i].trimmingCharacters(in: .whitespaces)
+                if let f = fence {
+                    if line.hasPrefix(f) { fence = nil }
+                } else if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                    fence = Substring(line.prefix(3))
+                } else if line.isEmpty && !blank {
+                    split = bytes.index(after: i)
+                }
+                blank = line.isEmpty
+                lineStart = bytes.index(after: i)
+            }
+            i = bytes.index(after: i)
+        }
+        guard let split else {
+            return parts + parse(String(text[from...]))
+        }
+        parts += parse(String(text[from..<split]))
+        grown = Grown(text: String(text[..<split]), bytes: bytes.distance(from: bytes.startIndex, to: split), parts: parts)
+        return parts + parse(String(text[split...]))
     }
 
-    private func inline(_ s: String) -> AttributedString {
+    private struct Grown {
+        var text: String
+        var bytes: Int
+        var parts: [Part]
+    }
+
+    /// The reply last parsed by `growing`, up to its last blank line.
+    nonisolated(unsafe) private static var grown: Grown?
+
+    /// Inline Markdown as the chat draws it. Kept per string, so a part that's drawn
+    /// again, or a row that scrolls back, isn't parsed again.
+    static func inline(_ s: String) -> AttributedString {
+        let key = s as NSString
+        if let kept = inlineKept.object(forKey: key) { return kept.value }
         let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace, failurePolicy: .returnPartiallyParsedIfPossible)
-        guard var out = try? AttributedString(markdown: s, options: options) else { return AttributedString(s) }
+        var out = (try? AttributedString(markdown: s, options: options)) ?? AttributedString(s)
         for run in out.runs {
             if let intent = run.inlinePresentationIntent, intent.contains(.code) {
                 out[run.range].font = Fonts.code
@@ -74,8 +103,73 @@ struct MarkdownView: View {
                 out[run.range].underlineStyle = .single
             }
         }
+        inlineKept.setObject(Kept(out), forKey: key, cost: s.utf8.count)
         return out
     }
+
+    private final class Kept {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    nonisolated(unsafe) private static let inlineKept: NSCache<NSString, Kept> = {
+        let c = NSCache<NSString, Kept>()
+        c.totalCostLimit = 4 << 20
+        return c
+    }()
+}
+
+/// One part of a Markdown text.
+private struct PartView: View, Equatable {
+    var part: MarkdownView.Part
+    var font: Font
+
+    var body: some View {
+        switch part {
+        case .paragraph(let s):
+            Text(MarkdownView.inline(s)).font(font).foregroundStyle(P.ink).lineSpacing(4)
+        case .heading(let level, let s):
+            Text(MarkdownView.inline(s))
+                .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
+                .foregroundStyle(P.ink)
+                .padding(.top, 4)
+        case .item(let indent, let mark, let s):
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
+                Text(MarkdownView.inline(s)).font(font).foregroundStyle(P.ink).lineSpacing(4)
+            }
+            .padding(.leading, CGFloat(indent) * 16)
+        case .quote(let s):
+            Text(MarkdownView.inline(s))
+                .font(font).foregroundStyle(P.ink2).lineSpacing(4)
+                .padding(.leading, 12)
+                .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 2) }
+        case .code(let language, let s):
+            CodeBlock(language: language, text: s)
+        case .raw(let s):
+            Sideways {
+                Text(s).font(Fonts.code).foregroundStyle(P.ink2).fixedSize()
+            }
+        case .rule:
+            Rectangle().fill(P.line).frame(height: 1).padding(.vertical, 4)
+        }
+    }
+}
+
+/// Its content as it is when it fits across, and in a sideways scroll only when it's
+/// wider: most code blocks and tables need no scroll view of their own.
+struct Sideways<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            content
+            ScrollView(.horizontal, showsIndicators: false) { content }
+        }
+    }
+}
+
+extension MarkdownView {
 
     /// The text's blocks, in order.
     static func parse(_ text: String, keepBreaks: Bool = false) -> [Part] {
@@ -170,10 +264,11 @@ struct MarkdownView: View {
 }
 
 extension MarkdownView {
-    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply) {
+    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, live: Bool = false) {
         self.text = text
         self.keepBreaks = keepBreaks
         self.font = font
+        self.live = live
     }
 }
 
@@ -209,12 +304,11 @@ struct CodeBlock: View {
             .padding(.leading, 12)
             .padding(.trailing, 4)
             .padding(.top, 4)
-            ScrollView(.horizontal, showsIndicators: false) {
+            Sideways {
                 Text(text)
                     .font(Fonts.code)
                     .foregroundStyle(P.ink)
                     .lineSpacing(3)
-                    .textSelection(.enabled)
                     .fixedSize()
                     .padding(.horizontal, 12)
                     .padding(.bottom, 12)

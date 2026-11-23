@@ -3096,7 +3096,24 @@ impl Model {
                 self.live.remove(&id);
                 let conversation = s(f, "conversation");
                 if Some(conversation.clone()) == self.conversation() {
-                    self.dirty.insert(List::Messages);
+                    // The event carries the message, or the id of one gone: it goes in
+                    // its place, without asking the core for the whole page again.
+                    if kind == "message.deleted" {
+                        let gone = message.as_str().unwrap_or_default();
+                        self.messages.retain(|m| m.queued || m.id != gone);
+                    } else {
+                        let m = self.message_of(&message);
+                        if let Some(old) =
+                            self.messages.iter_mut().find(|o| !o.queued && o.id == m.id)
+                        {
+                            *old = m;
+                        } else if kind == "message.created" {
+                            self.messages.push(m);
+                            self.place_queued();
+                        }
+                        // The tool calls it names.
+                        self.dirty.insert(List::Tools);
+                    }
                     // A pin put on or taken off here, or a pinned message gone.
                     if kind == "message.updated" || kind == "message.deleted" {
                         self.pins_stale = true;
@@ -6228,6 +6245,36 @@ mod tests {
         // Waiting and Five would join, but a line comes between them.
         assert_eq!(f[8].joined, Joined::default());
         assert_eq!(f[9].joined, Joined::default());
+    }
+
+    #[test]
+    fn a_message_event_in_the_open_chat_goes_in_its_place() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        m.dirty.clear();
+        let msg = |id: &str, text: &str| json!({"id": id, "conversation": "c_1", "role": "agent", "agent": "a_1", "at": 1, "blocks": [{"kind": "text", "text": text}]});
+        let event = |kind: &str, message: Value| json!({"t": "event", "kind": kind, "conversation": "c_1", "message": message});
+        m.take(&event("message.created", msg("msg_1", "one")));
+        m.take(&event("message.created", msg("msg_2", "two")));
+        let ids = |m: &Model| m.messages.iter().map(|x| x.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&m), vec!["msg_1", "msg_2"]);
+        m.take(&event("message.updated", msg("msg_1", "one, pinned")));
+        assert_eq!(m.messages[0].blocks[0].text, "one, pinned");
+        m.take(&event("message.deleted", json!("msg_2")));
+        assert_eq!(ids(&m), vec!["msg_1"]);
+        // None of it asked the core for the page again.
+        assert!(!m.dirty.contains(&List::Messages));
     }
 
     #[test]

@@ -9,13 +9,16 @@ struct ThreadView: View {
     /// When the agent last finished, for the one-time snap back to idle.
     var snapped: Date?
     var large = false
+    /// The snap that's over, so the timeline stops once it is.
+    @State private var settled: Date?
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 60, paused: !moves(mood, snapped))) { context in
+        TimelineView(.animation(minimumInterval: 1 / 60, paused: !moves(mood, snapped, settled: settled))) { context in
             Canvas { ctx, size in
                 draw(&ctx, size, t: context.date.timeIntervalSinceReferenceDate, now: context.date)
             }
         }
+        .settles(snapped, into: $settled)
         .accessibilityHidden(true)
     }
 
@@ -96,9 +99,46 @@ struct ThreadView: View {
     }
 }
 
-/// Whether a thread in this state moves, so its view keeps drawing frames.
-func moves(_ mood: Mood, _ snapped: Date?) -> Bool {
-    (mood != .idle && mood != .failed) || (snapped.map { Date.now.timeIntervalSince($0) < 1.2 } ?? false)
+/// Whether a thread in this state moves, so its view keeps drawing frames: while the
+/// agent works, and for the snap after it finishes, until `settled` says it's over.
+func moves(_ mood: Mood, _ snapped: Date?, settled: Date? = nil) -> Bool {
+    if mood != .idle && mood != .failed { return true }
+    guard let snapped, snapped != settled else { return false }
+    return Date.now.timeIntervalSince(snapped) < 1.2
+}
+
+extension View {
+    /// Sets `settled` to `snapped` once its snap is over, so the view is drawn again then
+    /// and its timeline pauses, rather than drawing frames for as long as it's shown.
+    func settles(_ snapped: Date?, into settled: Binding<Date?>) -> some View {
+        task(id: snapped) {
+            guard let snapped else { return }
+            let left = 1.2 - Date.now.timeIntervalSince(snapped)
+            if left > 0 {
+                try? await Task.sleep(for: .seconds(left + 0.02))
+                if Task.isCancelled { return }
+            }
+            settled.wrappedValue = snapped
+        }
+    }
+}
+
+/// A thread at rest, as a shape: what a finished reply shows beside its agent's name.
+struct StillThread: Shape {
+    func path(in rect: CGRect) -> Path {
+        let stroke = Tokens.ThreadStroke.small
+        let mid = rect.midY
+        let half = rect.height / 2
+        let steps = max(Int(rect.width / 1.5), 8)
+        var path = Path()
+        for i in 0...steps {
+            let u = Double(i) / Double(steps)
+            let up = ThreadView.lift(.idle, u: u, width: rect.width, t: 0, sinceSnap: .infinity)
+            let p = CGPoint(x: rect.minX + u * rect.width, y: mid - up * (half - stroke))
+            if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+        }
+        return path
+    }
 }
 
 /// An agent's thread in its shape (PLAN.md, "Its shape"): `points`, in a box from -1 to
@@ -112,13 +152,15 @@ struct ShapeView: View {
 
     /// How far its moods bend it, in points.
     private static let room = 1.0
+    @State private var settled: Date?
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1 / 60, paused: !moves(mood, snapped))) { context in
+        TimelineView(.animation(minimumInterval: 1 / 60, paused: !moves(mood, snapped, settled: settled))) { context in
             Canvas { ctx, size in
                 draw(&ctx, size, t: context.date.timeIntervalSinceReferenceDate, now: context.date)
             }
         }
+        .settles(snapped, into: $settled)
         .accessibilityHidden(true)
     }
 

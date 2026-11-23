@@ -437,6 +437,9 @@ pub struct Loom {
     /// The core's frames changed what the chat shows: its rows are made again once,
     /// before the next frame, however many frames came.
     rows_dirty: bool,
+    /// The wheel on the browser the person took over, summed until it goes, at most
+    /// every 40 ms: where it was, how far, and whether it's waiting to go.
+    wheel: ((f32, f32), f32, bool),
     /// The chat's list, as a view of its own (`ChatList`).
     chat_view: Option<Entity<ChatList>>,
     /// Where the page is drawn, for turning a click on it into the page's own pixels.
@@ -1157,6 +1160,7 @@ ACTA_KEY=secret:ACTA_KEY",
             search_gen: 0,
             place_gen: 0,
             rows_dirty: false,
+            wheel: ((0.0, 0.0), 0.0, false),
             chat_view: None,
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
@@ -4139,13 +4143,32 @@ ACTA_KEY=secret:ACTA_KEY",
                 if dy.abs() < 1.0 {
                     return;
                 }
-                if let Some(f) = this
-                    .model
-                    .browser_input(serde_json::json!({"kind": "wheel", "x": x, "y": y, "dy": dy}))
-                {
-                    this.send(f);
-                    cx.stop_propagation();
+                let agent = this.model.watching.clone().unwrap_or_default();
+                if !this.model.browser(&agent).person {
+                    return;
                 }
+                cx.stop_propagation();
+                // Summed and sent at most every 40 ms: the smooth wheel moves a little
+                // each frame, and each piece was a command and a DevTools call.
+                this.wheel.0 = (x, y);
+                this.wheel.1 += dy;
+                if this.wheel.2 {
+                    return;
+                }
+                this.wheel.2 = true;
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(40))
+                        .await;
+                    let _ = this.update(cx, |loom, _| {
+                        let ((x, y), dy, _) = std::mem::take(&mut loom.wheel);
+                        let wheel = serde_json::json!({"kind": "wheel", "x": x, "y": y, "dy": dy});
+                        if let Some(f) = loom.model.browser_input(wheel) {
+                            loom.send(f);
+                        }
+                    });
+                })
+                .detach();
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if this

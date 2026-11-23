@@ -39,7 +39,18 @@ enum P {
 
     /// An agent's thread colour, by the name the instance gives it, or its own as
     /// #rrggbb, kept to its hue and made light or dark enough for the appearance.
+    /// Kept per name: a new dynamic colour never equals the last, so a thread given one
+    /// would be drawn again whenever the view around it is.
     static func thread(_ name: String) -> Color {
+        if let kept = threads[name] { return kept }
+        let c = makeThread(name)
+        threads[name] = c
+        return c
+    }
+
+    nonisolated(unsafe) private static var threads: [String: Color] = [:]    // drawn on the main thread only
+
+    private static func makeThread(_ name: String) -> Color {
         typealias TL = Tokens.ThreadColorLight
         typealias TD = Tokens.ThreadColorDark
         if name.count == 7, name.hasPrefix("#"), let rgb = UInt32(name.dropFirst(), radix: 16) {

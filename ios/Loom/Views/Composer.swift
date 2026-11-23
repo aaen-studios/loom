@@ -108,10 +108,7 @@ struct Composer: View {
     /// A photo goes up as a JPEG, which every agent's model takes (PLAN.md, "Files and
     /// images"), from a copy in the app's temporary folder.
     private func attachPhoto(_ item: PhotosPickerItem) async {
-        guard let data = try? await item.loadTransferable(type: Data.self),
-              let image = UIImage(data: data),
-              let jpeg = image.jpegData(compressionQuality: 0.85)
-        else {
+        guard let data = try? await item.loadTransferable(type: Data.self) else {
             session.model.notice = "That photo couldn't be read."
             return
         }
@@ -120,13 +117,19 @@ struct Composer: View {
         let name = "Photo \(stamp).jpg"
         let folder = Composer.outbox().appendingPathComponent(UUID().uuidString, isDirectory: true)
         let url = folder.appendingPathComponent(name)
-        do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            try jpeg.write(to: url)
-            session.send(session.model.attach(path: url.path, name: name))
-        } catch {
+        guard (try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)) != nil else {
             session.model.notice = "That photo couldn't be kept to send."
+            return
         }
+        // Decoded and written as a JPEG off the main thread, and its chip's picture made
+        // there too.
+        let made = await Task.detached(priority: .userInitiated) { Pictures.jpeg(data, to: url) }.value
+        guard made else {
+            session.model.notice = "That photo couldn't be read."
+            return
+        }
+        _ = await Pictures.load(url.path, side: AttachmentChip.side)
+        session.send(session.model.attach(path: url.path, name: name))
     }
 
     /// A file from Files is copied in first, since its own place is only open for a
@@ -157,11 +160,15 @@ struct Composer: View {
 private struct AttachmentChip: View {
     var attachment: Attachment
     var remove: () -> Void
+    /// How big its picture is, in points.
+    static let side: CGFloat = 28
+    @State private var picture: UIImage?
 
     var body: some View {
         HStack(spacing: Tokens.Space.s) {
-            if attachment.path.hasSuffix(".jpg"), let image = UIImage(contentsOfFile: attachment.path) {
-                Image(uiImage: image).resizable().scaledToFill().frame(width: 28, height: 28).clipShape(RoundedRectangle(cornerRadius: 6))
+            // A picture made small off the main thread, not the photo itself.
+            if attachment.path.hasSuffix(".jpg"), let image = picture ?? Pictures.kept(attachment.path, side: Self.side) {
+                Image(uiImage: image).resizable().scaledToFill().frame(width: Self.side, height: Self.side).clipShape(RoundedRectangle(cornerRadius: 6))
             } else {
                 Image(systemName: "doc.text").foregroundStyle(P.ink3)
             }
@@ -188,5 +195,9 @@ private struct AttachmentChip: View {
         .padding(.trailing, 2)
         .padding(.vertical, 5)
         .background(P.bubble, in: RoundedRectangle(cornerRadius: Tokens.Radius.row, style: .continuous))
+        .task(id: attachment.path) {
+            guard attachment.path.hasSuffix(".jpg"), Pictures.kept(attachment.path, side: Self.side) == nil else { return }
+            picture = await Pictures.load(attachment.path, side: Self.side)
+        }
     }
 }
