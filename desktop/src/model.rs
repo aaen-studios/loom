@@ -1642,7 +1642,7 @@ pub enum Part {
 
 /// What Copy puts on the clipboard for a message: the words it shows, a paragraph each.
 /// For a reply that's its answer, not what it said on the way, folded under it.
-pub fn copy_text(m: &Message, tools: &[Tool]) -> String {
+pub fn copy_text(m: &Message, tools: &Tools) -> String {
     let shows = Shows {
         tools: false,
         thoughts: false,
@@ -1660,8 +1660,8 @@ pub fn copy_text(m: &Message, tools: &[Tool]) -> String {
 }
 
 /// A tool call's title, as its agent named it.
-pub fn tool_title(call: Option<&String>, tools: &[Tool]) -> String {
-    call.and_then(|c| tools.iter().find(|t| &t.call == c))
+pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
+    call.and_then(|c| tools.get(c))
         .map(|t| t.title.clone())
         .unwrap_or_else(|| "Using a tool".to_string())
 }
@@ -1677,7 +1677,7 @@ fn asks(text: &str) -> bool {
 /// it works, that line is the latest step. Cards, files, plans, notices and words that
 /// ask the person something stay in view, in their places. A turn cut short keeps all it
 /// had in view, and so does a person's message.
-pub fn parts(m: &Message, tools: &[Tool], shows: Shows) -> Vec<Part> {
+pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
     let n = m.blocks.len();
     let said = |i: usize| m.blocks[i].kind == "text" && !m.blocks[i].text.trim().is_empty();
     // Whether a block has anything to draw, as the prefs have it.
@@ -1768,7 +1768,7 @@ fn lay_out(m: &Message, shown: &[usize]) -> Vec<Part> {
 
 /// The step a running turn is on, in a line: the first line of what it last said, the
 /// tool it last called, or that it's thinking.
-fn working_words(m: &Message, tools: &[Tool]) -> String {
+fn working_words(m: &Message, tools: &Tools) -> String {
     for b in m.blocks.iter().rev() {
         match b.kind.as_str() {
             "text" => {
@@ -1928,6 +1928,37 @@ pub struct Tool {
     pub run: String,
     pub title: String,
     pub status: Option<String>,
+}
+
+/// The tool calls, in order, and found by call: a reply's tool blocks look theirs up
+/// each frame, and a heavy user has thousands.
+#[derive(Default, Debug)]
+pub struct Tools {
+    list: Vec<Tool>,
+    by_call: HashMap<String, usize>,
+}
+
+impl Tools {
+    pub fn new(list: Vec<Tool>) -> Tools {
+        let by_call = list
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.call.clone(), i))
+            .collect();
+        Tools { list, by_call }
+    }
+
+    pub fn get(&self, call: &str) -> Option<&Tool> {
+        self.by_call.get(call).map(|&i| &self.list[i])
+    }
+}
+
+impl std::ops::Deref for Tools {
+    type Target = [Tool];
+
+    fn deref(&self) -> &[Tool] {
+        &self.list
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2125,7 +2156,7 @@ pub struct Model {
     pub agents: Vec<Agent>,
     pub conversations: Vec<Conversation>,
     pub runs: Vec<Run>,
-    pub tools: Rc<Vec<Tool>>,
+    pub tools: Rc<Tools>,
     pub approvals: Vec<Approval>,
     pub programs: Vec<String>,
     /// Whether the instance has said which programs it has, since the last ask.
@@ -4122,7 +4153,7 @@ impl Model {
                     .collect();
             }
             List::Tools => {
-                self.tools = Rc::new(
+                self.tools = Rc::new(Tools::new(
                     items
                         .iter()
                         .map(|t| Tool {
@@ -4132,7 +4163,7 @@ impl Model {
                             status: t.get("status").and_then(Value::as_str).map(str::to_string),
                         })
                         .collect(),
-                );
+                ));
             }
             List::Approvals => {
                 self.approvals = items
@@ -4214,8 +4245,9 @@ impl Model {
                 continue;
             }
             let mut blocks = self.live.get(&r.message).cloned().unwrap_or_default();
+            let mut have: HashSet<String> = blocks.iter().filter_map(|b| b.call.clone()).collect();
             for t in self.tools.iter().filter(|t| t.run == r.id) {
-                if !blocks.iter().any(|b| b.call.as_ref() == Some(&t.call)) {
+                if have.insert(t.call.clone()) {
                     let mut b = Block::text("tool", String::new());
                     b.call = Some(t.call.clone());
                     blocks.push(b);
@@ -5732,14 +5764,14 @@ mod tests {
         }
     }
 
-    fn tools() -> Vec<Tool> {
+    fn tools() -> Tools {
         let tool = |call: &str, title: &str| Tool {
             call: call.into(),
             run: "run_1".into(),
             title: title.into(),
             status: Some("done".into()),
         };
-        vec![tool("tc_1", "Search the web"), tool("tc_2", "ls")]
+        Tools::new(vec![tool("tc_1", "Search the web"), tool("tc_2", "ls")])
     }
 
     const QUIET: Shows = Shows {
@@ -6069,13 +6101,13 @@ mod tests {
             role: "person".into(),
             ..turn(&["text:One", "text:Two "], false, "")
         };
-        assert_eq!(copy_text(&person, &[]), "One\n\nTwo");
+        assert_eq!(copy_text(&person, &Tools::default()), "One\n\nTwo");
         let reply = turn(
             &["text:Looking.", "tool:", "text:Here it is."],
             false,
             "done",
         );
-        assert_eq!(copy_text(&reply, &[]), "Here it is.");
+        assert_eq!(copy_text(&reply, &Tools::default()), "Here it is.");
     }
 
     #[test]
@@ -6147,12 +6179,12 @@ mod tests {
             "text",
             "Checking first whether there's a release.",
         ));
-        m.tools = Rc::new(vec![Tool {
+        m.tools = Rc::new(Tools::new(vec![Tool {
             call: "tc_1".into(),
             run: "run_1".into(),
             title: "Search the web".into(),
             status: Some("running".into()),
-        }]);
+        }]));
         let now = |m: &Model| {
             let shown = m.shown();
             parts(&shown[0], &m.tools, QUIET)

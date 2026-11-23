@@ -23,6 +23,7 @@ extern "C" fn on_event(json: *const u8, len: usize, ctx: *mut u8) {
     let bytes = unsafe { std::slice::from_raw_parts(json, len) };
     let tx = unsafe { &*(ctx as *const Sender<String>) };
     let _ = tx.send(String::from_utf8_lossy(bytes).into_owned());
+    crate::wake::wake();
 }
 
 pub struct Core {

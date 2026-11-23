@@ -13,6 +13,9 @@ pub enum TrayAction {
     CheckUpdates,
 }
 
+static MENU_EVENTS: std::sync::Mutex<Vec<MenuEvent>> = std::sync::Mutex::new(Vec::new());
+static TRAY_EVENTS: std::sync::Mutex<Vec<TrayIconEvent>> = std::sync::Mutex::new(Vec::new());
+
 pub struct Tray {
     _icon: TrayIcon,
     open: MenuItem,
@@ -59,6 +62,21 @@ impl Tray {
             b = b.with_icon(i);
         }
         let icon = b.build().ok()?;
+        // What happens in the tray waits here, and wakes the window's task to look.
+        MenuEvent::set_event_handler(Some(|e: MenuEvent| {
+            if let Ok(mut m) = MENU_EVENTS.lock() {
+                m.push(e);
+            }
+            crate::wake::wake();
+        }));
+        TrayIconEvent::set_event_handler(Some(|e: TrayIconEvent| {
+            if let TrayIconEvent::Click { .. } = e {
+                if let Ok(mut t) = TRAY_EVENTS.lock() {
+                    t.push(e);
+                }
+                crate::wake::wake();
+            }
+        }));
         Some(Tray {
             _icon: icon,
             open,
@@ -76,7 +94,15 @@ impl Tray {
     /// What happened in the tray since the last look.
     pub fn actions(&self) -> Vec<TrayAction> {
         let mut out = Vec::new();
-        while let Ok(e) = MenuEvent::receiver().try_recv() {
+        let menu = MENU_EVENTS
+            .lock()
+            .map(|mut m| std::mem::take(&mut *m))
+            .unwrap_or_default();
+        let tray = TRAY_EVENTS
+            .lock()
+            .map(|mut t| std::mem::take(&mut *t))
+            .unwrap_or_default();
+        for e in menu {
             if e.id == *self.open.id() {
                 out.push(TrayAction::Open);
             } else if e.id == *self.quit.id() {
@@ -87,7 +113,7 @@ impl Tray {
                 out.push(TrayAction::CheckUpdates);
             }
         }
-        while let Ok(e) = TrayIconEvent::receiver().try_recv() {
+        for e in tray {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: tray_icon::MouseButtonState::Up,
@@ -176,6 +202,7 @@ pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
             if let (Some(a), Ok(mut c)) = (about.clone(), CLICKED.lock()) {
                 c.push(a);
             }
+            crate::wake::wake();
             Ok(())
         });
     if let Err(e) = toast.show() {

@@ -21,6 +21,7 @@ mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]
 mod tokens;
+mod wake;
 
 use std::borrow::Cow;
 
@@ -103,6 +104,7 @@ fn main() {
         panel_test::run(out.into());
         return;
     }
+    app::start_first_core();
     gpui_kit::application().with_assets(AppAssets).run(|cx| {
         gpui_kit::init(cx);
         let fonts: Vec<Cow<'static, [u8]>> = FONTS.iter().map(|f| Cow::Borrowed(*f)).collect();

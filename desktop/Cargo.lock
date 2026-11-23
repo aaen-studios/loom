@@ -4214,9 +4214,11 @@ dependencies = [
 name = "loom-desktop"
 version = "0.2.0-dev"
 dependencies = [
+ "async-channel",
  "auto-launch",
  "base64 0.23.1",
  "chrono",
+ "futures-lite",
  "gpui-kit",
  "iana-time-zone",
  "image",

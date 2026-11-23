@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS activity (
     kind TEXT NOT NULL, text TEXT NOT NULL, by TEXT NOT NULL, at INTEGER NOT NULL,
     status TEXT NOT NULL DEFAULT '', input TEXT NOT NULL DEFAULT '', why TEXT NOT NULL DEFAULT '',
     ended INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS activity_by_agent ON activity (user, agent, id);
 CREATE TABLE IF NOT EXISTS secrets (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, nonce TEXT NOT NULL,
     sealed TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -99,6 +100,8 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversation, at);
 -- A page of a chat goes by rowid, which this index ends in, so it needs no sort.
 CREATE INDEX IF NOT EXISTS messages_in_order ON messages (user, conversation);
+-- Only the pinned messages, so the pins of a long chat are found without reading it.
+CREATE INDEX IF NOT EXISTS messages_pinned ON messages (user, conversation, json_extract(json, '$.pinned.at')) WHERE json_extract(json, '$.pinned') IS NOT NULL;
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL);
@@ -118,6 +121,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     conversation TEXT NOT NULL, status TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS tasks_by_conversation ON tasks (conversation);
+CREATE INDEX IF NOT EXISTS tasks_by_user ON tasks (user, agent, status);
 CREATE TABLE IF NOT EXISTS queue (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     pos INTEGER NOT NULL, json TEXT NOT NULL);
@@ -1129,6 +1133,12 @@ impl Store {
             if let ok(j) = parse(text(r[0].copy())) { out.push(j) }
         }
         return out
+    }
+
+    // How many of `agent`'s tasks are running.
+    pub fn tasks_running(self, user: String, agent: String) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT count(*) FROM tasks WHERE user = ? AND agent = ? AND status = 'running'"), [t(user), t(agent)])
+        return int((row ?? List<Value>())[0].copy())
     }
 
     // Every task that was running, as (user, task), for after a restart.
