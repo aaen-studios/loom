@@ -442,6 +442,8 @@ impl WindowsPlatform {
             .name("VSyncProvider".to_owned())
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
+                // loom: since when no window has been on screen.
+                let mut none_shown_since: Option<std::time::Instant> = None;
                 loop {
                     let signal_source = vsync_provider.wait_for_vsync();
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
@@ -488,10 +490,17 @@ impl WindowsPlatform {
                             }
                         }
                     }
-                    // loom: with no window on screen, as in the tray, the thread looks
-                    // five times a second rather than at every vblank.
-                    if !shown {
-                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    // loom: with no window on screen for a second, as in the tray, the
+                    // thread looks five times a second rather than at every vblank. Not
+                    // sooner: a window that's opening isn't on screen until its first
+                    // frame, and the frames after it wait on this thread.
+                    if shown {
+                        none_shown_since = None;
+                    } else {
+                        let since = *none_shown_since.get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= std::time::Duration::from_secs(1) {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                        }
                     }
                 }
             })
