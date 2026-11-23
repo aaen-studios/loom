@@ -5049,14 +5049,19 @@ ACTA_KEY=secret:ACTA_KEY",
                         10.0,
                         self.model.finished_at(&a.id),
                     ))
+                    // One line whatever the agent is doing: what it's on sits quietly after
+                    // its name, so starting or stopping work never moves a row.
                     .child(
                         div()
                             .flex_1()
                             .flex()
-                            .flex_col()
+                            .items_center()
+                            .gap(px(space::S))
                             .min_w_0()
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .text_size(px(size::BODY))
                                     .font_weight(if unread {
                                         FontWeight::SEMIBOLD
@@ -5067,20 +5072,24 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .truncate()
                                     .child(a.name.clone()),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(size::CAPTION))
-                                    .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
-                                    .text_color(if mood == Mood::Failed {
-                                        p.bad
-                                    } else if unread {
-                                        p.ink
-                                    } else {
-                                        p.ink_3
-                                    })
-                                    .truncate()
-                                    .when(!preview.is_empty(), |d| d.child(preview)),
-                            ),
+                            .when(!preview.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .min_w_0()
+                                        .max_w(relative(0.55))
+                                        .text_size(px(size::CAPTION))
+                                        .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                        .text_color(if mood == Mood::Failed {
+                                            p.bad
+                                        } else if unread {
+                                            p.ink
+                                        } else {
+                                            p.ink_3
+                                        })
+                                        .truncate()
+                                        .child(preview),
+                                )
+                            }),
                     )
                     .when(a.pinned.is_some(), |d| {
                         d.child(

@@ -2,9 +2,9 @@
 // sent, the agent thinks, uses a tool, writes, asks before it deploys and waits for the yes, then
 // finishes. While the turn runs, one quiet line under the reply says the step it's on; once it's
 // done, its last words are the answer and the steps before them fold under one line that opens
-// (desktop/src/model.rs, parts). The moods, the sidebar's previews ("Thinking", the tool's title,
-// "Wants to …") and the wording are the app's. Clicking Allow once, Always allow or Deny answers
-// the approval; left alone, it's allowed after a moment.
+// (desktop/src/model.rs, parts). The moods, what the sidebar says after an agent's name on its
+// one line ("Thinking", the tool's title, "Wants to …") and the wording are the app's. Clicking
+// Allow once, Always allow or Deny answers the approval; left alone, it's allowed after a moment.
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs).
