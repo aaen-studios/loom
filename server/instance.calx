@@ -1290,7 +1290,8 @@ impl Instance {
         try i.store.settle_cut_short()
         // Each person's secrets, opened once for the activity log to hide.
         for u in try i.store.users() { i.reopen_secrets(u.id) }
-        // Nor did it stop the browsers it had open, if it crashed.
+        // Nor did it stop the browsers it had open, if it crashed and they didn't
+        // end with it: the desktop app's on Linux and macOS (server/browser.calx).
         browser.stop_leftovers("{i.data}/browsers")
         try i.give_imported_servers()
         i.pick_up_registry()
