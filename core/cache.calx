@@ -39,6 +39,7 @@ const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
 const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
 // Only what a tool block shows, each call's call, run, title and status: a call's input
 // and output can be many KB, and the apps ask again at every tool event.
+const TOOLS_FOR: str = "SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
 const TOOLS: str = "SELECT json_object('call', call, 'run', run, 'title', json_extract(json, '$.title'), 'status', json_extract(json, '$.status')) FROM tools ORDER BY rowid"
 const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
 const OUTBOX: str = "SELECT json FROM outbox ORDER BY at, rowid"
@@ -356,6 +357,13 @@ impl Cache {
         return some(array(try self.texts(sql, List<Value>())))
     }
 
+    /// The tool calls named in `calls`, and those of the runs in `runs`, each a JSON array
+    /// of ids, as a JSON array's text: what a chat's blocks and its runs show, rather than
+    /// every call ever.
+    pub fn tools_text(self, calls: String, runs: String) -> String ! Error {
+        return array(try self.texts(TOOLS_FOR, [t(calls.copy()), t(runs.copy())]))
+    }
+
     fn page(self, conversation: String, before: String?, limit: i64) -> (List<String>, bool) ! Error {
         var cut = i64.MAX
         if let b = before {
@@ -548,4 +556,19 @@ fn lists_come_as_text_too() ! Error {
     let (page, more) = try c.messages_text(String("c_1"), none, 2)
     let (parsed, _) = try c.messages(String("c_1"), none, 2)
     assert(more and try parse(page) == Json.Array(parsed))
+}
+
+@test
+fn tools_come_for_the_calls_and_runs_asked() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    _ = try c.apply(ev(1, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).s("title", String("ls")).done()))
+    _ = try c.apply(ev(2, "tool.started", Obj.new().s("run", String("run_2")).s("call", String("tc_2")).s("title", String("cat")).done()))
+    _ = try c.apply(ev(3, "tool.started", Obj.new().s("run", String("run_3")).s("call", String("tc_3")).s("title", String("rm")).done()))
+    let got = try parse(try c.tools_text(String(#"["tc_1"]"#), String(#"["run_3"]"#)))
+    if let Json.Array(items) = got {
+        assert(items.len() == 2 and str_at(items[0], "call") == some(String("tc_1")) and str_at(items[1], "title") == some(String("rm")))
+    } else {
+        panic("not an array")
+    }
+    assert(try c.tools_text(String("null"), String("[]")) == "[]")
 }

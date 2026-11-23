@@ -965,6 +965,10 @@ impl Conn {
 
     // A list from the cache as a JSON array's text, and whether there's more of it.
     fn read_cache(self, what: String, m: Json) -> (String, bool) ! Error {
+        // Only the calls and runs the app names, when it names them.
+        if what == "tools" and (m.get(String("calls")) != none or m.get(String("runs")) != none) {
+            return (try self.cache.tools_text("{at(m, "calls")}", "{at(m, "runs")}"), false)
+        }
         if let list = try self.cache.list_text(what) { return (list, false) }
         let limit = int_at(m, "limit") ?? 50
         return try self.cache.messages_text(str_at(m, "conversation") ?? String(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })

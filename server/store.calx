@@ -2121,11 +2121,11 @@ impl Store {
         return i64.wrap(u64(gone))
     }
 
-    // `user`'s events after `after`, in order, as the text stored.
-    pub fn events_after(self, user: String, after: i64) -> List<String> ! Error {
-        var out = List<String>()
-        for r in try self.db.query(String("SELECT json FROM events WHERE user = ? AND seq > ? ORDER BY seq"), [t(user), Value.Int(after)]) {
-            out.push(text(r[0].copy()))
+    // Up to `most` of `user`'s events after `after`, in order, each its seq and the text stored.
+    pub fn events_after(self, user: String, after: i64, most: usize) -> List<(i64, String)> ! Error {
+        var out = List<(i64, String)>()
+        for r in try self.db.query(String("SELECT seq, json FROM events WHERE user = ? AND seq > ? ORDER BY seq LIMIT ?"), [t(user), Value.Int(after), Value.Int(i64.wrap(u64(most)))]) {
+            out.push((int(r[0].copy()), text(r[1].copy())))
         }
         return out
     }
@@ -2270,8 +2270,8 @@ fn events_are_counted_per_person() {
     assert("{e1}".contains("\"seq\":1") and "{e1}".contains("\"n\":\"one\""))
     assert("{f1}".contains("\"seq\":1"))
     assert(s.last_seq(a.id.copy())! == 2)
-    assert(s.events_after(a.id.copy(), 1)!.len() == 1)
-    assert(s.events_after(b.id.copy(), 0)!.len() == 1)
+    assert(s.events_after(a.id.copy(), 1, 100)!.len() == 1)
+    assert(s.events_after(b.id.copy(), 0, 100)!.len() == 1)
 }
 
 @test

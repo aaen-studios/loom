@@ -245,6 +245,7 @@ pub struct Instance {
     next_job: i64
     auths: Map<i64, Auth>
     dummy_hash: String
+    skills_written: Map<String, String>    // each skill file written, by path: what was in it, hashed
     failures: LinkedMap<String, List<i64>>
     thumbs: Sender<Thumb>
     events: EventLife
@@ -389,6 +390,8 @@ const PROFILE_MOST: usize = 4000
 // Side questions: how long one may be, and how much of the chat the agent is given.
 const SIDE_QUESTION_MOST: usize = 4000
 const SIDE_MESSAGES: usize = 40
+// How many events catching a device up reads at a time.
+const EVENTS_PAGE: usize = 500
 const SIDE_TRANSCRIPT_MOST: usize = 24000
 
 // How full a session's context may get, in percent of its window, before the
@@ -1112,7 +1115,7 @@ impl Instance {
         }
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: List<Thread>(), fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, skills_written: Map<String, String>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_marks: Map<String, (String, String)>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -4259,7 +4262,7 @@ impl Instance {
 
     // Writes `new` for the path `old` wherever the person's agents' instructions,
     // their skills and their memories name it.
-    fn repath(i: Instance, user: String, old: String, new: String) ! Error {
+    fn repath(i: mut Instance, user: String, old: String, new: String) ! Error {
         for a in try i.store.agents(user.copy()) {
             let text = str_at(a.copy(), "instructions") ?? String()
             if not text.contains(old.copy()) { continue }
@@ -5965,8 +5968,17 @@ impl Instance {
         if reset {
             _ = i.server.send_text(s, "{try i.snapshot(user.copy(), last)}")
         } else {
-            for e in try i.store.events_after(user.copy(), after) {
-                _ = i.server.send_text(s, e)
+            // A page at a time, so a device far behind doesn't hold its whole backlog in
+            // memory twice over.
+            var from = after
+            loop {
+                let page = try i.store.events_after(user.copy(), from, EVENTS_PAGE)
+                let n = page.len()
+                for (seq, e) in page {
+                    _ = i.server.send_text(s, e)
+                    from = seq
+                }
+                if n < EVENTS_PAGE { break }
             }
         }
         // Replies still being written, from position 0.
@@ -6679,7 +6691,7 @@ impl Instance {
     // Puts `user`'s skills in an agent's folder, as `.claude/skills/<name>/SKILL.md`,
     // and takes out the ones loom put there that are gone. A folder loom made
     // has a `.loom` file in it; others are the person's own and stay.
-    fn write_skills(i: Instance, user: String, agent: Json) {
+    fn write_skills(i: mut Instance, user: String, agent: Json) {
         let folder = i.agent_folder(user.copy(), agent.copy())
         let place = i.place(user.copy(), agent)
         let skills = match i.store.skills(user.copy(), true) {
@@ -6696,8 +6708,8 @@ impl Instance {
             if not valid_skill(name.copy()) { continue }
             names.push(name.copy())
             let dir = "{root}/{name}"
-            if let err(e) = i.put_file(place.copy(), "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes()) { eprintln("loom: skill {name}: {e}") }
-            if let err(e) = i.put_file(place.copy(), "{dir}/SKILL.md", skill_file(s).to_bytes()) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = i.put_skill_file(place.copy(), "{dir}/.loom", "Written by loom from its skills. Changes here are overwritten.\n".to_bytes()) { eprintln("loom: skill {name}: {e}") }
+            if let err(e) = i.put_skill_file(place.copy(), "{dir}/SKILL.md", skill_file(s).to_bytes()) { eprintln("loom: skill {name}: {e}") }
         }
         let present = match fs.list(root.copy()) {
             ok(entries) => entries,
@@ -6711,14 +6723,27 @@ impl Instance {
             // Only the two files loom wrote, then the folder if that left it empty.
             let written: List<str> = ["SKILL.md", ".loom"]
             for f in written {
+                _ = i.skills_written.remove("{dir}/{f}")
                 if let err(e) = i.drop_file(place.copy(), "{dir}/{f}") { eprintln("loom: skill {name}: {e}") }
             }
             if let err(e) = i.drop_dir(place.copy(), dir) { eprintln("loom: skill {name}'s folder stays: {e}") }
         }
     }
 
+    // A skill's file, unless loom wrote the same there already and it's still there: a
+    // skill saved writes every agent's skills, and an agent's program starting writes
+    // its own, which in a sandbox is a process for each file.
+    fn put_skill_file(i: mut Instance, place: sandbox.Place?, path: String, data: List<u8>) ! Error {
+        let hash = bytes.hex(sha256(data.copy()))
+        if let had = i.skills_written.find(path.copy()) {
+            if had == hash and fs.exists(path.copy()) { return }
+        }
+        try i.put_file(place, path.copy(), data)
+        i.skills_written.insert(path.copy(), hash)
+    }
+
     // After a skill changes: every one of `user`'s agents' folders.
-    fn sync_skills(i: Instance, user: String) {
+    fn sync_skills(i: mut Instance, user: String) {
         let agents = match i.store.agents(user.copy()) {
             ok(a) => a,
             err(_) => return,
