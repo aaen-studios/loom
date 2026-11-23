@@ -14,6 +14,7 @@ module server.codemode
 // each script runs with, starting Deno, and what the agent is told. `loom mcp`
 // (server/mcp.calx) runs the script and makes the calls; the instance
 // fetches Deno.
+import std.bytes
 import std.env
 import std.fs
 import std.json.{Json, parse}
@@ -321,7 +322,17 @@ pub fn search(tools: List<Tool>, query: String, limit: usize, trouble: List<Stri
 
 // --- Running a script ---
 
-// The prelude every script imports: loom, mcp and plugins, whose functions
+// A Deno waits for its script (LOO-222): `loom mcp` starts one before it's
+// needed, at the session's first search_tools and after each script, so a
+// script doesn't wait for Deno to start (50 ms, and 500 ms for a session's
+// first). It runs the prelude below, and reads its script as the first line of
+// its input, `{"t":"run","url":...}`, a data: URL of the TypeScript, which it
+// imports: a data: URL needs no permission, as a file would. One that waits
+// WAIT_IDLE_MS for nothing ends by itself, and so does one whose input ends,
+// as when loom mcp has gone.
+pub const WAIT_IDLE_MS: i64 = 300000
+
+// The prelude every script runs with: loom, mcp and plugins, whose functions
 // each send a call on standard output and wait for its answer on standard
 // input, and console, whose lines go to loom mcp as what the script logged.
 // Generated here, so loom's code stays Calx; it's the same for every script.
@@ -334,6 +345,13 @@ pub const PRELUDE: str = ##"
     }
     const waiting = new Map();
     let next = 0;
+    let started = false;
+    const idle = setTimeout(() => Deno.exit(0), 300000);
+    function start(url) {
+      started = true;
+      clearTimeout(idle);
+      import(url).catch((e) => { send({ t: "end", ok: false, error: show(e) }); Deno.exit(0); });
+    }
     (async () => {
       const dec = new TextDecoder();
       let buf = "";
@@ -345,12 +363,14 @@ pub const PRELUDE: str = ##"
           buf = buf.slice(n + 1);
           if (!line.trim()) continue;
           const m = JSON.parse(line);
+          if (m.t === "run") { if (!started) start(m.url); continue; }
           const w = waiting.get(m.id);
           if (!w) continue;
           waiting.delete(m.id);
           if (m.ok) w.resolve(m.value); else w.reject(new Error(m.error));
         }
       }
+      Deno.exit(0);
     })();
     function call(tool, args) {
       const id = ++next;
@@ -375,9 +395,9 @@ pub const PRELUDE: str = ##"
         },
       });
     }
-    export const loom = space("loom.");
-    export const mcp = spaces("mcp.");
-    export const plugins = spaces("plugins.");
+    const loom = space("loom.");
+    const mcp = spaces("mcp.");
+    const plugins = spaces("plugins.");
     function show(v) {
       if (typeof v === "string") return v;
       if (v instanceof Error) return String(v.stack || v);
@@ -385,7 +405,7 @@ pub const PRELUDE: str = ##"
     }
     const log = (...xs) => send({ t: "log", text: xs.map(show).join(" ") });
     for (const k of ["log", "info", "debug", "warn", "error", "trace", "dir", "table"]) console[k] = log;
-    export async function __run(f) {
+    async function __run(f) {
       try {
         const v = await f();
         let value = null;
@@ -396,24 +416,46 @@ pub const PRELUDE: str = ##"
       }
       Deno.exit(0);
     }
+    globalThis.__loom = { loom, mcp, plugins, __run };
     "##
 
-// The script's own file: the prelude imported and the code in a function,
-// with the code from its second line.
+// The script as Deno imports it: the prelude's names and the code in a
+// function, with the code from its second line.
 pub fn script_text(code: String) -> String {
-    return "import \{ loom, mcp, plugins, __run \} from \"./loom.js\"; await __run(async () => \{\n{code}\n\});\n"
+    return "const \{ loom, mcp, plugins, __run \} = globalThis.__loom; await __run(async () => \{\n{code}\n\});\n"
 }
 
-// Starts `code` in Deno, in `folder` (made for this script alone), as its
-// `n`th script. Deno is given no permission, and asked for none: it reads only
-// the script and the prelude, the module loader's, and nothing from the
-// network or npm. Its environment is only what it needs to start.
-pub fn start(deno: String, folder: String, n: i64, code: String) -> Child ! Error {
-    let prelude = "{folder}/loom.js"
-    if not fs.exists(prelude.copy()) { try fs.write_text(prelude, String(PRELUDE)) }
-    let file = "{folder}/run-{n}.ts"
-    try fs.write_text(file.copy(), script_text(code))
-    let args: List<String> = [String("run"), String("--quiet"), String("--no-prompt"), String("--no-remote"), String("--no-npm"), String("--no-config"), String("--no-lock"), String("--no-check"), "--v8-flags=--max-old-space-size={MEMORY_MB}", file]
+// The line that gives a waiting Deno its script, as a data: URL to import.
+pub fn run_line(code: String) -> String {
+    let url = "data:application/typescript;base64,{bytes.base64(script_text(code).to_bytes())}"
+    return "{Obj.new().s("t", String("run")).s("url", url).done()}\n"
+}
+
+// What Deno said of the script, as the agent reads it: each place in it given
+// as the line of the agent's code. Deno names the script by its data: URL,
+// whole or with its middle cut out ("Y29u......Cg=="), which base64 has no
+// colon in, so it ends at the place's colon.
+pub fn said_of(text: String, n: i64) -> String {
+    let mark = "data:application/typescript;base64,"
+    var out = String()
+    var rest = text.copy()
+    while let k = rest.find(mark) {
+        let after = k + mark.len()
+        let end = after + (rest[after..].find(":") ?? rest[after..].len())
+        out = "{out}{rest[..k]}run-{n}.ts"
+        rest = rest[end..].copy()
+    }
+    return places_fixed("{out}{rest}", n)
+}
+
+// Starts a Deno in `folder` (the session's) that waits for a script. Deno is
+// given no permission, and asked for none: it reads only the prelude, the
+// module loader's, and the script it's given, and nothing from the network or
+// npm. Its environment is only what it needs to start.
+pub fn wait(deno: String, folder: String) -> Child ! Error {
+    let prelude = "{folder}/wait.js"
+    if not fs.exists(prelude.copy()) { try fs.write_text(prelude.copy(), String(PRELUDE)) }
+    let args: List<String> = [String("run"), String("--quiet"), String("--no-prompt"), String("--no-remote"), String("--no-npm"), String("--no-config"), String("--no-lock"), String("--no-check"), "--v8-flags=--max-old-space-size={MEMORY_MB}", prelude]
     var c = Command.new(deno).args(args).dir(folder.copy()).env_clear().env(String("DENO_DIR"), "{folder}/deno").env(String("NO_COLOR"), String("1")).env(String("DENO_NO_UPDATE_CHECK"), String("1"))
     // Windows's own folder, which programs there need to start.
     for name in ["SystemRoot", "SYSTEMROOT", "TEMP", "TMP"] {
@@ -557,6 +599,15 @@ fn searches_by_words() {
 fn places_are_lines_of_the_code() {
     let said = String("error: Uncaught (in promise) Error: no\n    at file:///C:/t/run-2.ts:4:9\n    at __run (file:///C:/t/loom.js:70:23)")
     assert(places_fixed(said, 2) == "error: Uncaught (in promise) Error: no\n    at line 3:9\n    at __run (file:///C:/t/loom.js:70:23)")
+    // A waiting Deno names the script by its data: URL.
+    let line = run_line(String("throw new Error(\"no\");"))
+    assert(line.starts_with(#"{"t":"run","url":"data:application/typescript;base64,"#) and line.ends_with("\"\}\n"))
+    let url = parse(line)!.get(String("url")) ?? Json.Null
+    assert(said_of("Error: no\n    at {url.as_str() ?? String()}:2:7\n    at __run (file:///C:/t/wait.js:70:23)", 3) == "Error: no\n    at line 1:7\n    at __run (file:///C:/t/wait.js:70:23)")
+    // A long one has its middle cut out.
+    assert(said_of(String("Error: boom\n    at data:application/typescript;base64,Y29uc3Qg......Cg==:4:11\n    at data:application/typescript;base64,Y29u......Cg==:1:59"), 2) == "Error: boom\n    at line 3:11\n    at the start:59")
+    // It waits as long as WAIT_IDLE_MS says.
+    assert(PRELUDE.contains("setTimeout(() => Deno.exit(0), {WAIT_IDLE_MS})"))
 }
 
 @test

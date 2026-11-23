@@ -81,6 +81,7 @@ pub struct Config {
     pub sandbox_image: String    // the image they run
     pub release: update.Source    // where its own updates come from: loom's releases, but for tests
     pub in_app: bool    // an instance inside the desktop app, which updates with the app
+    pub mcp: String    // the program each session's `loom mcp` runs: the desktop app's own small one (server/mcp_main.calx), or "" for this one
 }
 
 // An update of the instance's own program (server/update.calx), while one is
@@ -268,6 +269,7 @@ enum Pending {
     Resume(String, String)    // the run, and the session picked up again
     Prompt(String)
     Config(String, String, String, String)    // the run, its session, and the option and value being set
+    Warm(String, String)    // a conversation's session readied before its message, and the one picked up, or "" for a new one
 }
 
 struct Proc {
@@ -289,6 +291,9 @@ struct Proc {
     profiled: Map<String, i64>    // ACP session -> the revision of the person's profile it has
     configs: Map<String, Json>    // ACP session -> its configOptions, as it last gave them
     waiting: List<String>
+    warm_next: List<String>    // conversations whose sessions are readied once it has started
+    warming: List<String>    // conversations whose sessions are being readied
+    held: List<String>    // runs waiting for their conversation's session to be readied
     key: String    // its key in `procs`: proc_key(agent, program)
     stopped: bool    // whether it was told to stop, so it's let go of
     used: i64    // when it last said something, for stopping it once it has been idle a while
@@ -316,6 +321,9 @@ pub struct Instance {
     approvals: LinkedMap<String, Approval>
     lines: Receiver<Line>
     lines_to: Sender<Line>
+    stopped_to: Sender<String>    // each agent program's thread, once a program the loop stopped has ended
+    stopped: Receiver<String>
+    stopping: i64    // programs told to stop that haven't ended yet, which the instance waits for as it ends
     waker: LoopWaker    // wakes next_event, for threads that send to the loop
     hash_to: Sender<Job>
     hash_done: Receiver<Done>
@@ -345,6 +353,9 @@ pub struct Instance {
     installs: Map<i64, Install>    // installs on the installer's thread
     deno_job: i64    // the installer's job fetching Deno for Code Mode, or 0
     deno_waiters: List<Request>    // loom mcp's asks for Deno, answered once it's fetched
+    tools_body: String    // GET /api/mcp/tools's answer, made at its first ask
+    follows: Map<i64, (String, String)>    // the installer's jobs installing a found program's version: its name, and the version
+    next_follow: i64    // when the registry is next read for the found programs' versions, or 0 while none is followed
     code_acts: Map<i64, String>    // a script's call to an MCP server, as recorded -> the token it came with
     leftovers: List<String>    // folders of removed ACP agents and plugins, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
@@ -414,6 +425,7 @@ pub struct Instance {
     release: update.Source    // where its own updates come from
     host: update.Host    // how it runs, which says whether and how it updates itself
     exe: String    // the program's path, taken at start: on Linux the running program follows its file when an update renames it to .old
+    mcp_exe: String    // the program each session's `loom mcp` runs (Config.mcp), or "" for this one
     update_to: Sender<update.Job>    // the thread that downloads and checks updates
     update_back: Receiver<update.Back>
     updating: Updating
@@ -499,6 +511,8 @@ struct Install {
 }
 
 const REGISTRY_FRESH_MS: i64 = 600000
+// How often the registry is read again for a found program's newer version.
+const FOLLOW_MS: i64 = 21600000
 // How long the person's profile may be: it goes into every session.
 const PROFILE_MOST: usize = 4000
 // Side questions: how long one may be, and how much of the chat the agent is given.
@@ -1264,6 +1278,8 @@ impl Instance {
         let waker = try server.waker()
         let lines = Receiver<Line>()
         let to = lines.sender()
+        let stopped = Receiver<String>()
+        let stopped_to = stopped.sender()
         let (hash_to, hash_done) = hashing.start(config.hasher)
         // What a login with an unknown name checks against, so it takes as long as a
         // wrong password. Made with the hasher's parameters, so checking it costs the
@@ -1284,7 +1300,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, Waiter>(), fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -1517,8 +1533,7 @@ impl Instance {
         }
         for key in keys {
             if let p = i.procs.remove(key) {
-                var to = p.to.copy()
-                to.send(Out.Stop)
+                i.stop_proc(p.to)
             }
         }
         i.close_browser("{user}/{id}")
@@ -1747,18 +1762,108 @@ impl Instance {
 
     // Adds the ACP agent programs found on this computer that the instance doesn't know
     // yet, so an instance in the desktop app can make agents at once.
-    pub fn find_acp_agents(i: Instance) ! Error {
+    pub fn find_acp_agents(i: mut Instance) ! Error {
         if process.which(String("npx")) != none {
-            if try i.store.acp_agent(String("claude")) == none {
-                try i.store.set_acp_agent(String("claude"), String("npx"), [String("-y"), String("@agentclientprotocol/claude-agent-acp")])
+            // Each at a version, which it follows (installer.found_programs).
+            // One an older loom added runs npx's newest, and follows from now on.
+            for (name, registry_id, package) in installer.found_programs() {
+                let had = try i.store.acp_agent(String(name))
+                let unpinned = if let a = had.copy() { a.command == "npx" and a.args.len() == 2 and a.args[1] == package } else { false }
+                if had == none or unpinned {
+                    try i.store.set_acp_agent(String(name), String("npx"), [String("-y"), "{package}@{i.found_version(String(registry_id), String(package))}"])
+                    try i.store.set_meta("follows:{name}", String(registry_id))
+                }
             }
-            if try i.store.acp_agent(String("codex")) == none {
-                try i.store.set_acp_agent(String("codex"), String("npx"), [String("-y"), String("@agentclientprotocol/codex-acp")])
-            }
+            i.follow_programs()
         }
         if process.which(String("gemini")) != none and try i.store.acp_agent(String("gemini")) == none {
             try i.store.set_acp_agent(String("gemini"), String("gemini"), [String("--experimental-acp")])
         }
+    }
+
+    // The version a found program runs: the registry's, once the instance has read it.
+    fn found_version(i: Instance, registry_id: String, package: String) -> String {
+        return installer.registry_version(i.registry.copy(), registry_id.copy(), package) ?? installer.found_version(registry_id)
+    }
+
+    // Brings each found program to its version (installer.found_programs): run
+    // with npx at that version at once, and installed with npm on the
+    // installer's thread, to run with node once it's in. Older versions'
+    // folders go once nothing runs the program.
+    fn follow_programs(i: mut Instance) {
+        if let err(e) = i.follow_programs_in() { eprintln("loom: keeping the found agent programs up to date: {e}") }
+    }
+
+    fn follow_programs_in(i: mut Instance) ! Error {
+        let root = "{try fs.absolute(i.data.copy())}/acp"
+        for (name, registry_id, package) in installer.found_programs() {
+            if try i.store.meta("follows:{name}") != some(String(registry_id)) { continue }
+            let a = try i.store.acp_agent(String(name)) else {
+                try i.store.set_meta("follows:{name}", String())
+                continue
+            }
+            // One the person changed by hand isn't followed any more.
+            let ours = a.command == "npx" or (a.command == "node" and a.args.len() > 0 and a.args[0].replace("\\", "/").starts_with("{root}/{name}/"))
+            if not ours {
+                try i.store.set_meta("follows:{name}", String())
+                continue
+            }
+            // The registry is read again each 6 hours for a newer version.
+            if i.next_follow == 0 { i.next_follow = now() + FOLLOW_MS }
+            let version = i.found_version(String(registry_id), String(package))
+            let folder = "{root}/{name}/{version}"
+            var running = false
+            for (_, p) in i.procs {
+                if p.program == name { running = true }
+            }
+            if a.command == "node" and a.args[0].replace("\\", "/").starts_with("{folder}/") {
+                // Up to date: older versions go once nothing runs it.
+                if not running {
+                    let names = match fs.list("{root}/{name}") {
+                        ok(l) => l,
+                        err(_) => List<String>(),
+                    }
+                    for old in names {
+                        if old != version {
+                            if let err(e) = fs.remove_dir_all("{root}/{name}/{old}") { eprintln("loom: removing {name} {old}: {e}") }
+                        }
+                    }
+                }
+                continue
+            }
+            var busy = false
+            for (_, f) in i.follows {
+                if f.0 == name { busy = true }
+            }
+            if busy { continue }
+            // npx at that version until it's installed.
+            let pinned: List<String> = [String("-y"), "{package}@{version}"]
+            if a.command == "npx" and a.args != pinned {
+                try i.store.set_acp_agent(String(name), String("npx"), pinned)
+                i.stop_program(String(name))
+            }
+            i.next_job += 1
+            i.follows.insert(i.next_job, (String(name), version.copy()))
+            i.install_to.send(installer.Job { id: i.next_job, work: installer.Work.Npm("{package}@{version}", String(package), folder) })
+        }
+    }
+
+    // A found program's version installed with npm: it runs with node from
+    // now on, as each of its programs next starts.
+    fn followed(i: mut Instance, name: String, version: String, d: installer.Done) ! Error {
+        if d.error.len() > 0 {
+            eprintln("loom: {name} {version} didn't install, so it runs with npx: {d.error}")
+            return
+        }
+        let a = try i.store.acp_agent(name.copy()) else return
+        if a.command != "npx" and a.command != "node" { return }
+        var args = List<String>()
+        if let Json.Array(items) = at(d.value.copy(), "args") {
+            for x in items { args.push(x.as_str() ?? String()) }
+        }
+        try i.store.set_acp_agent(name.copy(), str_at(d.value, "command") ?? String("node"), args)
+        try i.store.set_acp_settings(name.copy(), a.source, version, a.env)
+        i.stop_program(name)
     }
 
     // Runs until the program is asked to stop.
@@ -1845,6 +1950,10 @@ impl Instance {
                     if signal.take() != none { break }
                     i.prune()
                     if now() >= i.next_proc_sweep { i.stop_idle_procs() }
+                    if i.next_follow > 0 and now() >= i.next_follow {
+                        i.next_follow = now() + FOLLOW_MS
+                        i.read_registry()
+                    }
                     if i.leftovers.len() > 0 and now() >= i.next_sweep { i.sweep() }
                 },
                 _ => {},
@@ -1864,6 +1973,7 @@ impl Instance {
                 }
             }
             if held { i.let_go() }
+            i.take_stopped()
             if let err(e) = i.store.truncate_log(mut i.wal_big) { eprintln("loom: database: {e}") }
             while let d = i.install_done.next() {
                 match i.installed(d) {
@@ -2009,9 +2119,10 @@ impl Instance {
                 if not i.browser_in_use(key.copy()) { i.close_browser(key) }
             }
         }
-        for (_, p) in i.procs {
-            var to = p.to.copy()
-            to.send(Out.Stop)
+        var running = List<String>()
+        for (k, _) in i.procs { running.push(k.copy()) }
+        for k in running {
+            if let p = i.procs.remove(k) { i.stop_proc(p.to) }
         }
         // Each browser is stopped, with what it started, before the instance ends.
         var keys = List<String>()
@@ -2022,6 +2133,10 @@ impl Instance {
         for n in stopped {
             if let t = i.stopped_browsers.remove(n) { t.join() }
         }
+        // And each agent program, with what it started (npx's node, Claude
+        // Code, loom mcp and its Deno), so none outlives the instance through
+        // a restart or an update. One that won't end in 10 seconds is left.
+        i.wait_stopped(10000)
         i.close_doors(String(), none)
         if let s = mut i.stop_gate { s.send(true) }
         if let t = i.gate.take() { t.join() }
@@ -2876,7 +2991,9 @@ impl Instance {
         }
         let address = i.server.url()
         var base = if address.ends_with("/") { address[..address.len() - 1].copy() } else { address }
-        var exe = current_exe()
+        // The desktop app's small loom mcp, which starts in half the time the
+        // app does (LOO-222), where it has written it; else this program.
+        var exe = if i.mcp_exe.len() > 0 and fs.exists(i.mcp_exe.copy()) { i.mcp_exe.copy() } else { current_exe() }
         let wanted = match i.store.agent(user.copy(), agent.copy()) {
             ok(some(a)) => a,
             _ => Json.Null,
@@ -3210,7 +3327,9 @@ impl Instance {
             return some(http_error(401, "unauthorized", String("That isn't a token for loom's tools.")))
         }
         if req.path == "/api/mcp/tools" and req.method == "GET" {
-            return some(json_response(200, Obj.new().j("tools", Json.Array(tools.all())).done()))
+            // The same for every agent, so it's made once, not for each session (LOO-230).
+            if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
+            return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
         for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done"] {
             if req.path == path { return try i.code_route(req, grant, token) }
@@ -3370,6 +3489,8 @@ impl Instance {
         let folder = try i.deno_folder()
         let program = if os() == "windows" { "{folder}/deno.exe" } else { "{folder}/deno" }
         if fs.exists(program.copy()) { return some(json_response(200, Obj.new().s("path", program).done())) }
+        // `?here`: only where it's fetched already, for loom mcp to start one ahead of a script.
+        if req.query == "here" { return some(json_response(200, Obj.new().s("error", String("Deno isn't fetched yet")).done())) }
         let how = codemode.deno_release(installer.platform()) else {
             return some(json_response(200, Obj.new().s("error", "Deno has no build for this computer, {installer.platform()}").done()))
         }
@@ -6570,6 +6691,8 @@ impl Instance {
         }
         _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).done()}")
         i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0) })
+        // A person who opens an app is likely to write soon (LOO-223).
+        i.prestart(user.copy())
         // The owner's first device after an update the instance made by itself hears of
         // it live, so it notifies.
         if i.told_update != Json.Null and try i.store.role(user) == some(String("owner")) { try i.tell_owner_update() }
@@ -7121,8 +7244,8 @@ impl Instance {
         }
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
-        let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker)
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), key: key.copy(), stopped: false, used: now() }
+        let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -7196,6 +7319,11 @@ impl Instance {
             user = r.user.copy()
             agent = r.agent.copy()
         } else {
+            return
+        }
+        // Its session is being readied already: the run goes on once it is.
+        if p.warming.contains(conversation.copy()) {
+            p.held.push(run_id.copy())
             return
         }
         p.next_id += 1
@@ -7292,6 +7420,81 @@ impl Instance {
         p.next_id += 1
         p.pending.insert(p.next_id, Pending.NewSession(run_id.copy()))
         p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", i.mcp_servers(user, agent, conversation, p.mcp_http, p.boxed)).j("_meta", acp.session_meta()).done())))
+    }
+
+    // --- Ready before the first message (LOO-223) ---
+    //
+    // A program takes a second or two to start (Node, and npx), and Claude's
+    // adapter as long again for a session, which starts Claude Code. So when
+    // one of a person's apps connects, a message is likely soon, and the
+    // program of the agent they last wrote to starts then, with the session of
+    // that chat: picked up again where the program can, or a new one. It's
+    // stopped after 30 idle minutes as any other is, so the cost is one
+    // program for a while after the person opens an app.
+
+    // Starts `user`'s last chat's program and readies its session, unless they're running.
+    fn prestart(i: mut Instance, user: String) {
+        if let err(e) = i.prestart_in(user) { eprintln("loom: starting an agent program ahead: {e}") }
+    }
+
+    fn prestart_in(i: mut Instance, user: String) ! Error {
+        if i.holding() or i.moving.len() > 0 { return }
+        let conversation = try i.store.last_chat(user.copy()) else return
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        let agent_id = str_at(conversation, "agent") ?? String()
+        // A turn going on there has what it needs.
+        for (_, r) in i.runs {
+            if r.user == user and r.conversation == conversation_id { return }
+        }
+        let agent = try i.store.agent(user.copy(), agent_id.copy()) else return
+        let its_own = str_at(agent.copy(), "acp_agent") ?? String()
+        let program = try i.store.conversation_program(user.copy(), conversation_id.copy()) ?? its_own
+        if program.len() == 0 or try i.store.acp_agent(program.copy()) == none or not try i.may_use(user.copy(), program.copy()) { return }
+        if let (left, _) = try i.budget_left(user.copy(), program.copy()) {
+            if left <= 0 { return }
+        }
+        let key = proc_key(agent_id, program.copy())
+        if not i.procs.contains(key.copy()) {
+            if let p = i.place(user.copy(), agent.copy()) {
+                if i.sandbox_used(p) > sandbox.DISK_BYTES { return }
+            }
+            try i.start_proc(user, agent, program)
+        }
+        var p = i.procs.remove(key.copy()) else return
+        if not p.sessions.contains(conversation_id.copy()) and not p.warming.contains(conversation_id.copy()) and not p.warm_next.contains(conversation_id.copy()) {
+            if p.ready { i.warm_session(mut p, conversation_id) } else { p.warm_next.push(conversation_id) }
+        }
+        i.procs.insert(key, p)
+    }
+
+    // Readies `conversation`'s session in its program, as its next run would
+    // start it, before that run: picked up again, or a new one. A session that
+    // a run would carry over to a fresh one (nearly full, or its tools
+    // changed) is left for the run.
+    fn warm_session(i: mut Instance, p: mut Proc, conversation: String) {
+        let kept = match i.store.acp_session(p.user.copy(), conversation.copy(), p.program.copy()) {
+            ok(s) => s,
+            err(_) => return,
+        }
+        var picked = String()
+        if let session = kept {
+            if i.nearly_full(session.copy()) or i.tools_changed(p.user.copy(), p.agent.copy(), conversation.copy(), session.copy()) { return }
+            if p.resume or p.load { picked = session }
+        }
+        let folder = match fs.absolute(i.folder_of(p.user.copy(), p.agent.copy())) {
+            ok(path) => path,
+            err(_) => String("."),
+        }
+        let servers = i.mcp_servers(p.user.copy(), p.agent.copy(), conversation.copy(), p.mcp_http, p.boxed)
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.Warm(conversation.copy(), picked.copy()))
+        p.warming.push(conversation.copy())
+        if picked.len() > 0 {
+            let method = if p.resume { "session/resume" } else { "session/load" }
+            p.to.send(Out.Send(acp.request(p.next_id, method, Obj.new().s("sessionId", picked).s("cwd", folder).j("mcpServers", servers).j("_meta", acp.session_meta()).done())))
+        } else {
+            p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", servers).j("_meta", acp.session_meta()).done())))
+        }
     }
 
     // Puts an agent's instructions in its folder, as AGENTS.md and CLAUDE.md,
@@ -7554,7 +7757,7 @@ impl Instance {
             Pending.Init => {
                 if let e = error {
                     eprintln("loom: agent {p.agent} didn't initialize: {e}")
-                    p.to.send(Out.Stop)
+                    i.stop_proc(p.to.copy())
                     p.stopped = true
                     let waiting = p.waiting.copy()
                     p.waiting = List<String>()
@@ -7573,9 +7776,45 @@ impl Instance {
                     Json.Object(_) => true,
                     _ => false,
                 }
+                // A session readied ahead first, for a run that comes on it.
+                let warm = p.warm_next.copy()
+                p.warm_next = List<String>()
+                for conversation in warm {
+                    i.warm_session(mut p, conversation)
+                }
                 let waiting = p.waiting.copy()
                 p.waiting = List<String>()
                 for run in waiting {
+                    i.proceed(mut p, run)
+                }
+            },
+            Pending.Warm(conversation, picked) => {
+                if let k = p.warming.position(|c| c == conversation) { _ = p.warming.remove(k) }
+                if let e = error {
+                    // A run on it starts its own session, as it would have.
+                    eprintln("loom: agent {p.agent} couldn't ready a session ahead: {str_at(e, "message") ?? String()}")
+                } else {
+                    let sid = if picked.len() > 0 { picked.copy() } else { str_at(result.copy(), "sessionId") ?? String() }
+                    if sid.len() > 0 {
+                        try i.store.put_acp_session(p.user.copy(), conversation.copy(), p.program.copy(), sid.copy(), i.tools_of(p.user.copy(), p.agent.copy()))
+                        p.sessions.insert(conversation.copy(), sid.copy())
+                        let config = at(result, "configOptions")
+                        if let Json.Array(_) = config {
+                            p.configs.insert(sid, config.copy())
+                            if picked.len() == 0 and try i.runs_own(p.user.copy(), p.agent.copy(), p.program.copy()) { try i.learn_options(p.user.copy(), p.agent.copy(), p.program.copy(), config) }
+                        }
+                    }
+                }
+                // The runs that came meanwhile go on it now.
+                var held = List<String>()
+                var rest = List<String>()
+                for run in p.held {
+                    // One that ended meanwhile goes too: proceed lets it be.
+                    let on = if let r = i.runs.find(run.copy()) { r.conversation == conversation } else { true }
+                    if on { held.push(run.copy()) } else { rest.push(run.copy()) }
+                }
+                p.held = rest
+                for run in held {
                     i.proceed(mut p, run)
                 }
             },
@@ -7650,7 +7889,7 @@ impl Instance {
             p.configs.insert(sid.copy(), config.copy())
             // What a new session starts on is what the agent offers: its own
             // program's, not a backup's or another a chat moved to.
-            if new and try i.runs_own(user.copy(), p.agent.copy(), p.program.copy()) { try i.learn_options(user, p.agent.copy(), config) }
+            if new and try i.runs_own(user.copy(), p.agent.copy(), p.program.copy()) { try i.learn_options(user, p.agent.copy(), p.program.copy(), config) }
         }
         i.configure(mut p, run, sid)
     }
@@ -7659,12 +7898,11 @@ impl Instance {
     // the agent, for the person to pick from, when it's new or changed, and
     // with each of the person's other agents on that program, which offers
     // them the same before they've started a session on it.
-    fn learn_options(i: Instance, user: String, id: String, config: Json) ! Error {
-        let agent = try i.store.agent(user.copy(), id.copy()) else return
-        let program = str_at(agent, "acp_agent") ?? String()
+    fn learn_options(i: Instance, user: String, id: String, program: String, config: Json) ! Error {
         let options = acp.offered(config)
-        for a in try i.store.agents(user.copy()) {
-            if str_at(a.copy(), "acp_agent") != some(program.copy()) { continue }
+        // Only the agents whose options differ are read: with nothing new, as
+        // at nearly every session, none (LOO-230).
+        for a in try i.store.agents_to_tell(user.copy(), program, "{options}") {
             try i.keep_options(user.copy(), a, options.copy(), id.copy())
         }
     }
@@ -9010,6 +9248,10 @@ impl Instance {
             }
             return
         }
+        if let (name, version) = i.follows.remove(d.id) {
+            try i.followed(name, version, d)
+            return
+        }
         if let job = i.installs.remove(d.id) {
             if d.error.len() > 0 {
                 i.answer_cmd(job.waiter, Answer.Refused(String("install_failed"), "{job.name} didn't install: {d.error}"))
@@ -9042,6 +9284,8 @@ impl Instance {
         i.registry = d.value.copy()
         i.registry_time = now()
         i.keep_registry()
+        // A found program the registry has a newer version of moves to it.
+        i.follow_programs()
         let list = try i.registry_list()
         for w in waiting {
             i.answer_cmd(w, Answer.Value(list.copy()))
@@ -9141,8 +9385,7 @@ impl Instance {
         }
         for key in idle {
             if let p = i.procs.remove(key) {
-                var to = p.to.copy()
-                to.send(Out.Stop)
+                i.stop_proc(p.to)
             }
         }
     }
@@ -9165,8 +9408,38 @@ impl Instance {
         }
         for key in idle {
             if let p = i.procs.remove(key) {
-                var to = p.to.copy()
-                to.send(Out.Stop)
+                i.stop_proc(p.to)
+            }
+        }
+    }
+
+    // Stops an agent program the loop has let go of, with what it started. Its
+    // thread says once they've ended, which the instance waits for as it ends.
+    fn stop_proc(i: mut Instance, to: acp.To) {
+        var t = to.copy()
+        t.send(Out.Stop)
+        i.stopping += 1
+    }
+
+    // Takes what the agent programs' threads said of the programs stopped.
+    fn take_stopped(i: mut Instance) {
+        while let _ = i.stopped.next() {
+            if i.stopping > 0 { i.stopping -= 1 }
+        }
+    }
+
+    // Waits up to `ms` for every agent program told to stop to have ended.
+    fn wait_stopped(i: mut Instance, ms: i64) {
+        i.take_stopped()
+        let until = now() + ms
+        while i.stopping > 0 {
+            let left = until - now()
+            if left <= 0 {
+                eprintln("loom: {i.stopping} agent programs didn't stop in time")
+                return
+            }
+            if let _ = unsafe { i.stopped.wait_for(u64.wrap(left) * 1000000) } {
+                i.stopping -= 1
             }
         }
     }
@@ -9184,8 +9457,7 @@ impl Instance {
         }
         for key in idle {
             if let p = i.procs.remove(key) {
-                var to = p.to.copy()
-                to.send(Out.Stop)
+                i.stop_proc(p.to)
             }
         }
     }

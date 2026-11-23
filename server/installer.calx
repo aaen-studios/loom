@@ -28,6 +28,7 @@ const WAIT_MS: u32 = 600000
 pub enum Work {
     Registry(String)    // the registry, from this address
     Install(Json, String)    // a program, as `pick` gave it, into this folder
+    Npm(String, String, String)    // an npm package at a version (name@1.2.3), its name, and the folder it goes in
 }
 
 pub struct Job {
@@ -63,7 +64,97 @@ fn work(w: Work) -> Json ! Error {
     return match w {
         Work.Registry(address) => try fetch_registry(address),
         Work.Install(how, folder) => try install(how, folder),
+        Work.Npm(spec, name, folder) => try install_npm(spec, name, folder),
     }
+}
+
+// --- The agent programs an instance in the desktop app finds itself ---
+//
+// Where npx is, Claude's and Codex's ACP adapters are added as `claude` and
+// `codex`. Each runs at a version: the ACP Registry's, or until the instance
+// has read it, the one here. npx would ask npm's registry which is newest at
+// every start (0.8 s, and once its cache is stale, 15 s to fetch it), and npm
+// itself takes most of a second to start, so the instance installs that
+// version with npm into acp/NAME/VERSION/ and runs it with node, and npx only
+// until then. When the registry names a newer version, that's installed the
+// same way, and the program moves to it once it's in.
+
+// loom's name for each, the registry's id, and its npm package.
+pub fn found_programs() -> List<(str, str, str)> {
+    return [("claude", "claude-acp", "@agentclientprotocol/claude-agent-acp"), ("codex", "codex-acp", "@agentclientprotocol/codex-acp")]
+}
+
+// The version each runs until the instance has read the registry.
+pub fn found_version(registry_id: String) -> String {
+    if registry_id == "claude-acp" { return String("0.109.1") }
+    if registry_id == "codex-acp" { return String("2.9.0") }
+    return String()
+}
+
+// The version of `package` the registry's entry `registry_id` runs with npx,
+// or none where it doesn't say.
+pub fn registry_version(registry: Json, registry_id: String, package: String) -> String? {
+    if let Json.Array(agents) = at(registry, "agents") {
+        for a in agents {
+            if str_at(a.copy(), "id") != some(registry_id.copy()) { continue }
+            let spec = str_at(at(at(a, "distribution"), "npx"), "package") ?? String()
+            let k = spec.find_last("@") else return none
+            if k == 0 or spec[..k] != package { return none }
+            let version = spec[k + 1..].copy()
+            return if version.len() > 0 { some(version) } else { none }
+        }
+    }
+    return none
+}
+
+// Installs an npm package with npm into `folder`, and gives how to start its
+// program with node: npm's own start, and its look at npm's registry, are
+// left out of every start after.
+pub fn install_npm(spec: String, name: String, folder: String) -> Json ! Error {
+    if not folder.contains("/acp/") { fail "{folder} isn't an ACP agent's folder" }
+    let part = "{folder}.part"
+    if fs.exists(part.copy()) { try fs.remove_dir_all(part.copy()) }
+    try fs.make_dir_all(part.copy())
+    let args: List<String> = [String("install"), String("--prefix"), part.copy(), String("--no-audit"), String("--no-fund"), String("--omit=dev"), String("--loglevel=error"), spec.copy()]
+    let out = try process.Command.new(String("npm")).args(args).output()
+    if not out.status.success() { fail "npm couldn't install {spec}: {out.error_text().trim()}" }
+    let manifest = try fs.read_text("{part}/node_modules/{name}/package.json") ?? String()
+    let bin = bin_of(try parse(manifest), name.copy()) else { fail "{spec} has no program to run" }
+    if fs.exists(folder.copy()) { try fs.remove_dir_all(folder.copy()) }
+    try fs.rename(part, folder.copy())
+    return Obj.new().s("command", String("node")).j("args", Json.Array([Json.Str("{folder}/node_modules/{name}/{program_name(bin)}")])).done()
+}
+
+// The file a package's `bin` runs: the only one, or the one named for the package.
+fn bin_of(manifest: Json, name: String) -> String? {
+    let bin = at(manifest, "bin")
+    if let s = bin.as_str() { return some(s) }
+    if let Json.Object(m) = bin {
+        let short = match name.find_last("/") {
+            some(k) => name[k + 1..].copy(),
+            none => name.copy(),
+        }
+        var first: String? = none
+        for (k, v) in m {
+            let path = v.as_str() ?? String()
+            if k == short { return some(path) }
+            if first == none { first = some(path) }
+        }
+        return first
+    }
+    return none
+}
+
+@test
+fn finds_a_found_programs_version_and_bin() {
+    let registry = parse(#"{"agents":[{"id":"claude-acp","distribution":{"npx":{"package":"@agentclientprotocol/claude-agent-acp@0.110.0"}}},{"id":"codex-acp","distribution":{"binary":{}}}]}"#)!
+    assert(registry_version(registry.copy(), String("claude-acp"), String("@agentclientprotocol/claude-agent-acp")) == some(String("0.110.0")))
+    assert(registry_version(registry.copy(), String("claude-acp"), String("@other/thing")) == none)
+    assert(registry_version(registry, String("codex-acp"), String("@agentclientprotocol/codex-acp")) == none)
+    assert(bin_of(parse(#"{"bin":{"claude-agent-acp":"dist/index.js"}}"#)!, String("@agentclientprotocol/claude-agent-acp")) == some(String("dist/index.js")))
+    assert(bin_of(parse(#"{"bin":"./cli.js"}"#)!, String("x")) == some(String("./cli.js")))
+    assert(bin_of(parse(#"{}"#)!, String("x")) == none)
+    assert(found_version(String("claude-acp")).len() > 0 and found_version(String("nope")) == "")
 }
 
 // Starts the thread. Gives the end that sends it jobs, and the queue its

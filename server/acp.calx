@@ -59,6 +59,7 @@ struct Worker {
     outbox: Receiver<Out>
     lines: Sender<Line>
     wake: LoopWaker    // the loop's, woken after each line
+    stopped: Sender<String>    // told once a program the loop stopped has ended, with what it started
 }
 
 impl Task for Worker {
@@ -83,9 +84,12 @@ impl Task for Worker {
                     Out.Stop => {
                         // The loop has let go of this program already, and
                         // may have started the agent again: nothing more
-                        // comes from this one.
-                        w.child.kill()
+                        // comes from this one. What it started goes too: npx's
+                        // node, Claude Code, its loom mcp and their Deno.
+                        w.child.kill_tree()
                         _ = w.child.wait()
+                        w.stopped.send(w.agent.copy())
+                        w.wake.wake()
                         return
                     },
                 }
@@ -97,6 +101,8 @@ impl Task for Worker {
                 continue
             }
             if w.child.ended() {
+                // Nothing it started outlives it.
+                w.child.kill_tree()
                 let out = w.child.wait()
                 w.lines.send(Line { agent: w.agent.copy(), text: none, exit: some(out.status.code ?? -1) })
                 w.wake.wake()
@@ -108,9 +114,11 @@ impl Task for Worker {
 
 // Starts an agent program in `dir`, and gives the end that sends to it.
 // Everything it writes comes to `lines`, tagged with `agent`. `env` is a JSON
-// object of the environment variables it gets on top of the instance's.
-pub fn start(agent: String, command: String, args: List<String>, env: Json, dir: String, lines: Sender<Line>, wake: LoopWaker) -> To ! Error {
-    var c = Command.new(command).args(args).dir(dir).stdin(Stdio.Pipe).stdout(Stdio.Pipe)
+// object of the environment variables it gets on top of the instance's. It
+// runs in a group of its own, so stopping it stops what it started too, and
+// `stopped` hears once a stop has ended them.
+pub fn start(agent: String, command: String, args: List<String>, env: Json, dir: String, lines: Sender<Line>, wake: LoopWaker, stopped: Sender<String>) -> To ! Error {
+    var c = Command.new(command).args(args).dir(dir).stdin(Stdio.Pipe).stdout(Stdio.Pipe).own_group()
     if let Json.Object(vars) = env {
         for (k, v) in vars {
             if let value = v.as_str() { c = c.env(k.copy(), value) }
@@ -119,7 +127,7 @@ pub fn start(agent: String, command: String, args: List<String>, env: Json, dir:
     let child = try c.spawn()
     let outbox = Receiver<Out>()
     let to = To { out: outbox.sender(), waker: child.waker() }
-    _ = unsafe { Thread.spawn(Worker { agent: agent.copy(), child: child, outbox: outbox, lines: lines.copy(), wake: wake }) }
+    _ = unsafe { Thread.spawn(Worker { agent: agent.copy(), child: child, outbox: outbox, lines: lines.copy(), wake: wake, stopped: stopped.copy() }) }
     return to
 }
 

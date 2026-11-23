@@ -80,6 +80,7 @@ struct Local {
     username: String
     kind: String
     version: String    // the app's, which the instance in it says it is
+    mcp: String    // the app's own small loom mcp, which each agent session runs, or ""
     ready: Sender<String>
     stop: Receiver<bool>
 }
@@ -94,7 +95,7 @@ impl Task for Local {
             ok(some(t)) => u16.parse(t.trim().copy()) ?? 0,
             _ => 0,
         }
-        var i = match open_local(l.data.copy(), last, l.version.copy()) {
+        var i = match open_local(l.data.copy(), last, l.version.copy(), l.mcp.copy()) {
             ok(i) => i,
             err(e) => {
                 l.ready.send("error:{e}")
@@ -128,18 +129,18 @@ impl Task for Local {
 
 // The instance in the app, on the port it had last time if it's free, or on
 // a new one.
-fn open_local(data: String, last: u16, version: String) -> Instance ! Error {
+fn open_local(data: String, last: u16, version: String, mcp_exe: String) -> Instance ! Error {
     if last != 0 {
-        match Instance.open(local_config(data.copy(), last, version.copy())) {
+        match Instance.open(local_config(data.copy(), last, version.copy(), mcp_exe.copy())) {
             ok(i) => return i,
             err(_) => {},
         }
     }
-    return try Instance.open(local_config(data, 0, version))
+    return try Instance.open(local_config(data, 0, version, mcp_exe))
 }
 
-fn local_config(data: String, port: u16, version: String) -> Config {
-    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: version.copy(), lan: true, sandboxes: String(), sandbox_image: String(), release: ServerSource.official(), in_app: true }
+fn local_config(data: String, port: u16, version: String, mcp_exe: String) -> Config {
+    return Config { data: data.copy(), port: port, host: String("127.0.0.1"), hasher: PasswordHasher(), events: EventLife.standard(), registry: String(installer.REGISTRY), minute_ms: 60000, apns: String(), version: version.copy(), lan: true, sandboxes: String(), sandbox_image: String(), release: ServerSource.official(), in_app: true, mcp: mcp_exe.copy() }
 }
 
 /// What the app holds between calls.
@@ -254,7 +255,7 @@ pub fn start_local(cfg: Json, data: String) -> (Thread, Sender<bool>, String, St
     var ready = Receiver<String>()
     let stop = Receiver<bool>()
     let stop_to = stop.sender()
-    let task = Local { data: "{data}/instance", username: str_at(cfg.copy(), "username") ?? String("me"), kind: str_at(cfg.copy(), "kind") ?? String("windows"), version: str_at(cfg, "version") ?? String("desktop"), ready: ready.sender(), stop: stop }
+    let task = Local { data: "{data}/instance", username: str_at(cfg.copy(), "username") ?? String("me"), kind: str_at(cfg.copy(), "kind") ?? String("windows"), version: str_at(cfg.copy(), "version") ?? String("desktop"), mcp: str_at(cfg, "mcp") ?? String(), ready: ready.sender(), stop: stop }
     let t = unsafe { Thread.spawn(task) }
     // Opening it can take a moment the first time, while it makes its database.
     let said = unsafe { ready.wait_for(60000000000) } else {

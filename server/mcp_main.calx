@@ -1,0 +1,12 @@
+module server.mcp_main
+
+// `loom mcp` alone (server/mcp.calx), as a program of its own: what the
+// instance in the desktop app gives each agent's session, in place of the app
+// itself, which takes twice as long to start (LOO-222). The desktop app
+// carries it, built by desktop/build.rs, and writes it into the instance's
+// folder (PLAN.md, "Loom's own tools").
+import server.mcp
+
+fn main() ! Error {
+    try mcp.serve()
+}

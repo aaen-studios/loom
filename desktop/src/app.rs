@@ -16206,6 +16206,43 @@ pub fn start_first_core() {
     }
 }
 
+/// `loom mcp` alone (server/mcp_main.calx), built with the app by build.rs.
+static MCP_PROGRAM: &[u8] = include_bytes!(env!("LOOM_MCP_PROGRAM"));
+
+/// Where the instance in the app finds the small `loom mcp` it gives each agent session in
+/// place of the app itself, which takes twice as long to start: written into `folder`'s
+/// bin/ once for each build of it, with the older builds' let go. None if it can't be.
+fn mcp_program(folder: &std::path::Path) -> Option<String> {
+    let name = format!(
+        "loom-mcp-{}{}",
+        env!("LOOM_MCP_HASH"),
+        std::env::consts::EXE_SUFFIX
+    );
+    let dir = folder.join("bin");
+    let path = dir.join(&name);
+    if !path.exists() {
+        std::fs::create_dir_all(&dir).ok()?;
+        let part = dir.join(format!("{name}.part"));
+        std::fs::write(&part, MCP_PROGRAM).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).ok()?;
+        }
+        std::fs::rename(&part, &path).ok()?;
+        // An older build's, unless a session still runs it.
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                let other = e.file_name().to_string_lossy().into_owned();
+                if other.starts_with("loom-mcp-") && other != name {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
 fn core_config(dir: &str, server: Option<&str>) -> String {
     let folder = server_folder(dir);
     let _ = std::fs::create_dir_all(&folder);
@@ -16249,6 +16286,9 @@ fn core_config(dir: &str, server: Option<&str>) -> String {
     config["platform"] = "windows-installer".into();
     if local_mode() {
         config["mode"] = "local".into();
+        if let Some(mcp) = mcp_program(&folder) {
+            config["mcp"] = mcp.into();
+        }
         config["username"] = std::env::var("USERNAME")
             .unwrap_or_else(|_| "me".into())
             .into();
