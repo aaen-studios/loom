@@ -20,6 +20,8 @@ Each agent runs on an agent program you already use, through the [Agent Client P
 
 **Windows.** Download `loom-setup.exe` from the [latest release](https://github.com/aaen-studios/loom/releases/latest). It installs for your user only, with no admin rights. On first start, choose to run loom on this computer, or sign in to a server.
 
+**Mac**, with Apple silicon. Download `loom-mac.dmg` from the [latest release](https://github.com/aaen-studios/loom/releases/latest) and drag loom into Applications. The first time, macOS won't open it: choose Open Anyway in System Settings → Privacy & Security. It keeps itself up to date from there.
+
 **A Linux server**, as root:
 
 ```sh
@@ -41,11 +43,11 @@ Put a proxy with TLS in front of it.
 
 **Your phone.** In the desktop app, **Add a phone** shows a QR code. The phone reaches your computer over Noise, end to end, on your Wi-Fi or over Tailscale. Push notifications go through an opt-in relay and are sealed end to end. The iPhone app isn't released yet.
 
-**macOS.** The `loom` server runs on macOS. The Mac app isn't released yet.
+**The server on a Mac.** `loom-macos` in each release is the `loom` server for macOS.
 
 ## Status
 
-loom 0.2 is a rewrite. The server and the Windows app are in daily use. The Mac and iPhone apps are being built. [PLAN.md](PLAN.md) is the plan, [protocol/protocol.md](protocol/protocol.md) is the wire protocol, and work is tracked on the [Acta board](https://acta.aaenz.no/aaen-studios/loom).
+loom 0.2 is a rewrite. The server and the Windows app are in daily use, and the Mac app is new. The iPhone app is being built. [PLAN.md](PLAN.md) is the plan, [protocol/protocol.md](protocol/protocol.md) is the wire protocol, and work is tracked on the [Acta board](https://acta.aaenz.no/aaen-studios/loom).
 
 The previous loom (0.1: a Rust engine with its own model loop, a React UI and Tauri) is at the [`v0.1`](https://github.com/aaen-studios/loom/tree/v0.1) tag. Its updater offers 0.2, which replaces it and leaves your 0.1 data in `~/.loom` where it is.
 
@@ -55,7 +57,7 @@ The previous loom (0.1: a Rust engine with its own model loop, a React UI and Ta
 |---|---|---|
 | Server | [Calx](https://calxlang.com) | Accounts, agents, chats, memory, routines, loom's tools and push. Runs on a server, or inside the desktop app |
 | Core | Calx, as a static library | Connection, sign-in, sync and the offline cache, shared by the desktop and iPhone apps |
-| Desktop app | Rust and [GPUI](https://www.gpui.rs) | Windows now, macOS next. Draws screens and reaches the system; everything else is in the core |
+| Desktop app | Rust and [GPUI](https://www.gpui.rs) | Windows and macOS. Draws screens and reaches the system; everything else is in the core |
 | iPhone app | Swift and SwiftUI | Links the same core |
 
 The apps hold no logic, so the desktop and the phone can't disagree about data or the protocol.
