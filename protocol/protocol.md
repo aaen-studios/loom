@@ -185,7 +185,7 @@ A file goes in a message by its `file`, in [`send`](#send)'s `files`.
 
 ### `GET /files/<sha256>`
 
-Login needed, as above. The file, with its type, for whoever uploaded it or got it from an agent, and `404` for anyone else. With `?thumb`, a thumbnail of a PNG or JPEG image instead, at most 512 pixels a side, as a JPEG, or a PNG when it has transparency. It's made just after the upload; until it's there, and for files that have none, `?thumb` gives the file itself. Both are cached for good (`Cache-Control: private, immutable`), since a file's name is its content.
+Login needed, as above. The file, with its type, for whoever uploaded it or got it from an agent, and `404` for anyone else. With `?thumb`, a thumbnail of a PNG or JPEG image instead, at most 512 pixels a side, as a JPEG, or a PNG when it has transparency. It's made just after the upload; until it's there, and for files that have none, `?thumb` gives the file itself. Both are cached for good (`Cache-Control: private, immutable`), since a file's name is its content, except the file given while its thumbnail is still being made: that one has `X-Loom-Thumb: not-yet` and `Cache-Control: no-store`, and the core shows it without keeping it as the thumbnail.
 
 ### `GET /api/mcp/tools` and `POST /api/mcp/call`
 

@@ -392,6 +392,7 @@ const SIDE_QUESTION_MOST: usize = 4000
 const SIDE_MESSAGES: usize = 40
 // How many events catching a device up reads at a time.
 const EVENTS_PAGE: usize = 500
+const FIRES_A_PASS: i64 = 5    // routines fired in one pass of the loop, at most
 const SIDE_TRANSCRIPT_MOST: usize = 24000
 
 // How full a session's context may get, in percent of its window, before the
@@ -1613,7 +1614,7 @@ impl Instance {
                         }
                         continue
                     }
-                    match i.http(req.copy()) {
+                    match i.http(req) {
                         ok(some(res)) => i.server.respond(req, res),
                         ok(none) => {},
                         err(e) => {
@@ -2023,7 +2024,7 @@ impl Instance {
         for (id, s) in i.sessions {
             if not s.live or s.user != user { continue }
             if watching and i.watched_by(id) != key { continue }
-            _ = i.server.send_text(s.socket, frame.copy())
+            _ = i.server.send_text(s.socket, frame)
         }
     }
 
@@ -2046,8 +2047,9 @@ impl Instance {
     // A frame of the page, to the devices watching it.
     fn browser_frame(i: Instance, key: String, data: String, width: i64, height: i64) {
         let (_, agent) = key.split_once("/") ?? (String(), String())
-        let frame = Obj.new().s("t", String("browser.frame")).s("agent", agent).s("data", data).i("width", width).i("height", height).done()
-        i.browser_send(key, "{frame}", true)
+        // Built as text: base64 needs no escaping, and the frame is 100 KB or more.
+        let frame = #"{"t":"browser.frame","agent":#{Json.Str(agent)},"data":"#{data}","width":#{width},"height":#{height}}"#
+        i.browser_send(key, frame, true)
     }
 
     // Tells a browser whether anyone watches it now.
@@ -2356,7 +2358,7 @@ impl Instance {
     fn publish_text(i: Instance, user: String, text: String) {
         for (_, s) in i.sessions {
             if s.live and s.user == user {
-                _ = i.server.send_text(s.socket, text.copy())
+                _ = i.server.send_text(s.socket, text)
             }
         }
     }
@@ -2770,7 +2772,7 @@ impl Instance {
     // computer, straight: not through a proxy in front of the instance, nor the
     // phones' bridge, which say so in their headers.
     fn scripts_route(i: mut Instance, req: Request) -> Response? ! Error {
-        if not from_here(req.copy()) { return some(http_error(403, "not_here", String("Scripts reach the instance only from its own computer."))) }
+        if not from_here(req) { return some(http_error(403, "not_here", String("Scripts reach the instance only from its own computer."))) }
         let h = req.header(String("Authorization")) ?? String()
         let token = if h.starts_with("Bearer ") { h[7..].copy() } else { String() }
         let op = req.path.trim_prefix("/api/scripts/").copy()
@@ -4604,7 +4606,7 @@ impl Instance {
                 ok(m) => m,
                 err(_) => false,
             }
-            if may { _ = i.server.send_text(s.socket, frame.copy()) }
+            if may { _ = i.server.send_text(s.socket, frame) }
         }
     }
 
@@ -4864,7 +4866,14 @@ impl Instance {
                 return
             },
         }
+        // A few at a time, so routines set for the same minute don't hold up the
+        // loop all at once: the rest go on the next passes, straight after.
+        var fired: i64 = 0
         for (user, r) in due {
+            if fired == FIRES_A_PASS {
+                i.next_due = t
+                break
+            }
             let s = routines.read(at(r.copy(), "schedule")) else { continue }
             let tz = str_at(r.copy(), "tz") ?? String("UTC")
             let was = int_at(r.copy(), "next") ?? t
@@ -4881,6 +4890,7 @@ impl Instance {
                 ok(_) => {},
                 err(e) => eprintln("loom: a routine: {e}"),
             }
+            fired += 1
         }
     }
 
@@ -5232,7 +5242,7 @@ impl Instance {
     // --- Files (protocol.md, "Files") ---
 
     fn files_route(i: mut Instance, req: Request) -> Response ! Error {
-        let device = try i.bearer(req.copy()) else {
+        let device = try i.bearer(req) else {
             return http_error(401, "unauthorized", String("That token isn't signed in."))
         }
         if req.path == "/files" and req.method == "POST" {
@@ -5259,9 +5269,14 @@ impl Instance {
             let mime = files.sniff(small.copy()) ?? String("image/jpeg")
             return Response.new(200, mime, small).with_header(String("Cache-Control"), forever)
         }
-        // With no thumbnail (yet, or ever), the file itself.
+        // With no thumbnail (yet, or ever), the file itself. One that's still being
+        // made is said to be on its way, so the original isn't kept in its place.
         let data = try fs.read(path)
-        return Response.new(200, str_at(f, "mime") ?? String("application/octet-stream"), data).with_header(String("Cache-Control"), forever)
+        let mime = str_at(f, "mime") ?? String("application/octet-stream")
+        if thumb and files.thumbable(mime.copy()) {
+            return Response.new(200, mime, data).with_header(String("Cache-Control"), String("no-store")).with_header(String("X-Loom-Thumb"), String("not-yet"))
+        }
+        return Response.new(200, mime, data).with_header(String("Cache-Control"), forever)
     }
 
     // POST /files?name=<name>: the body is the file, with its type in Content-Type.
@@ -5280,12 +5295,12 @@ impl Instance {
                 return http_error(413, "storage_full", "That would go over the {max / 1000000} MB of files each person can keep here.")
             }
         }
-        let sha = bytes.hex(sha256(req.body.copy()))
+        let sha = bytes.hex(sha256(req.body))
         let given = req.header(String("Content-Type")) ?? String()
         // What the bytes say beats what was given, for the types loom shows or passes on.
-        var mime = files.sniff(req.body.copy()) ?? (if given.len() > 0 and given != "application/octet-stream" { given } else { content_type(name.copy()) })
+        var mime = files.sniff(req.body) ?? (if given.len() > 0 and given != "application/octet-stream" { given } else { content_type(name.copy()) })
         if let semi = mime.find(";") { mime = mime[..semi].trim().copy() }
-        try i.keep_file(user.copy(), sha.copy(), name.copy(), mime.copy(), req.body.copy())
+        try i.keep_file(user.copy(), sha.copy(), name.copy(), mime.copy(), req.body)
         return json_response(200, Obj.new().s("file", sha).s("name", name).s("mime", mime).i("size", size).done())
     }
 
@@ -5393,7 +5408,7 @@ impl Instance {
 
     // A file an agent made: kept as the person's, and given as a file block.
     fn agent_file(i: mut Instance, user: String, name: String, mime: String, data: List<u8>) -> Json ! Error {
-        let sha = bytes.hex(sha256(data.copy()))
+        let sha = bytes.hex(sha256(data))
         let size = i64.wrap(u64(data.len()))
         try i.keep_file(user, sha.copy(), name.copy(), mime.copy(), data)
         return Obj.new().s("kind", String("file")).s("file", sha).s("name", name).s("mime", mime).i("size", size).done()
@@ -6734,7 +6749,7 @@ impl Instance {
     // skill saved writes every agent's skills, and an agent's program starting writes
     // its own, which in a sandbox is a process for each file.
     fn put_skill_file(i: mut Instance, place: sandbox.Place?, path: String, data: List<u8>) ! Error {
-        let hash = bytes.hex(sha256(data.copy()))
+        let hash = bytes.hex(sha256(data))
         if let had = i.skills_written.find(path.copy()) {
             if had == hash and fs.exists(path.copy()) { return }
         }
@@ -7213,13 +7228,13 @@ impl Instance {
     // embedded resource's blob, or a file:// link to a file on this machine. None for
     // anything else, or a file too big for the person's space.
     fn file_from_agent(i: mut Instance, user: String, agent: String, content: Json) -> Json? ! Error {
-        let kind = str_at(content.copy(), "type") ?? String()
+        let kind = str_at(content, "type") ?? String()
         var data: List<u8>? = none
         var name = String("file")
         var mime = String()
         if kind == "image" {
-            data = bytes.from_base64(str_at(content.copy(), "data") ?? String())
-            mime = str_at(content.copy(), "mimeType") ?? String("image/png")
+            data = bytes.from_base64(str_at(content, "data") ?? String())
+            mime = str_at(content, "mimeType") ?? String("image/png")
             let ext = if mime == "image/jpeg" { String("jpg") } else if mime.starts_with("image/") { mime[6..].copy() } else { String("bin") }
             name = "image.{ext}"
         } else if kind == "resource" {
@@ -7228,12 +7243,12 @@ impl Instance {
             mime = str_at(res.copy(), "mimeType") ?? String()
             name = safe_name(str_at(res, "uri") ?? String("file"))
         } else if kind == "resource_link" {
-            let uri = str_at(content.copy(), "uri") ?? String()
+            let uri = str_at(content, "uri") ?? String()
             if not uri.starts_with("file://") { return none }
             var path = url.decode(uri[7..].copy())
             // file:///C:/x on Windows is the path C:/x.
             if path.len() > 2 and path.starts_with("/") and path[2..].starts_with(":") { path = path[1..].copy() }
-            name = safe_name(str_at(content.copy(), "name") ?? path.copy())
+            name = safe_name(str_at(content, "name") ?? path.copy())
             mime = str_at(content, "mimeType") ?? String()
             // A sandboxed agent's link is read in its sandbox: the instance reads
             // as its own user, which reads everything.
@@ -7254,7 +7269,7 @@ impl Instance {
             let max = i64.parse(limit) ?? 0
             if max > 0 and try i.store.file_usage(user.copy()) + i64.wrap(u64(got.len())) > max { return none }
         }
-        if let sniffed = files.sniff(got.copy()) { mime = sniffed }
+        if let sniffed = files.sniff(got) { mime = sniffed }
         if mime.len() == 0 { mime = content_type(name.copy()) }
         return some(try i.agent_file(user, name, mime, got))
     }
@@ -7601,7 +7616,7 @@ impl Instance {
         var sent = false
         for (_, s) in i.sessions {
             if not sent and s.live and s.device == device and s.tools != Json.Null {
-                _ = i.server.send_text(s.socket, frame.copy())
+                _ = i.server.send_text(s.socket, frame)
                 sent = true
             }
         }

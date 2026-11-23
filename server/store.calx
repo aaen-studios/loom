@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversation, at);
+CREATE INDEX IF NOT EXISTS conversations_by_agent ON conversations (user, agent);
 -- A page of a chat goes by rowid, which this index ends in, so it needs no sort.
 CREATE INDEX IF NOT EXISTS messages_in_order ON messages (user, conversation);
 -- Only the pinned messages, so the pins of a long chat are found without reading it.
@@ -843,7 +844,7 @@ impl Store {
     // `agent`'s conversation with the newest message, as the apps show its
     // chat. A task's conversation is the task's, not the chat.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id) FROM conversations c LEFT JOIN messages m ON m.conversation = c.id AND m.user = c.user WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) GROUP BY c.id ORDER BY max(coalesce(m.at, c.at)) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -2117,8 +2118,15 @@ impl Store {
     // cursor is older than what's left gets reset: true and a snapshot.
     // Gives how many went.
     pub fn prune_events(self, before: i64, keep: i64) -> i64 ! Error {
-        let gone = try self.db.execute(String("DELETE FROM events WHERE at < ? AND seq <= (SELECT max(e.seq) FROM events e WHERE e.user = events.user) - ?"), [Value.Int(before), Value.Int(keep)])
-        return i64.wrap(u64(gone))
+        // A person at a time, by seq, which grows with at: the oldest go up to the
+        // first event that's new enough, keeping the newest `keep` whatever their age.
+        var gone: u64 = 0
+        var users = List<String>()
+        for r in try self.db.query(String("SELECT id FROM users"), List<Value>()) { users.push(text(r[0].copy())) }
+        for user in users {
+            gone += u64(try self.db.execute(String("DELETE FROM events WHERE user = ?1 AND seq <= min((SELECT max(seq) FROM events WHERE user = ?1) - ?3, coalesce((SELECT seq FROM events WHERE user = ?1 AND at >= ?2 ORDER BY seq LIMIT 1) - 1, (SELECT max(seq) FROM events WHERE user = ?1)))"), [t(user.copy()), Value.Int(before), Value.Int(keep)]))
+        }
+        return i64.wrap(gone)
     }
 
     // Up to `most` of `user`'s events after `after`, in order, each its seq and the text stored.
