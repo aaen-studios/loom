@@ -1,17 +1,20 @@
 ---
-// A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads in their shapes, an
-// agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
+// A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads in their shapes, the
+// pinned ones as tiles over the rest, an agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
 // colours and words are the app's (desktop/src/app.rs, design/tokens.toml); the script that plays
 // it is src/scripts/demo.ts. The approval's buttons answer it, a reply's steps open, and the
 // sidebar collapses to the rail, as the app's do.
 import { brains } from '../lib/registry.mjs';
 
 const agents = [
-	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true },
-	{ name: 'Moss', color: 'mint', shape: 'heart' },
-	{ name: 'Biscuit', color: 'apricot', shape: 'star' },
+	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true, pinned: true },
+	{ name: 'Moss', color: 'mint', shape: 'heart', pinned: true },
+	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
 	{ name: 'Pip', color: 'lavender' },
+	{ name: 'Otto', color: 'coral', shape: 'snail' },
 ];
+const pinned = agents.filter((a) => a.pinned);
+const rest = agents.filter((a) => !a.pinned);
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
 const [claude] = await brains(['claude-acp']);
 ---
@@ -47,8 +50,18 @@ const [claude] = await brains(['claude-acp']);
 			</span>
 		</div>
 		<div class="list" aria-hidden="true">
+			<div class="pins">
+				{
+					pinned.map((a) => (
+						<div class:list={['tile', { on: a.on }]} data-agent={a.name} title={a.name}>
+							<svg data-thread data-color={a.color} data-shape={a.shape} width="52" height="36" />
+							<span class="tile-name">{a.name}</span>
+						</div>
+					))
+				}
+			</div>
 			{
-				agents.map((a) => (
+				rest.map((a) => (
 					<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
 						<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
 						<span class="agent-text">
@@ -367,6 +380,54 @@ const [claude] = await brains(['claude-acp']);
 	.agent-preview:empty {
 		display: none;
 	}
+	/* The pinned agents over the rest: tiles three across, each with its thread drawn large
+	   in its shape and its name under it. */
+	.pins {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 4px;
+		margin-bottom: 6px;
+	}
+	.pins:empty {
+		display: none;
+	}
+	.tile {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 4px;
+		width: 78px;
+		height: 78px;
+		padding: 0 8px;
+		border-radius: var(--radius-card);
+		background: var(--raised);
+		transition: background-color 0.12s;
+	}
+	.tile:hover {
+		background: var(--raised-2);
+	}
+	.tile.on {
+		background: var(--active);
+	}
+	.tile svg {
+		width: 52px;
+		height: 36px;
+		flex: none;
+	}
+	.tile-name {
+		max-width: 100%;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink-2);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tile.on .tile-name {
+		color: var(--ink);
+	}
 	.side-foot {
 		display: flex;
 		align-items: center;
@@ -427,18 +488,37 @@ const [claude] = await brains(['claude-acp']);
 		justify-content: center;
 		padding: 0;
 	}
-	.app.railed :is(.brand, .new, .agent-text, .server-text) {
+	.app.railed :is(.brand, .new, .agent-text, .tile-name, .server-text) {
 		display: none;
 	}
 	.app.railed .list {
 		justify-items: center;
 		padding: 4px 0 0;
 	}
-	.app.railed .agent {
+	/* On the rail a pinned agent is its thread, as every agent is, first. */
+	.app.railed .pins {
+		display: grid;
+		gap: 2px;
+		margin: 0;
+	}
+	.app.railed :is(.agent, .tile) {
 		width: 40px;
 		height: 40px;
 		padding: 0;
 		justify-content: center;
+	}
+	.app.railed .tile:not(.on) {
+		background: none;
+	}
+	.app.railed .tile:not(.on):hover {
+		background: var(--hover);
+	}
+	.app.railed .tile {
+		border-radius: var(--radius-row);
+	}
+	.app.railed .tile svg {
+		width: 26px;
+		height: 18px;
 	}
 	.app.railed .side-foot {
 		flex-direction: column-reverse;

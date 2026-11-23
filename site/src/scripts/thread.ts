@@ -14,8 +14,10 @@ export type Mood = 'idle' | 'thinking' | 'writing' | 'tool' | 'waiting' | 'faile
 export type Shape = keyof typeof shapes;
 
 const NS = 'http://www.w3.org/2000/svg';
-/** How far a shape's moods bend it, in pixels (thread.rs, SHAPE_ROOM). */
+/** How far a shape's moods bend it in a row, in pixels (thread.rs, SHAPE_ROOM). */
 const SHAPE_ROOM = 1;
+/** A row's thread's height (thread.rs, STRAND_H). A shape in a taller box, as on a pinned agent's tile, is drawn thicker and bends as much more. */
+const STRAND_H = 22;
 const TAU = Math.PI * 2;
 const PI = Math.PI;
 const EASE = 0.7;
@@ -224,7 +226,7 @@ export class Thread {
 		const pluck =
 			sincePluck < PLUCK ? room * 2 * motion.pluck.amplitude * this.pluckAmp * Math.exp(-motion.pluck.damping * sincePluck) * Math.sin(sincePluck * motion.pluck.frequency) : 0;
 		if (this.outline) {
-			this.drawShape(this.outline, t, k, sinceSnap, failed, pluck * (SHAPE_ROOM / room));
+			this.drawShape(this.outline, t, k, sinceSnap, failed, pluck * (this.shapeRoom / room));
 			return;
 		}
 		let d = '';
@@ -248,13 +250,23 @@ export class Thread {
 		this.path.setAttribute('stroke-width', s);
 	}
 
+	/** How far its shape's moods bend it: more in a box taller than a row's (thread.rs, strand_in). */
+	private get shapeRoom() {
+		return SHAPE_ROOM * Math.max(this.h / STRAND_H, 1);
+	}
+
+	/** Its shape's stroke: thicker in a box taller than a row's. */
+	private get shapeStroke() {
+		return this.h > STRAND_H ? stroke.large : stroke.small;
+	}
+
 	/** The shape fitted into the box, made again only when the box changes size. */
 	private fit(pts: number[][]): Fitted {
 		const { w, h } = this;
 		if (this.fitted && this.fitted.w === w && this.fitted.h === h) return this.fitted;
 		let [sx, sy] = [0.1, 0.1];
 		for (const [x, y] of pts) [sx, sy] = [Math.max(sx, Math.abs(x)), Math.max(sy, Math.abs(y))];
-		const pad = 2 * stroke.small + SHAPE_ROOM;
+		const pad = 2 * this.shapeStroke + this.shapeRoom;
 		const scale = Math.min((w - pad) / (2 * sx), (h - pad) / (2 * sy));
 		const base = pts.map(([x, y]) => [w / 2 + x * scale, h / 2 + y * scale]);
 		const along = [0];
@@ -274,7 +286,8 @@ export class Thread {
 	 */
 	private drawShape(pts: number[][], t: number, k: number, sinceSnap: number, failed: number, pluck: number) {
 		const { base, along, length, tangent } = this.fit(pts);
-		const push = (mood: Mood, u: number): [number, number] => (mood === 'failed' ? [0, 0] : bend(mood, u, length, SHAPE_ROOM, t, sinceSnap));
+		const room = this.shapeRoom;
+		const push = (mood: Mood, u: number): [number, number] => (mood === 'failed' ? [0, 0] : bend(mood, u, length, room, t, sinceSnap));
 		let d = '';
 		for (let i = 0; i < base.length; i++) {
 			const u = along[i] / length;
@@ -284,11 +297,11 @@ export class Thread {
 			const al = fa + (ta - fa) * k;
 			const up = fu + (tu - fu) * k + pluck * Math.sin(PI * u);
 			const x = base[i][0] + tx * al + ty * up;
-			const y = base[i][1] + ty * al - tx * up + failed * u * u * SHAPE_ROOM * 1.6;
+			const y = base[i][1] + ty * al - tx * up + failed * u * u * room * 1.6;
 			d += `${i ? 'L' : 'M'}${at(x)} ${at(y)}`;
 		}
 		this.path.setAttribute('d', d);
-		this.stroke(stroke.small);
+		this.stroke(this.shapeStroke);
 	}
 }
 
