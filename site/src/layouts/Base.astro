@@ -7,8 +7,8 @@ import '../styles/global.css';
 import Header from '../components/Header.astro';
 import Footer from '../components/Footer.astro';
 import Nudge from '../components/Nudge.astro';
-import { GITHUB, LATEST, ORIGIN, STUDIO } from '../lib/site.mjs';
-import { latest } from '../lib/releases.mjs';
+import { GITHUB, LATEST, MAC_APP, ORIGIN, STUDIO, WINDOWS_APP } from '../lib/site.mjs';
+import { carries, latest } from '../lib/releases.mjs';
 // The UI font's Latin file, fetched before the CSS asks for it, so the wordmark is drawn in it at once.
 import geist from '@fontsource-variable/geist/files/geist-latin-wght-normal.woff2?url';
 
@@ -28,6 +28,7 @@ const full = title ? `${title} | loom` : 'loom';
 const canonical = new URL(Astro.url.pathname, ORIGIN).href;
 const image = new URL('/og.png', ORIGIN).href;
 const release = await latest();
+const mac = carries(release, MAC_APP);
 
 const graph = {
 	'@context': 'https://schema.org',
@@ -64,7 +65,7 @@ const graph = {
 			'@type': 'SoftwareApplication',
 			'@id': `${ORIGIN}/#app`,
 			name: 'loom',
-			description: 'A self-hostable agent app: chat with your own AI agents, running on Claude, Codex or any program that speaks the Agent Client Protocol, on your server or on your PC.',
+			description: 'A self-hostable agent app: chat with your own AI agents, running on Claude, Codex or any program that speaks the Agent Client Protocol, on your server or on your computer.',
 			url: `${ORIGIN}/`,
 			image,
 			screenshot: image,
@@ -76,13 +77,13 @@ const graph = {
 						softwareVersion: release.version,
 						datePublished: release.date,
 						releaseNotes: `${ORIGIN}/changelog/#${release.tag}`,
-						downloadUrl: [`${LATEST}/loom-setup.exe`, `${ORIGIN}/download/`],
+						downloadUrl: [`${LATEST}/${WINDOWS_APP}`, ...(mac ? [`${LATEST}/${MAC_APP}`] : []), `${ORIGIN}/download/`],
 					}
 				: {}),
 			featureList: [
 				'Agents on Claude, Codex, OpenCode, Gemini CLI, goose or any ACP agent program',
 				'Approvals and rules for what agents may do',
-				'Runs on your PC, on a Linux server, or in Docker',
+				'Runs on your computer, on a Linux server, or in Docker',
 				'Routines, webhooks and long tasks',
 				'A browser of its own for each agent',
 				'Plugins that agents write themselves',
@@ -164,6 +165,14 @@ const graph = {
 				if (t === 'dark') document.documentElement.dataset.theme = 'dark';
 				else if (t === 'system') delete document.documentElement.dataset.theme;
 			} catch {}
+		</script>
+		<!-- Which app's download comes first (Get.astro, download.astro): Windows', the Mac's
+		     once a release has it, or on anything else, as a phone, the server. -->
+		<script is:inline define:vars={{ mac }}>
+			const platform = navigator.userAgentData?.platform ?? navigator.platform ?? '';
+			// An iPad says it's a Mac, but has a touch screen.
+			const mobile = /Android|iPhone|iPad/i.test(navigator.userAgent) || (/Mac/i.test(platform) && navigator.maxTouchPoints > 1);
+			document.documentElement.dataset.os = mobile ? 'other' : /Win/i.test(platform) ? 'windows' : mac && /Mac/i.test(platform) ? 'mac' : 'other';
 		</script>
 	</head>
 	<body>

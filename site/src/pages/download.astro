@@ -1,11 +1,13 @@
 ---
-// Everything there is to download, from the newest release: the Windows app, and the server for a
-// Linux server, Docker, or the program on its own. The links are the newest release's, so they stay
-// right between builds; the version and sizes are this build's.
+// Everything there is to download, from the newest release: the Windows and Mac apps, and the
+// server for a Linux server, Docker, or the program on its own. The links are the newest release's,
+// so they stay right between builds; the version and sizes are this build's. The visitor's system
+// (html[data-os], set in Base.astro) puts its own app first, or the server, on anything else. The
+// Mac app shows once the newest release has its disk image.
 import Base from '../layouts/Base.astro';
 import Command from '../components/Command.astro';
-import { latest, sizeOf, day } from '../lib/releases.mjs';
-import { DOCKER, GITHUB, GUIDES, INSTALL, LATEST } from '../lib/site.mjs';
+import { carries, latest, sizeOf, day } from '../lib/releases.mjs';
+import { DOCKER, GITHUB, GUIDES, INSTALL, LATEST, MAC_APP, WINDOWS_APP } from '../lib/site.mjs';
 
 const release = await latest();
 const version = release?.version;
@@ -15,29 +17,55 @@ const programs = [
 	{ name: 'macOS', detail: 'Apple silicon', file: 'loom-macos' },
 	{ name: 'Windows', detail: 'x64', file: 'loom-windows.exe' },
 ];
-const setup = sizeOf(release, 'loom-setup.exe');
+const mac = carries(release, MAC_APP);
+const meta = (...parts: (string | undefined)[]) => [version && `loom ${version}`, ...parts].filter(Boolean).join(' · ');
 ---
 
-<Base title="Download" crumb="Download" description="Download loom for Windows, or install it on a Linux server, in Docker, or as one program for Linux, macOS and Windows.">
+<Base
+	title="Download"
+	crumb="Download"
+	description={mac
+		? 'Download loom for Windows or Mac, or install it on a Linux server, in Docker, or as one program for Linux, macOS and Windows.'
+		: 'Download loom for Windows, or install it on a Linux server, in Docker, or as one program for Linux, macOS and Windows.'}
+>
 	<div class="wrap page">
 		<h1>Download</h1>
 		{version && <p class="version">loom {version}{release && <>, {day(release.date)}</>}</p>}
 
-		<section aria-labelledby="app">
+		<div class="sections">
+		<section aria-labelledby="app" class="apps">
 			<h2 id="app">Desktop app</h2>
-			<div class="app">
+			<div class="app app-windows">
 				<div class="app-text">
 					<h3>Windows</h3>
 					<p>Runs your agents on this computer, or signs in to loom on your servers. It installs for you alone, with no administrator, and keeps itself up to date.</p>
 				</div>
 				<div class="app-get">
-					<a class="btn btn-primary" href={`${LATEST}/loom-setup.exe`} download>
+					<a class="btn btn-primary" href={`${LATEST}/${WINDOWS_APP}`} download>
 						<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
 						Download for Windows
 					</a>
-					<span class="meta">{[version && `loom ${version}`, setup, 'x64'].filter(Boolean).join(' · ')}</span>
+					<span class="meta">{meta(sizeOf(release, WINDOWS_APP), 'x64')}</span>
 				</div>
 			</div>
+			{
+				mac && (
+					<div class="app app-mac">
+						<div class="app-text">
+							<h3>Mac</h3>
+							<p>Runs your agents on this Mac, or signs in to loom on your servers. Drag it into Applications, and it keeps itself up to date.</p>
+							<p class="first">The first time, macOS won't open it: choose Open Anyway in System Settings → Privacy & Security.</p>
+						</div>
+						<div class="app-get">
+							<a class="btn btn-quiet" href={`${LATEST}/${MAC_APP}`} download>
+								<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7 10.5l5 5 5-5M5 19.5h14"></path></svg>
+								Download for Mac
+							</a>
+							<span class="meta">{meta(sizeOf(release, MAC_APP), 'Apple silicon')}</span>
+						</div>
+					</div>
+				)
+			}
 		</section>
 
 		<section aria-labelledby="server" id="server">
@@ -73,6 +101,7 @@ const setup = sizeOf(release, 'loom-setup.exe');
 				</div>
 			</div>
 		</section>
+		</div>
 
 		<section class="more" aria-label="More">
 			<p>
@@ -124,6 +153,18 @@ const setup = sizeOf(release, 'loom-setup.exe');
 		background: var(--raised);
 		border: 1px solid var(--line);
 	}
+	.sections {
+		display: flex;
+		flex-direction: column;
+	}
+	.apps {
+		display: flex;
+		flex-direction: column;
+	}
+	/* The heading stays first, whichever app comes first under it. */
+	.apps > h2 {
+		order: -2;
+	}
 	.app {
 		display: flex;
 		align-items: center;
@@ -136,6 +177,29 @@ const setup = sizeOf(release, 'loom-setup.exe');
 	}
 	.app-text p {
 		margin-top: 6px;
+	}
+	.app-text .first {
+		font-size: 14px;
+		color: var(--ink-3);
+	}
+	/* The visitor's own app first, as the primary button; the other quiet. Anywhere but
+	   Windows and a Mac, the server comes first, with both apps quiet. */
+	:global(html[data-os='mac']) .app-mac {
+		order: -1;
+	}
+	:global(html[data-os='mac']) .app-mac .btn {
+		background: var(--button);
+		color: var(--button-ink);
+		border-color: transparent;
+	}
+	:global(html[data-os='mac']) .app-windows .btn,
+	:global(html[data-os='other']) .app-windows .btn {
+		background: transparent;
+		color: var(--ink);
+		border-color: var(--line-strong);
+	}
+	:global(html[data-os='other']) #server {
+		order: -1;
 	}
 	.app-get {
 		display: flex;
