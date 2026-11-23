@@ -15,7 +15,7 @@ import std.crypto.{NoiseHandshake, NoiseTransport, X25519PublicKey}
 import std.http.server.{Request, Response, Server, ServerSocket}
 import std.http.websocket
 import std.http.websocket.{WebSocket}
-import std.net.{Ip, interfaces}
+import std.net.{Ip, Waker, interfaces}
 import std.net.mdns.{find}
 import std.time.{Instant}
 import std.thread.{Task}
@@ -23,6 +23,7 @@ import shared.noise
 import shared.noise.{Joiner, Opened}
 import shared.obj.{Obj, at, int_at, str_at}
 import shared.protocol
+import shared.stop.{Stop}
 
 const SCHEME: str = "noise://"
 
@@ -174,23 +175,27 @@ struct Tunnel {
     queued: List<List<u8>>     // messages waiting for the handshake
     local: ServerSocket?       // the core's /ws it carries, for a session's
     calls: Map<i64, Request>   // the core's HTTP requests it carries, by id
+    w: Waker                   // the relay loop's, which its socket wakes as messages come
 }
 
 struct Relay {
     place: Place
     ready: Sender<String>
+    wakers: Sender<Waker>      // its loop's, sent before ready, for what stops it
     stop: Receiver<bool>
 }
 
 /// Starts the relay to `p`: its thread, what stops it, and its http:// address.
-pub fn start(p: Place) -> (Thread, Sender<bool>, String) ! Error {
+pub fn start(p: Place) -> (Thread, Stop, String) ! Error {
     var ready = Receiver<String>()
+    var wakers = Receiver<Waker>()
     let stop = Receiver<bool>()
     let stop_to = stop.sender()
-    let t = unsafe { Thread.spawn(Relay { place: p.copy(), ready: ready.sender(), stop: stop }) }
+    let t = unsafe { Thread.spawn(Relay { place: p.copy(), ready: ready.sender(), wakers: wakers.sender(), stop: stop }) }
     let said = unsafe { ready.wait_for(10000000000) } else { fail "the relay didn't start" }
     if said.starts_with("error:") { fail "the relay didn't start: {said[6..]}" }
-    return (t, stop_to, said)
+    let w = wakers.next() else { fail "the relay can't be stopped" }
+    return (t, Stop.new(stop_to, w), said)
 }
 
 impl Task for Relay {
@@ -210,6 +215,17 @@ impl Task for Relay {
         server.log = false
         server.max_message = protocol.MAX_FRAME
         server.ping_interval_ms = 0
+        // Each Noise socket to the PC wakes the loop as a message comes, and so does
+        // what stops it, so it waits for them rather than looking every 10 ms (15.6
+        // on Windows), each way of every message.
+        let w = match server.waker() {
+            ok(w) => w,
+            err(e) => {
+                r.ready.send("error:{e}")
+                return
+            },
+        }
+        r.wakers.send(w)
         r.ready.send("http://127.0.0.1:{server.port}")
         var reaching = r.place.copy()
         var looked = Looked { at: none }
@@ -219,19 +235,19 @@ impl Task for Relay {
         var good: usize = 0    // the address that answered last
         loop {
             if r.stop.next() != none { break }
-            match server.next_event(10) {
+            match server.next_event() {
                 some(Request(req)) => {
                     if req.path == "/ws" and req.method == "GET" {
                         match server.upgrade(req.copy()) {
                             ok(s) => {
-                                var t = open(reaching, key, if good < reaching.addresses.len() { good } else { 0 })
+                                var t = open(reaching, key, if good < reaching.addresses.len() { good } else { 0 }, w)
                                 t.local = some(s)
                                 sessions.insert(s.id(), t)
                             },
                             err(_) => {},
                         }
                     } else {
-                        if http == none { http = some(open(reaching, key, if good < reaching.addresses.len() { good } else { 0 })) }
+                        if http == none { http = some(open(reaching, key, if good < reaching.addresses.len() { good } else { 0 }, w)) }
                         if let t = mut http {
                             let id = next_id
                             next_id += 1
@@ -277,8 +293,8 @@ impl Task for Relay {
 }
 
 // A Noise socket to the address `n` of `p`, with the handshake's first message on its way.
-fn open(p: Place, key: X25519PublicKey, n: usize) -> Tunnel {
-    var t = Tunnel { ws: none, hs: none, t: none, j: Joiner.new(), tried: n, tries: 0, queued: List<List<u8>>(), local: none, calls: Map<i64, Request>() }
+fn open(p: Place, key: X25519PublicKey, n: usize, w: Waker) -> Tunnel {
+    var t = Tunnel { ws: none, hs: none, t: none, j: Joiner.new(), tried: n, tries: 0, queued: List<List<u8>>(), local: none, calls: Map<i64, Request>(), w: w }
     dial(mut t, p, key)
     return t
 }
@@ -286,6 +302,7 @@ fn open(p: Place, key: X25519PublicKey, n: usize) -> Tunnel {
 fn dial(t: mut Tunnel, p: Place, key: X25519PublicKey) {
     var h = noise.initiator(key)
     let ws = websocket.open("ws://{p.addresses[t.tried]}{noise.PATH}", [], OPEN_MS, noise.LONGEST)
+    ws.wake_on(t.w)
     match h.write_message([]) {
         ok(first) => match ws.send_binary(first) {
             ok => {},

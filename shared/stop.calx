@@ -1,0 +1,23 @@
+module shared.stop
+
+// What stops a thread whose loop waits on its server's `next_event` with no
+// timeout: the Noise bridge (server/noise.calx), the sandboxes' gate
+// (server/gate.calx) and the core's relay (core/relay.calx). It says so and
+// wakes the loop, which would otherwise wait for the next thing to come.
+import std.net.{Waker}
+
+pub struct Stop {
+    to: Sender<bool>
+    waker: Waker
+}
+
+impl Stop {
+    pub fn new(to: own Sender<bool>, waker: Waker) -> Stop {
+        return Stop { to: to, waker: waker }
+    }
+
+    pub fn send(mut self, v: bool) {
+        self.to.send(v)
+        self.waker.wake()
+    }
+}

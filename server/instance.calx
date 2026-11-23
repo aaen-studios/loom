@@ -28,6 +28,7 @@ import shared.obj.{Obj, at, bool_at, int_at, merge, without, str_at}
 import shared.protocol
 import shared.pushrelay
 import shared.shape
+import shared.stop.{Stop}
 import server.acp
 import server.acp.{Line, Out}
 import server.announce
@@ -313,14 +314,14 @@ pub struct Instance {
     move_done: Receiver<move.Done>
     lan: bool    // whether phones may reach it on the network: an instance in the desktop app
     bridge: Thread?    // the Noise bridge on the network (server/noise.calx), while phones are on
-    stop_bridge: Sender<bool>?
+    stop_bridge: Stop?
     lan_port: u16    // its port, while it runs
     announcer: Thread?    // says where it is on the local network, with mDNS, while phones are on (server/announce.calx)
     stop_announcer: Sender<bool>?
     to_close: List<ServerSocket>    // sessions of someone removed, closed once the command that did it is answered
     boxes: sandbox.Sandboxes?    // where the agents of everyone but the owner run (server/sandbox.calx)
     gate: Thread?    // the sandboxes' way to loom's tools (server/gate.calx)
-    stop_gate: Sender<bool>?
+    stop_gate: Stop?
     checkpointer: Thread?    // checkpoints the database off the loop (shared/checkpoint.calx)
     stop_checkpoints: Sender<bool>
     wal_big: Receiver<bool>    // the checkpoint thread saying the log grew long
