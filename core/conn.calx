@@ -670,8 +670,12 @@ impl Conn {
         self.to_app.send(text)
     }
 
-    /// Reads what has come on the socket, without waiting.
+    /// Reads what has come on the socket, without waiting. What it applies to the cache
+    /// is saved once, at the end, rather than once a frame: a commit costs far more than
+    /// an event does, and catching up is thousands of them. The cursor moves in the same
+    /// transaction, so a crash before the end only means they come again.
     fn read(mut self) {
+        var held = false
         loop {
             let got = match self.ws {
                 some(ws) => match ws.receive(0) {
@@ -683,14 +687,32 @@ impl Conn {
                 none => Got.Nothing,
             }
             match got {
-                Got.Text(text) => self.frame(text),
+                Got.Text(text) => {
+                    if not held {
+                        match self.cache.hold() {
+                            ok => held = true,
+                            err(e) => self.tell_error("cache", "{e}"),
+                        }
+                    }
+                    self.frame(text)
+                },
                 Got.Skip => {},
-                Got.Nothing => return,
+                Got.Nothing => break,
                 Got.Ended(e) => {
+                    self.let_go()
+                    held = false
                     self.ended(e)
-                    return
+                    break
                 },
             }
+        }
+        if held { self.let_go() }
+    }
+
+    fn let_go(mut self) {
+        match self.cache.let_go() {
+            ok => {},
+            err(e) => self.tell_error("cache", "{e}"),
         }
     }
 
