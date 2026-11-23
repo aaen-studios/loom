@@ -226,6 +226,14 @@ struct Run {
     proc: String    // the key of the program's process in `procs`, proc_key(agent, program)
     tried: List<String>    // the programs that couldn't answer it, before its backup took over
     starter: String    // who started the turn, as rules name it: person, agent, routine, webhook, script or plugin
+    since: i64    // the person's last event before run.started: its calls' events come after
+}
+
+// The tool.finished that ends a call its turn ended without anything finishing:
+// `denied` for one a rule or the person said no to, and otherwise `cancelled`.
+fn call_closed(call: String, refused: bool) -> Json {
+    let status = if refused { String("denied") } else { String("cancelled") }
+    return Obj.new().s("call", call).s("status", status).j("output", Json.Array(List<Json>())).done()
 }
 
 struct Approval {
@@ -1201,6 +1209,10 @@ impl Instance {
         var restarted = List<(String, String, String)>()
         for (user, run, conversation) in try store.unfinished_runs() {
             restarted.push((user.copy(), conversation.copy(), String("failed")))
+            // Its calls still open end with it, as a turn's do when it ends.
+            for (call, ended, refused) in try store.run_calls(user.copy(), run.copy(), try store.seq_before_run(user.copy(), run.copy())) {
+                if ended.len() == 0 { _ = try store.append(user.copy(), "tool.finished", call_closed(call, refused)) }
+            }
             try store.finish_run(run.copy(), String("failed"))
             _ = try store.append(user, "run.finished", Obj.new().s("run", run).s("conversation", conversation).s("status", String("failed")).s("error", String("the instance restarted")).done())
         }
@@ -6795,8 +6807,10 @@ impl Instance {
         }
         // A routine's quiet run says whose it is, so the apps don't draw it in the chat.
         let quiet_for = if let q = i.quiet_turns.find(run_id.copy()) { some(q.routine.copy()) } else { none }
+        // Where its events begin, so its calls are found when it ends.
+        let since = try i.store.last_seq(user.copy())
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).maybe("routine", quiet_for).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter) })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
@@ -8623,6 +8637,12 @@ impl Instance {
             _ = i.setups.remove(call.copy())
             i.answer_call(call.copy(), tool_error(String("The run ended before your person answered.")))
             try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
+        }
+        // A call nothing finished, as one a rule said no to that its program never
+        // reported on, ends with the turn, so the kept reply never shows it running.
+        for (call, ended, refused) in try i.store.run_calls(r.user.copy(), run_id.copy(), r.since) {
+            if ended.len() > 0 { continue }
+            try i.event(r.user.copy(), "tool.finished", call_closed(call.copy(), refused or r.denied.contains(call.copy())))
         }
         var blocks = List<Json>()
         var said = String()

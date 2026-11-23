@@ -13951,16 +13951,18 @@ fn card_view(
         .child(body)
 }
 
-/// One tool call: its title, and how it went.
-fn tool_line(p: Palette, b: &model::Block, tools: &model::Tools) -> Div {
+/// One tool call: its title, and how it went. `live` is a reply still being written,
+/// where a call nothing finished yet is running.
+fn tool_line(p: Palette, b: &model::Block, tools: &model::Tools, live: bool) -> Div {
     let t = b.call.as_ref().and_then(|c| tools.get(c));
     let (title, mark, color) = match t {
         Some(t) => {
-            let (mark, color) = match t.status.as_deref() {
-                Some("done") => ("✓", p.ok),
-                Some("failed") => ("✕", p.bad),
-                Some("denied") => ("denied", p.bad),
-                _ => ("…", p.ink_3),
+            let (mark, color) = match model::tool_went(t, live) {
+                model::Went::Done => ("✓", p.ok),
+                model::Went::Failed => ("✕", p.bad),
+                model::Went::Denied => ("denied", p.bad),
+                model::Went::Stopped => ("stopped", p.ink_3),
+                model::Went::Running => ("…", p.ink_3),
             };
             (t.title.clone(), mark, color)
         }
@@ -14305,13 +14307,13 @@ impl ReplyDraw<'_> {
         };
         let (parts, n) = model::inside(self.m, i, shows);
         if n == 0 {
-            return tool_line(p, b, self.tools).into_any_element();
+            return tool_line(p, b, self.tools, self.m.live).into_any_element();
         }
         let key = format!("sub/{}", self.key(i));
         let opened = self.open.contains(&key);
         let this = self.this.clone();
         let k = key.clone();
-        let line = tool_line(p, b, self.tools)
+        let line = tool_line(p, b, self.tools, self.m.live)
             .id(SharedString::from(format!("u-{}", self.key(i))))
             .cursor_pointer()
             .child(div().flex_none().text_color(p.ink_3).child(if n == 1 {

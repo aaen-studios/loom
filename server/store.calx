@@ -2359,6 +2359,39 @@ impl Store {
         }
         return out
     }
+
+    // Run `run`'s tool calls among `user`'s events after `after`, in the order they
+    // started: each with how it ended (tool.finished's status), or "" for one still
+    // open, and whether a rule or the person said no to it (approval.answered).
+    pub fn run_calls(self, user: String, run: String, after: i64) -> List<(String, String, bool)> ! Error {
+        var ends = LinkedMap<String, String>()
+        var refused = List<String>()
+        let sql = "SELECT json_extract(json, '$.kind'), json_extract(json, '$.call'), json_extract(json, '$.run'), json_extract(json, '$.status'), json_extract(json, '$.allow'), json_extract(json, '$.by') FROM events WHERE user = ? AND seq > ? AND json_extract(json, '$.kind') IN ('tool.started', 'tool.finished', 'approval.answered') ORDER BY seq"
+        for r in try self.db.query(String(sql), [t(user), Value.Int(after)]) {
+            let kind = text(r[0].copy())
+            let call = text(r[1].copy())
+            if kind == "tool.started" {
+                if text(r[2].copy()) == run { ends.insert(call, String()) }
+            } else if let _ = ends.find(call.copy()) {
+                if kind == "tool.finished" {
+                    ends.insert(call, text(r[3].copy()))
+                } else if int(r[4].copy()) == 0 and text(r[5].copy()) != "cancel" {
+                    // A no from a rule or the person, not the turn ending.
+                    refused.push(call)
+                }
+            }
+        }
+        var out = List<(String, String, bool)>()
+        for (call, status) in ends { out.push((call.copy(), status.copy(), refused.contains(call.copy()))) }
+        return out
+    }
+
+    // The seq of `user`'s last event before run `run` started, for run_calls.
+    pub fn seq_before_run(self, user: String, run: String) -> i64 ! Error {
+        let sql = "SELECT coalesce((SELECT min(seq) - 1 FROM events WHERE user = ?1 AND at >= (SELECT at FROM runs WHERE id = ?2)), (SELECT max(seq) FROM events WHERE user = ?1), 0)"
+        let row = try self.db.query_one(String(sql), [t(user), t(run)])
+        return int((row ?? List<Value>())[0].copy())
+    }
 }
 
 // A recall as FTS5 reads it: any of the words, each in quotes and a prefix,
@@ -2669,6 +2702,31 @@ fn events_are_counted_per_person() {
     assert(s.last_seq(a.id.copy())! == 2)
     assert(s.events_after(a.id.copy(), 1, 100)!.len() == 1)
     assert(s.events_after(b.id.copy(), 0, 100)!.len() == 1)
+}
+
+@test
+fn a_runs_calls_say_how_they_ended() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    _ = s.append(a.id.copy(), "x", Obj.new().done())!
+    s.add_run(a.id.copy(), String("run_1"), String("c_1"))!
+    let before = s.seq_before_run(a.id.copy(), String("run_1"))!
+    // At most the last event before it: one in the same millisecond counts as after.
+    assert(before <= 1)
+    _ = s.append(a.id.copy(), "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).done())!
+    _ = s.append(a.id.copy(), "tool.started", Obj.new().s("run", String("run_2")).s("call", String("tc_2")).done())!
+    _ = s.append(a.id.copy(), "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_3")).done())!
+    _ = s.append(a.id.copy(), "tool.finished", Obj.new().s("call", String("tc_1")).s("status", String("done")).done())!
+    _ = s.append(a.id.copy(), "tool.finished", Obj.new().s("call", String("tc_2")).s("status", String("failed")).done())!
+    // A rule's no to one, and a turn's end answering another's question.
+    _ = s.append(a.id.copy(), "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_4")).done())!
+    _ = s.append(a.id.copy(), "approval.answered", Obj.new().s("call", String("tc_3")).b("allow", false).s("by", String("rule")).done())!
+    _ = s.append(a.id.copy(), "approval.answered", Obj.new().s("call", String("tc_4")).b("allow", false).s("by", String("cancel")).done())!
+    let calls = s.run_calls(a.id.copy(), String("run_1"), before)!
+    assert(calls.len() == 3)
+    assert(calls[0].0 == "tc_1" and calls[0].1 == "done" and not calls[0].2)
+    assert(calls[1].0 == "tc_3" and calls[1].1 == "" and calls[1].2)
+    assert(calls[2].0 == "tc_4" and calls[2].1 == "" and not calls[2].2)
 }
 
 @test
