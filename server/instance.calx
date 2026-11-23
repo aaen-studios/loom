@@ -2368,8 +2368,8 @@ impl Instance {
 
     fn event(i: Instance, user: String, kind: str, fields: Json) ! Error {
         let pushed = if kind == "notify" or kind == "approval.needed" { fields.copy() } else { Json.Null }
-        let e = try i.store.append(user.copy(), kind, fields)
-        i.publish(user.copy(), e)
+        let e = try i.store.append_text(user.copy(), kind, fields)
+        i.publish_text(user.copy(), e)
         if pushed != Json.Null { i.push_event(user, kind, pushed) }
     }
 
