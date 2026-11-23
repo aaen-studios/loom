@@ -242,7 +242,7 @@ struct Reply: View {
     private func block(_ b: Block, key: String) -> some View {
         switch b.kind {
         case "text" where !b.text.isEmpty:
-            MarkdownView(b.text)
+            MarkdownView(b.text, live: message.live)
         case "thought" where !b.text.isEmpty:
             Thought(text: b.text, open: openThoughts.contains(key)) {
                 if openThoughts.contains(key) { openThoughts.remove(key) } else { openThoughts.insert(key) }

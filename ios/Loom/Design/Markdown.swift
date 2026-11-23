@@ -9,9 +9,11 @@ struct MarkdownView: View {
     /// What a person typed keeps its line breaks.
     var keepBreaks = false
     var font: Font = Fonts.reply
+    /// Still being written, so it grows at the end.
+    var live = false
 
     var body: some View {
-        let parts = MarkdownView.parse(text, keepBreaks: keepBreaks)
+        let parts = live && !keepBreaks ? MarkdownView.growing(text) : MarkdownView.parse(text, keepBreaks: keepBreaks)
         VStack(alignment: .leading, spacing: 10) {
             // Each part is its own view, compared before it's drawn again: as a reply is
             // written, only its last part changes.
@@ -31,6 +33,58 @@ struct MarkdownView: View {
         case raw(String)
         case rule
     }
+
+    /// The parts of a reply that may be growing as it's written. What's before its last
+    /// blank line outside a code block is parsed once and kept, and only what follows
+    /// it is parsed again: a blank line there ends every part, so the parts come out
+    /// the same as parsing the whole.
+    static func growing(_ text: String) -> [Part] {
+        let bytes = text.utf8
+        // A carriage return would put a line's end inside a character.
+        if bytes.contains(13) { return parse(text) }
+        var parts: [Part] = []
+        var from = bytes.startIndex
+        if let g = grown, bytes.count >= g.bytes, text.hasPrefix(g.text) {
+            parts = g.parts
+            from = bytes.index(bytes.startIndex, offsetBy: g.bytes)
+        }
+        // The last place in what's left that follows a blank line outside a fence.
+        var split: String.Index?
+        var fence: Substring?
+        var lineStart = from
+        var blank = true
+        var i = from
+        while i < bytes.endIndex {
+            if bytes[i] == 10 {
+                let line = text[lineStart..<i].trimmingCharacters(in: .whitespaces)
+                if let f = fence {
+                    if line.hasPrefix(f) { fence = nil }
+                } else if line.hasPrefix("```") || line.hasPrefix("~~~") {
+                    fence = Substring(line.prefix(3))
+                } else if line.isEmpty && !blank {
+                    split = bytes.index(after: i)
+                }
+                blank = line.isEmpty
+                lineStart = bytes.index(after: i)
+            }
+            i = bytes.index(after: i)
+        }
+        guard let split else {
+            return parts + parse(String(text[from...]))
+        }
+        parts += parse(String(text[from..<split]))
+        grown = Grown(text: String(text[..<split]), bytes: bytes.distance(from: bytes.startIndex, to: split), parts: parts)
+        return parts + parse(String(text[split...]))
+    }
+
+    private struct Grown {
+        var text: String
+        var bytes: Int
+        var parts: [Part]
+    }
+
+    /// The reply last parsed by `growing`, up to its last blank line.
+    nonisolated(unsafe) private static var grown: Grown?
 
     /// Inline Markdown as the chat draws it. Kept per string, so a part that's drawn
     /// again, or a row that scrolls back, isn't parsed again.
@@ -210,10 +264,11 @@ extension MarkdownView {
 }
 
 extension MarkdownView {
-    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply) {
+    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, live: Bool = false) {
         self.text = text
         self.keepBreaks = keepBreaks
         self.font = font
+        self.live = live
     }
 }
 
