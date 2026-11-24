@@ -256,6 +256,7 @@ struct Approval {
     title: String    // what it asks, for the activity log
     action: Json    // for one of loom's own tools: the command to run if allowed, {name, args}; null for an ACP request
     proc: String    // for an ACP request: the key of the process that asked, in `procs`
+    always: String    // for one of loom's own: the tool a yes for always allows from then on, as a rule; "" for none
 }
 
 // A command's answer: its value, or its error's code and message.
@@ -3849,7 +3850,10 @@ impl Instance {
         }
         let place = if server.starts_with("plugin-") { "the plugin {server[7..]}" } else { "the MCP server {server}" }
         let action = Obj.new().s("name", String("code.call")).j("args", Obj.new().s("server", server.copy()).s("tool", tool.copy()).j("arguments", args).i("act", act).done()).done()
-        return match try i.ask_person(req, g, "Use {tool} on {place}", kind, action) {
+        // Always allow keeps allowing the tool with a rule, except where a rule
+        // asked: an allow rule wouldn't get past it.
+        let always = if v.then == "ask" { String() } else { "{server}.{tool}" }
+        return match try i.ask_person_always(req, g, "Use {tool} on {place}", kind, action, always) {
             some(refused) => {
                 if act > 0 {
                     _ = i.code_acts.remove(act)
@@ -8649,7 +8653,7 @@ impl Instance {
         }
         // A yes for always would let the program stop asking, past the rule that asked.
         let can_always = v.then != "ask" and acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: title.copy(), action: Json.Null, proc: p.key.copy() })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: title.copy(), action: Json.Null, proc: p.key.copy(), always: String() })
         try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", title).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).maybe("rule", str_at(v.rule, "id")).done())
     }
 
@@ -8774,7 +8778,7 @@ impl Instance {
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
         if mode == "ask" {
             let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
-            i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action, proc: String() })
+            i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action, proc: String(), always: String() })
             try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", kind).s("title", title).j("detail", Obj.new().s("device", device_name).s("tool", tool_name).j("args", cut_input(at(args, "args"))).done()).b("can_always", false).s("device", device).s("request", request).done())
             return none
         }
@@ -8840,7 +8844,7 @@ impl Instance {
         // An install always asks, even on a host that's allowed: it's several
         // commands, and the device acts on none without its own signed yes.
         let action = Obj.new().s("name", String("device.call")).s("device", device.copy()).s("request", request.copy()).done()
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action, proc: String() })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action, proc: String(), always: String() })
         try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String("execute")).s("title", title).j("detail", detail).b("can_always", false).s("device", device).s("request", request).done())
         return none
     }
@@ -8970,7 +8974,7 @@ impl Instance {
     fn answer_approval(i: mut Instance, call: String, allow: bool, always: bool, by: String) ! Error {
         let a = i.approvals.remove(call.copy()) else return
         if a.action != Json.Null {
-            try i.answer_action(a, allow, by)
+            try i.answer_action(a, allow, always, by)
             return
         }
         let option = acp.pick_option(a.options.copy(), allow, always)
@@ -8995,7 +8999,7 @@ impl Instance {
 
     // The person's answer to one of loom's own tools that asks first: runs the
     // command as the device that allowed it, and answers the agent's call.
-    fn answer_action(i: mut Instance, a: Approval, allow: bool, by: String) ! Error {
+    fn answer_action(i: mut Instance, a: Approval, allow: bool, always: bool, by: String) ! Error {
         let user = i.run_user(a.run.copy())
         if user.len() == 0 { return }
         if allow and str_at(a.action.copy(), "name") == some(String("browser.fill")) {
@@ -9003,8 +9007,10 @@ impl Instance {
             return
         }
         let name = str_at(a.action.copy(), "name") ?? String()
-        i.log(user.copy(), a.agent.copy(), "approval", if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
-        try i.event(user.copy(), "approval.answered", Obj.new().s("call", a.call.copy()).b("allow", allow).b("always", false).s("by", by.copy()).done())
+        let kept = allow and always and a.always.len() > 0
+        i.log(user.copy(), a.agent.copy(), "approval", if kept { "Always allowed: {a.title}" } else if allow { "Allowed: {a.title}" } else { "Denied: {a.title}" }, by.copy())
+        if kept { try i.allow_always(user.copy(), a.agent.copy(), a.always.copy(), by.copy()) }
+        try i.event(user.copy(), "approval.answered", Obj.new().s("call", a.call.copy()).b("allow", allow).b("always", kept).s("by", by.copy()).done())
         // An install takes a while: the installer's thread answers it.
         if allow and (name == "acp.install" or name == "acp.registry") {
             i.slow_calls.insert(a.call.copy(), user.copy())
@@ -9250,11 +9256,28 @@ impl Instance {
         return Json.Array(out)
     }
 
+    // Always allow on one of loom's own asks: a rule allowing `tool` for the
+    // agent, made as the Rules page makes one, so it's there to remove. With
+    // no room for it, this call still goes, and the log says why it'll ask again.
+    fn allow_always(i: Instance, user: String, agent: String, tool: String, by: String) ! Error {
+        let wanted = Obj.new().s("then", String("allow")).s("tool", tool.copy()).s("agent", agent.copy()).done()
+        match try i.rule_command(user.copy(), by.copy(), String("rule.put"), wanted) {
+            Answer.Value(_) => {},
+            Answer.Refused(_, message) => i.log(user, agent, "approval", "Couldn't keep allowing {tool}: {message}", by),
+        }
+    }
+
     // One of loom's own tools that deletes or changes a permission mode: it
     // shows in the agent's chat as a tool waiting on the person, and the
     // agent's call is answered once they do. An agent never answers this
     // itself: only a device's `approve` does.
     fn ask_person(i: mut Instance, req: Request, g: Grant, title: String, kind: str, action: Json) -> Json? ! Error {
+        return try i.ask_person_always(req, g, title, kind, action, String())
+    }
+
+    // The same, with Always allow for `tool` (`server.tool`), which a yes for
+    // always keeps allowing for the agent with a rule; "" offers none.
+    fn ask_person_always(i: mut Instance, req: Request, g: Grant, title: String, kind: str, action: Json, tool: String) -> Json? ! Error {
         let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
@@ -9266,9 +9289,9 @@ impl Instance {
             place = tool_place(r.blocks, call.copy())
         }
         try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
-        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy(), proc: String() })
+        i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy(), proc: String(), always: tool.copy() })
         i.hold_call(call.copy(), req.copy())
-        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", false).done())
+        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", tool.len() > 0).done())
         return none
     }
 
