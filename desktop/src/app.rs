@@ -5785,6 +5785,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    // The middle button scrolls it, as it does the chat.
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                            this.auto_press(e.position, window, cx);
+                        }),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -12986,6 +12993,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         }
                         this.auto.moved(e.position);
+                        this.auto_cursor(window, cx);
                         this.auto_run(window, cx);
                     });
                 });
@@ -13004,13 +13012,24 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    /// The middle button went down in the chat at `at`: the chat scrolls by where the
-    /// pointer is from there.
+    /// The middle button went down in the chat or the sidebar at `at`: what's under it
+    /// scrolls by where the pointer is from there. Not on a link, a pill or a button,
+    /// which have the pointing hand: the middle button does there what it does there.
     fn auto_press(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if window.hovered_cursor_style() == Some(CursorStyle::PointingHand) {
+            return;
+        }
         self.auto.press(at);
+        self.auto_cursor(window, cx);
         self.auto_run(window, cx);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Shows the middle button's cursor while it's on, the way it scrolls once it does,
+    /// and the cursor of what's under the pointer again once it's off.
+    fn auto_cursor(&self, window: &mut Window, cx: &mut App) {
+        window.set_pan_cursor(self.auto.cursor(), cx);
     }
 
     /// Starts the middle button's steps, one a frame, unless they're coming: started
@@ -19066,6 +19085,8 @@ impl Render for Loom {
                 self.auto_run(window, cx);
             }
         }
+        // Its cursor, or none once a click, key or wheel stopped it.
+        self.auto_cursor(window, cx);
         let h = window.viewport_size().height.as_f32();
         let splash = self.splash(h);
         // A new agent's curtain covers what its weave covered: the whole window for the
@@ -20730,21 +20751,21 @@ fn auto_step(this: WeakEntity<Loom>, run: u64, last: Instant, window: &mut Windo
     window.on_next_frame(move |window, cx| auto_step(this, run, now, window, cx));
 }
 
-/// The middle button's marker, where it was pressed: a round button with an arrow up and
-/// one down, and a dot between.
+/// The middle button's marker, where it was pressed, as a browser's: small, plain and
+/// see-through, an arrow up and one down with a dot between. It stays as it is: the
+/// cursor shows which way it scrolls.
 fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
-    const SIZE: f32 = 30.0;
-    let ink = p.ink_2;
+    const SIZE: f32 = 24.0;
+    let ink = p.ink_2.opacity(0.75);
     div()
         .absolute()
         .left(at.x - px(SIZE / 2.0))
         .top(at.y - px(SIZE / 2.0))
         .size(px(SIZE))
         .rounded_full()
-        .bg(p.bg)
+        .bg(p.bg.opacity(0.7))
         .border_1()
-        .border_color(p.line_strong)
-        .shadow(card_shadow(p))
+        .border_color(p.ink_3.opacity(0.5))
         .child(
             canvas(
                 |_, _, _| {},
@@ -20752,7 +20773,7 @@ fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
                     let c = bounds.center();
                     // An arrow: its tip `dir` (−1 up, 1 down) from the middle.
                     let arrow = |dir: f32| {
-                        let (tip, base, half) = (9.0 * dir, 4.5 * dir, 3.5);
+                        let (tip, base, half) = (7.5 * dir, 3.5 * dir, 3.0);
                         let mut b = PathBuilder::fill();
                         b.move_to(point(c.x, c.y + px(tip)));
                         b.line_to(point(c.x + px(half), c.y + px(base)));
@@ -20765,7 +20786,7 @@ fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
                             window.paint_path(path, ink);
                         }
                     }
-                    let r = px(1.5);
+                    let r = px(1.25);
                     window.paint_quad(
                         fill(
                             Bounds::new(point(c.x - r, c.y - r), size(r * 2.0, r * 2.0)),
