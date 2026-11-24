@@ -1,0 +1,84 @@
+module tests.protocol.at_mentions
+
+// Mentions (PLAN.md, "Mentions"): the composer's @ picker finds files with
+// agent.files, in the agent's folder and the shared one, leaving out hidden
+// folders and node_modules. A message keeps its mentions as links, and the
+// agent reads them as @ and a name, or a path in code, told who and what each
+// is.
+//
+//     calx tests/protocol/at_mentions.calx
+import std.fs
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn words(m: Json) -> String {
+    var out = String()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("text")) { out.push_str(str_at(b, "text") ?? String()) }
+        }
+    }
+    return out
+}
+
+fn agent_named(app: mut Session, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let mine = try agent_named(mut app, "q_1", "Main")
+    let casper = try agent_named(mut app, "q_2", "Casper")
+
+    // --- The picker's files ---
+    let folder = "{i.data}/agents/{mine}"
+    try fs.make_dir_all("{folder}/notes")
+    try fs.make_dir_all("{folder}/node_modules/x")
+    try fs.write_text("{folder}/notes/hours.md", String("# Hours\n"))
+    try fs.write_text("{folder}/node_modules/x/hours.md", String("not this one\n"))
+    let found = try app.cmd("q_3", "agent.files", Obj.new().s("agent", mine.copy()).s("query", String("HOU")).done())
+    let listed = "{at(at(found, "value"), "files")}"
+    try check(listed.contains(#""path":"notes/hours.md","name":"hours.md","where":"notes""#), "agent.files finds a file in the agent's folder, its name matched in any case")
+    try check(not listed.contains("node_modules"), "and leaves node_modules out")
+
+    // --- A message with mentions ---
+    let c = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", mine.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    let said = "/context\nAsk [@Casper](loom:agent/{casper}) about [hours.md](loom:file/{mine}/notes%2Fhours.md)."
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", said.copy()).done())
+    let reply = try reply_in(mut app, chat.copy())
+    let text = words(reply)
+    try check(text.contains("Ask @Casper about `notes/hours.md`."), "the agent reads a mention as @ and a name, or a path in code")
+    try check(text.contains("@Casper is Casper, another of your person's agents: message_agent with agent \"Casper\" reaches it"), "and is told who an agent it mentions is, and how to reach it")
+    try check(text.contains("`notes/hours.md` is a file in your folder"), "and where a file it mentions is")
+    let listed_messages = try app.cmd("q_5", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    try check("{at(listed_messages, "value")}".contains("[@Casper](loom:agent/{casper})"), "the message keeps its mentions as links")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nat mentions: all good")
+}

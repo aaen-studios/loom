@@ -2062,17 +2062,31 @@ fn links_of(m: &Value) -> HashMap<String, Link> {
         .unwrap_or_default()
 }
 
-/// A message's words with its links as the chat shows them (PLAN.md, "Links and
-/// sources"): each looked-up link with its site's icon before it, as an image the
-/// Markdown view draws (`icon_src` gives its address, or none while it isn't fetched),
-/// and a bare address with its page's title in place of the address. Code stays as it
-/// is.
-pub fn with_link_icons(
-    text: &str,
-    links: &HashMap<String, Link>,
-    icon_src: &dyn Fn(&str) -> Option<String>,
-) -> String {
-    if links.is_empty() {
+/// What a message's words need to show their links and mentions (`with_link_icons`).
+pub struct Inline<'a> {
+    /// The pages it links to that the instance has looked up.
+    pub links: &'a HashMap<String, Link>,
+    /// Where a fetched thumbnail is, by its file: a site's icon, or a picture's.
+    pub icon_src: &'a dyn Fn(&str) -> Option<String>,
+    /// For an agent it mentions, by id: its name's colour, as #rrggbb, and where its
+    /// thread's picture is. None for one that's gone.
+    pub agent: &'a dyn Fn(&str) -> Option<(String, String)>,
+    /// Where the icon for a file of this name is.
+    pub file_icon: &'a dyn Fn(&str) -> String,
+}
+
+/// A message's words with its links and mentions as the chat shows them (PLAN.md,
+/// "Links and sources" and "Mentions"), as Markdown the view draws:
+/// - a looked-up link with its site's icon before it, and a bare address as its
+///   page's title;
+/// - an agent it mentions as its thread and its name in its colour, a little
+///   weathered;
+/// - a file it mentions, or one sent with it, with a tiny picture of it or its type's
+///   icon before its name.
+///
+/// Code stays as it is.
+pub fn with_link_icons(text: &str, inline: &Inline) -> String {
+    if inline.links.is_empty() && !text.contains("](loom") {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len() + 64);
@@ -2090,22 +2104,23 @@ pub fn with_link_icons(
             out.push_str(line);
             continue;
         }
-        out.push_str(&line_links(line, links, icon_src));
+        out.push_str(&line_links(line, inline));
     }
     out
 }
 
-fn line_links(
-    line: &str,
-    links: &HashMap<String, Link>,
-    icon_src: &dyn Fn(&str) -> Option<String>,
-) -> String {
+fn img(src: &str, w: u32, h: u32) -> String {
+    format!("<img src=\"{src}\" width=\"{w}\" height=\"{h}\" /> ")
+}
+
+fn line_links(line: &str, inline: &Inline) -> String {
+    let links = inline.links;
     let icon = |url: &str| -> String {
         links
             .get(url)
             .and_then(|l| l.icon.as_deref())
-            .and_then(icon_src)
-            .map(|src| format!("<img src=\"{src}\" width=\"14\" height=\"14\" /> "))
+            .and_then(inline.icon_src)
+            .map(|src| img(&src, 14, 14))
             .unwrap_or_default()
     };
     let mut out = String::with_capacity(line.len());
@@ -2125,11 +2140,36 @@ fn line_links(
             }
             continue;
         }
-        // A Markdown link, [words](url): its icon before it.
+        // A Markdown link, [words](url).
         if rest.starts_with('[') {
-            if let Some((len, url)) = md_link(rest) {
-                out.push_str(&icon(url));
-                out.push_str(&rest[..len]);
+            if let Some((len, words, url)) = md_link(rest) {
+                let whole = &rest[..len];
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    out.push_str(&icon(url));
+                    out.push_str(whole);
+                } else if let Some(id) = url.strip_prefix("loom:agent/") {
+                    let name = words.trim().trim_start_matches('@').replace(['<', '>'], "");
+                    match (inline.agent)(id) {
+                        Some((color, thread)) => {
+                            out.push_str(&img(&thread, 14, 10));
+                            out.push_str(&format!(
+                                "<span style=\"color: {color}; font-weight: 500\">{name}</span>"
+                            ));
+                        }
+                        None => out.push_str(&format!("@{name}")),
+                    }
+                } else if url.starts_with("loom:file/") {
+                    out.push_str(&img(&(inline.file_icon)(words), 14, 14));
+                    out.push_str(whole);
+                } else if let Some(sha) = url.strip_prefix("loom-file:") {
+                    let src = (inline.icon_src)(sha)
+                        .filter(|_| is_picture(words))
+                        .unwrap_or_else(|| (inline.file_icon)(words));
+                    out.push_str(&img(&src, 14, 14));
+                    out.push_str(whole);
+                } else {
+                    out.push_str(whole);
+                }
                 rest = &rest[len..];
                 continue;
             }
@@ -2162,6 +2202,14 @@ fn line_links(
     out
 }
 
+/// Whether a file of this name is a picture, by its type.
+fn is_picture(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic"]
+        .iter()
+        .any(|t| lower.ends_with(t))
+}
+
 /// A page's title as a bare address shows it: at most 60 characters, cut at a word.
 fn short_title(title: &str) -> String {
     const MOST: usize = 60;
@@ -2176,8 +2224,8 @@ fn short_title(title: &str) -> String {
     )
 }
 
-/// A Markdown link at the start of `s`: its length, and its address.
-fn md_link(s: &str) -> Option<(usize, &str)> {
+/// A Markdown link at the start of `s`: its length, its words and its address.
+fn md_link(s: &str) -> Option<(usize, &str, &str)> {
     let close = s.find("](")?;
     if s[1..close].contains('\n') {
         return None;
@@ -2186,8 +2234,116 @@ fn md_link(s: &str) -> Option<(usize, &str)> {
     let end = after.find(')')?;
     let url = after[..end].trim();
     let url = url.split_whitespace().next().unwrap_or("");
-    (url.starts_with("http://") || url.starts_with("https://"))
-        .then_some((close + 2 + end + 1, url))
+    (!url.is_empty()).then_some((close + 2 + end + 1, &s[1..close], url))
+}
+
+// --- Mentions (PLAN.md, "Mentions") ---
+
+/// A mention as the composer holds it, an inline token: its id, the `loom:` link it
+/// goes as, and its text.
+pub fn agent_mention(id: &str, name: &str) -> (String, String) {
+    (format!("loom:agent/{id}"), format!("@{name}"))
+}
+
+/// A file in `agent`'s folder or the shared one, its path as a reply would name it.
+pub fn file_mention(agent: &str, path: &str, name: &str) -> (String, String) {
+    let mut escaped = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            ' ' | '(' | ')' | '%' | '[' | ']' | '<' | '>' | '\\' => {
+                let mut b = [0u8; 4];
+                for byte in c.encode_utf8(&mut b).bytes() {
+                    escaped.push_str(&format!("%{byte:02X}"));
+                }
+            }
+            _ => escaped.push(c),
+        }
+    }
+    (format!("loom:file/{agent}/{escaped}"), name.to_string())
+}
+
+/// What the person typed with each mention (an inline token: its range, its link and
+/// its text) as the Markdown link it's sent as.
+pub fn with_mention_links(
+    text: &str,
+    tokens: &[(std::ops::Range<usize>, String, String)],
+) -> String {
+    let mut sorted: Vec<_> = tokens.iter().collect();
+    sorted.sort_by_key(|(r, _, _)| r.start);
+    let mut out = String::with_capacity(text.len() + 32 * tokens.len());
+    let mut at = 0;
+    for (range, link, words) in sorted {
+        if range.start < at || range.end > text.len() {
+            continue;
+        }
+        out.push_str(&text[at..range.start]);
+        out.push_str(&format!("[{}]({link})", words.replace(['[', ']'], "")));
+        at = range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// The @ being typed just before the cursor, for the picker: where it is, and what
+/// comes after it. None unless it starts the text or follows a space, with no space
+/// since.
+pub fn mention_query(text: &str, cursor: usize) -> Option<(usize, String)> {
+    let before = text.get(..cursor)?;
+    let at = before.rfind('@')?;
+    let query = &before[at + 1..];
+    if query.chars().any(char::is_whitespace) || query.chars().count() > 40 {
+        return None;
+    }
+    let starts = before[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| c.is_whitespace() || c == '(');
+    starts.then(|| (at, query.to_string()))
+}
+
+/// `%2F` and the like as the characters they stand for.
+fn unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
+        {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
+/// A file the composer's @ picker found (`agent.files`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoundFile {
+    /// As a reply would name it.
+    pub path: String,
+    pub name: String,
+    /// Its folder, as the picker shows it.
+    pub place: String,
+}
+
+/// One of the @ picker's choices.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pick {
+    Agent {
+        id: String,
+        name: String,
+        color: String,
+        about: String,
+    },
+    File(FoundFile),
 }
 
 fn mentions_of(m: &Value) -> Vec<Mention> {
@@ -3041,6 +3197,11 @@ pub struct Updates {
 
 #[derive(Default)]
 pub struct Model {
+    /// The files the composer's @ picker last found: for which agent and query, and
+    /// the files (`agent.files`).
+    pub found_files: (String, String, Vec<FoundFile>),
+    /// The agent.files asked last: its id, agent and query.
+    files_asking: Option<(String, String, String)>,
     /// The instance's version against the newest release, once the core has said.
     pub version: Option<ServerVersion>,
     /// An update of the instance under way, while there's one.
@@ -3750,6 +3911,75 @@ impl Model {
 
     pub fn agent(&self, id: &str) -> Option<&Agent> {
         self.agents.iter().find(|a| a.id == id)
+    }
+
+    /// Asks for the files in the shown agent's folder and the shared one that match
+    /// `query`, for the composer's @ picker, unless it has them or is asking already.
+    pub fn find_files(&mut self, query: &str) -> Option<Value> {
+        let agent = self.selected.clone()?;
+        let (had_agent, had_query, _) = &self.found_files;
+        if (had_agent, had_query) == (&agent, &query.to_string()) {
+            return None;
+        }
+        if let Some((_, a, q)) = &self.files_asking {
+            if (a, q.as_str()) == (&agent, query) {
+                return None;
+            }
+        }
+        let id = self.id("app.agent_files");
+        self.files_asking = Some((id.clone(), agent.clone(), query.to_string()));
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.files", "args": {"agent": agent, "query": query}}),
+        )
+    }
+
+    /// The @ picker's choices for `query`: the person's other agents whose names match,
+    /// then the files found for it.
+    pub fn picks(&self, query: &str) -> Vec<Pick> {
+        let q = query.to_lowercase();
+        let mut agents: Vec<(bool, &Agent)> = self
+            .agents
+            .iter()
+            .filter(|a| Some(&a.id) != self.selected.as_ref())
+            .filter_map(|a| {
+                let name = a.name.to_lowercase();
+                name.contains(&q).then(|| (!name.starts_with(&q), a))
+            })
+            .collect();
+        agents.sort_by_key(|(later, _)| *later);
+        let mut out: Vec<Pick> = agents
+            .into_iter()
+            .take(5)
+            .map(|(_, a)| Pick::Agent {
+                id: a.id.clone(),
+                name: a.name.clone(),
+                color: a.color.clone(),
+                about: a
+                    .instructions
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(|l| l.trim_start_matches(['#', ' ']).chars().take(48).collect())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        let (agent, found_for, files) = &self.found_files;
+        if Some(agent) == self.selected.as_ref() && found_for == query {
+            out.extend(files.iter().take(8).cloned().map(Pick::File));
+        }
+        out
+    }
+
+    /// Opens a file a message mentions, from its `loom:file/AGENT/PATH` link: the
+    /// instance keeps it as the person's first.
+    pub fn open_file_mention(&mut self, link: &str) -> Option<Value> {
+        let rest = link.strip_prefix("loom:file/")?;
+        let (agent, path) = rest.split_once('/')?;
+        let path = unescape(path);
+        let id = self.id("app.agent_file");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "agent.file", "args": {"agent": agent, "path": path}}),
+        )
     }
 
     pub fn select(&mut self, agent: Option<String>) {
@@ -4599,6 +4829,30 @@ impl Model {
             if let Some(e) = f.get("error") {
                 self.secret_sending.remove(call);
                 self.secret_errors.insert(call.to_string(), s(e, "message"));
+            }
+            return;
+        }
+        // The files the @ picker asked for, unless it has asked for others since.
+        if id.starts_with("app.agent_files") {
+            if let Some((asked, agent, query)) = self.files_asking.take() {
+                if asked != id {
+                    self.files_asking = Some((asked, agent, query));
+                    return;
+                }
+                let files = f
+                    .pointer("/value/files")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .map(|v| FoundFile {
+                                path: s(v, "path"),
+                                name: s(v, "name"),
+                                place: s(v, "where"),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.found_files = (agent, query, files);
             }
             return;
         }
@@ -7349,15 +7603,24 @@ mod tests {
         links.insert("https://a.example/y".to_string(), page("", None));
         let src = |sha: &str| (sha == "abc").then(|| "/icons/abc".to_string());
         let img = "<img src=\"/icons/abc\" width=\"14\" height=\"14\" /> ";
+        let none = |_: &str| None;
+        let file = |_: &str| String::from("/icons/file");
+        let mut inline = Inline {
+            links: &links,
+            icon_src: &src,
+            agent: &none,
+            file_icon: &file,
+        };
         assert_eq!(
-            with_link_icons("See https://a.example/x.", &links, &src),
+            with_link_icons("See https://a.example/x.", &inline),
             format!("See {img}[A page](https://a.example/x).")
         );
         assert_eq!(
-            with_link_icons("Read [this](https://a.example/x) now", &links, &src),
+            with_link_icons("Read [this](https://a.example/x) now", &inline),
             format!("Read {img}[this](https://a.example/x) now")
         );
         // A long title is cut at a word.
+        let mut links = links.clone();
         links.insert(
             "https://a.example/z".to_string(),
             page(
@@ -7365,28 +7628,75 @@ mod tests {
                 None,
             ),
         );
+        inline.links = &links;
         assert_eq!(
-            with_link_icons("https://a.example/z", &links, &src),
+            with_link_icons("https://a.example/z", &inline),
             "[GitHub · Change is constant. GitHub keeps you ahead…](https://a.example/z)"
         );
         // Not looked up, or no title: as written.
         assert_eq!(
-            with_link_icons(
-                "at https://a.example/y and https://c.example/",
-                &links,
-                &src
-            ),
+            with_link_icons("at https://a.example/y and https://c.example/", &inline),
             "at https://a.example/y and https://c.example/"
         );
         // Code stays as it is.
         assert_eq!(
             with_link_icons(
                 "`https://a.example/x`\n```\nhttps://a.example/x\n```",
-                &links,
-                &src
+                &inline
             ),
             "`https://a.example/x`\n```\nhttps://a.example/x\n```"
         );
+    }
+
+    #[test]
+    fn a_mention_shows_its_agent_in_its_colour_and_a_file_with_its_icon() {
+        let links = HashMap::new();
+        let src = |sha: &str| (sha == "pic").then(|| "/thumbs/pic".to_string());
+        let agent =
+            |id: &str| (id == "a1").then(|| ("#9c8636".to_string(), "/thread/a1".to_string()));
+        let file = |name: &str| format!("/icons/{name}");
+        let inline = Inline {
+            links: &links,
+            icon_src: &src,
+            agent: &agent,
+            file_icon: &file,
+        };
+        assert_eq!(
+            with_link_icons("Ask [@Casper](loom:agent/a1) now", &inline),
+            "Ask <img src=\"/thread/a1\" width=\"14\" height=\"10\" /> \
+             <span style=\"color: #9c8636; font-weight: 500\">Casper</span> now"
+        );
+        // An agent that's gone is its name.
+        assert_eq!(with_link_icons("[@Old](loom:agent/zz)", &inline), "@Old");
+        assert_eq!(
+            with_link_icons("[hours.md](loom:file/a1/notes%2Fhours.md)", &inline),
+            "<img src=\"/icons/hours.md\" width=\"14\" height=\"14\" /> \
+             [hours.md](loom:file/a1/notes%2Fhours.md)"
+        );
+        // A picture sent with a message shows a tiny copy of itself; another file its icon.
+        assert_eq!(
+            with_link_icons("[cat.png](loom-file:pic) [a.pdf](loom-file:pdf)", &inline),
+            "<img src=\"/thumbs/pic\" width=\"14\" height=\"14\" /> [cat.png](loom-file:pic) \
+             <img src=\"/icons/a.pdf\" width=\"14\" height=\"14\" /> [a.pdf](loom-file:pdf)"
+        );
+    }
+
+    #[test]
+    fn the_composer_finds_the_at_being_typed_and_sends_mentions_as_links() {
+        assert_eq!(mention_query("hi @cas", 7), Some((3, "cas".into())));
+        assert_eq!(mention_query("@", 1), Some((0, String::new())));
+        assert_eq!(mention_query("me@mail", 7), None);
+        assert_eq!(mention_query("@cas per", 8), None);
+        let (link, words) = agent_mention("a1", "Casper");
+        let (file, name) = file_mention("a1", "my notes/h(1).md", "h(1).md");
+        assert_eq!(file, "loom:file/a1/my%20notes/h%281%29.md");
+        let text = "Ask @Casper about h(1).md.";
+        let sent = with_mention_links(text, &[(18..25, file.clone(), name), (4..11, link, words)]);
+        assert_eq!(
+            sent,
+            "Ask [@Casper](loom:agent/a1) about [h(1).md](loom:file/a1/my%20notes/h%281%29.md)."
+        );
+        assert_eq!(unescape("my%20notes/h%281%29.md"), "my notes/h(1).md");
     }
 
     #[test]

@@ -1033,6 +1033,155 @@ fn handoff_path(given: String, mine: String, shared: String) -> String? {
     return none
 }
 
+// --- Mentions (PLAN.md, "Mentions") ---
+
+// How many files agent.files gives, and how many entries it looks through.
+const FOUND_MOST: usize = 20
+const LOOKED_MOST: usize = 20000
+
+// The files in `folder` whose path has `query` in it, for the composer's @
+// picker: each with `path` as a reply or a mention names it (`shown` plus the
+// path inside `folder`: empty for the agent's own folder, so relative, or the
+// shared folder's own path), its `name`, and `where` it is, as the picker
+// shows it. Hidden folders, node_modules and build output are left out. Each
+// with how well it matched: its name starting with the query, then its name
+// having it, then its path.
+fn files_matching(folder: String, shown: String, label: String, query: String) -> List<(i64, Json)> {
+    var out = List<(i64, Json)>()
+    let entries = match fs.walk(folder.copy()) {
+        ok(e) => e,
+        err(_) => return out,
+    }
+    let base = folder.replace("\\", "/")
+    let q = query.trim().to_lower_root()
+    var looked: usize = 0
+    for e in entries {
+        looked += 1
+        if looked > LOOKED_MOST { break }
+        match e.kind {
+            fs.Kind.File => {},
+            _ => continue,
+        }
+        let full = e.path.replace("\\", "/")
+        if not full.starts_with(base.copy()) { continue }
+        let inside = full[base.len()..].trim_prefix("/").copy()
+        let skipped = "/{inside}"
+        if skipped.contains("/.") or skipped.contains("/node_modules/") or skipped.contains("/target/") or skipped.contains("/__pycache__/") { continue }
+        let name = if let cut = inside.find_last("/") { inside[cut + 1..].copy() } else { inside.copy() }
+        let dir = if let cut = inside.find_last("/") { inside[..cut].copy() } else { String() }
+        let lower_name = name.to_lower_root()
+        let rank: i64 = if q.len() == 0 or lower_name.starts_with(q.copy()) { 0 } else if lower_name.contains(q.copy()) { 1 } else if inside.to_lower_root().contains(q.copy()) { 2 } else { continue }
+        let path = if shown.len() == 0 { inside.copy() } else { "{shown}/{inside}" }
+        let place = if label.len() == 0 { dir } else if dir.len() == 0 { label.copy() } else { "{label}/{dir}" }
+        out.push((rank, Obj.new().s("path", path).s("name", name).s("where", place).done()))
+    }
+    return out
+}
+
+// The best FOUND_MOST of `found`: by how well each matched, then the shortest
+// path.
+fn best_found(found: List<(i64, Json)>) -> List<Json> {
+    var ranked = found.copy()
+    ranked.sort_by(|a, b| {
+        let pa = str_at(a.1.copy(), "path") ?? String()
+        let pb = str_at(b.1.copy(), "path") ?? String()
+        if a.0 != b.0 { a.0.cmp(b.0) } else { pa.len().cmp(pb.len()) }
+    })
+    var out = List<Json>()
+    for (_, f) in ranked {
+        if out.len() >= FOUND_MOST { break }
+        out.push(f.copy())
+    }
+    return out
+}
+
+// What a mention in a message's words is: `[@Casper](loom:agent/a_2)` names
+// an agent by its id, and `[hours.md](loom:file/a_1/notes%2Fhours.md)` a file
+// in an agent's folder or the shared one, its path as a reply would name it.
+pub struct Mentioned {
+    pub kind: String    // "agent" or "file"
+    pub shown: String    // the words in the brackets
+    pub target: String    // the agent's id, or the file's path
+    pub agent: String    // for a file, the agent whose folder it's named from
+}
+
+// The mentions in `text`, in order, and the text as the agent reads it: an
+// agent's as @ and its name, and a file's as its path in code.
+fn mentions_in(text: String) -> (String, List<Mentioned>) {
+    var out = String()
+    var found = List<Mentioned>()
+    var rest = text.copy()
+    loop {
+        let open = rest.find("](loom:") else break
+        let start = rest[..open].find_last("[") else {
+            out.push_str(rest[..open + 2])
+            rest = rest[open + 2..].copy()
+            continue
+        }
+        let close = rest[open..].find(")") else break
+        let shown = rest[start + 1..open].copy()
+        let link = rest[open + 7..open + close].copy()
+        out.push_str(rest[..start])
+        if link.starts_with("agent/") {
+            let id = link[6..].copy()
+            let name = shown.trim_prefix("@").copy()
+            out.push_str("@{name}")
+            found.push(Mentioned { kind: String("agent"), shown: name, target: id, agent: String() })
+        } else if link.starts_with("file/") {
+            let after = link[5..].copy()
+            let cut = after.find("/") ?? after.len()
+            let agent = after[..cut].copy()
+            let path = if cut < after.len() { url_unescape(after[cut + 1..].copy()) } else { String() }
+            out.push_str("`{path}`")
+            found.push(Mentioned { kind: String("file"), shown: shown, target: path, agent: agent })
+        } else {
+            out.push_str(rest[start..open + close + 1])
+        }
+        rest = rest[open + close + 1..].copy()
+    }
+    out.push_str(rest)
+    return (out, found)
+}
+
+// `%2F` and the like as the characters they stand for.
+fn url_unescape(s: String) -> String {
+    var decoded = List<u8>()
+    let b = s.to_bytes()
+    var n: usize = 0
+    while n < b.len() {
+        if b[n] == 37 and n + 2 < b.len() {
+            if let hi = hex_digit(b[n + 1]) {
+                if let lo = hex_digit(b[n + 2]) {
+                    decoded.push(hi * 16 + lo)
+                    n += 3
+                    continue
+                }
+            }
+        }
+        decoded.push(b[n])
+        n += 1
+    }
+    return String.from_utf8(decoded) ?? s.copy()
+}
+
+fn hex_digit(c: u8) -> u8? {
+    if c >= 48 and c <= 57 { return some(c - 48) }
+    if c >= 97 and c <= 102 { return some(c - 87) }
+    if c >= 65 and c <= 70 { return some(c - 55) }
+    return none
+}
+
+@test
+fn a_mention_reads_as_a_name_or_a_path() {
+    let (said, found) = mentions_in(String("Ask [@Casper](loom:agent/a_2) about [hours.md](loom:file/a_1/notes%2Fhours.md), and [a page](https://x.io)."))
+    assert(said == "Ask @Casper about `notes/hours.md`, and [a page](https://x.io).")
+    assert(found.len() == 2)
+    assert(found[0].kind == "agent" and found[0].target == "a_2" and found[0].shown == "Casper")
+    assert(found[1].kind == "file" and found[1].target == "notes/hours.md" and found[1].agent == "a_1")
+    let (plain, none_found) = mentions_in(String("No [mentions](loom:other) here."))
+    assert(plain == "No [mentions](loom:other) here." and none_found.len() == 0)
+}
+
 // How many files a reply names that it shows as chips.
 const MENTIONS_MOST: usize = 10
 
@@ -4892,8 +5041,6 @@ impl Instance {
         return none
     }
 
-    // The files a reply names that are in its agent's folder or the shared
-    // one: each `path` as the reply wrote it, its `name` and its `size`.
     // --- Links and sources (PLAN.md, "Links and sources") ---
 
     // The pages a message names: the links in its own words (not a subagent's)
@@ -4991,6 +5138,8 @@ impl Instance {
         }
     }
 
+    // The files a reply names that are in its agent's folder or the shared
+    // one: each `path` as the reply wrote it, its `name` and its `size`.
     fn mentions(i: Instance, user: String, agent: String, said: String) -> List<Json> {
         var out = List<Json>()
         let named = named_paths(said)
@@ -8036,8 +8185,37 @@ impl Instance {
         try i.store.put_message(user.copy(), message.copy())
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let from = try i.writing_from(user.copy(), device)
-        let note = if steered { String("[loom: Your person stopped you to say this. Carry on from where you were, with it in mind.]") } else { String() }
-        try i.start_run(user, conversation, run_id, message_id, text, sent_files, from, note, "person")
+        var note = if steered { String("[loom: Your person stopped you to say this. Carry on from where you were, with it in mind.]") } else { String() }
+        // What it mentions, as the agent reads it (PLAN.md, "Mentions").
+        let (said, mentioned) = mentions_in(text.copy())
+        let told = try i.mentions_told(user.copy(), str_at(conversation.copy(), "agent") ?? String(), mentioned)
+        if told.len() > 0 { note = if note.len() > 0 { "{note}\n{told}" } else { told } }
+        try i.start_run(user, conversation, run_id, message_id, said, sent_files, from, note, "person")
+    }
+
+    // What the agent is told of what a message mentions: each agent, and how
+    // to reach it, and each file, and where it is.
+    fn mentions_told(i: Instance, user: String, agent: String, mentioned: List<Mentioned>) -> String ! Error {
+        var parts = List<String>()
+        for m in mentioned {
+            if m.kind == "agent" {
+                if m.target == agent {
+                    parts.push("@{m.shown} is you")
+                    continue
+                }
+                let other = try i.store.agent(user.copy(), m.target.copy()) else continue
+                let name = str_at(other, "name") ?? m.shown.copy()
+                parts.push("@{m.shown} is {name}, another of your person's agents: message_agent with agent \"{name}\" reaches it")
+            } else {
+                let mine = i.folder_of(user.copy(), agent.copy())
+                let shared = i.shared_of(user.copy(), agent.copy())
+                if handoff_path(m.target.copy(), mine, shared.copy()) == none { continue }
+                let place = if path_key(m.target.copy()).starts_with(path_key(shared)) { String("the shared folder") } else { String("your folder") }
+                parts.push("`{m.target}` is a file in {place}")
+            }
+        }
+        if parts.len() == 0 { return String() }
+        return "[loom: In this message, {parts.join("; ")}.]"
     }
 
     // --- Tasks (PLAN.md, "Work that waits its turn") ---
@@ -11545,6 +11723,17 @@ impl Instance {
             let file_name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
             let mime = files.sniff(data.copy()) ?? content_type(file_name.copy())
             return Answer.Value(Obj.new().j("file", try i.agent_file(user, file_name, mime, data)).done())
+        }
+        if name == "agent.files" {
+            // The files in the agent's folder and the shared one whose path has
+            // `query` in it, for the composer's @ picker (PLAN.md, "Mentions").
+            let id = str_at(args.copy(), "agent") ?? String()
+            if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            let query = str_at(args, "query") ?? String()
+            let shared = i.shared_of(user.copy(), id.copy())
+            var found = files_matching(i.folder_of(user, id), String(), String(), query.copy())
+            found.extend(files_matching(shared.copy(), shared.replace("\\", "/"), String("shared"), query))
+            return Answer.Value(Obj.new().j("files", Json.Array(best_found(found))).done())
         }
         if name == "agent.summary" {
             // What the agent's settings panel shows, counted: what it knows
