@@ -7056,6 +7056,28 @@ impl Instance {
     // A turn that ends, or is stopped, with servers its agent proposed: one its
     // person never answered isn't added, and a call that still waits hears how
     // things stand.
+    // A secret `user`'s `agent` asked for on a card in the run `run_id`, which its
+    // person hasn't answered: the call is told the turn ended. With `at_once`, from a
+    // run being stopped, the card says it wasn't answered at once; otherwise the
+    // run's kept reply says so as it ends.
+    fn close_secret_ask(i: mut Instance, user: String, agent: String, run_id: String, at_once: bool) {
+        let browser_key = "{user}/{agent}"
+        var asked_call = String()
+        var card = Json.Null
+        if let b = mut i.browsers.find(browser_key.copy()) {
+            if str_at(b.secret_ask.copy(), "run") == some(run_id.copy()) {
+                asked_call = str_at(b.secret_ask.copy(), "call") ?? String()
+                card = at(b.secret_ask.copy(), "card")
+                b.secret_ask = Json.Null
+                b.busy -= 1
+            }
+        }
+        if asked_call.len() == 0 { return }
+        i.answer_call(asked_call, tool_error(String("The turn ended before your person answered.")))
+        if at_once { _ = i.put_own_card(run_id, cards.secret_card_now(card, "closed", List<String>())) }
+        i.browser_state(browser_key)
+    }
+
     fn close_mcp_adds(i: mut Instance, run_id: String) ! Error {
         var calls = List<String>()
         for (call, a) in i.mcp_adds {
@@ -9971,6 +9993,15 @@ impl Instance {
             try i.answer_approval(call, false, false, String("cancel"))
         }
         try i.close_mcp_adds(run_id.copy())
+        // A secret asked for on a card is answered now, so an agent that waits on the
+        // call before it stops isn't left waiting on a person who can't answer.
+        var agent = String()
+        var user = String()
+        if let r = i.runs.find(run_id.copy()) {
+            agent = r.agent.copy()
+            user = r.user.copy()
+        }
+        i.close_secret_ask(user, agent, run_id.copy(), true)
         if let p = i.procs.find(key) {
             var to = p.to.copy()
             if session.len() > 0 {
@@ -10047,19 +10078,7 @@ impl Instance {
         }
         // A secret it asked for on a card that its person hasn't answered goes with
         // the turn, and the card says so (below).
-        let browser_key = "{r.user}/{r.agent}"
-        var asked_call = String()
-        if let b = mut i.browsers.find(browser_key.copy()) {
-            if str_at(b.secret_ask.copy(), "run") == some(run_id.copy()) {
-                asked_call = str_at(b.secret_ask.copy(), "call") ?? String()
-                b.secret_ask = Json.Null
-                b.busy -= 1
-            }
-        }
-        if asked_call.len() > 0 {
-            i.answer_call(asked_call, tool_error(String("The turn ended before your person answered.")))
-            i.browser_state(browser_key)
-        }
+        i.close_secret_ask(r.user.copy(), r.agent.copy(), run_id.copy(), false)
         // A call nothing finished, as one a rule said no to that its program never
         // reported on, ends with the turn, so the kept reply never shows it running.
         for (call, ended, refused) in try i.store.run_calls(r.user.copy(), run_id.copy(), r.since) {
