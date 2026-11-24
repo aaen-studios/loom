@@ -129,7 +129,8 @@ impl Phone {
     }
 
     // What the core says, until a frame whose `t` is `t` and, if `field` isn't
-    // empty, whose `field` is `value`. Fails after 20 s.
+    // empty, whose `field` is `value`. Fails after 20 s, and at once when the core
+    // answers the command whose `id` is `value` with an error of its own.
     fn until(mut self, t: str, field: str, value: String) -> Json ! Error {
         let start = unsafe { Instant.now() }
         loop {
@@ -138,7 +139,9 @@ impl Phone {
             let got = unsafe { self.from_core.wait_for((20000 - waited) * 1000000) } else { continue }
             let m = got.text() else { continue }
             let f = try parse(m)
-            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            let ft = str_at(f.copy(), "t") ?? String()
+            if field == "id" and ft == "error" and str_at(f.copy(), "for") == some(value.copy()) { fail "the core answered {value} with {f}" }
+            if ft != t { continue }
             if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
         }
     }
@@ -242,15 +245,21 @@ fn through(inst: Instance, relay_url: String, relay_key: String, apns_base: Stri
 
 fn main() ! Error {
     // The phone's box key is kept in the system's credential store, which a Linux
-    // server without a Secret Service doesn't have.
+    // server without a Secret Service doesn't have, and which a Mac reached over SSH
+    // keeps locked. Only keeping something there tells, since a locked one still
+    // answers that it holds nothing.
     var random = Random.system()
     let service = "loom-test-relay-{random.next_u32()}"
-    match keyring.get(service.copy(), String("push box")) {
-        ok(_) => {},
+    match keyring.set(service.copy(), String("probe"), String("x")) {
+        ok => {},
         err(e) => {
             println("relay: skipped: it needs the system's credential store ({e})")
             return
         },
+    }
+    match keyring.delete(service.copy(), String("probe")) {
+        ok(_) => {},
+        err(_) => {},
     }
     var apns = try Server.listen(0)
     apns.log = false

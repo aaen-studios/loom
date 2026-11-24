@@ -163,6 +163,48 @@ pub fn remove_scratch(data: String) {
     }
 }
 
+/// `data` with every `from` in it written over with `to`, which is as long, as the
+/// update tests make a newer loom from the one they built.
+pub fn patched(data: List<u8>, from: String, to: String) -> List<u8> ! Error {
+    let a = from.to_bytes()
+    let b = to.to_bytes()
+    if a.len() != b.len() or a.len() == 0 { fail "a version is patched with one as long" }
+    var out = data.copy()
+    var found: usize = 0
+    var k: usize = 0
+    while k + a.len() <= out.len() {
+        var same = true
+        for j in 0usize..a.len() {
+            if out[k + j] != a[j] {
+                same = false
+                break
+            }
+        }
+        if same {
+            for j in 0usize..b.len() {
+                out[k + j] = b[j]
+            }
+            found += 1
+            k += a.len()
+        } else {
+            k += 1
+        }
+    }
+    if found == 0 { fail "the program doesn't hold {from}" }
+    return out
+}
+
+/// Writes `data`, a program, to `path`, ready to run. On macOS it's signed again ad
+/// hoc, since a patched program's signature no longer matches and the system kills it.
+pub fn write_program(path: String, data: List<u8>) ! Error {
+    try fs.write(path.copy(), data)
+    if env.os() == "windows" { return }
+    try fs.set_mode(path.copy(), 0o755)
+    if env.os() != "macos" { return }
+    let signed = try Command.new(String("codesign")).args([String("--force"), String("--sign"), String("-"), path.copy()]).output()
+    if not signed.status.success() { fail "codesign {path}: {signed.error_text()}" }
+}
+
 /// A device a test signs in, as the command line's would be.
 pub fn device(name: str) -> Json {
     return client.device(name, "cli", "Europe/Oslo")
