@@ -2427,7 +2427,10 @@ pub fn flow(rows: &[Option<&Message>], day: impl Fn(i64) -> i64) -> Vec<Flow> {
     let mut replied = false;
     for (i, row) in rows.iter().enumerate() {
         let Some(m) = row else { continue };
-        if !m.queued && m.at > 0 {
+        // A reply still being written has no time yet (`i64::MAX`, so it sorts last). It
+        // would otherwise start a time line of its own, an empty one, with its agent's
+        // name again, both gone once it's done.
+        if !m.queued && m.at > 0 && m.at != i64::MAX {
             let line = match last {
                 None => true,
                 Some(t) => m.at - t >= LINE_GAP_MS || day(m.at) != day(t),
@@ -8184,6 +8187,21 @@ mod tests {
         // Waiting and Five would join, but a line comes between them.
         assert_eq!(f[8].joined, Joined::default());
         assert_eq!(f[9].joined, Joined::default());
+
+        // A reply still being written, after a steered message, sits in its stretch: no
+        // empty time line above it, and no name again.
+        let live = [
+            at(person("text:Fix it"), start),
+            at(reply(), start + MIN),
+            at(person("text:Does it work?"), start + 2 * MIN),
+            Message {
+                live: true,
+                ..at(reply(), i64::MAX)
+            },
+        ];
+        let list: Vec<Option<&Message>> = live.iter().map(Some).collect();
+        let f = flow(&list, |t| t / (1000 * MIN));
+        assert!(!f[3].line && !f[3].head);
     }
 
     #[test]
