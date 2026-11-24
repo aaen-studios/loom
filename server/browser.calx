@@ -618,7 +618,7 @@ impl Worker {
         } else if kind == "wheel" {
             try w.mouse("mouseWheel", x, y, Obj.new().j("deltaX", Json.Float(0.0)).j("deltaY", Json.Float(at(e.copy(), "dy").as_f64() ?? 0.0)))
         } else if kind == "key" {
-            try w.press_key(str_at(e, "key") ?? String())
+            try w.press_key(str_at(e.copy(), "key") ?? String(), key_bits(at(e, "modifiers")))
         } else if kind == "text" {
             _ = try w.call("Input.insertText", Obj.new().s("text", str_at(e, "text") ?? String()).done())
         }
@@ -707,7 +707,8 @@ impl Worker {
             return
         }
         if kind == "key" {
-            let key = str_at(e, "key") ?? String()
+            let bits = key_bits(at(e.copy(), "modifiers"))
+            let key = key_label(str_at(e, "key") ?? String(), bits)
             // Backspace while typing takes the last character back out of the step.
             if key == "Backspace" {
                 if let last = w.last_step() {
@@ -1061,12 +1062,18 @@ impl Worker {
         _ = try w.call("Input.dispatchMouseEvent", params)
     }
 
-    fn press_key(w: mut Worker, name: String) ! Error {
+    // A key, held with `bits`, the modifiers as CDP takes them (key_bits). A
+    // character held with Ctrl, Alt or Meta types nothing, and an editing
+    // shortcut goes with its command (key_commands).
+    fn press_key(w: mut Worker, name: String, bits: i64 = 0) ! Error {
         let (code, typed) = key_code(name.copy()) else fail "browser_press takes a key such as Enter, Tab, Escape, Backspace, ArrowDown or PageDown, or a single character."
-        var down = Obj.new().s("type", String(if typed.len() > 0 { "keyDown" } else { "rawKeyDown" })).s("key", name.copy()).i("windowsVirtualKeyCode", code)
-        if typed.len() > 0 { down = down.s("text", typed.copy()) }
+        let types = if bits & (ALT_KEY | CTRL_KEY | META_KEY) == 0 { typed } else { String() }
+        var down = Obj.new().s("type", String(if types.len() > 0 { "keyDown" } else { "rawKeyDown" })).s("key", name.copy()).i("windowsVirtualKeyCode", code).i("modifiers", bits)
+        if types.len() > 0 { down = down.s("text", types.copy()) }
+        let commands = key_commands(name.copy(), bits)
+        if commands.len() > 0 { down = down.j("commands", Json.Array(commands)) }
         _ = try w.call("Input.dispatchKeyEvent", down.done())
-        _ = try w.call("Input.dispatchKeyEvent", Obj.new().s("type", String("keyUp")).s("key", name).i("windowsVirtualKeyCode", code).done())
+        _ = try w.call("Input.dispatchKeyEvent", Obj.new().s("type", String("keyUp")).s("key", name).i("windowsVirtualKeyCode", code).i("modifiers", bits).done())
     }
 
     // A call, on a browser started for it if it isn't open. One started again
@@ -1423,6 +1430,55 @@ fn key_code(name: String) -> (i64, String)? {
     return some((code, name.copy()))
 }
 
+// The modifiers as CDP's Input.dispatchKeyEvent takes them, one bit each.
+const ALT_KEY: i64 = 1
+const CTRL_KEY: i64 = 2
+const META_KEY: i64 = 4
+const SHIFT_KEY: i64 = 8
+
+// browser.input's `modifiers`, a list of shift, ctrl, alt and meta, as CDP's bits.
+fn key_bits(modifiers: Json) -> i64 {
+    let Json.Array(list) = modifiers else return 0
+    var bits: i64 = 0
+    for m in list {
+        let Json.Str(name) = m else continue
+        if name == "alt" { bits = bits | ALT_KEY }
+        if name == "ctrl" { bits = bits | CTRL_KEY }
+        if name == "meta" { bits = bits | META_KEY }
+        if name == "shift" { bits = bits | SHIFT_KEY }
+    }
+    return bits
+}
+
+// A key held with `bits`, as a recording's step names it: Shift+Tab, Ctrl+A.
+fn key_label(key: own String, bits: i64) -> String {
+    if key.len() == 0 { return key }
+    var out = String()
+    if bits & CTRL_KEY != 0 { out.push_str("Ctrl+") }
+    if bits & ALT_KEY != 0 { out.push_str("Alt+") }
+    if bits & SHIFT_KEY != 0 { out.push_str("Shift+") }
+    if bits & META_KEY != 0 { out.push_str("Meta+") }
+    if out.len() == 0 { return key }
+    var runes = 0
+    for _ in key.runes() { runes += 1 }
+    out.push_str(if runes == 1 { key.to_upper_root() } else { key })
+    return out
+}
+
+// The editing commands Chrome runs for a key held with `bits`: Ctrl or ⌘ (Meta)
+// with A, C, X, Z, Shift+Z or Y selects all, copies, cuts, undoes or redoes,
+// whichever computer each side is on. Headless Chrome on a Mac runs them no
+// other way. Paste comes as text, from the person's own clipboard.
+fn key_commands(name: String, bits: i64) -> List<Json> {
+    let held = bits & (CTRL_KEY | META_KEY)
+    if held == 0 or held == CTRL_KEY | META_KEY or bits & ALT_KEY != 0 { return List<Json>() }
+    let shift = bits & SHIFT_KEY != 0
+    let key = name.to_lower_root()
+    let command = if key == "a" and not shift { "selectAll" } else if key == "c" and not shift { "copy" } else if key == "x" and not shift { "cut" } else if key == "z" { if shift { "redo" } else { "undo" } } else if key == "y" and not shift { "redo" } else { "" }
+    if command.len() == 0 { return List<Json>() }
+    return [Json.Str(String(command))]
+}
+
 // What a guarded browser loads nothing from: files, the computer itself, and
 // the private networks it may be on. Chrome matches them against each request's
 // address as it writes it, so 2130706433 is 127.0.0.1 here too.
@@ -1581,6 +1637,30 @@ fn hosts_are_what_a_secret_is_for() {
     assert(host_of(String("http://me:pw@localhost:8080#top")) == "localhost:8080")
     assert(host_of(String("file:///C:/x.html")) == "")
     assert(host_of(String("about:blank")) == "")
+}
+
+// key_commands' commands, for a test: "" for none.
+fn only(name: str, bits: i64) -> String {
+    var out = List<String>()
+    for c in key_commands(String(name), bits) {
+        if let Json.Str(s) = c { out.push(s.copy()) }
+    }
+    return out.join(",")
+}
+
+@test
+fn keys_go_with_their_modifiers() {
+    let mods = parse(#"["shift","ctrl","alt","meta","hyper"]"#)!
+    assert(key_bits(mods) == 15)
+    assert(key_bits(Json.Null) == 0)
+    assert(key_label(String("Tab"), SHIFT_KEY) == "Shift+Tab")
+    assert(key_label(String("a"), CTRL_KEY | SHIFT_KEY) == "Ctrl+Shift+A")
+    assert(key_label(String("Enter"), 0) == "Enter")
+    assert(only("a", CTRL_KEY) == "selectAll" and only("A", META_KEY) == "selectAll")
+    assert(only("c", CTRL_KEY) == "copy" and only("x", META_KEY) == "cut")
+    assert(only("z", CTRL_KEY) == "undo" and only("z", META_KEY | SHIFT_KEY) == "redo" and only("y", CTRL_KEY) == "redo")
+    // Not a shortcut: alone, with AltGr (Ctrl+Alt), or with both Ctrl and ⌘.
+    assert(only("a", 0) == "" and only("a", CTRL_KEY | ALT_KEY) == "" and only("a", CTRL_KEY | META_KEY) == "" and only("v", CTRL_KEY) == "")
 }
 
 @test

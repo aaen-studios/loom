@@ -4239,7 +4239,6 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             match page_input(k, e.prefer_character_input) {
                 PageKey::Send(input) => input,
-                PageKey::Keep => return true,
                 PageKey::Pass => return false,
             }
         };
@@ -17766,18 +17765,33 @@ fn page_fit(fw: f32, fh: f32, most_w: f32, most_h: Option<f32>) -> (f32, f32) {
 enum PageKey {
     /// Goes to the page, as `browser.input`'s args.
     Send(Value),
-    /// The page's, though `browser.input` has no way to give it: Shift+Tab, which
-    /// would otherwise take the app's focus off the page.
-    Keep,
     /// The window's own, such as Ctrl+B.
     Pass,
 }
 
-/// A keystroke on the page, as `browser.input` takes it: a named key, or the text it
-/// types. A character typed with modifiers is text too, as AltGr+2 types `@` on a
-/// Norwegian keyboard, which Windows gives as Ctrl+Alt, and Option+2 on a Mac.
+/// A keystroke on the page, as `browser.input` takes it: a named key with what's held
+/// with it, the text it types, or a shortcut that edits the page's text: Ctrl (⌘ on a
+/// Mac) with A, C, X, Z, Shift+Z or Y. A character typed with modifiers is text too,
+/// as AltGr+2 types `@` on a Norwegian keyboard, which Windows gives as Ctrl+Alt, and
+/// Option+2 on a Mac.
 fn page_input(k: &Keystroke, prefer_character_input: bool) -> PageKey {
     let m = &k.modifiers;
+    let key = |key: &str| {
+        let held: Vec<&str> = [
+            (m.shift, "shift"),
+            (m.control, "ctrl"),
+            (m.alt, "alt"),
+            (m.platform, "meta"),
+        ]
+        .into_iter()
+        .filter_map(|(on, name)| on.then_some(name))
+        .collect();
+        let mut input = serde_json::json!({"kind": "key", "key": key});
+        if !held.is_empty() {
+            input["modifiers"] = held.into();
+        }
+        PageKey::Send(input)
+    };
     let named = match k.key.as_str() {
         "enter" => Some("Enter"),
         "tab" => Some("Tab"),
@@ -17794,18 +17808,31 @@ fn page_input(k: &Keystroke, prefer_character_input: bool) -> PageKey {
         "pagedown" => Some("PageDown"),
         _ => None,
     };
-    if let Some(key) = named {
-        if k.key == "tab" && m.shift {
-            return PageKey::Keep;
-        }
-        return PageKey::Send(serde_json::json!({"kind": "key", "key": key}));
+    if let Some(named) = named {
+        return key(named);
     }
     let modified = m.control || m.platform || (m.alt && !cfg!(target_os = "macos"));
     match k.key_char.as_deref().filter(|t| !t.is_empty()) {
         Some(text) if prefer_character_input || !modified => {
             PageKey::Send(serde_json::json!({"kind": "text", "text": text}))
         }
-        _ => PageKey::Pass,
+        _ => {
+            let shortcut = if cfg!(target_os = "macos") {
+                m.platform && !m.control
+            } else {
+                m.control && !m.platform
+            } && !m.alt;
+            let edits = match k.key.as_str() {
+                "a" | "c" | "x" | "y" => !m.shift,
+                "z" => true,
+                _ => false,
+            };
+            if shortcut && edits {
+                key(&k.key)
+            } else {
+                PageKey::Pass
+            }
+        }
     }
 }
 
@@ -17840,6 +17867,11 @@ mod page_key_tests {
         page_input(&Keystroke::parse(s).unwrap(), prefer_character_input)
     }
 
+    /// `key` for a keystroke made up here, as `Keystroke::parse` takes only one that lasts.
+    fn chord(s: String) -> PageKey {
+        key(Box::leak(s.into_boxed_str()), false)
+    }
+
     fn named(key: &str) -> PageKey {
         PageKey::Send(json!({"kind": "key", "key": key}))
     }
@@ -17860,8 +17892,44 @@ mod page_key_tests {
         assert_eq!(key("ctrl-alt-2->@", true), text("@"));
         // The window's own keys stay the window's.
         assert_eq!(key("ctrl-b->b", false), PageKey::Pass);
-        // Shift+Tab has no way to the page, but doesn't move the focus off it.
-        assert_eq!(key("shift-tab", false), PageKey::Keep);
+        assert_eq!(key("cmd-b->b", false), PageKey::Pass);
+    }
+
+    // LOO-281: Shift+Tab, Shift+arrows and Ctrl+A (⌘A) never reached the page.
+    #[test]
+    fn keys_on_the_page_go_with_what_is_held() {
+        let held = |key: &str, held: &[&str]| {
+            PageKey::Send(json!({"kind": "key", "key": key, "modifiers": held}))
+        };
+        assert_eq!(key("shift-tab", false), held("Tab", &["shift"]));
+        assert_eq!(key("shift-left", false), held("ArrowLeft", &["shift"]));
+        assert_eq!(
+            key("ctrl-shift-right", false),
+            held("ArrowRight", &["shift", "ctrl"])
+        );
+        // The shortcuts that edit the page's text, with the computer's own modifier.
+        let (shortcut, modifier) = if cfg!(target_os = "macos") {
+            ("cmd", "meta")
+        } else {
+            ("ctrl", "ctrl")
+        };
+        for k in ["a", "c", "x", "z", "y"] {
+            assert_eq!(chord(format!("{shortcut}-{k}")), held(k, &[modifier]));
+        }
+        assert_eq!(
+            chord(format!("{shortcut}-shift-z")),
+            held("z", &["shift", modifier])
+        );
+        // Not Shift with the others, nor the other computer's modifier, nor Ctrl+V, which
+        // the app pastes from its own clipboard.
+        assert_eq!(chord(format!("{shortcut}-shift-a")), PageKey::Pass);
+        let other = if cfg!(target_os = "macos") {
+            "ctrl"
+        } else {
+            "cmd"
+        };
+        assert_eq!(chord(format!("{other}-a")), PageKey::Pass);
+        assert_eq!(chord(format!("{shortcut}-v")), PageKey::Pass);
     }
 
     #[test]
