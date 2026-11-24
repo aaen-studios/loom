@@ -342,7 +342,7 @@ pub fn secret_card(call: String, agent: String, why: String, site: String, field
     let place = if site.len() > 0 { site.copy() } else { String("a file on this computer") }
     var card = Obj.new().s("id", "secret_{call}").s("type", String("secret_ask")).s("title", tidy(why, TITLE_MOST)).s("call", call).s("agent", agent).s("site", place)
     let name = site_name(site)
-    if name.len() > 0 { card = card.j("badge", badge.badge(name, String())) }
+    if name.len() > 0 { card = card.j("badge", badge.badge(name, String(), String())) }
     return card.j("fields", Json.Array(shown)).s("state", String("asking")).j("saved", Json.Array(List<Json>())).done()
 }
 
@@ -391,7 +391,7 @@ fn makes_the_secret_card() {
     let (_, bad_name) = ask_fields(Obj.new().s("ref", String("e1")).s("save", String("my password")).done(), String())
     assert(bad_name.starts_with("save is \"my password\""))
     let card = secret_card(String("bc_7"), String("a_1"), String(" Your NTNU password "), String("innsida.ntnu.no"), one)
-    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"badge\":{badge.badge(String("ntnu"), String())},\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
+    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"badge\":{badge.badge(String("ntnu"), String(), String())},\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
     let filled = secret_card_now(card.copy(), "filled", [String("ntnu-password")])
     assert(str_at(filled.copy(), "state") == some(String("filled")) and "{at(filled.copy(), "saved")}" == "[\"ntnu-password\"]")
     assert(str_at(ended(card.copy()), "state") == some(String("closed")) and str_at(ended(filled), "state") == some(String("filled")))
