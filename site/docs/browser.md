@@ -14,7 +14,7 @@ While an agent browses, its page shows as a small window at the chat's bottom ri
 
 Some things only you should do: a login, a 2FA code, a CAPTCHA. The agent can ask you, and then a card over the message box says what it wants, with **Take over**. You can also take over whenever you like: press **Take over** under the page, or click into the page.
 
-Once you have it, the page has the agent's colour round it, and your clicks, scrolling and typing go to the page, Tab and Enter too, and Ctrl+V pastes. The agent's browser tools wait. **Hand back** lets the agent carry on, and it's told what you did.
+Once you have it, the page has the agent's colour round it, and your clicks, scrolling and typing go to the page, with the keys held with them, such as Shift+Tab and Shift with the arrows. Ctrl+A, C, X, Z and Y (⌘ on a Mac) select, copy, cut, undo and redo on the page, and Ctrl+V (⌘V) pastes. The agent's browser tools wait. **Hand back** lets the agent carry on, and it's told what you did.
 
 ## Secrets
 

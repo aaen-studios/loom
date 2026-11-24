@@ -20,7 +20,7 @@ Everything else in Settings is kept on the instance, so every device you sign in
 
 ## Appearance
 
-- **Theme**: System (it follows Windows), Light or Dark.
+- **Theme**: System (it follows Windows or macOS), Light or Dark.
 - **Chat text**: Small, Default or Large.
 - **Fonts**: the words in loom's own font, Geist, or the system's, and code in Geist Mono or the system's monospace font.
 
@@ -28,6 +28,7 @@ Everything else in Settings is kept on the instance, so every device you sign in
 
 Under **Messages**:
 
+- **Chat width**: Normal, Comfortable or Full width, how wide the chat's column grows. Normal is the default.
 - **Agent replies**: **Bubbles**, where an agent's answer sits in a grey bubble, or **Plain**, as text in the column. Bubbles are the default.
 - **Vibrant bubbles**: your messages sit in the agent's own colour, light in the light theme and deep in the dark, rather than a touch of it. On by default.
 - **Tool calls**: how much of an agent's work a reply shows. **Hidden** shows none, not even one that failed: the agent tells you itself when a failure matters. **Folded** puts each run of calls on one line, which opens to show each. **Every call** shows each on its own line. Hidden is the default.
@@ -38,6 +39,10 @@ However much of its work a reply shows, a finished turn reads as one answer: the
 Under **Composer**:
 
 - **Send with Ctrl+Enter**: Enter makes a new line, and Ctrl+Enter sends. Off by default, so Enter sends and Shift+Enter makes a new line.
+
+Under **Sidebar**:
+
+- **Search in the sidebar**: a search box over the agents. Off by default.
 
 ## App & notifications
 

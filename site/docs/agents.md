@@ -14,16 +14,16 @@ sudo -u loom loom acp add claude npx -y @agentclientprotocol/claude-agent-acp --
 
 | You want | Install |
 |---|---|
-| Claude | Claude, with an Anthropic API key |
+| Claude | Claude Agent, with an Anthropic API key |
 | OpenAI's models | Codex, with an OpenAI API key |
-| OpenRouter, Ollama, LM Studio, DeepSeek, Groq, Mistral and others | OpenCode or Goose |
+| OpenRouter, Ollama, LM Studio, DeepSeek, Groq, Mistral and others | OpenCode or goose |
 | Gemini | Gemini CLI |
 
 ## Keys
 
 A program's settings are the environment variables it starts with: an API key, a model, a provider. Set them on the **Brains** page:
 
-- Claude: `ANTHROPIC_API_KEY`
+- Claude Agent: `ANTHROPIC_API_KEY`
 - Codex: `OPENAI_API_KEY`
 
 Loom keeps them sealed with the instance's `secret.key`, never shows their values again, and gives them only to the program's process. Loom never signs in to anything for an agent: a program uses the key you give it, or whatever sign-in it already has on that machine.
@@ -61,6 +61,8 @@ Set up MCP servers once, on the **MCP servers** page, and pick which each agent 
 In Code Mode, loom connects to the agent's MCP servers for it, and the agent reaches their tools through its scripts. With Code Mode off, the agent connects to them itself.
 
 Every agent already has a browser, which is part of loom ([The agent's browser](browser.md)), so it isn't an MCP server. If you added one with the old **Add a browser** button, loom removes it when it updates, and your agents use loom's own.
+
+An agent can add a server for you too, when you ask it to. A card in its reply, "Add the MCP server acta", shows its address or command and each setting, with a field for any key you don't keep yet. **Add** keeps that key as your secret, adds the server as your own, gives it to the agent, and tries it. A server that needs you to sign in goes on to **Sign in** and **Later** on the same card. **Cancel** adds nothing. Only you answer the card, and it asks whatever the agent's permission mode.
 
 **Test** on a server starts it as an agent would and says the tools it offers, or why it didn't start.
 
