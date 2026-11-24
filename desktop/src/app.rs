@@ -4999,15 +4999,17 @@ ACTA_KEY=secret:ACTA_KEY",
         let card = CardFrame::new()
             .lead(card_icon(p, Ico::Globe, tint))
             .title(state.asked.clone())
-            .side(card_button(p, "browser-open", "Take over", true).on_click(
-                cx.listener(move |this, _, window, cx| {
-                    this.watch(Some(id.clone()), cx);
-                    if let Some(f) = this.model.take_browser(true) {
-                        this.send(f);
-                    }
-                    window.focus(&this.browser_keys, cx);
-                }),
-            ));
+            .side(
+                card_button(p, "browser-open", "Take over", true).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.watch(Some(id.clone()), cx);
+                        if let Some(f) = this.model.take_browser(true) {
+                            this.send(f);
+                        }
+                        window.focus(&this.browser_keys, cx);
+                    },
+                )),
+            );
         Some(self.above_composer(card.draw(p, 1.0)))
     }
 
