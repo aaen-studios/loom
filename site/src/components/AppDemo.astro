@@ -19,7 +19,7 @@ const rest = agents.filter((a) => !a.pinned);
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
 const [claude] = await brains(['claude-acp']);
 // An agent's thread where a message mentions it, or over a message it sent: its shape, still,
-// in a box 14 by 10, as desktop/src/app.rs, mention_thread, draws it.
+// in a box 14 by 12, as desktop/src/app.rs, mention_thread, draws it.
 function mentionThread(shape: keyof typeof shapes): string {
 	const pts = shapes[shape] as number[][];
 	let sx = 0;
@@ -28,8 +28,8 @@ function mentionThread(shape: keyof typeof shapes): string {
 		sx = Math.max(sx, Math.abs(x));
 		sy = Math.max(sy, Math.abs(y));
 	}
-	const scale = Math.min(6 / Math.max(sx, 0.1), 4 / Math.max(sy, 0.1));
-	return pts.map(([x, y], i) => `${i ? 'L' : 'M'}${(7 + x * scale).toFixed(2)} ${(5 + y * scale).toFixed(2)}`).join(' ');
+	const scale = Math.min(6 / Math.max(sx, 0.1), 5.2 / Math.max(sy, 0.1));
+	return pts.map(([x, y], i) => `${i ? 'L' : 'M'}${(7 + x * scale).toFixed(2)} ${(6 + y * scale).toFixed(2)}`).join(' ');
 }
 const BISCUIT = mentionThread('star');
 
@@ -133,7 +133,7 @@ const GITHUB =
 			<div class="msgs" aria-live="off">
 				<div class="time-line">Today 09:02</div>
 				<div class="row from-agent" style="--from: var(--thread-apricot)">
-					<div class="from-who"><svg class="mention-thread" viewBox="0 0 14 10" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</div>
+					<div class="from-who"><svg class="mention-thread" viewBox="0 0 14 12" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</div>
 					<div class="from-bubble">The billing fix is ready. It needs a review before 2.4 goes out.</div>
 				</div>
 				<div class="row you">
@@ -173,7 +173,7 @@ const GITHUB =
 							<div class="said">
 								<p>
 									Two things. The notes for 2.4 are due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
-										><svg class="mention-thread" viewBox="0 0 14 10" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
+										><svg class="mention-thread" viewBox="0 0 14 12" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
 									> is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
 										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>the billing fix</span
 									>. Both are at the top of your list.
@@ -955,14 +955,14 @@ const GITHUB =
 	.mention-thread {
 		display: inline-block;
 		width: 14px;
-		height: 10px;
+		height: 12px;
 		margin-right: 3px;
 		fill: none;
 		stroke: color-mix(in srgb, var(--from) 70%, var(--ink-3));
 		stroke-width: 1.6;
 		stroke-linecap: round;
 		stroke-linejoin: round;
-		vertical-align: -1px;
+		vertical-align: -2px;
 	}
 	/* A message another agent sent (app.rs, person): on the person's side, a breath of the
 	   sender's colour, with its thread and name over it. */

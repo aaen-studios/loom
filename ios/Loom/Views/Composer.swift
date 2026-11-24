@@ -82,6 +82,9 @@ struct Composer: View {
                     .lineLimit(1...6)
                     .focused($focused)
                     .padding(.vertical, 8)
+                    // As far from the plus as the plus is from the edge, with the 2 points
+                    // the field pads its words itself.
+                    .padding(.leading, Tokens.Space.xs - Tokens.Space.s - 2)
 
                 Button {
                     if busy && text.isEmpty && model.attachments.isEmpty {

@@ -295,6 +295,12 @@ pub struct Loom {
     flow: Rc<Vec<model::Flow>>,
     scroller: Entity<MessageScrollerState>,
     composer: Entity<TextareaState>,
+    /// A chat was just opened: the composer takes the keys on the next draw, whatever had
+    /// them (`keep_composer_focused`).
+    focus_composer: bool,
+    /// What was over the chat when it was last drawn (the popup, whether a menu was
+    /// open, the page beside it), to see one close.
+    focus_over: (Option<Screen>, bool, Option<Screen>),
     /// Text to put in the composer at its cursor (true), or take out of it (false), on
     /// the next draw, which has the window: a file's `[name]` as it's attached and
     /// taken off.
@@ -1164,8 +1170,9 @@ ACTA_KEY=secret:ACTA_KEY",
             if !window.is_window_active() {
                 this.auto.stop();
                 this.let_go(cx);
-                cx.notify();
             }
+            // Back in it, the composer takes the keys if nothing else has them.
+            cx.notify();
         })
         .detach();
         let data = data_dir();
@@ -1241,6 +1248,8 @@ ACTA_KEY=secret:ACTA_KEY",
             flow: Rc::new(Vec::new()),
             scroller,
             composer,
+            focus_composer: true,
+            focus_over: (None, false, None),
             composer_edits: Vec::new(),
             mention: None,
             mention_lit: 0,
@@ -2333,8 +2342,12 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let (text, files) = self.drafts.remove(&key).unwrap_or_default();
         self.model.unpark_attachments(&files);
-        self.composer
-            .update(cx, |c, cx| c.set_value(text, window, cx));
+        // The caret after the draft, to carry on typing it.
+        self.composer.update(cx, |c, cx| {
+            c.set_value(text, window, cx);
+            let end = c.value().len();
+            c.set_selected_range(end..end, cx);
+        });
         cx.notify();
     }
 
@@ -2601,6 +2614,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.menu = None;
         self.model.select(Some(agent));
         self.model.show_task(None);
+        self.focus_composer = true;
         self.fetch();
         self.refresh_rows(cx);
         cx.notify();
@@ -2613,6 +2627,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.model.editing = None;
         self.menu = None;
         self.model.show_task(task);
+        self.focus_composer = true;
         self.fetch();
         self.refresh_rows(cx);
         cx.notify();
@@ -6791,7 +6806,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .map(|path| {
                             img(std::path::PathBuf::from(path))
                                 .w(px(16.0))
-                                .h(px(12.0))
+                                .h(px(14.0))
                                 .into_any_element()
                         })
                         .unwrap_or_else(|| div().into_any_element());
@@ -7693,6 +7708,34 @@ ACTA_KEY=secret:ACTA_KEY",
         (w - self.bar_width(w) - side).max(0.0)
     }
 
+    /// The composer takes the keys as a chat opens, and whenever nothing else in the
+    /// window has them, so the person can type at once: as the window comes back to the
+    /// front, or a popup or a page beside the chat closes. It's the window's own focus,
+    /// which never brings the window to the front.
+    fn keep_composer_focused(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut opened = std::mem::take(&mut self.focus_composer);
+        // A popup's or a page's fields live on hidden once it closes, keys and all, so
+        // its closing hands the keys back too.
+        let over = (self.popup, self.menu.is_some(), self.side);
+        if over != self.focus_over {
+            let closed = self.focus_over.0.is_some() && over.0.is_none()
+                || self.focus_over.1 && !over.1
+                || self.focus_over.2.is_some() && over.2.is_none();
+            opened |= closed;
+            self.focus_over = over;
+        }
+        if self.popup.is_some()
+            || self.menu.is_some()
+            || self.browser_big
+            || self.model.selected.is_none()
+        {
+            return;
+        }
+        if opened || window.focused(cx).is_none() {
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+        }
+    }
+
     fn chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         // A new account starts by picking who to talk to, once the instance has said it has no agents.
@@ -7702,6 +7745,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             return div().flex_1();
         }
+        self.keep_composer_focused(window, cx);
         let rows = self.rows.clone();
         let flow = self.flow.clone();
         let secrets = self.card_secrets(&rows, window, cx);
@@ -8041,6 +8085,9 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(
                             div()
                                 .flex_1()
+                                // The textarea pads its words itself: back over the
+                                // gap, the plus sits as far from them as from the edge.
+                                .ml(px(-space::S))
                                 .text_size(px(size::COMPOSER))
                                 // Before the textarea's own Paste, which would
                                 // paste a copied file as its path.
@@ -14782,7 +14829,7 @@ fn person(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(hex.as_deref().and_then(hex_color).unwrap_or(p.ink_3))
                 .when_some(glyph, |d, path| {
-                    d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(10.0)))
+                    d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(12.0)))
                 })
                 .child(from.clone()),
         );
@@ -17135,7 +17182,7 @@ fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -
         let hex = mention_color(p, &a.color);
         return row
             .when_some(mention_thread(a, &hex), |d, path| {
-                d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(10.0)))
+                d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(12.0)))
             })
             .child(
                 div()
@@ -17191,7 +17238,9 @@ fn mention_svg(name: &str, svg: impl FnOnce() -> String) -> Option<String> {
     Some(path)
 }
 
-/// An agent's thread in its shape and `color`, 14 by 10, still, as an SVG file.
+/// An agent's thread in its shape and `color`, 14 by 12, still, as an SVG file: a long
+/// shape fills the width, and a round one, a heart or a star, stands as tall as a
+/// file's icon.
 fn mention_thread(a: &model::Agent, color: &str) -> Option<String> {
     use std::hash::{Hash, Hasher};
     let pts = model::outline_of(&a.shape, &a.drawing);
@@ -17207,22 +17256,22 @@ fn mention_thread(a: &model::Agent, color: &str) -> Option<String> {
                     sx = sx.max(x.abs());
                     sy = sy.max(y.abs());
                 }
-                let scale = (6.0 / sx.max(0.1)).min(4.0 / sy.max(0.1));
+                let scale = (6.0 / sx.max(0.1)).min(5.2 / sy.max(0.1));
                 let mut d = String::new();
                 for (i, (x, y)) in pts.iter().enumerate() {
                     let cmd = if i == 0 { 'M' } else { 'L' };
                     d.push_str(&format!(
                         "{cmd}{:.2} {:.2} ",
                         7.0 + x * scale,
-                        5.0 + y * scale
+                        6.0 + y * scale
                     ));
                 }
                 d
             }
-            None => "M1 6 C 3.5 2, 5.5 2, 7 5 S 10.5 8.5, 13 4".to_string(),
+            None => "M1 7 C 3.5 3, 5.5 3, 7 6 S 10.5 9.5, 13 5".to_string(),
         };
         format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"20\" viewBox=\"0 0 14 10\">\
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"24\" viewBox=\"0 0 14 12\">\
              <path d=\"{d}\" fill=\"none\" stroke=\"#{color}\" stroke-width=\"1.6\" \
              stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
         )
