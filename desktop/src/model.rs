@@ -1973,6 +1973,9 @@ pub struct Mention {
     pub path: String,
     pub name: String,
     pub size: u64,
+    /// For a picture, its thumbnail, kept as the person's file, once the instance has
+    /// made it: the reply shows the picture (PLAN.md, "Mentions").
+    pub thumb: Option<String>,
 }
 
 impl Mention {
@@ -1982,6 +1985,16 @@ impl Mention {
             .rsplit_once('.')
             .map(|(_, ext)| ext.to_uppercase())
             .unwrap_or_default()
+    }
+
+    /// Its thumbnail as a picture in the chat draws it, a file like any other.
+    pub fn picture(&self) -> Option<FileRef> {
+        Some(FileRef {
+            file: self.thumb.clone()?,
+            name: self.name.clone(),
+            mime: "image/jpeg".into(),
+            size: self.size,
+        })
     }
 }
 
@@ -2073,6 +2086,9 @@ pub struct Inline<'a> {
     pub agent: &'a dyn Fn(&str) -> Option<(String, String)>,
     /// Where the icon for a file of this name is.
     pub file_icon: &'a dyn Fn(&str) -> String,
+    /// For a picture it mentions, by its `loom:file/` link, where its fetched thumbnail
+    /// is, drawn in place of the icon.
+    pub file_thumb: &'a dyn Fn(&str) -> Option<String>,
 }
 
 /// A message's words with its links and mentions as the chat shows them (PLAN.md,
@@ -2159,7 +2175,8 @@ fn line_links(line: &str, inline: &Inline) -> String {
                         None => out.push_str(&format!("@{name}")),
                     }
                 } else if url.starts_with("loom:file/") {
-                    out.push_str(&img(&(inline.file_icon)(words), 14, 14));
+                    let src = (inline.file_thumb)(url).unwrap_or_else(|| (inline.file_icon)(words));
+                    out.push_str(&img(&src, 14, 14));
                     out.push_str(whole);
                 } else if let Some(sha) = url.strip_prefix("loom-file:") {
                     let src = (inline.icon_src)(sha)
@@ -2443,6 +2460,7 @@ fn mentions_of(m: &Value) -> Vec<Mention> {
                     path: s(v, "path"),
                     name: s(v, "name"),
                     size: v.get("size").and_then(Value::as_u64).unwrap_or(0),
+                    thumb: Some(s(v, "thumb")).filter(|t| !t.is_empty()),
                 })
                 .collect()
         })
@@ -3445,6 +3463,10 @@ pub struct Model {
     /// The stack of pictures the viewer was opened on, which it steps through instead
     /// of the chat's; empty for a picture opened on its own.
     viewing_stack: Vec<FileRef>,
+    /// The pictures a reply names that the viewer waits for the instance to keep as the
+    /// person's (`view_mentions`): the ask's id, and each one's file once it's answered,
+    /// or none for one that couldn't be kept.
+    mention_stack: Option<(String, Vec<Option<Option<FileRef>>>)>,
     /// The files of messages this app sent, by SHA-256, so one waiting to be sent shows
     /// them.
     sent_files: HashMap<String, FileRef>,
@@ -4979,12 +5001,40 @@ impl Model {
             }
             return;
         }
-        // A file a reply named, kept as the person's: it opens once it's here.
+        // One of the pictures a reply names, for the viewer: it opens on them once
+        // they're all kept, without those that couldn't be.
+        if let Some((group, got)) = self.mention_stack.as_mut() {
+            if let Some(k) = id
+                .strip_prefix(group.as_str())
+                .and_then(|r| r.strip_prefix('#'))
+                .and_then(|k| k.parse::<usize>().ok())
+            {
+                if let Some(slot) = got.get_mut(k) {
+                    *slot = Some(f.pointer("/value/file").map(FileRef::of));
+                }
+                if got.iter().all(Option::is_some) {
+                    let stack: Vec<FileRef> = got.iter().flatten().flatten().cloned().collect();
+                    self.mention_stack = None;
+                    if let Some(frame) = self.view_stack(&stack) {
+                        self.to_send.push(frame);
+                    }
+                }
+                return;
+            }
+        }
+        // A file a reply named, kept as the person's: a picture opens in the viewer
+        // as the chat's do, anything else in its own program once it's here.
         if id.starts_with("app.agent_file") {
             match (f.get("error"), f.pointer("/value/file")) {
                 (Some(e), _) => self.notices.push(s(e, "message")),
                 (None, Some(file)) => {
-                    if let Some(frame) = self.open_file(&FileRef::of(file)) {
+                    let file = FileRef::of(file);
+                    let frame = if file.image() {
+                        self.view(&file)
+                    } else {
+                        self.open_file(&file)
+                    };
+                    if let Some(frame) = frame {
                         self.to_send.push(frame);
                     }
                 }
@@ -6396,6 +6446,16 @@ impl Model {
             .filter(|f| f.image())
             .map(|f| f.file.clone())
             .collect();
+        // And the thumbnails of the pictures its replies name.
+        let named = self
+            .messages
+            .iter()
+            .flat_map(|m| m.mentions.iter().filter_map(|x| x.thumb.clone()));
+        for sha in named {
+            if !wanted.contains(&sha) {
+                wanted.push(sha);
+            }
+        }
         let cards = blocks
             .iter()
             .filter_map(|b| b.card.as_ref()?.badge.as_ref());
@@ -6434,10 +6494,25 @@ impl Model {
         Some(json!({"t": "file.get", "id": id, "file": f.file, "name": f.name}))
     }
 
-    /// Opens a file a reply named: the instance keeps it as the person's first.
+    /// Opens a file a reply named: the instance keeps it as the person's first. A
+    /// picture opens in the viewer, anything else in its own program.
     pub fn open_mention(&mut self, m: &Mention) -> Value {
         let id = self.id("app.agent_file");
         json!({"t": "cmd", "id": id, "name": "agent.file", "args": {"agent": m.agent, "path": m.path}})
+    }
+
+    /// Opens the viewer on the pictures a reply names, at the first, to step through
+    /// them: the instance keeps each as the person's first, and the viewer opens once
+    /// they're all kept.
+    pub fn view_mentions(&mut self, list: &[Mention]) -> Vec<Value> {
+        let group = self.id("app.agent_file.pictures");
+        self.mention_stack = Some((group.clone(), vec![None; list.len()]));
+        list.iter()
+            .enumerate()
+            .map(|(k, m)| {
+                json!({"t": "cmd", "id": format!("{group}#{k}"), "name": "agent.file", "args": {"agent": m.agent, "path": m.path}})
+            })
+            .collect()
     }
 
     /// Shows a page beside the chat: fetched first, unless it's here already.
@@ -7728,11 +7803,13 @@ mod tests {
         let img = "<img src=\"/icons/abc\" width=\"14\" height=\"14\" /> ";
         let none = |_: &str| None;
         let file = |_: &str| String::from("/icons/file");
+        let no_thumb = |_: &str| None::<String>;
         let mut inline = Inline {
             links: &links,
             icon_src: &src,
             agent: &none,
             file_icon: &file,
+            file_thumb: &no_thumb,
         };
         assert_eq!(
             with_link_icons("See https://a.example/x.", &inline),
@@ -7778,11 +7855,14 @@ mod tests {
         let agent =
             |id: &str| (id == "a1").then(|| ("#9c8636".to_string(), "/thread/a1".to_string()));
         let file = |name: &str| format!("/icons/{name}");
+        let thumb =
+            |url: &str| (url == "loom:file/a1/chart.png").then(|| "/thumbs/chart".to_string());
         let inline = Inline {
             links: &links,
             icon_src: &src,
             agent: &agent,
             file_icon: &file,
+            file_thumb: &thumb,
         };
         assert_eq!(
             with_link_icons("Ask [@Casper](loom:agent/a1) now", &inline),
@@ -7802,6 +7882,11 @@ mod tests {
             "<img src=\"/thumbs/pic\" width=\"14\" height=\"14\" /> [cat.png](loom-file:pic) \
              <img src=\"/icons/a.pdf\" width=\"14\" height=\"14\" /> [a.pdf](loom-file:pdf)"
         );
+        // So does a picture a reply names, once its thumbnail is here.
+        assert_eq!(
+            with_link_icons("[chart.png](loom:file/a1/chart.png)", &inline),
+            "<img src=\"/thumbs/chart\" width=\"14\" height=\"14\" /> [chart.png](loom:file/a1/chart.png)"
+        );
     }
 
     #[test]
@@ -7816,6 +7901,7 @@ mod tests {
             path: "notes/hours.md".into(),
             name: "hours.md".into(),
             size: 7,
+            thumb: None,
         };
         let mentions = vec![hours];
         assert_eq!(

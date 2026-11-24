@@ -301,6 +301,14 @@ struct Reply: View {
             ForEach(Array(laid.enumerated()), id: \.offset) { _, part in
                 self.part(part, onTheWay: false)
             }
+            // The pictures it names, as the chat's pictures are, opening in the viewer
+            // (PLAN.md, "Mentions").
+            let pictured = message.named.filter { $0.thumb != nil }
+            if pictured.count == 1, let f = pictured[0].picture {
+                FileView(file: f, named: pictured)
+            } else if pictured.count > 1 {
+                PictureFan(files: pictured.compactMap(\.picture), named: pictured)
+            }
             if !message.sources.isEmpty && sourcesAt(laid) == nil {
                 SourcesTab(message: message)
             }
@@ -519,10 +527,12 @@ struct ToolLine: View {
 }
 
 /// A file in a message: a picture for an image, its name and size otherwise. Tapping it
-/// fetches it and shows it.
+/// fetches it and shows it. A picture a reply names (`named`) is drawn by its thumbnail,
+/// and opens once the instance has kept it.
 struct FileView: View {
     @Environment(Session.self) private var session
     var file: FileRef
+    var named: [NamedFile] = []
     /// Its thumbnail, read and decoded off the main thread.
     @State private var thumb: UIImage?
 
@@ -533,7 +543,11 @@ struct FileView: View {
     var body: some View {
         let path = file.isImage ? session.model.files["\(file.file).thumb"] : nil
         Button {
-            session.send(session.model.open(file))
+            if named.isEmpty {
+                session.send(session.model.open(file))
+            } else {
+                for frame in session.model.viewNamed(named) { session.send(frame) }
+            }
         } label: {
             if file.isImage {
                 let image = path.flatMap { thumb ?? Pictures.kept($0) }
@@ -579,10 +593,12 @@ struct FileView: View {
 /// Two or more pictures in a message as one fan of a fixed size, however many there are,
 /// as the desktop draws it at rest: the first in front, up to four more tilted behind it
 /// either side (`fanCards`), and what `fanCount` says in its corner. It keeps the room its
-/// tilted cards reach into. Tapping it opens the viewer at the first.
+/// tilted cards reach into. Tapping it opens the viewer at the first: the pictures a
+/// reply names (`named`, drawn by their thumbnails) once the instance has kept them.
 struct PictureFan: View {
     @Environment(Session.self) private var session
     var files: [FileRef]
+    var named: [NamedFile] = []
 
     /// The front card's size.
     static let size = CGSize(width: 240, height: 180)
@@ -595,7 +611,11 @@ struct PictureFan: View {
         let (left, right) = ((reach.left * w).rounded(.up) + Self.shadowRoom, (reach.right * w).rounded(.up) + Self.shadowRoom)
         let up = (reach.up * w).rounded(.up) + Self.shadowRoom
         Button {
-            session.model.view(files)
+            if named.isEmpty {
+                session.model.view(files)
+            } else {
+                for frame in session.model.viewNamed(named) { session.send(frame) }
+            }
         } label: {
             ZStack {
                 ForEach(fanCards(files.count), id: \.picture) { c in
