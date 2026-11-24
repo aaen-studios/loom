@@ -5,8 +5,9 @@ module server.files
 // uploaded it. Thumbnails of PNG and JPEG images are made on a thread of their
 // own, since decoding a photo takes long enough to hold up the loop, and are
 // written beside the file as <sha256>.thumb.
+import std.bytes
 import std.fs
-import std.image.{Image, Kind}
+import std.image.{Color, Image, Kind}
 import std.thread.{Task}
 
 /// The longest side of a thumbnail, in pixels.
@@ -73,6 +74,50 @@ pub fn sniff(head: List<u8>) -> String? {
     return none
 }
 
+/// The longest side of an MCP server's icon as loom keeps it, in pixels.
+pub const ICON: usize = 128
+/// The most pixels a side of an icon may have before it's read.
+const ICON_MOST: u32 = 1024
+
+/// A PNG's or a JPEG's width and height, from its header, or none.
+fn header_size(data: List<u8>) -> (u32, u32)? {
+    let n = data.len()
+    let mime = sniff(data[..if n < 12 { n } else { 12 }]) ?? String()
+    if mime == "image/png" {
+        if n < 24 { return none }
+        return some((bytes.u32_be(data.copy(), 16), bytes.u32_be(data, 20)))
+    }
+    if mime != "image/jpeg" { return none }
+    // The frame's header, among the segments after the start.
+    var i: usize = 2
+    while i + 9 < n {
+        if data[i] != 0xff { return none }
+        let marker = data[i + 1]
+        if marker == 0xff {
+            i += 1
+            continue
+        }
+        if marker >= 0xc0 and marker <= 0xcf and marker != 0xc4 and marker != 0xc8 and marker != 0xcc {
+            return some((u32(bytes.u16_be(data.copy(), i + 7)), u32(bytes.u16_be(data, i + 5))))
+        }
+        i += 2 + usize(bytes.u16_be(data.copy(), i + 2))
+    }
+    return none
+}
+
+/// An MCP server's icon (PLAN.md, "Cards in the chat"), checked and made ready
+/// to keep: a PNG or a JPEG of at most 1024 pixels a side, read, made at most
+/// `ICON` pixels a side, and written as a PNG. Anything else isn't one.
+pub fn icon_png(data: List<u8>) -> List<u8> ! Error {
+    let (w, h) = header_size(data.copy()) else { fail "it isn't a PNG or a JPEG" }
+    if w == 0 or h == 0 or w > ICON_MOST or h > ICON_MOST { fail "it's {w} by {h} pixels: an icon is at most {ICON_MOST} a side" }
+    let im = match Image.decode(data) {
+        ok(i) => i,
+        err(why) => fail "it isn't a picture loom can read: {why}",
+    }
+    return im.thumbnail(ICON, ICON).encode_png()
+}
+
 /// Whether loom makes thumbnails of this type.
 pub fn thumbable(mime: String) -> bool {
     return mime == "image/png" or mime == "image/jpeg"
@@ -89,4 +134,28 @@ fn types_are_sniffed() {
     assert(sniff([0xffu8, 0xd8, 0xff, 0xe0]) == some(String("image/jpeg")))
     assert(sniff([0x25u8, 0x50, 0x44, 0x46, 0x2d, 0x31]) == some(String("application/pdf")))
     assert(sniff([1u8, 2, 3]) == none)
+}
+
+@test
+fn an_icon_is_a_small_picture() {
+    let big = Image.new(300, 200, Kind.Rgba, Color.rgba(10, 20, 30, 200))
+    let png = icon_png(big.encode_png())!
+    let back = Image.decode(png)!
+    assert(back.width() == ICON and back.height() == 85 and back.kind().has_alpha())
+    let photo = Image.new(64, 48, Kind.Rgb, Color.rgb(200, 10, 10)).encode_jpeg(80)
+    assert(header_size(photo.copy()) == some((64u32, 48u32)))
+    let kept = Image.decode(icon_png(photo)!)!
+    assert(kept.width() == 64 and kept.height() == 48)
+    // Not a picture, a picture that's cut short, and one too big to read.
+    assert(refused("<svg></svg>".to_bytes()))
+    let cut = Image.new(32, 32, Kind.Rgb, Color.rgb(0, 0, 0)).encode_png()
+    assert(refused(cut[..40]))
+    assert(refused(Image.new(1100, 10, Kind.Gray, Color.gray(0)).encode_png()))
+}
+
+fn refused(data: List<u8>) -> bool {
+    return match icon_png(data) {
+        ok(_) => false,
+        err(_) => true,
+    }
 }

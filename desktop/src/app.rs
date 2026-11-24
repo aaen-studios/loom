@@ -15144,6 +15144,28 @@ fn card_mark(key: &str, waits: bool, tint: Hsla) -> AnyElement {
 
 /// A service's badge (`shared/badge.calx`): its initial on its colour, `size` square.
 fn badge_view(p: Palette, b: &model::Badge, size: f32) -> Div {
+    let round = px(if size >= BADGE {
+        radius::CARD
+    } else {
+        radius::ROW
+    });
+    // An MCP server's own icon, once it's fetched, in the initial's place.
+    if let Some(path) = badge_icon(b.icon_for(p.dark)) {
+        let inset = (size * 0.14).round();
+        return div()
+            .size(px(size))
+            .flex_none()
+            .p(px(inset))
+            .rounded(round)
+            .bg(card_inset(p))
+            .border_1()
+            .border_color(p.line)
+            .child(
+                img(std::path::PathBuf::from(path))
+                    .size_full()
+                    .object_fit(ObjectFit::Contain),
+            );
+    }
     let fill = thread::color(&b.color, p.dark);
     let fill = if b.color.is_empty() { p.ink_3 } else { fill };
     div()
@@ -15152,11 +15174,7 @@ fn badge_view(p: Palette, b: &model::Badge, size: f32) -> Div {
         .flex()
         .items_center()
         .justify_center()
-        .rounded(px(if size >= BADGE {
-            radius::CARD
-        } else {
-            radius::ROW
-        }))
+        .rounded(round)
         .bg(fill)
         .text_size(px((size * 0.44).round()))
         .font_weight(FontWeight::SEMIBOLD)
@@ -16354,6 +16372,29 @@ thread_local! {
     /// The pictures of stacks, cropped to a card's shape (`CardLoader`).
     static CARDS: std::cell::RefCell<Option<Entity<KeptImages>>> =
         const { std::cell::RefCell::new(None) };
+    /// The files the server on screen has fetched, as its model has them, for the
+    /// badges' icons (`badge_icon`). Shared, not copied: the model's next change to
+    /// them makes its own copy.
+    static BADGE_FILES: std::cell::RefCell<Rc<HashMap<String, String>>> =
+        std::cell::RefCell::new(Rc::new(HashMap::new()));
+}
+
+/// Gives `badge_icon` the files of the server on screen.
+fn sync_badge_files(files: &Rc<HashMap<String, String>>) {
+    BADGE_FILES.with(|b| {
+        if !Rc::ptr_eq(&b.borrow(), files) {
+            *b.borrow_mut() = files.clone();
+        }
+    });
+}
+
+/// Where a badge's icon is, once it's fetched: its thumbnail, as the chat's pictures
+/// are fetched (`Model::file_fetches`).
+fn badge_icon(sha: &str) -> Option<String> {
+    if sha.is_empty() {
+        return None;
+    }
+    BADGE_FILES.with(|b| b.borrow().get(&format!("{sha}.thumb")).cloned())
 }
 
 /// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
@@ -17675,6 +17716,7 @@ impl Render for Loom {
         let p = self.p;
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
+        sync_badge_files(&self.model.files);
         self.finish_weaving(window, cx);
         if std::mem::take(&mut self.rows_dirty) {
             self.refresh_rows(cx);

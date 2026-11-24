@@ -16,6 +16,7 @@ module server.mcp
 //
 // MCP is JSON-RPC 2.0, one message a line. Requests are answered in turn: a
 // message_agent call waits for the other agent's reply.
+import std.bytes
 import std.env
 import std.fs
 import std.http.{Header, Request, get, post}
@@ -28,6 +29,7 @@ import shared.obj.{Obj, at, int_at, merge, str_at}
 import shared.tools
 import server.codemode
 import server.codemode.{Tool}
+import server.icons
 import server.mcpclient.{Server}
 import server.mcpclient
 
@@ -152,6 +154,7 @@ struct Code {
     spare: Child?    // a Deno waiting for the next script (codemode.wait)
     spare_at: Instant?    // when it started
     done: Child?    // the last script's Deno, ended once its result has gone
+    known_icons: Json    // what the icons the instance keeps of each server are known by (icons.key)
 }
 
 // Starts one of the person's MCP servers and lists its tools.
@@ -188,7 +191,38 @@ impl Task for Starter {
     }
 }
 
+// Fetches a server's icons (server/icons.calx) where the agent runs, and gives
+// them to the instance, which keeps them for its badge. It runs on a thread
+// of its own, which nothing waits for: a slow icon never holds up the tools.
+struct IconFetch {
+    link: Link
+    server: String
+    info: Json
+    known: String
+}
+
+impl Task for IconFetch {
+    fn run(own self) {
+        let got = icons.of_server(self.info, self.known)
+        if not got.fresh { return }
+        // Icons it couldn't fetch are tried again by the next session.
+        if got.key.len() > 0 and got.light.len() == 0 and got.dark.len() == 0 { return }
+        let body = Obj.new().s("server", self.server).s("key", got.key).s("icon", bytes.base64(got.light)).s("icon_dark", bytes.base64(got.dark)).done()
+        let answer = self.link.send("/api/mcp/icon", body)
+        if is_error(answer.copy()) { eprintln("loom mcp: an icon: {codemode.error_of(answer)}") }
+    }
+}
+
 impl Code {
+    // A server just started: its icons are fetched when they aren't the ones
+    // the instance keeps.
+    fn note_icons(self, link: Link, name: own String, info: own Json) {
+        // A plugin's tool server has its plugin's icon, not one of its own.
+        if name.starts_with("plugin-") { return }
+        let known = (self.known_icons.get(name.copy()) ?? Json.Null).as_str() ?? String()
+        _ = unsafe { Thread.spawn(IconFetch { link: Link { base: link.base.copy(), token: link.token.copy() }, server: name, info: info, known: known }) }
+    }
+
     // Every tool a script can call: loom's own, and each server's, which are
     // started the first time.
     fn load(self: mut Code, link: Link) {
@@ -216,6 +250,7 @@ impl Code {
                 Json.Null
             },
         }
+        self.known_icons = at(given.copy(), "icons")
         if let Json.Array(specs) = at(given, "servers") { self.take_in(link, specs.copy()) }
     }
 
@@ -244,13 +279,17 @@ impl Code {
                 if let r = self.signed_start(link, name.copy(), specs[k].copy()) {
                     let (server, listed) = r
                     self.tools.extend(codemode.tools_of(name.copy(), listed))
+                    self.note_icons(link, name.copy(), server.info.copy())
                     self.servers.insert(name, server)
                 }
                 continue
             }
             if s.trouble.len() > 0 { self.trouble.push(s.trouble) }
             self.tools.extend(codemode.tools_of(name.copy(), s.tools))
-            if let server = started { self.servers.insert(name, server) }
+            if let server = started {
+                self.note_icons(link, name.copy(), server.info.copy())
+                self.servers.insert(name, server)
+            }
         }
     }
 
@@ -262,6 +301,7 @@ impl Code {
             ok(g) => g,
             err(_) => return,
         }
+        self.known_icons = at(given.copy(), "icons")
         let Json.Array(specs) = at(given, "servers") else return
         var fresh = List<Json>()
         for spec in specs {
@@ -306,6 +346,7 @@ impl Code {
             ok(g) => g,
             err(_) => return,
         }
+        self.known_icons = at(given.copy(), "icons")
         let Json.Array(specs) = at(given, "servers") else return
         for spec in specs {
             let name = str_at(spec.copy(), "name") ?? String()
@@ -318,6 +359,7 @@ impl Code {
                 }
                 self.tools = kept
                 self.tools.extend(codemode.tools_of(name.copy(), listed))
+                self.note_icons(link, name.copy(), server.info.copy())
                 self.servers.insert(name.copy(), server)
                 var left = List<String>()
                 for w in self.signing {
@@ -670,7 +712,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }

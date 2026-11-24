@@ -9,8 +9,10 @@ module shared.badge
 //
 // `color` is one of the agents' thread colours (design/tokens.toml), chosen from
 // the name, so a service has the same colour wherever it shows. `icon`, when
-// there is one, is the service's own (MCP `icons`), and the apps draw it in the
-// initial's place.
+// there is one, is an MCP server's own (its `serverInfo.icons`), kept as the
+// person's file and given by its SHA-256, and `icon_dark` the one it gave for a
+// dark background, when it gave one. The apps draw it in the initial's place,
+// and the initial until they have it.
 import std.json.{Json}
 import shared.obj.{Obj}
 
@@ -41,18 +43,24 @@ pub fn color(name: String) -> String {
     return names[h % names.len()].copy()
 }
 
-// The badge for `name`, with `icon` when the service has its own.
-pub fn badge(name: String, icon: String) -> Json {
+// The badge for `name`, with `icon` and `dark` (files' SHA-256s) when the
+// service has its own.
+pub fn badge(name: String, icon: String, dark: String) -> Json {
     var b = Obj.new().s("name", name.copy()).s("initial", initial(name.copy())).s("color", color(name))
-    if icon.len() > 0 { b = b.s("icon", icon) }
+    if icon.len() > 0 {
+        b = b.s("icon", icon)
+        if dark.len() > 0 { b = b.s("icon_dark", dark) }
+    }
     return b.done()
 }
 
 @test
 fn a_name_keeps_its_badge() {
-    assert("{badge(String("gmail"), String())}" == "\{\"name\":\"gmail\",\"initial\":\"G\",\"color\":\"{color(String("gmail"))}\"\}")
+    assert("{badge(String("gmail"), String(), String())}" == "\{\"name\":\"gmail\",\"initial\":\"G\",\"color\":\"{color(String("gmail"))}\"\}")
     assert(color(String("Outlook")) == color(String("outlook ")))
     assert(initial(String("_acta")) == "A" and initial(String("--")) == "?" and initial(String("élan")) == "É")
     assert(COLORS.split(" ").contains(color(String("composio"))))
-    assert("{badge(String("acta"), String("ab12"))}".contains("\"icon\":\"ab12\""))
+    assert("{badge(String("acta"), String("ab12"), String())}".contains("\"icon\":\"ab12\"\}"))
+    assert("{badge(String("acta"), String("ab12"), String("cd34"))}".ends_with("\"icon\":\"ab12\",\"icon_dark\":\"cd34\"\}"))
+    assert(not "{badge(String("acta"), String(), String("cd34"))}".contains("icon"))
 }

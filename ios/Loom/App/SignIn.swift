@@ -31,7 +31,7 @@ final class SignInPage: NSObject, ASWebAuthenticationPresentationContextProvidin
         close(saying: "You started another sign-in.")
         opened += 1
         let n = opened
-        let page = ASWebAuthenticationSession(url: url, callback: .customScheme("loom")) { back, error in
+        let page = ASWebAuthenticationSession(url: url, callback: .customScheme("loom")) { [weak self] back, error in
             let query = back.map(SignInPage.query)
             let words = error.map(SignInPage.words)
             Task { @MainActor [weak self] in

@@ -126,8 +126,8 @@ pub fn card_of(args: Json, id: String) -> (Json, String) {
 // servers"): the apps draw it with Sign in, and the server's badge
 // (`shared/badge.calx`). Agents can't make one with show_card, whose types
 // don't have it.
-pub fn sign_in_card(server: String) -> Json {
-    return Obj.new().s("id", "sign_in_{server}").s("type", String("sign_in")).s("title", tidy("Sign in to {server}", TITLE_MOST)).s("server", server.copy()).j("badge", badge.badge(server, String())).done()
+pub fn sign_in_card(server: String, icon: String, dark: String) -> Json {
+    return Obj.new().s("id", "sign_in_{server}").s("type", String("sign_in")).s("title", tidy("Sign in to {server}", TITLE_MOST)).s("server", server.copy()).j("badge", badge.badge(server, icon, dark)).done()
 }
 
 // The states an MCP server an agent proposed goes through on its card:
@@ -144,11 +144,12 @@ pub const MCP_ADD_STATES: str = "asking adding sign_in later ready added failed 
 // name, with whether the person has it (`have`, their secrets' names), never
 // its value. `said` is a line in plain words: the tools it offers, or what
 // went wrong; once it's `ready`, `tools` has the tools' names too, each on its
-// own. The server's badge is `shared/badge.calx`'s. Agents can't make one with
+// own. The server's badge is `shared/badge.calx`'s, with its own icons
+// (`icon`, `dark`) when it gave them. Agents can't make one with
 // show_card.
-pub fn mcp_add_card(call: String, spec: Json, have: List<String>, state: String, said: String) -> Json {
+pub fn mcp_add_card(call: String, spec: Json, have: List<String>, state: String, said: String, icon: String, dark: String) -> Json {
     let name = str_at(spec.copy(), "name") ?? String()
-    var card = Obj.new().s("id", "mcp_add_{call}").s("type", String("mcp_add")).s("title", tidy("Add the MCP server {name}", TITLE_MOST)).s("call", call).s("server", name.copy()).j("badge", badge.badge(name, String()))
+    var card = Obj.new().s("id", "mcp_add_{call}").s("type", String("mcp_add")).s("title", tidy("Add the MCP server {name}", TITLE_MOST)).s("call", call).s("server", name.copy()).j("badge", badge.badge(name, icon, dark))
     if state == "ready" {
         var tools = List<Json>()
         for t in said.split(", ") {
@@ -200,14 +201,16 @@ pub fn secrets_missing(spec: Json, have: List<String>) -> List<String> {
 @test
 fn makes_the_mcp_add_card() {
     let spec = Obj.new().s("name", String("acta")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("@acta/mcp"))])).j("env", Obj.new().j("ACTA_KEY", Obj.new().s("secret", String("ACTA_KEY")).done()).s("ACTA_URL", String("https://acta.example")).done()).done()
-    let card = mcp_add_card(String("tc_4"), spec.copy(), [String("OTHER")], "asking", String())
-    assert("{card}" == "\{\"id\":\"mcp_add_tc_4\",\"type\":\"mcp_add\",\"title\":\"Add the MCP server acta\",\"call\":\"tc_4\",\"server\":\"acta\",\"badge\":{badge.badge(String("acta"), String())},\"command\":\"npx\",\"args\":[\"-y\",\"@acta/mcp\"],\"settings\":[\{\"name\":\"ACTA_KEY\",\"in\":\"env\",\"secret\":\"ACTA_KEY\",\"have\":false\},\{\"name\":\"ACTA_URL\",\"in\":\"env\",\"value\":\"https://acta.example\"\}],\"state\":\"asking\",\"said\":\"\"\}")
+    let card = mcp_add_card(String("tc_4"), spec.copy(), [String("OTHER")], "asking", String(), String(), String())
+    assert("{card}" == "\{\"id\":\"mcp_add_tc_4\",\"type\":\"mcp_add\",\"title\":\"Add the MCP server acta\",\"call\":\"tc_4\",\"server\":\"acta\",\"badge\":{badge.badge(String("acta"), String(), String())},\"command\":\"npx\",\"args\":[\"-y\",\"@acta/mcp\"],\"settings\":[\{\"name\":\"ACTA_KEY\",\"in\":\"env\",\"secret\":\"ACTA_KEY\",\"have\":false\},\{\"name\":\"ACTA_URL\",\"in\":\"env\",\"value\":\"https://acta.example\"\}],\"state\":\"asking\",\"said\":\"\"\}")
     assert(secrets_missing(spec.copy(), [String("OTHER")]).join(",") == "ACTA_KEY" and secrets_missing(spec, [String("ACTA_KEY")]).len() == 0)
-    let hosted = mcp_add_card(String("tc_5"), Obj.new().s("name", String("docs")).s("url", String("https://docs.example/mcp")).j("headers", Obj.new().done()).done(), List<String>(), "sign_in", String("It didn't sign you in"))
+    let hosted = mcp_add_card(String("tc_5"), Obj.new().s("name", String("docs")).s("url", String("https://docs.example/mcp")).j("headers", Obj.new().done()).done(), List<String>(), "sign_in", String("It didn't sign you in"), String(), String())
     assert(str_at(hosted.copy(), "url") == some(String("https://docs.example/mcp")) and str_at(hosted.copy(), "command") == none and str_at(hosted, "said") == some(String("It didn't sign you in")))
     // Ready, its tools each on their own.
-    let ready = mcp_add_card(String("tc_6"), spec.copy(), List<String>(), "ready", String("list_issues, create_issue, search"))
-    assert("{at(ready, "tools")}" == #"["list_issues","create_issue","search"]"#)
+    let ready = mcp_add_card(String("tc_6"), spec.copy(), List<String>(), "ready", String("list_issues, create_issue, search"), String("ab12"), String("cd34"))
+    assert("{at(ready.copy(), "tools")}" == #"["list_issues","create_issue","search"]"#)
+    // With the server's own icons, its badge carries them.
+    assert(str_at(at(ready.copy(), "badge"), "icon") == some(String("ab12")) and str_at(at(ready, "badge"), "icon_dark") == some(String("cd34")))
     let (_, why) = card_of(Obj.new().s("type", String("mcp_add")).done(), String("card_1"))
     assert(why.starts_with("type is \"mcp_add\""))
 }
@@ -339,7 +342,7 @@ pub fn secret_card(call: String, agent: String, why: String, site: String, field
     let place = if site.len() > 0 { site.copy() } else { String("a file on this computer") }
     var card = Obj.new().s("id", "secret_{call}").s("type", String("secret_ask")).s("title", tidy(why, TITLE_MOST)).s("call", call).s("agent", agent).s("site", place)
     let name = site_name(site)
-    if name.len() > 0 { card = card.j("badge", badge.badge(name, String())) }
+    if name.len() > 0 { card = card.j("badge", badge.badge(name, String(), String())) }
     return card.j("fields", Json.Array(shown)).s("state", String("asking")).j("saved", Json.Array(List<Json>())).done()
 }
 
@@ -388,7 +391,7 @@ fn makes_the_secret_card() {
     let (_, bad_name) = ask_fields(Obj.new().s("ref", String("e1")).s("save", String("my password")).done(), String())
     assert(bad_name.starts_with("save is \"my password\""))
     let card = secret_card(String("bc_7"), String("a_1"), String(" Your NTNU password "), String("innsida.ntnu.no"), one)
-    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"badge\":{badge.badge(String("ntnu"), String())},\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
+    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"badge\":{badge.badge(String("ntnu"), String(), String())},\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
     let filled = secret_card_now(card.copy(), "filled", [String("ntnu-password")])
     assert(str_at(filled.copy(), "state") == some(String("filled")) and "{at(filled.copy(), "saved")}" == "[\"ntnu-password\"]")
     assert(str_at(ended(card.copy()), "state") == some(String("closed")) and str_at(ended(filled), "state") == some(String("filled")))
@@ -401,7 +404,8 @@ fn makes_the_secret_card() {
 
 @test
 fn makes_the_sign_in_card() {
-    assert("{sign_in_card(String("acta"))}" == "\{\"id\":\"sign_in_acta\",\"type\":\"sign_in\",\"title\":\"Sign in to acta\",\"server\":\"acta\",\"badge\":{badge.badge(String("acta"), String())}\}")
+    assert(str_at(at(sign_in_card(String("acta"), String("ab12"), String()), "badge"), "icon") == some(String("ab12")))
+    assert("{sign_in_card(String("acta"), String(), String())}" == "\{\"id\":\"sign_in_acta\",\"type\":\"sign_in\",\"title\":\"Sign in to acta\",\"server\":\"acta\",\"badge\":{badge.badge(String("acta"), String(), String())}\}")
     let (_, why) = card_of(Obj.new().s("type", String("sign_in")).s("server", String("acta")).done(), String("card_1"))
     assert(why.starts_with("type is \"sign_in\""))
 }
