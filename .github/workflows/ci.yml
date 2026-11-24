@@ -240,5 +240,14 @@ jobs:
           calx scripts/mac.calx dmg build/mac/loom.app build/mac/loom-mac.dmg
           ls -l build/mac
 
+      # The same break-out test as on Windows, with WKWebView (PLAN.md, "The panel
+      # sandbox"). macOS has no timeout command, so perl's alarm stands in.
+      - name: Panel break-out test
+        run: |
+          status=0
+          perl -e 'alarm 180; exec @ARGV' desktop/target/release/loom --panel-test panel-test.json || status=$?
+          cat panel-test.json || true
+          exit $status
+
       - name: Updates, end to end
         run: calx tests/setup/mac.calx build/mac/loom.app

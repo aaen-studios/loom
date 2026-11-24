@@ -19,8 +19,10 @@ pub type Files = HashMap<String, Vec<u8>>;
 
 /// The content security policy every page of a panel comes with: its own files,
 /// its inline scripts and styles, and nothing from anywhere else. No fetch, no
-/// frames, no workers, no forms.
-pub const CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'";
+/// frames, no workers, no forms. And sandboxed, with scripts: the page's origin is
+/// no one's, and so is each blank frame's it makes, which it can't reach into, so
+/// a frame the prelude doesn't run in (WKWebView's) lends it nothing.
+pub const CSP: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' data: blob:; connect-src 'none'; frame-src 'none'; child-src 'none'; worker-src 'none'; object-src 'none'; manifest-src 'none'; form-action 'none'; base-uri 'none'; sandbox allow-scripts";
 
 /// The browser's own settings, for every panel. Past the policy and the request
 /// filter, HTTP gets nowhere either: every request goes to a proxy that isn't
@@ -36,9 +38,10 @@ const BROWSER_ARGS: &str = concat!(
     " --disable-background-networking --no-pings --dns-prefetch-disable",
 );
 
-/// Runs before a panel's own scripts, in every frame: turns off the web view's
-/// storage (a panel's data is the instance's, through the door) and WebRTC, and
-/// gives the panel `loom.send(op, args)`, the door, which answers with a promise.
+/// Runs before a panel's own scripts, in every frame that loads (WKWebView leaves out
+/// a blank frame, which the policy's sandbox keeps the page out of): turns off the web
+/// view's storage (a panel's data is the instance's, through the door) and WebRTC,
+/// and gives the panel `loom.send(op, args)`, the door, which answers with a promise.
 const PRELUDE: &str = r#"(() => {
   const off = (o, k) => { try { Object.defineProperty(o, k, { get() { throw new Error("A panel keeps its data through loom.send."); }, configurable: false }); } catch (e) {} };
   for (const k of ["localStorage", "sessionStorage", "indexedDB", "caches", "openDatabase", "RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel"]) off(window, k);
@@ -60,6 +63,71 @@ const PRELUDE: &str = r#"(() => {
     },
   }), configurable: false, writable: false });
 })();"#;
+
+/// Runs after the prelude: a click on a link out of the panel does nothing, since
+/// WKWebView connects to the link's host as it's clicked, before the policy, the
+/// sandbox or the rule list see anything, and around the proxy for this computer and
+/// its network. A capturing listener cancels it: on the window, on every shadow root
+/// the page attaches, and around a click the page sends into a tree of its own.
+/// Everything it uses is taken before the page's scripts run. `HOME` is the panel's
+/// origin and a slash.
+const LINKS: &str = r#"(() => {
+  const home = HOME;
+  const apply = Reflect.apply;
+  const getter = (o, k) => Object.getOwnPropertyDescriptor(o, k).get;
+  const pathOf = Event.prototype.composedPath;
+  const cancel = Event.prototype.preventDefault;
+  const starts = String.prototype.startsWith;
+  const hrefs = [getter(HTMLAnchorElement.prototype, "href"), getter(HTMLAreaElement.prototype, "href")];
+  const listen = EventTarget.prototype.addEventListener;
+  const unlisten = EventTarget.prototype.removeEventListener;
+  const rootOf = Node.prototype.getRootNode;
+  const click = HTMLElement.prototype.click;
+  const dispatch = EventTarget.prototype.dispatchEvent;
+  const attach = Element.prototype.attachShadow;
+  const internalsRoot = window.ElementInternals ? getter(ElementInternals.prototype, "shadowRoot") : null;
+  const doc = document;
+  const out = (node) => {
+    for (let i = 0; i < 2; i++) {
+      let url;
+      try { url = apply(hrefs[i], node, []); } catch (e) { continue; }
+      return url !== "" && !apply(starts, url, [home]) && !apply(starts, url, ["javascript:"]);
+    }
+    return false;
+  };
+  const guard = (e) => {
+    let stop = true;
+    try {
+      const path = apply(pathOf, e, []);
+      stop = false;
+      for (let i = 0; i < path.length; i++) if (out(path[i])) stop = true;
+    } catch (x) { stop = true; }
+    if (stop) apply(cancel, e, []);
+  };
+  const watch = (t) => { apply(listen, t, ["click", guard, true]); apply(listen, t, ["auxclick", guard, true]); };
+  const unwatch = (t) => { apply(unlisten, t, ["click", guard, true]); apply(unlisten, t, ["auxclick", guard, true]); };
+  watch(window);
+  const around = (target, f) => {
+    let own = null, top = null;
+    try { own = apply(rootOf, target, []); top = apply(rootOf, target, [{ composed: true }]); } catch (e) {}
+    if (own === doc) own = null;
+    if (top === doc || top === own) top = null;
+    if (own) watch(own);
+    if (top) watch(top);
+    try { return f(); } finally { if (own) unwatch(own); if (top) unwatch(top); }
+  };
+  const put = (o, k, v) => Object.defineProperty(o, k, { value: v, writable: false, configurable: false });
+  put(HTMLElement.prototype, "click", function click_() { return around(this, () => apply(click, this, [])); });
+  put(EventTarget.prototype, "dispatchEvent", function dispatchEvent(ev) { return around(this, () => apply(dispatch, this, [ev])); });
+  put(Element.prototype, "attachShadow", function attachShadow(init) { const r = apply(attach, this, [init]); watch(r); return r; });
+  if (internalsRoot) Object.defineProperty(ElementInternals.prototype, "shadowRoot", { get() { const r = apply(internalsRoot, this, []); if (r) watch(r); return r; }, configurable: false });
+})();"#;
+
+/// The prelude and the link guard for a panel whose origin is `origin`.
+fn prelude(origin: &str) -> String {
+    let home = serde_json::to_string(&format!("{origin}/")).unwrap_or_default();
+    format!("{PRELUDE}\n{}", LINKS.replacen("HOME", &home, 1))
+}
 
 /// A message through the door: what the panel asks the app for.
 #[derive(Debug, Clone)]
@@ -122,6 +190,8 @@ impl Panel {
     ) -> Result<Panel, String> {
         let scheme = scheme(&source.id);
         let origin = origin(&scheme);
+        #[cfg(target_os = "macos")]
+        let config = mac::configuration(context.data_directory())?;
         let refused: Rc<dyn Fn(String)> = Rc::new(refused);
         let entry_path = source.entry.trim_start_matches('/').to_string();
         let serve = {
@@ -175,7 +245,7 @@ impl Panel {
             .with_custom_protocol(scheme.clone(), serve)
             .with_url(format!("{origin}/{entry_path}"))
             .with_bounds(bounds)
-            .with_initialization_script(PRELUDE)
+            .with_initialization_script_for_main_only(prelude(&origin), false)
             .with_navigation_handler(navigated)
             .with_new_window_req_handler(windows)
             .with_download_started_handler(downloads)
@@ -194,6 +264,11 @@ impl Panel {
                 .with_additional_browser_args(BROWSER_ARGS)
                 .with_default_context_menus(false)
                 .with_browser_accelerator_keys(false)
+        };
+        #[cfg(target_os = "macos")]
+        let builder = {
+            use wry::WebViewBuilderExtMacos;
+            builder.with_webview_configuration(config)
         };
         let view = builder.build_as_child(window).map_err(|e| e.to_string())?;
         #[cfg(windows)]
@@ -233,7 +308,9 @@ fn read_message(body: &str) -> Option<Message> {
     })
 }
 
-/// A file of the panel's, with the policy, or 404.
+/// A file of the panel's, with the policy, or 404. Any origin may read it, as the
+/// sandboxed page's own is no one's: its fonts and modules come with CORS. Only the
+/// panel's own web view has its scheme.
 fn serve(files: &Files, entry: &str, path: &str) -> Response<Cow<'static, [u8]>> {
     let path = path.trim_start_matches('/');
     let path = if path.is_empty() { entry } else { path };
@@ -249,7 +326,9 @@ fn serve(files: &Files, entry: &str, path: &str) -> Response<Cow<'static, [u8]>>
         .header(header::CONTENT_SECURITY_POLICY, CSP)
         .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         .header(header::CACHE_CONTROL, "no-store")
+        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .header("Referrer-Policy", "no-referrer")
+        .header("X-DNS-Prefetch-Control", "off")
         .body(Cow::Owned(bytes.clone()))
         .expect("a response")
 }
@@ -329,6 +408,165 @@ fn refuse_the_rest(
     Ok(())
 }
 
+/// What WKWebView gives a panel's web view on a Mac, past what wry sets: a data store
+/// that keeps nothing, a content rule list that blocks every load but the panel's own
+/// (the Mac's `refuse_the_rest`), no windows opened by a script, no AirPlay, and no
+/// Safe Browsing lookups of where it goes.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::cell::RefCell;
+    use std::ffi::c_char;
+    use std::path::Path;
+    use std::rc::Rc;
+    use std::time::{Duration, Instant};
+
+    use block2::RcBlock;
+    use objc2::rc::Retained;
+    use objc2::runtime::AnyObject;
+    use objc2::{msg_send, sel, MainThreadMarker};
+    use objc2_foundation::{
+        NSArray, NSDate, NSDefaultRunLoopMode, NSError, NSObjectProtocol, NSRunLoop, NSString,
+        NSURL,
+    };
+    use objc2_web_kit::{
+        WKContentRuleList, WKContentRuleListStore, WKWebViewConfiguration, WKWebsiteDataStore,
+    };
+
+    /// Blocks every load, then lets through the panel's own scheme and the data: and
+    /// blob: URLs its policy allows, which never leave the web view. A panel's web view
+    /// has its own scheme and no other panel's, so the one rule list does for all.
+    const RULES: &str = r#"[
+  {"trigger": {"url-filter": ".*"}, "action": {"type": "block"}},
+  {"trigger": {"url-filter": "^panel-[a-z0-9]*://localhost/"}, "action": {"type": "ignore-previous-rules"}},
+  {"trigger": {"url-filter": "^data:"}, "action": {"type": "ignore-previous-rules"}},
+  {"trigger": {"url-filter": "^blob:"}, "action": {"type": "ignore-previous-rules"}}
+]"#;
+
+    thread_local! {
+        static COMPILED: RefCell<Option<Retained<WKContentRuleList>>> = const { RefCell::new(None) };
+    }
+
+    /// What WebKit's compiler answers: the rule list, or why not.
+    type Compiled = Result<Retained<WKContentRuleList>, String>;
+
+    /// A web view's configuration for a panel. The first one waits for WebKit to compile
+    /// the rule list, into `dir` (the web views' folder), running the main thread's
+    /// loop meanwhile, as WebView2 does while it starts.
+    pub fn configuration(dir: Option<&Path>) -> Result<Retained<WKWebViewConfiguration>, String> {
+        let mtm = MainThreadMarker::new().ok_or("a panel is made on the main thread")?;
+        let rules = rules(dir, mtm)?;
+        // SAFETY: WebKit's own setters, on the main thread, with objects it made.
+        unsafe {
+            let config = WKWebViewConfiguration::new(mtm);
+            let store = WKWebsiteDataStore::nonPersistentDataStore(mtm);
+            dead_end(&store)?;
+            config.setWebsiteDataStore(&store);
+            config.userContentController().addContentRuleList(&rules);
+            config.setAllowsAirPlayForMediaPlayback(false);
+            let prefs = config.preferences();
+            prefs.setJavaScriptCanOpenWindowsAutomatically(false);
+            prefs.setFraudulentWebsiteWarningEnabled(false);
+            Ok(config)
+        }
+    }
+
+    #[link(name = "Network", kind = "framework")]
+    extern "C" {
+        fn nw_endpoint_create_host(host: *const c_char, port: *const c_char) -> *mut AnyObject;
+        fn nw_proxy_config_create_http_connect(
+            endpoint: *mut AnyObject,
+            tls: *mut AnyObject,
+        ) -> *mut AnyObject;
+        fn nw_proxy_config_set_failover_allowed(config: *mut AnyObject, allowed: bool);
+    }
+
+    /// Sends whatever gets past the rules to a proxy that isn't there, and never around
+    /// it when it doesn't answer, as WebView2's does: from macOS 14, which takes one.
+    /// macOS never sends this computer's addresses or its network's to a proxy, so
+    /// these get no further than the rules and the prelude's link guard let them.
+    fn dead_end(store: &WKWebsiteDataStore) -> Result<(), String> {
+        if !store.respondsToSelector(sel!(setProxyConfigurations:)) {
+            return Ok(());
+        }
+        // SAFETY: Network's own constructors, each of which hands over a new object or
+        // null, and WebKit's setter for its proxies, which takes an array of them.
+        unsafe {
+            let endpoint = Retained::from_raw(nw_endpoint_create_host(
+                c"127.0.0.1".as_ptr(),
+                c"9".as_ptr(),
+            ))
+            .ok_or("Network made no endpoint")?;
+            let proxy = Retained::from_raw(nw_proxy_config_create_http_connect(
+                Retained::as_ptr(&endpoint) as *mut AnyObject,
+                std::ptr::null_mut(),
+            ))
+            .ok_or("Network made no proxy")?;
+            nw_proxy_config_set_failover_allowed(Retained::as_ptr(&proxy) as *mut AnyObject, false);
+            let proxies = NSArray::from_retained_slice(&[proxy]);
+            let _: () = msg_send![store, setProxyConfigurations: &*proxies];
+        }
+        Ok(())
+    }
+
+    fn rules(
+        dir: Option<&Path>,
+        mtm: MainThreadMarker,
+    ) -> Result<Retained<WKContentRuleList>, String> {
+        if let Some(compiled) = COMPILED.with(|c| c.borrow().clone()) {
+            return Ok(compiled);
+        }
+        // SAFETY: WebKit's stores, on the main thread.
+        let store = unsafe {
+            match dir {
+                Some(dir) => {
+                    let url = NSURL::fileURLWithPath(&NSString::from_str(
+                        &dir.join("rules").to_string_lossy(),
+                    ));
+                    WKContentRuleListStore::storeWithURL(Some(&url), mtm)
+                }
+                None => WKContentRuleListStore::defaultStore(mtm),
+            }
+        }
+        .ok_or("WebKit has no store for content rule lists")?;
+        let got: Rc<RefCell<Option<Compiled>>> = Rc::default();
+        let done = {
+            let got = got.clone();
+            RcBlock::new(move |list: *mut WKContentRuleList, error: *mut NSError| {
+                // SAFETY: what WebKit hands the handler: a rule list or an error, either
+                // of which may be null.
+                let answer = match unsafe { Retained::retain(list) } {
+                    Some(list) => Ok(list),
+                    None => Err(unsafe { error.as_ref() }
+                        .map(|e| e.localizedDescription().to_string())
+                        .unwrap_or_else(|| String::from("no rule list"))),
+                };
+                *got.borrow_mut() = Some(answer);
+            })
+        };
+        // SAFETY: the identifier, the rules and a handler WebKit calls on the main thread.
+        unsafe {
+            store.compileContentRuleListForIdentifier_encodedContentRuleList_completionHandler(
+                Some(&NSString::from_str("loom-panels")),
+                Some(&NSString::from_str(RULES)),
+                Some(&done),
+            );
+        }
+        let until = Instant::now() + Duration::from_secs(20);
+        while got.borrow().is_none() && Instant::now() < until {
+            let soon = NSDate::dateWithTimeIntervalSinceNow(0.02);
+            // SAFETY: the default mode, a constant of Foundation's.
+            NSRunLoop::currentRunLoop().runMode_beforeDate(unsafe { NSDefaultRunLoopMode }, &soon);
+        }
+        let compiled = got
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(|| Err(String::from("WebKit didn't compile the rule list in time")))
+            .map_err(|e| format!("the panel's rule list didn't compile: {e}"))?;
+        COMPILED.with(|c| *c.borrow_mut() = Some(compiled.clone()));
+        Ok(compiled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +591,14 @@ mod tests {
             serve(&files, "index.html", "/../secret").status(),
             StatusCode::NOT_FOUND
         );
+    }
+
+    #[test]
+    fn the_link_guard_knows_the_panel_s_own_pages() {
+        let p = prelude("panel-a://localhost");
+        assert!(p.contains(r#"const home = "panel-a://localhost/";"#));
+        assert!(!p.contains("HOME"));
+        assert!(CSP.ends_with("sandbox allow-scripts"));
     }
 
     #[test]
