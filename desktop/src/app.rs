@@ -2160,6 +2160,17 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Opens a stack of pictures from the chat big over the window, at its first.
+    pub fn view_stack(&mut self, stack: &[model::FileRef], cx: &mut Context<Self>) {
+        if self.model.viewing.is_none() {
+            self.viewer_at = Instant::now();
+        }
+        if let Some(frame) = self.model.view_stack(stack) {
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
     /// The viewer's next picture (1) or the one before (-1).
     fn view_step(&mut self, by: i32, cx: &mut Context<Self>) {
         if let Some(frame) = self.model.view_step(by) {
@@ -6798,8 +6809,9 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// A picture from the chat, big over the window: whole once it's fetched, its
-    /// thumbnail until then. A click beside it or Esc closes it, the arrows (or ← and →)
-    /// go between the chat's pictures, and Open hands it to its own program.
+    /// thumbnail until then, with its name and where it is among them. A click beside it
+    /// or Esc closes it, the arrows (or ← and →) go between the pictures of the stack it
+    /// was opened on, or else the chat's, and Open hands it to its own program.
     fn viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let f = self.model.viewing.clone()?;
         let files = self.model.files.clone();
@@ -6807,7 +6819,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .get(&f.file)
             .or_else(|| files.get(&format!("{}.thumb", f.file)))
             .cloned();
-        let all = self.model.pictures();
+        let all = self.model.viewer_pictures();
         let at = all.iter().position(|x| x.file == f.file);
         let (before, after) = match at {
             Some(i) => (i > 0, i + 1 < all.len()),
@@ -6857,10 +6869,26 @@ ACTA_KEY=secret:ACTA_KEY",
                 .into_any_element(),
         };
         let opened = f.clone();
-        let caption = match at {
-            Some(i) if all.len() > 1 => format!("{} · {} of {}", f.name, i + 1, all.len()),
-            _ => f.name.clone(),
+        let count = match at {
+            Some(i) if all.len() > 1 => Some(format!("{} / {}", i + 1, all.len())),
+            _ => None,
         };
+        let caption = div()
+            .max_w(px((w - 2.0 * space::XL).max(100.0)))
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .text_size(px(size::SMALL))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(white().opacity(0.75))
+                    .child(f.name.clone()),
+            )
+            .when_some(count, |d, c| {
+                d.child(div().flex_none().text_color(white().opacity(0.5)).child(c))
+            });
         Some(
             div()
                 .id("viewer")
@@ -6888,12 +6916,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(picture),
                 )
-                .child(
-                    div()
-                        .text_size(px(size::SMALL))
-                        .text_color(white().opacity(0.7))
-                        .child(caption),
-                )
+                .child(caption)
                 .child(
                     div()
                         .absolute()
@@ -14028,8 +14051,6 @@ fn person(
         .map(|b| b.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    // What a person typed keeps its line breaks, which Markdown would join.
-    let text = text.replace('\n', "  \n");
     let mut out = div()
         .w_full()
         .flex()
@@ -14045,20 +14066,45 @@ fn person(
                 .child(format!("From {from}")),
         );
     }
-    for (i, b) in m.blocks.iter().enumerate() {
-        if let Some(f) = &b.file {
-            out = out.child(file_view(
-                p,
-                f,
-                files,
-                format!("{}/{i}", m.id),
-                room,
-                this.clone(),
-            ));
+    // Its files over its words, two or more pictures as one stack.
+    let mut stacked: Vec<model::FileRef> = Vec::new();
+    for part in model::file_parts(m) {
+        match part {
+            model::Part::Pictures(run) => {
+                let stack: Vec<model::FileRef> = run
+                    .iter()
+                    .filter_map(|&i| m.blocks[i].file.clone())
+                    .collect();
+                out = out.child(picture_stack(
+                    p,
+                    &stack,
+                    files,
+                    format!("{}/{}", m.id, run[0]),
+                    room,
+                    this.clone(),
+                ));
+                stacked.extend(stack);
+            }
+            model::Part::Block(i) => {
+                if let Some(f) = &m.blocks[i].file {
+                    out = out.child(file_view(
+                        p,
+                        f,
+                        files,
+                        format!("{}/{i}", m.id),
+                        room,
+                        this.clone(),
+                    ));
+                }
+            }
+            _ => {}
         }
     }
     // Each file reads as a link where it was attached, which opens it: a picture big over
-    // the window, anything else in its own program.
+    // the window, anything else in its own program. A stack's pictures only listed by
+    // name are left out, since the stack shows them and the viewer their names.
+    // What a person typed keeps its line breaks, which Markdown would join.
+    let text = model::unmark_stacked(&text, &stacked).replace('\n', "  \n");
     let attached: Vec<model::FileRef> = m.blocks.iter().filter_map(|b| b.file.clone()).collect();
     let words = model::link_files(&model::literal_html(&text), &attached);
     let opener = this.clone();
@@ -14253,6 +14299,113 @@ fn file_view(
         .into_any_element()
 }
 
+/// Two or more pictures in a message as one stack of a fixed size, however many there
+/// are: the first on top, filling its place, up to two more peeking out behind it, and
+/// how many there are in its corner. Clicking it opens the viewer at the first, to step
+/// through them.
+fn picture_stack(
+    p: Palette,
+    stack: &[model::FileRef],
+    files: &HashMap<String, String>,
+    key: String,
+    room: i32,
+    this: WeakEntity<Loom>,
+) -> AnyElement {
+    let w = STACK_W
+        .min(room as f32 - 2.0 * space::XL - 2.0 * STACK_STEP)
+        .max(PICTURE_LEAST);
+    let h = (w * STACK_H / STACK_W).round();
+    let behind = stack.len().saturating_sub(1).min(2);
+    let card = |f: &model::FileRef, layer: usize| {
+        let shift = STACK_STEP * layer as f32;
+        div()
+            .absolute()
+            .left(px(shift))
+            .top(px(STACK_STEP * behind as f32 - shift))
+            .w(px(w))
+            .h(px(h))
+            .rounded(px(radius::BUBBLE))
+            .bg(p.bubble)
+            // Each layer rounded itself: a parent's corners don't clip what's in it. The
+            // picture comes cropped to the card's shape (`CardLoader`), so it fills it.
+            .when_some(
+                files.get(&format!("{}.thumb", f.file)).zip(card_images()),
+                |d, (path, cards)| {
+                    d.child(
+                        img(std::path::PathBuf::from(path))
+                            .image_cache(&cards)
+                            .size_full()
+                            .rounded(px(radius::BUBBLE))
+                            .object_fit(ObjectFit::Fill),
+                    )
+                },
+            )
+            // The ones behind sit a step back, a little toward the page.
+            .when(layer > 0, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .rounded(px(radius::BUBBLE))
+                        .bg(p.bg.opacity(0.35)),
+                )
+            })
+            // A fine edge over the picture, so the layers read apart.
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .rounded(px(radius::BUBBLE))
+                    .border_1()
+                    .border_color(p.line),
+            )
+    };
+    let mut out = div()
+        .id(SharedString::from(format!("stack-{key}")))
+        .relative()
+        .flex_none()
+        .w(px(w + STACK_STEP * behind as f32))
+        .h(px(h + STACK_STEP * behind as f32))
+        .cursor_pointer();
+    for layer in (1..=behind).rev() {
+        out = out.child(card(&stack[layer], layer));
+    }
+    let opened = stack.to_vec();
+    out.child(
+        card(&stack[0], 0).child(
+            div()
+                .absolute()
+                .right(px(space::S))
+                .bottom(px(space::S))
+                .h(px(20.0))
+                .min_w(px(20.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(black().opacity(0.6))
+                .text_color(white())
+                .text_size(px(size::CAPTION))
+                .font_weight(FontWeight::MEDIUM)
+                .child(stack.len().to_string()),
+        ),
+    )
+    .on_click(move |_, _, cx| {
+        let _ = this.update(cx, |loom, cx| loom.view_stack(&opened, cx));
+    })
+    .into_any_element()
+}
+
+/// A stack's place, wide and tall, at most, and how far each picture behind peeks out.
+const STACK_W: f32 = 240.0;
+const STACK_H: f32 = 180.0;
+const STACK_STEP: f32 = 6.0;
+
 /// The most room a picture in a message takes, wide and tall.
 const PICTURE_W: f32 = 360.0;
 const PICTURE_H: f32 = 400.0;
@@ -14340,6 +14493,50 @@ impl Asset for PictureLoader {
                 None => gpui.await,
             }
         }
+    }
+}
+
+/// How a stack's cards load (`KeptImages` with `cards`): the picture file cropped from its
+/// middle to the stack's shape, so it's drawn whole, filling its card, with its own
+/// corners rounded. GPUI clips only to rectangles, so a picture drawn to cover its card
+/// either spilled out of it or had square corners.
+enum CardLoader {}
+
+impl Asset for CardLoader {
+    type Source = Resource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    // An async fn would hold on to `App`, and the future must outlive it.
+    #[allow(clippy::manual_async_fn)]
+    fn load(
+        source: Resource,
+        _: &mut App,
+    ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
+        async move {
+            let failed = |why: &str| ImageCacheError::Io(Arc::new(std::io::Error::other(why)));
+            let Resource::Path(path) = source else {
+                return Err(failed("a card is a file"));
+            };
+            let bytes = std::fs::read(&*path).map_err(|e| ImageCacheError::Io(Arc::new(e)))?;
+            let full = picture_pixels(&bytes).ok_or_else(|| failed("not a picture"))?;
+            let (x, y, w, h) = card_crop(full.width(), full.height());
+            let card = image::imageops::crop_imm(&full, x, y, w, h).to_image();
+            Ok(Arc::new(RenderImage::new(vec![image::Frame::new(card)])))
+        }
+    }
+}
+
+/// The middle of a `w` × `h` picture in a stack card's shape: its left, top, width and
+/// height.
+fn card_crop(w: u32, h: u32) -> (u32, u32, u32, u32) {
+    let (w, h) = (w.max(1), h.max(1));
+    let shape = STACK_W / STACK_H;
+    if w as f32 / h as f32 > shape {
+        let cw = ((h as f32 * shape).round() as u32).clamp(1, w);
+        ((w - cw) / 2, 0, cw, h)
+    } else {
+        let ch = ((w as f32 / shape).round() as u32).clamp(1, h);
+        (0, (h - ch) / 2, w, ch)
     }
 }
 
@@ -14668,27 +14865,33 @@ thread_local! {
     /// (`kept_images`).
     static IMAGES: std::cell::RefCell<Option<(Entity<KeptImages>, Entity<KeptImages>)>> =
         const { std::cell::RefCell::new(None) };
+    /// The pictures of stacks, cropped to a card's shape (`CardLoader`).
+    static CARDS: std::cell::RefCell<Option<Entity<KeptImages>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
 /// it has loaded, in memory and on the GPU, until the app ends; one that leaves this
-/// one goes from there too, and loads again if it's drawn again.
+/// one goes from there too, and loads again if it's drawn again. With `cards`, they're
+/// a stack's, loaded by `CardLoader`.
 struct KeptImages {
     most: usize,
     tick: u64,
     items: HashMap<Resource, u64>,
+    cards: bool,
 }
 
 impl KeptImages {
-    fn new(most: usize, cx: &mut App) -> Entity<Self> {
+    fn new(most: usize, cards: bool, cx: &mut App) -> Entity<Self> {
         let e = cx.new(|_| KeptImages {
             most,
             tick: 0,
             items: HashMap::new(),
+            cards,
         });
         cx.observe_release(&e, |c, cx| {
             for (resource, _) in c.items.drain() {
-                forget_picture(&resource, None, cx);
+                forget_picture(&resource, c.cards, None, cx);
             }
         })
         .detach();
@@ -14698,7 +14901,14 @@ impl KeptImages {
 
 /// Lets a picture `KeptImages` had go: off the GPU and out of GPUI's cache, or its load
 /// stopped.
-fn forget_picture(resource: &Resource, window: Option<&mut Window>, cx: &mut App) {
+fn forget_picture(resource: &Resource, card: bool, window: Option<&mut Window>, cx: &mut App) {
+    if card {
+        if let Some(Ok(image)) = cx.fetch_asset::<CardLoader>(resource) {
+            cx.drop_image(image, window);
+        }
+        cx.remove_asset::<CardLoader>(resource);
+        return;
+    }
     if let Some(Ok(image)) = cx.fetch_asset::<PictureLoader>(resource) {
         cx.drop_image(image, window);
     }
@@ -14722,8 +14932,11 @@ impl ImageCache for KeptImages {
                 .map(|(r, _)| r.clone());
             if let Some(oldest) = oldest {
                 self.items.remove(&oldest);
-                forget_picture(&oldest, Some(window), cx);
+                forget_picture(&oldest, self.cards, Some(window), cx);
             }
+        }
+        if self.cards {
+            return window.use_asset::<CardLoader>(resource, cx);
         }
         window.use_asset::<PictureLoader>(resource, cx)
     }
@@ -14735,9 +14948,20 @@ fn kept_images(cx: &mut App) -> (Entity<KeptImages>, Entity<KeptImages>) {
     if let Some(both) = IMAGES.with(|c| c.borrow().clone()) {
         return both;
     }
-    let both = (KeptImages::new(40, cx), KeptImages::new(3, cx));
+    let both = (
+        KeptImages::new(40, false, cx),
+        KeptImages::new(3, false, cx),
+    );
     IMAGES.with(|c| *c.borrow_mut() = Some(both.clone()));
+    // A stack's cards: three each, so as many as the chat's pictures.
+    let cards = KeptImages::new(40, true, cx);
+    CARDS.with(|c| *c.borrow_mut() = Some(cards));
     both
+}
+
+/// The pictures of stacks, once `kept_images` has made them.
+fn card_images() -> Option<Entity<KeptImages>> {
+    CARDS.with(|c| c.borrow().clone())
 }
 
 /// The chat's pictures, once `kept_images` has made them.
@@ -14830,6 +15054,20 @@ impl ReplyDraw<'_> {
             Part::Bubbles(run) => self.bubbles(run),
             Part::Tools(run) => self.tool_run(run),
             Part::Block(i) => self.block(*i),
+            Part::Pictures(run) => {
+                let stack: Vec<model::FileRef> = run
+                    .iter()
+                    .filter_map(|&i| self.m.blocks[i].file.clone())
+                    .collect();
+                picture_stack(
+                    self.p,
+                    &stack,
+                    self.files,
+                    self.key(run[0]),
+                    self.show.room,
+                    self.this.clone(),
+                )
+            }
             Part::Fold {
                 words,
                 working,
@@ -15656,7 +15894,17 @@ mod command_tests {
 
 #[cfg(test)]
 mod picture_tests {
-    use super::{fit, picture_size, PICTURE_H, PICTURE_W};
+    use super::{card_crop, fit, picture_size, PICTURE_H, PICTURE_W};
+
+    #[test]
+    fn a_stacks_card_is_the_middle_of_its_picture() {
+        // 4:3 already: all of it.
+        assert_eq!(card_crop(512, 384), (0, 0, 512, 384));
+        // Wide: its middle across. Tall: its middle down.
+        assert_eq!(card_crop(1000, 300), (300, 0, 400, 300));
+        assert_eq!(card_crop(300, 800), (0, 287, 300, 225));
+        assert_eq!(card_crop(0, 0), (0, 0, 1, 1));
+    }
 
     #[test]
     fn a_picture_keeps_its_shape_inside_its_place() {

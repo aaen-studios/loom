@@ -73,6 +73,12 @@ struct Conversation: Equatable, Sendable {
     }
 }
 
+/// Pictures shown big, to page through.
+struct Viewing: Identifiable {
+    let id = UUID()
+    var stack: [FileRef]
+}
+
 /// A file in a message, or one sent: its SHA-256, name, type and size.
 struct FileRef: Equatable, Sendable {
     var file: String
@@ -213,6 +219,8 @@ enum Part: Equatable, Sendable {
     case tools([Int])
     /// Anything else on its own: a thought, a plan, a notice or a file.
     case block(Int)
+    /// Two or more pictures next to each other, drawn as one stack the viewer opens.
+    case pictures([Int])
     /// The turn's steps, folded under one quiet line that opens to show them. While the
     /// turn runs (`working`), the line is the step it's on, and it's there even with no
     /// steps yet. Once it's done, it says how many.
@@ -272,11 +280,23 @@ private func asks(_ text: String) -> Bool {
     text.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("?")
 }
 
-/// The blocks `shown`, in order, with words next to each other as one group and tool
-/// calls next to each other as one run.
+/// The blocks `shown`, in order, with words next to each other as one group, tool calls
+/// next to each other as one run, and two or more pictures next to each other as one
+/// stack.
 private func layOut(_ m: Message, _ shown: [Int]) -> [Part] {
+    func picture(_ i: Int) -> Bool { m.blocks[i].file?.isImage == true }
     var out: [Part] = []
     for i in shown {
+        if picture(i) {
+            if case .pictures(let run)? = out.last {
+                out[out.count - 1] = .pictures(run + [i])
+                continue
+            }
+            if case .block(let j)? = out.last, picture(j) {
+                out[out.count - 1] = .pictures([j, i])
+                continue
+            }
+        }
         let kind = m.blocks[i].kind
         switch (kind, out.last) {
         case ("text", .words(let run)?):
@@ -289,6 +309,69 @@ private func layOut(_ m: Message, _ shown: [Int]) -> [Part] {
         }
     }
     return out
+}
+
+/// A person's message's files as they're drawn, above its words, as
+/// desktop/src/model.rs's `file_parts`: each on its own, and two or more pictures as one
+/// stack, wherever they were among the others.
+func fileParts(_ m: Message) -> [Part] {
+    let files = m.blocks.indices.filter { m.blocks[$0].file != nil }
+    let pictures = files.filter { m.blocks[$0].file?.isImage == true }
+    let others = files.filter { m.blocks[$0].file?.isImage != true }
+    return layOut(m, pictures) + others.map { .block($0) }
+}
+
+/// A person's words without the marks (`[name]`) of the pictures in a stack where they
+/// only list them, as desktop/src/model.rs's `unmark_stacked`: two or more standing
+/// together with nothing but spaces between, or one alone on its line. A mark among
+/// other words is part of what was said, and stays.
+func unmarkStacked(_ text: String, _ stacked: [FileRef]) -> String {
+    var left = stacked.filter { !$0.name.isEmpty }.map { "[\($0.name)]" }
+    if left.isEmpty { return text }
+    var lines: [String] = []
+    for line in text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init) {
+        // The stacked pictures' marks on this line, each picture's first, in order.
+        var marks: [Range<String.Index>] = []
+        var from = line.startIndex
+        while let open = line[from...].firstIndex(of: "[") {
+            if let k = left.firstIndex(where: { line[open...].hasPrefix($0) }) {
+                let end = line.index(open, offsetBy: left.remove(at: k).count)
+                marks.append(open..<end)
+                from = end
+            } else {
+                from = line.index(after: open)
+            }
+        }
+        // Marks with only spaces between them stand together.
+        var runs: [(range: Range<String.Index>, count: Int)] = []
+        for mark in marks {
+            if let last = runs.last, line[last.range.upperBound..<mark.lowerBound].allSatisfy(\.isWhitespace) {
+                runs[runs.count - 1] = (last.range.lowerBound..<mark.upperBound, last.count + 1)
+            } else {
+                runs.append((mark, 1))
+            }
+        }
+        var out = ""
+        var at = line.startIndex
+        var cut = false
+        for run in runs {
+            let alone = line[..<run.range.lowerBound].allSatisfy(\.isWhitespace) && line[run.range.upperBound...].allSatisfy(\.isWhitespace)
+            if run.count >= 2 || alone {
+                out += line[at..<run.range.lowerBound]
+                at = line[run.range.upperBound...].firstIndex { !$0.isWhitespace } ?? line.endIndex
+                cut = true
+            }
+        }
+        if !cut {
+            lines.append(line)
+            continue
+        }
+        out += line[at...]
+        // A line that was only marks goes with them.
+        let kept = out.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+        if !kept.isEmpty { lines.append(kept) }
+    }
+    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
 /// The step a running turn is on, in a line: the first line of what it last said, the
@@ -413,6 +496,8 @@ final class Model {
     var files: [String: String] = [:]
     /// A file fetched to be opened, for the screen to show.
     var toOpen: URL?
+    /// A stack of pictures shown big, to page through.
+    var viewing: Viewing?
     /// When an agent's reply last grew, and when its last run finished or failed.
     var lastDelta: [String: Date] = [:]
     var finished: [String: Date] = [:]
@@ -834,6 +919,20 @@ final class Model {
         }
         let id = id("app.get")
         getting[id] = (f.file, true)
+        return ["t": "file.get", "id": JSON(id), "file": JSON(f.file), "name": JSON(f.name)]
+    }
+
+    /// Shows a stack of pictures big, at its first.
+    func view(_ stack: [FileRef]) {
+        guard !stack.isEmpty else { return }
+        viewing = Viewing(stack: stack)
+    }
+
+    /// Fetches a picture whole, for the viewer, unless it's here or on its way.
+    func whole(_ f: FileRef) -> JSON? {
+        if files[f.file] != nil || getting.values.contains(where: { $0.key == f.file }) { return nil }
+        let id = id("app.get")
+        getting[id] = (f.file, false)
         return ["t": "file.get", "id": JSON(id), "file": JSON(f.file), "name": JSON(f.name)]
     }
 

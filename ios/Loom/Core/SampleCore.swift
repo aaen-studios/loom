@@ -294,6 +294,11 @@ enum Sample {
                 ["kind": "tool", "call": "tc_41"],
                 ["kind": "text", "text": "Not yet. It's still orange near the stem; give it two or three more days."],
              ]],
+            ["id": "msg_43", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187120000,
+             "blocks": [["kind": "file", "file": "sample-dusk", "name": "balcony 2.png", "mime": "image/png", "size": 398_000],
+                        ["kind": "file", "file": "sample-leaf", "name": "leaves.png", "mime": "image/png", "size": 351_000],
+                        ["kind": "file", "file": "sample-tall", "name": "balcony.png", "mime": "image/png", "size": 412_000],
+                        ["kind": "text", "text": "[balcony 2.png] [leaves.png] [balcony.png] And these, from this evening?"]]],
         ],
     ]
 
@@ -305,20 +310,31 @@ enum Sample {
 
     /// The file of a sample picture, drawn the first time it's asked for.
     static func picture(_ sha: String) -> String? {
-        guard sha == "sample-tall" else { return nil }
-        let path = FileManager.default.temporaryDirectory.appendingPathComponent("loom-sample-tall.png").path
+        // The sky, the ground and the tomato of each: a tall one by day, a wide one at
+        // dusk, and leaves.
+        let looks: [String: (size: CGSize, sky: UIColor, ground: UIColor, fruit: UIColor)] = [
+            "sample-tall": (CGSize(width: 300, height: 800), UIColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1),
+                            UIColor(red: 0.3, green: 0.6, blue: 0.3, alpha: 1), UIColor(red: 0.95, green: 0.45, blue: 0.2, alpha: 1)),
+            "sample-dusk": (CGSize(width: 800, height: 600), UIColor(red: 0.85, green: 0.55, blue: 0.45, alpha: 1),
+                            UIColor(red: 0.25, green: 0.35, blue: 0.3, alpha: 1), UIColor(red: 0.85, green: 0.25, blue: 0.15, alpha: 1)),
+            "sample-leaf": (CGSize(width: 600, height: 600), UIColor(red: 0.45, green: 0.65, blue: 0.4, alpha: 1),
+                            UIColor(red: 0.2, green: 0.45, blue: 0.25, alpha: 1), UIColor(red: 0.9, green: 0.6, blue: 0.2, alpha: 1)),
+        ]
+        guard let look = looks[sha] else { return nil }
+        let path = FileManager.default.temporaryDirectory.appendingPathComponent("loom-\(sha).png").path
         if FileManager.default.fileExists(atPath: path) { return path }
-        let image = UIGraphicsImageRenderer(size: CGSize(width: 300, height: 800), format: {
+        let (w, h) = (look.size.width, look.size.height)
+        let image = UIGraphicsImageRenderer(size: look.size, format: {
             let f = UIGraphicsImageRendererFormat()
             f.scale = 1
             return f
         }()).image { c in
-            UIColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1).setFill()
-            c.fill(CGRect(x: 0, y: 0, width: 300, height: 800))
-            UIColor(red: 0.3, green: 0.6, blue: 0.3, alpha: 1).setFill()
-            c.fill(CGRect(x: 0, y: 520, width: 300, height: 280))
-            UIColor(red: 0.95, green: 0.45, blue: 0.2, alpha: 1).setFill()
-            UIBezierPath(ovalIn: CGRect(x: 90, y: 360, width: 120, height: 120)).fill()
+            look.sky.setFill()
+            c.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            look.ground.setFill()
+            c.fill(CGRect(x: 0, y: h * 0.65, width: w, height: h * 0.35))
+            look.fruit.setFill()
+            UIBezierPath(ovalIn: CGRect(x: w / 2 - 60, y: h * 0.45, width: 120, height: 120)).fill()
         }
         guard let data = image.pngData(), (try? data.write(to: URL(fileURLWithPath: path))) != nil else { return nil }
         return path
