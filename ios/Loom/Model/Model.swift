@@ -295,6 +295,9 @@ struct Message: Identifiable, Equatable, Sendable {
     var sources: [Source] = []
     /// The pages it links to that the instance has looked up, by address.
     var links: [String: PageLink] = [:]
+    /// For a reply, the files it names in code that are in its agent's folder or the shared
+    /// one (`mentions`): each path as it wrote it, and the file's name.
+    var named: [NamedFile] = []
 
     var isPerson: Bool { role == "person" }
 
@@ -477,6 +480,13 @@ func linkFiles(_ text: String, _ files: [FileRef]) -> String {
     return out
 }
 
+/// A file a reply names in code that's in its agent's folder or the shared one: its path as
+/// the reply wrote it, and its name.
+struct NamedFile: Equatable, Sendable {
+    var path: String
+    var name: String
+}
+
 /// A mention the composer put in: the words it put in the field, and the `loom:` link it
 /// goes as.
 struct Mention: Equatable, Sendable {
@@ -530,6 +540,79 @@ func withMentionLinks(_ text: String, _ mentions: [Mention]) -> String {
     }
     out += text[at...]
     return out
+}
+
+/// A reply's words with what it mentions as the person's messages have it, as
+/// desktop/src/model.rs's `with_reply_mentions`: an agent reads a mention as `@Casper` or
+/// `` `notes/hours.md` `` and writes it back that way, so `@` and the name of one of the
+/// person's `agents` becomes that agent's link, and a path in code that the reply names
+/// (`files`, in `agent`'s folder or the shared one) becomes the file's. The longest name
+/// wins. Links and code blocks stay as they are.
+func withReplyMentions(_ text: String, agents: [(id: String, name: String)], files: [NamedFile], agent: String) -> String {
+    if !text.contains("@") && (files.isEmpty || !text.contains("`")) { return text }
+    let names = agents.filter { !$0.name.isEmpty }.sorted { $0.name.count > $1.name.count }
+    var lines: [String] = []
+    var fenced = false
+    for line in text.components(separatedBy: "\n") {
+        let trimmed = line.drop(while: { $0 == " " || $0 == "\t" })
+        let fence = trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+        if fence { fenced.toggle() }
+        if fenced || fence {
+            lines.append(line)
+            continue
+        }
+        var out = ""
+        var rest = Substring(line)
+        var before: Character? = nil
+        while let c = rest.first {
+            // A path in code: the file's link when the reply named a file there.
+            if c == "`" {
+                let after = rest.dropFirst()
+                guard let end = after.firstIndex(of: "`") else {
+                    out += rest
+                    break
+                }
+                let inside = String(after[after.startIndex..<end])
+                if let f = files.first(where: { $0.path == inside }) {
+                    let m = fileMention(agent: agent, path: f.path, name: f.name)
+                    out += "[\(m.words.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: ""))](\(m.link))"
+                } else {
+                    out += rest[rest.startIndex...end]
+                }
+                before = "`"
+                rest = rest[rest.index(after: end)...]
+                continue
+            }
+            // A link stays as it is.
+            if c == "[", let close = rest.range(of: "]("), let end = rest[close.upperBound...].firstIndex(of: ")"),
+               !rest[rest.startIndex..<close.lowerBound].contains("\n") {
+                out += rest[rest.startIndex...end]
+                before = ")"
+                rest = rest[rest.index(after: end)...]
+                continue
+            }
+            // @ and an agent's name, not in the middle of a word or an address.
+            if c == "@", before.map({ !$0.isLetter && !$0.isNumber && $0 != "." && $0 != "/" }) ?? true {
+                let after = rest.dropFirst()
+                if let found = names.first(where: { n in
+                    guard after.hasPrefix(n.name) else { return false }
+                    let next = after.dropFirst(n.name.count).first
+                    return next.map { !$0.isLetter && !$0.isNumber && $0 != "_" } ?? true
+                }) {
+                    let m = agentMention(id: found.id, name: found.name)
+                    out += "[\(m.words.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: ""))](\(m.link))"
+                    before = found.name.last
+                    rest = after.dropFirst(found.name.count)
+                    continue
+                }
+            }
+            out.append(c)
+            before = c
+            rest = rest.dropFirst()
+        }
+        lines.append(out)
+    }
+    return lines.joined(separator: "\n")
 }
 
 /// The @ being typed at the end of the composer's text, for the picker: how many
@@ -1429,7 +1512,7 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]))
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text) }.filter { !$0.path.isEmpty })
             }
             placeQueued()
             // The tool calls these messages name.
@@ -1591,7 +1674,8 @@ final class Model {
     /// nothing to send.
     func send(_ text: String, mentions: [Mention] = []) -> JSON? {
         guard let agent = selected, !uploading else { return nil }
-        let text = withMentionLinks(text, mentions).trimmingCharacters(in: .whitespacesAndNewlines)
+        // An agent's name typed after @ without the picker is a mention too.
+        let text = withReplyMentions(withMentionLinks(text, mentions), agents: agents.map { (id: $0.id, name: $0.name) }, files: [], agent: agent).trimmingCharacters(in: .whitespacesAndNewlines)
         let files = attachments.compactMap { $0.file?.file }
         if text.isEmpty && files.isEmpty { return nil }
         attachments = []
@@ -1623,6 +1707,12 @@ final class Model {
     }
 
     // MARK: Mentions
+
+    /// A reply's words with what it mentions as the person's messages show it
+    /// (`withReplyMentions`), so the person sees the same whoever wrote them.
+    func replyWords(_ m: Message, _ text: String) -> String {
+        withReplyMentions(text, agents: agents.map { (id: $0.id, name: $0.name) }, files: m.named, agent: selected ?? "")
+    }
 
     /// What a message's words need to show their links and mentions: the icons of the
     /// sites it links to and the thumbnails of the pictures sent with it, once they're

@@ -331,11 +331,11 @@ struct Reply: View {
                 if onTheWay {
                     // What it said on its way to the answer: smaller and quieter, never a
                     // bubble, so it doesn't read as a message.
-                    MarkdownView(b.text, font: Fonts.small, ink: P.ink2, live: live, links: links)
+                    MarkdownView(session.model.replyWords(message, b.text), font: Fonts.small, ink: P.ink2, live: live, links: links)
                 } else if replies == Prefs.bubbles {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
-                    let bubble = MarkdownView(titledLinks(b.text, message.links), live: live, links: links)
+                    let bubble = MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
                         .background(P.bubble, in: UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubbleJoined, bottomLeadingRadius: Tokens.Radius.bubble, bottomTrailingRadius: Tokens.Radius.bubble, topTrailingRadius: Tokens.Radius.bubble, style: .continuous))
@@ -350,7 +350,7 @@ struct Reply: View {
                         bubble
                     }
                 } else {
-                    MarkdownView(titledLinks(b.text, message.links), live: live, links: links)
+                    MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
                     if i == sourcesAt { SourcesTab(message: message) }
                 }
             }
@@ -797,7 +797,7 @@ struct SourcesTab: View {
                     }
                 }
                 if shown.count == 1, let one = shown.first {
-                    Text(one.site).font(Fonts.mono(Tokens.PhoneSize.caption - 1, relativeTo: .caption))
+                    Text(one.site).font(Fonts.ui(Tokens.PhoneSize.caption, relativeTo: .caption))
                 } else {
                     Text("\(shown.count) sources").font(Fonts.caption)
                 }
@@ -841,7 +841,7 @@ private struct SourcesSheet: View {
                             SiteIcon(icon: shown.icon, size: 20)
                             Text(shown.title).font(Fonts.body).foregroundStyle(P.ink).lineLimit(1)
                             Spacer(minLength: Tokens.Space.s)
-                            Text(shown.site).font(Fonts.mono(Tokens.PhoneSize.caption, relativeTo: .caption)).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.tail)
+                            Text(shown.site).font(Fonts.ui(Tokens.PhoneSize.caption, relativeTo: .caption)).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.tail)
                         }
                     }
                     .listRowBackground(P.raised)

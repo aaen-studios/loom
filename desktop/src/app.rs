@@ -16893,8 +16893,24 @@ enum MentionKey {
 }
 
 /// What's in the composer as it's sent: each mention in it as its link (PLAN.md,
-/// "Mentions").
+/// "Mentions"), and an agent's name typed after @ without the picker as one too, so the
+/// person sees what they meant and the agent is told who it is.
 fn composer_text(c: &TextareaState) -> String {
+    model::with_reply_mentions(&picked_text(c), &mention_agents(), &[])
+}
+
+/// The person's agents, as `with_reply_mentions` takes them.
+fn mention_agents() -> Vec<(String, String)> {
+    MENTION_AGENTS.with(|a| {
+        a.borrow()
+            .iter()
+            .map(|a| (a.id.clone(), a.name.clone()))
+            .collect()
+    })
+}
+
+/// What's in the composer with each mention the picker put in as its link.
+fn picked_text(c: &TextareaState) -> String {
     let content = c.content();
     let tokens: Vec<_> = content
         .tokens()
@@ -17282,14 +17298,39 @@ impl ReplyDraw<'_> {
                 .flex_col()
                 .gap(px(if show.bubbles { space::XS } else { space::S }));
         for (k, &i) in run.iter().enumerate() {
+            // What it mentions shows as the person's mentions do (PLAN.md, "Mentions").
+            let said = model::with_reply_mentions(
+                &self.m.blocks[i].text,
+                &mention_agents(),
+                &self.m.mentions,
+            );
+            let opener = self.this.clone();
             let words = div()
                 .text_size(px(size::REPLY * show.text_scale))
                 .line_height(relative(line::REPLY))
                 .text_color(p.ink)
                 .child(KeptText::new(
                     SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    linked_words(p, &self.m.blocks[i].text, self.m),
-                    |v| with_links(v.selectable(true)),
+                    linked_words(p, &said, self.m),
+                    move |v| {
+                        let opener = opener.clone();
+                        with_links(v.selectable(true).on_link_click(
+                            move |url: &SharedString,
+                                  _: &ClickEvent,
+                                  _: &mut Window,
+                                  cx: &mut App| {
+                                if url.starts_with("loom:file/") {
+                                    let _ = opener.update(cx, |loom, _| {
+                                        if let Some(frame) = loom.model.open_file_mention(url) {
+                                            loom.send(frame);
+                                        }
+                                    });
+                                } else if !url.starts_with("loom:") {
+                                    cx.open_url(url);
+                                }
+                            },
+                        ))
+                    },
                 ));
             let sources = (self.sources_at == Some(i)).then(|| self.sources_tab());
             group = group.child(if show.bubbles {
@@ -17367,9 +17408,7 @@ impl ReplyDraw<'_> {
             );
         }
         let label = match shown.as_slice() {
-            [(_, site, _, _)] => div()
-                .font_family(crate::prefs::mono_font())
-                .child(site.clone()),
+            [(_, site, _, _)] => div().child(site.clone()),
             all => div().child(format!("{} sources", all.len())),
         };
         let toggle = self.this.clone();
@@ -17459,8 +17498,7 @@ impl ReplyDraw<'_> {
                                 .min_w_0()
                                 .max_w(px(120.0))
                                 .truncate()
-                                .font_family(crate::prefs::mono_font())
-                                .text_size(px(size::CAPTION - 0.5))
+                                .text_size(px(size::CAPTION))
                                 .text_color(p.ink_3)
                                 .child(site),
                         )
@@ -17878,10 +17916,23 @@ fn reply(
     if sources_at.is_none() && !m.sources.is_empty() {
         body = body.child(div().flex().child(drawing.sources_tab()));
     }
-    // The files it names, each a chip with its type, which opens it.
-    if !m.mentions.is_empty() {
+    // The files it names that its words don't show where they're named (they show there
+    // as the person's mentions do, `with_reply_mentions`), each a chip with its type,
+    // which opens it.
+    let said: String = m
+        .blocks
+        .iter()
+        .filter(|b| b.kind == "text")
+        .map(|b| b.text.as_str())
+        .collect();
+    let unshown: Vec<&model::Mention> = m
+        .mentions
+        .iter()
+        .filter(|x| !said.contains(&format!("`{}`", x.path)))
+        .collect();
+    if !unshown.is_empty() {
         let mut chips = div().flex().flex_wrap().gap(px(space::S));
-        for (i, mention) in m.mentions.iter().enumerate() {
+        for (i, mention) in unshown.into_iter().enumerate() {
             let this = this.clone();
             let opened = mention.clone();
             chips = chips.child(

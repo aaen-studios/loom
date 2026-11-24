@@ -2284,6 +2284,92 @@ pub fn with_mention_links(
     out
 }
 
+/// A reply's words with what it mentions as the person's messages have it (PLAN.md,
+/// "Mentions"): an agent reads a mention as `@Casper` or `` `notes/hours.md` `` and writes
+/// it back that way, so `@` and the name of one of the person's `agents` (id, name)
+/// becomes that agent's link, and a path in code that the reply's `mentions` has becomes
+/// the file's. The longest name wins, so `@Main agent` isn't `@Main`. Code blocks stay as
+/// they are.
+pub fn with_reply_mentions(
+    text: &str,
+    agents: &[(String, String)],
+    mentions: &[Mention],
+) -> String {
+    if !text.contains('@') && (mentions.is_empty() || !text.contains('`')) {
+        return text.to_string();
+    }
+    let mut names: Vec<&(String, String)> = agents.iter().filter(|(_, n)| !n.is_empty()).collect();
+    names.sort_by_key(|(_, n)| std::cmp::Reverse(n.len()));
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut fenced = false;
+    for (k, line) in text.split('\n').enumerate() {
+        if k > 0 {
+            out.push('\n');
+        }
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+        }
+        if fenced || line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            out.push_str(line);
+            continue;
+        }
+        let mut rest = line;
+        let mut before: Option<char> = None;
+        while let Some(c) = rest.chars().next() {
+            // A path in code: the file's link when the reply named a file there.
+            if c == '`' {
+                let end = rest[1..].find('`').map(|e| e + 1);
+                let Some(end) = end else {
+                    out.push_str(rest);
+                    break;
+                };
+                let inside = &rest[1..end];
+                match mentions.iter().find(|m| m.path == inside) {
+                    Some(m) => {
+                        let (link, name) = file_mention(&m.agent, &m.path, &m.name);
+                        out.push_str(&format!("[{}]({link})", name.replace(['[', ']'], "")));
+                    }
+                    None => out.push_str(&rest[..=end]),
+                }
+                before = Some('`');
+                rest = &rest[end + 1..];
+                continue;
+            }
+            // A link stays as it is.
+            if c == '[' {
+                if let Some((len, _, _)) = md_link(rest) {
+                    out.push_str(&rest[..len]);
+                    before = Some(')');
+                    rest = &rest[len..];
+                    continue;
+                }
+            }
+            // @ and an agent's name, not in the middle of a word or an address.
+            if c == '@' && before.is_none_or(|b| !b.is_alphanumeric() && b != '.' && b != '/') {
+                let after = &rest[1..];
+                let found = names.iter().find(|(_, n)| {
+                    after.starts_with(n.as_str())
+                        && after[n.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|e| !e.is_alphanumeric() && e != '_')
+                });
+                if let Some((id, name)) = found {
+                    let (link, words) = agent_mention(id, name);
+                    out.push_str(&format!("[{}]({link})", words.replace(['[', ']'], "")));
+                    before = name.chars().last();
+                    rest = &after[name.len()..];
+                    continue;
+                }
+            }
+            out.push(c);
+            before = Some(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
 /// The @ being typed just before the cursor, for the picker: where it is, and what
 /// comes after it. None unless it starts the text or follows a space, with no space
 /// since.
@@ -7715,6 +7801,44 @@ mod tests {
             with_link_icons("[cat.png](loom-file:pic) [a.pdf](loom-file:pdf)", &inline),
             "<img src=\"/thumbs/pic\" width=\"14\" height=\"14\" /> [cat.png](loom-file:pic) \
              <img src=\"/icons/a.pdf\" width=\"14\" height=\"14\" /> [a.pdf](loom-file:pdf)"
+        );
+    }
+
+    #[test]
+    fn a_reply_shows_what_it_mentions_as_the_persons_messages_do() {
+        let agents = vec![
+            ("a1".to_string(), "Main".to_string()),
+            ("a2".to_string(), "Casper".to_string()),
+            ("a3".to_string(), "Main agent".to_string()),
+        ];
+        let hours = Mention {
+            agent: "a1".into(),
+            path: "notes/hours.md".into(),
+            name: "hours.md".into(),
+            size: 7,
+        };
+        let mentions = vec![hours];
+        assert_eq!(
+            with_reply_mentions(
+                "Ask @Casper about `notes/hours.md` please.",
+                &agents,
+                &mentions
+            ),
+            "Ask [@Casper](loom:agent/a2) about [hours.md](loom:file/a1/notes/hours.md) please."
+        );
+        // The longest name; not an address, a word or someone unknown; code it didn't
+        // name, links and code blocks as they are.
+        assert_eq!(
+            with_reply_mentions("@Main agent, me@Casper.no, @Caspers, @Bob", &agents, &[]),
+            "[@Main agent](loom:agent/a3), me@Casper.no, @Caspers, @Bob"
+        );
+        assert_eq!(
+            with_reply_mentions(
+                "`other.md` [@Casper](loom:agent/a2)\n```\n@Casper `notes/hours.md`\n```",
+                &agents,
+                &mentions
+            ),
+            "`other.md` [@Casper](loom:agent/a2)\n```\n@Casper `notes/hours.md`\n```"
         );
     }
 

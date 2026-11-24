@@ -1071,6 +1071,10 @@ const GITHUB =
 		border-radius: var(--radius-card);
 		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.1);
 	}
+	/* Shut until the tab opens it: its own display would show it whatever `hidden` says. */
+	.sources-list[hidden] {
+		display: none;
+	}
 	.sources-list.up {
 		top: auto;
 		bottom: calc(100% + 4px);
@@ -1104,7 +1108,7 @@ const GITHUB =
 	.source .d {
 		margin-left: auto;
 		max-width: 120px;
-		font: 11.5px var(--font-mono);
+		font-size: var(--size-caption);
 		color: var(--ink-3);
 		white-space: nowrap;
 		overflow: hidden;
