@@ -1002,9 +1002,10 @@ const [claude] = await brains(['claude-acp']);
 		width: 14px;
 		height: 14px;
 	}
+	/* Opens upward: the approval sits at the bottom of the chat, which clips what's below. */
 	.menu {
 		position: absolute;
-		top: calc(100% + 4px);
+		bottom: calc(100% + 4px);
 		left: 0;
 		z-index: 2;
 		min-width: 180px;
