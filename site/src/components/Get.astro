@@ -1,8 +1,8 @@
 ---
-// The ways to get loom, side by side: the Windows app, the Mac app and a server. Which comes first
-// follows the visitor's system (html[data-os], set in Base.astro): on Windows the Windows app, on a
-// Mac the Mac app, and elsewhere, as on a phone, the server, with both apps quiet beside it. The Mac
-// app shows once the newest release has its disk image.
+// The ways to get loom, side by side. What shows follows the visitor's system (html[data-os], set in
+// Base.astro): on Windows the Windows app and a server, on a Mac the Mac app and a server, and
+// elsewhere, as on a phone, the server first with both apps quiet beside it. The Mac app shows once
+// the newest release has its disk image.
 import { carries, latest, sizeOf } from '../lib/releases.mjs';
 import { LATEST, MAC_APP, WINDOWS_APP } from '../lib/site.mjs';
 
@@ -54,13 +54,14 @@ const macMeta = line(sizeOf(release, MAC_APP), 'Apple silicon');
 		font-size: 13px;
 		color: var(--ink-3);
 	}
-	/* Windows, and before the system is known: the Windows app first. */
+	/* Windows, and before the system is known: the Windows app, and no Mac app. */
+	.get-mac,
 	.meta-mac {
 		display: none;
 	}
-	/* On a Mac: the Mac app first, the rest quiet. */
+	/* On a Mac: the Mac app, and no Windows app. */
 	:global(html[data-os='mac']) .get-mac {
-		order: -1;
+		display: inline-flex;
 		background: var(--button);
 		color: var(--button-ink);
 		border-color: transparent;
@@ -68,8 +69,13 @@ const macMeta = line(sizeOf(release, MAC_APP), 'Apple silicon');
 	:global(html[data-os='mac']) .meta-mac {
 		display: block;
 	}
+	:global(html[data-os='mac']) .get-windows,
 	:global(html[data-os='mac']) .meta-windows {
 		display: none;
+	}
+	/* Anywhere else both apps show, quiet beside the server. */
+	:global(html[data-os='other']) .get-mac {
+		display: inline-flex;
 	}
 	/* Anywhere else: the server first, and both apps quiet beside it. */
 	:global(html[data-os='other']) .get-server {
@@ -78,7 +84,6 @@ const macMeta = line(sizeOf(release, MAC_APP), 'Apple silicon');
 		color: var(--button-ink);
 		border-color: transparent;
 	}
-	:global(html[data-os='mac']) .get-windows,
 	:global(html[data-os='other']) .get-windows {
 		background: transparent;
 		color: var(--ink);

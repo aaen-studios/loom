@@ -15,7 +15,7 @@ The guides are in [`docs/`](docs/): running loom, agents and keys, people, phone
 | `/llms.txt` | What loom is, for AI assistants and search |
 | `/404.html` | A page that isn't there |
 
-The iPhone app goes on the download page once it ships. The Mac app shows once the newest release has `loom-mac.dmg`, and comes first for a visitor on a Mac.
+The iPhone app goes on the download page once it ships. The Mac app shows once the newest release has `loom-mac.dmg`, and comes first for a visitor on a Mac. The home page shows a visitor on Windows only the Windows app and one on a Mac only the Mac app, each beside the server; anyone else gets the server first with both apps beside it.
 
 ## How it's made
 
