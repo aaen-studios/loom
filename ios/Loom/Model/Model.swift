@@ -361,6 +361,17 @@ func titledLinks(_ text: String, _ links: [String: PageLink]) -> String {
     return out.joined(separator: "\n")
 }
 
+/// A page's title as a bare address shows it: at most 60 characters, cut at a word, as
+/// desktop/src/model.rs's `short_title`.
+func shortTitle(_ title: String) -> String {
+    guard title.count > 60 else { return title }
+    let cut = String(title.prefix(60))
+    let words = cut.range(of: " ", options: .backwards).map { String(cut[..<$0.lowerBound]) } ?? cut
+    var end = Substring(words)
+    while let last = end.last, " ·-|,:.".contains(last) { end = end.dropLast() }
+    return String(end) + "…"
+}
+
 private func titledLine(_ line: String, _ links: [String: PageLink]) -> String {
     var out = ""
     var rest = Substring(line)
@@ -384,7 +395,7 @@ private func titledLine(_ line: String, _ links: [String: PageLink]) -> String {
             while let last = url.last, ".,;:!?)'".contains(last) { url = url.dropLast() }
             if url.isEmpty { url = rest[..<end] }
             if let title = links[String(url)]?.title.trimmingCharacters(in: .whitespaces), !title.isEmpty {
-                let plain = title.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+                let plain = shortTitle(title).replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
                 out += "[\(plain)](\(url))"
             } else {
                 out += url

@@ -2143,7 +2143,7 @@ fn line_links(
             let url = if url.is_empty() { &rest[..end] } else { url };
             match links.get(url).filter(|l| !l.title.trim().is_empty()) {
                 Some(l) => {
-                    let title = l.title.trim().replace(['[', ']'], "");
+                    let title = short_title(l.title.trim()).replace(['[', ']'], "");
                     out.push_str(&icon(url));
                     out.push_str(&format!("[{title}]({url})"));
                 }
@@ -2160,6 +2160,20 @@ fn line_links(
         rest = &rest[c.len_utf8()..];
     }
     out
+}
+
+/// A page's title as a bare address shows it: at most 60 characters, cut at a word.
+fn short_title(title: &str) -> String {
+    const MOST: usize = 60;
+    if title.chars().count() <= MOST {
+        return title.to_string();
+    }
+    let cut: String = title.chars().take(MOST).collect();
+    let words = cut.rsplit_once(' ').map_or(cut.as_str(), |(w, _)| w);
+    format!(
+        "{}…",
+        words.trim_end_matches([' ', '·', '-', '|', ',', ':', '.'])
+    )
 }
 
 /// A Markdown link at the start of `s`: its length, and its address.
@@ -7342,6 +7356,18 @@ mod tests {
         assert_eq!(
             with_link_icons("Read [this](https://a.example/x) now", &links, &src),
             format!("Read {img}[this](https://a.example/x) now")
+        );
+        // A long title is cut at a word.
+        links.insert(
+            "https://a.example/z".to_string(),
+            page(
+                "GitHub · Change is constant. GitHub keeps you ahead. · GitHub",
+                None,
+            ),
+        );
+        assert_eq!(
+            with_link_icons("https://a.example/z", &links, &src),
+            "[GitHub · Change is constant. GitHub keeps you ahead…](https://a.example/z)"
         );
         // Not looked up, or no title: as written.
         assert_eq!(
