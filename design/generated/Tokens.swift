@@ -119,6 +119,7 @@ enum Tokens {
         static let bubble: UInt32 = 0x1c1c1f
         static let ok: UInt32 = 0x6ccf9a
         static let bad: UInt32 = 0xff7a6b
+        static let warn: UInt32 = 0xf2a77a
     }
 
     enum ColorLight {
@@ -138,6 +139,7 @@ enum Tokens {
         static let bubble: UInt32 = 0xf1f1f3
         static let ok: UInt32 = 0x1f8a55
         static let bad: UInt32 = 0xd4442f
+        static let warn: UInt32 = 0xc2621f
     }
 
     enum ThreadColorDark {

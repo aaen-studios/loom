@@ -187,7 +187,7 @@ fn run(i: Instance, fake: String) ! Error {
     for f in app.frames {
         if str_at(f.copy(), "t") == some(String("card")) and str_at(at(f.copy(), "card"), "type") == some(String("sign_in")) { card = at(f, "card") }
     }
-    try check(str_at(card.copy(), "server") == some(String("acta")) and str_at(card, "title") == some(String("acta needs you to sign in")), "and its person gets a card in the reply to sign in with")
+    try check(str_at(card.copy(), "server") == some(String("acta")) and str_at(card, "title") == some(String("Sign in to acta")), "and its person gets a card in the reply to sign in with")
     let tried = try say(mut app, chat2.copy(), String("m_3"), "/mcp run_command {Obj.new().s("name", String("mcp.sign_in")).j("args", Obj.new().s("name", String("acta")).s("redirect", String(REDIRECT)).done()).done()}")
     try check(tried.contains("Only your person signs in"), "an agent can't sign in itself")
     // Signed in again, the same agent's tools work in its next script or search.

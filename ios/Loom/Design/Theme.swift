@@ -36,6 +36,8 @@ enum P {
     static let bubble = Color.loom(L.bubble, D.bubble)
     static let ok = Color.loom(L.ok, D.ok)
     static let bad = Color.loom(L.bad, D.bad)
+    /// A call that can change or run something, in its pill on a card.
+    static let warn = Color.loom(L.warn, D.warn)
     /// A card in the chat, as the desktop's `card_fill`: the page's colour in light,
     /// raised in dark; what's set into it the other way round; and its edge.
     static let cardFill = Color.loom(L.bg, D.raised)

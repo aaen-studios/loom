@@ -142,6 +142,10 @@ struct Card: Equatable, Sendable {
     var settings: [CardSetting] = []
     var state = ""
     var said = ""
+    /// Once an added server is ready, the tools it offers.
+    var tools: [String] = []
+    /// Loom's own cards' server's badge (`shared/badge.calx`).
+    var badge: Badge?
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// That the chat has gone on past its reply: choices no longer answer then, and a
@@ -172,6 +176,8 @@ struct Card: Equatable, Sendable {
         }
         state = c["state"].text
         said = c["said"].text
+        tools = c["tools"].array.map(\.text)
+        badge = Badge(c["badge"])
         id = c["id"].text
         title = c["title"].text
         options = c["options"].array.map(\.text)
@@ -496,12 +502,34 @@ struct Shown: Equatable, Sendable {
         var value: String
     }
 
+    /// One tool a call runs: what it does, the service it reaches, a few of its arguments
+    /// as chips, and how many more it was given.
+    struct Step: Equatable, Sendable {
+        var title: String
+        var badge: Badge?
+        var chips: [Line]
+        var more: Int
+    }
+
     /// `script`, `mcp`, `plugin`, `device`, `install`, or empty.
     var what = ""
     var lines: [Line] = []
     var more = 0
     var code = ""
     var raw = ""
+    /// What it does in plain words, and where it goes, small ("acta · search").
+    var title = ""
+    var place = ""
+    /// The services it reaches, at most two.
+    var badges: [Badge] = []
+    /// What loom knows it does (`reads`, `changes`, `deletes`, `runs`) and how the card
+    /// says it, or both empty.
+    var effect = ""
+    var effectWords = ""
+    var steps: [Step] = []
+    var stepsMore = 0
+    /// Why the agent makes the call, in its own words.
+    var reason = ""
 
     /// From the core's `shown`, or, for a question kept before the core shaped them, its
     /// `detail` as it came, for Details.
@@ -513,13 +541,40 @@ struct Shown: Equatable, Sendable {
             case .null: raw = ""
             case let other: raw = other.pretty
             }
+            title = a["title"].text
             return
         }
+        func lines(_ j: JSON) -> [Line] { j.array.map { Line(label: $0["label"].text, value: $0["value"].text) } }
         what = s["what"].text
-        lines = s["lines"].array.map { Line(label: $0["label"].text, value: $0["value"].text) }
+        self.lines = lines(s["lines"])
         more = s["more"].int ?? 0
         code = s["code"].text
         raw = s["raw"].text
+        title = s["title"].text.isEmpty ? a["title"].text : s["title"].text
+        place = s["place"].text
+        badges = s["badges"].array.compactMap(Badge.init)
+        effect = s["effect"]["kind"].text
+        effectWords = s["effect"]["words"].text
+        steps = s["steps"].array.map { Step(title: $0["title"].text, badge: Badge($0["badge"]), chips: lines($0["chips"]), more: $0["more"].int ?? 0) }
+        stepsMore = s["steps_more"].int ?? 0
+        reason = s["reason"].text
+    }
+}
+
+/// A service's badge on a card (`shared/badge.calx`): its initial on one of the thread
+/// colours, by name, or its own icon.
+struct Badge: Equatable, Sendable {
+    var name: String
+    var initial: String
+    var color: String
+    var icon: String
+
+    init?(_ j: JSON) {
+        name = j["name"].text
+        guard !name.isEmpty else { return nil }
+        initial = j["initial"].text
+        color = j["color"].text
+        icon = j["icon"].text
     }
 }
 

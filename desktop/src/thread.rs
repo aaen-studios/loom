@@ -421,6 +421,98 @@ pub fn thread(
     .flex_none()
 }
 
+thread_local! {
+    /// Each span's last state, under its key: pulled straight or not, and since when.
+    static SPANS: RefCell<HashMap<SharedString, (bool, f32)>> = RefCell::new(HashMap::new());
+}
+
+/// How long a span twangs after it's pulled straight, in seconds.
+const TWANG: f32 = 1.2;
+
+/// Where a span is at `u` (0..1 along it), in pixels up, `room` pixels from its middle
+/// to its edge: `tight` of the way from slack to straight, and `since` seconds after it
+/// was last pulled straight (or let go).
+fn span_at(u: f32, tight: f32, taut: bool, since: f32, room: f32, t: f32) -> f32 {
+    let slack = 1.0 - tight;
+    // Slack, it hangs in the middle and drifts, as a thread held loosely at both ends.
+    let sag = -(PI * u).sin() * room * 0.75 * slack;
+    let drift = (TAU * (u * 1.2 - t * 0.22)).sin() * (PI * u).sin() * room * 0.3 * slack;
+    // Pulled straight, it twangs once and settles.
+    let twang = if taut && since < TWANG {
+        thread_motion_snap::AMPLITUDE
+            * room
+            * (-thread_motion_snap::DAMPING * since).exp()
+            * (TAU * (thread_motion_snap::FREQUENCY / 10.0) * since).sin()
+            * (PI * u).sin()
+    } else {
+        0.0
+    };
+    sag + drift + twang
+}
+
+/// The agent's thread between two things on a card, `w` by `h`: on the card where an
+/// agent adds an MCP server, from loom's knot to the server's badge. Slack and drifting
+/// while `taut` is false, then pulled straight with one twang once it's true. It's the
+/// one line bending, as every thread is; nothing is added to it.
+pub fn span(
+    key: impl Into<SharedString>,
+    taut: bool,
+    tint: Hsla,
+    w: f32,
+    h: f32,
+) -> impl IntoElement {
+    let key = key.into();
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let t = now();
+            let since = SPANS.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.len() > 200 {
+                    s.retain(|_, v| t - v.1 < 600.0);
+                }
+                // A span first drawn starts as it is, without easing or twanging.
+                let e = s.entry(key.clone()).or_insert((taut, t - TWANG - EASE));
+                if e.0 != taut {
+                    *e = (taut, t);
+                }
+                t - e.1
+            });
+            let k = ease(since / EASE);
+            let tight = if taut { k } else { 1.0 - k };
+            // It asks for frames while it's pulled straight or let go. Slack, it drifts
+            // at the pace the window draws waiting cards (`Loom::cards_wait`).
+            if since < TWANG.max(EASE) {
+                window.request_animation_frame();
+            }
+            let x0 = bounds.origin.x.as_f32();
+            let mid = bounds.origin.y.as_f32() + bounds.size.height.as_f32() / 2.0;
+            let width = bounds.size.width.as_f32();
+            let room = (bounds.size.height.as_f32() / 2.0 - thread_stroke::SMALL).max(1.0);
+            let steps = (width / 1.5).max(32.0) as usize;
+            let mut pb = PathBuilder::stroke(px(thread_stroke::SMALL));
+            for i in 0..=steps {
+                let u = i as f32 / steps as f32;
+                let p = point(
+                    px(x0 + u * width),
+                    px(mid - span_at(u, tight, taut, since, room, t)),
+                );
+                if i == 0 {
+                    pb.move_to(p)
+                } else {
+                    pb.line_to(p)
+                }
+            }
+            if let Ok(path) = pb.build() {
+                window.paint_path(path, tint);
+            }
+        },
+    )
+    .w(px(w))
+    .h(px(h))
+    .flex_none()
+}
+
 /// How far a shape's moods bend it, in pixels: less than a straight thread's, so the
 /// shape still reads.
 const SHAPE_ROOM: f32 = 1.0;

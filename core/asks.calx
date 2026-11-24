@@ -17,19 +17,52 @@ module core.asks
 // - `code`: the command or the script it runs, at most six lines.
 // - `raw`: all of it, for the card's Details: the whole script, or what the call
 //   is given as JSON, or empty when the lines and the code show it all.
+//
+// And what the card's head and steps show (LOO-278), all from the call itself:
+//
+// - `title`: what the call does, in plain words. The agent program's own title
+//   when it gave one (an ACP tool call's), or for a tool of an MCP server or a
+//   plugin, its name in words ("Fetch emails"), or its steps'.
+// - `place`: where it goes, small: the server and the tool ("acta · search"),
+//   the device and the tool, or empty.
+// - `badges`: the services it reaches (`shared/badge.calx`), at most two: a
+//   call's steps' services, or else its server's.
+// - `effect`: what loom knows it does, `{"kind", "words"}`, from its kind (an ACP
+//   tool kind, or `read` for an MCP tool marked readOnlyHint): `reads` ("Only
+//   reads"), `changes`, `deletes` or `runs`, or both empty when it doesn't know.
+// - `steps`: for a call whose argument is a list of the tools it runs, each an
+//   object naming its tool (Composio's `tools: [{tool_slug, arguments}]`): each
+//   step's `title`, `badge`, `chips` (`{"label", "value"}`, a few of its
+//   arguments, short) and `more`. The other arguments then go under Details.
+// - `reason`: why the agent makes the call, in its own words, from an argument
+//   such as `thought` or `reason`, or empty.
 import std.json.{Json, parse, pretty}
 import shared.obj.{Obj, at, str_at}
+import shared.badge
 
 const LINES_MOST: usize = 6
 const VALUE_MOST: usize = 120
 const CODE_LINES_MOST: usize = 6
 const CODE_LINE_MOST: usize = 240
 const RAW_LINES_MOST: usize = 400
+const STEPS_MOST: usize = 6
+const CHIPS_MOST: usize = 4
+const CHIP_MOST: usize = 40
+const REASON_MOST: usize = 240
 
 // Names in a list's objects that say which one each is, best first.
 const NAMES: str = "name title tool_slug slug tool label path file url id key"
 // Words a label keeps in capitals.
 const CAPITALS: str = "id url uri api ip html json sql ssh dns"
+// What names the tool a step runs, in a list of the tools a call runs.
+const TOOL_KEYS: str = "tool_slug tool_name toolName tool"
+// What a step's arguments go by.
+const ARG_KEYS: str = "arguments args input params parameters"
+// Arguments that say why the agent makes the call.
+const REASONS: str = "thought reason why rationale explanation purpose intent"
+// Words a tool's name starts with when it says what it does rather than where:
+// GMAIL_FETCH_EMAILS starts with a service, and create_issue with a verb.
+const VERBS: str = "get list fetch search find read create add update edit delete remove send post put patch set run execute query open close move copy upload download start stop make write reply forward share invite insert append replace check count draft mark archive star sync import export generate call use"
 
 // `text`, cut at `most` runes with "…", and whether it's all there.
 fn cut(text: String, most: usize) -> (String, bool) {
@@ -64,14 +97,14 @@ fn first_line(text: String, most: usize) -> (String, bool) {
     return (short, whole and not others)
 }
 
-// A member's name in words: `file_path`, `filePath` and `file-path` are "File
-// path", and an id or a URL stays in capitals.
-pub fn label(key: String) -> String {
+// The words of a name: `file_path`, `filePath`, `file-path` and `FILE_PATH` are
+// "file" and "path", as they're written.
+fn words_of(key: String) -> List<String> {
     var parts = List<String>()
     var word = String()
     var after_small = false
     for r in key.runes() {
-        if r == '_' or r == '-' or r == ' ' or r == '.' {
+        if r == '_' or r == '-' or r == ' ' or r == '.' or r == '/' or r == ':' {
             if word.len() > 0 {
                 parts.push(word.copy())
                 word.clear()
@@ -88,33 +121,110 @@ pub fn label(key: String) -> String {
         after_small = (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9')
     }
     if word.len() > 0 { parts.push(word.copy()) }
+    return parts
+}
+
+// Whether a word stays in capitals: an id, a URL.
+fn capital(word: String) -> bool {
+    let small = word.to_lower_root()
+    for c in CAPITALS.split(" ") {
+        if small == c { return true }
+    }
+    return false
+}
+
+// `text` with its first rune in capitals.
+fn capitalized(text: String) -> String {
     var out = String()
-    for w in parts {
-        let small = w.to_lower_root()
-        var kept = false
-        for c in CAPITALS.split(" ") {
-            if small == c { kept = true }
-        }
-        let spelled = if kept { small.to_upper_root() } else if w.len() > 1 and w == w.to_upper_root() { w.copy() } else { small.copy() }
-        if out.len() == 0 {
-            // The first word starts with a capital.
-            var first = true
-            for r in spelled.runes() {
-                if first {
-                    var one = String()
-                    one.push(r)
-                    out.push_str(one.to_upper_root())
-                    first = false
-                } else {
-                    out.push(r)
-                }
-            }
+    var first = true
+    for r in text.runes() {
+        if first {
+            var one = String()
+            one.push(r)
+            out.push_str(one.to_upper_root())
+            first = false
         } else {
-            out.push_str(" ")
-            out.push_str(spelled)
+            out.push(r)
         }
     }
     return out
+}
+
+// `text` with its first rune small, unless its first word stays in capitals.
+fn uncapitalized(text: String) -> String {
+    let first = text.split(" ")[0].copy()
+    if capital(first.copy()) or (first.len() > 1 and first == first.to_upper_root()) { return text.copy() }
+    var out = String()
+    var at_start = true
+    for r in text.runes() {
+        if at_start {
+            var one = String()
+            one.push(r)
+            out.push_str(one.to_lower_root())
+            at_start = false
+        } else {
+            out.push(r)
+        }
+    }
+    return out
+}
+
+// A member's name in words: `file_path`, `filePath` and `file-path` are "File
+// path", and an id or a URL stays in capitals.
+pub fn label(key: String) -> String {
+    var spelled = List<String>()
+    for w in words_of(key) {
+        let small = w.to_lower_root()
+        spelled.push(if capital(w.copy()) { small.to_upper_root() } else if w.len() > 1 and w == w.to_upper_root() { w.copy() } else { small.copy() })
+    }
+    return capitalized(spelled.join(" "))
+}
+
+// Words as a phrase: in small letters but for an id or a URL, the first in
+// capitals. ["FETCH", "EMAILS"] is "Fetch emails".
+fn phrase(parts: List<String>) -> String {
+    var spelled = List<String>()
+    for w in parts {
+        let small = w.to_lower_root()
+        spelled.push(if capital(w.copy()) { small.to_upper_root() } else { small.copy() })
+    }
+    return capitalized(spelled.join(" "))
+}
+
+// Whether `word` is a verb a tool's name starts with.
+fn verb(word: String) -> bool {
+    let small = word.to_lower_root()
+    for v in VERBS.split(" ") {
+        if small == v { return true }
+    }
+    return false
+}
+
+// A tool's name as what it does and the service it reaches, when its name says
+// one: GMAIL_FETCH_EMAILS is ("gmail", "Fetch emails"), and create_issue is ("",
+// "Create issue"). Words that name `server` itself, as composio's
+// COMPOSIO_SEARCH_TOOLS does, are left out, as is a service named twice
+// (OUTLOOK_OUTLOOK_LIST_MESSAGES).
+fn action_of(name: String, server: String) -> (String, String) {
+    var parts = words_of(name.copy())
+    let home = server.trim_prefix("plugin-").to_lower_root()
+    while parts.len() > 1 and parts[0].to_lower_root() == home {
+        _ = parts.remove(0)
+    }
+    var service = String()
+    if parts.len() >= 3 and not verb(parts[0].copy()) {
+        service = parts.remove(0).to_lower_root()
+        while parts.len() > 1 and parts[0].to_lower_root() == service {
+            _ = parts.remove(0)
+        }
+    }
+    if parts.len() == 0 { return (service, name.copy()) }
+    return (service, phrase(parts))
+}
+
+// A service's name as a title says it: "gmail" is "Gmail".
+fn service_name(service: String) -> String {
+    return capitalized(service)
 }
 
 // Whether `v` is a string, a number or a bool.
@@ -245,9 +355,136 @@ fn raw_of(text: String) -> String {
     return out.join("\n")
 }
 
+// The tool a step of a call runs, by TOOL_KEYS.
+fn tool_of(v: Json) -> String? {
+    for k in TOOL_KEYS.split(" ") {
+        if let s = (v.get(k.copy()) ?? Json.Null).as_str() {
+            if not s.trim().is_empty() { return some(s.trim().copy()) }
+        }
+    }
+    return none
+}
+
+// What a step of a call is given, by ARG_KEYS.
+fn args_of(v: Json) -> Json {
+    for k in ARG_KEYS.split(" ") {
+        let a = v.get(k.copy()) ?? Json.Null
+        if let Json.Object(_) = a.copy() { return a }
+    }
+    return Json.Null
+}
+
+// Which of what a call is given is the list of the tools it runs: the first list
+// of objects that each name a tool.
+fn steps_key(given: LinkedMap<String, Json>) -> String? {
+    for (k, v) in given {
+        if let Json.Array(xs) = v.copy() {
+            if xs.len() == 0 { continue }
+            var named = true
+            for x in xs {
+                if tool_of(x.copy()) == none { named = false }
+            }
+            if named { return some(k.copy()) }
+        }
+    }
+    return none
+}
+
+// A few of what a step is given, each a short chip, and how many more there were.
+// Only plain values and lists of them: an object is in Details.
+fn chips_of(args: Json) -> (List<Json>, i64) {
+    var chips = List<Json>()
+    var more: i64 = 0
+    if let Json.Object(m) = args {
+        for (k, v) in m {
+            var listed = plain(v.copy())
+            if let Json.Array(xs) = v.copy() {
+                listed = true
+                for x in xs {
+                    if not plain(x.copy()) { listed = false }
+                }
+            }
+            if not listed { continue }
+            let (value, _) = line_of(v.copy()) else continue
+            if chips.len() == CHIPS_MOST {
+                more += 1
+                continue
+            }
+            let (short, _) = cut(value, CHIP_MOST)
+            chips.push(Obj.new().s("label", uncapitalized(label(k.copy()))).s("value", short).done())
+        }
+    }
+    return (chips, more)
+}
+
+// The steps of a call that runs the tools in `list`, each with its title, its
+// badge, its chips and how many more it was given; the services they reach,
+// once each, in order; and how many more steps there were than shown.
+fn steps_of(list: Json, server: String) -> (List<Json>, List<String>, i64) {
+    var steps = List<Json>()
+    var services = List<String>()
+    var more: i64 = 0
+    if let Json.Array(xs) = list {
+        for x in xs {
+            let tool = tool_of(x.copy()) ?? String()
+            let (service, action) = action_of(tool, server.copy())
+            if service.len() > 0 and not services.contains(service.copy()) { services.push(service.copy()) }
+            if steps.len() == STEPS_MOST {
+                more += 1
+                continue
+            }
+            let (chips, more_chips) = chips_of(args_of(x.copy()))
+            let title = if service.len() > 0 { "{action} in {service_name(service.copy())}" } else { action }
+            let reached = if service.len() > 0 { service } else { server.copy() }
+            steps.push(Obj.new().s("title", title).j("badge", badge.badge(reached, String())).j("chips", Json.Array(chips)).i("more", more_chips).done())
+        }
+    }
+    return (steps, services, more)
+}
+
+// The steps' titles as one: the first, and the second or how many more.
+fn steps_title(steps: List<Json>, more: i64) -> String {
+    if steps.len() == 0 { return String() }
+    let first = str_at(steps[0].copy(), "title") ?? String()
+    let others = i64.wrap(steps.len()) - 1 + more
+    if others == 0 { return first }
+    if others == 1 { return "{first} and {uncapitalized(str_at(steps[1].copy(), "title") ?? String())}" }
+    return "{first} and {others} more"
+}
+
+// What loom knows a call does, from its kind, and how a card says it.
+fn effect_of(kind: String, what: String) -> (String, String) {
+    if what == "script" { return (String("runs"), String("Runs a script")) }
+    if what == "install" { return (String("runs"), String("Runs commands")) }
+    if kind == "read" or kind == "search" or kind == "think" or kind == "fetch" { return (String("reads"), String("Only reads")) }
+    if kind == "edit" { return (String("changes"), String("Changes files")) }
+    if kind == "move" { return (String("changes"), String("Moves")) }
+    if kind == "delete" { return (String("deletes"), String("Deletes")) }
+    if kind == "execute" { return (String("runs"), String("Runs a command")) }
+    // A tool its server didn't mark read-only.
+    if what == "mcp" or what == "plugin" { return (String("changes"), String("Can change")) }
+    return (String(), String())
+}
+
+// Why the agent makes the call, from an argument that says so, and which it was.
+fn reason_of(given: LinkedMap<String, Json>) -> (String, String) {
+    for k in REASONS.split(" ") {
+        if let v = given.find(k.copy()) {
+            if let s = v.as_str() {
+                if not s.trim().is_empty() {
+                    let (short, _) = cut(s.trim().copy(), REASON_MOST)
+                    return (short, k.copy())
+                }
+            }
+        }
+    }
+    return (String(), String())
+}
+
 // What an approval.needed event `e` asks, as the lines, code and raw text above.
 pub fn shown(e: Json) -> Json {
-    let title = str_at(e.copy(), "title") ?? String()
+    let kind = str_at(e.copy(), "tool") ?? String()
+    let asked = str_at(e.copy(), "title") ?? String()
     let detail = at(e, "detail")
     var code = String()
     var what = String()
@@ -312,8 +549,54 @@ pub fn shown(e: Json) -> Json {
     }
     _ = given.remove(String("act"))
     var whole = true
+    // Where it goes, and the tool, for a tool of a server, a plugin or a device.
+    let server = str_at(detail.copy(), "server") ?? str_at(detail.copy(), "device") ?? String()
+    let tool = if what == "mcp" or what == "plugin" or what == "device" { str_at(detail.copy(), "tool") ?? String() } else { String() }
+    let place = if tool.len() > 0 and server.len() > 0 { "{server.trim_prefix("plugin-")} · {tool}" } else { String() }
+    // Why the agent makes it, in its own words: said once, as the reason.
+    let (reason, reason_key) = reason_of(given.copy())
+    if reason_key.len() > 0 { _ = given.remove(reason_key) }
+    // The tools it runs, as steps: the rest of what it's given is in Details.
+    var steps = List<Json>()
+    var services = List<String>()
+    var steps_more: i64 = 0
+    if what == "mcp" or what == "plugin" {
+        if let key = steps_key(given.copy()) {
+            if let list = given.find(key.copy()) {
+                let (ss, found, more_steps) = steps_of(list.copy(), server.copy())
+                steps = ss
+                services = found
+                steps_more = more_steps
+            }
+            given.clear()
+            whole = false
+        }
+    }
+    // What it does in plain words: the agent program's own title, or for a tool
+    // of a server or a plugin, its steps' or the tool's name in words.
+    var title = asked.copy()
+    if (what == "mcp" or what == "plugin") and tool.len() > 0 {
+        if steps.len() > 0 {
+            title = steps_title(steps.copy(), steps_more)
+        } else {
+            // A tool that names the service it reaches, as Composio's do, says it
+            // as a step does, with that service's badge.
+            let (service, action) = action_of(tool.copy(), server.copy())
+            title = if service.len() > 0 { "{action} in {service_name(service.copy())}" } else { action }
+            if service.len() > 0 { services.push(service) }
+        }
+    }
+    // The services it reaches: its steps', or its server's.
+    var badges = List<Json>()
+    for s in services {
+        if badges.len() < 2 { badges.push(badge.badge(s.copy(), String())) }
+    }
+    if badges.len() == 0 and (what == "mcp" or what == "plugin") and server.len() > 0 {
+        badges.push(badge.badge(server.trim_prefix("plugin-").copy(), String()))
+    }
+    let (effect, effect_words) = effect_of(kind, what.copy())
     // A command the title already says whole isn't said again.
-    if code.trim().len() >= 3 and not code.contains("\n") and title.contains(code.trim()) { code = String() }
+    if code.trim().len() >= 3 and not code.contains("\n") and asked.contains(code.trim()) { code = String() }
     let (shown_code, code_whole) = code_of(code.copy())
     if not code_whole { whole = false }
     var lines = List<Json>()
@@ -321,7 +604,7 @@ pub fn shown(e: Json) -> Json {
     for (k, v) in given {
         let (value, all_of_it) = line_of(v.copy()) else continue
         // What the title says already.
-        if all_of_it and value.trim().len() >= 3 and title.contains(value.trim()) { continue }
+        if all_of_it and value.trim().len() >= 3 and (asked.contains(value.trim()) or title.contains(value.trim())) { continue }
         if lines.len() == LINES_MOST {
             more += 1
             whole = false
@@ -332,9 +615,12 @@ pub fn shown(e: Json) -> Json {
     }
     var raw = String()
     if not whole {
-        raw = if not code_whole and lines.len() == 0 and more == 0 { raw_of(code.trim_end().copy()) } else if all != Json.Null { raw_of(pretty(all, 2)) } else { raw_of(code.trim_end().copy()) }
+        raw = if not code_whole and lines.len() == 0 and more == 0 and steps.len() == 0 { raw_of(code.trim_end().copy()) } else if all != Json.Null { raw_of(pretty(all, 2)) } else { raw_of(code.trim_end().copy()) }
     }
-    return Obj.new().s("what", what).j("lines", Json.Array(lines)).i("more", more).s("code", shown_code).s("raw", raw).done()
+    var out = Obj.new().s("what", what).j("lines", Json.Array(lines)).i("more", more).s("code", shown_code).s("raw", raw)
+    out = out.s("title", title).s("place", place).j("badges", Json.Array(badges))
+    out = out.j("effect", Obj.new().s("kind", effect).s("words", effect_words).done())
+    return out.j("steps", Json.Array(steps)).i("steps_more", steps_more).s("reason", reason).done()
 }
 
 fn ask(text: String) -> Json {
@@ -362,15 +648,81 @@ fn names_members_in_words() {
     assert(label(String("sync-response")) == "Sync response")
 }
 
+// A step's title and chips, as "title: label=value, …".
+fn steps_text(s: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(ss) = at(s, "steps") {
+        for st in ss {
+            var chips = List<String>()
+            if let Json.Array(cs) = at(st.copy(), "chips") {
+                for c in cs {
+                    chips.push("{str_at(c.copy(), "label") ?? String()}={str_at(c.copy(), "value") ?? String()}")
+                }
+            }
+            out.push("{str_at(st.copy(), "title") ?? String()}: {chips.join(", ")}")
+        }
+    }
+    return out.join("|")
+}
+
+// The badges' names, joined.
+fn badges_text(s: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(bs) = at(s, "badges") {
+        for b in bs {
+            out.push(str_at(b.copy(), "name") ?? String())
+        }
+    }
+    return out.join(",")
+}
+
 @test
-fn shows_an_mcp_call_as_lines() {
-    let s = ask(#"{"title": "Use COMPOSIO_MULTI_EXECUTE_TOOL on the MCP server composio", "detail": {"server": "composio", "tool": "COMPOSIO_MULTI_EXECUTE_TOOL", "arguments": {"tools": [{"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {"query": "is:unread"}}], "sync_response_to_workbench": false, "thought": "Fetch the unread mail", "memory": {}, "session_id": "s_1"}, "act": 3}}"#)
-    assert(lines_of(s.copy()) == "Tools=GMAIL_FETCH_EMAILS|Sync response to workbench=No|Thought=Fetch the unread mail|Session ID=s_1")
-    assert(str_at(s.copy(), "what") == some(String("mcp")))
-    assert(str_at(s.copy(), "code") == some(String()))
-    // A list of objects is only their names: Details has the rest.
-    let raw = str_at(s, "raw") ?? String()
-    assert(raw.contains("\"query\": \"is:unread\"") and not raw.contains("\"act\""))
+fn shows_the_tools_a_call_runs_as_steps() {
+    let s = ask(#"{"tool": "other", "title": "Use COMPOSIO_MULTI_EXECUTE_TOOL on the MCP server composio", "detail": {"server": "composio", "tool": "COMPOSIO_MULTI_EXECUTE_TOOL", "arguments": {"tools": [{"tool_slug": "OUTLOOK_OUTLOOK_SEARCH_MESSAGES", "arguments": {"query": "received>=2026-11-22", "top": 30, "select": ["from", "subject"], "filter": {"a": 1}}}, {"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {"query": "is:unread", "max_results": 15}}], "sync_response_to_workbench": false, "thought": "Fetch the unread mail from today so I can sum it up for you", "memory": {}, "session_id": "s_1"}, "act": 3}}"#)
+    assert(str_at(s.copy(), "title") == some(String("Search messages in Outlook and fetch emails in Gmail")))
+    assert(str_at(s.copy(), "place") == some(String("composio · COMPOSIO_MULTI_EXECUTE_TOOL")))
+    assert(badges_text(s.copy()) == "outlook,gmail")
+    assert(steps_text(s.copy()) == "Search messages in Outlook: query=received>=2026-11-22, top=30, select=from, subject|Fetch emails in Gmail: query=is:unread, max results=15")
+    assert(str_at(s.copy(), "reason") == some(String("Fetch the unread mail from today so I can sum it up for you")))
+    // Nothing it doesn't know: Composio's tool isn't marked read-only.
+    assert(str_at(at(s.copy(), "effect"), "words") == some(String("Can change")))
+    // The rest of what it's given is under Details, all of it.
+    assert(lines_of(s.copy()) == "")
+    let raw = str_at(s.copy(), "raw") ?? String()
+    assert(raw.contains("\"session_id\": \"s_1\"") and raw.contains("\"a\": 1") and not raw.contains("\"act\""))
+    assert(str_at(s, "what") == some(String("mcp")))
+}
+
+@test
+fn says_a_tool_in_words_with_its_service_s_badge() {
+    let s = ask(#"{"tool": "read", "title": "Use search_issues on the MCP server acta", "detail": {"server": "acta", "tool": "search_issues", "arguments": {"query": "invoices", "limit": 5}, "act": 0}}"#)
+    assert(str_at(s.copy(), "title") == some(String("Search issues")))
+    assert(badges_text(s.copy()) == "acta")
+    assert(str_at(at(s.copy(), "effect"), "kind") == some(String("reads")))
+    assert(str_at(at(s.copy(), "effect"), "words") == some(String("Only reads")))
+    assert(steps_text(s.copy()) == "")
+    // A name with the server's own name in front, as composio's are.
+    let named = ask(#"{"tool": "other", "title": "x", "detail": {"server": "composio", "tool": "COMPOSIO_SEARCH_TOOLS", "arguments": {}}}"#)
+    assert(str_at(named, "title") == some(String("Search tools")))
+    // One that names the service it reaches says it, with that service's badge.
+    let gmail = ask(#"{"tool": "other", "title": "x", "detail": {"server": "composio", "tool": "GMAIL_SEND_EMAIL", "arguments": {"subject": "Saturday"}}}"#)
+    assert(str_at(gmail.copy(), "title") == some(String("Send email in Gmail")) and badges_text(gmail) == "gmail")
+    // A plugin's, by its own name.
+    let plugin = ask(#"{"tool": "other", "title": "x", "detail": {"server": "plugin-board", "tool": "addCard", "arguments": {"title": "Ship it"}}}"#)
+    assert(str_at(plugin.copy(), "place") == some(String("board · addCard")) and badges_text(plugin.copy()) == "board")
+    assert(str_at(plugin, "title") == some(String("Add card")))
+}
+
+@test
+fn keeps_an_agent_program_s_own_title_and_says_its_kind() {
+    let s = ask(#"{"tool": "execute", "title": "Run the tests", "detail": {"command": "cargo test", "description": "Run the tests"}}"#)
+    assert(str_at(s.copy(), "title") == some(String("Run the tests")))
+    assert(str_at(s.copy(), "place") == some(String()) and badges_text(s.copy()) == "")
+    assert(str_at(at(s.copy(), "effect"), "words") == some(String("Runs a command")))
+    let gone = ask(#"{"tool": "delete", "title": "Delete the agent Pip", "detail": null}"#)
+    assert(str_at(at(gone, "effect"), "kind") == some(String("deletes")))
+    let other = ask(#"{"tool": "other", "title": "Save a token", "detail": {"path": "/x"}}"#)
+    assert(str_at(at(other, "effect"), "kind") == some(String()))
 }
 
 @test
@@ -438,7 +790,7 @@ fn shows_an_install_as_its_plan_and_commands() {
 @test
 fn shows_nothing_for_nothing() {
     let s = ask(#"{"title": "Delete the agent Pip", "detail": null}"#)
-    assert("{s}" == #"{"what":"","lines":[],"more":0,"code":"","raw":""}"#)
+    assert("{s}" == #"{"what":"","lines":[],"more":0,"code":"","raw":"","title":"Delete the agent Pip","place":"","badges":[],"effect":{"kind":"","words":""},"steps":[],"steps_more":0,"reason":""}"#)
     let text = ask(#"{"title": "Run a command", "detail": "gh run list --branch main"}"#)
     assert(str_at(text, "code") == some(String("gh run list --branch main")))
 }
