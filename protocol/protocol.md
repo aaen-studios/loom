@@ -435,7 +435,7 @@ An agent's browser opened or closed, was taken over or handed back, or is asking
 
 ### `browser.frame`
 
-A picture of the page, to each session watching that agent's browser: `agent`, and `width` and `height`, the page's pixels, which `browser.input`'s `x` and `y` are in, whatever the picture's own size. They come as the page changes, at most about twelve a second, each no bigger than the biggest any session watching it shows it at (`browser.watch`'s `width` and `height`), and never bigger than the page.
+A picture of the page, to each session watching that agent's browser: `agent`, and `width` and `height`, the page's pixels, which `browser.input`'s `x` and `y` are in, whatever the picture's own size. They come as the page changes, at most about twelve a second, each no bigger than the biggest any session watching it shows it at (`browser.watch`'s `width` and `height`), and never bigger than the page. None made at the size before comes after `browser.watch` answers.
 
 From version 2 it's a binary message: the head, `{"t":"browser.frame","agent":"a_1","width":1264,"height":705}`, a newline, then the JPEG's bytes. In version 1 it's a text frame with the JPEG in base64 as `data`. The JPEG is as the browser wrote it: Chrome on Linux writes a scan for each of its three colors, which an app's decoder has to read as well as a JPEG in one scan.
 

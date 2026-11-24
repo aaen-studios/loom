@@ -26,6 +26,7 @@ import std.env
 import std.fs
 import std.http.{Header, get}
 import std.http.websocket.{Message, WebSocket, connect}
+import std.image.jpeg
 import std.json.{Json, parse}
 import std.net.{Waker as LoopWaker}
 import std.process.{Child, Command, ProcessError, Stdio, which}
@@ -92,6 +93,15 @@ pub fn frame_size(width: i64, height: i64) -> (i64, i64) {
     return (width.max(FRAME_LEAST).min(PAGE_WIDTH), height.max(FRAME_LEAST).min(PAGE_HEIGHT))
 }
 
+// Whether a picture `width` × `height` of a page `page_width` × `page_height` is
+// one its frames asked for at most `cast_width` × `cast_height` give: within
+// that, and filling it across or down, or as big as the page when it's smaller.
+// Chrome rounds, so a pixel or two short fills it.
+fn at_cast_size(width: i64, height: i64, page_width: i64, page_height: i64, cast_width: i64, cast_height: i64) -> bool {
+    if width > cast_width or height > cast_height { return false }
+    return width >= cast_width - 2 or height >= cast_height - 2 or (width >= page_width - 2 and height >= page_height - 2)
+}
+
 pub enum In {
     Do(Op)
     Watch(Watching)    // who watches it now
@@ -103,7 +113,7 @@ pub enum In {
 // What a browser's thread tells the loop. Each names the agent by its key.
 pub enum Back {
     Done(String, String, Json)    // a call, and its MCP result
-    Frame(String, String, List<u8>)    // a picture of the page, as browser.frame's text for protocol version 1 and as its binary message for later ones, each empty when no one takes it so
+    Frame(String, String, List<u8>, i64, i64)    // a picture of the page, as browser.frame's text for protocol version 1 and as its binary message for later ones, each empty when no one takes it so; then the most it's wide and high, as its cast was asked
     Open(String, bool)    // whether its browser is open now
     Steps(String, Json, bool)    // what the person's done while recording, as steps, and whether the recording's ended
     Stopped(u64)    // the thread numbered so is ending, with its browser stopped, for the loop to join
@@ -142,6 +152,7 @@ struct Worker {
     casting: bool    // whether the page sends frames
     cast_width: i64     // the most they're wide, as the page was asked
     cast_height: i64    // and high
+    fresh: bool    // the frames have just started again, and none at their size has come yet
     recording: bool    // whether what the person does is kept as steps
     steps: List<Json>    // what they've done since they started recording
     last_url: String    // the page the last step was on
@@ -217,7 +228,7 @@ impl Task for Worker {
 pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, before: own Thread?, back: BackTo) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false, before: before }) }
+    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, fresh: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false, before: before }) }
     return (to, t)
 }
 
@@ -528,37 +539,62 @@ impl Worker {
         let width = i64.round(at(meta.copy(), "deviceWidth").as_f64() ?? 0.0)
         let height = i64.round(at(meta, "deviceHeight").as_f64() ?? 0.0)
         let data = str_at(params, "data") ?? String()
+        var picture = List<u8>()
+        if w.watch.binary or w.fresh { picture = bytes.from_base64(data.copy()) ?? List<u8>() }
+        // Just after its frames start again at another size, Chrome may still send one
+        // or two at the size before. Until one at this size comes, each is looked at,
+        // and one that isn't goes to no one.
+        if w.fresh {
+            let d = match jpeg.decode(picture.copy()) {
+                ok(d) => d,
+                err(_) => return,
+            }
+            if not at_cast_size(i64.wrap(d.width), i64.wrap(d.height), width, height, w.cast_width, w.cast_height) { return }
+            w.fresh = false
+        }
         let (_, agent) = w.key.split_once("/") ?? (String(), String())
         // Made here, not on the instance's loop: the text, with the JPEG as the
         // page sent it, in base64, and the binary message, with it as it is.
         var as_text = String()
         if w.watch.text { as_text = #"{"t":"browser.frame","agent":#{Json.Str(agent.copy())},"data":"#{data}","width":#{width},"height":#{height}}"# }
         var as_binary = List<u8>()
-        if w.watch.binary {
-            if let jpeg = bytes.from_base64(data) {
-                as_binary = protocol.binary(#"{"t":"browser.frame","agent":#{Json.Str(agent)},"width":#{width},"height":#{height}}"#, jpeg)
-            }
+        if w.watch.binary and picture.len() > 0 {
+            as_binary = protocol.binary(#"{"t":"browser.frame","agent":#{Json.Str(agent)},"width":#{width},"height":#{height}}"#, picture)
         }
-        w.back.send(Back.Frame(w.key.copy(), as_text, as_binary))
+        w.back.send(Back.Frame(w.key.copy(), as_text, as_binary, w.cast_width, w.cast_height))
     }
 
     // Starts or stops the page's frames, as whether someone watches says, and
     // starts them again at the size they're shown at when it changes.
+    //
+    // A frame from before the size changed would otherwise reach an app after
+    // browser.watch answered, at the size it showed the page at before. Each frame
+    // goes to the loop with the size its cast was asked for, so the loop drops
+    // those already on their way, or come while the last cast stopped; and those
+    // Chrome still sends at the old size once it's started again are dropped here.
     fn cast(w: mut Worker) {
         if w.page == none { return }
         let on = w.watch.on
         if w.casting and (not on or w.cast_width != w.watch.width or w.cast_height != w.watch.height) {
             if let err(e) = w.call("Page.stopScreencast", Obj.new().done()) { eprintln("loom: the browser: {e}") }
             w.casting = false
+            w.cast_width = 0
+            w.cast_height = 0
             w.ack_at = 0
         }
         if on and not w.casting {
             // Chrome scales each frame down to fit, so a small window gets a small JPEG.
+            // The size is set first, as the first frame may come before the call's answer.
+            w.cast_width = w.watch.width
+            w.cast_height = w.watch.height
             let params = Obj.new().s("format", String("jpeg")).i("quality", 60).i("maxWidth", w.watch.width).i("maxHeight", w.watch.height).done()
-            if let ok(_) = w.call("Page.startScreencast", params) {
-                w.casting = true
-                w.cast_width = w.watch.width
-                w.cast_height = w.watch.height
+            w.fresh = true
+            match w.call("Page.startScreencast", params) {
+                ok(_) => w.casting = true,
+                err(_) => {
+                    w.cast_width = 0
+                    w.cast_height = 0
+                },
             }
         }
     }
@@ -1585,6 +1621,20 @@ fn frames_are_asked_for_at_the_size_they_are_shown() {
     assert(frame_size(420, 263) == (420i64, 263i64))
     assert(frame_size(2560, 1600) == (PAGE_WIDTH, PAGE_HEIGHT))
     assert(frame_size(10, 6) == (FRAME_LEAST, FRAME_LEAST))
+}
+
+@test
+fn a_frame_from_before_the_size_changed_is_known() {
+    // Shown 640 × 400: the page, 1280 × 657, scaled to fit.
+    assert(at_cast_size(640, 328, 1280, 657, 640, 400))
+    assert(not at_cast_size(1280, 657, 1280, 657, 640, 400))
+    // At the page's size, as it is.
+    assert(at_cast_size(1280, 657, 1280, 657, 1280, 800))
+    assert(at_cast_size(1279, 800, 1280, 800, 1280, 800))
+    assert(not at_cast_size(640, 328, 1280, 657, 1280, 800))
+    assert(not at_cast_size(640, 400, 1280, 800, 1280, 800))
+    // A page smaller than it's shown at.
+    assert(at_cast_size(300, 200, 300, 200, 1280, 800))
 }
 
 @test

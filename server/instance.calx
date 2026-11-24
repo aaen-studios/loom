@@ -464,6 +464,7 @@ struct Browser {
     steps: i64    // how many steps the recording has
     record_by: String    // the device that started it
     told: String    // the site whose notes the agent was told of last
+    cast: (i64, i64)    // the size its frames are asked for now, as watch_changed last told it
 }
 
 // A browser_fill_secret call, until its secret is in: what it fills, for the
@@ -2105,7 +2106,7 @@ impl Instance {
                         }
                         i.answer_call(call, result)
                     },
-                    browser.Back.Frame(key, text, binary) => i.browser_frame(key, text, binary),
+                    browser.Back.Frame(key, text, binary, width, height) => i.browser_frame(key, text, binary, (width, height)),
                     browser.Back.Stopped(n) => {
                         if let t = i.stopped_browsers.remove(n) { t.join() }
                         var done_closing = List<String>()
@@ -2280,7 +2281,7 @@ impl Instance {
             var before: Thread? = none
             if let m = i.closing_browsers.remove(key.copy()) { before = i.stopped_browsers.remove(m) }
             let (to, thread) = browser.start(n, key.copy(), try fs.absolute(i.data.copy()), profile, i.isolated(g.user.copy(), agent), proxy, reopen, before, browser.BackTo { to: i.browser_to.copy(), waker: i.waker })
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, n: n, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String() })
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, n: n, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String(), cast: (0, 0) })
             i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
@@ -2458,8 +2459,11 @@ impl Instance {
 
     // A frame of the page, to the devices watching it: as a binary message to an
     // app of protocol version 2 on, and as JSON text to one of version 1. The
-    // browser's thread made both, so the loop only sends them.
-    fn browser_frame(i: Instance, key: String, text: String, binary: List<u8>) {
+    // browser's thread made both, so the loop only sends them. One cast at
+    // another size than is asked for now is from before it changed, and goes to no one.
+    fn browser_frame(i: Instance, key: String, text: String, binary: List<u8>, cast: (i64, i64)) {
+        let b = i.browsers.find(key.copy()) else return
+        if b.cast != cast { return }
         let (user, _) = key.split_once("/") ?? (String(), String())
         for (id, s) in i.sessions {
             if not s.live or s.user != user or i.watched_by(id) != key { continue }
@@ -2487,7 +2491,10 @@ impl Instance {
             if s.version >= protocol.BINARY_FRAMES { w.binary = true } else { w.text = true }
         }
         if not w.on { w = browser.unwatched() }
-        if let b = mut i.browsers.find(key) { b.to.send(browser.In.Watch(w)) }
+        if let b = mut i.browsers.find(key) {
+            b.cast = (w.width, w.height)
+            b.to.send(browser.In.Watch(w))
+        }
     }
 
     // A session that's gone watches nothing. A browser no one watches now
