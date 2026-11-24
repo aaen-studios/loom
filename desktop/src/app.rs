@@ -3768,10 +3768,12 @@ ACTA_KEY=secret:ACTA_KEY",
             .rounded(px(radius::ROW))
             .cursor_pointer()
             .when(open, |d| d.bg(p.active))
-            .when(!open, move |d| d.soft_hover(transparent_black(), p.hover, None))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open_thread(&agent, &conversation, cx)
-            }))
+            .when(!open, move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            })
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.open_thread(&agent, &conversation, cx)),
+            )
             .child(self.ask_strand(format!("ask-side-{}", k.conversation), k))
             .child(
                 div()

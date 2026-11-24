@@ -182,7 +182,16 @@ struct ChatView: View {
             // Back from a thread, the chat is the agent's own again.
             model.open(thread: thread?.id)
             session.flush()
+            openFromLaunch()
         }
+    }
+
+    /// `-thread <conversation>` at launch, with `-open`, opens that agent's thread with
+    /// another, for screenshots of it (ios/README.md).
+    private func openFromLaunch() {
+        let args = ProcessInfo.processInfo.arguments
+        guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
+        threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
     }
 
     /// A link tapped in a message: a file it mentions or one sent with it opens here, and

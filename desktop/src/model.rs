@@ -9965,7 +9965,10 @@ mod tests {
         m.select(Some("a_2".into()));
         m.show_branch(Some("c_19".into()));
         assert_eq!(m.conversation().as_deref(), Some("c_19"));
-        assert_eq!(m.ask_open().map(|k| k.label).as_deref(), Some("From Casper"));
+        assert_eq!(
+            m.ask_open().map(|k| k.label).as_deref(),
+            Some("From Casper")
+        );
         assert!(!m.asks("a_2")[0].unread);
         m.show_branch(None);
         assert_eq!(m.conversation().as_deref(), Some("c_3"));
