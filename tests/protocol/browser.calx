@@ -11,6 +11,7 @@ module tests.protocol.browser
 //
 //     calx tests/protocol/browser.calx
 import std.bytes
+import std.env
 import std.fs
 import std.image.{Image}
 import std.json.{Json}
@@ -266,6 +267,41 @@ fn run(i: Instance) ! Error {
     _ = try app.cmd("q_t4", "browser.give", Obj.new().s("agent", agent.copy()).done())
     let given = try reply_in(mut app, conversation.copy())
     try see(given.starts_with("browser_ask_person: Your person handed the browser back after 2 clicks and keys"), "and the agent hears of both", given.copy())
+
+    // Keys go with their modifiers (LOO-281): Shift+Tab goes back a field, Ctrl+A (⌘A
+    // on a Mac) and typing replace what's in it, and Shift+arrows select. The page's
+    // title says which field has the focus, what each holds and what's selected.
+    try fs.write_text("{pages}/keys.html", String(#"
+        <!doctype html><title>Keys</title>
+        <input name="a" aria-label="First" value="one"><input name="b" aria-label="Second" value="two">
+        <script>
+        const show = () => { const f = document.activeElement, v = n => document.querySelector('[name=' + n + ']').value; document.title = (f.name || '-') + ':' + v('a') + ':' + v('b') + ':' + (f.name ? f.value.slice(f.selectionStart, f.selectionEnd) : ''); };
+        for (const e of ['focusin', 'input', 'keyup', 'selectionchange']) document.addEventListener(e, show);
+        </script>
+        "#))
+    let keys_page = try say(mut app, conversation.copy(), "m_k1", "/mcp browser_open \{\"url\":\"{file_url("{pages}/keys.html")}\"\}")
+    try see(keys_page.contains("Page: Keys"), "a page with two fields opens", keys_page.copy())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_k2")).s("conversation", conversation.copy()).s("text", String(#"/mcp browser_ask_person {"why":"Fix the first field."}"#)).done())
+    loop {
+        let state = try app.until("browser.state", "")
+        if str_at(state, "asked") == some(String("Fix the first field.")) { break }
+    }
+    _ = try app.cmd("q_k1", "browser.take", Obj.new().s("agent", agent.copy()).done())
+    let shortcut = if env.os() == "macos" { "meta" } else { "ctrl" }
+    // A key and what's held with it; with no key, "new" typed.
+    let presses: List<(str, str, List<str>)> = [("q_k2", "Tab", []), ("q_k3", "Tab", []), ("q_k4", "Tab", ["shift"]), ("q_k5", "a", [shortcut]), ("q_k6", "", []), ("q_k7", "ArrowLeft", ["shift"]), ("q_k8", "ArrowLeft", ["shift"])]
+    var taken = true
+    for (id, key, held) in presses {
+        var mods = List<Json>()
+        for m in held { mods.push(Json.Str(String(m))) }
+        let input = if key.len() > 0 { Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String(key)).j("modifiers", Json.Array(mods)).done() } else { Obj.new().s("agent", agent.copy()).s("kind", String("text")).s("text", String("new")).done() }
+        let r = try app.cmd(id, "browser.input", input)
+        taken = taken and bool_at(r, "ok") == some(true)
+    }
+    try check(taken, "browser.input takes keys with modifiers")
+    _ = try app.cmd("q_k9", "browser.give", Obj.new().s("agent", agent.copy()).done())
+    let fixed = try reply_in(mut app, conversation.copy())
+    try see(fixed.contains("a:new:two:ew ("), "Shift+Tab goes back a field, Ctrl+A (⌘A on a Mac) and typing replace its text, and Shift+arrows select", fixed.copy())
 
     // While frames come all the time, the first after the size it's shown at changes is
     // already at that size: none from before it was asked comes after browser.watch answers.
