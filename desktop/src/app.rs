@@ -317,6 +317,18 @@ pub struct Loom {
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
+    /// The code another device shows under Add a device, pasted to add this computer.
+    add_code_in: Entity<InputState>,
+    /// Whether a server is signed in to with its address and a password, rather than
+    /// with a code.
+    password_form: bool,
+    /// The first password of an account a link code made, and whether its row is open.
+    new_password_in: Entity<InputState>,
+    setting_password: bool,
+    /// Devices asking to be added that the person closed without answering, by ask.
+    asks_hidden: HashSet<String>,
+    /// Whether a `loom://` link that started loom was looked for.
+    links_looked: bool,
     /// A masked field for each secret an MCP server an agent proposed needs that the
     /// person doesn't have, by its card's call and the secret's name ("tc_4/ACTA_KEY");
     /// and for each field of a card asking for a secret, by its call and the field's
@@ -719,6 +731,28 @@ impl Loom {
         let user_in = input(window, cx, "Username", false);
         let pass_in = input(window, cx, "Password", true);
         let code_in = input(window, cx, "Setup code", false);
+        let add_code_in = input(window, cx, "K7QF-M2XD@loom.example.com", false);
+        let new_password_in = input(window, cx, "At least 8 characters", true);
+        cx.subscribe_in(
+            &add_code_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.use_code(cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &new_password_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_password(cx);
+                }
+            },
+        )
+        .detach();
         let name_in = input(window, cx, "Name", false);
         // An agent's own colour: each change that makes a whole #rrggbb sets it.
         let color_in = input(window, cx, "#5b8def", false);
@@ -1011,6 +1045,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     if crate::single::asked_to_show() {
                         shell::show_window(loom.hwnd, true);
                         crate::perf::once("shown for another start");
+                        loom.open_link(cx);
+                    }
+                    // A link that started this loom.
+                    if !loom.links_looked {
+                        loom.links_looked = true;
+                        loom.open_link(cx);
                     }
                     loom.tick_prefs(cx);
                     shell::post_notifications(cx);
@@ -1258,6 +1298,12 @@ ACTA_KEY=secret:ACTA_KEY",
             server_in,
             user_in,
             pass_in,
+            add_code_in,
+            password_form: false,
+            new_password_in,
+            setting_password: false,
+            asks_hidden: HashSet::new(),
+            links_looked: false,
             card_secrets: Rc::default(),
             queue_in,
             aside_in,
@@ -1649,8 +1695,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let f = self.model.create_link();
                 self.send(f);
-                let d = self.model.load_devices();
+                // From the instance, with when each was last on; the cache's offline.
+                let d = if self.model.synced {
+                    self.model.list_devices()
+                } else {
+                    self.model.load_devices()
+                };
                 self.send(d);
+                self.setting_password = false;
+                self.model.password_error = None;
                 let r = self.model.set_relay(None);
                 self.send(r);
             }
@@ -1661,6 +1714,9 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             Screen::AddServer => {
                 self.show_code = false;
+                // A code says where the server is; an address an agent offered goes in
+                // the form that signs in with a password.
+                self.password_form = self.fill_server.as_deref().is_some_and(|a| !a.is_empty());
                 if self.fill_server.is_none() {
                     self.fill_server = Some(String::new());
                 }
@@ -2009,9 +2065,96 @@ ACTA_KEY=secret:ACTA_KEY",
             .unwrap_or(2);
         let dir = format!("servers/{n}");
         let _ = std::fs::remove_dir_all(server_folder(&dir));
-        self.away.push(Away::start(dir.clone(), Some(server)));
+        // A code says where the server is itself, so its core starts with none.
+        self.away.push(Away::start(
+            dir.clone(),
+            Some(server).filter(|s| !s.is_empty()),
+        ));
         self.adding = Some(dir.clone());
         dir
+    }
+
+    /// Adds this computer with the code in the field, which another device shows under
+    /// Add a device: to the first server on the first screen, or beside the one on
+    /// screen in the popup. It waits for a yes on that device.
+    fn use_code(&mut self, cx: &mut Context<Self>) {
+        let text = self.add_code_in.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if self.popup == Some(Screen::AddServer) {
+            let dir = self.start_adding("");
+            if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+                if a.model.logging_in || a.model.adding.is_some() {
+                    return;
+                }
+                let frame = a.model.use_code(&text);
+                a.core.send(&frame.to_string());
+            }
+        } else {
+            if self.model.logging_in || self.model.adding.is_some() {
+                return;
+            }
+            let frame = self.model.use_code(&text);
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
+    /// A `loom://add?…` link that opened loom: this computer is added with its code, at
+    /// the step where the person says yes on the device that showed it. On the first
+    /// screen it signs in to its first server; once signed in, it's a server beside the
+    /// one on screen, in the popup.
+    fn open_link(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = crate::single::take_link(std::path::Path::new(&data_dir())) else {
+            return;
+        };
+        let signed_out = self.here.is_empty()
+            && matches!(self.model.conn, None | Some(Conn::SignedOut))
+            && !self.local();
+        if signed_out {
+            self.server_form = true;
+            self.password_form = false;
+            self.form_at = Instant::now();
+            let frame = self.model.use_code(&link);
+            self.send(frame);
+        } else {
+            self.fill_server = Some(String::new());
+            self.open(Screen::AddServer, cx);
+            let dir = self.start_adding("");
+            if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+                let frame = a.model.use_code(&link);
+                a.core.send(&frame.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Stops waiting for a yes on the other device, here or in the popup.
+    fn cancel_code(&mut self, cx: &mut Context<Self>) {
+        if self.popup == Some(Screen::AddServer) {
+            if let Some(dir) = self.adding.clone() {
+                if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+                    let frame = a.model.cancel_adding();
+                    a.core.send(&frame.to_string());
+                }
+            }
+        } else {
+            let frame = self.model.cancel_adding();
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
+    /// Sets the account's first password, from the Add a device page.
+    fn save_password(&mut self, cx: &mut Context<Self>) {
+        let password = self.new_password_in.read(cx).value().to_string();
+        if password.is_empty() {
+            return;
+        }
+        let f = self.model.set_password(&password);
+        self.send(f);
+        cx.notify();
     }
 
     /// Signs in to the server in the add-a-server form: with a core of its own beside
@@ -2928,7 +3071,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 (
                     "pop-phone",
                     Ico::Smartphone,
-                    "Add a phone",
+                    "Add a device",
                     Screen::AddPhone,
                 ),
             ];
@@ -3124,7 +3267,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Hosts => self.hosts_page(cx),
             Screen::Move => self.move_page(cx),
             Screen::People => self.people_page(cx),
-            Screen::AddPhone => self.add_phone_page(cx),
+            Screen::AddPhone => self.add_device_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Secrets => self.secrets_page(cx),
             Screen::Plugins => self.plugins_page(cx),
@@ -3189,6 +3332,128 @@ ACTA_KEY=secret:ACTA_KEY",
                 .size_full()
                 // It takes the pointer: nothing behind it hovers or takes a click, so
                 // the button that opened it doesn't open it again.
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(scrim)
+                .child(card),
+        )
+    }
+
+    /// A device asking to be added to the account, on any server the app is signed in
+    /// to: `Add "Elliot's MacBook"?` with the check the new device shows, and Add or Not
+    /// me. A click outside puts it away unanswered, and it runs out on its own.
+    fn ask_view(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        let p = self.p;
+        let hidden = self.asks_hidden.clone();
+        let mut found = None;
+        for a in self.model.open_asks() {
+            if !hidden.contains(&a.id) {
+                found = Some((self.here.clone(), a));
+                break;
+            }
+        }
+        if found.is_none() {
+            for away in &mut self.away {
+                if let Some(a) = away.model.open_asks().into_iter().find(|a| !hidden.contains(&a.id)) {
+                    found = Some((away.dir.clone(), a));
+                    break;
+                }
+            }
+        }
+        let (dir, ask) = found?;
+        let what = match ask.kind.as_str() {
+            "ios" => Ico::Smartphone,
+            "macos" => Ico::Laptop,
+            "windows" => Ico::Monitor,
+            _ => Ico::SquareTerminal,
+        };
+        let answer = |allow: bool| {
+            let (dir, id) = (dir.clone(), ask.id.clone());
+            cx.listener(move |this: &mut Loom, _, _, cx| {
+                let frame = if this.here == dir {
+                    Some(this.model.answer_ask(&id, allow))
+                } else {
+                    this.away
+                        .iter_mut()
+                        .find(|a| a.dir == dir)
+                        .map(|a| a.model.answer_ask(&id, allow))
+                };
+                if let Some(f) = frame {
+                    this.send_to(&dir, &f);
+                }
+                cx.notify();
+            })
+        };
+        let hide = ask.id.clone();
+        let card = div()
+            .id("link-ask")
+            .occlude()
+            .w(px(360.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::M))
+            .p(px(space::XL))
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                this.asks_hidden.insert(hide.clone());
+                cx.notify();
+            }))
+            .child(self.tile(what))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .text_center()
+                    .child(format!("Add \u{201c}{}\u{201d}?", ask.name)),
+            )
+            .child(
+                div()
+                    .font_family(crate::prefs::mono_font())
+                    .text_size(px(32.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child(spaced_digits(&ask.check)),
+            )
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .text_center()
+                    .child("Only if the new device shows the same"),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .pt(px(space::S))
+                    .flex()
+                    .gap(px(space::S))
+                    .child(
+                        self.button("ask-no", "Not me", false)
+                            .flex_1()
+                            .on_click(answer(false)),
+                    )
+                    .child(
+                        self.button("ask-yes", "Add", true)
+                            .flex_1()
+                            .on_click(answer(true)),
+                    ),
+            );
+        let mut scrim = p.bg;
+        scrim.a = 0.7;
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
                 .occlude()
                 .flex()
                 .items_center()
@@ -5326,53 +5591,140 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// Signing in to an instance on a server: its address, the account, and for a new
-    /// server, the setup code it printed.
+    /// The check a device being added shows while the person says yes on the device that
+    /// showed the code: the four digits, large, and Cancel.
+    fn code_check(&self, id: &'static str, check: &str, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::M))
+            .py(px(space::L))
+            .child(
+                div()
+                    .font_family(crate::prefs::mono_font())
+                    .text_size(px(40.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child(spaced_digits(check)),
+            )
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .text_center()
+                    .child("Say yes on your other device if it shows the same"),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .cursor_pointer()
+                    .soft_ink(p.ink_3, p.ink)
+                    .child("Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_code(cx))),
+            )
+    }
+
+    /// Signing in to an instance on a server: the code another device shows under Add a
+    /// device, or else its address, the account, and for a new server, the setup code it
+    /// printed.
     fn server_sign_in(&mut self, column: Div, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let busy = self.model.logging_in;
         let input = |s: &Entity<InputState>| div().w_full().child(Input::new(s).large());
-        column
-            .gap(px(space::M))
+        let header = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pb(px(space::M))
             .child(
                 div()
-                    .w_full()
+                    .id("back")
+                    .size(px(control::ICON))
                     .flex()
                     .items_center()
-                    .gap(px(space::S))
-                    .pb(px(space::M))
-                    .child(
-                        div()
-                            .id("back")
-                            .size(px(control::ICON))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(radius::BUTTON))
-                            .text_color(p.ink_2)
-                            .cursor_pointer()
-                            .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
-                            .child(Icon::new(Ico::ArrowLeft).small())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                // A server being added goes again, back to the one before.
-                                if !this.here.is_empty() {
-                                    this.remove_server(cx);
-                                    return;
-                                }
-                                this.server_form = false;
-                                this.form_at = Instant::now();
-                                this.model.login_error = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(size::HEADING))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.ink)
-                            .child("Your server"),
-                    ),
+                    .justify_center()
+                    .rounded(px(radius::BUTTON))
+                    .text_color(p.ink_2)
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
+                    .child(Icon::new(Ico::ArrowLeft).small())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.model.adding.is_some() {
+                            this.cancel_code(cx);
+                        }
+                        // A server being added goes again, back to the one before.
+                        if !this.here.is_empty() {
+                            this.remove_server(cx);
+                            return;
+                        }
+                        this.server_form = false;
+                        this.password_form = false;
+                        this.form_at = Instant::now();
+                        this.model.login_error = None;
+                        cx.notify();
+                    })),
             )
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Your server"),
+            );
+        let switch = |id: &'static str, words: &'static str, to_password: bool| {
+            div()
+                .id(id)
+                .pt(px(space::S))
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .cursor_pointer()
+                .soft_ink(p.ink_3, p.ink)
+                .child(words)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.password_form = to_password;
+                    this.model.login_error = None;
+                    cx.notify();
+                }))
+        };
+        if let Some((check, _)) = self.model.adding.clone() {
+            return column
+                .gap(px(space::M))
+                .child(header)
+                .child(self.code_check("cancel-code", &check, cx));
+        }
+        if !self.password_form {
+            return column
+                .gap(px(space::M))
+                .child(header)
+                .child(input(&self.add_code_in))
+                .when_some(self.model.login_error.clone(), |d, e| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.bad)
+                            .child(e),
+                    )
+                })
+                .child(
+                    div().w_full().pt(px(space::S)).child(
+                        self.button("use-code", if busy { "Adding…" } else { "Add" }, true)
+                            .w_full()
+                            .h(px(control::BUTTON_WIDE))
+                            .on_click(cx.listener(|this, _, _, cx| this.use_code(cx))),
+                    ),
+                )
+                .child(switch("password-instead", "Sign in with a password", true));
+        }
+        column
+            .gap(px(space::M))
+            .child(header)
             .child(input(&self.server_in))
             .child(input(&self.user_in))
             .child(input(&self.pass_in))
@@ -5414,6 +5766,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 )
             })
+            .child(switch("code-instead", "Use a code instead", false))
     }
 
     /// What search found, in place of the agents.
@@ -12107,13 +12460,15 @@ ACTA_KEY=secret:ACTA_KEY",
         ))
     }
 
-    /// The Add a phone page: a QR code the phone's loom app scans to join this account,
-    /// with a token of its own. The core makes what's in it; this draws it, dark on white
-    /// in either theme so a camera reads it. Then the devices signed in.
-    fn add_phone_page(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The Add a device page: a QR code a phone scans and the code a computer pastes, to
+    /// join this account once the person says yes here. The core makes what's in them;
+    /// this draws the QR code, dark on white in either theme so a camera reads it. Then
+    /// the devices signed in, with when each was last on, to remove one; and for an
+    /// account a link code made, its first password.
+    fn add_device_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut groups = Vec::new();
-        // The instance in this app listens only on this computer until phones are on.
+        // The instance in this app listens only on this computer until devices may reach it.
         let local = self.local();
         let phones_on = !local || self.model.phones == Some(true);
         let mut pair = Vec::new();
@@ -12121,7 +12476,7 @@ ACTA_KEY=secret:ACTA_KEY",
             pair.push(
                 self.row(
                     Some(self.tile(Ico::Smartphone)),
-                    "Phones can reach this computer",
+                    "Other devices can reach this computer",
                     None,
                     Some(
                         self.switch("phones-switch", phones_on)
@@ -12177,9 +12532,44 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_size(px(size::BODY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(p.ink)
-                            .child("Scan it with loom on your phone"),
-                    )
-                    .child(caption(format!("Works once, until {}", time_of(expires))));
+                            .child("Scan it with your phone, or paste the code on a computer"),
+                    );
+                if let Some(pasted) = self.model.link_text.clone() {
+                    let (copy_code, copy_link) = (pasted.clone(), text.clone());
+                    code = code
+                        .child(
+                            div()
+                                .id("add-code")
+                                .px(px(space::M))
+                                .py(px(space::S))
+                                .rounded(px(radius::ROW))
+                                .bg(p.raised_2)
+                                .font_family(crate::prefs::mono_font())
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(pasted),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(space::S))
+                                .child(self.small_button("copy-add-code", "Copy code", true).on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_code.clone(),
+                                        ));
+                                    },
+                                ))
+                                .child(self.small_button("copy-add-link", "Copy link", false).on_click(
+                                    move |_, _, cx| {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(
+                                            copy_link.clone(),
+                                        ));
+                                    },
+                                )),
+                        );
+                }
+                code = code.child(caption(format!("Works once, until {}", time_of(expires))));
             } else {
                 code = code.child(caption("Making a code…".into()));
             }
@@ -12196,16 +12586,18 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(relay) = self.relay_group(cx) {
             groups.push(relay);
         }
-        // Every device signed in to this account, so one that shouldn't be can be signed out.
+        // Every device signed in to this account, so one that shouldn't be can be removed,
+        // which signs it out.
+        let now = chrono::Local::now();
         let mut devices = Vec::new();
-        for (id, name, kind) in self.model.devices.clone() {
-            let (what, icon) = match kind.as_str() {
-                "ios" => ("iPhone", Ico::Smartphone),
-                "macos" => ("Mac", Ico::Laptop),
-                "windows" => ("Windows PC", Ico::Monitor),
-                _ => ("Command line", Ico::SquareTerminal),
+        for d in self.model.devices.clone() {
+            let icon = match d.kind.as_str() {
+                "ios" => Ico::Smartphone,
+                "macos" => Ico::Laptop,
+                "windows" => Ico::Monitor,
+                _ => Ico::SquareTerminal,
             };
-            let this_one = id == self.model.me;
+            let this_one = d.id == self.model.me;
             let control = if this_one {
                 div()
                     .px(px(space::S))
@@ -12217,7 +12609,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child("This one")
                     .into_any_element()
             } else {
-                self.small_button(format!("revoke-{id}"), "Sign out", false)
+                let id = d.id.clone();
+                self.small_button(format!("revoke-{id}"), "Remove", false)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let f = this.model.revoke_device(&id);
                         this.send(f);
@@ -12225,18 +12618,66 @@ ACTA_KEY=secret:ACTA_KEY",
                     }))
                     .into_any_element()
             };
+            let line = if this_one {
+                device_line(&d.kind, 0, false, now)
+            } else {
+                device_line(&d.kind, d.seen, d.online, now)
+            };
             devices.push(
-                self.row(
-                    Some(self.tile(icon)),
-                    name,
-                    Some(what.into()),
-                    Some(control),
-                )
-                .into_any_element(),
+                self.row(Some(self.tile(icon)), d.name.clone(), Some(line), Some(control))
+                    .into_any_element(),
             );
         }
         if !devices.is_empty() {
-            groups.push(self.group(Some("Signed in"), devices));
+            groups.push(self.group(Some("Your devices"), devices));
+        }
+        // An account a link code made has no password until the person sets one, for
+        // signing in with it where there's no device to show a code.
+        let mut account = Vec::new();
+        if !local && self.model.has_password == Some(false) {
+            if self.setting_password {
+                account.push(self.field_row("Password", Input::new(&self.new_password_in)));
+                if let Some(e) = self.model.password_error.clone() {
+                    account.push(self.note_row(e, p.bad));
+                }
+                account.push(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(space::S))
+                        .px(px(space::L))
+                        .pb(px(space::M))
+                        .child(self.small_button("keep-no-password", "Cancel", false).on_click(
+                            cx.listener(|this, _, _, cx| {
+                                this.setting_password = false;
+                                this.model.password_error = None;
+                                cx.notify();
+                            }),
+                        ))
+                        .child(
+                            self.small_button("save-password", "Save", true)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_password(cx))),
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                account.push(
+                    self.row(
+                        None,
+                        "Set a password",
+                        None,
+                        Some(
+                            self.small_button("set-password", "Set", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.setting_password = true;
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        ),
+                    )
+                    .into_any_element(),
+                );
+            }
         }
         // Leaving an instance on a server: the account and everything of it. The instance
         // refuses the owner's, whose account goes with the instance.
@@ -12272,23 +12713,22 @@ ACTA_KEY=secret:ACTA_KEY",
                     }))
                     .into_any_element()
             };
-            groups.push(self.group(
-                Some("Your account"),
-                vec![self
-                    .row(
-                        None,
-                        "Delete my account",
-                        Some(if self.confirm_delete {
-                            "Every agent, chat, routine and secret of yours, for good".into()
-                        } else {
-                            "With everything of yours on this server".into()
-                        }),
-                        Some(control),
-                    )
-                    .into_any_element()],
-            ));
+            account.push(
+                self.row(
+                    None,
+                    "Delete my account",
+                    Some(if self.confirm_delete {
+                        "Every agent, chat, routine and secret of yours, for good".into()
+                    } else {
+                        "With everything of yours on this server".into()
+                    }),
+                    Some(control),
+                )
+                .into_any_element(),
+            );
+            groups.push(self.group(Some("Your account"), account));
         }
-        self.settings_page("add-phone-page", "Add a phone", None, groups)
+        self.settings_page("add-device-page", "Add a device", None, groups)
     }
 
     /// The This PC page: what agents may do on this computer, tool by tool. The core keeps
@@ -12462,51 +12902,97 @@ ACTA_KEY=secret:ACTA_KEY",
             .and_then(|dir| self.away.iter().find(|a| &a.dir == dir));
         let busy = pending.is_some_and(|a| a.model.logging_in);
         let error = pending.and_then(|a| a.model.login_error.clone());
-        let mut rows = vec![
-            self.field_row("Address", Input::new(&self.server_in)),
-            self.field_row("Username", Input::new(&self.user_in)),
-            self.field_row("Password", Input::new(&self.pass_in)),
-        ];
-        if self.show_code {
-            rows.push(self.field_row("Setup code", Input::new(&self.code_in)));
-        }
-        if let Some(e) = error {
-            rows.push(self.note_row(e, p.bad));
-        }
-        let actions = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(space::M))
-            .child(if self.show_code {
-                div().into_any_element()
-            } else {
+        let waiting = pending.and_then(|a| a.model.adding.clone());
+        let link = |id: &'static str, words: &'static str, to_password: bool| {
+            div()
+                .id(id)
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .cursor_pointer()
+                .soft_ink(p.ink_3, p.ink)
+                .child(words)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.password_form = to_password;
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        let mut groups = Vec::new();
+        if let Some((check, _)) = waiting {
+            groups.push(self.group(
+                None,
+                vec![self.code_check("cancel-added-code", &check, cx).into_any_element()],
+            ));
+        } else if !self.password_form {
+            // The code another device of the person's shows under Add a device.
+            let mut rows = vec![self.field_row("Code", Input::new(&self.add_code_in))];
+            if let Some(e) = error {
+                rows.push(self.note_row(e, p.bad));
+            }
+            groups.push(self.group(None, rows));
+            groups.push(
                 div()
-                    .id("add-server-code")
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .cursor_pointer()
-                    .soft_ink(p.ink_3, p.ink)
-                    .child("New server? Add its setup code")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_code = true;
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .child(
-                self.button(
-                    "add-server",
-                    if busy { "Signing in…" } else { "Sign in" },
-                    true,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .child(link("add-server-password", "Sign in with a password", true))
+                    .child(
+                        self.button("add-server-code-go", if busy { "Adding…" } else { "Add" }, true)
+                            .on_click(cx.listener(|this, _, _, cx| this.use_code(cx))),
+                    )
+                    .into_any_element(),
             );
-        let mut groups = vec![
-            self.group(None, rows),
-            actions.into_any_element(),
-            self.agent_group("add-server-prompt", ADD_SERVER_PROMPT, cx),
-        ];
+        } else {
+            let mut rows = vec![
+                self.field_row("Address", Input::new(&self.server_in)),
+                self.field_row("Username", Input::new(&self.user_in)),
+                self.field_row("Password", Input::new(&self.pass_in)),
+            ];
+            if self.show_code {
+                rows.push(self.field_row("Setup code", Input::new(&self.code_in)));
+            }
+            if let Some(e) = error {
+                rows.push(self.note_row(e, p.bad));
+            }
+            let actions = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(space::M))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(space::L))
+                        .child(link("add-server-with-code", "Use a code instead", false))
+                        .when(!self.show_code, |d| {
+                            d.child(
+                                div()
+                                    .id("add-server-code")
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink_3)
+                                    .cursor_pointer()
+                                    .soft_ink(p.ink_3, p.ink)
+                                    .child("New server? Add its setup code")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_code = true;
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    self.button(
+                        "add-server",
+                        if busy { "Signing in…" } else { "Sign in" },
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
+                );
+            groups.push(self.group(None, rows));
+            groups.push(actions.into_any_element());
+        }
+        groups.push(self.agent_group("add-server-prompt", ADD_SERVER_PROMPT, cx));
         // While the instance on this computer is out of the app, it can come back, with
         // the agents and chats it had.
         if self.first_out() {
@@ -18558,6 +19044,38 @@ fn value_name(o: &model::ConfigOption, value: &str) -> String {
         .map_or_else(|| value.to_string(), |(_, name)| name.clone())
 }
 
+/// A check's digits with a thin space between each, so they read one by one.
+fn spaced_digits(check: &str) -> String {
+    check
+        .chars()
+        .map(String::from)
+        .collect::<Vec<_>>()
+        .join("\u{2009}")
+}
+
+/// What a device's row says of it: its kind, and whether it's connected or when it last
+/// was ("Mac · Last seen yesterday 14:05").
+fn device_line(kind: &str, seen: i64, online: bool, now: chrono::DateTime<chrono::Local>) -> String {
+    let what = match kind {
+        "ios" => "iPhone",
+        "macos" => "Mac",
+        "windows" => "Windows PC",
+        _ => "Command line",
+    };
+    if online {
+        return format!("{what} · Connected");
+    }
+    if seen <= 0 {
+        return what.to_string();
+    }
+    let when = when_sent(seen, now);
+    let when = match when.strip_prefix("Yesterday") {
+        Some(rest) => format!("yesterday{rest}"),
+        None => when,
+    };
+    format!("{what} · Last seen {when}")
+}
+
 fn time_of(ms: i64) -> String {
     use chrono::TimeZone;
     if ms <= 0 || ms == i64::MAX {
@@ -19219,6 +19737,7 @@ impl Render for Loom {
         let menu_scrim = self.menu_scrim(cx);
         let ctx_menu = self.ctx_menu(cx);
         let popup = self.popup_view(window, cx);
+        let ask = self.ask_view(cx);
         let browser_full = self.browser_full(window, cx);
         let viewer = self.viewer(window, cx);
         let toast = self.toast(window, cx);
@@ -19250,6 +19769,7 @@ impl Render for Loom {
                 |d, pop| d.child(pop),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(ask, |d, a| d.child(a))
             .when_some(browser_full, |d, b| d.child(b))
             .when_some(viewer, |d, v| d.child(v))
             .when_some(toast, |d, t| d.child(t))

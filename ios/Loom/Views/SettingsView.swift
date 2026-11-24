@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage(Prefs.vibrant) private var vibrant = true
     @State private var notifications: UNAuthorizationStatus = .notDetermined
     @State private var confirmSignOut = false
+    /// Add a device, open at launch with `-addDevice`, for its screenshot.
+    @State private var addingDevice = ProcessInfo.processInfo.arguments.contains("-addDevice")
 
     var body: some View {
         let model = session.model
@@ -25,18 +27,40 @@ struct SettingsView: View {
                     Row(label: "Address", value: server.isEmpty ? "—" : server)
                     Row(label: "Connection", value: connection(model.conn))
                 }
+                Section {
+                    NavigationLink {
+                        AddDeviceView()
+                    } label: {
+                        Text("Add a device").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                }
                 if !model.devices.isEmpty {
                     Section("Your devices") {
                         ForEach(model.devices) { d in
                             HStack {
                                 Image(systemName: icon(d.kind)).foregroundStyle(P.ink3).frame(width: 22)
-                                Text(d.name).font(Fonts.body).foregroundStyle(P.ink)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(d.name).font(Fonts.body).foregroundStyle(P.ink)
+                                    if d.id != model.me?.device, let line = seen(d) {
+                                        Text(line).font(Fonts.caption).foregroundStyle(P.ink3)
+                                    }
+                                }
                                 Spacer()
                                 if d.id == model.me?.device {
                                     Text("This phone").font(Fonts.caption).foregroundStyle(P.ink3)
                                 }
                             }
+                            .swipeActions {
+                                if d.id != model.me?.device {
+                                    Button("Remove", role: .destructive) { session.send(model.removeDevice(d.id)) }
+                                }
+                            }
                         }
+                    }
+                }
+                if model.hasPassword == false {
+                    Section {
+                        SetPassword()
                     }
                 }
                 Section {
@@ -114,8 +138,13 @@ struct SettingsView: View {
             } message: {
                 Text("Your agents and chats stay on the instance")
             }
+            .navigationDestination(isPresented: $addingDevice) { AddDeviceView() }
         }
         .task { notifications = await Notifications.status() }
+        .onAppear {
+            model.loadDevices()
+            session.flush()
+        }
     }
 
     private func connection(_ c: Conn) -> String {
@@ -134,6 +163,103 @@ struct SettingsView: View {
         case "macos": return "laptopcomputer"
         case "cli": return "terminal"
         default: return "desktopcomputer"
+        }
+    }
+
+    /// Whether a device is connected, or when it last was.
+    private func seen(_ d: Device) -> String? {
+        if d.online { return "Connected" }
+        guard d.seen > 0 else { return nil }
+        let when = When.time(d.seen)
+        return "Last seen " + (when.hasPrefix("Yesterday") ? "yesterday" + when.dropFirst("Yesterday".count) : when)
+    }
+}
+
+/// Add a device: the QR code another phone scans, and the code a computer pastes, for a
+/// device that joins this account once the person says yes here.
+struct AddDeviceView: View {
+    @Environment(Session.self) private var session
+
+    var body: some View {
+        let model = session.model
+        List {
+            Section {
+                VStack(spacing: Tokens.Space.l) {
+                    if let name = model.joined {
+                        Text("\(name) joined").font(Fonts.body).foregroundStyle(P.ink)
+                    } else if let code = model.addCode {
+                        if let picture = QRPicture.of(code.qr) {
+                            Image(uiImage: picture)
+                                .interpolation(.none)
+                                .resizable()
+                                .frame(width: 220, height: 220)
+                                .padding(Tokens.Space.s)
+                                .background(Color.white, in: RoundedRectangle(cornerRadius: Tokens.Radius.input))
+                        }
+                        Text("Scan it with your phone, or paste the code on a computer")
+                            .font(Fonts.body)
+                            .foregroundStyle(P.ink)
+                            .multilineTextAlignment(.center)
+                        Text(code.text)
+                            .font(Fonts.code)
+                            .foregroundStyle(P.ink)
+                            .textSelection(.enabled)
+                            .multilineTextAlignment(.center)
+                        HStack(spacing: Tokens.Space.m) {
+                            Button("Copy code") { UIPasteboard.general.string = code.text }
+                                .buttonStyle(.loom)
+                            ShareLink(item: code.qr) { Text("Share link") }
+                                .buttonStyle(.loomQuiet)
+                        }
+                        Text("Works once, until \(When.time(code.expires))")
+                            .font(Fonts.caption)
+                            .foregroundStyle(P.ink3)
+                    } else {
+                        ProgressView().tint(P.ink3)
+                    }
+                    Button("New code") { session.send(model.makeAddCode()) }
+                        .font(Fonts.small)
+                        .foregroundStyle(P.ink3)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, Tokens.Space.l)
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(P.side)
+        .navigationTitle("Add a device")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { session.send(model.makeAddCode()) }
+    }
+}
+
+/// The first password of an account a link code made, for signing in with it where
+/// there's no device to show a code.
+private struct SetPassword: View {
+    @Environment(Session.self) private var session
+    @State private var password = ""
+    @State private var open = false
+
+    var body: some View {
+        let model = session.model
+        if open {
+            SecureField("At least 8 characters", text: $password)
+                .textContentType(.newPassword)
+                .font(Fonts.body)
+            if let error = model.passwordError {
+                Text(error).font(Fonts.small).foregroundStyle(P.bad)
+            }
+            Button("Save") {
+                session.send(model.setPassword(password))
+            }
+            .font(Fonts.body)
+            .disabled(password.isEmpty)
+        } else {
+            Button {
+                open = true
+            } label: {
+                Text("Set a password").font(Fonts.body).foregroundStyle(P.ink)
+            }
         }
     }
 }

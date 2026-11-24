@@ -1059,6 +1059,9 @@ struct Run: Equatable, Sendable {
 
 /// A routine's prompt that an instance kept in the chat before routines ran quietly
 /// (PLAN.md, "Routines"): stored, but not shown.
+/// Now, in Unix ms, as the instance's times are.
+func nowMs() -> Int { Int(Date.now.timeIntervalSince1970 * 1000) }
+
 func routinePrompt(_ m: JSON) -> Bool {
     m["role"].text == "person" && m["from"].text.hasPrefix("rt_")
 }
@@ -1067,6 +1070,19 @@ struct Device: Identifiable, Equatable, Sendable {
     var id: String
     var name: String
     var kind: String
+    /// When it was last connected (Unix ms), or 0 for never or not known.
+    var seen: Int = 0
+    var online = false
+}
+
+/// A device asking to be added to the account (protocol.md, "Adding a device"), with the
+/// four digits it shows too.
+struct LinkAsk: Identifiable, Equatable, Sendable {
+    var id: String
+    var name: String
+    var kind: String
+    var check: String
+    var expires: Int
 }
 
 /// A file picked to go with the next message.
@@ -1123,6 +1139,20 @@ final class Model {
     /// Answers given here, by call, until the instance takes them.
     private var answering: [String: Approval.Answer] = [:]
     var devices: [Device] = []
+    /// The code that adds a device, while Add a device shows one: the QR code's text, the
+    /// code to paste on a computer, and when it expires (Unix ms).
+    var addCode: (qr: String, text: String, expires: Int)?
+    /// The name of the device that joined with it, once one has.
+    var joined: String?
+    /// Devices asking to be added, until one of the person's devices answers.
+    var asks: [LinkAsk] = []
+    /// This phone used a code, and waits for a yes on the device that showed it: the
+    /// check both show.
+    var adding: String?
+    /// Whether the account has a password, as welcome says it, and why the last one
+    /// wasn't set.
+    var hasPassword: Bool?
+    var passwordError: String?
     /// Each agent program's name as people know it ("Claude Agent" for `claude-acp`), by
     /// its name, as `acp.list` gives it.
     var programTitles: [String: String] = [:]
@@ -1340,9 +1370,17 @@ final class Model {
             }
         case "core.login":
             loggingIn = false
-            loginError = f["error"].isNull ? nil : f["error"]["message"].string ?? f["error"]["code"].text
+            if f["waiting"].bool == true {
+                // The code was used, and waits for a yes on the device that showed it.
+                adding = f["check"].text
+                loginError = nil
+            } else {
+                adding = nil
+                loginError = f["error"].isNull ? nil : f["error"]["message"].string ?? f["error"]["code"].text
+            }
         case "welcome":
             me = (f["user"].text, f["device"].text)
+            hasPassword = f["has_password"].bool
         case "synced":
             synced = true
             dirty.formUnion(CoreList.allCases)
@@ -1445,6 +1483,21 @@ final class Model {
             dirty.insert(.approvals)
         case "device":
             dirty.insert(.devices)
+            if kind == "device.added", addCode != nil {
+                addCode = nil
+                joined = f["device"]["name"].text
+            }
+        case "link":
+            if kind == "link.asked" {
+                let a = f["ask"]
+                let ask = LinkAsk(id: a["id"].text, name: a["name"].text, kind: a["kind"].text, check: a["check"].text, expires: a["expires"].int ?? 0)
+                if ask.expires > nowMs(), !asks.contains(where: { $0.id == ask.id }) { asks.append(ask) }
+            } else if kind == "link.answered" {
+                let id = f["ask"].text
+                asks.removeAll { $0.id == id }
+            }
+        case "account":
+            if let has = f["has_password"].bool { hasPassword = has }
         default:
             break
         }
@@ -1524,6 +1577,29 @@ final class Model {
         case let id where id.hasPrefix("app.secret_"):
             if let error { notice = error }
             secretsStale = true
+        case let id where id.hasPrefix("app.add_code"):
+            if let error {
+                notice = error
+            } else {
+                let v = f["value"]
+                addCode = (v["qr"].text, v["text"].text, v["expires"].int ?? 0)
+                joined = nil
+            }
+        case let id where id.hasPrefix("app.device_list"):
+            if let error {
+                notice = error
+            } else {
+                devices = f["value"]["devices"].array.map {
+                    Device(id: $0["id"].text, name: $0["name"].text, kind: $0["kind"].text, seen: $0["seen"].int ?? 0, online: $0["online"].bool ?? false)
+                }
+            }
+        case let id where id.hasPrefix("app.password_set"):
+            if let error {
+                passwordError = error
+            } else {
+                passwordError = nil
+                hasPassword = true
+            }
         default:
             if let error { notice = error }
         }
@@ -1701,6 +1777,9 @@ final class Model {
                 // heavy user has tens of thousands of calls, and this comes at each one.
                 let calls = messages.flatMap(\.blocks).compactMap(\.call)
                 out.append(["t": "core.get", "id": "app.tools", "what": "tools", "calls": JSON(calls), "runs": JSON(runs.map(\.id))])
+            } else if l == .devices && synced {
+                // From the instance, with when each was last connected.
+                out.append(["t": "cmd", "id": JSON(id("app.device_list")), "name": "device.list"])
             } else {
                 out.append(["t": "core.get", "id": JSON("app.\(l.rawValue)"), "what": JSON(l.rawValue)])
             }
@@ -1878,11 +1957,54 @@ final class Model {
         return .object(frame)
     }
 
-    /// Joins the instance in a QR code the desktop app shows under Add a phone.
+    /// Joins the instance in a code another device shows under Add a device: its QR
+    /// code's text, the link, or the code pasted. It waits for a yes on that device.
     func link(qr: String, device: JSON) -> JSON {
         loggingIn = true
         loginError = nil
-        return ["t": "link", "id": JSON(id("app.link")), "qr": JSON(qr), "device": device]
+        adding = nil
+        return ["t": "link", "id": JSON(id("app.link")), "qr": JSON(qr.trimmingCharacters(in: .whitespacesAndNewlines)), "device": device]
+    }
+
+    /// Stops waiting for a yes on the other device.
+    func cancelLink() -> JSON {
+        adding = nil
+        loggingIn = false
+        return ["t": "link.cancel"]
+    }
+
+    /// A new code for Add a device.
+    func makeAddCode() -> JSON {
+        addCode = nil
+        joined = nil
+        return ["t": "cmd", "id": JSON(id("app.add_code")), "name": "link.create"]
+    }
+
+    /// The asks still waiting, the ones that ran out let go.
+    var openAsks: [LinkAsk] {
+        let now = nowMs()
+        return asks.filter { $0.expires > now }
+    }
+
+    /// The person's yes or no, here, to a device asking to be added.
+    func answerAsk(_ ask: String, allow: Bool) -> JSON {
+        asks.removeAll { $0.id == ask }
+        return ["t": "cmd", "id": JSON(id("app.link_answer")), "name": "link.answer", "args": ["ask": JSON(ask), "allow": JSON(allow)]]
+    }
+
+    /// Asks the instance for the person's devices again, with when each was last on.
+    func loadDevices() { dirty.insert(.devices) }
+
+    /// Signs one of the person's devices out, for good.
+    func removeDevice(_ device: String) -> JSON {
+        devices.removeAll { $0.id == device }
+        return ["t": "cmd", "id": JSON(id("app.device_revoke")), "name": "device.revoke", "args": ["device": JSON(device)]]
+    }
+
+    /// The first password of an account a link code made, which has none.
+    func setPassword(_ password: String) -> JSON {
+        passwordError = nil
+        return ["t": "cmd", "id": JSON(id("app.password_set")), "name": "password.set", "args": ["password": JSON(password)]]
     }
 
     func cancel() -> JSON? {

@@ -122,6 +122,10 @@ fn main() {
     // One loom to a data folder: started again, it shows the loom running and ends.
     let background = std::env::args().any(|a| a == "--background");
     let data = app::data_dir();
+    // A loom:// link that adds this device waits for whichever loom has the folder.
+    if let Some(link) = single::link_in_args() {
+        single::keep_link(std::path::Path::new(&data), &link);
+    }
     match single::claim(std::path::Path::new(&data), !background, single::WAIT) {
         single::Start::First(owner) => single::keep(owner),
         single::Start::Running => return,
@@ -131,6 +135,19 @@ fn main() {
     // Opened again from the Dock or Finder while it runs: the window comes back.
     #[cfg(target_os = "macos")]
     application.on_reopen(|_| single::reopened());
+    // A loom:// link opened while it runs, or that opened it (Info.plist names the scheme).
+    #[cfg(target_os = "macos")]
+    {
+        let folder = data.clone();
+        application.on_open_urls(move |urls| {
+            if let Some(link) = urls
+                .iter()
+                .find(|u| u.starts_with("loom://add?") || u.starts_with("loom://link?"))
+            {
+                single::opened_link(std::path::Path::new(&folder), link);
+            }
+        });
+    }
     application.run(|cx| {
         gpui_kit::init(cx);
         app::bind_page_keys(cx);

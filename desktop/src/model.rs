@@ -3318,6 +3318,28 @@ pub struct Updates {
     pub why: String,
 }
 
+/// One of the person's devices signed in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DeviceRow {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    /// When it was last connected (Unix ms), or 0 for never.
+    pub seen: i64,
+    pub online: bool,
+}
+
+/// A device asking to be added to the account (protocol.md, "Adding a device").
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkAsk {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    /// The four digits the new device shows too.
+    pub check: String,
+    pub expires: i64,
+}
+
 #[derive(Default)]
 pub struct Model {
     /// The files the composer's @ picker last found: for which agent and query, and
@@ -3525,9 +3547,20 @@ pub struct Model {
     /// The panel's messages sent on as commands: the command's id, the message's id, and
     /// where its answer is in the command's value.
     door_waiting: HashMap<String, (i64, &'static str)>,
-    /// The QR code that adds a phone, while one is shown: its text, and when it expires
+    /// The QR code that adds a device, while one is shown: its text, and when it expires
     /// (Unix ms).
     pub link: Option<(String, i64)>,
+    /// And the code to paste on a computer: the code and where the instance is.
+    pub link_text: Option<String>,
+    /// Devices asking to be added to the account, until they're answered or run out.
+    pub asks: Vec<LinkAsk>,
+    /// This device used a code and waits for a yes on another: the check both show, and
+    /// when it stops waiting.
+    pub adding: Option<(String, i64)>,
+    /// Whether the account has a password, as welcome says it.
+    pub has_password: Option<bool>,
+    /// Why the password wasn't set, as the instance said it.
+    pub password_error: Option<String>,
     /// The name of the device that joined with it, once one has.
     pub joined: Option<String>,
     /// Whether phones reach the instance in this app over the network, once it has said.
@@ -3548,8 +3581,8 @@ pub struct Model {
     pub people_log: Vec<PeopleEntry>,
     pub people_open: bool,
     people_stale: bool,
-    /// The person's devices, as the cache has them: id, name and kind.
-    pub devices: Vec<(String, String, String)>,
+    /// The person's devices signed in, as `device.list` gives them.
+    pub devices: Vec<DeviceRow>,
     /// This device's id, once the instance has welcomed it.
     pub me: String,
     /// What the selected agent remembers, for the memory page, newest first.
@@ -3848,6 +3881,9 @@ impl Model {
                     .collect();
                 let runs: Vec<&str> = self.runs.iter().map(|r| r.id.as_str()).collect();
                 out.push(json!({"t": "core.get", "id": "app.tools", "what": "tools", "calls": calls, "runs": runs}));
+            } else if l == List::Devices && self.synced {
+                // From the instance, with when each was last connected.
+                out.push(self.list_devices());
             } else {
                 out.push(
                     json!({"t": "core.get", "id": format!("app.{}", l.name()), "what": l.name()}),
@@ -4282,9 +4318,18 @@ impl Model {
             }
             "core.login" => {
                 self.logging_in = false;
-                if let Some(e) = f.get("error") {
+                // A code was used, and waits for a yes on the person's other device.
+                if f.get("waiting").and_then(Value::as_bool) == Some(true) {
+                    self.adding = Some((
+                        s(f, "check"),
+                        f.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                    ));
+                    self.login_error = None;
+                } else if let Some(e) = f.get("error") {
+                    self.adding = None;
                     self.login_error = Some(s(e, "message"));
                 } else {
+                    self.adding = None;
                     self.login_error = None;
                 }
             }
@@ -4313,6 +4358,7 @@ impl Model {
             }
             "welcome" => {
                 self.me = s(f, "device");
+                self.has_password = f.get("has_password").and_then(Value::as_bool);
                 // An update under way, to an owner or admin; none once it's done.
                 self.server_update = f.get("update").map(ServerUpdate::of);
             }
@@ -4510,7 +4556,33 @@ impl Model {
                 self.dirty.insert(List::Devices);
                 if kind == "device.added" && self.link.is_some() {
                     self.link = None;
+                    self.link_text = None;
                     self.joined = Some(s(f.get("device").unwrap_or(&Value::Null), "name"));
+                }
+            }
+            // A device used a code, and the person is asked here, until one of their
+            // devices answers.
+            "link" => {
+                if kind == "link.asked" {
+                    let a = f.get("ask").unwrap_or(&Value::Null);
+                    let ask = LinkAsk {
+                        id: s(a, "id"),
+                        name: s(a, "name"),
+                        kind: s(a, "kind"),
+                        check: s(a, "check"),
+                        expires: a.get("expires").and_then(Value::as_i64).unwrap_or(0),
+                    };
+                    if ask.expires > now_ms() && !self.asks.iter().any(|x| x.id == ask.id) {
+                        self.asks.push(ask);
+                    }
+                } else if kind == "link.answered" {
+                    let id = s(f, "ask");
+                    self.asks.retain(|a| a.id != id);
+                }
+            }
+            "account" => {
+                if let Some(has) = f.get("has_password").and_then(Value::as_bool) {
+                    self.has_password = Some(has);
                 }
             }
             "agent" => {
@@ -5513,7 +5585,32 @@ impl Model {
                     s(v, "qr"),
                     v.get("expires").and_then(Value::as_i64).unwrap_or(0),
                 ));
+                self.link_text = Some(s(v, "text")).filter(|t| !t.is_empty());
                 self.joined = None;
+            }
+        } else if id.starts_with("app.link_answer") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+        } else if id.starts_with("app.device_list") {
+            if let Some(ds) = f.pointer("/value/devices").and_then(Value::as_array) {
+                self.devices = ds
+                    .iter()
+                    .map(|d| DeviceRow {
+                        id: s(d, "id"),
+                        name: s(d, "name"),
+                        kind: s(d, "kind"),
+                        seen: d.get("seen").and_then(Value::as_i64).unwrap_or(0),
+                        online: d.get("online").and_then(Value::as_bool) == Some(true),
+                    })
+                    .collect();
+            }
+        } else if id.starts_with("app.password_set") {
+            if let Some(e) = f.get("error") {
+                self.password_error = Some(s(e, "message"));
+            } else {
+                self.password_error = None;
+                self.has_password = Some(true);
             }
         } else if id.starts_with("app.flows") {
             self.flows = f
@@ -5840,10 +5937,16 @@ impl Model {
             .cloned()
             .unwrap_or_default();
         match what {
+            // Offline, from the cache, until device.list says when each was last on.
             List::Devices => {
                 self.devices = items
                     .iter()
-                    .map(|d| (s(d, "id"), s(d, "name"), s(d, "kind")))
+                    .map(|d| DeviceRow {
+                        id: s(d, "id"),
+                        name: s(d, "name"),
+                        kind: s(d, "kind"),
+                        ..Default::default()
+                    })
                     .collect();
             }
             List::Agents => {
@@ -6585,7 +6688,7 @@ impl Model {
     pub fn login(&mut self, server: &str, username: &str, password: &str, code: &str) -> Value {
         self.logging_in = true;
         self.login_error = None;
-        let device = json!({"name": device_name(), "kind": "windows"});
+        let device = this_device();
         if code.trim().is_empty() {
             json!({"t": "login", "server": server.trim(), "username": username.trim(), "password": password, "device": device})
         } else {
@@ -6598,7 +6701,7 @@ impl Model {
     pub fn link_offered(&mut self, offer: &Offer) -> Value {
         self.logging_in = true;
         self.login_error = None;
-        let device = json!({"name": device_name(), "kind": "windows"});
+        let device = this_device();
         let mut frame = json!({"t": "link", "server": offer.address.trim(), "code": offer.code, "device": device});
         if !offer.username.is_empty() {
             frame["username"] = json!(offer.username);
@@ -7356,6 +7459,50 @@ impl Model {
         json!({"t": "core.get", "id": "app.devices", "what": "devices"})
     }
 
+    /// Asks the instance for the person's devices, with when each was last connected.
+    pub fn list_devices(&mut self) -> Value {
+        let id = self.id("app.device_list");
+        json!({"t": "cmd", "id": id, "name": "device.list"})
+    }
+
+    /// The person's yes or no, here, to a device asking to be added. It stops being
+    /// asked at once; the other devices stop with link.answered.
+    pub fn answer_ask(&mut self, ask: &str, allow: bool) -> Value {
+        self.asks.retain(|a| a.id != ask);
+        let id = self.id("app.link_answer");
+        json!({"t": "cmd", "id": id, "name": "link.answer", "args": {"ask": ask, "allow": allow}})
+    }
+
+    /// The asks still waiting, the ones that ran out let go.
+    pub fn open_asks(&mut self) -> Vec<LinkAsk> {
+        let now = now_ms();
+        self.asks.retain(|a| a.expires > now);
+        self.asks.clone()
+    }
+
+    /// Adds this computer to an account with a code another device shows: its QR code's
+    /// text, the link, or the code to paste. It waits for a yes on that device.
+    pub fn use_code(&mut self, text: &str) -> Value {
+        self.logging_in = true;
+        self.login_error = None;
+        self.adding = None;
+        json!({"t": "link", "id": "app.add", "qr": text.trim(), "device": this_device()})
+    }
+
+    /// Stops waiting for a yes on the other device.
+    pub fn cancel_adding(&mut self) -> Value {
+        self.adding = None;
+        self.logging_in = false;
+        json!({"t": "link.cancel"})
+    }
+
+    /// The first password of an account a link code made, which has none.
+    pub fn set_password(&mut self, password: &str) -> Value {
+        self.password_error = None;
+        let id = self.id("app.password_set");
+        json!({"t": "cmd", "id": id, "name": "password.set", "args": {"password": password}})
+    }
+
     /// Signs one of the person's devices out, for good: its token stops working.
     pub fn revoke_device(&mut self, device: &str) -> Value {
         let id = self.id("app.device_revoke");
@@ -7678,7 +7825,38 @@ impl Model {
 }
 
 fn device_name() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        // The name the Mac goes by in Sharing settings, such as "Elliot's MacBook".
+        if let Ok(out) = std::process::Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+        {
+            let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if out.status.success() && !name.is_empty() {
+                return name;
+            }
+        }
+    }
     std::env::var("COMPUTERNAME").unwrap_or_else(|_| "Desktop".into())
+}
+
+/// Now, in Unix ms.
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// This computer, as a login, a setup or a code that adds it names it.
+fn this_device() -> Value {
+    let kind = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "windows"
+    };
+    json!({"name": device_name(), "kind": kind})
 }
 
 pub fn approve(call: &str, allow: bool, always: bool) -> Value {
@@ -10614,6 +10792,72 @@ mod tests {
         m.result(&json!({"t": "result", "id": off["id"], "ok": false, "error": {"code": "not_allowed", "message": "Only the owner"}}));
         assert_eq!(m.phones, Some(true));
         assert!(m.notices.last().unwrap().contains("Only the owner"));
+    }
+
+    #[test]
+    fn a_device_asking_to_be_added_is_asked_here_until_it_is_answered() {
+        let mut m = Model::new();
+        let later = now_ms() + 60_000;
+        let asked = |id: &str, expires: i64| json!({"t": "event", "kind": "link.asked", "ask": {"id": id, "name": "Elliot's MacBook", "kind": "macos", "check": "4821", "expires": expires}});
+        m.take(&asked("la_1", later));
+        m.take(&asked("la_1", later));
+        m.take(&asked("la_old", 1));
+        let open = m.open_asks();
+        assert_eq!(open.len(), 1, "once each, and not one that ran out");
+        assert_eq!((open[0].name.as_str(), open[0].check.as_str()), ("Elliot's MacBook", "4821"));
+        let yes = m.answer_ask("la_1", true);
+        assert_eq!(yes["name"], "link.answer");
+        assert_eq!(yes["args"], json!({"ask": "la_1", "allow": true}));
+        assert!(m.open_asks().is_empty());
+        // Another device answered.
+        m.take(&asked("la_2", later));
+        m.take(&json!({"t": "event", "kind": "link.answered", "ask": "la_2", "allow": false}));
+        assert!(m.open_asks().is_empty());
+    }
+
+    #[test]
+    fn a_code_used_here_waits_with_its_check_until_the_other_device_answers() {
+        let mut m = Model::new();
+        let f = m.use_code(" K7QF-M2XD@loom.example.com ");
+        assert_eq!(f["t"], "link");
+        assert_eq!(f["qr"], "K7QF-M2XD@loom.example.com");
+        assert!(m.logging_in);
+        m.take(&json!({"t": "core.login", "id": "app.add", "waiting": true, "check": "0472", "expires": 9}));
+        assert_eq!(m.adding, Some(("0472".into(), 9)));
+        assert!(!m.logging_in);
+        m.take(&json!({"t": "core.login", "id": "app.add", "error": {"code": "refused", "message": "That was turned down on your other device."}}));
+        assert!(m.adding.is_none());
+        assert!(m.login_error.as_deref().unwrap().contains("turned down"));
+        m.take(&json!({"t": "core.login", "id": "app.add", "waiting": true, "check": "1111", "expires": 9}));
+        assert_eq!(m.cancel_adding(), json!({"t": "link.cancel"}));
+        assert!(m.adding.is_none());
+    }
+
+    #[test]
+    fn the_devices_say_when_each_was_last_on_and_a_first_password_is_set() {
+        let mut m = Model::new();
+        let listed = m.list_devices();
+        m.result(&json!({"t": "result", "id": listed["id"], "ok": true, "value": {"devices": [
+            {"id": "d_1", "name": "Desk PC", "kind": "windows", "at": 1, "seen": 5, "online": true},
+            {"id": "d_2", "name": "MacBook", "kind": "macos", "at": 2, "seen": 0, "online": false},
+        ]}}));
+        assert_eq!(m.devices.len(), 2);
+        assert!(m.devices[0].online && m.devices[0].seen == 5);
+        assert_eq!(m.devices[1].kind, "macos");
+        m.take(&json!({"t": "welcome", "device": "d_1", "has_password": false}));
+        assert_eq!(m.has_password, Some(false));
+        let weak = m.set_password("short");
+        m.result(&json!({"t": "result", "id": weak["id"], "ok": false, "error": {"code": "weak_password", "message": "A password needs at least 8 characters."}}));
+        assert_eq!(m.password_error.as_deref(), Some("A password needs at least 8 characters."));
+        assert_eq!(m.has_password, Some(false));
+        let set = m.set_password("a fine password");
+        assert_eq!(set["args"], json!({"password": "a fine password"}));
+        m.result(&json!({"t": "result", "id": set["id"], "ok": true, "value": {}}));
+        assert_eq!((m.has_password, m.password_error.clone()), (Some(true), None));
+        // Set on another device.
+        m.has_password = Some(false);
+        m.take(&json!({"t": "event", "kind": "account.updated", "has_password": true}));
+        assert_eq!(m.has_password, Some(true));
     }
 
     #[test]
