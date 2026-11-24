@@ -1599,6 +1599,11 @@ pub struct FileRef {
     pub name: String,
     pub mime: String,
     pub size: u64,
+    /// A picture's width and height in pixels as it shows, as the instance read them from
+    /// its header (protocol.md, "Files"); 0 where they aren't known, for any other file
+    /// and a picture kept before pictures kept them.
+    pub width: u32,
+    pub height: u32,
 }
 
 impl FileRef {
@@ -1608,7 +1613,14 @@ impl FileRef {
             name: s(v, "name"),
             mime: s(v, "mime"),
             size: v.get("size").and_then(Value::as_u64).unwrap_or(0),
+            width: v.get("width").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
+            height: v.get("height").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
         }
+    }
+
+    /// A picture's width and height, where the instance said them.
+    pub fn shown_size(&self) -> Option<(u32, u32)> {
+        (self.width > 0 && self.height > 0).then_some((self.width, self.height))
     }
 
     /// Whether the chat shows it as a picture.
@@ -3680,6 +3692,8 @@ impl Queued {
                             name: "A file".into(),
                             mime: String::new(),
                             size: 0,
+                            width: 0,
+                            height: 0,
                         })
                         .collect()
                 })
@@ -8719,6 +8733,8 @@ mod tests {
             name: name.into(),
             mime: "image/png".into(),
             size: 13,
+            width: 0,
+            height: 0,
         };
         let attached = |name: &str| Attachment {
             id: name.into(),
@@ -8743,6 +8759,8 @@ mod tests {
             name: name.into(),
             mime: "image/png".into(),
             size: 13,
+            width: 0,
+            height: 0,
         }
     }
 
@@ -8753,6 +8771,8 @@ mod tests {
             name: "notes.txt".into(),
             mime: "text/plain".into(),
             size: 4,
+            width: 0,
+            height: 0,
         };
         let mut m = turn(&["text:Here."], false, "done");
         m.blocks.push(Block::file(picture("aa", "a.png")));
@@ -8813,6 +8833,14 @@ mod tests {
             "code\n[other.png]"
         );
         assert_eq!(unmark_stacked("hi [a.png]", &[]), "hi [a.png]");
+    }
+
+    #[test]
+    fn a_pictures_size_comes_with_it() {
+        let f = FileRef::of(&json!({"file": "aa", "name": "a.png", "mime": "image/png", "size": 9, "width": 4000, "height": 3000}));
+        assert_eq!(f.shown_size(), Some((4000, 3000)));
+        let old = FileRef::of(&json!({"file": "aa", "name": "a.png", "mime": "image/png", "size": 9}));
+        assert_eq!(old.shown_size(), None);
     }
 
     #[test]

@@ -22,7 +22,9 @@ Anything bigger, such as a report or a chart, comes as a page in the chat instea
 
 ## Pictures
 
-Two or more pictures in one message, yours or an agent's, are one fan: the first in front, and up to four more tilted behind it, which spread out when you point at them. Its corner says how many there are, or past five, how many more ("+2"). Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
+Two or more pictures in one message, yours or an agent's, are one fan: the first in front, and up to four more tilted behind it, which spread out when you point at them. Its corner says how many there are, all of them ("7"). Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
+
+In the viewer, the wheel zooms toward the pointer and dragging moves the picture around. Double-click to go between fitting the window and the picture's own size; + and − zoom, and 0 fits it again. On a trackpad, pinch to zoom, and once zoomed in, swipe with two fingers to move it. On the iPhone, pinch to zoom, drag to move it, and double-tap to zoom in or out; zoomed in, a swipe moves the picture rather than going to the next one.
 
 ## Links and sources
 
