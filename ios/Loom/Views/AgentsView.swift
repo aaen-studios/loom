@@ -6,18 +6,75 @@ struct AgentsView: View {
     @Environment(Session.self) private var session
     @State private var path: [String] = []
     @State private var settings = false
+    /// Whether the hidden agents show, and the folder being named.
+    @State private var hiddenOpen = false
+    @State private var naming: Naming?
 
     var body: some View {
         let model = session.model
         NavigationStack(path: $path) {
             List {
-                ForEach(model.agents) { agent in
-                    NavigationLink(value: agent.id) {
-                        AgentRow(agent: agent)
+                if model.sidebar.isEmpty {
+                    rows(model.agents)
+                }
+                ForEach(Array(model.sidebar.enumerated()), id: \.offset) { _, section in
+                    let members = section.agents.compactMap { model.agent($0) }
+                    switch section.part {
+                    case .waiting:
+                        if !members.isEmpty {
+                            Section { rows(members) } header: { GroupHead(title: "Waiting on you") }
+                        }
+                    case .pinned:
+                        rows(members)
+                    case .agents:
+                        // One just made that the list doesn't have yet goes here too.
+                        let listed = Set(model.sidebar.flatMap(\.agents))
+                        rows(members + model.agents.filter { !listed.contains($0.id) })
+                    case .folder(let id, let name, let collapsed):
+                        Section {
+                            if !collapsed { rows(members) }
+                        } header: {
+                            Button {
+                                session.send(model.collapseFolder(id, !collapsed))
+                            } label: {
+                                GroupHead(title: name, open: !collapsed)
+                            }
+                            .contextMenu {
+                                Button("Rename", systemImage: "pencil") {
+                                    naming = Naming(folder: id, agent: nil, name: name)
+                                }
+                                Button("Delete folder", systemImage: "trash", role: .destructive) {
+                                    session.send(model.deleteFolder(id))
+                                }
+                            }
+                        }
+                    case .hidden:
+                        if !members.isEmpty {
+                            Section {
+                                if hiddenOpen { rows(members) }
+                            } header: {
+                                Button {
+                                    hiddenOpen.toggle()
+                                } label: {
+                                    GroupHead(title: "Hidden", open: hiddenOpen)
+                                }
+                            }
+                        }
                     }
-                    .listRowBackground(P.bg)
-                    .listRowSeparatorTint(P.line)
-                    .listRowInsets(EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l))
+                }
+            }
+            .alert(naming?.folder == nil ? "New folder" : "Rename folder", isPresented: Binding(get: { naming != nil }, set: { if !$0 { naming = nil } })) {
+                TextField("Name", text: Binding(get: { naming?.name ?? "" }, set: { naming?.name = $0 }))
+                Button("Cancel", role: .cancel) { naming = nil }
+                Button(naming?.folder == nil ? "Make" : "Rename") {
+                    if let n = naming {
+                        if let folder = n.folder {
+                            session.send(model.renameFolder(folder, n.name))
+                        } else {
+                            session.send(model.newFolder(n.name, agent: n.agent))
+                        }
+                    }
+                    naming = nil
                 }
             }
             .listStyle(.plain)
@@ -61,9 +118,50 @@ struct AgentsView: View {
             SettingsView()
         }
         .background {
-            Warmup(agent: model.synced && path.isEmpty ? model.agents.first?.id : nil)
+            Warmup(agent: model.synced && path.isEmpty ? model.shownAgents.first?.id : nil)
         }
         .onAppear(perform: openFromLaunch)
+    }
+
+    /// Each agent's row, which opens its chat, with a long press for its folder and
+    /// whether it's hidden.
+    private func rows(_ agents: [Agent]) -> some View {
+        let model = session.model
+        return ForEach(agents) { agent in
+            NavigationLink(value: agent.id) {
+                AgentRow(agent: agent)
+            }
+            .listRowBackground(P.bg)
+            .listRowSeparatorTint(P.line)
+            .listRowInsets(EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l))
+            .contextMenu {
+                Menu("Move to folder", systemImage: "folder") {
+                    ForEach(model.folders, id: \.id) { folder in
+                        Button {
+                            session.send(model.groupAgent(agent.id, folder.id))
+                        } label: {
+                            if agent.group == folder.id {
+                                Label(folder.name, systemImage: "checkmark")
+                            } else {
+                                Text(folder.name)
+                            }
+                        }
+                        .disabled(agent.group == folder.id)
+                    }
+                    if agent.group != nil {
+                        Button("Remove from folder", systemImage: "folder.badge.minus") {
+                            session.send(model.groupAgent(agent.id, nil))
+                        }
+                    }
+                    Button("New folder", systemImage: "folder.badge.plus") {
+                        naming = Naming(folder: nil, agent: agent.id, name: "")
+                    }
+                }
+                Button(agent.hidden ? "Show" : "Hide", systemImage: agent.hidden ? "eye" : "eye.slash") {
+                    session.send(model.hideAgent(agent.id, !agent.hidden))
+                }
+            }
+        }
     }
 
     /// `-open <agent>` and `-settings` at launch open that screen, for screenshots of each
@@ -72,6 +170,38 @@ struct AgentsView: View {
         let args = ProcessInfo.processInfo.arguments
         if let i = args.firstIndex(of: "-open"), i + 1 < args.count { path = [args[i + 1]] }
         if args.contains("-settings") { settings = true }
+    }
+}
+
+/// A folder being named: a new one, for an agent, or one being renamed.
+private struct Naming {
+    var folder: String?
+    var agent: String?
+    var name: String
+}
+
+/// A group's head in the agent list: its name, small and quiet, with a chevron when it
+/// opens and shuts.
+private struct GroupHead: View {
+    var title: String
+    var open: Bool?
+
+    var body: some View {
+        HStack(spacing: Tokens.Space.xs) {
+            Text(title)
+                .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                .lineLimit(1)
+            if let open {
+                Image(systemName: open ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(P.ink3)
+        .textCase(nil)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(open == nil ? [.isHeader] : [.isHeader, .isButton])
     }
 }
 

@@ -20,6 +20,8 @@ pub enum List {
     Outbox,
     Messages,
     Devices,
+    /// How the sidebar groups the agents (`core/sidebar.calx`).
+    Sidebar,
 }
 
 impl List {
@@ -33,6 +35,7 @@ impl List {
             List::Outbox => "outbox",
             List::Messages => "messages",
             List::Devices => "devices",
+            List::Sidebar => "sidebar",
         }
     }
 
@@ -46,6 +49,7 @@ impl List {
             "outbox" => List::Outbox,
             "messages" => List::Messages,
             "devices" => List::Devices,
+            "sidebar" => List::Sidebar,
             _ => return None,
         })
     }
@@ -72,6 +76,57 @@ fn sort_agents(agents: &mut [Agent]) {
             a.pinned.unwrap_or(0),
         )
     });
+}
+
+/// A part of the sidebar, as the core groups the agents (`core/sidebar.calx`): who's
+/// waiting on the person, the pinned ones, the rest not in a folder, each folder, and
+/// the hidden ones.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SidePart {
+    Waiting,
+    Pinned,
+    Agents,
+    Folder {
+        id: String,
+        name: String,
+        collapsed: bool,
+    },
+    Hidden,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Section {
+    pub part: SidePart,
+    /// Its agents' ids, in order.
+    pub agents: Vec<String>,
+}
+
+impl Section {
+    fn of(v: &Value) -> Option<Section> {
+        let part = match v.get("kind").and_then(Value::as_str)? {
+            "waiting" => SidePart::Waiting,
+            "pinned" => SidePart::Pinned,
+            "agents" => SidePart::Agents,
+            "hidden" => SidePart::Hidden,
+            "group" => SidePart::Folder {
+                id: s(v, "id"),
+                name: s(v, "name"),
+                collapsed: v.get("collapsed").and_then(Value::as_bool).unwrap_or(false),
+            },
+            _ => return None,
+        };
+        let agents = v
+            .get("agents")
+            .and_then(Value::as_array)
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Section { part, agents })
+    }
 }
 
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
@@ -126,6 +181,9 @@ pub struct Agent {
     /// Its place in the list, where the person dragged it; None for one that hasn't
     /// been placed, which goes after those that have, in the order they were made.
     pub order: Option<i64>,
+    /// The sidebar folder it's in, if any, and whether it's hidden there.
+    pub group: Option<String>,
+    pub hidden: bool,
     /// Whether it reaches tools through scripts, search_tools and run_code (Code
     /// Mode, the default), rather than each tool plainly.
     pub code_mode: bool,
@@ -3376,6 +3434,13 @@ pub struct Model {
     pub login_error: Option<String>,
     pub logging_in: bool,
     pub agents: Rc<Vec<Agent>>,
+    /// How the sidebar groups them, as the core says.
+    pub sidebar: Rc<Vec<Section>>,
+    /// An agent to put in the folder the app asked the instance to make, once it's made.
+    folder_for: Option<String>,
+    /// The folder the app asked the instance to make last, once it's made, for the app
+    /// to name it.
+    pub made_folder: Option<String>,
     /// Newest first, as the core orders them: by when each one's newest message is from.
     pub conversations: Vec<Conversation>,
     /// That time, by conversation id, so a message keeps the order without reading the
@@ -3826,6 +3891,14 @@ impl Model {
                 let id = self.id("browser.watch");
                 out.push(json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": agent, "on": false}}));
             }
+        }
+        // The sidebar groups the agents by what they are, and who's waiting by the
+        // questions open in their runs.
+        if [List::Agents, List::Runs, List::Approvals]
+            .iter()
+            .any(|l| self.dirty.contains(l))
+        {
+            self.dirty.insert(List::Sidebar);
         }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
@@ -4522,6 +4595,9 @@ impl Model {
                     self.revisions_stale = true;
                 }
             }
+            "group" => {
+                self.dirty.insert(List::Sidebar);
+            }
             "conversation" => {
                 self.dirty.insert(List::Conversations);
                 self.dirty.insert(List::Messages);
@@ -4928,6 +5004,20 @@ impl Model {
 
     fn result(&mut self, f: &Value) {
         let id = s(f, "id");
+        // A folder made: the agent it was made for goes in, and the app has it named.
+        if id.starts_with("app.folder_new") {
+            if let Some(g) = f.pointer("/value/group/id").and_then(Value::as_str) {
+                self.made_folder = Some(g.to_string());
+                if let Some(agent) = self.folder_for.take() {
+                    let f = self.group_agent(&agent, Some(g));
+                    self.to_send.push(f);
+                }
+            } else if let Some(e) = f.get("error") {
+                self.folder_for = None;
+                self.notices.push(s(e, "message"));
+            }
+            return;
+        }
         if id.starts_with("browser.watch") || id.starts_with("browser.hand") {
             if let Some(v) = f.get("value") {
                 if v.get("agent").is_some() {
@@ -5840,6 +5930,14 @@ impl Model {
             .cloned()
             .unwrap_or_default();
         match what {
+            List::Sidebar => {
+                let sections = f
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(|ss| ss.iter().filter_map(Section::of).collect())
+                    .unwrap_or_default();
+                self.sidebar = Rc::new(sections);
+            }
             List::Devices => {
                 self.devices = items
                     .iter()
@@ -5876,6 +5974,8 @@ impl Model {
                         config: config_values(a),
                         pinned: a.get("pinned").and_then(Value::as_i64),
                         order: a.get("order").and_then(Value::as_i64),
+                        group: a.get("group").and_then(Value::as_str).map(str::to_string),
+                        hidden: a.get("hidden").is_some_and(|h| !h.is_null()),
                         code_mode: a.get("code_mode").and_then(Value::as_bool).unwrap_or(true),
                         isolated: a.get("isolated").and_then(Value::as_bool).unwrap_or(false),
                         network: a.get("network").and_then(Value::as_array).map(|hs| {
@@ -5900,7 +6000,12 @@ impl Model {
                     .as_ref()
                     .is_none_or(|id| self.agent(id).is_none())
                 {
-                    let first = self.agents.first().map(|a| a.id.clone());
+                    let first = self
+                        .agents
+                        .iter()
+                        .find(|a| !a.hidden)
+                        .or(self.agents.first())
+                        .map(|a| a.id.clone());
                     self.select(first);
                 }
             }
@@ -7570,6 +7675,109 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.pin", "args": {"agent": agent, "pinned": pinned}}),
         )
+    }
+
+    /// Puts an agent in a sidebar folder, or with None, out of them. It shows there at
+    /// once, and the instance tells every device.
+    pub fn group_agent(&mut self, agent: &str, group: Option<&str>) -> Value {
+        let sections = Rc::make_mut(&mut self.sidebar);
+        for sec in sections.iter_mut() {
+            sec.agents.retain(|a| a != agent);
+        }
+        let into = sections.iter_mut().find(|sec| match (&sec.part, group) {
+            (SidePart::Folder { id, .. }, Some(g)) => id == g,
+            (SidePart::Agents, None) => true,
+            _ => false,
+        });
+        if let Some(sec) = into {
+            sec.agents.push(agent.to_string());
+        }
+        let id = self.id("app.group_agent");
+        json!({"t": "cmd", "id": id, "name": "agent.group", "args": {"agent": agent, "group": group.unwrap_or_default()}})
+    }
+
+    /// Hides an agent in the sidebar, or shows it again.
+    pub fn hide_agent(&mut self, agent: &str, hidden: bool) -> Value {
+        let id = self.id("app.hide_agent");
+        json!({"t": "cmd", "id": id, "name": "agent.hide", "args": {"agent": agent, "hidden": hidden}})
+    }
+
+    /// Makes a sidebar folder, with `agent` in it once it's made. `made_folder` says
+    /// which it is, so the app can have it named.
+    pub fn new_folder(&mut self, name: &str, agent: Option<&str>) -> Value {
+        self.folder_for = agent.map(str::to_string);
+        let id = self.id("app.folder_new");
+        json!({"t": "cmd", "id": id, "name": "group.create", "args": {"name": name}})
+    }
+
+    /// Renames a sidebar folder. A blank name keeps the one it has.
+    pub fn rename_folder(&mut self, folder: &str, name: &str) -> Option<Value> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        for sec in Rc::make_mut(&mut self.sidebar).iter_mut() {
+            if let SidePart::Folder { id, name: n, .. } = &mut sec.part {
+                if id == folder {
+                    *n = name.to_string();
+                }
+            }
+        }
+        let id = self.id("app.folder");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "group.update", "args": {"group": folder, "name": name}}),
+        )
+    }
+
+    /// Opens or shuts a sidebar folder, at once here, and on every device of the person's.
+    pub fn collapse_folder(&mut self, folder: &str, collapsed: bool) -> Value {
+        for sec in Rc::make_mut(&mut self.sidebar).iter_mut() {
+            if let SidePart::Folder {
+                id, collapsed: c, ..
+            } = &mut sec.part
+            {
+                if id == folder {
+                    *c = collapsed;
+                }
+            }
+        }
+        let id = self.id("app.folder");
+        json!({"t": "cmd", "id": id, "name": "group.update", "args": {"group": folder, "collapsed": collapsed}})
+    }
+
+    /// Deletes a sidebar folder. Its agents stay, out of any folder.
+    pub fn delete_folder(&mut self, folder: &str) -> Value {
+        let id = self.id("app.folder");
+        json!({"t": "cmd", "id": id, "name": "group.delete", "args": {"group": folder}})
+    }
+
+    /// The part of the sidebar an agent is in.
+    pub fn part_of(&self, agent: &str) -> Option<SidePart> {
+        self.sidebar
+            .iter()
+            .find(|sec| sec.agents.iter().any(|a| a == agent))
+            .map(|sec| sec.part.clone())
+    }
+
+    /// The sidebar's folders, each id and name, in order.
+    pub fn folders(&self) -> Vec<(String, String)> {
+        self.sidebar
+            .iter()
+            .filter_map(|sec| match &sec.part {
+                SidePart::Folder { id, name, .. } => Some((id.clone(), name.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The agents of the sidebar, in its order, without the hidden ones: what the rail
+    /// shows, and what Ctrl+1 to 9 open.
+    pub fn shown_agents(&self) -> Vec<String> {
+        self.sidebar
+            .iter()
+            .filter(|sec| sec.part != SidePart::Hidden)
+            .flat_map(|sec| sec.agents.iter().cloned())
+            .collect()
     }
 
     /// Sets an agent's permission mode, or with None, has it follow the default.
@@ -10889,6 +11097,55 @@ mod tests {
         let f = m.pin_agent(true).unwrap();
         assert_eq!(f["name"], "agent.pin");
         assert_eq!(f["args"]["agent"], "a_1");
+    }
+
+    #[test]
+    fn the_sidebar_comes_grouped_from_the_core() {
+        let mut m = Model::new();
+        let asked: Vec<Value> = m.fetches();
+        assert!(asked.iter().any(|f| f["what"] == "sidebar"));
+        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
+            {"kind": "waiting", "agents": ["a_3"]},
+            {"kind": "pinned", "agents": []},
+            {"kind": "agents", "agents": ["a_1"]},
+            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "agents": ["a_2"]},
+            {"kind": "hidden", "agents": ["a_4"]}
+        ]}));
+        assert_eq!(m.folders(), [("g_1".to_string(), "Work".to_string())]);
+        assert_eq!(m.shown_agents(), ["a_3", "a_1", "a_2"]);
+        assert_eq!(m.part_of("a_4"), Some(SidePart::Hidden));
+        // Put in the folder, it's there at once.
+        let f = m.group_agent("a_1", Some("g_1"));
+        assert_eq!(f["name"], "agent.group");
+        assert_eq!(f["args"], json!({"agent": "a_1", "group": "g_1"}));
+        assert_eq!(m.shown_agents(), ["a_3", "a_2", "a_1"]);
+        let f = m.collapse_folder("g_1", true);
+        assert_eq!(f["args"], json!({"group": "g_1", "collapsed": true}));
+        assert!(m.rename_folder("g_1", "  ").is_none());
+        // A folder made for an agent: the agent goes in, and the app names it.
+        let f = m.new_folder("New folder", Some("a_3"));
+        assert_eq!(f["name"], "group.create");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"group": {"id": "g_2", "name": "New folder"}}}));
+        assert_eq!(m.made_folder.as_deref(), Some("g_2"));
+        assert_eq!(m.to_send.len(), 1);
+        assert_eq!(m.to_send[0]["args"], json!({"agent": "a_3", "group": "g_2"}));
+        // A folder changed on another device: the sidebar is read again.
+        m.fetches();
+        m.take(&json!({"t": "event", "seq": 9, "kind": "group.updated", "group": {"id": "g_1"}}));
+        assert!(m.fetches().iter().any(|f| f["what"] == "sidebar"));
+    }
+
+    #[test]
+    fn a_hidden_agent_isnt_opened_first() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One", "hidden": 5},
+            {"id": "a_2", "name": "Two", "group": "g_1"}
+        ]}));
+        assert_eq!(m.selected.as_deref(), Some("a_2"));
+        assert!(m.agents[0].hidden && m.agents[1].group.as_deref() == Some("g_1"));
+        let f = m.hide_agent("a_2", true);
+        assert_eq!(f["args"], json!({"agent": "a_2", "hidden": true}));
     }
 
     #[test]

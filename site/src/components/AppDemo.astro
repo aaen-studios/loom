@@ -771,22 +771,23 @@ const GITHUB =
 		display: flex;
 		justify-content: flex-end;
 	}
-	/* What the person wrote: a bubble in the agent's colour itself, light in the light theme and
-	   deep in the dark, as the app's Vibrant bubbles, its default, draws it. */
+	/* What the person wrote: the bubble grey with a breath of the agent's colour, a little more
+	   in the dark, as the app draws it by default (Vibrant bubbles, the colour itself, is a
+	   choice in its settings). */
 	.bubble {
 		max-width: 520px;
 		padding: 10px 16px;
 		border-radius: var(--radius-bubble);
-		background: hsl(from var(--tint) h s 80%);
+		background: color-mix(in srgb, var(--tint) 7%, var(--bubble));
 		overflow-wrap: anywhere;
 	}
 	@media (prefers-color-scheme: dark) {
 		:root:not([data-theme='light']) .bubble {
-			background: hsl(from var(--tint) h s 28%);
+			background: color-mix(in srgb, var(--tint) 12%, var(--bubble));
 		}
 	}
 	:root[data-theme='dark'] .bubble {
-		background: hsl(from var(--tint) h s 28%);
+		background: color-mix(in srgb, var(--tint) 12%, var(--bubble));
 	}
 	.reply {
 		display: flex;
