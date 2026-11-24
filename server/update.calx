@@ -20,7 +20,7 @@ import std.json.{Json}
 import std.process.{Command, current_exe, exit}
 import std.thread.{Task}
 import shared.obj.{at, str_at}
-import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer}
+import shared.release.{MANIFEST, RELEASE_KEY, check_manifest, newer, signature_url}
 
 const DOWNLOAD_MOST: usize = 400000000
 const DOWNLOAD_MS: u32 = 600000
@@ -87,7 +87,8 @@ fn fetch(url: String, most: usize) -> List<u8> ! Error {
 /// The newest release's manifest, once its signature is `src`'s key's.
 pub fn manifest(src: Source) -> Json ! Error {
     let text = try fetch(src.manifest.copy(), 1048576)
-    let sig = String.from_utf8(try fetch("{src.manifest}.sig", 4096)) ?? String()
+    // From the release the manifest names, not through the latest link again.
+    let sig = String.from_utf8(try fetch(signature_url(src.manifest.copy(), text.copy()), 4096)) ?? String()
     let m = check_manifest(text, sig, src.key.copy()) else {
         fail "the release manifest isn't signed with loom's release key, so it isn't used"
     }
