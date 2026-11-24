@@ -614,7 +614,7 @@ enum Part: Equatable, Sendable {
     case tools([Int])
     /// Anything else on its own: a thought, a plan, a notice, a file or a card.
     case block(Int)
-    /// Two or more pictures next to each other, drawn as one stack the viewer opens.
+    /// Two or more pictures next to each other, drawn as one fan the viewer opens.
     case pictures([Int])
     /// The turn's steps, folded under one quiet line that opens to show them. While the
     /// turn runs (`working`), the line is the step it's on, and it's there even with no
@@ -678,7 +678,7 @@ private func asks(_ text: String) -> Bool {
 
 /// The blocks `shown`, in order, with words next to each other as one group, tool calls
 /// next to each other as one run, and two or more pictures next to each other as one
-/// stack.
+/// fan.
 private func layOut(_ m: Message, _ shown: [Int]) -> [Part] {
     func picture(_ i: Int) -> Bool { m.blocks[i].file?.isImage == true }
     var out: [Part] = []
@@ -709,12 +709,69 @@ private func layOut(_ m: Message, _ shown: [Int]) -> [Part] {
 
 /// A person's message's files as they're drawn, above its words, as
 /// desktop/src/model.rs's `file_parts`: each on its own, and two or more pictures as one
-/// stack, wherever they were among the others.
+/// fan, wherever they were among the others.
 func fileParts(_ m: Message) -> [Part] {
     let files = m.blocks.indices.filter { m.blocks[$0].file != nil }
     let pictures = files.filter { m.blocks[$0].file?.isImage == true }
     let others = files.filter { m.blocks[$0].file?.isImage != true }
     return layOut(m, pictures) + others.map { .block($0) }
+}
+
+/// Where a picture behind the first sits in a fan, at rest, as desktop/src/app.rs's
+/// `FanCard` (PLAN.md, "Pictures"): its picture's place among them, how far its middle is
+/// to the side of the first's, as a share of the card's width, its tilt in degrees and
+/// its size. The phone has no pointer, so its fan never opens further.
+struct FanCard: Equatable, Sendable {
+    var picture: Int
+    var x: CGFloat
+    var tilt: CGFloat
+    var scale: CGFloat
+}
+
+/// The most pictures a fan draws.
+let fanMost = 5
+
+/// The cards behind the first in a fan of `n` pictures, the ones furthest back first, as
+/// desktop/src/app.rs's `fan_cards` lays them out at rest:
+/// - two: one behind, tilted to the right;
+/// - three: one each side, apart already;
+/// - four: tight, the fourth furthest back on the left, the side a reader starts from;
+/// - five or more: tight, two each side. Only five are drawn.
+///
+/// The numbers are the sketch's, in points at the chat's 240-wide card.
+func fanCards(_ n: Int) -> [FanCard] {
+    func card(_ picture: Int, _ x: CGFloat, _ tilt: CGFloat, _ scale: CGFloat) -> FanCard {
+        FanCard(picture: picture, x: x / 240, tilt: tilt, scale: scale)
+    }
+    switch n {
+    case ..<2: return []
+    case 2: return [card(1, 24, 6, 0.95)]
+    case 3: return [card(1, -27, -7, 0.94), card(2, 27, 7, 0.94)]
+    case 4: return [card(3, -20, -8, 0.92), card(1, -12, -4, 0.96), card(2, 12, 4, 0.96)]
+    default: return [card(3, -20, -8, 0.92), card(4, 20, 8, 0.92), card(1, -12, -4, 0.96), card(2, 12, 4, 0.96)]
+    }
+}
+
+/// How far a fan of `n` pictures reaches past its front card, with the tilted corners of
+/// the ones behind, as shares of the card's width: to the left, to the right, and above
+/// and below it. `aspect` is the card's height over its width. The fan keeps that room,
+/// so nothing of it is cut off.
+func fanReach(_ n: Int, aspect: CGFloat) -> (left: CGFloat, right: CGFloat, up: CGFloat) {
+    var out: (left: CGFloat, right: CGFloat, up: CGFloat) = (0, 0, 0)
+    for c in fanCards(n) {
+        let t = abs(c.tilt) * .pi / 180
+        let half = (c.scale * (cos(t) + aspect * sin(t)) - 1) / 2
+        out.left = max(out.left, half - c.x)
+        out.right = max(out.right, half + c.x)
+        out.up = max(out.up, (c.scale * (sin(t) + aspect * cos(t)) - aspect) / 2)
+    }
+    return out
+}
+
+/// What a fan's corner says, as desktop/src/app.rs's `fan_count`: how many pictures there
+/// are, up to five, and past that how many more there are than the five it shows.
+func fanCount(_ n: Int) -> String {
+    n > fanMost ? "+\(n - fanMost)" : "\(n)"
 }
 
 /// A person's words without the marks (`[name]`) of the pictures in a stack where they

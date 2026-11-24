@@ -140,6 +140,14 @@ pub fn tracks_hover(d: Stateful<Div>, key: SharedString) -> Stateful<Div> {
 }
 
 fn set_hovered(key: SharedString, on: bool) {
+    // A thing in a view drawn from its cache, as a chat's row is, is built again for the
+    // change, so what it does with the pointer on it starts at once.
+    if let Some(view) = SCOPES.with(|s| s.borrow().get(&key).copied()) {
+        MOVING.with(|m| m.set(true));
+        MOVING_IN.with(|m| {
+            m.borrow_mut().insert(view);
+        });
+    }
     HOVERED.with(|h| {
         h.borrow_mut().insert(key, on);
     });

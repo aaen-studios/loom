@@ -14814,10 +14814,74 @@ fn file_view(
         .into_any_element()
 }
 
-/// Two or more pictures in a message as one stack of a fixed size, however many there
-/// are: the first on top, filling its place, up to two more peeking out behind it, and
-/// how many there are in its corner. Clicking it opens the viewer at the first, to step
-/// through them.
+/// Where a picture behind the first sits in a fan (`picture_stack`): how far to the side,
+/// as a share of the card's width, its tilt in degrees and its size, at rest and with the
+/// pointer on the fan.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct FanCard {
+    rest: (f32, f32, f32),
+    open: (f32, f32, f32),
+}
+
+/// The cards behind the first in a fan of `n` pictures, the ones furthest back first, each
+/// with its picture's place in the message (PLAN.md, "Pictures"):
+/// - two: one behind, tilted to the right;
+/// - three: one each side, apart already;
+/// - four: tight, the third behind on the left, the side a reader starts from;
+/// - five or more: tight, two each side. Only five are drawn.
+///
+/// Under the pointer the cards behind fan out. The numbers are the sketch's, at the
+/// chat's 240-wide card.
+fn fan_cards(n: usize) -> Vec<(usize, FanCard)> {
+    let at = |x: f32| x / STACK_W;
+    let card = |rest: (f32, f32, f32), open: (f32, f32, f32)| FanCard {
+        rest: (at(rest.0), rest.1, rest.2),
+        open: (at(open.0), open.1, open.2),
+    };
+    let (l1, r1) = if n == 3 {
+        (
+            card((-27.0, -7.0, 0.94), (-40.0, -10.0, 0.94)),
+            card((27.0, 7.0, 0.94), (40.0, 10.0, 0.94)),
+        )
+    } else {
+        (
+            card((-12.0, -4.0, 0.96), (-33.0, -8.0, 0.95)),
+            card((12.0, 4.0, 0.96), (33.0, 8.0, 0.95)),
+        )
+    };
+    let l2 = card((-20.0, -8.0, 0.92), (-56.0, -15.0, 0.88));
+    let r2 = card((20.0, 8.0, 0.92), (56.0, 15.0, 0.88));
+    match n {
+        0 | 1 => vec![],
+        2 => vec![(1, card((24.0, 6.0, 0.95), (40.0, 9.0, 0.95)))],
+        3 => vec![(1, l1), (2, r1)],
+        4 => vec![(3, l2), (1, l1), (2, r1)],
+        _ => vec![(3, l2), (4, r2), (1, l1), (2, r1)],
+    }
+}
+
+/// What a fan's corner says: how many pictures there are, up to five, and past that how
+/// many more there are than the five it shows.
+fn fan_count(n: usize) -> String {
+    if n > FAN_MOST {
+        format!("+{}", n - FAN_MOST)
+    } else {
+        n.to_string()
+    }
+}
+
+/// The most pictures a fan draws.
+const FAN_MOST: usize = 5;
+/// How long a fan takes to open or close under the pointer, in seconds.
+const FAN_SECS: f32 = 0.28;
+/// The room kept around a tilted card's picture for its shadow, as a share of its width
+/// (`CardLoader`, `TILTED`).
+const FAN_SHADOW: f32 = 0.06;
+
+/// Two or more pictures in a message as a fan of a fixed size, however many there are:
+/// the first in front, filling its place, up to four more tilted behind it either side,
+/// and how many there are in its corner. Under the pointer the ones behind fan out.
+/// Clicking it opens the viewer at the first, to step through them.
 fn picture_stack(
     p: Palette,
     stack: &[model::FileRef],
@@ -14826,21 +14890,42 @@ fn picture_stack(
     room: i32,
     this: WeakEntity<Loom>,
 ) -> AnyElement {
-    let w = STACK_W
-        .min(room as f32 - 2.0 * space::XL - 2.0 * STACK_STEP)
-        .max(PICTURE_LEAST);
+    let behind = fan_cards(stack.len());
+    // As far as the fan reaches either side, open, with its tilted corners.
+    let reach = |side: f32| {
+        behind
+            .iter()
+            .map(|(_, c)| {
+                let (x, deg, s) = c.open;
+                let t = deg.abs().to_radians();
+                let half = (s * (t.cos() + STACK_H / STACK_W * t.sin()) - 1.0) / 2.0;
+                (x * side + half).max(0.0)
+            })
+            .fold(0.0f32, f32::max)
+    };
+    let (left, right) = (reach(-1.0), reach(1.0));
+    let w = ((room as f32 - 2.0 * space::XL) / (1.0 + left + right)).clamp(PICTURE_LEAST, STACK_W);
     let h = (w * STACK_H / STACK_W).round();
-    let behind = stack.len().saturating_sub(1).min(2);
-    let card = |f: &model::FileRef, layer: usize| {
-        let shift = STACK_STEP * layer as f32;
+    let id = SharedString::from(format!("stack-{key}"));
+    // Kept under the fan's hover key, so a change of hover builds its row again.
+    let open = motion::level(&id, motion::hovered(&id), FAN_SECS);
+    let pad = (h * 0.09).round();
+    let card = |f: &model::FileRef| {
         div()
             .absolute()
-            .left(px(shift))
-            .top(px(STACK_STEP * behind as f32 - shift))
+            .left(px((w * left).round()))
+            .top(px(pad))
             .w(px(w))
             .h(px(h))
             .rounded(px(radius::BUBBLE))
             .bg(p.bubble)
+            .shadow(vec![BoxShadow {
+                color: black().opacity(0.14),
+                offset: point(px(0.0), px(3.0)),
+                blur_radius: px(10.0),
+                spread_radius: px(0.0),
+                inset: false,
+            }])
             // Each layer rounded itself: a parent's corners don't clip what's in it. The
             // picture comes cropped to the card's shape (`CardLoader`), so it fills it.
             .when_some(
@@ -14855,19 +14940,7 @@ fn picture_stack(
                     )
                 },
             )
-            // The ones behind sit a step back, a little toward the page.
-            .when(layer > 0, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full()
-                        .rounded(px(radius::BUBBLE))
-                        .bg(p.bg.opacity(0.35)),
-                )
-            })
-            // A fine edge over the picture, so the layers read apart.
+            // A fine edge over the picture.
             .child(
                 div()
                     .absolute()
@@ -14879,19 +14952,39 @@ fn picture_stack(
                     .border_color(p.line),
             )
     };
-    let mut out = div()
-        .id(SharedString::from(format!("stack-{key}")))
-        .relative()
-        .flex_none()
-        .w(px(w + STACK_STEP * behind as f32))
-        .h(px(h + STACK_STEP * behind as f32))
-        .cursor_pointer();
-    for layer in (1..=behind).rev() {
-        out = out.child(card(&stack[layer], layer));
+    let mut out = motion::tracks_hover(
+        div()
+            .id(id.clone())
+            .relative()
+            .flex_none()
+            .w(px((w * (1.0 + left + right)).round()))
+            .h(px(h + 2.0 * pad))
+            .cursor_pointer(),
+        id,
+    );
+    for (i, c) in &behind {
+        let Some(path) = files.get(&format!("{}.thumb", stack[*i].file)) else {
+            continue;
+        };
+        let mix = |a: f32, b: f32| a + (b - a) * open;
+        let (x, deg, s) = (
+            mix(c.rest.0, c.open.0),
+            mix(c.rest.1, c.open.1),
+            mix(c.rest.2, c.open.2),
+        );
+        out = out.child(
+            div()
+                .absolute()
+                .left(px((w * left).round()))
+                .top(px(pad))
+                .w(px(w))
+                .h(px(h))
+                .child(tilted_card(path.clone(), x * w, deg, s)),
+        );
     }
     let opened = stack.to_vec();
     out.child(
-        card(&stack[0], 0).child(
+        card(&stack[0]).child(
             div()
                 .absolute()
                 .right(px(space::S))
@@ -14907,7 +15000,7 @@ fn picture_stack(
                 .text_color(white())
                 .text_size(px(size::CAPTION))
                 .font_weight(FontWeight::MEDIUM)
-                .child(stack.len().to_string()),
+                .child(fan_count(stack.len())),
         ),
     )
     .on_click(move |_, _, cx| {
@@ -14916,10 +15009,48 @@ fn picture_stack(
     .into_any_element()
 }
 
-/// A stack's place, wide and tall, at most, and how far each picture behind peeks out.
+/// A picture behind the first in a fan, over the first's place: `dx` to the side, tilted
+/// `deg` degrees about its middle and sized by `scale`, drawn from its tilted card
+/// (`CardLoader`, `TILTED`), which has its rounded corners, its edge and its shadow.
+fn tilted_card(path: String, dx: f32, deg: f32, scale: f32) -> impl IntoElement {
+    let resource = Resource::Uri(SharedUri::from(format!("{TILTED}{path}")));
+    canvas(
+        move |_, window, cx| {
+            card_images().and_then(|cards| {
+                cards
+                    .update(cx, |c, cx| c.load(&resource, window, cx))?
+                    .ok()
+            })
+        },
+        move |bounds, image, window, _| {
+            let Some(image) = image else {
+                return;
+            };
+            let center = bounds.center() + point(px(dx), px(0.0));
+            let margin = bounds.size.width * FAN_SHADOW;
+            let size = size(
+                (bounds.size.width + margin * 2.0) * scale,
+                (bounds.size.height + margin * 2.0) * scale,
+            );
+            let at = Bounds::centered_at(center, size);
+            let turn = TransformationMatrix::rotation_about(
+                center,
+                radians(deg.to_radians()),
+                window.scale_factor(),
+            );
+            let _ =
+                window.paint_image_transformed(at, at, Corners::default(), image, 0, false, turn);
+        },
+    )
+    .size_full()
+}
+
+/// How a tilted card's picture is named for `CardLoader`: this, then the picture's path.
+const TILTED: &str = "loom-tilted:";
+
+/// A stack's place, wide and tall, at most.
 const STACK_W: f32 = 240.0;
 const STACK_H: f32 = 180.0;
-const STACK_STEP: f32 = 6.0;
 
 /// The most room a picture in a message takes, wide and tall.
 const PICTURE_W: f32 = 360.0;
@@ -15029,16 +15160,82 @@ impl Asset for CardLoader {
     ) -> impl std::future::Future<Output = Self::Output> + Send + 'static {
         async move {
             let failed = |why: &str| ImageCacheError::Io(Arc::new(std::io::Error::other(why)));
-            let Resource::Path(path) = source else {
-                return Err(failed("a card is a file"));
+            let (path, tilted) = match &source {
+                Resource::Path(path) => (path.to_path_buf(), false),
+                Resource::Uri(uri) => match uri.strip_prefix(TILTED) {
+                    Some(path) => (std::path::PathBuf::from(path), true),
+                    None => return Err(failed("a card is a file")),
+                },
+                _ => return Err(failed("a card is a file")),
             };
-            let bytes = std::fs::read(&*path).map_err(|e| ImageCacheError::Io(Arc::new(e)))?;
+            let bytes = std::fs::read(&path).map_err(|e| ImageCacheError::Io(Arc::new(e)))?;
             let full = picture_pixels(&bytes).ok_or_else(|| failed("not a picture"))?;
             let (x, y, w, h) = card_crop(full.width(), full.height());
             let card = image::imageops::crop_imm(&full, x, y, w, h).to_image();
+            let card = if tilted { tilted_pixels(&card) } else { card };
             Ok(Arc::new(RenderImage::new(vec![image::Frame::new(card)])))
         }
     }
+}
+
+/// A card behind the first in a fan, ready to be drawn tilted (`tilted_card`): its picture
+/// (BGRA) with the card's rounded corners and a fine edge, a little quieter than the one
+/// in front, on a soft shadow, with `FAN_SHADOW` of room around it. The GPU only turns
+/// it, so the corners and the shadow are part of the picture.
+fn tilted_pixels(card: &image::RgbaImage) -> image::RgbaImage {
+    let (cw, ch) = (card.width().max(1), card.height().max(1));
+    let k = cw as f32 / STACK_W;
+    let margin = (FAN_SHADOW * cw as f32).round() as u32;
+    let (r, drop, blur) = (radius::BUBBLE * k, 3.0 * k, 10.0 * k);
+    let (w, h) = (cw as f32, ch as f32);
+    // How far a point is outside a rounded rectangle: below 0 inside it.
+    let sdf = |x: f32, y: f32, top: f32| {
+        let qx = (x - w / 2.0).abs() - (w / 2.0 - r);
+        let qy = (y - top - h / 2.0).abs() - (h / 2.0 - r);
+        let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+        outside + qx.max(qy).min(0.0) - r
+    };
+    let mut out = image::RgbaImage::new(cw + 2 * margin, ch + 2 * margin);
+    for (ox, oy, px) in out.enumerate_pixels_mut() {
+        let (x, y) = (
+            ox as f32 + 0.5 - margin as f32,
+            oy as f32 + 0.5 - margin as f32,
+        );
+        let d = sdf(x, y, 0.0);
+        // The shadow, a little below, soft at its edge.
+        let t = (1.0 - (sdf(x, y, drop) + blur * 0.3) / blur).clamp(0.0, 1.0);
+        let shadow = 0.16 * t * t * (3.0 - 2.0 * t);
+        let cover = (0.5 - d).clamp(0.0, 1.0);
+        let mut color = [0.0f32; 3];
+        if cover > 0.0 {
+            let sx = (x.max(0.0) as u32).min(cw - 1);
+            let sy = (y.max(0.0) as u32).min(ch - 1);
+            let s = card.get_pixel(sx, sy).0;
+            let (b, g, red) = (s[0] as f32, s[1] as f32, s[2] as f32);
+            let grey = 0.0722 * b + 0.7152 * g + 0.2126 * red;
+            // A step back: a little less colour and light, and a fine dark edge.
+            let edge = 1.0 - 0.08 * (1.0 - (d + 0.5).abs()).clamp(0.0, 1.0);
+            for (c, v) in color.iter_mut().zip([b, g, red]) {
+                *c = (grey + (v - grey) * 0.88) * 0.97 * edge;
+            }
+        }
+        // The card over its shadow (black), as straight alpha.
+        let alpha = cover + shadow * (1.0 - cover);
+        let rgb = |c: f32| {
+            if alpha > 0.0 {
+                (c * cover / alpha).round().clamp(0.0, 255.0) as u8
+            } else {
+                0
+            }
+        };
+        *px = image::Rgba([
+            rgb(color[0]),
+            rgb(color[1]),
+            rgb(color[2]),
+            (alpha * 255.0).round() as u8,
+        ]);
+    }
+    out
 }
 
 /// The middle of a `w` × `h` picture in a stack card's shape: its left, top, width and
@@ -18127,6 +18324,52 @@ mod command_tests {
         );
         assert_eq!(readable_name("notes.md"), "notes.md");
         assert_eq!(readable_name("Made Button"), "Made Button");
+    }
+}
+
+#[cfg(test)]
+mod fan_tests {
+    use super::{fan_cards, fan_count, tilted_pixels};
+
+    #[test]
+    fn a_fan_puts_its_pictures_either_side_and_counts_past_five() {
+        let places = |n: usize| fan_cards(n).iter().map(|(i, _)| *i).collect::<Vec<_>>();
+        assert!(places(1).is_empty());
+        assert_eq!(places(2), vec![1]);
+        assert_eq!(places(3), vec![1, 2]);
+        // The ones furthest back come first, so they're drawn first.
+        assert_eq!(places(4), vec![3, 1, 2]);
+        assert_eq!(places(5), vec![3, 4, 1, 2]);
+        assert_eq!(places(24), places(5));
+        // Two: behind on the right. Three: one each side, apart already, and further
+        // apart under the pointer.
+        let two = fan_cards(2)[0].1;
+        assert!(two.rest.0 > 0.0 && two.rest.1 > 0.0);
+        let three = fan_cards(3);
+        assert!(three[0].1.rest.0 < 0.0 && three[1].1.rest.0 > 0.0);
+        assert!(three[1].1.open.0 > three[1].1.rest.0 && three[1].1.open.1 > three[1].1.rest.1);
+        // Four and five rest tighter than three.
+        assert!(fan_cards(5)[3].1.rest.0 < three[1].1.rest.0);
+        assert_eq!(fan_count(2), "2");
+        assert_eq!(fan_count(5), "5");
+        assert_eq!(fan_count(7), "+2");
+        assert_eq!(fan_count(24), "+19");
+    }
+
+    #[test]
+    fn a_tilted_card_has_round_corners_and_room_for_its_shadow() {
+        let card = image::RgbaImage::from_pixel(240, 180, image::Rgba([10, 200, 30, 255]));
+        let tilted = tilted_pixels(&card);
+        let m = (tilted.width() - 240) / 2;
+        assert!(m > 0 && tilted.height() == 180 + 2 * m);
+        // The middle is the picture, a little quieter; the very corner is clear of it.
+        let mid = tilted.get_pixel(m + 120, m + 90).0;
+        assert_eq!(mid[3], 255);
+        assert!(mid[1] < 200 && mid[1] > 150);
+        assert!(tilted.get_pixel(m, m).0[3] < 128);
+        // Below the card, its shadow.
+        let under = tilted.get_pixel(m + 120, m + 180 + m / 3).0;
+        assert!(under[3] > 0 && under[0] == 0);
     }
 }
 

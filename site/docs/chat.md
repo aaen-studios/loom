@@ -22,7 +22,7 @@ Anything bigger, such as a report or a chart, comes as a page in the chat instea
 
 ## Pictures
 
-Two or more pictures in one message, yours or an agent's, are one stack, with how many in its corner. Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
+Two or more pictures in one message, yours or an agent's, are one fan: the first in front, and up to four more tilted behind it, which spread out when you point at them. Its corner says how many there are, or past five, how many more ("+2"). Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
 
 ## Links and sources
 
