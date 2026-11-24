@@ -10671,9 +10671,10 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.panel_opening.is_some() {
             return;
         }
-        // A Mac's web view doesn't keep a panel from the network yet: the panel break-out
-        // test gets out there (LOO-268). Until it doesn't, panels and pages don't open on
-        // a Mac. `loom --panel-test` still runs there, to check.
+        // A Mac's web view passes the panel break-out test, but a link in a closed
+        // declarative shadow root, when clicked, still has WebKit connect to an address on
+        // this computer or its network, and only WebKit's private settings stop that
+        // (LOO-275). Until then, panels and pages don't open on a Mac.
         if cfg!(target_os = "macos") {
             self.model
                 .notices

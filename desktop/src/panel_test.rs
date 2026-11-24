@@ -88,58 +88,70 @@ pub fn run(out: std::path::PathBuf) {
         gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                focus: false,
+                show: false,
                 ..Default::default()
             },
             cx,
             move |window, cx| {
+                out_of_the_way(window);
                 cx.new(|cx| {
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let refused = Rc::new(RefCell::new(Vec::new()));
                     let mut files = HashMap::new();
                     files.insert(String::from("index.html"), PAGE.as_bytes().to_vec());
-                    let mut context = panel::context(&data);
-                    let shown = Panel::open(
-                        &*window,
-                        &mut context,
-                        &Source {
-                            id: String::from("breakout"),
-                            files: Arc::new(files),
-                            entry: format!("index.html?c={tcp_port}&u={udp_port}"),
-                        },
-                        Rect {
+                    let source = Source {
+                        id: String::from("breakout"),
+                        files: Arc::new(files),
+                        entry: format!("index.html?c={tcp_port}&u={udp_port}"),
+                    };
+                    let Ok(parent) = raw_window_handle::HasWindowHandle::window_handle(&*window)
+                        .map(|h| Parent(h.as_raw()))
+                    else {
+                        eprintln!("loom: the window has no handle");
+                        std::process::exit(2);
+                    };
+                    let door = {
+                        let messages = messages.clone();
+                        move |m| messages.borrow_mut().push(m)
+                    };
+                    let stopped = {
+                        let refused = refused.clone();
+                        move |what| refused.borrow_mut().push(what)
+                    };
+                    let data = data.clone();
+                    // Made from a task, with nothing borrowed, as the app makes a panel
+                    // (app.rs, sync_panel): making one runs the main thread's loop.
+                    cx.spawn(async move |this, cx| {
+                        let mut context = panel::context(&data);
+                        let bounds = Rect {
                             position: LogicalPosition::new(0.0, 0.0).into(),
                             size: LogicalSize::new(800.0, 600.0).into(),
-                        },
-                        {
-                            let messages = messages.clone();
-                            move |m| messages.borrow_mut().push(m)
-                        },
-                        {
-                            let refused = refused.clone();
-                            move |what| refused.borrow_mut().push(what)
-                        },
-                    );
-                    let panel = match shown {
-                        Ok(p) => Some(p),
-                        Err(e) => {
-                            eprintln!("loom: the panel didn't open: {e}");
-                            std::process::exit(2);
+                        };
+                        match Panel::open(&parent, &mut context, &source, bounds, door, stopped) {
+                            Ok(p) => {
+                                let _ = this.update(cx, |t: &mut BreakOut, _| t.panel = Some(p));
+                            }
+                            Err(e) => {
+                                eprintln!("loom: the panel didn't open: {e}");
+                                std::process::exit(2);
+                            }
                         }
-                    };
-                    cx.spawn(async move |this, cx| loop {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(50))
-                            .await;
-                        let finished = this
-                            .update(cx, |t: &mut BreakOut, _| t.step())
-                            .unwrap_or(true);
-                        if finished {
-                            break;
+                        loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(50))
+                                .await;
+                            let finished = this
+                                .update(cx, |t: &mut BreakOut, _| t.step())
+                                .unwrap_or(true);
+                            if finished {
+                                break;
+                            }
                         }
                     })
                     .detach();
                     BreakOut {
-                        panel,
+                        panel: None,
                         messages,
                         refused,
                         reports: Vec::new(),
@@ -151,8 +163,61 @@ pub fn run(out: std::path::PathBuf) {
             },
         )
         .expect("a window");
-        cx.activate(true);
     });
+}
+
+/// The test's window, by its handle, for the task that makes the panel.
+struct Parent(raw_window_handle::RawWindowHandle);
+
+impl raw_window_handle::HasWindowHandle for Parent {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+        // SAFETY: the handle is the test's one window, which lives until the test exits,
+        // and the panel is made on its thread.
+        Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.0) })
+    }
+}
+
+/// Shows the test's window far off every screen, without taking focus, as the test
+/// often runs on a computer someone is working at. A Mac's loom has no Dock icon
+/// while it runs.
+fn out_of_the_way(window: &Window) {
+    let handle = crate::shell::hwnd(window);
+    #[cfg(windows)]
+    {
+        let scale = window.scale_factor();
+        let (w, h) = ((800.0 * scale) as i32, (600.0 * scale) as i32);
+        crate::shell::out_of_the_way(handle, w, h, true);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSView};
+        use objc2_foundation::NSPoint;
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        NSApplication::sharedApplication(mtm)
+            .setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+        if handle == 0 {
+            return;
+        }
+        // SAFETY: the NSView of the test's own window, which lives until the test
+        // exits, on the main thread.
+        let view: &NSView = unsafe { &*(handle as *const NSView) };
+        // macOS keeps part of a window on a screen, so it's also clear and lets clicks
+        // through, behind every other window.
+        if let Some(w) = view.window() {
+            w.setAlphaValue(0.0);
+            w.setIgnoresMouseEvents(true);
+            w.setHasShadow(false);
+            w.orderBack(None);
+            w.setFrameOrigin(NSPoint::new(-10000.0, -10000.0));
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    let _ = handle;
 }
 
 impl BreakOut {
