@@ -4810,6 +4810,56 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Picks `value` on field `field` of the form `card` in reply `message`.
+    fn pick_form(
+        &mut self,
+        message: &str,
+        card: &str,
+        field: usize,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.pick_form(message, card, field, value);
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
+    /// Send on the form `card` in reply `message`: what's typed in its boxes and picked
+    /// on it goes as one answer, or the card says what's missing.
+    fn send_form(&mut self, message: &str, card: &str, cx: &mut Context<Self>) {
+        let count = (0..)
+            .take_while(|k| {
+                self.model
+                    .messages
+                    .iter()
+                    .find(|m| m.id == message)
+                    .and_then(|m| {
+                        m.blocks.iter().find_map(|b| match b.card.as_ref() {
+                            Some(c) if c.id == card => match &c.body {
+                                model::CardBody::Form { fields, .. } => Some(*k < fields.len()),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
+        let typed: Vec<String> = (0..count)
+            .map(|k| {
+                self.card_secrets
+                    .get(&form_field_key(message, card, k))
+                    .map(|i| i.read(cx).value().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if let Some(f) = self.model.send_form(message, card, &typed) {
+            self.send(f);
+        }
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
     /// Ticks or unticks Save as on field `field` of the card asking for a secret for `call`.
     fn toggle_secret_keep(&mut self, call: &str, field: usize, cx: &mut Context<Self>) {
         self.model.toggle_secret_keep(call, field);
@@ -4837,9 +4887,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 Row::Approval(_) => None,
             })
             .flat_map(|m| m.blocks.iter())
-            .filter_map(|b| b.card.as_ref().map(|c| &c.body));
-        for body in cards {
-            match body {
+            .filter_map(|b| b.card.as_ref());
+        for card in cards {
+            match &card.body {
                 model::CardBody::McpAdd {
                     call,
                     settings,
@@ -4873,6 +4923,25 @@ ACTA_KEY=secret:ACTA_KEY",
                                 "Name".into(),
                                 false,
                                 f.save.clone(),
+                            ));
+                        }
+                    }
+                }
+                // A form not sent: a box for each text and number field, with what it
+                // starts as.
+                model::CardBody::Form {
+                    message,
+                    fields,
+                    answers: None,
+                    ..
+                } => {
+                    for (k, f) in fields.iter().enumerate() {
+                        if f.kind == "text" || f.kind == "number" {
+                            wanted.push((
+                                form_field_key(message, &card.id, k),
+                                f.placeholder.clone(),
+                                false,
+                                f.start_text(),
                             ));
                         }
                     }
@@ -7830,6 +7899,17 @@ ACTA_KEY=secret:ACTA_KEY",
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
         let column = self.prefs.column();
+        // Allow held on a risky question: allowed once it's held long enough, and drawn
+        // filling at every frame meanwhile.
+        let now = Instant::now();
+        if let Some(f) = self.model.hold_tick(now) {
+            self.send(f);
+            self.refresh_rows(cx);
+        }
+        if self.model.holding(now) {
+            window.request_animation_frame();
+        }
+        let hold = self.model.hold_shown(now);
         // Clear of the small browser window, while it shows.
         let pad = mini.is_some().then(|| {
             let (fw, fh) = self
@@ -7857,6 +7937,7 @@ ACTA_KEY=secret:ACTA_KEY",
             width: self.chat_width(window),
             p,
             pad,
+            hold,
         };
         // The list is a view of its own, built with the window, and each finished message
         // in it another, drawn from its cache until what it shows changes (`RowView`): a
@@ -14663,14 +14744,18 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Picks answer `i` on the choices card of the chat's newest message, from the key
     /// that names it (Ctrl or Cmd and its number). False when there's none to pick.
     fn choose_by_key(&mut self, i: usize, cx: &mut Context<Self>) -> bool {
-        let answer = self.newest_message().and_then(|m| {
-            m.blocks
-                .iter()
-                .find_map(|b| match b.card.as_ref().map(|c| &c.body) {
-                    Some(model::CardBody::Choices { options, .. }) => options.get(i).cloned(),
-                    _ => None,
-                })
-        });
+        // Only once the reply is finished, so the person has read it all.
+        let answer = self
+            .newest_message()
+            .filter(|m| m.takes_answers(true))
+            .and_then(|m| {
+                m.blocks
+                    .iter()
+                    .find_map(|b| match b.card.as_ref().map(|c| &c.body) {
+                        Some(model::CardBody::Choices { options, .. }) => options.get(i).cloned(),
+                        _ => None,
+                    })
+            });
         match answer {
             Some(a) => {
                 self.choose(&a, cx);
@@ -14761,6 +14846,27 @@ ACTA_KEY=secret:ACTA_KEY",
         let f = self.model.answer(&call, allow, always);
         self.send(f);
         self.refresh_rows(cx);
+        cx.notify();
+    }
+
+    /// Allow pressed on a risky question: it starts being held (`Model::press_allow`).
+    pub fn press_allow(&mut self, call: &str, cx: &mut Context<Self>) {
+        if let Some(f) = self.model.press_allow(call, Instant::now()) {
+            self.send(f);
+            self.refresh_rows(cx);
+        }
+        cx.notify();
+    }
+
+    /// Allow let go: held long enough, the question's allowed; sooner, it says to hold.
+    pub fn release_allow(&mut self, cx: &mut Context<Self>) {
+        if !self.model.is_held() {
+            return;
+        }
+        if let Some(f) = self.model.release_allow(Instant::now()) {
+            self.send(f);
+            self.refresh_rows(cx);
+        }
         cx.notify();
     }
 }
@@ -15553,7 +15659,8 @@ struct Show {
     text_scale: f32,
     bubbles: bool,
     vibrant: bool,
-    /// Whether this is the chat's newest message, whose choices still answer.
+    /// Whether its questions answer now: it's the chat's newest message, and finished
+    /// (`Message::takes_answers`).
     newest: bool,
     /// How wide the chat's column is, to the pixel (`Loom::chat_room`), in the text's
     /// id, so text measures itself again when the column changes.
@@ -16228,6 +16335,7 @@ fn card_view(
         CardBody::SignIn { .. } => sign_in_card(p, card, key, tint, scale, this),
         CardBody::McpAdd { .. } => mcp_add_card(p, card, key, name, tint, scale, secrets, this),
         CardBody::SecretAsk { .. } => secret_ask_card(p, card, key, tint, scale, secrets, this),
+        CardBody::Form { .. } => form_card(p, card, key, tint, show, secrets, this),
         _ => shown_card(p, card, tint, scale),
     }
 }
@@ -16815,6 +16923,217 @@ fn secret_ask_card(
     div().max_w(px(CARD_MOST)).child(frame.draw(p, scale))
 }
 
+/// The key of the box for field `k` of the form `card` in reply `message`, among the
+/// card fields (`Loom::card_secrets`).
+fn form_field_key(message: &str, card: &str, k: usize) -> String {
+    format!("form/{message}/{card}/{k}")
+}
+
+/// A form's on and off switch, as the settings' own (`Loom::switch`).
+fn form_switch(p: Palette, id: SharedString, on: bool) -> Stateful<Div> {
+    let k = motion::level(&id, on, motion::SLIDE);
+    div()
+        .id(id.clone())
+        .role(Role::Switch)
+        .relative()
+        .w(px(38.0))
+        .h(px(22.0))
+        .flex_none()
+        .rounded(px(radius::ROW))
+        .cursor_pointer()
+        .bg(motion::mix(p.line_strong, p.button, k))
+        .child(
+            div()
+                .absolute()
+                .top(px(3.0))
+                .left(px(3.0 + 16.0 * k))
+                .size(px(16.0))
+                .rounded(px(4.0))
+                .bg(motion::mix(p.bg, p.button_ink, k))
+                .shadow_sm(),
+        )
+}
+
+/// Several questions an agent asks at once (show_card's `form`), in the card frame: each
+/// field under its label, text and numbers in a box, a choice as its options side by
+/// side, a toggle as a switch beside its label, then Send, which sends them as one
+/// answer. Sent, it's one quiet line, as it is once the chat has gone on without it.
+fn form_card(
+    p: Palette,
+    card: &model::Card,
+    key: &str,
+    tint: Hsla,
+    show: Show,
+    secrets: &HashMap<String, Entity<InputState>>,
+    this: WeakEntity<Loom>,
+) -> Div {
+    let model::CardBody::Form {
+        message,
+        fields,
+        picks,
+        answers,
+        sending,
+        error,
+    } = &card.body
+    else {
+        return div();
+    };
+    let scale = show.text_scale;
+    let quiet = |icon: Ico, how: &str| {
+        div().child(card_done(
+            p,
+            done_lead(p, None, icon),
+            how,
+            &card.title,
+            scale,
+        ))
+    };
+    if answers.is_some() {
+        return quiet(Ico::Check, "Sent");
+    }
+    if !show.newest {
+        return quiet(Ico::X, "Not sent");
+    }
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap(px(space::M))
+        .text_size(px(size::SMALL * scale));
+    for (k, f) in fields.iter().enumerate() {
+        let label = div()
+            .flex()
+            .items_baseline()
+            .gap(px(space::S))
+            .min_w_0()
+            .child(
+                div()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child(f.label.clone()),
+            )
+            .when(!f.required && f.kind != "toggle", |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child("Optional"),
+                )
+            });
+        let pick = picks.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let picked = {
+            let this = this.clone();
+            let (message, card_id) = (message.clone(), card.id.clone());
+            move |value: serde_json::Value| {
+                let this = this.clone();
+                let (message, card_id) = (message.clone(), card_id.clone());
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    let _ = this.update(cx, |loom, cx| {
+                        loom.pick_form(&message, &card_id, k, value.clone(), cx)
+                    });
+                }
+            }
+        };
+        let one = match f.kind.as_str() {
+            "toggle" => {
+                let on = pick.as_bool().unwrap_or(false);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(div().flex_1().min_w_0().child(label))
+                    .child(
+                        form_switch(p, SharedString::from(format!("form-{key}-{k}")), on)
+                            .aria_label(f.label.clone())
+                            .on_click(picked(serde_json::Value::Bool(!on))),
+                    )
+            }
+            "choice" => {
+                let mut options = div().flex().flex_wrap().gap(px(space::S));
+                for (n, o) in f.options.iter().enumerate() {
+                    let chosen = pick.as_str() == Some(o.as_str());
+                    options = options.child(
+                        div()
+                            .id(SharedString::from(format!("form-{key}-{k}-{n}")))
+                            .role(Role::RadioButton)
+                            .aria_label(o.clone())
+                            .px(px(space::M))
+                            .py(px(space::XS + 2.0))
+                            .rounded(px(radius::BUTTON))
+                            .border_1()
+                            .cursor_pointer()
+                            .when(chosen, |d| {
+                                d.border_color(tint)
+                                    .bg(motion::mix(card_fill(p), tint, 0.14))
+                                    .text_color(p.ink)
+                                    .font_weight(FontWeight::MEDIUM)
+                            })
+                            .when(!chosen, |d| {
+                                d.border_color(p.line_strong)
+                                    .text_color(p.ink_2)
+                                    .soft_hover(
+                                        card_fill(p),
+                                        motion::mix(card_fill(p), tint, 0.08),
+                                        None,
+                                    )
+                            })
+                            .child(o.clone())
+                            .on_click(picked(serde_json::Value::String(o.clone()))),
+                    );
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S))
+                    .child(label)
+                    .child(options)
+            }
+            _ => div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(label)
+                .children(
+                    secrets
+                        .get(&form_field_key(message, &card.id, k))
+                        .map(|input| div().w_full().child(Input::new(input).small())),
+                ),
+        };
+        list = list.child(one);
+    }
+    let mut frame = CardFrame::new()
+        .lead(card_icon(p, Ico::ClipboardPen, tint))
+        .title(card.title.clone())
+        .mark(card_mark(key, true, tint))
+        .waits(tint)
+        .row(list);
+    if !error.is_empty() {
+        frame = frame.row(
+            div()
+                .text_size(px(size::SMALL * scale))
+                .text_color(p.bad)
+                .child(error.clone()),
+        );
+    }
+    let send = {
+        let this = this.clone();
+        let (message, card_id) = (message.clone(), card.id.clone());
+        card_button(
+            p,
+            format!("form-send-{key}"),
+            if *sending { "Sending…" } else { "Send" },
+            true,
+        )
+        .on_click(move |_, _, cx| {
+            let _ = this.update(cx, |loom, cx| loom.send_form(&message, &card_id, cx));
+        })
+    };
+    div()
+        .max_w(px(CARD_MOST))
+        .child(frame.action(send).draw(p, scale))
+}
+
 /// A card that only shows: a checklist, progress, facts, or a table, in the card frame.
 fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
     use model::CardBody;
@@ -16957,7 +17276,8 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         CardBody::Choices { .. }
         | CardBody::SignIn { .. }
         | CardBody::McpAdd { .. }
-        | CardBody::SecretAsk { .. } => {}
+        | CardBody::SecretAsk { .. }
+        | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
     let wide = matches!(card.body, CardBody::Table { .. });
@@ -18264,14 +18584,16 @@ fn ask_icon(a: &Approval) -> Ico {
 /// in small mono, and what loom knows it does in a pill; then the tools it runs as
 /// steps, or its arguments as lines, the command or script it runs, and why the agent
 /// makes it, in its own words. Allow is a split button, its menu holding Always allow
-/// where that's offered, then Deny, and Details for all of it. Answered here, it's one
-/// quiet line with the badge, until the instance takes the question away.
+/// where that's offered, then Deny, and Details for all of it. On a risky one, Allow is
+/// held, filling as it is (`hold_button`). Answered here, it's one quiet line with the
+/// badge, until the instance takes the question away.
 fn approval(
     p: Palette,
     a: &Approval,
     tint: Hsla,
     open: &HashSet<String>,
     scale: f32,
+    hold: &HoldShown,
     this: WeakEntity<Loom>,
 ) -> Div {
     let s = &a.shown;
@@ -18341,9 +18663,19 @@ fn approval(
     // Allow, and beside it the arrow that opens Always allow, where that's offered.
     let menu_key = format!("always/{}", a.call);
     let menu_open = a.can_always && open.contains(&menu_key);
-    let allow = card_button(p, format!("allow-{}", a.call), "Allow", true)
-        .when(a.can_always, |d| d.rounded_r(px(0.0)))
-        .on_click(answer(true, false));
+    let allow = if a.risky {
+        let held = hold
+            .0
+            .as_ref()
+            .filter(|(call, _)| *call == a.call)
+            .map(|(_, k)| *k);
+        let hint = hold.1.as_deref() == Some(a.call.as_str());
+        hold_button(p, &a.call, held, hint, this.clone())
+    } else {
+        card_button(p, format!("allow-{}", a.call), "Allow", true)
+            .when(a.can_always, |d| d.rounded_r(px(0.0)))
+            .on_click(answer(true, false))
+    };
     let split = div()
         .flex()
         .items_center()
@@ -18433,6 +18765,61 @@ fn approval(
         card = card.foot(details_toggle(p, &details, details_open, this.clone()));
     }
     place.child(card.draw(p, scale))
+}
+
+/// Allow on a risky question (PLAN.md, "Permissions"): pressed and held, it fills from
+/// the left, and once it's full the question is allowed. Let go sooner, it says to hold.
+fn hold_button(
+    p: Palette,
+    call: &str,
+    held: Option<f32>,
+    hint: bool,
+    this: WeakEntity<Loom>,
+) -> Stateful<Div> {
+    let label = match (held, hint) {
+        (Some(_), _) => "Keep holding",
+        (None, true) => "Hold to allow",
+        (None, false) => "Allow",
+    };
+    let (press, release, out) = (this.clone(), this.clone(), this);
+    let call_down = call.to_string();
+    div()
+        .id(SharedString::from(format!("allow-{call}")))
+        .role(Role::Button)
+        .aria_label("Hold to allow")
+        .relative()
+        .overflow_hidden()
+        .px(px(space::M + 2.0))
+        .h(px(control::BUTTON_SMALL))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(radius::BUTTON))
+        .text_size(px(size::SMALL))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.button_ink)
+        .bg(p.button)
+        .cursor_pointer()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .h_full()
+                .w(relative(held.unwrap_or(0.0)))
+                .bg(motion::mix(p.button, p.bad, 0.75)),
+        )
+        .child(div().relative().child(label))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            let _ = press.update(cx, |loom, cx| loom.press_allow(&call_down, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            let _ = release.update(cx, |loom, cx| loom.release_allow(cx));
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+            let _ = out.update(cx, |loom, cx| loom.release_allow(cx));
+        })
 }
 
 /// A button's name, shown under the pointer after a moment, for buttons that are only an icon.
@@ -20238,6 +20625,7 @@ mod row_tests {
             line: None,
             when: Some("14:05".into()),
             when_at: super::WhenAt::Outside,
+            hold: (None, None),
         }
     }
 
@@ -20456,7 +20844,13 @@ struct ChatInputs {
     width: f32,
     p: Palette,
     pad: Option<f32>,
+    /// Allow held on a risky question, and the one a plain click said to hold (`Model::hold_shown`).
+    hold: HoldShown,
 }
+
+/// Allow held on a risky question now, and how far along; and the question a plain click
+/// just said to hold for.
+type HoldShown = (Option<(String, f32)>, Option<String>);
 
 /// Where a message's time shows while the pointer is over it.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -20589,6 +20983,7 @@ struct RowInputs {
     line: Option<String>,
     when: Option<String>,
     when_at: WhenAt,
+    hold: HoldShown,
 }
 
 impl RowInputs {
@@ -20616,6 +21011,7 @@ impl RowInputs {
             && self.line == o.line
             && self.when == o.when
             && self.when_at == o.when_at
+            && self.hold == o.hold
     }
 }
 
@@ -20807,6 +21203,7 @@ fn chat_list(
         width,
         p,
         pad,
+        hold,
     } = i;
     let now = chrono::Local::now();
     let (content, gutter) = row_room(width, column);
@@ -20881,7 +21278,8 @@ fn chat_list(
                 open.iter().filter(|k| k.contains(of)).cloned().collect()
             },
             show: Show {
-                newest: m.is_some_and(|m| newest.as_deref() == Some(m.id.as_str())),
+                newest: m
+                    .is_some_and(|m| m.takes_answers(newest.as_deref() == Some(m.id.as_str()))),
                 ..show
             },
             is_new: m.is_some_and(|m| new_line.as_deref() == Some(m.id.as_str())),
@@ -20891,6 +21289,12 @@ fn chat_list(
             line: m.filter(|_| here.line).map(|m| line_of(m.at, now)),
             when,
             when_at,
+            // Only a question is held, so a hold never draws a message again.
+            hold: if m.is_none() {
+                hold.clone()
+            } else {
+                (None, None)
+            },
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -21067,7 +21471,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             show,
             this.clone(),
         ),
-        Row::Approval(a) => approval(p, a, tint, open, show.text_scale, this.clone()),
+        Row::Approval(a) => approval(p, a, tint, open, show.text_scale, &i.hold, this.clone()),
     };
     // A message's pin, just outside its corner: there while it's pinned, and
     // on hover to pin it.

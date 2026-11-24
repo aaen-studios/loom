@@ -36,6 +36,31 @@ fn cards_in(m: Json) -> List<Json> {
     return out
 }
 
+// The kinds of a message's blocks, joined with commas.
+fn kinds(m: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            out.push(str_at(b, "kind") ?? String())
+        }
+    }
+    return out.join(",")
+}
+
+// The kind of a message's last block.
+fn last_kind(m: Json) -> String {
+    let all = kinds(m)
+    return match all.find_last(",") {
+        some(k) => all[k + 1..].copy(),
+        none => all,
+    }
+}
+
+// A send that answers the form `card_1` in the reply `message`.
+fn form_answer(conversation: String, cid: str, message: String, answers: Json) -> Json {
+    return Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).j("form", Obj.new().s("message", message).s("card", String("card_1")).j("answers", answers).done()).done()
+}
+
 fn strings(xs: List<str>) -> Json {
     var out = List<Json>()
     for x in xs {
@@ -54,8 +79,60 @@ fn run(i: Instance) ! Error {
     let choices = Obj.new().s("type", String("choices")).s("title", String("Which colour?")).j("options", strings(["Red", "Green", "Blue"])).done()
     let asked = try say(mut app, chat.copy(), "m_1", "/mcp show_card {choices}")
     let shown = cards_in(asked.copy())
-    try check(reply_text(asked).starts_with("show_card: It's in the chat, as card_1") and shown.len() == 1, "show_card puts a card in the agent's reply")
+    try check(reply_text(asked).starts_with("show_card: It goes at the end of your reply, as card_1") and shown.len() == 1, "show_card puts a card in the agent's reply")
     try check("{shown[0]}" == "\{\"id\":\"card_1\",\"type\":\"choices\",\"title\":\"Which colour?\",\"options\":[\"Red\",\"Green\",\"Blue\"]\}", "as the card it described, with its id")
+
+    // A question made before the words it's about still goes after them, and
+    // shows only once the reply is finished: no card frame comes while it's written.
+    let before = app.frames.len()
+    let first_then_words = try say(mut app, chat.copy(), "m_1b", "/mcp show_card {choices}\n/say Red is warm, green is calm and blue is cool.")
+    var framed = false
+    for k in before..app.frames.len() {
+        if str_at(app.frames[k].copy(), "t") == some(String("card")) { framed = true }
+    }
+    try check(last_kind(first_then_words.copy()) == "card" and reply_text(first_then_words).contains("Red is warm") and not framed, "a question made first goes after the reply's words, once it's finished")
+    let words_then_card = try say(mut app, chat.copy(), "m_1c", "/say Here are three colours.\n/mcp show_card {choices}")
+    try check(last_kind(words_then_card) == "card", "and one made last stays last")
+    // Changed by its id, a question stays where it is, at the end.
+    let changed = Obj.new().s("type", String("choices")).s("id", String("card_1")).s("title", String("Which one, then?")).j("options", strings(["Red", "Blue"])).done()
+    let moved_q = try say(mut app, chat.copy(), "m_1d", "/mcp show_card {choices}\n/mcp show_card {changed}\n/say Two left.")
+    let qs = cards_in(moved_q.copy())
+    try check(qs.len() == 1 and str_at(qs[0].copy(), "title") == some(String("Which one, then?")) and last_kind(moved_q.copy()) == "card" and reply_text(moved_q).contains("show_card: Changed card_1 in the chat."), "a question changed by its id stays at the end, as it was last")
+    // Asked to go here, it's where the agent made it.
+    let here = Obj.new().s("type", String("choices")).s("place", String("here")).j("options", strings(["Yes", "No"])).done()
+    let placed = try say(mut app, chat.copy(), "m_1e", "/mcp show_card {here}\n/say After it.")
+    try check(last_kind(placed) == "text", "with place here, a question goes where the agent made it")
+    let bad_place = reply_text(try say(mut app, chat.copy(), "m_1f", "/mcp show_card {Obj.new().s("type", String("facts")).s("place", String("top")).j("items", Json.Array([Obj.new().s("label", String("A")).s("value", String("1")).done()])).done()}"))
+    try check(bad_place.starts_with("show_card failed: place is \"top\""), "a place there isn't is refused")
+
+    // A form: several questions at once, sent back as one answer.
+    let fields = Json.Array([Obj.new().s("label", String("Name")).done(), Obj.new().s("label", String("Size")).s("kind", String("choice")).j("options", strings(["Small", "Large"])).done(), Obj.new().s("label", String("Gift wrap")).s("kind", String("toggle")).done(), Obj.new().s("label", String("Note")).b("required", false).done()])
+    let form = Obj.new().s("type", String("form")).s("title", String("Your order")).j("fields", fields).done()
+    let ordered = try say(mut app, chat.copy(), "m_1g", "/mcp show_card {form}\n/say A few things first.")
+    let form_card = cards_in(ordered.copy())
+    try check(form_card.len() == 1 and str_at(form_card[0].copy(), "type") == some(String("form")) and last_kind(ordered.copy()) == "card", "a form goes at the end of the reply too")
+    let reply_id = str_at(ordered, "id") ?? String()
+    try app.send(form_answer(chat.copy(), "m_1h", reply_id.copy(), Obj.new().s("Size", String("Large")).done()))
+    let empty = try app.until("error", "")
+    try check(str_at(empty.copy(), "code") == some(String("bad_form")) and str_at(empty, "message") == some(String("Name needs an answer.")), "a form's required field left empty is refused, saying which")
+    try app.send(form_answer(chat.copy(), "m_1i", reply_id.copy(), Obj.new().s("Name", String("Elliot")).s("Size", String("Large")).b("Gift wrap", true).done()))
+    let updated = try app.until("event", "message.updated")
+    let kept_form = cards_in(at(updated, "message"))
+    try check(kept_form.len() == 1 and "{at(kept_form[0].copy(), "answers")}" == #"{"Name":"Elliot","Size":"Large","Gift wrap":true}"#, "the form keeps its answers, for every device")
+    var person = Json.Null
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("person")) {
+            person = m
+            break
+        }
+    }
+    try check(reply_text(person.copy()) == "Name: Elliot\nSize: Large\nGift wrap: Yes" and "{at(at(person, "form"), "answers")}" == #"{"Name":"Elliot","Size":"Large","Gift wrap":true}"#, "and goes as the person's message, in words, with the answers as they are")
+    _ = try reply_in(mut app, chat.copy())
+    try app.send(form_answer(chat.copy(), "m_1j", reply_id, Obj.new().s("Name", String("Again")).s("Size", String("Small")).done()))
+    let again = try app.until("error", "")
+    try check(str_at(again, "message") == some(String("That form was sent already.")), "a form answers once")
 
     let bad = reply_text(try say(mut app, chat.copy(), "m_2", "/mcp show_card {Obj.new().s("type", String("choices")).j("options", strings(["Only"])).done()}"))
     try check(bad.starts_with("show_card failed: options has 1"), "a card that can't be drawn is refused, saying why")

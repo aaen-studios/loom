@@ -483,6 +483,72 @@ pub fn of_args(args: Json) -> Act {
     return a
 }
 
+// Whether what an agent asks the person about is risky (PLAN.md,
+// "Permissions"), so the apps have them hold Allow rather than click it: it
+// deletes (`kind` is delete), it's one of loom's own commands (`action`) that
+// changes an agent's permission mode or moves the instance, or `command` does
+// what can't be undone: deletes a folder and what's in it, wipes or formats a
+// disk, throws away git history or work, or drops a database's tables.
+pub fn risky(kind: String, command: String, action: Json) -> bool {
+    if kind == "delete" { return true }
+    let name = str_at(action.copy(), "name") ?? String()
+    if name == "instance.move" { return true }
+    if name == "agent.update" and str_at(at(action, "args"), "permission") != none { return true }
+    for c in commands_in(command) {
+        if risky_command(bare(c)) { return true }
+    }
+    return false
+}
+
+// Whether one command, without what wraps it, can't be undone (`risky`).
+fn risky_command(command: String) -> bool {
+    var words = List<String>()
+    for w in command.split(" ") {
+        if w.len() > 0 { words.push(w.copy()) }
+    }
+    if words.len() == 0 { return false }
+    // The program, without its folder or .exe, and what it's given, in small letters.
+    var program = words[0].to_lower_root()
+    if let k = program.find_last("/") { program = program[k + 1..].copy() }
+    if let k = program.find_last("\\") { program = program[k + 1..].copy() }
+    if program.ends_with(".exe") { program = program[..program.len() - 4].copy() }
+    var given = List<String>()
+    // The letters of its short flags, as they're written: -rf is r and f.
+    var short = String()
+    for k in 1usize..words.len() {
+        given.push(words[k].to_lower_root())
+        if words[k].starts_with("-") and not words[k].starts_with("--") { short.push_str(words[k][1..]) }
+    }
+    let small = short.to_lower_root()
+    if program == "rm" { return small.contains("r") or given.contains(String("--recursive")) }
+    if program == "rmdir" or program == "rd" or program == "del" or program == "erase" { return given.contains(String("/s")) }
+    if program == "remove-item" or program == "ri" { return small.contains("recurse") }
+    if program == "format" or program == "diskpart" or program == "wipefs" or program == "shred" or program == "mkfs" or program.starts_with("mkfs.") { return true }
+    if program == "dd" {
+        for w in given {
+            if w.starts_with("of=") { return true }
+        }
+        return false
+    }
+    if program == "git" and given.len() >= 1 {
+        let sub = given[0].copy()
+        if sub == "reset" { return given.contains(String("--hard")) }
+        if sub == "clean" { return short.contains("f") or given.contains(String("--force")) }
+        if sub == "push" {
+            for w in given {
+                if w.starts_with("+") or w.starts_with("--force") or w == "--delete" or w == "--mirror" { return true }
+            }
+            return short.contains("f") or short.contains("d")
+        }
+        if sub == "branch" { return short.contains("D") or (short.contains("d") and short.contains("f")) }
+        if sub == "filter-branch" or sub == "filter-repo" { return true }
+        if sub == "stash" { return given.contains(String("drop")) or given.contains(String("clear")) }
+        return false
+    }
+    let all = command.to_lower_root()
+    return all.contains("drop table") or all.contains("drop database") or all.contains("drop schema") or all.contains("truncate table")
+}
+
 // The kind of tool a what-if is, for the permission mode, when it names
 // none: a command executes, a site is fetched, an MCP tool reads or is
 // other, and a path is read or edited, by its effect.
@@ -617,4 +683,22 @@ fn tool_calls_say_what_they_touch() {
     assert(tool_matches(String("github.create_issue"), String("github")) and tool_matches(String("github.delete_repo"), String("github.delete_*")) and not tool_matches(String("gitlab.x"), String("github")))
     assert(kind_of(of_args(Obj.new().s("command", String("ls")).done())) == "execute")
     assert(said(a_rule("deny", "command", "git push")) == "Deny commands like git push")
+}
+
+@test
+fn knows_what_is_risky() {
+    let none_given = Json.Null
+    assert(risky(String("delete"), String(), none_given.copy()))
+    assert(not risky(String("edit"), String(), none_given.copy()))
+    let loose = Obj.new().s("name", String("agent.update")).j("args", Obj.new().s("agent", String("a_2")).s("permission", String("allow")).done()).done()
+    assert(risky(String("other"), String(), loose))
+    let renamed = Obj.new().s("name", String("agent.update")).j("args", Obj.new().s("agent", String("a_2")).s("name", String("Pip")).done()).done()
+    assert(not risky(String("other"), String(), renamed))
+    assert(risky(String("move"), String(), Obj.new().s("name", String("instance.move")).done()))
+    for c in ["rm -rf build", "sudo rm -r /srv/x", "cd x && rm -fr y", "/bin/rm --recursive z", "Remove-Item -Recurse -Force C:\\x", "rmdir /s /q x", "git reset --hard HEAD~3", "git clean -fdx", "git push --force origin main", "git push -f", "git push origin +main", "git push origin --delete old", "git branch -D topic", "dd if=/dev/zero of=/dev/sda", "mkfs.ext4 /dev/sdb1", "psql -c 'DROP TABLE users'", "git stash clear"] {
+        assert(risky(String("execute"), String(c), Json.Null))
+    }
+    for c in ["rm notes.txt", "ls -la", "git push origin main", "git push -u origin main", "git branch -d merged", "git clean -n", "git reset HEAD file", "cargo test", "Remove-Item x.txt", "git stash pop"] {
+        assert(not risky(String("execute"), String(c), Json.Null))
+    }
 }
