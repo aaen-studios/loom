@@ -1379,8 +1379,12 @@ pub struct Card {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CardBody {
-    /// Answers, each a button that sends it as the person's next message.
-    Choices(Vec<String>),
+    /// Answers, each a button that sends it as the person's next message, and the one
+    /// the person sent, once the chat has gone on.
+    Choices {
+        options: Vec<String>,
+        chosen: Option<usize>,
+    },
     Checklist(Vec<(String, bool)>),
     Table {
         columns: Vec<String>,
@@ -1393,10 +1397,14 @@ pub enum CardBody {
     },
     Facts(Vec<(String, String)>),
     /// One of the person's MCP servers needs them to sign in (loom's own card, never
-    /// an agent's): its name, for Sign in, and whether they have since.
+    /// an agent's): its name, for Sign in; once they have since, as whom (empty when
+    /// the sign-in didn't say); whether its sign-in page is open now; and whether the
+    /// chat has gone on past the reply it's in, when it only waits quietly.
     SignIn {
         server: String,
-        signed: bool,
+        signed: Option<String>,
+        signing: bool,
+        passed: bool,
     },
 }
 
@@ -1413,7 +1421,10 @@ impl Card {
         };
         let items = v.get("items").and_then(Value::as_array);
         let body = match v.get("type").and_then(Value::as_str)? {
-            "choices" => CardBody::Choices(strings(v.get("options"))),
+            "choices" => CardBody::Choices {
+                options: strings(v.get("options")),
+                chosen: None,
+            },
             "checklist" => CardBody::Checklist(
                 items?
                     .iter()
@@ -1422,7 +1433,9 @@ impl Card {
             ),
             "sign_in" => CardBody::SignIn {
                 server: s(v, "server"),
-                signed: false,
+                signed: None,
+                signing: false,
+                passed: false,
             },
             "facts" => CardBody::Facts(
                 items?
@@ -2381,9 +2394,57 @@ impl std::ops::Deref for Tools {
 pub struct Approval {
     pub call: String,
     pub run: String,
+    /// The kind of tool it is, as `tool.started` says: `execute`, `delete`, `other`…
+    pub kind: String,
     pub title: String,
-    pub detail: String,
+    /// What the card shows of the call, as the core shaped it (`core/asks.calx`).
+    pub shown: Shown,
     pub can_always: bool,
+    /// How the person answered it here, while the instance hasn't said yet: allowed,
+    /// and always.
+    pub answered: Option<(bool, bool)>,
+}
+
+/// What an approval's card shows of the call: what kind of call it is, its arguments as
+/// labelled lines, how many more there were, the command or script it runs, and
+/// everything for Details.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Shown {
+    /// `script`, `mcp`, `plugin`, `device`, `install`, or empty.
+    pub what: String,
+    pub lines: Vec<(String, String)>,
+    pub more: u64,
+    pub code: String,
+    pub raw: String,
+}
+
+impl Shown {
+    /// From the core's `shown`, or, for a question kept before the core shaped them,
+    /// its `detail` as it came, for Details.
+    fn of(a: &Value) -> Shown {
+        let Some(v) = a.get("shown") else {
+            let raw = match a.get("detail") {
+                Some(Value::String(d)) => d.clone(),
+                Some(Value::Null) | None => String::new(),
+                Some(other) => serde_json::to_string_pretty(other).unwrap_or_default(),
+            };
+            return Shown {
+                raw,
+                ..Shown::default()
+            };
+        };
+        Shown {
+            what: s(v, "what"),
+            lines: v
+                .get("lines")
+                .and_then(Value::as_array)
+                .map(|ls| ls.iter().map(|l| (s(l, "label"), s(l, "value"))).collect())
+                .unwrap_or_default(),
+            more: v.get("more").and_then(Value::as_u64).unwrap_or(0),
+            code: s(v, "code"),
+            raw: s(v, "raw"),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2590,6 +2651,8 @@ pub struct Model {
     pub runs: Vec<Run>,
     pub tools: Rc<Tools>,
     pub approvals: Vec<Approval>,
+    /// Answers given here, by call, until the instance takes them.
+    answering: HashMap<String, (bool, bool)>,
     pub programs: Vec<String>,
     /// Whether the instance has said which programs it has, since the last ask.
     pub programs_known: bool,
@@ -4924,18 +4987,20 @@ impl Model {
                     .map(|a| Approval {
                         call: s(a, "call"),
                         run: s(a, "run"),
+                        kind: s(a, "tool"),
                         title: s(a, "title"),
-                        detail: match a.get("detail") {
-                            Some(Value::String(d)) => d.clone(),
-                            Some(Value::Null) | None => String::new(),
-                            Some(other) => other.to_string(),
-                        },
+                        shown: Shown::of(a),
                         can_always: a
                             .get("can_always")
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
+                        answered: None,
                     })
                     .collect();
+                // An answer given here is for a question that's still open.
+                let open: HashSet<&str> = self.approvals.iter().map(|a| a.call.as_str()).collect();
+                self.answering
+                    .retain(|call, _| open.contains(call.as_str()));
             }
             List::Outbox => {
                 self.queued = items.iter().map(Queued::of).collect();
@@ -4964,6 +5029,15 @@ impl Model {
                 self.place_queued();
                 // The tool calls these messages name.
                 self.dirty.insert(List::Tools);
+                // A sign-in card for a server not known to be signed in: whether it is
+                // since, as on another device.
+                let unsigned = self.messages.iter().flat_map(|m| &m.blocks).any(|b| {
+                    matches!(&b.card, Some(Card { body: CardBody::SignIn { server, .. }, .. })
+                        if self.mcp_signed_as(server).is_none())
+                });
+                if unsigned {
+                    self.mcp_stale = true;
+                }
             }
         }
     }
@@ -5046,22 +5120,49 @@ impl Model {
                 pinned: false,
             });
         }
-        // A sign-in card says Signed in once the person has.
-        for m in out.iter_mut() {
+        // A sign-in card says Signed in once the person has, and only waits quietly once
+        // the chat has gone on past its reply; a choices card says which answer the
+        // person sent, as the message after it.
+        let last = out.len().saturating_sub(1);
+        let sent: Vec<Option<String>> = (0..out.len())
+            .map(|i| {
+                out.get(i + 1).filter(|n| n.role == "person").map(|n| {
+                    n.blocks
+                        .iter()
+                        .filter(|b| b.kind == "text")
+                        .map(|b| b.text.trim())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            })
+            .collect();
+        for (i, (m, sent)) in out.iter_mut().zip(sent).enumerate() {
             for b in m.blocks.iter_mut() {
-                if let Some(Card {
-                    body: CardBody::SignIn { server, signed },
-                    ..
-                }) = b.card.as_mut()
-                {
-                    *signed = self.mcp_signed_in(server);
+                match b.card.as_mut().map(|c| &mut c.body) {
+                    Some(CardBody::SignIn {
+                        server,
+                        signed,
+                        signing,
+                        passed,
+                    }) => {
+                        *signed = self.mcp_signed_as(server);
+                        *signing = self.mcp_signing.contains(server.as_str());
+                        *passed = i < last;
+                    }
+                    Some(CardBody::Choices { options, chosen }) => {
+                        *chosen = sent
+                            .as_deref()
+                            .and_then(|t| options.iter().position(|o| o.trim() == t));
+                    }
+                    _ => {}
                 }
             }
         }
         out
     }
 
-    /// The questions waiting in the shown chat.
+    /// The questions waiting in the shown chat, each with the answer given here while
+    /// the instance hasn't taken it yet.
     pub fn shown_approvals(&self) -> Vec<Approval> {
         let conversation = self.conversation();
         self.approvals
@@ -5071,8 +5172,17 @@ impl Model {
                     .iter()
                     .any(|r| r.id == a.run && Some(&r.conversation) == conversation.as_ref())
             })
-            .cloned()
+            .map(|a| Approval {
+                answered: self.answering.get(&a.call).copied(),
+                ..a.clone()
+            })
             .collect()
+    }
+
+    /// The person answered a question here: its card says so until the instance has it.
+    pub fn answer(&mut self, call: &str, allow: bool, always: bool) -> Value {
+        self.answering.insert(call.to_string(), (allow, always));
+        approve(call, allow, always)
     }
 
     /// What an agent's thread shows now.
@@ -5686,11 +5796,16 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "mcp.sign_out", "args": {"name": name}})
     }
 
-    /// Whether the person is signed in to their MCP server `name`.
-    pub fn mcp_signed_in(&self, name: &str) -> bool {
+    /// Whom the person is signed in to their MCP server `name` as, once they are: empty
+    /// when the sign-in didn't say.
+    pub fn mcp_signed_as(&self, name: &str) -> Option<String> {
         self.mcp_servers
             .iter()
-            .any(|m| m.name == name && matches!(m.sign_in, SignIn::SignedIn(_)))
+            .find(|m| m.name == name)
+            .and_then(|m| match &m.sign_in {
+                SignIn::SignedIn(who) => Some(who.clone()),
+                _ => None,
+            })
     }
 
     pub fn put_secret(&mut self, name: &str, value: &str) -> Value {
@@ -6520,7 +6635,8 @@ mod tests {
             Some("secret:X_SECRET")
         );
         assert_eq!(m.mcp_servers[2].sign_in, SignIn::No);
-        assert!(m.mcp_signed_in("acta") && !m.mcp_signed_in("fixed"));
+        assert_eq!(m.mcp_signed_as("acta").as_deref(), Some("ada@example.com"));
+        assert!(m.mcp_signed_as("fixed").is_none());
 
         // Sign in: the address goes to the browser, and the answer reloads the list.
         let f = m.sign_in_mcp("fixed", "http://127.0.0.1:47251/callback");
@@ -6574,7 +6690,9 @@ mod tests {
             card.body,
             CardBody::SignIn {
                 server: "acta".into(),
-                signed: false
+                signed: None,
+                signing: false,
+                passed: false
             }
         );
         let mut m = Model::new();
@@ -6583,6 +6701,87 @@ mod tests {
             m.mcp_stale,
             "the servers are loaded, for whether it's signed in"
         );
+    }
+
+    #[test]
+    fn cards_go_quiet_once_the_chat_goes_on() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        let reply = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 1, "status": "done", "blocks": [
+            {"kind": "card", "card": {"id": "sign_in_acta", "type": "sign_in", "title": "acta needs you to sign in", "server": "acta"}},
+            {"kind": "card", "card": {"id": "card_1", "type": "choices", "title": "Which?", "options": ["Red", "Blue"]}}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": reply}));
+        let cards = |m: &Model| -> Vec<CardBody> {
+            m.shown()[0]
+                .blocks
+                .iter()
+                .filter_map(|b| b.card.clone().map(|c| c.body))
+                .collect()
+        };
+        let sign_in = |signed: Option<&str>, passed: bool| CardBody::SignIn {
+            server: "acta".into(),
+            signed: signed.map(str::to_string),
+            signing: false,
+            passed,
+        };
+        let choices = |chosen: Option<usize>| CardBody::Choices {
+            options: vec!["Red".into(), "Blue".into()],
+            chosen,
+        };
+        assert_eq!(cards(&m), vec![sign_in(None, false), choices(None)]);
+        // The person answers: the sign-in only waits quietly, and the answer they sent
+        // stays marked.
+        let answer = json!({"id": "msg_2", "conversation": "c_1", "role": "person", "at": 2, "blocks": [{"kind": "text", "text": "Blue "}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": answer}));
+        assert_eq!(cards(&m), vec![sign_in(None, true), choices(Some(1))]);
+        // Signed in, it says as whom.
+        m.take(&json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+            {"name": "acta", "url": "https://acta.example/api/mcp", "headers": {}, "sign_in": "signed_in", "signed_in_as": "ada@example.com"}]}}));
+        assert_eq!(
+            cards(&m),
+            vec![sign_in(Some("ada@example.com"), true), choices(Some(1))]
+        );
+    }
+
+    #[test]
+    fn a_question_shows_what_the_core_put_in_words() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "approvals", "items": [
+            {"call": "tc_1", "run": "run_1", "tool": "other", "title": "Use search on the MCP server acta", "can_always": true,
+             "detail": {"server": "acta", "tool": "search", "arguments": {"query": "invoices"}},
+             "shown": {"what": "mcp", "lines": [{"label": "Query", "value": "invoices"}], "more": 0, "code": "", "raw": ""}},
+            {"call": "tc_2", "run": "run_1", "tool": "execute", "title": "Run ls", "detail": {"command": "ls"}}]}));
+        assert_eq!(m.approvals[0].kind, "other");
+        assert_eq!(
+            m.approvals[0].shown,
+            Shown {
+                what: "mcp".into(),
+                lines: vec![("Query".into(), "invoices".into())],
+                ..Shown::default()
+            }
+        );
+        // One the core didn't put in words still shows all of it, under Details.
+        assert_eq!(m.approvals[1].shown.raw, "{\n  \"command\": \"ls\"\n}");
+        // Answered here, it says how until the instance takes it away.
+        assert_eq!(
+            m.answer("tc_1", true, false),
+            json!({"t": "approve", "call": "tc_1", "allow": true, "always": false})
+        );
+        assert_eq!(m.answering.get("tc_1"), Some(&(true, false)));
+        m.take(&json!({"t": "core.data", "what": "approvals", "items": [
+            {"call": "tc_2", "run": "run_1", "tool": "execute", "title": "Run ls", "detail": {"command": "ls"}}]}));
+        assert!(m.answering.is_empty());
     }
 
     fn with_panel() -> Model {
@@ -7838,7 +8037,10 @@ mod tests {
         );
         assert_eq!(
             kept.card.map(|c| c.body),
-            Some(CardBody::Choices(vec!["Red".into(), "Blue".into()]))
+            Some(CardBody::Choices {
+                options: vec!["Red".into(), "Blue".into()],
+                chosen: None
+            })
         );
         assert!(Card::of(&json!({"type": "chart"})).is_none());
     }

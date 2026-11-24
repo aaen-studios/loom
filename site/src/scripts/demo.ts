@@ -6,7 +6,8 @@
 // its subagent did inside it (model.rs, inside). The moods, what the sidebar says after an agent's name on its
 // one line ("Thinking", the tool's title, "Wants to …"), or under the pointer on a pinned agent's
 // tile, and the wording are the app's. Clicking
-// Allow once, Always allow or Deny answers the approval; left alone, it's allowed after a moment.
+// Allow once, Always allow or Deny answers the approval, which says how in one quiet line before
+// it goes; left alone, it's allowed after a moment.
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs).
@@ -193,10 +194,17 @@ export function play(app: HTMLElement) {
 				if (answered) return;
 				answered = true;
 				button.classList.add('pressed');
+				// One quiet line says how, until the question goes, as in the app.
 				setTimeout(() => {
-					row.classList.add('leaving');
-					setTimeout(() => row.remove(), 350);
-					done(a === 'deny' ? 'deny' : 'allow');
+					const how = a === 'deny' ? 'Denied' : a === 'always' ? 'Always allowed' : 'Allowed once';
+					row.querySelector('.card-done span')!.textContent = `${how} · ${ASK}`;
+					if (a === 'deny') row.querySelector('.card-done path')!.setAttribute('d', 'M18 6 6 18M6 6l12 12');
+					row.classList.add('answered');
+					setTimeout(() => {
+						row.classList.add('leaving');
+						setTimeout(() => row.remove(), 350);
+						done(a === 'deny' ? 'deny' : 'allow');
+					}, 700);
 				}, 220);
 			};
 			for (const b of row.querySelectorAll<HTMLButtonElement>('button[data-answer]')) {

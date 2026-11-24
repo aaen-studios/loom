@@ -46,6 +46,11 @@ enum JSON: Sendable, Equatable {
         return nil
     }
 
+    var double: Double? {
+        if case .number(let n) = self { return n }
+        return nil
+    }
+
     var bool: Bool? {
         if case .bool(let b) = self { return b }
         return nil

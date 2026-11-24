@@ -36,6 +36,11 @@ enum P {
     static let bubble = Color.loom(L.bubble, D.bubble)
     static let ok = Color.loom(L.ok, D.ok)
     static let bad = Color.loom(L.bad, D.bad)
+    /// A card in the chat, as the desktop's `card_fill`: the page's colour in light,
+    /// raised in dark; what's set into it the other way round; and its edge.
+    static let cardFill = Color.loom(L.bg, D.raised)
+    static let cardInset = Color.loom(L.raised, D.bg)
+    static let cardEdge = Color.loom(L.lineStrong, D.line)
 
     /// An agent's thread colour, by the name the instance gives it, or its own as
     /// #rrggbb, kept to its hue and made light or dark enough for the appearance.

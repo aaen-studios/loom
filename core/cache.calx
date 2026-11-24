@@ -13,6 +13,7 @@ import std.sqlite.{Database, Value}
 import std.time.{Timestamp}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.checkpoint
+import core.asks
 import std.fs
 import std.thread.{Task, sleep}
 
@@ -611,9 +612,17 @@ impl Cache {
 
     /// A list the app asks for, `what` as in `core.get`, as a JSON array's text, made
     /// from the rows' JSON as it's kept, with nothing parsed. None for messages, which
-    /// `messages_text` gives, or a list there isn't.
+    /// `messages_text` gives, or a list there isn't. The questions, few, each come with
+    /// `shown`, what the card draws of the call (`core/asks.calx`).
     pub fn list_text(self, what: String) -> String? ! Error {
-        let sql = if what == "agents" { AGENTS } else if what == "conversations" { CONVERSATIONS } else if what == "devices" { DEVICES } else if what == "runs" { RUNS } else if what == "tools" { TOOLS } else if what == "approvals" { APPROVALS } else if what == "outbox" { OUTBOX } else { return none }
+        if what == "approvals" {
+            var out = List<String>()
+            for a in try self.approvals() {
+                out.push("{merge(a.copy(), Obj.new().j("shown", asks.shown(a)).done())}")
+            }
+            return some(array(out))
+        }
+        let sql = if what == "agents" { AGENTS } else if what == "conversations" { CONVERSATIONS } else if what == "devices" { DEVICES } else if what == "runs" { RUNS } else if what == "tools" { TOOLS } else if what == "outbox" { OUTBOX } else { return none }
         return some(array(try self.texts(sql, List<Value>())))
     }
 
@@ -742,6 +751,9 @@ fn keeps_runs_and_questions_until_they_end() ! Error {
     assert((try c.runs()).len() == 1 and (try c.approvals()).len() == 1)
     let tools = try c.tools()
     assert(str_at(tools[0].copy(), "status") == some(String("done")) and str_at(tools[0].copy(), "title") == some(String("ls")))
+    // The app reads each with what its card shows of the call.
+    let listed = try parse(try c.list_text(String("approvals")) ?? String())
+    assert(at(listed.at(0) ?? Json.Null, "shown").get(String("lines")) != none)
     _ = try c.apply(ev(5, "approval.answered", Obj.new().s("call", String("tc_1")).done()))
     assert((try c.approvals()).len() == 0)
     _ = try c.apply(ev(6, "run.finished", Obj.new().s("run", String("run_1")).done()))

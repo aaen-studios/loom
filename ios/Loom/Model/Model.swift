@@ -111,6 +111,50 @@ struct PlanEntry: Equatable, Sendable {
     var status: String
 }
 
+/// One line of a card: a checklist's item, done or not, or a fact's label and value.
+struct CardItem: Equatable, Sendable {
+    var text: String
+    var value = ""
+    var done = false
+}
+
+/// A card in a reply (PLAN.md, "Cards in the chat"): an agent's `show_card` (`choices`,
+/// `checklist`, `table`, `progress`, `facts`) or loom's own `sign_in`, with the fields
+/// its type has.
+struct Card: Equatable, Sendable {
+    var id: String
+    var type: String
+    var title: String
+    var options: [String] = []
+    var items: [CardItem] = []
+    var columns: [String] = []
+    var rows: [[String]] = []
+    var label = ""
+    var value = 0.0
+    var server = ""
+    /// For choices, the answer the person sent once the chat went on.
+    var chosen: Int?
+    /// That the chat has gone on past its reply: choices no longer answer then, and a
+    /// sign-in only waits quietly.
+    var passed = false
+
+    init?(_ c: JSON) {
+        type = c["type"].text
+        guard ["choices", "checklist", "table", "progress", "facts", "sign_in"].contains(type) else { return nil }
+        id = c["id"].text
+        title = c["title"].text
+        options = c["options"].array.map(\.text)
+        items = c["items"].array.map { i in
+            type == "facts" ? CardItem(text: i["label"].text, value: i["value"].text) : CardItem(text: i["text"].text, done: i["done"].bool ?? false)
+        }
+        columns = c["columns"].array.map(\.text)
+        rows = c["rows"].array.map { $0.array.map(\.text) }
+        label = c["label"].text
+        value = min(max(c["value"].double ?? 0, 0), 1)
+        server = c["server"].text
+    }
+}
+
 struct Block: Equatable, Sendable {
     var kind: String
     var text: String
@@ -120,6 +164,7 @@ struct Block: Equatable, Sendable {
     /// The subagent call a tool call, words or a thought sit inside (protocol.md,
     /// "Messages and streaming"): the phone leaves them out of the reply.
     var parent: String?
+    var card: Card?
 
     static func text(_ kind: String, _ text: String) -> Block {
         Block(kind: kind, text: text, call: nil, file: nil)
@@ -133,7 +178,8 @@ struct Block: Equatable, Sendable {
             call: b["call"].string,
             file: kind == "file" ? FileRef(b) : nil,
             plan: b["entries"].array.map { PlanEntry(content: $0["content"].text, status: $0["status"].text) },
-            parent: b["parent"].string
+            parent: b["parent"].string,
+            card: kind == "card" ? Card(b["card"]) : nil
         )
     }
 }
@@ -202,7 +248,7 @@ func placeTools(_ blocks: inout [Block], _ tools: [Tool]) {
         }
         while blocks.count <= i { blocks.append(.text("", "")) }
         let gap = blocks[i]
-        if gap.call == nil && gap.file == nil && gap.text.isEmpty {
+        if gap.call == nil && gap.file == nil && gap.card == nil && gap.text.isEmpty {
             blocks[i] = b
         } else {
             blocks.append(b)
@@ -217,7 +263,7 @@ enum Part: Equatable, Sendable {
     case words([Int])
     /// A run of tool calls.
     case tools([Int])
-    /// Anything else on its own: a thought, a plan, a notice or a file.
+    /// Anything else on its own: a thought, a plan, a notice, a file or a card.
     case block(Int)
     /// Two or more pictures next to each other, drawn as one stack the viewer opens.
     case pictures([Int])
@@ -248,6 +294,7 @@ func parts(_ m: Message, tools: [Tool]) -> [Part] {
         case "thought", "plan": return !b.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !b.plan.isEmpty
         case "tool", "notice": return true
         case "file": return b.file != nil
+        case "card": return b.card != nil
         default: return false
         }
     }
@@ -397,13 +444,58 @@ private func workingWords(_ m: Message, tools: [Tool]) -> String {
     return "Thinking…"
 }
 
+/// What an approval's card shows of the call, as the core shaped it (core/asks.calx):
+/// what kind of call it is, its arguments as labelled lines, how many more there were,
+/// the command or script it runs, and everything for Details.
+struct Shown: Equatable, Sendable {
+    struct Line: Equatable, Sendable {
+        var label: String
+        var value: String
+    }
+
+    /// `script`, `mcp`, `plugin`, `device`, `install`, or empty.
+    var what = ""
+    var lines: [Line] = []
+    var more = 0
+    var code = ""
+    var raw = ""
+
+    /// From the core's `shown`, or, for a question kept before the core shaped them, its
+    /// `detail` as it came, for Details.
+    init(_ a: JSON) {
+        let s = a["shown"]
+        guard !s.isNull else {
+            switch a["detail"] {
+            case .string(let d): raw = d
+            case .null: raw = ""
+            case let other: raw = other.pretty
+            }
+            return
+        }
+        what = s["what"].text
+        lines = s["lines"].array.map { Line(label: $0["label"].text, value: $0["value"].text) }
+        more = s["more"].int ?? 0
+        code = s["code"].text
+        raw = s["raw"].text
+    }
+}
+
 struct Approval: Identifiable, Equatable, Sendable {
     var call: String
     var run: String
+    /// The kind of tool it is, as `tool.started` says: `execute`, `delete`, `other`…
+    var kind: String
     var title: String
-    var detail: String
+    var shown: Shown
     var canAlways: Bool
+    /// How the person answered it here, while the instance hasn't said yet.
+    var answered: Answer?
     var id: String { call }
+
+    struct Answer: Equatable, Sendable {
+        var allow: Bool
+        var always: Bool
+    }
 }
 
 struct Run: Equatable, Sendable {
@@ -479,6 +571,8 @@ final class Model {
     var runs: [Run] = []
     var tools: [Tool] = []
     var approvals: [Approval] = []
+    /// Answers given here, by call, until the instance takes them.
+    private var answering: [String: Approval.Answer] = [:]
     var devices: [Device] = []
     /// The selected agent's messages, oldest first, with the queued ones last.
     var messages: [Message] = []
@@ -542,14 +636,32 @@ final class Model {
             placeTools(&blocks, tools.filter { $0.run == r.id })
             out.append(Message(id: r.message, role: "agent", at: .max, blocks: blocks, live: true))
         }
+        // A choices card says which answer the person sent, as the message after it, and
+        // a card goes quiet once the chat has gone on past its reply, as
+        // desktop/src/model.rs's `shown` does.
+        for i in out.indices {
+            let next = i + 1 < out.count ? out[i + 1] : nil
+            let sent = next.flatMap { $0.isPerson ? $0.blocks.filter { $0.kind == "text" }.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }.joined(separator: "\n") : nil }
+            for j in out[i].blocks.indices {
+                guard var c = out[i].blocks[j].card else { continue }
+                if c.type == "choices" { c.chosen = sent.flatMap { t in c.options.firstIndex { $0.trimmingCharacters(in: .whitespaces) == t } } }
+                c.passed = next != nil
+                out[i].blocks[j].card = c
+            }
+        }
         return out
     }
 
-    /// The questions waiting in the selected chat.
+    /// The questions waiting in the selected chat, each with the answer given here while
+    /// the instance hasn't taken it yet.
     var shownApprovals: [Approval] {
         let conversation = self.conversation
         return approvals.filter { a in
             runs.contains { $0.id == a.run && $0.conversation == conversation }
+        }.map { a in
+            var a = a
+            a.answered = answering[a.call]
+            return a
         }
     }
 
@@ -669,6 +781,16 @@ final class Model {
             dirty.insert(.messages)
         case "delta":
             delta(f)
+        case "card":
+            // A card in a reply still being written, new or changed: it takes its
+            // block's place whole.
+            let message = f["message"].text
+            let block = f["block"].int ?? 0
+            guard let card = Card(f["card"]), block >= 0 else { break }
+            var blocks = live.removeValue(forKey: message) ?? []
+            while blocks.count <= block { blocks.append(.text("", "")) }
+            blocks[block] = Block(kind: "card", text: "", call: nil, file: nil, card: card)
+            live[message] = blocks
         case "event":
             event(f)
         case "core.moved":
@@ -778,14 +900,11 @@ final class Model {
             }
         case .approvals:
             approvals = items.map { a in
-                let detail: String
-                switch a["detail"] {
-                case .string(let s): detail = s
-                case .null: detail = ""
-                case let other: detail = other.pretty
-                }
-                return Approval(call: a["call"].text, run: a["run"].text, title: a["title"].text, detail: detail, canAlways: a["can_always"].bool ?? false)
+                Approval(call: a["call"].text, run: a["run"].text, kind: a["tool"].text, title: a["title"].text, shown: Shown(a), canAlways: a["can_always"].bool ?? false)
             }
+            // An answer given here is for a question that's still open.
+            let open = Set(approvals.map(\.call))
+            answering = answering.filter { open.contains($0.key) }
         case .outbox:
             // The outbox has only what the instance hasn't acked: keep those it queued.
             let waiting = queued.filter { $0.message != nil }
@@ -959,8 +1078,17 @@ final class Model {
         return ["t": "cancel", "run": JSON(run.id)]
     }
 
+    /// The person's answer to a question: its card says how at once, until the instance
+    /// takes the question away.
     func approve(_ call: String, allow: Bool, always: Bool = false) -> JSON {
-        ["t": "approve", "call": JSON(call), "allow": JSON(allow), "always": JSON(always)]
+        answering[call] = Approval.Answer(allow: allow, always: always)
+        return ["t": "approve", "call": JSON(call), "allow": JSON(allow), "always": JSON(always)]
+    }
+
+    /// An answer picked on an agent's choices card: it goes as the person's message.
+    func choose(_ answer: String) -> JSON? {
+        guard let agent = selected else { return nil }
+        return ["t": "send", "agent": JSON(agent), "text": JSON(answer)]
     }
 
     func startFresh() -> JSON? {

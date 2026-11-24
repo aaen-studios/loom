@@ -334,6 +334,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 - **Loom's own tools follow loom's rules.** Sending, paying, deleting, letting people in, changing permissions and moving always ask.
 - **Agent programs don't ask before Code Mode's tools.** Loom asks for each call in a script ([Code Mode](#code-mode)), so a program that asked before `search_tools` or `run_code` too would ask twice. Each program is told in its own way. The tools' MCP annotations say `search_tools` only reads, and `run_code` destroys nothing and reaches nothing by itself, which is enough for Codex. Claude's adapter gets them as `allowedTools` in the session's `_meta`. OpenCode gets a rule allowing each in its config (`OPENCODE_CONFIG_CONTENT`, added to a config the program's settings already give, whose own rules for them win). In `ask`, loom asks before each script itself.
 - **Where the agent runs limits what it can do anyway:** as `loom` on a server, in a sandbox (every member's agent, and any marked Isolated), or as you in a desktop instance.
+- **A question is a card in the chat, in plain words.** The core puts the call in words for both apps (`core/asks.calx`): the tool and its server in the title, its arguments as labelled lines, short values whole and long ones cut, a list or an object said in short, a command or a script as it's written, and all of it under **Details**. Then **Allow once**, **Always allow** where it's offered, and **Deny**. Answered, the card is one quiet line saying how until the question goes.
 
 ### Loom's own tools
 
@@ -421,6 +422,8 @@ Ideas taken from OpenBot ([CopilotKit's](https://github.com/CopilotKit/OpenBot),
   - `facts`: up to 12 labels, each with its value.
 - **A card changes as the work moves along.** Called again with a card's id from the same reply, `show_card` puts the new card in that one's place, so a checklist ticks itself off and a bar fills while the agent works. The apps get each change at once, and the finished reply keeps the card as it was last.
 - **The instance tidies what it's given**: text is cut short and kept to one line, and a card that can't be drawn is refused, saying why, so the agent fixes it. Anything bigger, or with its own look, is a page (above).
+- **Every card in the chat has one frame**: a small square at its start with an icon or a name's initial, its title, its rows, and its buttons, the main one filled. An agent's cards, loom's sign-in, the questions an agent waits on ([Permissions](#permissions)) and the asks above the composer all use it, in the chat's own quiet look, with the agent's colour as the one hint of it.
+- **A card goes quiet once it's done.** Choices keep the answer the person sent marked once the chat goes on. A sign-in card says Signed in, and as whom, once the server is signed in, and once the chat has gone on past its reply it's one quiet line with a small Sign in, so old ones don't pile up as live buttons. The apps' models decide this, not their views.
 
 ### Shared tables
 

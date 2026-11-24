@@ -4685,8 +4685,8 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// The agent asking for something only the person should know, typed
-    /// straight into its page: a masked box above the composer.
+    /// The agent asking for something only the person should know, typed straight into
+    /// its page: a card above the composer with a masked box.
     fn secret_ask(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
         let state = self.model.browser(&agent.id);
         if state.secret.is_empty() {
@@ -4694,63 +4694,27 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let p = self.p;
         let tint = thread::color(&agent.color, p.dark);
-        Some(
-            div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .px(px(space::XL))
-                .pb(px(space::S))
-                .child(
+        let card =
+            CardFrame::new()
+                .lead(card_icon(p, Ico::ShieldCheck, tint))
+                .title(state.secret.clone())
+                .row(Input::new(&self.secret_in))
+                .row(
                     div()
-                        .w_full()
-                        .max_w(px(self.prefs.column()))
-                        .flex()
-                        .flex_col()
-                        .gap(px(space::S))
-                        .px(px(space::L))
-                        .py(px(space::M))
-                        .rounded(px(radius::BUTTON))
-                        .border_1()
-                        .border_color(tint)
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S))
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .child(Icon::new(Ico::ShieldCheck).small().text_color(tint))
-                                .child(state.secret.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(space::S))
-                                .child(div().flex_1().child(Input::new(&self.secret_in)))
-                                .child(self.button("secret-skip", "Not now", false).on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.give_secret(false, window, cx)
-                                    }),
-                                ))
-                                .child(self.button("secret-give", "Fill it in", true).on_click(
-                                    cx.listener(|this, _, window, cx| {
-                                        this.give_secret(true, window, cx)
-                                    }),
-                                )),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .child(format!(
-                                    "It goes into the page. {} never sees it.",
-                                    agent.name
-                                )),
-                        ),
-                ),
-        )
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(format!(
+                            "It goes into the page. {} never sees it.",
+                            agent.name
+                        )),
+                )
+                .action(card_button(p, "secret-give", "Fill it in", true).on_click(
+                    cx.listener(|this, _, window, cx| this.give_secret(true, window, cx)),
+                ))
+                .action(card_button(p, "secret-skip", "Not now", false).on_click(
+                    cx.listener(|this, _, window, cx| this.give_secret(false, window, cx)),
+                ));
+        Some(self.above_composer(card.draw(p, 1.0)))
     }
 
     /// The agent asking for the person in its browser, above the composer while
@@ -4765,38 +4729,25 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let tint = thread::color(&agent.color, p.dark);
         let id = agent.id.clone();
-        Some(
-            div()
-                .w_full()
-                .flex()
-                .justify_center()
-                .px(px(space::XL))
-                .pb(px(space::S))
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(px(self.prefs.column()))
-                        .flex()
-                        .items_center()
-                        .gap(px(space::M))
-                        .px(px(space::L))
-                        .py(px(space::M))
-                        .rounded(px(radius::BUTTON))
-                        .border_1()
-                        .border_color(tint)
-                        .child(Icon::new(Ico::Globe).small().text_color(tint))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .child(state.asked.clone()),
-                        )
-                        .child(self.button("browser-open", "Open browser", true).on_click(
-                            cx.listener(move |this, _, _, cx| this.watch(Some(id.clone()), cx)),
-                        )),
-                ),
-        )
+        let card = CardFrame::new()
+            .lead(card_icon(p, Ico::Globe, tint))
+            .title(state.asked.clone())
+            .side(
+                card_button(p, "browser-open", "Open browser", true)
+                    .on_click(cx.listener(move |this, _, _, cx| this.watch(Some(id.clone()), cx))),
+            );
+        Some(self.above_composer(card.draw(p, 1.0)))
+    }
+
+    /// A card above the composer, as wide as the chat's column.
+    fn above_composer(&self, card: Div) -> Div {
+        div()
+            .w_full()
+            .flex()
+            .justify_center()
+            .px(px(space::XL))
+            .pb(px(space::S))
+            .child(div().w_full().max_w(px(self.prefs.column())).child(card))
     }
 
     fn button(&self, id: &'static str, label: &str, primary: bool) -> Stateful<Div> {
@@ -9606,6 +9557,8 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let f = self.model.sign_in_mcp(name, &catcher.redirect);
         self.send(f);
+        // A sign-in card says Signing in… meanwhile.
+        self.rows_dirty = true;
         let dir = self.here.clone();
         let back = catcher.back;
         cx.spawn(async move |this, cx| loop {
@@ -9626,6 +9579,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     // Ten minutes and the browser didn't come back.
                     let _ = this.update(cx, |loom, cx| {
                         loom.model.mcp_signing.clear();
+                        loom.rows_dirty = true;
                         cx.notify();
                     });
                     return;
@@ -14040,8 +13994,13 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    pub fn answer(&mut self, call: String, allow: bool, always: bool) {
-        self.send(model::approve(&call, allow, always));
+    /// The person's answer to a question: its card says how at once, until the instance
+    /// takes the question away.
+    pub fn answer(&mut self, call: String, allow: bool, always: bool, cx: &mut Context<Self>) {
+        let f = self.model.answer(&call, allow, always);
+        self.send(f);
+        self.refresh_rows(cx);
+        cx.notify();
     }
 }
 
@@ -14609,8 +14568,307 @@ struct Show {
     room: i32,
 }
 
-/// A card an agent put in its reply (PLAN.md, "Cards in the chat"), drawn plainly in
-/// the chat's own look: choices as buttons that answer, and the rest in a quiet box.
+/// The widest a card in the chat grows: past that, its few lines would sit far apart
+/// from its buttons in a wide column.
+const CARD_MOST: f32 = 600.0;
+
+/// A card's fill: the window's own in the light theme, outlined, and a step lighter in
+/// the dark, where an outline alone sinks.
+fn card_fill(p: Palette) -> Hsla {
+    if p.dark {
+        p.raised
+    } else {
+        p.bg
+    }
+}
+
+/// What sits inside a card on a fill of its own (its icon's square, a command, the
+/// Details), a step from the card's.
+fn card_inset(p: Palette) -> Hsla {
+    if p.dark {
+        p.bg
+    } else {
+        p.raised
+    }
+}
+
+/// The frame every card in the chat is drawn in (PLAN.md, "Cards in the chat"): loom's
+/// asks and its sign-in, an agent's `show_card`, the install's plan, and the asks above
+/// the composer. A box with a small square at its start (an icon or an initial), and
+/// beside it, from the top, the title with what goes beside it, the rows, and the
+/// actions, one of them the main one. Answered, a card is one quiet line (`card_done`).
+#[derive(Default)]
+struct CardFrame {
+    lead: Option<AnyElement>,
+    title: Option<SharedString>,
+    side: Option<AnyElement>,
+    rows: Vec<AnyElement>,
+    actions: Vec<AnyElement>,
+}
+
+impl CardFrame {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// The small square at its start: `card_icon` or `card_initial`.
+    fn lead(mut self, lead: impl IntoElement) -> Self {
+        self.lead = Some(lead.into_any_element());
+        self
+    }
+
+    /// Its title, which an empty one leaves out.
+    fn title(mut self, title: impl Into<SharedString>) -> Self {
+        let title = title.into();
+        if !title.is_empty() {
+            self.title = Some(title);
+        }
+        self
+    }
+
+    /// What goes at the title's end: how far along it is, or its one button.
+    fn side(mut self, side: impl IntoElement) -> Self {
+        self.side = Some(side.into_any_element());
+        self
+    }
+
+    fn row(mut self, row: impl IntoElement) -> Self {
+        self.rows.push(row.into_any_element());
+        self
+    }
+
+    /// A button under the rows, the main one first (`card_button`).
+    fn action(mut self, action: impl IntoElement) -> Self {
+        self.actions.push(action.into_any_element());
+        self
+    }
+
+    fn draw(self, p: Palette, scale: f32) -> Div {
+        let head = (self.title.is_some() || self.side.is_some()).then(|| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::M))
+                .min_h(px(control::ICON_SMALL))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(size::BODY * scale))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink)
+                        .children(self.title),
+                )
+                .children(self.side)
+        });
+        let actions = (!self.actions.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(space::S))
+                .pt(px(space::XS))
+                .children(self.actions)
+        });
+        div()
+            .w_full()
+            .flex()
+            .items_start()
+            .gap(px(space::M))
+            .px(px(space::L))
+            .py(px(space::M))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(if p.dark { p.line } else { p.line_strong })
+            .bg(card_fill(p))
+            .children(self.lead)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S))
+                    .children(head)
+                    .children(self.rows)
+                    .children(actions),
+            )
+    }
+}
+
+/// The small square at a card's start.
+fn card_lead(p: Palette) -> Div {
+    div()
+        .size(px(control::ICON_SMALL))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::ROW))
+        .bg(card_inset(p))
+}
+
+/// A card's icon, in `ink`: an ask's in its agent's colour, the one hint of it.
+fn card_icon(p: Palette, icon: Ico, ink: Hsla) -> Div {
+    card_lead(p).text_color(ink).child(Icon::new(icon).small())
+}
+
+/// A card's initial, for something with a name and no icon of its own, such as an MCP
+/// server.
+fn card_initial(p: Palette, name: &str) -> Div {
+    let initial = name
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_else(|| "?".into());
+    card_lead(p)
+        .text_size(px(size::SMALL))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(p.ink_2)
+        .child(initial)
+}
+
+/// A labelled line in a card: what it is, quiet, then its value, each cut to the room
+/// it has, so a long one never runs past the card.
+fn card_line(
+    p: Palette,
+    label: impl Into<SharedString>,
+    value: impl Into<SharedString>,
+    scale: f32,
+) -> Div {
+    div()
+        .flex()
+        .gap(px(space::M))
+        .text_size(px(size::SMALL * scale))
+        .child(
+            div()
+                .w(px(layout::FIELD_LABEL))
+                .flex_none()
+                .truncate()
+                .text_color(p.ink_3)
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(p.ink)
+                .child(value.into()),
+        )
+}
+
+/// Labelled lines in a card, close together, as an approval's call and the facts card
+/// show them.
+fn card_lines(p: Palette, lines: &[(String, String)], scale: f32) -> Div {
+    let mut out = div().flex().flex_col().gap(px(space::XS));
+    for (label, value) in lines {
+        out = out.child(card_line(p, label.clone(), value.clone(), scale));
+    }
+    out
+}
+
+/// A command or a script in a card, as it's written, wrapped to the card.
+fn card_code(p: Palette, text: impl Into<SharedString>, scale: f32) -> Div {
+    div()
+        .w_full()
+        .px(px(space::M))
+        .py(px(space::S))
+        .rounded(px(radius::INPUT))
+        .bg(card_inset(p))
+        .font_family(crate::prefs::mono_font())
+        .text_size(px(size::SMALL * scale))
+        .text_color(p.ink_2)
+        .child(text.into())
+}
+
+/// Details, folded under its line until it's clicked: all of what a card shows only
+/// some of, in a box of its own that scrolls past a few lines.
+fn card_details(
+    p: Palette,
+    key: String,
+    open: bool,
+    raw: &str,
+    scale: f32,
+    this: WeakEntity<Loom>,
+) -> Div {
+    let k = key.clone();
+    let toggle = div()
+        .id(SharedString::from(format!("t-{key}")))
+        .flex()
+        .items_center()
+        .gap(px(space::XS))
+        .text_size(px(size::CAPTION))
+        .text_color(p.ink_3)
+        .cursor_pointer()
+        .soft_ink(p.ink_3, p.ink)
+        .child(if open { "⌄" } else { "›" })
+        .child("Details")
+        .on_click(move |_, _, cx| {
+            let _ = this.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
+        });
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(space::S))
+        .child(div().flex().child(toggle))
+        .when(open, |d| {
+            d.child(
+                card_code(p, raw.to_string(), scale)
+                    .id(SharedString::from(format!("r-{key}")))
+                    .max_h(px(280.0))
+                    .overflow_y_scroll(),
+            )
+        })
+}
+
+/// A card's button, as tall as an approval's: the main one filled, the rest outlined.
+fn card_button(
+    p: Palette,
+    id: impl Into<SharedString>,
+    label: &str,
+    primary: bool,
+) -> Stateful<Div> {
+    div()
+        .id(id.into())
+        .role(Role::Button)
+        .aria_label(label.to_string())
+        .px(px(space::M))
+        .h(px(control::BUTTON_SMALL))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(radius::BUTTON))
+        .text_size(px(size::SMALL))
+        .font_weight(FontWeight::MEDIUM)
+        .cursor_pointer()
+        .when(primary, |d| {
+            d.text_color(p.button_ink)
+                .soft_hover(p.button, motion::mix(p.button, p.bg, 0.18), None)
+        })
+        .when(!primary, |d| {
+            d.border_1()
+                .border_color(p.line_strong)
+                .text_color(p.ink)
+                .soft_hover(transparent_black(), p.hover, None)
+        })
+        .child(label.to_string())
+}
+
+/// A card once it's answered: one quiet line saying how.
+fn card_done(p: Palette, icon: Ico, words: impl Into<SharedString>, scale: f32) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::S))
+        .text_size(px(size::SMALL * scale))
+        .text_color(p.ink_3)
+        .child(Icon::new(icon).xsmall())
+        .child(div().min_w_0().truncate().child(words.into()))
+}
+
+/// A card an agent put in its reply (PLAN.md, "Cards in the chat"), or loom's own, in
+/// the card frame: choices as buttons that answer, and the rest in the frame.
 fn card_view(
     p: Palette,
     card: &model::Card,
@@ -14621,26 +14879,22 @@ fn card_view(
 ) -> Div {
     use model::CardBody;
     let scale = show.text_scale;
-    let title = (!card.title.is_empty()).then(|| {
-        div()
-            .text_size(px(size::SMALL * scale))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(p.ink_2)
-            .child(card.title.clone())
-    });
-    // Choices stand on their own: a row of buttons under the reply, live while it's
-    // the newest message, and quiet once the chat has gone on.
-    if let CardBody::Choices(options) = &card.body {
+    // Choices stand on their own: the question, then a row of buttons under it, live
+    // while it's the newest message. Once the chat has gone on, the one the person
+    // sent stays marked, and the rest go quiet.
+    if let CardBody::Choices { options, chosen } = &card.body {
         let mut row = div().flex().flex_wrap().gap(px(space::S));
         for (i, option) in options.iter().enumerate() {
             let chip = div()
                 .id(SharedString::from(format!("choice-{key}-{i}")))
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.0))
                 .px(px(space::M))
-                .py(px(space::XS + 2.0))
-                .rounded(px(radius::BUBBLE))
+                .h(px(control::BUTTON_SMALL))
+                .rounded(px(radius::BUTTON))
                 .border_1()
-                .text_size(px(size::SMALL * scale))
-                .child(option.clone());
+                .text_size(px(size::SMALL * scale));
             row = row.child(if show.newest {
                 let this = this.clone();
                 let answer = option.clone();
@@ -14651,19 +14905,103 @@ fn card_view(
                     .on_click(move |_, _, cx| {
                         let _ = this.update(cx, |loom, cx| loom.choose(&answer, cx));
                     })
+                    .child(option.clone())
+            } else if *chosen == Some(i) {
+                chip.border_color(p.line_strong)
+                    .bg(card_inset(p))
+                    .text_color(p.ink_2)
+                    .child(Icon::new(Ico::Check).xsmall())
+                    .child(option.clone())
             } else {
-                chip.border_color(p.line).text_color(p.ink_3)
+                chip.border_color(p.line)
+                    .text_color(p.ink_3)
+                    .child(option.clone())
             });
         }
         return div()
             .flex()
             .flex_col()
             .gap(px(space::S))
-            .children(title)
+            .when(!card.title.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_size(px(size::SMALL * scale))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink_2)
+                        .child(card.title.clone()),
+                )
+            })
             .child(row);
     }
-    let body = match &card.body {
+    // Loom's own card for an MCP server that needs the person to sign in: the server
+    // by its initial, and Sign in, which opens its sign-in page in their browser. Once
+    // they have, one quiet line says so, as whom when the sign-in said; and once the
+    // chat has gone on without it, one quiet line keeps a small Sign in.
+    if let CardBody::SignIn {
+        server,
+        signed,
+        signing,
+        passed,
+    } = &card.body
+    {
+        if let Some(who) = signed {
+            let words = if who.is_empty() {
+                format!("Signed in to {server}")
+            } else {
+                format!("Signed in to {server} as {who}")
+            };
+            return div().child(card_done(p, Ico::Check, words, scale));
+        }
+        let go = {
+            let this = this.clone();
+            let name = server.clone();
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                let _ = this.update(cx, |loom, cx| loom.sign_in_mcp(&name, cx));
+            }
+        };
+        if *passed {
+            return div().child(
+                card_done(p, Ico::KeyRound, card.title.clone(), scale).child(
+                    div()
+                        .id(SharedString::from(format!("sign-in-{key}")))
+                        .role(Role::Button)
+                        .flex_none()
+                        .text_color(p.ink_2)
+                        .font_weight(FontWeight::MEDIUM)
+                        .cursor_pointer()
+                        .soft_ink(p.ink_2, p.ink)
+                        .child(if *signing { "Signing in…" } else { "Sign in" })
+                        .on_click(go),
+                ),
+            );
+        }
+        return div().max_w(px(CARD_MOST)).child(
+            CardFrame::new()
+                .lead(card_initial(p, server))
+                .title(card.title.clone())
+                .side(
+                    card_button(
+                        p,
+                        format!("sign-in-{key}"),
+                        if *signing { "Signing in…" } else { "Sign in" },
+                        true,
+                    )
+                    .on_click(go),
+                )
+                .draw(p, scale),
+        );
+    }
+    let mut frame = CardFrame::new().title(card.title.clone());
+    match &card.body {
         CardBody::Checklist(items) => {
+            let done = items.iter().filter(|(_, d)| *d).count();
+            frame = frame.side(
+                div()
+                    .flex_none()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(format!("{done} of {}", items.len())),
+            );
             let mut list = div().flex().flex_col().gap(px(space::XS + 2.0));
             for (text, done) in items {
                 let mark = div()
@@ -14692,73 +15030,62 @@ fn card_view(
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .when(*done, |d| d.text_color(p.ink_3).line_through())
+                                .when(*done, |d| d.text_color(p.ink_3))
                                 .when(!*done, |d| d.text_color(p.ink))
                                 .child(text.clone()),
                         ),
                 );
             }
-            list
+            frame = frame.row(list);
         }
         CardBody::Progress { label, value } => {
             let pct = (value * 100.0).round() as u32;
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(space::S))
-                .child(
+            frame = frame.side(
+                div()
+                    .flex_none()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(format!("{pct}%")),
+            );
+            // With no title, what's going on is the title.
+            frame = if card.title.is_empty() || label.is_empty() {
+                frame.title(label.clone())
+            } else {
+                frame.row(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
+                        .truncate()
                         .text_size(px(size::SMALL * scale))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(p.ink)
-                                .child(label.clone()),
-                        )
-                        .child(div().text_color(p.ink_3).child(format!("{pct}%"))),
+                        .text_color(p.ink_2)
+                        .child(label.clone()),
                 )
-                .child(
-                    div()
-                        .h(px(6.0))
-                        .w_full()
-                        .rounded_full()
-                        .bg(p.line)
-                        .child(div().h_full().w(relative(*value)).rounded_full().bg(tint)),
-                )
+            };
+            frame = frame.row(
+                div()
+                    .h(px(6.0))
+                    .w_full()
+                    .rounded_full()
+                    .bg(card_inset(p))
+                    .child(div().h_full().w(relative(*value)).rounded_full().bg(tint)),
+            );
         }
         CardBody::Facts(items) => {
-            let mut list = div().flex().flex_col().gap(px(space::XS + 2.0));
-            for (label, value) in items {
-                list = list.child(
-                    div()
-                        .flex()
-                        .gap(px(space::M))
-                        .text_size(px(size::SMALL * scale))
-                        .child(
-                            div()
-                                .w(px(140.0))
-                                .flex_none()
-                                .truncate()
-                                .text_color(p.ink_3)
-                                .child(label.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_color(p.ink)
-                                .child(value.clone()),
-                        ),
-                );
-            }
-            list
+            frame = frame.row(card_lines(p, items, scale));
         }
         CardBody::Table { columns, rows } => {
+            // Each column as wide as its longest cell asks, between a few characters and
+            // forty, so a number's column doesn't take a title's room.
+            let share: Vec<f32> = (0..columns.len())
+                .map(|c| {
+                    std::iter::once(columns.get(c))
+                        .chain(rows.iter().map(|r| r.get(c)))
+                        .flatten()
+                        .map(|s| s.chars().count())
+                        .max()
+                        .unwrap_or(0)
+                        .clamp(3, 40) as f32
+                })
+                .collect();
+            let all: f32 = share.iter().sum::<f32>().max(1.0);
             let line = |cells: &[String], head: bool| {
                 let mut r = div()
                     .flex()
@@ -14769,10 +15096,11 @@ fn card_view(
                     } else {
                         size::SMALL * scale
                     }));
-                for c in cells {
+                for (k, c) in cells.iter().enumerate() {
                     r = r.child(
                         div()
-                            .flex_1()
+                            .flex_basis(relative(share.get(k).copied().unwrap_or(3.0) / all))
+                            .flex_shrink(1.0)
                             .min_w_0()
                             .truncate()
                             .when(head, |d| {
@@ -14797,51 +15125,17 @@ fn card_view(
                     r
                 });
             }
-            table
+            frame = frame.row(table);
         }
-        CardBody::Choices(_) => div(),
-        // Loom's own card for an MCP server that needs the person to sign in: Sign in
-        // opens its sign-in page in their browser, and once they have, it says so.
-        CardBody::SignIn { signed: true, .. } => div()
-            .text_size(px(size::SMALL * scale))
-            .text_color(p.ink_3)
-            .child("Signed in"),
-        CardBody::SignIn { server, .. } => {
-            let this = this.clone();
-            let server = server.clone();
-            div().flex().child(
-                div()
-                    .id(SharedString::from(format!("sign-in-{key}")))
-                    .px(px(space::M))
-                    .py(px(space::XS + 2.0))
-                    .rounded(px(radius::BUBBLE))
-                    .border_1()
-                    .border_color(tint.opacity(0.55))
-                    .text_size(px(size::SMALL * scale))
-                    .text_color(p.ink)
-                    .cursor_pointer()
-                    .soft_hover(p.raised, motion::mix(p.raised, tint, 0.14), None)
-                    .on_click(move |_, _, cx| {
-                        let _ = this.update(cx, |loom, cx| loom.sign_in_mcp(&server, cx));
-                    })
-                    .child("Sign in"),
-            )
-        }
-    };
+        CardBody::Choices { .. } | CardBody::SignIn { .. } => {}
+    }
+    // A table has columns to fit, and takes the reply's room.
+    let wide = matches!(card.body, CardBody::Table { .. });
     div()
         .w_full()
-        .max_w(relative(0.94))
-        .flex()
-        .flex_col()
-        .gap(px(space::S + 2.0))
-        .px(px(space::L))
-        .py(px(space::M))
-        .rounded(px(radius::CARD))
-        .border_1()
-        .border_color(p.line)
-        .bg(p.raised)
-        .children(title)
-        .child(body)
+        .when(wide, |d| d.max_w(relative(0.94)))
+        .when(!wide, |d| d.max_w(px(CARD_MOST)))
+        .child(frame.draw(p, scale))
 }
 
 /// One tool call: its title, and how it went. `live` is a reply still being written,
@@ -15579,97 +15873,101 @@ fn reply(
         .child(body)
 }
 
-fn approval(p: Palette, a: &Approval, this: WeakEntity<Loom>) -> Div {
+/// The icon of a question's card: what kind of call it is, as the core says (Code Mode's
+/// script, a tool of an MCP server or a plugin, one of the person's devices or hosts),
+/// or else the kind of tool.
+fn ask_icon(a: &Approval) -> Ico {
+    match (a.shown.what.as_str(), a.kind.as_str()) {
+        ("script", _) | (_, "execute") => Ico::SquareTerminal,
+        ("mcp", _) => Ico::Plug,
+        ("plugin", _) => Ico::Puzzle,
+        ("device", _) => Ico::Laptop,
+        ("install", _) => Ico::Server,
+        (_, "delete") => Ico::Trash,
+        (_, "edit") => Ico::Pencil,
+        (_, "move") => Ico::Truck,
+        (_, "fetch") => Ico::Globe,
+        (_, "read") => Ico::FileText,
+        (_, "search") => Ico::Search,
+        _ => Ico::ShieldCheck,
+    }
+}
+
+/// A question the agent waits on (PLAN.md, "Permissions"), in the card frame: what it
+/// would do as the core put it in words (`core/asks.calx`), with Details for all of it,
+/// then Allow once, Always allow where it's offered, and Deny. Answered here, it's one
+/// quiet line saying how, until the instance takes the question away.
+fn approval(
+    p: Palette,
+    a: &Approval,
+    tint: Hsla,
+    open: &HashSet<String>,
+    scale: f32,
+    this: WeakEntity<Loom>,
+) -> Div {
+    let title = if a.title.is_empty() {
+        "Can it go ahead?".to_string()
+    } else {
+        format!("{}?", a.title)
+    };
+    let place = div().ml(px(26.0)).max_w(px(CARD_MOST + 26.0));
+    if let Some((allow, always)) = a.answered {
+        let (icon, how) = match (allow, always) {
+            (false, _) => (Ico::X, "Denied"),
+            (true, true) => (Ico::Check, "Always allowed"),
+            (true, false) => (Ico::Check, "Allowed once"),
+        };
+        let words = if a.title.is_empty() {
+            how.to_string()
+        } else {
+            format!("{how} · {}", a.title)
+        };
+        return place.child(card_done(p, icon, words, scale));
+    }
     let call = a.call.clone();
-    let detail = command_of(&a.detail);
+    let to_answer = this.clone();
     let answer = move |allow: bool, always: bool| {
-        let this = this.clone();
+        let this = to_answer.clone();
         let call = call.clone();
         move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-            let _ = this.update(cx, |loom, _| loom.answer(call.clone(), allow, always));
+            let _ = this.update(cx, |loom, cx| loom.answer(call.clone(), allow, always, cx));
         }
     };
-    let btn = |id: String, label: &'static str, primary: bool| {
-        div()
-            .id(SharedString::from(id))
-            .px(px(space::M))
-            .h(px(control::BUTTON_SMALL))
-            .flex()
-            .items_center()
-            .rounded(px(radius::BUTTON))
-            .text_size(px(size::SMALL))
-            .font_weight(FontWeight::MEDIUM)
-            .cursor_pointer()
-            .when(primary, |d| {
-                d.text_color(p.button_ink).soft_hover(
-                    p.button,
-                    motion::mix(p.button, p.bg, 0.18),
-                    None,
-                )
-            })
-            .when(!primary, |d| {
-                d.border_1()
-                    .border_color(p.line_strong)
-                    .text_color(p.ink)
-                    .soft_hover(transparent_black(), p.hover, None)
-            })
-            .child(label)
-    };
-    div()
-        .ml(px(26.0))
-        .p(px(space::L))
-        .flex()
-        .flex_col()
-        .gap(px(space::M))
-        .bg(p.raised)
-        .border_1()
-        .border_color(p.line)
-        .rounded(px(radius::CARD))
-        .child(
-            div()
-                .text_size(px(size::BODY))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(p.ink)
-                .child(if a.title.is_empty() {
-                    "Can it go ahead?".to_string()
-                } else {
-                    format!("{}?", a.title)
-                }),
-        )
-        .when(!detail.is_empty(), |d| {
-            d.child(
-                div()
-                    .px(px(space::M))
-                    .py(px(space::S))
-                    .bg(p.bg)
-                    .border_1()
-                    .border_color(p.line)
-                    .rounded(px(radius::INPUT))
-                    .font_family(crate::prefs::mono_font())
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_2)
-                    .child(detail),
-            )
-        })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(space::S))
-                .child(
-                    btn(format!("allow-{}", a.call), "Allow once", true)
-                        .on_click(answer(true, false)),
-                )
-                .when(a.can_always, |d| {
-                    d.child(
-                        btn(format!("always-{}", a.call), "Always allow", false)
-                            .on_click(answer(true, true)),
-                    )
-                })
-                .child(
-                    btn(format!("deny-{}", a.call), "Deny", false).on_click(answer(false, false)),
-                ),
-        )
+    let mut card = CardFrame::new()
+        .lead(card_icon(p, ask_icon(a), tint))
+        .title(title);
+    if !a.shown.lines.is_empty() {
+        card = card.row(card_lines(p, &a.shown.lines, scale));
+    }
+    if !a.shown.code.is_empty() {
+        card = card.row(card_code(p, a.shown.code.clone(), scale));
+    }
+    if !a.shown.raw.is_empty() {
+        let key = format!("details/{}", a.call);
+        let opened = open.contains(&key);
+        card = card.row(card_details(
+            p,
+            key,
+            opened,
+            &a.shown.raw,
+            scale,
+            this.clone(),
+        ));
+    }
+    card = card.action(
+        card_button(p, format!("allow-{}", a.call), "Allow once", true)
+            .on_click(answer(true, false)),
+    );
+    if a.can_always {
+        card = card.action(
+            card_button(p, format!("always-{}", a.call), "Always allow", false)
+                .on_click(answer(true, true)),
+        );
+    }
+    card = card.action(
+        card_button(p, format!("deny-{}", a.call), "Deny", false).on_click(answer(false, false)),
+    );
+    place.child(card.draw(p, scale))
 }
 
 /// A button's name, shown under the pointer after a moment, for buttons that are only an icon.
@@ -15693,32 +15991,6 @@ fn rail_dot(p: Palette) -> Div {
         .size(px(6.0))
         .rounded_full()
         .bg(p.ink)
-}
-
-/// What an approval would run, from the tool's input: its command if it has one.
-fn command_of(detail: &str) -> String {
-    match serde_json::from_str::<Value>(detail) {
-        // A script before it runs, in Code Mode: the script itself, as it was written.
-        Ok(v) if v.pointer("/arguments/code").is_some_and(Value::is_string) => v
-            .pointer("/arguments/code")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        Ok(v) => match v.get("command") {
-            Some(Value::String(c)) => c.clone(),
-            Some(Value::Array(parts)) => parts
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" "),
-            _ => match v {
-                Value::Null => String::new(),
-                Value::String(s) => s,
-                other => serde_json::to_string_pretty(&other).unwrap_or_default(),
-            },
-        },
-        Err(_) => detail.to_string(),
-    }
 }
 
 /// The day of `ms`, as the activity page heads its entries: "Today", "Yesterday", or a date.
@@ -15896,16 +16168,6 @@ mod bubble_tests {
 }
 #[cfg(test)]
 mod command_tests {
-    use super::command_of;
-
-    #[test]
-    fn a_question_shows_what_would_run() {
-        assert_eq!(command_of(r#"{"command":["git","push"]}"#), "git push");
-        let script = r#"{"server":"loom","tool":"run_code","arguments":{"code":"const a = 1;\nreturn a;"},"act":0}"#;
-        assert_eq!(command_of(script), "const a = 1;\nreturn a;");
-        assert_eq!(command_of("plain words"), "plain words");
-    }
-
     #[test]
     fn a_tools_name_reads_as_words() {
         use super::readable_name;
@@ -17615,12 +17877,14 @@ fn chat_list(
             } else {
                 Mood::Idle
             },
-            open: m.map_or_else(HashSet::new, |m| {
-                open.iter()
-                    .filter(|k| k.contains(m.id.as_str()))
-                    .cloned()
-                    .collect()
-            }),
+            // What's open in it, named by its message, or a question's by its call.
+            open: {
+                let of = match row {
+                    Row::Message(m) => m.id.as_str(),
+                    Row::Approval(a) => a.call.as_str(),
+                };
+                open.iter().filter(|k| k.contains(of)).cloned().collect()
+            },
             show: Show {
                 newest: m.is_some_and(|m| newest.as_deref() == Some(m.id.as_str())),
                 ..show
@@ -17761,7 +18025,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             show,
             this.clone(),
         ),
-        Row::Approval(a) => approval(p, a, this.clone()),
+        Row::Approval(a) => approval(p, a, tint, open, show.text_scale, this.clone()),
     };
     // A message's pin, just outside its corner: there while it's pinned, and
     // on hover to pin it.
