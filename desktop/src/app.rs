@@ -472,6 +472,8 @@ pub struct Loom {
     /// Whether the watched browser fills the panel beside the chat. Otherwise it's
     /// the small window at the chat's bottom right.
     browser_docked: bool,
+    /// Whether the browser beside the chat is open big over the window instead.
+    browser_big: bool,
     /// The agent whose small browser window the person closed, until its browser closes.
     browser_shut: Option<String>,
     /// The panel's width, as the person dragged it, kept in the data folder.
@@ -1258,6 +1260,7 @@ ACTA_KEY=secret:ACTA_KEY",
             activity_lines: ((0, None, None, chrono::NaiveDate::MIN), Rc::default()),
             page_bounds: Rc::new(std::cell::Cell::new(None)),
             browser_docked: false,
+            browser_big: false,
             browser_shut: None,
             side_w: std::fs::read_to_string(std::path::Path::new(&data_dir()).join("side-width"))
                 .ok()
@@ -1329,6 +1332,8 @@ ACTA_KEY=secret:ACTA_KEY",
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.model.viewing.is_some() {
             self.model.viewing = None;
+        } else if self.browser_big {
+            self.browser_big = false;
         } else if self.menu.is_some() || self.ctx.is_some() {
             self.menu = None;
             self.ctx = None;
@@ -3928,6 +3933,8 @@ ACTA_KEY=secret:ACTA_KEY",
         self.browser_docked = agent.is_some();
         if agent.is_some() {
             self.browser_shut = None;
+        } else {
+            self.browser_big = false;
         }
         // Opened beside the chat, the person watches it, which keeps it open.
         if let Some(f) = self.model.watch(agent, false) {
@@ -4211,42 +4218,38 @@ ACTA_KEY=secret:ACTA_KEY",
         (x >= 0.0 && y >= 0.0 && x <= f.width && y <= f.height).then_some((x, y))
     }
 
-    /// The person's key, on the page they've taken over: a named key, or the text it types.
-    fn page_key(&mut self, e: &KeyDownEvent) -> bool {
+    /// The person's key, on the page they've taken over: a named key, the text it
+    /// types, or what's on the clipboard for Ctrl+V (⌘V). Whether it was the page's.
+    fn page_key(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let k = &e.keystroke;
-        let named = match k.key.as_str() {
-            "enter" => Some("Enter"),
-            "tab" => Some("Tab"),
-            "escape" => Some("Escape"),
-            "backspace" => Some("Backspace"),
-            "delete" => Some("Delete"),
-            "up" => Some("ArrowUp"),
-            "down" => Some("ArrowDown"),
-            "left" => Some("ArrowLeft"),
-            "right" => Some("ArrowRight"),
-            "home" => Some("Home"),
-            "end" => Some("End"),
-            "pageup" => Some("PageUp"),
-            "pagedown" => Some("PageDown"),
-            _ => None,
-        };
-        let input = if let Some(key) = named {
-            serde_json::json!({"kind": "key", "key": key})
-        } else if k.modifiers.control || k.modifiers.alt || k.modifiers.platform {
-            return false;
-        } else if let Some(text) = k.key_char.clone().filter(|t| !t.is_empty()) {
+        let paste = k.key == "v"
+            && k.modifiers.secondary(cx)
+            && !k.modifiers.alt
+            && !k.modifiers.shift
+            && !e.prefer_character_input;
+        let input = if paste {
+            let text = cx
+                .read_from_clipboard()
+                .and_then(|c| c.text())
+                .unwrap_or_default();
+            if text.is_empty() {
+                return true;
+            }
             serde_json::json!({"kind": "text", "text": text})
         } else {
-            return false;
+            match page_input(k, e.prefer_character_input) {
+                PageKey::Send(input) => input,
+                PageKey::Keep => return true,
+                PageKey::Pass => return false,
+            }
         };
-        if let Some(f) = self.model.browser_input(input) {
+        for f in self.model.browser_input(input) {
             self.send(f);
         }
         true
     }
 
-    /// The agent's browser beside its chat: its page as it changes, and the
-    /// person's way in for what only they should do.
+    /// The agent's browser beside its chat.
     fn browser_panel(
         &mut self,
         agent: &model::Agent,
@@ -4254,30 +4257,146 @@ ACTA_KEY=secret:ACTA_KEY",
         cx: &mut Context<Self>,
     ) -> Div {
         let p = self.p;
-        let tint = thread::color(&agent.color, p.dark);
-        let state = self.model.browser(&agent.id);
-        self.decode_page(window);
         let width = {
             let ww = window.viewport_size().width.as_f32();
             side_width(true, ww, self.bar_width(ww), self.side_w)
         };
-        let inner = width - 2.0 * space::L;
+        let (header, screen, footer) =
+            self.browser_view(agent, width - 2.0 * space::L, None, window, cx);
+        div()
+            .w(px(width))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(space::M))
+            .p(px(space::L))
+            .relative()
+            .border_l_1()
+            .border_color(p.line)
+            .child(self.side_edge(width, cx))
+            .child(header)
+            .child(screen)
+            .child(footer)
+    }
+
+    /// The agent's browser big over the window, from the panel's full screen control,
+    /// its page as large as the window lets it be and asked for at that size. Esc, the
+    /// same control or a click beside it puts it back beside the chat.
+    fn browser_full(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        if !self.browser_big {
+            return None;
+        }
+        let agent = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .filter(|a| {
+                self.screen == Screen::Chat
+                    && self.browser_docked
+                    && self.model.watching.as_deref() == Some(a.id.as_str())
+            })
+            .cloned();
+        let Some(agent) = agent else {
+            self.browser_big = false;
+            return None;
+        };
+        let p = self.p;
+        let k = motion::arrive(&SharedString::from("browser-full"), 0.15);
+        if k < 1.0 {
+            window.request_animation_frame();
+        }
+        // Under the title bar, which keeps the window's own controls.
+        let size = window.viewport_size();
+        let (w, h) = (size.width.as_f32(), size.height.as_f32() - layout::TITLEBAR);
+        let card_w = (w - 2.0 * space::XL).max(320.0);
+        let card_h = (h - 2.0 * space::XL).max(240.0);
+        // What's left for the page under the header and over the line under it.
+        let page_w = card_w - 2.0 * space::L;
+        let page_h = card_h - 2.0 * space::L - 2.0 * space::M - BROWSER_HEAD - control::BUTTON;
+        let (header, screen, footer) = self.browser_view(&agent, page_w, Some(page_h), window, cx);
+        Some(
+            div()
+                .id("browser-full")
+                .absolute()
+                .top(px(layout::TITLEBAR))
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .occlude()
+                .opacity(k)
+                .bg(black().opacity(0.45))
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.browser_big = false;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .w(px(card_w))
+                        .max_h(px(card_h))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(space::M))
+                        .p(px(space::L))
+                        .bg(p.bg)
+                        .rounded(px(radius::WINDOW))
+                        .border_1()
+                        .border_color(p.line_strong)
+                        .shadow_lg()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(header.w_full())
+                        .child(screen)
+                        .child(footer.w_full()),
+                ),
+        )
+    }
+
+    /// The agent's browser, beside the chat or full screen: over the page its name, the
+    /// full screen control and the close; the page as it changes, at most `most_w` wide
+    /// and `most_h` tall, at its own shape; and under it what's going on, with Take over
+    /// or Hand back. A click on the page takes it over, so the person's clicks, scrolls
+    /// and keys go to it.
+    fn browser_view(
+        &mut self,
+        agent: &model::Agent,
+        most_w: f32,
+        most_h: Option<f32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Div, Stateful<Div>, Div) {
+        let p = self.p;
+        let big = self.browser_big;
+        let tint = thread::color(&agent.color, p.dark);
+        let state = self.model.browser(&agent.id);
+        self.decode_page(window);
         let (fw, fh) = self
             .model
             .frame
             .as_ref()
             .map_or((1280.0, 800.0), |f| (f.width.max(1.0), f.height.max(1.0)));
-        let height = inner * fh / fw;
-        self.page_shown(inner, window);
+        let (pw, ph) = page_fit(fw, fh, most_w - 4.0, most_h.map(|h| h - 4.0));
+        self.page_shown(pw, window);
         let bounds = self.page_bounds.clone();
         let page = match self.page_image.clone() {
             Some((_, image)) => img(ImageSource::Render(image))
                 .size_full()
+                .object_fit(ObjectFit::Fill)
                 .rounded(px(radius::BUTTON - 2.0))
                 .into_any_element(),
             None => div()
-                .w(px(inner))
-                .h(px(height))
+                .size_full()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -4291,17 +4410,51 @@ ACTA_KEY=secret:ACTA_KEY",
                 .into_any_element(),
         };
         let person = state.person;
+        let open = state.open;
+        let asked = !state.asked.is_empty();
+        // Until it's theirs, a click on the page takes it over: said under the pointer,
+        // and all the while the agent asks for them.
+        let hint = (open && !person && self.page_image.is_some()).then(|| {
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(space::M))
+                .flex()
+                .justify_center()
+                .when(!asked, |d| {
+                    d.opacity(0.0)
+                        .group_hover("browser-page", |s| s.opacity(1.0))
+                })
+                .child(
+                    div()
+                        .h(px(control::CHIP))
+                        .px(px(space::M))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .bg(p.button)
+                        .text_color(p.button_ink)
+                        .text_size(px(size::SMALL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .shadow_md()
+                        .child("Click to take over"),
+                )
+        });
         let screen = div()
             .id("browser-page")
+            .key_context(PAGE_KEYS)
             .track_focus(&self.browser_keys)
+            .group("browser-page")
             .relative()
-            .w(px(inner))
-            .h(px(height))
+            .flex_none()
+            .w(px(pw + 4.0))
+            .h(px(ph + 4.0))
             .rounded(px(radius::BUTTON))
             .overflow_hidden()
             .border_2()
             .border_color(if person { tint } else { p.line })
-            .when(person, |d| d.cursor_pointer())
+            .when(open && !person, |d| d.cursor_pointer())
             .child(page)
             .child(
                 canvas(move |b, _, _| bounds.set(Some(b)), |_, _, _, _| {})
@@ -4310,6 +4463,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .left_0()
                     .size_full(),
             )
+            .children(hint)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
@@ -4317,12 +4471,11 @@ ACTA_KEY=secret:ACTA_KEY",
                     let Some((x, y)) = this.page_point(e.position) else {
                         return;
                     };
-                    if let Some(f) = this
-                        .model
-                        .browser_input(serde_json::json!({"kind": "click", "x": x, "y": y}))
-                    {
+                    let click = serde_json::json!({"kind": "click", "x": x, "y": y});
+                    for f in this.model.browser_input(click) {
                         this.send(f);
                     }
+                    cx.notify();
                 }),
             )
             .on_scroll(cx.listener(|this, e: &ScrollEvent, _, cx| {
@@ -4356,7 +4509,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let _ = this.update(cx, |loom, _| {
                         let ((x, y), dy, _) = std::mem::take(&mut loom.wheel);
                         let wheel = serde_json::json!({"kind": "wheel", "x": x, "y": y, "dy": dy});
-                        if let Some(f) = loom.model.browser_input(wheel) {
+                        for f in loom.model.browser_input(wheel) {
                             loom.send(f);
                         }
                     });
@@ -4364,11 +4517,16 @@ ACTA_KEY=secret:ACTA_KEY",
                 .detach();
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                // Full screen, Esc puts the browser back beside the chat, as Esc
+                // steps back everywhere, rather than going to the page.
+                if this.browser_big && e.keystroke.key == "escape" {
+                    return;
+                }
                 if this
                     .model
                     .browser(this.model.watching.as_deref().unwrap_or_default())
                     .person
-                    && this.page_key(e)
+                    && this.page_key(e, cx)
                 {
                     cx.stop_propagation();
                 }
@@ -4379,18 +4537,24 @@ ACTA_KEY=secret:ACTA_KEY",
                 n => format!("Recording, {n} steps. Do the task, then turn Record off."),
             }
         } else if person {
-            "You have it. Click and type on the page, or record a task to teach it.".to_string()
-        } else if !state.asked.is_empty() {
+            format!(
+                "You have control. {} waits until you hand it back.",
+                agent.name
+            )
+        } else if asked {
             state.asked.clone()
-        } else {
+        } else if open {
             format!("{} is browsing.", agent.name)
+        } else {
+            String::new()
         };
         let hand = if person {
             self.button("browser-give", "Hand back", true)
         } else {
-            self.button("browser-take", "Take over", !state.asked.is_empty())
+            self.button("browser-take", "Take over", asked)
         }
-        .when(!state.open, |d| d.opacity(0.4))
+        .flex_none()
+        .when(!open, |d| d.opacity(0.4))
         .on_click(cx.listener(move |this, _, window, cx| {
             if let Some(f) = this.model.take_browser(!person) {
                 this.send(f);
@@ -4426,45 +4590,58 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 )
         });
-        div()
-            .w(px(width))
-            .h_full()
-            .flex_none()
+        let corner = |id: &'static str, icon: Ico, tooltip: &'static str| {
+            div()
+                .id(id)
+                .tooltip(tip(tooltip))
+                .p(px(space::XS))
+                .rounded(px(radius::ROW))
+                .cursor_pointer()
+                .text_color(p.ink_3)
+                .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                .child(Icon::new(icon).small())
+        };
+        let header = div()
+            .h(px(BROWSER_HEAD))
             .flex()
-            .flex_col()
-            .gap(px(space::M))
-            .p(px(space::L))
-            .relative()
-            .border_l_1()
-            .border_color(p.line)
-            .child(self.side_edge(width, cx))
+            .items_center()
+            .justify_between()
+            .gap(px(space::S))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .child(Icon::new(Ico::Globe).small().text_color(tint))
+                    .child(div().truncate().child(format!("{}'s browser", agent.name))),
+            )
             .child(
                 div()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .justify_between()
+                    .gap(px(space::XS))
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink_2)
-                            .child(Icon::new(Ico::Globe).small().text_color(tint))
-                            .child(format!("{}'s browser", agent.name)),
+                        if big {
+                            corner("browser-big", Ico::Minimize, "Back beside the chat")
+                        } else {
+                            corner("browser-big", Ico::Maximize, "Full screen")
+                        }
+                        // The click took the keys off the page: they go back to it.
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.browser_big = !this.browser_big;
+                            window.focus(&this.browser_keys, cx);
+                            cx.notify();
+                        })),
                     )
                     .child(
-                        div()
-                            .id("browser-close")
-                            .tooltip(tip("Close"))
-                            .p(px(space::XS))
-                            .rounded(px(radius::ROW))
-                            .cursor_pointer()
-                            .text_color(p.ink_3)
-                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
-                            .child(Icon::new(Ico::X).small())
+                        corner("browser-close", Ico::X, "Close")
                             // Back to the small window while it browses.
                             .on_click(cx.listener(|this, _, _, cx| {
+                                this.browser_big = false;
                                 if this
                                     .model
                                     .browser(&this.model.watching.clone().unwrap_or_default())
@@ -4477,28 +4654,45 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }
                             })),
                     ),
-            )
-            .child(screen)
+            );
+        // What's going on, wrapping in the room beside the controls, which go under it
+        // when there's too little.
+        let footer = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(space::M))
             .child(
                 div()
+                    .flex_grow(1.0)
+                    .flex_basis(px(200.0))
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap(px(space::M))
+                    .gap(px(space::S))
+                    .when(person, |d| {
+                        d.child(div().flex_none().size(px(8.0)).rounded_full().bg(tint))
+                    })
                     .child(
                         div()
                             .flex_1()
+                            .min_w_0()
                             .text_size(px(size::SMALL))
-                            .text_color(if person || !state.asked.is_empty() {
-                                p.ink
-                            } else {
-                                p.ink_3
-                            })
+                            .text_color(if person || asked { p.ink } else { p.ink_3 })
                             .child(words),
-                    )
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .ml_auto()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
                     .children(record)
                     .child(hand),
-            )
+            );
+        (header, screen, footer)
     }
 
     /// Sends what the person typed for the agent's browser_ask_secret, or says
@@ -4791,7 +4985,7 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The agent asking for the person in its browser, above the composer while
-    /// its browser isn't showing.
+    /// its browser isn't showing. Take over opens it beside the chat, theirs.
     fn browser_ask(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
         let state = self.model.browser(&agent.id);
         if state.asked.is_empty()
@@ -4806,8 +5000,15 @@ ACTA_KEY=secret:ACTA_KEY",
             .lead(card_icon(p, Ico::Globe, tint))
             .title(state.asked.clone())
             .side(
-                card_button(p, "browser-open", "Open browser", true)
-                    .on_click(cx.listener(move |this, _, _, cx| this.watch(Some(id.clone()), cx))),
+                card_button(p, "browser-open", "Take over", true).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.watch(Some(id.clone()), cx);
+                        if let Some(f) = this.model.take_browser(true) {
+                            this.send(f);
+                        }
+                        window.focus(&this.browser_keys, cx);
+                    },
+                )),
             );
         Some(self.above_composer(card.draw(p, 1.0)))
     }
@@ -7204,6 +7405,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.bar_width(w),
                 self.side_w,
             ),
+            // The agent's browser beside the chat, unless it's full screen.
+            None if self.browser_docked && self.model.watching.is_some() && !self.browser_big => {
+                side_width(true, w, self.bar_width(w), self.side_w)
+            }
             None => 0.0,
         };
         (w - self.bar_width(w) - side)
@@ -7244,6 +7449,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .filter(|a| !self.browser_docked && self.model.browser(&a.id).open)
             .map(|a| self.browser_mini(&a, window, cx));
         let panel = match (docked, self.side) {
+            // Full screen, it's drawn over the window instead (`browser_full`).
+            (Some(_), _) if self.browser_big => None,
             (Some(a), _) => Some(self.browser_panel(&a, window, cx)),
             (None, Some(side)) => Some(self.side_panel(side, window, cx)),
             (None, None) => None,
@@ -16872,6 +17079,7 @@ impl Render for Loom {
         let menu_scrim = self.menu_scrim(cx);
         let ctx_menu = self.ctx_menu(cx);
         let popup = self.popup_view(window, cx);
+        let browser_full = self.browser_full(window, cx);
         let viewer = self.viewer(window, cx);
         let toast = self.toast(window, cx);
         let out = root
@@ -16901,6 +17109,7 @@ impl Render for Loom {
                 |d, pop| d.child(pop),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(browser_full, |d, b| d.child(b))
             .when_some(viewer, |d, v| d.child(v))
             .when_some(toast, |d, t| d.child(t))
             .when_some(menu_scrim, |d, s| d.child(s))
@@ -17541,6 +17750,155 @@ const BAR_OPEN: &str = "Open sidebar  Ctrl+B";
 const MINI_W: f32 = 280.0;
 
 /// The height of the page in the small browser window, for a page `fw` by `fh`.
+/// How tall the row over the agent's browser is: its name and its controls.
+const BROWSER_HEAD: f32 = 26.0;
+
+/// The agent's browser's page, `fw` × `fh` pixels, drawn at its own shape as big as fits
+/// `most_w` wide and, when it's given, `most_h` tall.
+fn page_fit(fw: f32, fh: f32, most_w: f32, most_h: Option<f32>) -> (f32, f32) {
+    let (fw, fh) = (fw.max(1.0), fh.max(1.0));
+    let k = (most_w.max(1.0) / fw).min(most_h.map_or(f32::MAX, |h| h.max(1.0) / fh));
+    ((fw * k).floor().max(1.0), (fh * k).floor().max(1.0))
+}
+
+/// What a key pressed on the page the person took over does.
+#[derive(Debug, PartialEq)]
+enum PageKey {
+    /// Goes to the page, as `browser.input`'s args.
+    Send(Value),
+    /// The page's, though `browser.input` has no way to give it: Shift+Tab, which
+    /// would otherwise take the app's focus off the page.
+    Keep,
+    /// The window's own, such as Ctrl+B.
+    Pass,
+}
+
+/// A keystroke on the page, as `browser.input` takes it: a named key, or the text it
+/// types. A character typed with modifiers is text too, as AltGr+2 types `@` on a
+/// Norwegian keyboard, which Windows gives as Ctrl+Alt, and Option+2 on a Mac.
+fn page_input(k: &Keystroke, prefer_character_input: bool) -> PageKey {
+    let m = &k.modifiers;
+    let named = match k.key.as_str() {
+        "enter" => Some("Enter"),
+        "tab" => Some("Tab"),
+        "escape" => Some("Escape"),
+        "backspace" => Some("Backspace"),
+        "delete" => Some("Delete"),
+        "up" => Some("ArrowUp"),
+        "down" => Some("ArrowDown"),
+        "left" => Some("ArrowLeft"),
+        "right" => Some("ArrowRight"),
+        "home" => Some("Home"),
+        "end" => Some("End"),
+        "pageup" => Some("PageUp"),
+        "pagedown" => Some("PageDown"),
+        _ => None,
+    };
+    if let Some(key) = named {
+        if k.key == "tab" && m.shift {
+            return PageKey::Keep;
+        }
+        return PageKey::Send(serde_json::json!({"kind": "key", "key": key}));
+    }
+    let modified = m.control || m.platform || (m.alt && !cfg!(target_os = "macos"));
+    match k.key_char.as_deref().filter(|t| !t.is_empty()) {
+        Some(text) if prefer_character_input || !modified => {
+            PageKey::Send(serde_json::json!({"kind": "text", "text": text}))
+        }
+        _ => PageKey::Pass,
+    }
+}
+
+/// The page's own keys: Tab and Shift+Tab move the window's focus everywhere else
+/// (GPUI Kit's root binds them), and here they're the page's, so they reach its key
+/// handler. Bound for its key context, `BrowserPage`.
+pub fn bind_page_keys(cx: &mut App) {
+    cx.bind_keys(page_key_bindings());
+}
+
+fn page_key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("tab", NoAction, Some(PAGE_KEYS)),
+        KeyBinding::new("shift-tab", NoAction, Some(PAGE_KEYS)),
+    ]
+}
+
+/// The key context of the page the person can type into.
+const PAGE_KEYS: &str = "BrowserPage";
+
+// LOO-279: Tab on the page moved the window's focus to the composer, so what was
+// typed after it went into the chat, and AltGr's characters never reached the page.
+#[cfg(test)]
+mod page_key_tests {
+    use super::{page_fit, page_input, page_key_bindings, PageKey, PAGE_KEYS};
+    use gpui_kit::{actions, KeyBinding, KeyContext, Keymap, Keystroke};
+    use serde_json::json;
+
+    actions!(page_key_tests, [MoveFocus]);
+
+    fn key(s: &'static str, prefer_character_input: bool) -> PageKey {
+        page_input(&Keystroke::parse(s).unwrap(), prefer_character_input)
+    }
+
+    fn named(key: &str) -> PageKey {
+        PageKey::Send(json!({"kind": "key", "key": key}))
+    }
+
+    fn text(text: &str) -> PageKey {
+        PageKey::Send(json!({"kind": "text", "text": text}))
+    }
+
+    #[test]
+    fn keys_on_the_page_go_to_it() {
+        assert_eq!(key("tab", false), named("Tab"));
+        assert_eq!(key("enter", false), named("Enter"));
+        assert_eq!(key("backspace", false), named("Backspace"));
+        assert_eq!(key("escape", false), named("Escape"));
+        assert_eq!(key("a->a", false), text("a"));
+        assert_eq!(key("shift-a->A", false), text("A"));
+        // AltGr+2 on a Norwegian keyboard, which Windows gives as Ctrl+Alt.
+        assert_eq!(key("ctrl-alt-2->@", true), text("@"));
+        // The window's own keys stay the window's.
+        assert_eq!(key("ctrl-b->b", false), PageKey::Pass);
+        // Shift+Tab has no way to the page, but doesn't move the focus off it.
+        assert_eq!(key("shift-tab", false), PageKey::Keep);
+    }
+
+    #[test]
+    fn tab_on_the_page_is_the_pages() {
+        // As GPUI Kit's root binds them, to move the focus.
+        let mut bindings = vec![
+            KeyBinding::new("tab", MoveFocus, Some("Root")),
+            KeyBinding::new("shift-tab", MoveFocus, Some("Root")),
+        ];
+        bindings.extend(page_key_bindings());
+        let keymap = Keymap::new(bindings);
+        let root = KeyContext::parse("Root").unwrap();
+        let page = KeyContext::parse(PAGE_KEYS).unwrap();
+        for k in ["tab", "shift-tab"] {
+            let input = [Keystroke::parse(k).unwrap()];
+            let (elsewhere, _) = keymap.bindings_for_input(&input, std::slice::from_ref(&root));
+            assert_eq!(elsewhere.len(), 1, "{k} moves the focus elsewhere");
+            let (on_page, _) = keymap.bindings_for_input(&input, &[root.clone(), page.clone()]);
+            assert!(
+                on_page.is_empty(),
+                "{k} on the page reaches its key handler"
+            );
+        }
+    }
+
+    #[test]
+    fn the_page_is_drawn_at_its_own_shape() {
+        assert_eq!(page_fit(1264.0, 705.0, 632.0, None), (632.0, 352.0));
+        // Full screen, what's tall enough decides.
+        assert_eq!(
+            page_fit(1264.0, 705.0, 2000.0, Some(600.0)),
+            (1075.0, 600.0)
+        );
+        assert_eq!(page_fit(1264.0, 705.0, 900.0, Some(900.0)), (900.0, 501.0));
+    }
+}
+
 fn mini_page_height(fw: f32, fh: f32) -> f32 {
     (MINI_W * fh / fw).clamp(90.0, 200.0)
 }

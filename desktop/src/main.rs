@@ -132,6 +132,7 @@ fn main() {
     application.on_reopen(|_| single::reopened());
     application.run(|cx| {
         gpui_kit::init(cx);
+        app::bind_page_keys(cx);
         // A loom started while this one stops runs as soon as this one has let go.
         cx.on_app_quit(|_| {
             single::let_go();

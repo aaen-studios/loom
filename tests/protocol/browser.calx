@@ -246,6 +246,27 @@ fn run(i: Instance) ! Error {
     let handed = try reply_in(mut app, conversation.copy())
     try see(handed.starts_with("browser_ask_person: Your person handed the browser back after 3 clicks and keys") and handed.contains("boots ("), "browser.give answers the agent, with what they did and the page", handed.copy())
 
+    // A click on the page takes it over and lands in the same go, as the desktop app
+    // sends them: browser.take and browser.input one after the other, without waiting
+    // for the first's answer, handled in that order (LOO-279).
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_8b")).s("conversation", conversation.copy()).s("text", String(#"/mcp browser_ask_person {"why":"Sign in for me."}"#)).done())
+    loop {
+        let state = try app.until("browser.state", "")
+        if str_at(state, "asked") == some(String("Sign in for me.")) { break }
+    }
+    try app.send(Obj.new().s("t", String("cmd")).s("id", String("q_t1")).s("name", String("browser.take")).j("args", Obj.new().s("agent", agent.copy()).done()).done())
+    try app.send(Obj.new().s("t", String("cmd")).s("id", String("q_t2")).s("name", String("browser.input")).j("args", Obj.new().s("agent", agent.copy()).s("kind", String("click")).i("x", 20).i("y", 20).done()).done())
+    try app.send(Obj.new().s("t", String("cmd")).s("id", String("q_t3")).s("name", String("browser.input")).j("args", Obj.new().s("agent", agent.copy()).s("kind", String("key")).s("key", String("Tab")).done()).done())
+    var answered = List<String>()
+    for _ in 0..3 {
+        let r = try app.until("result", "")
+        answered.push("{str_at(r.copy(), "id") ?? String()} {bool_at(r, "ok") ?? false}")
+    }
+    try see(answered == [String("q_t1 true"), String("q_t2 true"), String("q_t3 true")], "a click sent right after browser.take, without waiting, is theirs", "{answered}")
+    _ = try app.cmd("q_t4", "browser.give", Obj.new().s("agent", agent.copy()).done())
+    let given = try reply_in(mut app, conversation.copy())
+    try see(given.starts_with("browser_ask_person: Your person handed the browser back after 2 clicks and keys"), "and the agent hears of both", given.copy())
+
     // While frames come all the time, the first after the size it's shown at changes is
     // already at that size: none from before it was asked comes after browser.watch answers.
     let moving = try say(mut app, conversation.copy(), "m_9", "/mcp browser_open \{\"url\":\"{file_url("{pages}/moving.html")}\"\}")
