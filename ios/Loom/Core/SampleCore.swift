@@ -451,6 +451,6 @@ enum Sample {
         // A risky one, which Allow is held for.
         ["call": "tc_33", "run": "run_30", "tool": "execute", "title": "rm -rf build", "detail": ["command": "rm -rf build"], "can_always": false, "risky": true,
          "shown": ["what": "", "lines": [], "more": 0, "code": "rm -rf build", "raw": "",
-                   "title": "Delete the build folder", "place": "", "badges": [], "effect": ["kind": "runs", "words": "Runs a command"], "steps": [], "steps_more": 0, "reason": ""]],
+                   "title": "Delete the build folder", "place": "", "badges": [], "effect": ["kind": "deletes", "words": "Risky"], "steps": [], "steps_more": 0, "reason": ""]],
     ]
 }
