@@ -1,3 +1,4 @@
+import AuthenticationServices
 import PhotosUI
 import QuickLook
 import SwiftUI
@@ -7,6 +8,7 @@ import UniformTypeIdentifiers
 /// on, and the composer.
 struct ChatView: View {
     @Environment(Session.self) private var session
+    @Environment(\.webAuthenticationSession) private var webAuthenticationSession
     let agentId: String
     /// Drawn once, hidden, before any chat is opened, so the first one opened doesn't
     /// pay for building the screen the first time (AgentsView's `Warmup`). It selects
@@ -126,6 +128,17 @@ struct ChatView: View {
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
         .fullScreenCover(item: warming ? .constant(nil) : Bindable(model).viewing) { v in
             PictureViewer(stack: v.stack)
+        }
+        // An MCP server's sign-in, in a sheet that catches the browser coming back to
+        // loom:, which the instance finishes.
+        .onChange(of: model.toSignIn) { _, url in
+            guard let url, !warming else { return }
+            model.toSignIn = nil
+            Task {
+                guard let back = try? await webAuthenticationSession.authenticate(using: url, callbackURLScheme: "loom") else { return }
+                let query = URLComponents(url: back, resolvingAgainstBaseURL: false)?.percentEncodedQuery ?? ""
+                session.send(model.signedIn(query: query))
+            }
         }
         .sheet(item: $reading) { r in
             NavigationStack {

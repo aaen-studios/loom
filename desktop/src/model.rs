@@ -1406,6 +1406,39 @@ pub enum CardBody {
         signing: bool,
         passed: bool,
     },
+    /// An MCP server an agent proposed with add_mcp_server (loom's own card): what
+    /// would be added, how it stands (protocol.md), a line in plain words, and whether
+    /// the person has signed in to it since, for one left waiting at Later, and whether
+    /// its sign-in page is open now.
+    McpAdd {
+        call: String,
+        server: String,
+        url: String,
+        command: String,
+        args: Vec<String>,
+        settings: Vec<McpSetting>,
+        state: String,
+        said: String,
+        signed: bool,
+        signing: bool,
+    },
+}
+
+/// A header or environment variable a proposed MCP server is given: its text, or the
+/// name of one of the person's secrets, and whether they have that secret yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct McpSetting {
+    pub name: String,
+    pub value: String,
+    pub secret: String,
+    pub have: bool,
+}
+
+impl McpSetting {
+    /// A secret the person types on the card before Add.
+    pub fn wanted(&self) -> bool {
+        !self.secret.is_empty() && !self.have
+    }
 }
 
 impl Card {
@@ -1436,6 +1469,31 @@ impl Card {
                 signed: None,
                 signing: false,
                 passed: false,
+            },
+            "mcp_add" => CardBody::McpAdd {
+                call: s(v, "call"),
+                server: s(v, "server"),
+                url: s(v, "url"),
+                command: s(v, "command"),
+                args: strings(v.get("args")),
+                settings: v
+                    .get("settings")
+                    .and_then(Value::as_array)
+                    .map(|xs| {
+                        xs.iter()
+                            .map(|x| McpSetting {
+                                name: s(x, "name"),
+                                value: s(x, "value"),
+                                secret: s(x, "secret"),
+                                have: x.get("have") == Some(&Value::Bool(true)),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                state: s(v, "state"),
+                said: s(v, "said"),
+                signed: false,
+                signing: false,
             },
             "facts" => CardBody::Facts(
                 items?
@@ -3853,8 +3911,9 @@ impl Model {
         let Some(card) = f.get("card").and_then(Card::of) else {
             return;
         };
-        // Whether the person signed in since, for a sign-in card.
-        if matches!(card.body, CardBody::SignIn { .. }) {
+        // Whether the person signed in since, for a sign-in card, and the servers and
+        // secrets as they are once one an agent proposed is added.
+        if matches!(card.body, CardBody::SignIn { .. } | CardBody::McpAdd { .. }) {
             self.mcp_stale = true;
         }
         let message = s(f, "message");
@@ -5154,6 +5213,17 @@ impl Model {
                             .as_deref()
                             .and_then(|t| options.iter().position(|o| o.trim() == t));
                     }
+                    // A proposed server's card left waiting for a sign-in says Signed in
+                    // once the person has, too.
+                    Some(CardBody::McpAdd {
+                        server,
+                        signed,
+                        signing,
+                        ..
+                    }) => {
+                        *signed = self.mcp_signed_as(server).is_some();
+                        *signing = self.mcp_signing.contains(server.as_str());
+                    }
                     _ => {}
                 }
             }
@@ -5794,6 +5864,23 @@ impl Model {
         self.mcp_tests.remove(name);
         let id = self.id("app.mcp_sign_out");
         json!({"t": "cmd", "id": id, "name": "mcp.sign_out", "args": {"name": name}})
+    }
+
+    /// The person's answer to the MCP server an agent proposed on card `call`: `add`,
+    /// with each secret it needs that they don't have yet, `cancel`, or `later`, for one
+    /// waiting on a sign-in.
+    pub fn answer_mcp_add(
+        &mut self,
+        call: &str,
+        answer: &str,
+        secrets: &[(String, String)],
+    ) -> Value {
+        let id = self.id("app.mcp_add");
+        let secrets: serde_json::Map<String, Value> = secrets
+            .iter()
+            .map(|(name, value)| (name.clone(), json!(value)))
+            .collect();
+        json!({"t": "cmd", "id": id, "name": "mcp.add_answer", "args": {"call": call, "answer": answer, "secrets": secrets}})
     }
 
     /// Whom the person is signed in to their MCP server `name` as, once they are: empty
@@ -6782,6 +6869,54 @@ mod tests {
         m.take(&json!({"t": "core.data", "what": "approvals", "items": [
             {"call": "tc_2", "run": "run_1", "tool": "execute", "title": "Run ls", "detail": {"command": "ls"}}]}));
         assert!(m.answering.is_empty());
+    }
+
+    #[test]
+    fn a_proposed_mcp_server_is_added_on_its_card() {
+        let card = json!({"id": "mcp_add_tc_4", "type": "mcp_add", "title": "Add the MCP server acta", "call": "tc_4", "server": "acta", "command": "npx", "args": ["-y", "@acta/mcp"], "settings": [{"name": "ACTA_KEY", "in": "env", "secret": "ACTA_KEY", "have": false}, {"name": "ACTA_URL", "in": "env", "value": "https://acta.example"}], "state": "asking", "said": ""});
+        let CardBody::McpAdd {
+            call,
+            command,
+            args,
+            settings,
+            state,
+            ..
+        } = Card::of(&card).unwrap().body
+        else {
+            panic!("an mcp_add card");
+        };
+        assert_eq!(
+            (call.as_str(), command.as_str(), state.as_str()),
+            ("tc_4", "npx", "asking")
+        );
+        assert_eq!(args, vec![String::from("-y"), String::from("@acta/mcp")]);
+        assert!(settings[0].wanted() && !settings[1].wanted());
+        assert_eq!(settings[1].value, "https://acta.example");
+
+        let mut m = Model::new();
+        m.take(&json!({"t": "card", "run": "run_1", "message": "msg_1", "block": 0, "card": card}));
+        assert!(m.mcp_stale, "the servers and secrets are loaded again");
+        let f = m.answer_mcp_add(
+            "tc_4",
+            "add",
+            &[(String::from("ACTA_KEY"), String::from("k"))],
+        );
+        assert_eq!(f["name"], "mcp.add_answer");
+        assert_eq!(
+            f["args"],
+            json!({"call": "tc_4", "answer": "add", "secrets": {"ACTA_KEY": "k"}})
+        );
+        assert_eq!(
+            m.answer_mcp_add("tc_4", "cancel", &[])["args"]["secrets"],
+            json!({})
+        );
+        // A refusal, such as a secret not filled in, is said.
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": false, "error": {"code": "bad_request", "message": "Fill in ACTA_KEY first."}}));
+        assert_eq!(
+            m.notices.last().map(String::as_str),
+            Some("Fill in ACTA_KEY first.")
+        );
     }
 
     fn with_panel() -> Model {
