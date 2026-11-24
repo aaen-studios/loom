@@ -262,6 +262,7 @@ enum Sample {
              "blocks": [
                 ["kind": "thought", "text": "The person wants notes for 0.3. I'll list the PRs merged since the v0.2 tag."],
                 ["kind": "tool", "call": "tc_1"],
+                ["kind": "card", "card": ["id": "card_1", "type": "checklist", "title": "Release 0.3", "items": [["text": "List the merged PRs", "done": true], ["text": "Write the notes", "done": true], ["text": "Tag v0.3", "done": false]]]],
                 ["kind": "text", "text": "Here they are, from the **12 PRs** merged since `v0.2`:\n\n## loom 0.3\n\n- Routines run on webhooks, signed as GitHub signs.\n- Agents get your MCP servers, with secrets sealed.\n- Screenshots and the clipboard as device tools.\n\nI kept them short. Want the full list too?"],
              ]],
             ["id": "msg_3", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187100000,
@@ -279,7 +280,10 @@ enum Sample {
              "blocks": [["kind": "text", "text": "Read the new mail in every inbox and tell me what needs me."]]],
             // What the routine's agent posted, which shows as any reply does.
             ["id": "msg_21", "conversation": "c_3", "role": "agent", "agent": "a_3", "routine": "rt_1", "at": 1795170090000,
-             "blocks": [["kind": "text", "text": "Two things need you:\n\n1. The VPS invoice is due Friday.\n2. Ola asked whether Saturday still works."]]],
+             "blocks": [["kind": "text", "text": "Two things need you:\n\n1. The VPS invoice is due Friday.\n2. Ola asked whether Saturday still works."],
+                        ["kind": "card", "card": ["id": "card_1", "type": "facts", "title": "Inbox, today", "items": [["label": "Unread", "value": "14"], ["label": "Need you", "value": "2"], ["label": "Newsletters", "value": "9, all archived"]]]],
+                        ["kind": "card", "card": ["id": "card_2", "type": "choices", "title": "Shall I tell Ola yes?", "options": ["Yes", "Not yet"]]],
+                        ["kind": "card", "card": ["id": "sign_in_vercel", "type": "sign_in", "title": "vercel needs you to sign in", "server": "vercel"]]]],
         ],
         "c_4": [
             ["id": "msg_40", "conversation": "c_4", "role": "person", "from": "a_1", "at": 1795160000000,
@@ -347,7 +351,14 @@ enum Sample {
         ["call": "tc_30", "run": "run_30", "tool": "edit", "title": "Edit notes/2026-11.md"],
     ]
 
+    /// Questions as `core.get` gives them, each with what its card shows (core/asks.calx).
     static let approvals: [JSON] = [
-        ["call": "tc_30", "run": "run_30", "tool": "edit", "title": "Edit notes/2026-11.md", "detail": "+ ## 21 November\n+ Shipped the iPhone app's first build.", "can_always": true],
+        ["call": "tc_30", "run": "run_30", "tool": "edit", "title": "Edit notes/2026-11.md", "detail": "+ ## 21 November\n+ Shipped the iPhone app's first build.", "can_always": true,
+         "shown": ["what": "", "lines": [], "more": 0, "code": "+ ## 21 November\n+ Shipped the iPhone app's first build.", "raw": ""]],
+        ["call": "tc_31", "run": "run_30", "tool": "other", "title": "Use GMAIL_SEND_EMAIL on the MCP server composio", "can_always": true,
+         "detail": ["server": "composio", "tool": "GMAIL_SEND_EMAIL", "arguments": ["recipient_email": "ola@example.com", "subject": "Saturday", "body": "Saturday still works. I'll bring the cake.", "is_html": false]],
+         "shown": ["what": "mcp", "more": 0, "code": "",
+                   "lines": [["label": "Recipient email", "value": "ola@example.com"], ["label": "Subject", "value": "Saturday"], ["label": "Body", "value": "Saturday still works. I'll bring the cake."], ["label": "Is HTML", "value": "No"]],
+                   "raw": ""]],
     ]
 }

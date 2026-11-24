@@ -1,0 +1,444 @@
+module core.asks
+
+// What an approval asks, as a few lines a person reads (PLAN.md, "Cards in the
+// chat"): the apps draw an approval's call from this rather than from its JSON,
+// so the desktop and the phone show the same. `shown` takes an approval.needed
+// event and gives
+//
+//     {"what": "mcp", "lines": [{"label": "Query", "value": "is:unread"}], "more": 0, "code": "", "raw": ""}
+//
+// - `what`: what kind of call it is, for the card's icon: `script` (Code Mode's,
+//   before it runs), `mcp` or `plugin` (a tool of one), `device` (one of the
+//   person's devices), `install` (loom put on one of their hosts), or empty.
+// - `lines`: what the call is given, at most six, each named in words and cut to
+//   one short line: a long text ends with "…", a list is its items or how many,
+//   and an object its members. What the title says already isn't said again.
+// - `more`: how many more there were than lines.
+// - `code`: the command or the script it runs, at most six lines.
+// - `raw`: all of it, for the card's Details: the whole script, or what the call
+//   is given as JSON, or empty when the lines and the code show it all.
+import std.json.{Json, parse, pretty}
+import shared.obj.{Obj, at, str_at}
+
+const LINES_MOST: usize = 6
+const VALUE_MOST: usize = 120
+const CODE_LINES_MOST: usize = 6
+const CODE_LINE_MOST: usize = 240
+const RAW_LINES_MOST: usize = 400
+
+// Names in a list's objects that say which one each is, best first.
+const NAMES: str = "name title tool_slug slug tool label path file url id key"
+// Words a label keeps in capitals.
+const CAPITALS: str = "id url uri api ip html json sql ssh dns"
+
+// `text`, cut at `most` runes with "…", and whether it's all there.
+fn cut(text: String, most: usize) -> (String, bool) {
+    var out = String()
+    var n: usize = 0
+    for r in text.runes() {
+        if n == most {
+            out.push_str("…")
+            return (out, false)
+        }
+        out.push(r)
+        n += 1
+    }
+    return (out, true)
+}
+
+// `text`'s first line with anything in it, trimmed and cut at `most` runes, and
+// whether that's all of `text`.
+fn first_line(text: String, most: usize) -> (String, bool) {
+    var first = String()
+    var others = false
+    for line in text.lines() {
+        if line.trim().is_empty() { continue }
+        if first.len() > 0 {
+            others = true
+            break
+        }
+        first = line.trim().copy()
+    }
+    let (short, whole) = cut(first, most)
+    if others and whole { return ("{short} …", false) }
+    return (short, whole and not others)
+}
+
+// A member's name in words: `file_path`, `filePath` and `file-path` are "File
+// path", and an id or a URL stays in capitals.
+pub fn label(key: String) -> String {
+    var parts = List<String>()
+    var word = String()
+    var after_small = false
+    for r in key.runes() {
+        if r == '_' or r == '-' or r == ' ' or r == '.' {
+            if word.len() > 0 {
+                parts.push(word.copy())
+                word.clear()
+            }
+            after_small = false
+            continue
+        }
+        let big = r >= 'A' and r <= 'Z'
+        if big and after_small and word.len() > 0 {
+            parts.push(word.copy())
+            word.clear()
+        }
+        word.push(r)
+        after_small = (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9')
+    }
+    if word.len() > 0 { parts.push(word.copy()) }
+    var out = String()
+    for w in parts {
+        let small = w.to_lower_root()
+        var kept = false
+        for c in CAPITALS.split(" ") {
+            if small == c { kept = true }
+        }
+        let spelled = if kept { small.to_upper_root() } else if w.len() > 1 and w == w.to_upper_root() { w.copy() } else { small.copy() }
+        if out.len() == 0 {
+            // The first word starts with a capital.
+            var first = true
+            for r in spelled.runes() {
+                if first {
+                    var one = String()
+                    one.push(r)
+                    out.push_str(one.to_upper_root())
+                    first = false
+                } else {
+                    out.push(r)
+                }
+            }
+        } else {
+            out.push_str(" ")
+            out.push_str(spelled)
+        }
+    }
+    return out
+}
+
+// Whether `v` is a string, a number or a bool.
+fn plain(v: Json) -> bool {
+    return match v {
+        Json.Array(_) => false,
+        Json.Object(_) => false,
+        Json.Null => false,
+        _ => true,
+    }
+}
+
+// A plain value in words: a string as it is, a bool as Yes or No, a number as
+// JSON writes it.
+fn words(v: Json) -> String {
+    if let s = v.as_str() { return s }
+    if let b = v.as_bool() { return String(if b { "Yes" } else { "No" }) }
+    return "{v}"
+}
+
+// What says which one an object in a list is, by NAMES.
+fn name_of(v: Json) -> String? {
+    for k in NAMES.split(" ") {
+        if let s = (v.get(k.copy()) ?? Json.Null).as_str() {
+            if not s.trim().is_empty() { return some(s.trim().copy()) }
+        }
+    }
+    return none
+}
+
+// `n` things, in words.
+fn count(n: usize, one: str, many: str) -> String {
+    if n == 1 { return "1 {one}" }
+    return "{n} {many}"
+}
+
+// A value as one short line, and whether the line is all of it. None for one
+// with nothing in it: null, "", [] or {}.
+fn line_of(v: Json) -> (String, bool)? {
+    if v == Json.Null { return none }
+    if let s = v.as_str() {
+        if s.trim().is_empty() { return none }
+        return some(first_line(s, VALUE_MOST))
+    }
+    if let Json.Array(xs) = v.copy() {
+        if xs.len() == 0 { return none }
+        // Plain values as themselves, objects by their names, or else how many.
+        var parts = List<String>()
+        var named = true
+        var all_plain = true
+        for x in xs {
+            if plain(x.copy()) {
+                parts.push(words(x.copy()))
+            } else {
+                all_plain = false
+                if let n = name_of(x.copy()) { parts.push(n) } else { named = false }
+            }
+        }
+        if not named { return some((count(xs.len(), "item", "items"), false)) }
+        let (short, whole) = first_line(parts.join(", "), VALUE_MOST)
+        return some((short, whole and all_plain))
+    }
+    if let Json.Object(m) = v.copy() {
+        if m.len() == 0 { return none }
+        // Its members, `name: value`, the plain ones as themselves.
+        var parts = List<String>()
+        for (k, x) in m {
+            let name = label(k.copy()).to_lower_root()
+            if plain(x.copy()) {
+                parts.push("{name}: {words(x.copy())}")
+            } else if let Json.Array(ys) = x.copy() {
+                parts.push("{name}: {count(ys.len(), "item", "items")}")
+            } else if x.len() > 0 {
+                parts.push("{name}: …")
+            }
+        }
+        if parts.len() == 0 { return none }
+        let (short, _) = first_line(parts.join(", "), VALUE_MOST)
+        return some((short, false))
+    }
+    return some((words(v), true))
+}
+
+// A command as one line of text: a string as it is, or a list of words joined.
+fn command_of(v: Json) -> String {
+    if let s = v.as_str() { return s }
+    if let Json.Array(parts) = v {
+        var out = List<String>()
+        for p in parts {
+            if let s = p.as_str() { out.push(s) }
+        }
+        return out.join(" ")
+    }
+    return String()
+}
+
+// `text`'s lines, at most CODE_LINES_MOST of them, each cut, and whether that's all.
+fn code_of(text: String) -> (String, bool) {
+    var out = List<String>()
+    var whole = true
+    for line in text.trim_end().lines() {
+        if out.len() == CODE_LINES_MOST {
+            whole = false
+            break
+        }
+        let (short, all) = cut(line.copy(), CODE_LINE_MOST)
+        if not all { whole = false }
+        out.push(short)
+    }
+    // Lines with nothing in them at the start say nothing.
+    while out.len() > 0 and out[0].trim().is_empty() {
+        _ = out.remove(0)
+    }
+    if not whole { out.push(String("…")) }
+    return (out.join("\n"), whole)
+}
+
+// `text`, at most RAW_LINES_MOST lines.
+fn raw_of(text: String) -> String {
+    var out = List<String>()
+    for line in text.lines() {
+        if out.len() == RAW_LINES_MOST {
+            out.push(String("…"))
+            break
+        }
+        out.push(line.copy())
+    }
+    return out.join("\n")
+}
+
+// What an approval.needed event `e` asks, as the lines, code and raw text above.
+pub fn shown(e: Json) -> Json {
+    let title = str_at(e.copy(), "title") ?? String()
+    let detail = at(e, "detail")
+    var code = String()
+    var what = String()
+    // What the call is given, member by member, and what Details shows of it.
+    var given = LinkedMap<String, Json>()
+    var all = Json.Null
+    if let s = detail.as_str() {
+        code = s
+    } else if let Json.Object(d) = detail.copy() {
+        let arguments = at(detail.copy(), "arguments")
+        let script = str_at(arguments.copy(), "code")
+        if let c = script {
+            // A script before it runs, in Code Mode: the script is all there is.
+            code = c
+            what = String("script")
+        } else if d.contains("server") and d.contains("tool") and d.contains("arguments") {
+            // A call to an MCP server's or a plugin's tool: what it's given. The
+            // title names the tool and where it is.
+            what = String(if (str_at(detail.copy(), "server") ?? String()).starts_with("plugin-") { "plugin" } else { "mcp" })
+            if let Json.Object(a) = arguments.copy() { given = a.copy() }
+            all = arguments
+        } else if d.contains("device") and d.contains("args") {
+            // A call to one of the person's devices: what it's given.
+            what = String("device")
+            if let Json.Object(a) = at(detail.copy(), "args") { given = a.copy() }
+            all = at(detail.copy(), "args")
+        } else if d.contains("plan") and d.contains("commands") {
+            // Loom put on one of the person's hosts: the plan, and the commands
+            // it runs there, word for word.
+            what = String("install")
+            for (k, v) in d {
+                if k == "plan" {
+                    if let Json.Object(p) = v.copy() {
+                        for (pk, pv) in p {
+                            given.insert(pk.copy(), pv.copy())
+                        }
+                    }
+                } else if k == "commands" {
+                    if let Json.Array(cs) = v.copy() {
+                        var lines = List<String>()
+                        for c in cs {
+                            if let s = c.as_str() { lines.push(s) }
+                        }
+                        code = lines.join("\n")
+                    }
+                } else {
+                    given.insert(k.copy(), v.copy())
+                }
+            }
+            all = detail.copy()
+        } else {
+            given = d.copy()
+            all = detail.copy()
+        }
+    }
+    // A command is shown as one, apart from the rest.
+    if code.len() == 0 {
+        if let c = given.find(String("command")) {
+            code = command_of(c.copy())
+        }
+        if code.len() > 0 { _ = given.remove(String("command")) }
+    }
+    _ = given.remove(String("act"))
+    var whole = true
+    // A command the title already says whole isn't said again.
+    if code.trim().len() >= 3 and not code.contains("\n") and title.contains(code.trim()) { code = String() }
+    let (shown_code, code_whole) = code_of(code.copy())
+    if not code_whole { whole = false }
+    var lines = List<Json>()
+    var more: i64 = 0
+    for (k, v) in given {
+        let (value, all_of_it) = line_of(v.copy()) else continue
+        // What the title says already.
+        if all_of_it and value.trim().len() >= 3 and title.contains(value.trim()) { continue }
+        if lines.len() == LINES_MOST {
+            more += 1
+            whole = false
+            continue
+        }
+        if not all_of_it { whole = false }
+        lines.push(Obj.new().s("label", label(k.copy())).s("value", value).done())
+    }
+    var raw = String()
+    if not whole {
+        raw = if not code_whole and lines.len() == 0 and more == 0 { raw_of(code.trim_end().copy()) } else if all != Json.Null { raw_of(pretty(all, 2)) } else { raw_of(code.trim_end().copy()) }
+    }
+    return Obj.new().s("what", what).j("lines", Json.Array(lines)).i("more", more).s("code", shown_code).s("raw", raw).done()
+}
+
+fn ask(text: String) -> Json {
+    return shown(parse(text)!)
+}
+
+fn lines_of(s: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(ls) = at(s, "lines") {
+        for l in ls {
+            out.push("{str_at(l.copy(), "label") ?? String()}={str_at(l.copy(), "value") ?? String()}")
+        }
+    }
+    return out.join("|")
+}
+
+@test
+fn names_members_in_words() {
+    assert(label(String("file_path")) == "File path")
+    assert(label(String("maxResults")) == "Max results")
+    assert(label(String("tool_slug")) == "Tool slug")
+    assert(label(String("session_id")) == "Session ID")
+    assert(label(String("url")) == "URL")
+    assert(label(String("TOOL")) == "TOOL")
+    assert(label(String("sync-response")) == "Sync response")
+}
+
+@test
+fn shows_an_mcp_call_as_lines() {
+    let s = ask(#"{"title": "Use COMPOSIO_MULTI_EXECUTE_TOOL on the MCP server composio", "detail": {"server": "composio", "tool": "COMPOSIO_MULTI_EXECUTE_TOOL", "arguments": {"tools": [{"tool_slug": "GMAIL_FETCH_EMAILS", "arguments": {"query": "is:unread"}}], "sync_response_to_workbench": false, "thought": "Fetch the unread mail", "memory": {}, "session_id": "s_1"}, "act": 3}}"#)
+    assert(lines_of(s.copy()) == "Tools=GMAIL_FETCH_EMAILS|Sync response to workbench=No|Thought=Fetch the unread mail|Session ID=s_1")
+    assert(str_at(s.copy(), "what") == some(String("mcp")))
+    assert(str_at(s.copy(), "code") == some(String()))
+    // A list of objects is only their names: Details has the rest.
+    let raw = str_at(s, "raw") ?? String()
+    assert(raw.contains("\"query\": \"is:unread\"") and not raw.contains("\"act\""))
+}
+
+@test
+fn says_it_all_without_details() {
+    let s = ask(#"{"title": "Use search on the MCP server acta", "detail": {"server": "acta", "tool": "search", "arguments": {"query": "invoices", "limit": 5}, "act": 0}}"#)
+    assert(lines_of(s.copy()) == "Query=invoices|Limit=5")
+    assert(str_at(s, "raw") == some(String()))
+}
+
+@test
+fn cuts_long_values_and_counts_the_rest() {
+    let long = "x".repeat(300)
+    let s = ask("\{\"title\": \"Use send on the MCP server mail\", \"detail\": \{\"server\": \"mail\", \"tool\": \"send\", \"arguments\": \{\"a\": \"{long}\", \"b\": \"one\\ntwo\", \"c\": 1, \"d\": 2, \"e\": 3, \"f\": 4, \"g\": 5, \"h\": 6\}\}\}")
+    if let Json.Array(ls) = at(s.copy(), "lines") {
+        assert(ls.len() == 6)
+        let first = str_at(ls[0].copy(), "value") ?? String()
+        assert(first.ends_with("…") and first.len() < 200)
+        assert(str_at(ls[1].copy(), "value") == some(String("one …")))
+    } else {
+        panic("no lines")
+    }
+    assert(at(s.copy(), "more") == Json.Int(2))
+    assert((str_at(s, "raw") ?? String()).len() > 0)
+}
+
+@test
+fn shows_a_command_as_code() {
+    let s = ask(#"{"title": "Run a command", "detail": {"command": ["gh", "run", "list"], "cwd": "/home/me/shop"}}"#)
+    assert(str_at(s.copy(), "code") == some(String("gh run list")))
+    assert(lines_of(s.copy()) == "Cwd=/home/me/shop")
+    assert(str_at(s, "raw") == some(String()))
+    // One the title says already isn't said twice.
+    let said = ask(#"{"title": "`./deploy.sh production`", "detail": {"command": "./deploy.sh production"}}"#)
+    assert(str_at(said, "code") == some(String()))
+}
+
+@test
+fn shows_a_script_and_folds_the_rest() {
+    var script = String()
+    for n in 0..20 {
+        script.push_str("const x{n} = await mcp.acta.search(\{query: \"{n}\"\})\n")
+    }
+    let e = Obj.new().s("title", String("Run a script")).j("detail", Obj.new().s("server", String("loom")).s("tool", String("run_code")).j("arguments", Obj.new().s("code", script.copy()).done()).i("act", 0).done()).done()
+    let s = shown(e)
+    let code = str_at(s.copy(), "code") ?? String()
+    assert(code.lines().len() == CODE_LINES_MOST + 1 and code.ends_with("…"))
+    assert(lines_of(s.copy()) == "")
+    assert(str_at(s.copy(), "what") == some(String("script")))
+    assert(str_at(s, "raw") == some(script.trim_end().copy()))
+}
+
+@test
+fn leaves_out_what_the_title_says() {
+    let s = ask(#"{"title": "Save a new status token to /srv/dash/token, as Pip asks", "detail": {"kind": "status", "path": "/srv/dash/token", "replace": true}}"#)
+    assert(lines_of(s) == "Replace=Yes")
+}
+
+@test
+fn shows_an_install_as_its_plan_and_commands() {
+    let s = ask(#"{"title": "Install loom on vps, through Tailscale, link it to Desk PC", "detail": {"host": "vps", "through": "Desk PC", "plan": {"domain": "", "import": "openbot", "from_user": "openbot", "username": "elliot"}, "commands": ["curl -fsSL https://loom.rip/install.sh | sh", "loom import openbot"]}}"#)
+    assert(lines_of(s.copy()) == "Import=openbot|From user=openbot|Username=elliot")
+    assert(str_at(s, "code") == some(String("curl -fsSL https://loom.rip/install.sh | sh\nloom import openbot")))
+}
+
+@test
+fn shows_nothing_for_nothing() {
+    let s = ask(#"{"title": "Delete the agent Pip", "detail": null}"#)
+    assert("{s}" == #"{"what":"","lines":[],"more":0,"code":"","raw":""}"#)
+    let text = ask(#"{"title": "Run a command", "detail": "gh run list --branch main"}"#)
+    assert(str_at(text, "code") == some(String("gh run list --branch main")))
+}

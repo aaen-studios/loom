@@ -57,7 +57,7 @@ struct ChatView: View {
                         }
                     }
                     ForEach(approvals) { a in
-                        ApprovalCard(approval: a)
+                        ApprovalCard(approval: a, tint: P.thread(agent?.color ?? ""))
                     }
                     Color.clear.frame(height: 1).id("end")
                 }
@@ -333,6 +333,8 @@ struct Reply: View {
             }
         case "file":
             if let f = b.file { FileView(file: f) }
+        case "card":
+            if let c = b.card { CardView(card: c, tint: P.thread(agent?.color ?? "")) }
         case "notice" where !b.text.isEmpty:
             // One line from loom, not the agent's own words: small and quiet.
             Text(b.text).font(Fonts.caption).foregroundStyle(P.ink3)
@@ -663,71 +665,6 @@ private struct WholePicture: View {
         .task(id: path) {
             guard let path else { return }
             image = await Pictures.load(path, side: Self.side)
-        }
-    }
-}
-
-// MARK: - Approvals
-
-/// A question the agent waits on, with Allow and Deny.
-struct ApprovalCard: View {
-    @Environment(Session.self) private var session
-    var approval: Approval
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Tokens.Space.m) {
-            Text(approval.title.isEmpty ? "Can it go ahead?" : "\(approval.title)?")
-                .font(Fonts.ui(Tokens.PhoneSize.body, .medium))
-                .foregroundStyle(P.ink)
-            let detail = ApprovalCard.command(approval.detail)
-            if !detail.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    Text(detail)
-                        .font(Fonts.code)
-                        .foregroundStyle(P.ink2)
-                        .fixedSize()
-                        .padding(.horizontal, Tokens.Space.m)
-                        .padding(.vertical, Tokens.Space.s + 2)
-                }
-                .frame(maxHeight: 180)
-                .background(P.bg, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.line, lineWidth: 1))
-            }
-            HStack(spacing: Tokens.Space.s) {
-                Button("Allow") { answer(true) }
-                    .buttonStyle(LoomButtonStyle(primary: true, wide: true))
-                Button("Deny") { answer(false) }
-                    .buttonStyle(LoomButtonStyle(primary: false, wide: true))
-            }
-            if approval.canAlways {
-                Button("Always allow this") { answer(true, always: true) }
-                    .font(Fonts.caption)
-                    .foregroundStyle(P.ink3)
-                    .frame(maxWidth: .infinity)
-            }
-        }
-        .padding(Tokens.Space.l)
-        .background(P.raised, in: RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous).strokeBorder(P.line, lineWidth: 1))
-    }
-
-    private func answer(_ allow: Bool, always: Bool = false) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        session.send(session.model.approve(approval.call, allow: allow, always: always))
-    }
-
-    /// What an approval would run, from the tool's input: its command if it has one.
-    static func command(_ detail: String) -> String {
-        guard let data = detail.data(using: .utf8), let v = try? JSON(parsing: data) else { return detail }
-        switch v["command"] {
-        case .string(let c): return c
-        case .array(let parts): return parts.compactMap(\.string).joined(separator: " ")
-        default:
-            switch v {
-            case .null: return ""
-            case .string(let s): return s
-            default: return v.pretty
-            }
         }
     }
 }
