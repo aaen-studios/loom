@@ -6,15 +6,15 @@ The agent reads a page as its outline and clicks, types, scrolls and goes back o
 
 ## Watching it
 
-While an agent browses, its page shows as a small window at the chat's bottom right, live. Click it to open the browser in the panel beside the chat, bigger. Its × puts it back in the small window.
+While an agent browses, its page shows as a small window at the chat's bottom right, live. Click it to open the browser in the panel beside the chat, bigger. Its × puts it back in the small window. The full screen button beside the × opens it over the whole window, and the same button or Esc puts it back.
 
 **Browser**, over the chat, shows or hides it while the browser is open. Loom sends the page's picture only while someone watches.
 
 ## Taking over
 
-Some things only you should do: a login, a 2FA code, a CAPTCHA. The agent can ask you, and then the panel says what it wants and **Take over** stands out. You can also take over whenever you like.
+Some things only you should do: a login, a 2FA code, a CAPTCHA. The agent can ask you, and then a card over the message box says what it wants, with **Take over**. You can also take over whenever you like: press **Take over** under the page, or click into the page.
 
-Once you have it, your clicks, scrolling and typing go to the page, and the agent's browser tools wait. **Hand back** lets the agent carry on, and it's told what you did.
+Once you have it, the page has the agent's colour round it, and your clicks, scrolling and typing go to the page, Tab and Enter too, and Ctrl+V pastes. The agent's browser tools wait. **Hand back** lets the agent carry on, and it's told what you did.
 
 ## Secrets
 

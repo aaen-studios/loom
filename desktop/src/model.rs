@@ -2684,6 +2684,10 @@ pub struct Model {
     /// A frame came since the window was last drawn.
     pub page_moved: bool,
     rewatch: bool,
+    /// The agents whose browser this device has asked about since it connected: a
+    /// browser's state isn't kept, so an app that connects while one waits for the
+    /// person asks, for the agent on screen.
+    browsers_asked: HashSet<String>,
     /// Each conversation's queue, by conversation id.
     pub queues: HashMap<String, Vec<QueueItem>>,
     queue_stale: bool,
@@ -3122,6 +3126,14 @@ impl Model {
                 out.push(self.watch_frame(&agent));
             }
         }
+        // How the agent on screen's browser is, without watching it: open, or asking
+        // for the person, from before this device connected.
+        if let Some(agent) = self.selected.clone().filter(|_| self.synced) {
+            if self.watching.as_ref() != Some(&agent) && self.browsers_asked.insert(agent.clone()) {
+                let id = self.id("browser.watch");
+                out.push(json!({"t": "cmd", "id": id, "name": "browser.watch", "args": {"agent": agent, "on": false}}));
+            }
+        }
         let dirty: Vec<List> = self.dirty.drain().collect();
         for l in dirty {
             if l == List::Messages {
@@ -3519,6 +3531,7 @@ impl Model {
                 self.defaults_stale = true;
                 self.rules_stale = true;
                 self.rewatch = true;
+                self.browsers_asked.clear();
                 self.queue_stale = true;
                 self.tasks_stale = true;
                 self.updates_stale = true;
@@ -4048,15 +4061,52 @@ impl Model {
         Some(json!({"t": "cmd", "id": id, "name": name, "args": {"agent": agent}}))
     }
 
-    /// The person's click, wheel, key or text, on the browser they've taken over.
-    pub fn browser_input(&mut self, mut input: Value) -> Option<Value> {
-        let agent = self.watching.clone()?;
-        if !self.browser(&agent).person {
-            return None;
+    /// A command on the watched browser was refused because it isn't the person's, or
+    /// isn't open: what the app took it to be is put right.
+    fn not_theirs(&mut self, code: &str) {
+        let Some(b) = self
+            .watching
+            .clone()
+            .and_then(|a| self.browsers.get_mut(&a))
+        else {
+            return;
+        };
+        match code {
+            "not_open" => {
+                b.open = false;
+                b.person = false;
+            }
+            "not_yours" => b.person = false,
+            _ => {}
+        }
+    }
+
+    /// The person's click, wheel, key or text, on the watched browser. A click takes
+    /// the browser over first, if they haven't yet, in the same go: the instance
+    /// handles a session's commands in order, so the click lands once it's theirs.
+    /// Anything else waits for them to have it.
+    pub fn browser_input(&mut self, mut input: Value) -> Vec<Value> {
+        let Some(agent) = self.watching.clone() else {
+            return Vec::new();
+        };
+        let b = self.browser(&agent);
+        let click = input["kind"] == "click";
+        if !b.open || !(b.person || click) {
+            return Vec::new();
+        }
+        let mut frames = Vec::new();
+        if !b.person {
+            frames.extend(self.take_browser(true));
+            // Theirs until the instance says otherwise, so the keys after the
+            // click go to the page while browser.take's answer is on its way.
+            if let Some(b) = self.browsers.get_mut(&agent) {
+                b.person = true;
+            }
         }
         input["agent"] = json!(agent);
         let id = self.id("browser.input");
-        Some(json!({"t": "cmd", "id": id, "name": "browser.input", "args": input}))
+        frames.push(json!({"t": "cmd", "id": id, "name": "browser.input", "args": input}));
+        frames
     }
 
     fn result(&mut self, f: &Value) {
@@ -4069,10 +4119,14 @@ impl Model {
             }
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
+                self.not_theirs(&s(e, "code"));
             }
             return;
         }
         if id.starts_with("browser.input") {
+            if let Some(e) = f.get("error") {
+                self.not_theirs(&s(e, "code"));
+            }
             return;
         }
         // A file a reply named, kept as the person's: it opens once it's here.
@@ -8273,6 +8327,76 @@ mod tests {
         let f = m.record_browser(false).unwrap();
         assert_eq!(f["name"], "browser.record");
         assert_eq!(f["args"]["on"], false);
+    }
+
+    // LOO-279: an app started while the agent waited for the person in its browser
+    // showed nothing of it, since a browser's state isn't kept for it to catch up on.
+    #[test]
+    fn an_app_that_connects_asks_how_the_browser_is() {
+        let mut m = Model::new();
+        m.selected = Some("a_1".into());
+        let asks = |m: &mut Model| -> Vec<Value> {
+            m.fetches()
+                .into_iter()
+                .filter(|f| f["name"] == "browser.watch")
+                .collect()
+        };
+        assert!(asks(&mut m).is_empty(), "not before it's connected");
+        m.take(&json!({"t": "synced", "seq": 0}));
+        let asked = asks(&mut m);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["args"], json!({"agent": "a_1", "on": false}));
+        assert!(asks(&mut m).is_empty(), "once");
+        // Its answer is the browser's state, which shows the ask.
+        m.result(&json!({"t": "result", "id": asked[0]["id"], "ok": true, "value": {"agent": "a_1", "open": true, "person": false, "asked": "Sign in for me", "secret": "", "recording": false, "steps": 0}}));
+        assert_eq!(m.browser("a_1").asked, "Sign in for me");
+        // Another agent on screen is asked about too; one watched is watched again.
+        m.selected = Some("a_2".into());
+        assert_eq!(asks(&mut m)[0]["args"]["agent"], "a_2");
+        m.watching = Some("a_2".into());
+        m.take(&json!({"t": "synced", "seq": 0}));
+        let again = asks(&mut m);
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0]["args"]["on"], true);
+    }
+
+    // LOO-279: clicks and keys on the page did nothing until the person had pressed
+    // Take over, which a long line beside it had pushed out of sight.
+    #[test]
+    fn a_click_on_the_page_takes_the_browser_over() {
+        let mut m = Model::new();
+        m.watching = Some("a_1".into());
+        let click = json!({"kind": "click", "x": 40.0, "y": 60.0});
+        // A browser that isn't open takes nothing.
+        assert!(m.browser_input(click.clone()).is_empty());
+        m.browser_state(&json!({"agent": "a_1", "open": true, "person": false, "asked": "Sign in for me", "secret": "", "recording": false, "steps": 0}));
+        // Keys, text and the wheel wait for the person to have it.
+        assert!(m
+            .browser_input(json!({"kind": "key", "key": "Tab"}))
+            .is_empty());
+        assert!(m
+            .browser_input(json!({"kind": "wheel", "x": 1.0, "y": 1.0, "dy": 40.0}))
+            .is_empty());
+        // A click takes it over and lands, in that order.
+        let sent = m.browser_input(click);
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0]["name"], "browser.take");
+        assert_eq!(sent[0]["args"]["agent"], "a_1");
+        assert_eq!(sent[1]["name"], "browser.input");
+        assert_eq!(sent[1]["args"]["kind"], "click");
+        assert_eq!(sent[1]["args"]["agent"], "a_1");
+        // What's typed next goes straight to the page.
+        assert!(m.browser("a_1").person);
+        let typed = m.browser_input(json!({"kind": "text", "text": "ann"}));
+        assert_eq!(typed.len(), 1);
+        assert_eq!(typed[0]["name"], "browser.input");
+        assert_eq!(typed[0]["args"]["text"], "ann");
+        // Refused as not theirs, keys wait again.
+        m.result(&json!({"t": "result", "id": typed[0]["id"], "ok": false, "error": {"code": "not_yours", "message": "Take over the browser first."}}));
+        assert!(!m.browser("a_1").person);
+        assert!(m
+            .browser_input(json!({"kind": "key", "key": "Enter"}))
+            .is_empty());
     }
 
     #[test]
