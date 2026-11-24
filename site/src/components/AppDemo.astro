@@ -5,6 +5,7 @@
 // it is src/scripts/demo.ts. The approval's buttons answer it, a reply's steps open, and the
 // sidebar collapses to the rail, as the app's do.
 import { brains } from '../lib/registry.mjs';
+import shapes from '../../../design/generated/shapes.json';
 
 const agents = [
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
@@ -17,6 +18,21 @@ const pinned = agents.filter((a) => a.pinned);
 const rest = agents.filter((a) => !a.pinned);
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
 const [claude] = await brains(['claude-acp']);
+// An agent's thread where a message mentions it, or over a message it sent: its shape, still,
+// in a box 14 by 10, as desktop/src/app.rs, mention_thread, draws it.
+function mentionThread(shape: keyof typeof shapes): string {
+	const pts = shapes[shape] as number[][];
+	let sx = 0;
+	let sy = 0;
+	for (const [x, y] of pts) {
+		sx = Math.max(sx, Math.abs(x));
+		sy = Math.max(sy, Math.abs(y));
+	}
+	const scale = Math.min(6 / Math.max(sx, 0.1), 4 / Math.max(sy, 0.1));
+	return pts.map(([x, y], i) => `${i ? 'L' : 'M'}${(7 + x * scale).toFixed(2)} ${(5 + y * scale).toFixed(2)}`).join(' ');
+}
+const BISCUIT = mentionThread('star');
+
 // GitHub's mark, as its site icon on the reply's link and sources.
 const GITHUB =
 	'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z';
@@ -116,6 +132,10 @@ const GITHUB =
 		<div class="chat">
 			<div class="msgs" aria-live="off">
 				<div class="time-line">Today 09:02</div>
+				<div class="row from-agent" style="--from: var(--thread-apricot)">
+					<div class="from-who"><svg class="mention-thread" viewBox="0 0 14 10" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</div>
+					<div class="from-bubble">The billing fix is ready. It needs a review before 2.4 goes out.</div>
+				</div>
 				<div class="row you">
 					<div class="bubble">What's on my plate today?</div>
 				</div>
@@ -152,7 +172,9 @@ const GITHUB =
 							</div>
 							<div class="said">
 								<p>
-									Two things. The notes for 2.4 are due at 15:00, and Biscuit is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
+									Two things. The notes for 2.4 are due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
+										><svg class="mention-thread" viewBox="0 0 14 10" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
+									> is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
 										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>the billing fix</span
 									>. Both are at the top of your list.
 								</p>
@@ -923,6 +945,52 @@ const GITHUB =
 		margin-top: 12px;
 	}
 	/* A link: its site's icon before it, underlined, its whole address on hover. */
+	/* An agent a message mentions (desktop/src/app.rs, linked_words): its thread and its name in
+	   its colour, a little weathered toward the quiet ink, with nothing behind it. */
+	.mention {
+		color: color-mix(in srgb, var(--from) 70%, var(--ink-3));
+		font-weight: var(--weight-medium);
+		white-space: nowrap;
+	}
+	.mention-thread {
+		display: inline-block;
+		width: 14px;
+		height: 10px;
+		margin-right: 3px;
+		fill: none;
+		stroke: color-mix(in srgb, var(--from) 70%, var(--ink-3));
+		stroke-width: 1.6;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+		vertical-align: -1px;
+	}
+	/* A message another agent sent (app.rs, person): on the person's side, a breath of the
+	   sender's colour, with its thread and name over it. */
+	.from-agent {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 4px;
+	}
+	.from-who {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: color-mix(in srgb, var(--from) 70%, var(--ink-3));
+	}
+	.from-who .mention-thread {
+		margin: 0;
+		stroke: currentColor;
+	}
+	.from-bubble {
+		max-width: 520px;
+		padding: 10px 16px;
+		border-radius: var(--radius-bubble);
+		background: color-mix(in srgb, var(--from) 10%, var(--bubble));
+		overflow-wrap: anywhere;
+	}
 	.link {
 		text-decoration: underline;
 		text-underline-offset: 2px;
