@@ -124,6 +124,9 @@ struct ChatView: View {
         }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
+        .fullScreenCover(item: warming ? .constant(nil) : Bindable(model).viewing) { v in
+            PictureViewer(stack: v.stack)
+        }
         .sheet(item: $reading) { r in
             NavigationStack {
                 SelectableText(text: r.text)
@@ -189,14 +192,26 @@ struct PersonMessage: View {
     var agent: Agent?
 
     var body: some View {
-        let text = message.blocks.filter { $0.kind == "text" }.map(\.text).joined(separator: "\n")
+        let files = fileParts(message)
+        // A stack's pictures only listed by name are left out of the words: the stack
+        // shows them, and the viewer their names.
+        let stacked = files.flatMap { part -> [FileRef] in
+            guard case .pictures(let run) = part else { return [] }
+            return run.compactMap { message.blocks[$0].file }
+        }
+        let text = unmarkStacked(message.blocks.filter { $0.kind == "text" }.map(\.text).joined(separator: "\n"), stacked)
         VStack(alignment: .trailing, spacing: Tokens.Space.xs + 2) {
             if let from = message.from {
                 Text("From \(from)").font(Fonts.caption).foregroundStyle(P.ink3)
             }
-            ForEach(Array(message.blocks.enumerated()), id: \.offset) { _, b in
-                if let f = b.file {
-                    FileView(file: f)
+            ForEach(Array(files.enumerated()), id: \.offset) { _, part in
+                switch part {
+                case .pictures(let run):
+                    PictureStack(files: run.compactMap { message.blocks[$0].file })
+                case .block(let i):
+                    if let f = message.blocks[i].file { FileView(file: f) }
+                default:
+                    EmptyView()
                 }
             }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -281,6 +296,8 @@ struct Reply: View {
             }
         case .block(let i):
             block(message.blocks[i], key: "\(message.id)/\(i)")
+        case .pictures(let run):
+            PictureStack(files: run.compactMap { message.blocks[$0].file })
         case .fold(let words, let working, let steps):
             Steps(words: words, working: working, open: openThoughts.contains(foldKey), canOpen: !steps.isEmpty) {
                 if openThoughts.contains(foldKey) { openThoughts.remove(foldKey) } else { openThoughts.insert(foldKey) }
@@ -487,6 +504,165 @@ struct FileView: View {
         .task(id: path) {
             guard let path, Pictures.kept(path) == nil else { return }
             thumb = await Pictures.load(path)
+        }
+    }
+}
+
+/// Two or more pictures in a message as one stack of a fixed size, however many there
+/// are, as the desktop draws it: the first on top, up to two more peeking out behind it,
+/// and how many there are in its corner. Tapping it shows them big, to page through.
+struct PictureStack: View {
+    @Environment(Session.self) private var session
+    var files: [FileRef]
+
+    static let size = CGSize(width: 240, height: 180)
+    /// How far each picture behind peeks out.
+    static let step: CGFloat = 6
+
+    var body: some View {
+        let behind = min(max(files.count - 1, 0), 2)
+        let room = Self.step * CGFloat(behind)
+        Button {
+            session.model.view(files)
+        } label: {
+            ZStack(alignment: .bottomLeading) {
+                ForEach((0...behind).reversed(), id: \.self) { layer in
+                    StackCard(file: files[layer], behind: layer > 0, count: layer == 0 ? files.count : nil)
+                        .offset(x: Self.step * CGFloat(layer), y: -Self.step * CGFloat(layer))
+                }
+            }
+            .frame(width: Self.size.width + room, height: Self.size.height + room, alignment: .bottomLeading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(files.count) pictures")
+    }
+}
+
+/// One picture of a stack, filling its place: the ones behind a step back, toward the
+/// page, and the top one with the count.
+private struct StackCard: View {
+    @Environment(Session.self) private var session
+    var file: FileRef
+    var behind: Bool
+    var count: Int?
+    @State private var thumb: UIImage?
+
+    var body: some View {
+        let path = session.model.files["\(file.file).thumb"]
+        let image = path.flatMap { thumb ?? Pictures.kept($0) }
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous)
+        Group {
+            if let image {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else {
+                P.bubble
+            }
+        }
+        .frame(width: PictureStack.size.width, height: PictureStack.size.height)
+        .overlay { if behind { P.bg.opacity(0.35) } }
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(P.line, lineWidth: 1))
+        .overlay(alignment: .bottomTrailing) {
+            if let count {
+                Text("\(count)")
+                    .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .padding(Tokens.Space.s)
+            }
+        }
+        .task(id: path) {
+            guard let path, Pictures.kept(path) == nil else { return }
+            thumb = await Pictures.load(path)
+        }
+    }
+}
+
+/// A stack's pictures big, over everything, a page each: whole once fetched, the
+/// thumbnail until then, with the picture's name and where it is among them.
+struct PictureViewer: View {
+    @Environment(Session.self) private var session
+    @Environment(\.dismiss) private var dismiss
+    var stack: [FileRef]
+    @State private var page = 0
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            TabView(selection: $page) {
+                ForEach(Array(stack.enumerated()), id: \.offset) { i, f in
+                    WholePicture(file: f).tag(i)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .ignoresSafeArea()
+        }
+        .overlay(alignment: .topTrailing) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 36, height: 36)
+                    .background(.white.opacity(0.12), in: Circle())
+            }
+            .accessibilityLabel("Close")
+            .padding(.horizontal, Tokens.PhoneSpace.gutter)
+        }
+        .overlay(alignment: .bottom) {
+            HStack(spacing: Tokens.Space.m) {
+                Text(stack[min(page, stack.count - 1)].name)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(.white.opacity(0.75))
+                if stack.count > 1 {
+                    Text("\(page + 1) / \(stack.count)")
+                        .monospacedDigit()
+                        .foregroundStyle(.white.opacity(0.5))
+                }
+            }
+            .font(Fonts.small)
+            .padding(.horizontal, Tokens.PhoneSpace.gutter)
+            .padding(.bottom, Tokens.Space.m)
+        }
+        .task(id: page) {
+            // This picture whole, and the ones either side.
+            for i in [page, page + 1, page - 1] where stack.indices.contains(i) {
+                session.send(session.model.whole(stack[i]))
+            }
+        }
+    }
+}
+
+/// One page of the viewer: the picture fitted to the screen.
+private struct WholePicture: View {
+    @Environment(Session.self) private var session
+    var file: FileRef
+    @State private var image: UIImage?
+
+    /// Points across it's decoded for, at the screen's scale.
+    static let side: CGFloat = 600
+
+    var body: some View {
+        let path = session.model.files[file.file] ?? session.model.files["\(file.file).thumb"]
+        Group {
+            if let shown = image ?? path.flatMap({ Pictures.kept($0, side: Self.side) }) {
+                Image(uiImage: shown).resizable().scaledToFit()
+            } else {
+                ProgressView().tint(.white)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.vertical, 56)
+        .accessibilityLabel("Picture, \(file.name)")
+        .task(id: path) {
+            guard let path else { return }
+            image = await Pictures.load(path, side: Self.side)
         }
     }
 }

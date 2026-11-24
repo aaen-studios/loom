@@ -1555,6 +1555,86 @@ pub fn link_files(text: &str, files: &[FileRef]) -> String {
     out
 }
 
+/// A person's message's files as they're drawn, above its words: each on its own, and
+/// two or more pictures as one stack, wherever they were among the others.
+pub fn file_parts(m: &Message) -> Vec<Part> {
+    let files: Vec<usize> = (0..m.blocks.len())
+        .filter(|&i| m.blocks[i].file.is_some())
+        .collect();
+    let (pictures, others): (Vec<usize>, Vec<usize>) = files
+        .iter()
+        .partition(|&&i| m.blocks[i].file.as_ref().is_some_and(FileRef::image));
+    let mut out = lay_out(m, &pictures);
+    out.extend(others.into_iter().map(Part::Block));
+    out
+}
+
+/// A person's words without the marks (`file_mark`) of the pictures in a stack where
+/// they only list them: two or more standing together with nothing but spaces between,
+/// or one alone on its line. The stack shows those pictures, and the viewer their
+/// names. A mark among other words is part of what was said, and stays.
+pub fn unmark_stacked(text: &str, stacked: &[FileRef]) -> String {
+    let mut left: Vec<String> = stacked
+        .iter()
+        .filter(|f| !f.name.is_empty())
+        .map(|f| file_mark(&f.name))
+        .collect();
+    if left.is_empty() {
+        return text.to_string();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    for line in text.split('\n') {
+        // The stacked pictures' marks on this line, each picture's first, in order.
+        let mut marks: Vec<(usize, usize)> = Vec::new();
+        let mut from = 0;
+        while let Some(open) = line[from..].find('[') {
+            let at = from + open;
+            match left
+                .iter()
+                .position(|mark| line[at..].starts_with(mark.as_str()))
+            {
+                Some(k) => {
+                    let end = at + left.remove(k).len();
+                    marks.push((at, end));
+                    from = end;
+                }
+                None => from = at + 1,
+            }
+        }
+        // Marks with only spaces between them stand together.
+        let mut runs: Vec<(usize, usize, usize)> = Vec::new();
+        for (start, end) in marks {
+            match runs.last_mut() {
+                Some(run) if line[run.1..start].trim().is_empty() => {
+                    run.1 = end;
+                    run.2 += 1;
+                }
+                _ => runs.push((start, end, 1)),
+            }
+        }
+        let mut out = String::new();
+        let mut at = 0;
+        for (start, end, count) in runs {
+            let alone = line[..start].trim().is_empty() && line[end..].trim().is_empty();
+            if count >= 2 || alone {
+                out.push_str(&line[at..start]);
+                let rest = &line[end..];
+                at = end + (rest.len() - rest.trim_start().len());
+            }
+        }
+        if at == 0 {
+            lines.push(line.to_string());
+            continue;
+        }
+        out.push_str(&line[at..]);
+        // A line that was only marks goes with them.
+        if !out.trim().is_empty() {
+            lines.push(out.trim_end().to_string());
+        }
+    }
+    lines.join("\n").trim().to_string()
+}
+
 /// A message search found.
 #[derive(Clone, Debug)]
 pub struct Hit {
@@ -1781,6 +1861,8 @@ pub enum Part {
     Tools(Vec<usize>),
     /// Anything else on its own: a thought, a plan, a notice, a file or a card.
     Block(usize),
+    /// Two or more pictures next to each other, drawn as one stack the viewer opens.
+    Pictures(Vec<usize>),
     /// The turn's steps, folded under one quiet line that opens to show them. While the
     /// turn runs (`working`), the line is the step it's on and changes as it goes, and
     /// it's there even with no steps to open yet. Once it's done, it says how many.
@@ -2011,10 +2093,29 @@ pub fn inside(m: &Message, i: usize, shows: Shows) -> (Vec<Part>, usize) {
 }
 
 /// The blocks `shown`, in order, with words next to each other as one group of
-/// bubbles and tool calls next to each other as one run.
+/// bubbles, tool calls next to each other as one run, and two or more pictures next to
+/// each other as one stack.
 fn lay_out(m: &Message, shown: &[usize]) -> Vec<Part> {
+    let picture = |i: usize| m.blocks[i].file.as_ref().is_some_and(FileRef::image);
     let mut out: Vec<Part> = Vec::new();
     for &i in shown {
+        if picture(i) {
+            match out.last_mut() {
+                Some(Part::Pictures(run)) => {
+                    run.push(i);
+                    continue;
+                }
+                Some(last) => {
+                    if let Part::Block(j) = *last {
+                        if picture(j) {
+                            *last = Part::Pictures(vec![j, i]);
+                            continue;
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
         match (m.blocks[i].kind.as_str(), out.last_mut()) {
             ("text", Some(Part::Bubbles(run))) | ("tool", Some(Part::Tools(run))) => run.push(i),
             ("text", _) => out.push(Part::Bubbles(vec![i])),
@@ -2538,6 +2639,9 @@ pub struct Model {
     pub page: Option<FileRef>,
     /// The picture shown big over the window, from the chat.
     pub viewing: Option<FileRef>,
+    /// The stack of pictures the viewer was opened on, which it steps through instead
+    /// of the chat's; empty for a picture opened on its own.
+    viewing_stack: Vec<FileRef>,
     /// The files of messages this app sent, by SHA-256, so one waiting to be sent shows
     /// them.
     sent_files: HashMap<String, FileRef>,
@@ -5199,6 +5303,18 @@ impl Model {
     /// Shows a picture big over the window, fetched whole unless it's here already. Its
     /// thumbnail shows until then.
     pub fn view(&mut self, f: &FileRef) -> Option<Value> {
+        self.viewing_stack.clear();
+        self.show_picture(f)
+    }
+
+    /// Opens the viewer on a stack of pictures, at its first, to step through them.
+    pub fn view_stack(&mut self, stack: &[FileRef]) -> Option<Value> {
+        let first = stack.first()?.clone();
+        self.viewing_stack = stack.to_vec();
+        self.show_picture(&first)
+    }
+
+    fn show_picture(&mut self, f: &FileRef) -> Option<Value> {
         self.viewing = Some(f.clone());
         if self.files.contains_key(&f.file) || self.getting.values().any(|(k, _)| *k == f.file) {
             return None;
@@ -5217,13 +5333,23 @@ impl Model {
             .collect()
     }
 
+    /// What the viewer steps through: the stack it was opened on, or else the chat's
+    /// pictures.
+    pub fn viewer_pictures(&self) -> Vec<FileRef> {
+        if self.viewing_stack.is_empty() {
+            self.pictures()
+        } else {
+            self.viewing_stack.clone()
+        }
+    }
+
     /// The viewer's next picture (`by` 1) or the one before (-1), if there is one.
     pub fn view_step(&mut self, by: i32) -> Option<Value> {
         let now = self.viewing.clone()?;
-        let all = self.pictures();
+        let all = self.viewer_pictures();
         let at = all.iter().position(|f| f.file == now.file)?;
         let next = all.get(at.checked_add_signed(by as isize)?)?.clone();
-        self.view(&next)
+        self.show_picture(&next)
     }
 
     /// Where the open page is on this computer, once it's fetched.
@@ -6945,6 +7071,100 @@ mod tests {
             link_files("look [image.png] and [odd]name.png]", &files),
             "look [image.png](loom-file:aa) and [odd]name.png]"
         );
+    }
+
+    fn picture(sha: &str, name: &str) -> FileRef {
+        FileRef {
+            file: sha.into(),
+            name: name.into(),
+            mime: "image/png".into(),
+            size: 13,
+        }
+    }
+
+    #[test]
+    fn two_or_more_pictures_together_are_one_stack() {
+        let doc = FileRef {
+            file: "dd".into(),
+            name: "notes.txt".into(),
+            mime: "text/plain".into(),
+            size: 4,
+        };
+        let mut m = turn(&["text:Here."], false, "done");
+        m.blocks.push(Block::file(picture("aa", "a.png")));
+        m.blocks.push(Block::file(picture("bb", "b.png")));
+        m.blocks.push(Block::file(picture("cc", "c.png")));
+        m.blocks.push(Block::file(doc.clone()));
+        m.blocks.push(Block::file(picture("ee", "e.png")));
+        assert_eq!(
+            parts(&m, &tools(), QUIET),
+            vec![
+                Part::Bubbles(vec![0]),
+                Part::Pictures(vec![1, 2, 3]),
+                Part::Block(4),
+                Part::Block(5),
+            ]
+        );
+        // A person's: every picture in one stack, the other files after it.
+        m.role = "person".into();
+        m.blocks.remove(0);
+        assert_eq!(
+            file_parts(&m),
+            vec![Part::Pictures(vec![0, 1, 2, 4]), Part::Block(3)]
+        );
+        // One picture stays as it is.
+        m.blocks = vec![Block::file(picture("aa", "a.png")), Block::file(doc)];
+        assert_eq!(file_parts(&m), vec![Part::Block(0), Part::Block(1)]);
+    }
+
+    #[test]
+    fn a_stacks_names_leave_the_words_where_they_only_list_it() {
+        let stack = [
+            picture("aa", "a.png"),
+            picture("bb", "b.png"),
+            picture("cc", "Screenshot 2026-11-24 at 02.11.35.png"),
+        ];
+        let names = "[a.png] [b.png] [Screenshot 2026-11-24 at 02.11.35.png]";
+        assert_eq!(unmark_stacked(names, &stack), "");
+        assert_eq!(
+            unmark_stacked(&format!("{names} what changed?"), &stack),
+            "what changed?"
+        );
+        assert_eq!(
+            unmark_stacked(&format!("Look at these:\n{names}"), &stack),
+            "Look at these:"
+        );
+        assert_eq!(
+            unmark_stacked("[a.png]\n[b.png]\nwhich is better?", &stack),
+            "which is better?"
+        );
+        // One among other words is part of what was said.
+        assert_eq!(
+            unmark_stacked("compare [a.png] with [b.png]", &stack),
+            "compare [a.png] with [b.png]"
+        );
+        // A name that isn't the stack's stays, and so do the lines it doesn't touch.
+        assert_eq!(
+            unmark_stacked("  code\n[a.png] [b.png] [other.png]", &stack),
+            "code\n[other.png]"
+        );
+        assert_eq!(unmark_stacked("hi [a.png]", &[]), "hi [a.png]");
+    }
+
+    #[test]
+    fn the_viewer_steps_through_the_stack_it_opened_on() {
+        let mut m = Model::new();
+        let stack = [picture("aa", "a.png"), picture("bb", "b.png")];
+        assert!(m.view_stack(&stack).is_some());
+        assert_eq!(m.viewing.as_ref().map(|f| f.file.as_str()), Some("aa"));
+        assert_eq!(m.viewer_pictures(), stack.to_vec());
+        assert!(m.view_step(-1).is_none());
+        assert!(m.view_step(1).is_some());
+        assert_eq!(m.viewing.as_ref().map(|f| f.file.as_str()), Some("bb"));
+        assert!(m.view_step(1).is_none());
+        // A picture opened on its own goes back to the chat's.
+        m.view(&picture("zz", "z.png"));
+        assert!(m.viewer_pictures().is_empty());
     }
 
     #[test]
