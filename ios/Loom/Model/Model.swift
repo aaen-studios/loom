@@ -147,6 +147,18 @@ struct Card: Equatable, Sendable {
     /// That the chat has gone on past its reply: choices no longer answer then, and a
     /// sign-in only waits quietly.
     var passed = false
+    /// For a card that signs in, as `mcp.list` says: whom the person is signed in to its
+    /// server as once they are (empty when the sign-in didn't say), whether its sign-in
+    /// page is open now, and why the last one here didn't finish.
+    var signedAs: String?
+    var signing = false
+    var signInError: String?
+
+    /// Whether it signs in to its server: a sign-in card, or a proposed server that
+    /// waits on one.
+    var signsIn: Bool {
+        type == "sign_in" || (type == "mcp_add" && ["sign_in", "later"].contains(state))
+    }
 
     init?(_ c: JSON) {
         type = c["type"].text
@@ -623,14 +635,22 @@ final class Model {
     var toOpen: URL?
     /// A stack of pictures shown big, to page through.
     var viewing: Viewing?
-    /// An MCP server's sign-in page, for the screen to open, and the servers the person
-    /// has signed in to from here since the app opened.
-    var toSignIn: URL?
-    var signedIn: Set<String> = []
     /// When an agent's reply last grew, and when its last run finished or failed.
     var lastDelta: [String: Date] = [:]
     var finished: [String: Date] = [:]
     var failed: [String: Date] = [:]
+    /// The person's MCP servers they're signed in to, from `mcp.list`, as whom (empty
+    /// when the sign-in didn't say).
+    var mcpSignedIn: [String: String] = [:]
+    /// MCP servers whose sign-in page is open here, and why the last sign-in to one
+    /// here didn't finish.
+    var mcpSigning: Set<String> = []
+    var mcpSignInErrors: [String: String] = [:]
+    /// A sign-in page the instance gave, for the session to open: the server and its
+    /// address.
+    var toSignIn: (server: String, url: URL)?
+    /// Whether `mcp.list` is to be asked again.
+    private var mcpStale = false
 
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
@@ -680,6 +700,11 @@ final class Model {
             for j in out[i].blocks.indices {
                 guard var c = out[i].blocks[j].card else { continue }
                 if c.type == "choices" { c.chosen = sent.flatMap { t in c.options.firstIndex { $0.trimmingCharacters(in: .whitespaces) == t } } }
+                if c.signsIn {
+                    c.signedAs = mcpSignedIn[c.server]
+                    c.signing = mcpSigning.contains(c.server)
+                    c.signInError = mcpSignInErrors[c.server]
+                }
                 c.passed = next != nil
                 out[i].blocks[j].card = c
             }
@@ -822,6 +847,8 @@ final class Model {
             let message = f["message"].text
             let block = f["block"].int ?? 0
             guard let card = Card(f["card"]), block >= 0 else { break }
+            // Whether the person signed in since, for a card that signs in.
+            if card.signsIn { mcpStale = true }
             var blocks = live.removeValue(forKey: message) ?? []
             while blocks.count <= block { blocks.append(.text("", "")) }
             blocks[block] = Block(kind: "card", text: "", call: nil, file: nil, card: card)
@@ -913,26 +940,8 @@ final class Model {
     }
 
     private func result(_ f: JSON) {
-        let error = f["error"].isNull ? nil : f["error"]["message"].string
-        switch f["id"].text {
-        case let id where id.hasPrefix("app.mcp_sign_in"):
-            // Where the person signs in, for the sign-in sheet.
-            if let error {
-                notice = error
-            } else if let url = f["value"]["url"].string.flatMap(URL.init(string:)) {
-                toSignIn = url
-            }
-        case "app.mcp_signed_in":
-            if let error {
-                notice = error
-            } else {
-                let server = f["value"]["server"].text
-                signedIn.insert(server)
-                notice = "Signed in to \(server)"
-            }
-        default:
-            if let error { notice = error }
-        }
+        if mcpResult(f) { return }
+        if !f["error"].isNull { notice = f["error"]["message"].string }
     }
 
     private func data(_ f: JSON) {
@@ -980,7 +989,56 @@ final class Model {
             placeQueued()
             // The tool calls these messages name.
             dirty.insert(.tools)
+            // A sign-in card for a server not known to be signed in: whether it is since,
+            // as on another device.
+            if messages.flatMap(\.blocks).contains(where: { b in b.card.map { $0.signsIn && mcpSignedIn[$0.server] == nil } ?? false }) {
+                mcpStale = true
+            }
         }
+    }
+
+    /// Takes the answer to one of the MCP commands the model sent, if it is one: the
+    /// servers' sign-ins, a sign-in page to open, or a sign-in finished. Its error goes on
+    /// the sign-in card, not in a notice.
+    private func mcpResult(_ f: JSON) -> Bool {
+        let id = f["id"].text
+        let error = f["error"].isNull ? nil : f["error"]["message"].string ?? f["error"]["code"].text
+        if id.hasPrefix("app.mcp_list") {
+            if error == nil {
+                var signed: [String: String] = [:]
+                for s in f["value"]["servers"].array where s["sign_in"].text == "signed_in" {
+                    signed[s["name"].text] = s["signed_in_as"].text
+                }
+                mcpSignedIn = signed
+            }
+            return true
+        }
+        func after(_ prefix: String) -> String? {
+            id.hasPrefix(prefix) ? String(id.dropFirst(prefix.count)) : nil
+        }
+        if let server = after("app.mcp_sign_in:") {
+            if let error {
+                signInEnded(server, error: error)
+            } else if let url = URL(string: f["value"]["url"].text), ["https", "http"].contains(url.scheme?.lowercased()) {
+                toSignIn = (server, url)
+            } else {
+                signInEnded(server, error: "The instance gave no page to sign in on.")
+            }
+            return true
+        }
+        if let server = after("app.mcp_signed_in:") {
+            mcpSigning.remove(server)
+            if let error {
+                mcpSignInErrors[server] = error
+            } else {
+                mcpSignInErrors[server] = nil
+                let name = f["value"]["server"].string ?? server
+                mcpSignedIn[name] = f["value"]["signed_in_as"].text
+            }
+            mcpStale = true
+            return true
+        }
+        return false
     }
 
     /// Who sent a person message other than the person: another agent. (A routine's
@@ -1034,6 +1092,10 @@ final class Model {
         var out: [JSON] = []
         let lists = dirty
         dirty = []
+        if mcpStale {
+            mcpStale = false
+            out.append(["t": "cmd", "id": JSON(id("app.mcp_list")), "name": "mcp.list"])
+        }
         for l in CoreList.allCases where lists.contains(l) {
             if l == .messages {
                 guard let conversation else {
@@ -1157,19 +1219,25 @@ final class Model {
          "args": ["call": JSON(call), "answer": JSON(answer), "secrets": .object(secrets.mapValues { JSON($0) })]]
     }
 
-    /// Where the browser comes back to from an MCP server's sign-in: the sign-in sheet
-    /// catches it.
-    static let signInBack = "loom://mcp-signed-in"
-
-    /// Asks where to sign in to the MCP server `name`; the address goes to `toSignIn`.
-    func signInMcp(_ name: String) -> JSON {
-        ["t": "cmd", "id": JSON(id("app.mcp_sign_in")), "name": "mcp.sign_in",
-         "args": ["name": JSON(name), "redirect": JSON(Model.signInBack)]]
+    /// Asks the instance where to sign in to the person's MCP server `server`, with the
+    /// browser coming back to `redirect` (PLAN.md, "Signing in to MCP servers"). Its card
+    /// says Signing in… until the sign-in ends; the page comes as `toSignIn`.
+    func signIn(_ server: String, redirect: String) -> JSON? {
+        guard mcpSigning.insert(server).inserted else { return nil }
+        mcpSignInErrors[server] = nil
+        return ["t": "cmd", "id": JSON("app.mcp_sign_in:\(server)"), "name": "mcp.sign_in", "args": ["name": JSON(server), "redirect": JSON(redirect)]]
     }
 
-    /// What the sign-in page sent the browser back with, for the instance to finish it.
-    func signedIn(query: String) -> JSON {
-        ["t": "cmd", "id": "app.mcp_signed_in", "name": "mcp.signed_in", "args": ["query": JSON(query)]]
+    /// What the browser brought back to the redirect, as it came, for the instance to
+    /// swap for tokens.
+    func signedIn(_ server: String, query: String) -> JSON {
+        ["t": "cmd", "id": JSON("app.mcp_signed_in:\(server)"), "name": "mcp.signed_in", "args": ["query": JSON(query)]]
+    }
+
+    /// A sign-in that ended here without coming back: the card is live again, saying why.
+    func signInEnded(_ server: String, error: String) {
+        mcpSigning.remove(server)
+        mcpSignInErrors[server] = error
     }
 
     func startFresh() -> JSON? {

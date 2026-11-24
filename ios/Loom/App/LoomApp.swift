@@ -13,6 +13,7 @@ struct LoomApp: App {
             RootView()
                 .environment(session)
                 .onAppear { delegate.session = session }
+                .onOpenURL { session.opened($0) }
         }
         .onChange(of: phase) { _, phase in
             switch phase {

@@ -136,6 +136,19 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 let mime = name.hasSuffix(".jpg") ? "image/jpeg" : "application/octet-stream"
                 tell(["t": "core.file", "id": f["id"], "file": ["file": JSON("sample-\(name)"), "name": JSON(name), "mime": JSON(mime), "size": JSON(size)]])
             }
+        case "cmd":
+            // The person's MCP servers, as the sample's sign-in card needs them, and a
+            // sign-in, which sample servers can't do.
+            switch f["name"].text {
+            case "mcp.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["servers": [["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed"]]]])
+            case "mcp.sign_in", "mcp.signed_in":
+                later(0.4) { [self] in
+                    tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "sign_in_failed", "message": "Sample servers can't be signed in to."]])
+                }
+            default:
+                break
+            }
         case "file.get":
             if let path = Sample.picture(f["file"].text) {
                 tell(["t": "core.file", "id": f["id"], "path": JSON(path)])

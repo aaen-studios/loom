@@ -283,25 +283,48 @@ struct CardView: View {
         }
     }
 
-    /// Loom's own card for an MCP server that needs the person to sign in: Sign in opens
-    /// its sign-in page in a sheet. Once they have, or once the chat has gone on, it's one
-    /// quiet line.
+    /// Loom's own card for an MCP server that needs the person to sign in, as the
+    /// desktop draws it: the server by its initial, and Sign in, which opens its sign-in
+    /// page over the app. Once they have, one quiet line says so, as whom when the
+    /// sign-in said; and once the chat has gone on without it, one quiet line keeps a
+    /// small Sign in. A sign-in that didn't finish says why under it.
     @ViewBuilder
     private var signIn: some View {
-        if session.model.signedIn.contains(card.server) {
-            CardDone(icon: "checkmark", words: "Signed in to \(card.server)")
+        if let who = card.signedAs {
+            CardDone(icon: "checkmark", words: who.isEmpty ? "Signed in to \(card.server)" : "Signed in to \(card.server) as \(who)")
         } else if card.passed {
-            CardDone(icon: "key", words: card.title)
+            VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+                HStack(spacing: Tokens.Space.s) {
+                    CardDone(icon: "key", words: card.title)
+                    Button(card.signing ? "Signing in…" : "Sign in") { startSignIn() }
+                        .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+                        .foregroundStyle(P.ink2)
+                        .buttonStyle(.plain)
+                        .disabled(card.signing)
+                }
+                signInError
+            }
         } else {
             CardFrame(card.title, lead: AnyView(CardLead.of(card.server)), side: AnyView(
-                Button("Sign in") { signInMcp() }.buttonStyle(CardButtonStyle(primary: true))
-            ))
+                Button(card.signing ? "Signing in…" : "Sign in") { startSignIn() }
+                    .buttonStyle(CardButtonStyle(primary: true))
+                    .disabled(card.signing)
+            )) {
+                signInError
+            }
         }
     }
 
-    private func signInMcp() {
+    @ViewBuilder
+    private var signInError: some View {
+        if let why = card.signInError {
+            Text(why).font(Fonts.caption).foregroundStyle(P.bad)
+        }
+    }
+
+    private func startSignIn() {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        session.send(session.model.signInMcp(card.server))
+        session.signIn(card.server)
     }
 
     private var checklist: some View {
@@ -384,7 +407,7 @@ struct McpAddCard: View {
     @State private var typed: [String: String] = [:]
 
     var body: some View {
-        let signed = session.model.signedIn.contains(card.server)
+        let signed = card.signedAs != nil
         if let done = done(signed: signed) {
             CardDone(icon: done.icon, words: done.words)
         } else {
@@ -455,6 +478,8 @@ struct McpAddCard: View {
 
     /// How it stands, in a line, and whether it's trouble.
     private var line: (text: String, bad: Bool)? {
+        // A sign-in here that didn't finish says why.
+        if card.signsIn, let why = card.signInError { return (why, true) }
         switch card.state {
         case "adding": return ("Starting \(card.server)", false)
         case "sign_in": return card.said.isEmpty ? nil : (card.said, true)
@@ -475,14 +500,12 @@ struct McpAddCard: View {
             .padding(.top, Tokens.Space.xs)
         case "sign_in":
             Flow {
-                Button("Sign in") { signIn() }.buttonStyle(CardButtonStyle(primary: true))
+                signInButton
                 Button("Later") { answer("later") }.buttonStyle(CardButtonStyle())
             }
             .padding(.top, Tokens.Space.xs)
         case "later":
-            Button("Sign in") { signIn() }
-                .buttonStyle(CardButtonStyle(primary: true))
-                .padding(.top, Tokens.Space.xs)
+            signInButton.padding(.top, Tokens.Space.xs)
         default:
             EmptyView()
         }
@@ -494,9 +517,14 @@ struct McpAddCard: View {
         session.send(session.model.answerMcpAdd(card.call, answer, secrets: secrets))
     }
 
-    private func signIn() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        session.send(session.model.signInMcp(card.server))
+    /// Sign in, which opens the server's sign-in page over the app, as on a sign-in card.
+    private var signInButton: some View {
+        Button(card.signing ? "Signing in…" : "Sign in") {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            session.signIn(card.server)
+        }
+        .buttonStyle(CardButtonStyle(primary: true))
+        .disabled(card.signing)
     }
 }
 

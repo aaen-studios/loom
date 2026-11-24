@@ -90,6 +90,10 @@ final class Session {
                 model.take(f)
             }
         }
+        if let s = model.toSignIn {
+            model.toSignIn = nil
+            openSignIn(s.url, server: s.server)
+        }
         #if DEBUG
         fromLaunch()
         #endif
@@ -124,6 +128,34 @@ final class Session {
         }
     }
     #endif
+
+    // MARK: Signing in to MCP servers
+
+    @ObservationIgnored private let signInPage = SignInPage()
+
+    /// Signs in to the person's MCP server `server` from its card (PLAN.md, "Signing in
+    /// to MCP servers"): the instance gives its sign-in page, which opens over the app,
+    /// and what the browser brings back to the `loom:` redirect goes to the instance,
+    /// which swaps it for tokens.
+    func signIn(_ server: String) {
+        send(model.signIn(server, redirect: SignInPage.redirect))
+    }
+
+    private func openSignIn(_ url: URL, server: String) {
+        signInPage.open(url, server: server) { [weak self] server, ended in
+            guard let self else { return }
+            switch ended {
+            case .back(let query): self.send(self.model.signedIn(server, query: query))
+            case .failed(let why): self.model.signInEnded(server, error: why)
+            }
+        }
+    }
+
+    /// A `loom:` address the system opened the app with: the end of a sign-in, when one
+    /// is going.
+    func opened(_ url: URL) {
+        signInPage.took(url)
+    }
 
     // MARK: The system
 
