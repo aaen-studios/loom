@@ -17,18 +17,48 @@ module server.chrome
 // server with no desktop may lack (NSS, GTK's ATK, ALSA and the like); those
 // come only as packages, so `libraries_missing` names them and the person runs
 // `sudo loom install`.
+//
+// A Mac with neither Chrome nor Edge fetches the headless shell too, on the
+// agents' first browser call, as Code Mode's Deno is fetched: one pinned build,
+// checked against its SHA-256, into the same browser/ folder. A new pin comes
+// with a release of loom.
+import std.bytes
 import std.env
 import std.fs
+import std.hash.{sha256}
 import std.http.{Header, get}
 import std.json.{Json, parse}
 import std.process.{Command, which}
-import std.thread.{sleep}
-import std.zip.{Zip}
+import std.http.server.{Server}
+import std.crypto.{random_bytes}
+import std.thread.{Task, sleep}
+import std.zip.{Writer, Zip}
 import shared.obj.{at, str_at}
 import server.store.{now}
 
 /// Where the Chrome for Testing builds are listed, with where each downloads from.
 pub const INDEX: str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+/// The headless shell a Mac without Chrome or Edge fetches: Chrome for Testing's
+/// Stable when it was pinned.
+pub const MAC_VERSION: str = "158.0.8127.88"
+const MAC_ARM64_SHA256: str = "69320f6869c4defbbdac8b8fa83aef65dc63975e83bbd06899b75dbea5c464b3"
+
+/// A build of the headless shell to fetch: its version, Chrome for Testing's
+/// name for the computer, where it downloads from, and the SHA-256 it must have.
+pub struct Pin {
+    pub version: String
+    pub build: String
+    pub url: String
+    pub sha256: String
+}
+
+/// The pinned build for a Mac of `arch`, or none where there isn't one. loom's
+/// Mac app is built for Apple silicon only.
+pub fn mac_pin(arch: String) -> Pin? {
+    if arch != "aarch64" { return none }
+    let build = String("mac-arm64")
+    return some(Pin { version: String(MAC_VERSION), build: build.copy(), url: "https://storage.googleapis.com/chrome-for-testing-public/{MAC_VERSION}/{build}/chrome-headless-shell-{build}.zip", sha256: String(MAC_ARM64_SHA256) })
+}
 /// How old a fetched browser may get, in ms, before it's fetched again.
 const REFRESH_MS: i64 = 28 * 24 * 3600 * 1000
 // What one download may take, and be.
@@ -148,24 +178,87 @@ fn fetch_locked(root: String, p: String) -> String ! Error {
     let dir = "{root}/chrome-{version}"
     if not fs.is_file(program_in(dir.copy(), p.copy())) {
         eprintln("loom: fetching Chrome for Testing's headless shell {version} for the agents' browser")
-        var req = get(url, List<Header>(), u32.wrap(DOWNLOAD_MS), BROWSER_MOST)
-        let got = try req.wait()
-        if got.status != 200 { fail "Chrome's headless shell didn't download ({got.status})" }
-        let part = "{root}/part"
-        if fs.exists(part.copy()) { try fs.remove_dir_all(part.copy()) }
-        let zip = try Zip.open(got.body)
-        try zip.extract(part.copy())
-        try fs.rename(part, dir.copy())
+        let body = try download(url)
+        try unpack(root.copy(), body, dir.copy(), p.copy())
     }
     try fs.write_text("{dir}/checked", "{now()}")
-    // Builds before this one aren't used again.
-    for n in try fs.list(root.copy()) {
+    remove_others(root, dir.copy())
+    return program_in(dir, p)
+}
+
+/// Where the program of the pinned build `pin` is, in `data`, once it's fetched.
+pub fn pinned_program(data: String, pin: Pin) -> String {
+    return program_in("{home(data)}/chrome-{pin.version}", pin.build)
+}
+
+/// The pinned build `pin` in `data`, fetched now unless it's there already:
+/// downloaded, refused unless its SHA-256 is the pin's, and unpacked into
+/// browser/chrome-VERSION, with builds before it removed. Another one fetching
+/// waits for this one.
+pub fn fetch_pinned(data: String, pin: Pin) -> String ! Error {
+    let root = home(data.copy())
+    let dir = "{root}/chrome-{pin.version}"
+    let program = pinned_program(data, pin.copy())
+    if fs.is_file(program.copy()) { return program }
+    try fs.make_dir_all(root.copy())
+    let lock = try locked("{root}/fetching.lock")
+    var failed = String()
+    // Another thread may have fetched it while this one waited for the lock.
+    if not fs.is_file(program.copy()) {
+        eprintln("loom: fetching Chrome's headless shell {pin.version} for the agents' browser")
+        match download(pin.url.copy()) {
+            ok(body) => {
+                let digest = bytes.hex(sha256(body.copy()))
+                if digest != pin.sha256.to_lower_root() {
+                    failed = "the download isn't the headless shell loom pins: its SHA-256 is {digest}"
+                } else if let err(e) = unpack(root.copy(), body, dir.copy(), pin.build.copy()) {
+                    failed = "{e}"
+                }
+            },
+            err(e) => failed = "{e}",
+        }
+    }
+    if failed.len() == 0 { remove_others(root, dir) }
+    if let err(e) = lock.release() { eprintln("loom: {e}") }
+    if failed.len() > 0 { fail "{failed}" }
+    return program
+}
+
+// The headless shell's archive at `url`.
+fn download(url: String) -> List<u8> ! Error {
+    var req = get(url, [Header { name: String("User-Agent"), value: String("loom") }], u32.wrap(DOWNLOAD_MS), BROWSER_MOST)
+    let got = try req.wait()
+    if got.status != 200 { fail "Chrome's headless shell didn't download ({got.status})" }
+    return got.body.copy()
+}
+
+// Unpacks the archive `body` into `dir`, through a folder beside it, so a
+// half-unpacked build is never taken for one.
+fn unpack(root: String, body: own List<u8>, dir: String, build: String) ! Error {
+    let part = "{root}/part"
+    if fs.exists(part.copy()) { try fs.remove_dir_all(part.copy()) }
+    let zip = try Zip.open(body)
+    try zip.extract(part.copy())
+    if not fs.is_file(program_in(part.copy(), build.copy())) {
+        try fs.remove_dir_all(part)
+        fail "the archive has no chrome-headless-shell for {build}"
+    }
+    if fs.exists(dir.copy()) { try fs.remove_dir_all(dir.copy()) }
+    try fs.rename(part, dir)
+}
+
+// Builds in `root` other than `dir` aren't used again.
+fn remove_others(root: String, dir: String) {
+    let names = match fs.list(root.copy()) {
+        ok(n) => n,
+        err(_) => return,
+    }
+    for n in names {
         let old = "{root}/{n}"
         if n.starts_with("chrome-") and old != dir and fs.is_dir(old.copy()) {
             if let err(e) = fs.remove_dir_all(old) { eprintln("loom: {e}") }
         }
     }
-    return program_in(dir, p)
 }
 
 /// Fetches the fonts for `gaps` into `data`, and writes the fontconfig file that
@@ -249,6 +342,63 @@ fn chrome_for_testing_has_a_shell_for_linux_servers() {
     let (version, url) = pick(String(index), String("linux64"))!
     assert(version == "158.0.8127.36" and url == "https://x/chrome-headless-shell-linux64.zip")
     assert(match pick(String(index), String("mac-arm64")) { ok(_) => false, err(_) => true })
+}
+
+@test
+fn a_mac_has_a_pinned_shell() {
+    let pin = mac_pin(String("aarch64"))!
+    assert(pin.build == "mac-arm64" and pin.version == MAC_VERSION and pin.sha256.len() == 64)
+    assert(pin.url == "https://storage.googleapis.com/chrome-for-testing-public/{MAC_VERSION}/mac-arm64/chrome-headless-shell-mac-arm64.zip")
+    assert(mac_pin(String("x86_64")) == none)
+}
+
+struct Serving {
+    server: Server
+    dir: String
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var s = self
+        s.server.serve(s.dir.copy())
+    }
+}
+
+// The pinned fetch, from a server on this computer: a download whose SHA-256
+// isn't the pin's is refused and leaves nothing, and the one that is is
+// unpacked, with its program runnable, and is found there after without a
+// download, the build before it removed.
+@test
+fn a_pinned_shell_is_checked_before_it_is_unpacked() {
+    let root = "{fs.temp_dir()!}/loom-chrome-{bytes.hex(random_bytes(8))}"
+    let served = "{root}/served"
+    let data = "{root}/data"
+    fs.make_dir_all(served.copy())!
+    var w = Writer.new()
+    w.add(String("chrome-headless-shell-mac-arm64/chrome-headless-shell"), "#!/bin/sh\n".to_bytes(), mode: 0o755)
+    w.add(String("chrome-headless-shell-mac-arm64/libEGL.dylib"), "lib".to_bytes())
+    let good = w.finish()
+    fs.write("{served}/good.zip", good.copy())!
+    fs.write("{served}/bad.zip", "not the build".to_bytes())!
+    var http = Server.listen(0)!
+    http.log = false
+    let base = http.url()[..http.url().len() - 1].copy()
+    _ = unsafe { Thread.spawn(Serving { server: http, dir: served.copy() }) }
+    let digest = bytes.hex(sha256(good))
+    fs.make_dir_all("{data}/browser/chrome-1.0")!
+    let refused = match fetch_pinned(data.copy(), Pin { version: String("2.0"), build: String("mac-arm64"), url: "{base}/bad.zip", sha256: digest.copy() }) {
+        ok(_) => String(),
+        err(e) => "{e}",
+    }
+    assert(refused.contains("SHA-256"))
+    assert(not fs.exists("{data}/browser/chrome-2.0") and not fs.exists("{data}/browser/part") and fs.is_dir("{data}/browser/chrome-1.0"))
+    let program = fetch_pinned(data.copy(), Pin { version: String("2.0"), build: String("mac-arm64"), url: "{base}/good.zip", sha256: digest.to_upper_root() })!
+    assert(program == "{data}/browser/chrome-2.0/chrome-headless-shell-mac-arm64/chrome-headless-shell" and fs.is_file(program.copy()))
+    if env.os() != "windows" { assert(fs.metadata(program.copy())!.mode & 0o111 != 0) }
+    assert(not fs.exists("{data}/browser/chrome-1.0"))
+    // Found there, without the server.
+    assert(fetch_pinned(data.copy(), Pin { version: String("2.0"), build: String("mac-arm64"), url: "{base}/gone.zip", sha256: digest })! == program)
+    fs.remove_dir_all(root)!
 }
 
 @test

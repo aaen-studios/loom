@@ -1193,6 +1193,29 @@ fn an_mcp_server_is_checked_once_for_both_ways_in() {
     }
 }
 
+// Whether `server` is the MCP server the MCP servers page's Add a browser set
+// up, as it set it up: named browser, running `npx -y @playwright/mcp@latest`,
+// with no settings.
+pub fn added_browser(server: Json) -> bool {
+    if str_at(server.copy(), "name") != some(String("browser")) or str_at(server.copy(), "url") != none { return false }
+    if str_at(server.copy(), "command") != some(String("npx")) { return false }
+    if at(server.copy(), "args") != Json.Array([Json.Str(String("-y")), Json.Str(String("@playwright/mcp@latest"))]) { return false }
+    return match at(server, "env") {
+        Json.Null => true,
+        Json.Object(m) => m.len() == 0,
+        _ => false,
+    }
+}
+
+@test
+fn only_the_browser_add_a_browser_set_up_goes() {
+    assert(added_browser(parse(String(#"{"name":"browser","command":"npx","args":["-y","@playwright/mcp@latest"],"env":{}}"#))!))
+    assert(added_browser(parse(String(#"{"name":"browser","command":"npx","args":["-y","@playwright/mcp@latest"]}"#))!))
+    for kept in [#"{"name":"browser","command":"npx","args":["-y","@playwright/mcp@latest","--headless"],"env":{}}"#, #"{"name":"browser","command":"npx","args":["-y","@playwright/mcp@0.0.40"],"env":{}}"#, #"{"name":"browser","command":"npx","args":["-y","@playwright/mcp@latest"],"env":{"DEBUG":"1"}}"#, #"{"name":"playwright","command":"npx","args":["-y","@playwright/mcp@latest"],"env":{}}"#, #"{"name":"browser","url":"https://browser.example/mcp","headers":{}}"#] {
+        assert(not added_browser(parse(String(kept))!))
+    }
+}
+
 // A list of names, keeping only the text ones.
 fn names_of(j: Json) -> Json {
     var out = List<Json>()
@@ -1428,6 +1451,7 @@ impl Instance {
         // end with it: the desktop app's on Linux and macOS (server/browser.calx).
         browser.stop_leftovers("{i.data}/browsers")
         try i.give_imported_servers()
+        try i.drop_mcp_browser()
         i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -2148,7 +2172,12 @@ impl Instance {
                         // Where the page is now, for the rules on sites.
                         let site = str_at(done.copy(), "loom_site")
                         let page_url = str_at(done.copy(), "loom_url") ?? String()
-                        let given = without(without(done, "loom_site"), "loom_url")
+                        // A browser the instance fetched for itself to start this one.
+                        let fetched = str_at(done.copy(), "loom_fetched") ?? String()
+                        if fetched.len() > 0 {
+                            if let slash = key.find("/") { i.log(key[..slash].copy(), key[slash + 1..].copy(), "browser", "Fetched a browser for this computer, which had none: {fetched}", String()) }
+                        }
+                        let given = without(without(without(done, "loom_site"), "loom_url"), "loom_fetched")
                         if let b = mut i.browsers.find(key.copy()) {
                             b.busy -= 1
                             b.used = now()
@@ -3514,6 +3543,35 @@ impl Instance {
             }
         }
         try i.store.set_meta(String("imported_servers_given"), String("1"))
+    }
+
+    // The MCP server the MCP servers page's Add a browser set up, Microsoft's
+    // Playwright MCP, goes once, for each person who has it as that button
+    // added it, now that every agent has loom's own browser (PLAN.md, "The
+    // agent's browser"); and with it, each agent's pick of it. One changed in
+    // any way is left as it is.
+    fn drop_mcp_browser(i: Instance) ! Error {
+        if try i.store.meta(String("mcp_browser_dropped")) != none { return }
+        for u in try i.store.users() {
+            let had = try i.store.mcp_server(u.id.copy(), String("browser")) else continue
+            if not added_browser(had) { continue }
+            _ = try i.store.delete_mcp_server(u.id.copy(), String("browser"))
+            for a in try i.store.agents(u.id.copy()) {
+                let picked = at(a.copy(), "mcp")
+                if let Json.Array(names) = picked {
+                    if not names.contains(Json.Str(String("browser"))) { continue }
+                    var kept = List<Json>()
+                    for n in names {
+                        if n != Json.Str(String("browser")) { kept.push(n.copy()) }
+                    }
+                    let given = merge(a, Obj.new().j("mcp", Json.Array(kept)).done())
+                    try i.store.put_agent_json(u.id.copy(), given.copy())
+                    try i.event(u.id.copy(), "agent.updated", Obj.new().j("agent", given).done())
+                }
+            }
+            i.log(u.id.copy(), String(), "agent", String("Removed the MCP server browser, which Add a browser set up: your agents use loom's own browser"), String())
+        }
+        try i.store.set_meta(String("mcp_browser_dropped"), String("1"))
     }
 
     // The person's MCP servers the agent has, as ACP's session/new takes them,

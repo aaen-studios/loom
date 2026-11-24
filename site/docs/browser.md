@@ -1,6 +1,6 @@
 # The agent's browser
 
-Each agent has a browser of its own, which loom starts the first time the agent uses it. On a server it's Chromium. On a PC it's the Chrome or Edge already there. To use another, set `LOOM_BROWSER` to its path before loom starts. The browser keeps its own profile for each agent, so logins last between runs, and it stops after ten idle minutes.
+Each agent has a browser of its own, which loom starts the first time the agent uses it. You don't install anything for it. On Windows it's the Chrome or Edge already there, and every Windows PC has Edge. On a Mac it's Chrome or Edge if you have one, and otherwise loom downloads a headless Chrome of its own the first time an agent browses, about 100 MB, which takes a moment once. On a server it's Chromium, which `loom install` sets up. To use another browser, set `LOOM_BROWSER` to its path before loom starts. The browser keeps its own profile for each agent, so logins last between runs, and it stops after five idle minutes.
 
 The agent reads a page as its outline and clicks, types, scrolls and goes back on it, as you would.
 
