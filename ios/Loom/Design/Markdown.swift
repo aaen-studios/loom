@@ -148,7 +148,7 @@ struct MarkdownView: View {
                 }
                 let ink = P.mention(agent.color)
                 if first {
-                    out = Text("\(out)\(Text(Image(uiImage: MentionGlyph.thread(agent.outline)).renderingMode(.template)).foregroundStyle(ink).baselineOffset(-2))\u{00A0}")
+                    out = Text("\(out)\(Text(Image(uiImage: MentionGlyph.thread(agent.outline)).renderingMode(.template)).foregroundStyle(ink).baselineOffset(-1))\u{00A0}")
                 }
                 out = Text("\(out)\(Text(verbatim: name).foregroundStyle(ink).fontWeight(.medium))")
                 continue
