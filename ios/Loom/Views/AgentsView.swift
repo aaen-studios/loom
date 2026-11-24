@@ -64,6 +64,12 @@ struct AgentsView: View {
             Warmup(agent: model.synced && path.isEmpty ? model.agents.first?.id : nil)
         }
         .onAppear(perform: openFromLaunch)
+        // A tap on an agent a message mentions opens its chat, in place of this one.
+        .onChange(of: model.openAgent) { _, id in
+            guard let id else { return }
+            model.openAgent = nil
+            path = [id]
+        }
     }
 
     /// `-open <agent>` and `-settings` at launch open that screen, for screenshots of each
