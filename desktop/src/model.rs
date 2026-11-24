@@ -752,25 +752,197 @@ pub fn tokens_text(n: i64) -> String {
 }
 
 /// One of the person's skills.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
 }
 
-/// The composer's text with a skill picked from the + menu: the message
-/// starts by asking for it, before what was written already.
-pub fn with_skill(name: &str, text: &str) -> String {
-    let ask = format!("Use the {name} skill.");
-    let rest = text.trim_start();
-    if rest.starts_with(&ask) {
-        return text.to_string();
+/// A skill picked from the + menu, as the composer holds it: its link and its words
+/// (PLAN.md, "The composer's + menu").
+pub fn skill_mention(name: &str) -> (String, String) {
+    (format!("loom:skill/{name}"), name.to_string())
+}
+
+/// A file sent or received lately in one of the person's chats (`files.recent`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecentFile {
+    pub file: FileRef,
+    pub at: i64,
+}
+
+/// What a row of the + menu opens beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlusSub {
+    Recent,
+    Skills,
+    Routines,
+}
+
+/// One row of the composer's + menu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlusRow {
+    Attach,
+    PasteImage,
+    /// Opens a list beside the menu.
+    Open(PlusSub),
+    File(RecentFile),
+    Skill(Skill),
+    Routine(Routine),
+    /// The end of a list beside the menu: its settings page.
+    Manage(PlusSub),
+}
+
+impl PlusRow {
+    /// The list it opens beside the menu, for a row that opens one.
+    pub fn opens(&self) -> Option<PlusSub> {
+        match self {
+            PlusRow::Open(s) => Some(*s),
+            _ => None,
+        }
     }
-    if rest.is_empty() {
-        format!("{ask} ")
-    } else {
-        format!("{ask} {rest}")
+}
+
+/// Whether `name` (or `also`) has `q` in it, and whether it starts with it.
+fn plus_match(q: &str, name: &str, also: &str) -> Option<bool> {
+    let name = name.to_lowercase();
+    if name.contains(q) {
+        return Some(name.starts_with(q));
+    }
+    also.to_lowercase().contains(q).then_some(false)
+}
+
+/// Those of `rows` that match `q`, by `name_of`, those whose names start with it first.
+fn plus_found<T: Clone>(
+    q: &str,
+    rows: &[T],
+    name_of: impl Fn(&T) -> (&str, &str),
+    row: impl Fn(T) -> PlusRow,
+) -> Vec<PlusRow> {
+    let mut found: Vec<(bool, &T)> = rows
+        .iter()
+        .filter_map(|r| {
+            let (name, also) = name_of(r);
+            plus_match(q, name, also).map(|first| (!first, r))
+        })
+        .collect();
+    found.sort_by_key(|(later, _)| *later);
+    found.into_iter().map(|(_, r)| row(r.clone())).collect()
+}
+
+/// A routine's own agent's first: the routines the + menu lists for `agent`.
+fn routines_for(routines: &[Routine], agent: &str) -> Vec<Routine> {
+    let mut out: Vec<Routine> = routines.to_vec();
+    out.sort_by_key(|r| r.agent != agent);
+    out
+}
+
+impl Model {
+    /// The + menu's groups, in order: what adds to the message, and what it does. With
+    /// something typed in its search, every group's rows that match it instead, the
+    /// lists beside the menu among them. `paste` is whether the clipboard holds a picture.
+    pub fn plus_groups(&self, query: &str, paste: bool) -> Vec<Vec<PlusRow>> {
+        let q = query.trim().to_lowercase();
+        let agent = self.selected.clone().unwrap_or_default();
+        if q.is_empty() {
+            let mut add = vec![PlusRow::Attach];
+            if paste {
+                add.push(PlusRow::PasteImage);
+            }
+            add.push(PlusRow::Open(PlusSub::Recent));
+            return vec![
+                add,
+                vec![
+                    PlusRow::Open(PlusSub::Skills),
+                    PlusRow::Open(PlusSub::Routines),
+                ],
+            ];
+        }
+        let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
+            .into_iter()
+            .chain(paste.then_some((PlusRow::PasteImage, "Paste image")))
+            .filter(|(_, title)| title.to_lowercase().contains(&q))
+            .map(|(r, _)| r)
+            .collect();
+        add.extend(plus_found(
+            &q,
+            &self.recent_files,
+            |f| (f.file.name.as_str(), ""),
+            PlusRow::File,
+        ));
+        let mut act = plus_found(
+            &q,
+            &self.skills,
+            |k| (k.name.as_str(), k.description.as_str()),
+            PlusRow::Skill,
+        );
+        act.extend(plus_found(
+            &q,
+            &routines_for(&self.routines, &agent),
+            |r| (r.name.as_str(), ""),
+            PlusRow::Routine,
+        ));
+        vec![add, act]
+            .into_iter()
+            .filter(|g| !g.is_empty())
+            .collect()
+    }
+
+    /// The list a row of the + menu opens beside it, ending in its settings page. Empty
+    /// but for that, the menu says there's nothing yet.
+    pub fn plus_sub(&self, which: PlusSub) -> Vec<PlusRow> {
+        let agent = self.selected.clone().unwrap_or_default();
+        let mut out: Vec<PlusRow> = match which {
+            PlusSub::Recent => self
+                .recent_files
+                .iter()
+                .cloned()
+                .map(PlusRow::File)
+                .collect(),
+            PlusSub::Skills => self.skills.iter().cloned().map(PlusRow::Skill).collect(),
+            PlusSub::Routines => routines_for(&self.routines, &agent)
+                .into_iter()
+                .map(PlusRow::Routine)
+                .collect(),
+        };
+        if which != PlusSub::Recent {
+            out.push(PlusRow::Manage(which));
+        }
+        out
+    }
+
+    /// Asks for what the + menu lists: the person's skills, their routines, and the files
+    /// sent lately in their chats.
+    pub fn load_plus(&mut self) -> Vec<Value> {
+        let id = self.id("app.recent_files");
+        vec![
+            self.load_skills(),
+            self.load_routines(),
+            json!({"t": "cmd", "id": id, "name": "files.recent", "args": {"limit": 50}}),
+        ]
+    }
+
+    /// A file from the + menu's recent files, for the next message: it's on the
+    /// instance already, so nothing goes up. Gives whether it was added, which it isn't
+    /// when it's waiting already.
+    pub fn attach_sent(&mut self, f: &FileRef) -> bool {
+        if self
+            .attachments
+            .iter()
+            .any(|a| a.file.as_ref().is_some_and(|x| x.file == f.file))
+        {
+            return false;
+        }
+        let id = self.id("app.sent");
+        self.attachments.push(Attachment {
+            id,
+            name: f.name.clone(),
+            path: String::new(),
+            file: Some(f.clone()),
+            error: None,
+        });
+        true
     }
 }
 
@@ -874,7 +1046,7 @@ pub fn asking(asks: &[String]) -> String {
 }
 
 /// One of the person's routines: a prompt an agent is sent on a schedule.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Routine {
     pub id: String,
     pub name: String,
@@ -2082,7 +2254,8 @@ pub struct Inline<'a> {
 /// - an agent it mentions as its thread and its name in its colour, a little
 ///   weathered;
 /// - a file it mentions, or one sent with it, with a tiny picture of it or its type's
-///   icon before its name.
+///   icon before its name;
+/// - a skill picked from the + menu as its name, a little weathered.
 ///
 /// Code stays as it is.
 pub fn with_link_icons(text: &str, inline: &Inline) -> String {
@@ -2158,6 +2331,9 @@ fn line_links(line: &str, inline: &Inline) -> String {
                         }
                         None => out.push_str(&format!("@{name}")),
                     }
+                } else if url.starts_with("loom:skill/") {
+                    let name = words.trim().replace(['<', '>'], "");
+                    out.push_str(&format!("<span style=\"font-weight: 500\">{name}</span>"));
                 } else if url.starts_with("loom:file/") {
                     out.push_str(&img(&(inline.file_icon)(words), 14, 14));
                     out.push_str(whole);
@@ -3495,6 +3671,9 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The files sent or received lately in the person's chats, newest first, for the
+    /// composer's + menu.
+    pub recent_files: Vec<RecentFile>,
     /// The open routine's runs, newest first, and which routine they're for.
     pub routine_runs: Vec<RoutineRun>,
     routine_runs_for: Option<String>,
@@ -5528,6 +5707,19 @@ impl Model {
                 .map(|rs| rs.iter().map(Routine::of).collect())
                 .unwrap_or_default();
             self.dirty.insert(List::Messages);
+        } else if id.starts_with("app.recent_files") {
+            self.recent_files = f
+                .pointer("/value/files")
+                .and_then(Value::as_array)
+                .map(|fs| {
+                    fs.iter()
+                        .map(|v| RecentFile {
+                            file: FileRef::of(v),
+                            at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
         } else if id.starts_with("app.runs_of_routine") {
             self.routine_runs = f
                 .pointer("/value/runs")
@@ -7791,6 +7983,11 @@ mod tests {
         );
         // An agent that's gone is its name.
         assert_eq!(with_link_icons("[@Old](loom:agent/zz)", &inline), "@Old");
+        // A skill from the + menu is its name.
+        assert_eq!(
+            with_link_icons("[review](loom:skill/review) this", &inline),
+            "<span style=\"font-weight: 500\">review</span> this"
+        );
         assert_eq!(
             with_link_icons("[hours.md](loom:file/a1/notes%2Fhours.md)", &inline),
             "<img src=\"/icons/hours.md\" width=\"14\" height=\"14\" /> \
@@ -10093,16 +10290,96 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_from_the_plus_menu_starts_the_message() {
-        assert_eq!(with_skill("review", ""), "Use the review skill. ");
+    fn the_plus_menu_has_its_groups_and_search_finds_every_row() {
+        let mut m = Model::new();
+        m.selected = Some("a1".into());
+        let skill = |name: &str, about: &str| Skill {
+            name: name.into(),
+            description: about.into(),
+            body: String::new(),
+        };
+        m.skills = vec![
+            skill("release-notes", "When a version ships"),
+            skill("review", "Before a pull request merges"),
+        ];
+        let routine = |id: &str, name: &str, agent: &str| Routine {
+            id: id.into(),
+            name: name.into(),
+            agent: agent.into(),
+            ..Routine::default()
+        };
+        m.routines = vec![
+            routine("r1", "Morning news", "a2"),
+            routine("r2", "Review inbox", "a1"),
+        ];
+        let file = |name: &str| RecentFile {
+            file: FileRef {
+                file: format!("sha-{name}"),
+                name: name.into(),
+                mime: "text/plain".into(),
+                size: 3,
+            },
+            at: 1,
+        };
+        m.recent_files = vec![file("notes.md"), file("preview.png")];
+        // Shut, it's two groups, Paste image only when there's a picture to paste.
         assert_eq!(
-            with_skill("review", "  the login page"),
-            "Use the review skill. the login page"
+            m.plus_groups("", false),
+            vec![
+                vec![PlusRow::Attach, PlusRow::Open(PlusSub::Recent)],
+                vec![
+                    PlusRow::Open(PlusSub::Skills),
+                    PlusRow::Open(PlusSub::Routines)
+                ],
+            ]
         );
+        assert!(m.plus_groups("", true)[0].contains(&PlusRow::PasteImage));
+        // Typed, each group's rows that match: names that start with it first, then a
+        // skill's when-to-use, and this agent's routines before another's.
+        let found = m.plus_groups("rev", false);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], vec![PlusRow::File(file("preview.png"))]);
         assert_eq!(
-            with_skill("review", "Use the review skill. again"),
-            "Use the review skill. again"
+            found[1],
+            vec![
+                PlusRow::Skill(m.skills[1].clone()),
+                PlusRow::Routine(m.routines[1].clone())
+            ]
         );
+        let by_use = m.plus_groups("ships", false);
+        assert_eq!(by_use, vec![vec![PlusRow::Skill(m.skills[0].clone())]]);
+        assert_eq!(m.plus_groups("attach", false), vec![vec![PlusRow::Attach]]);
+        assert!(m.plus_groups("nothing like it", true).is_empty());
+        // The lists beside it end in their settings page; recent files has none.
+        let routines = m.plus_sub(PlusSub::Routines);
+        assert_eq!(routines[0], PlusRow::Routine(m.routines[1].clone()));
+        assert_eq!(routines.last(), Some(&PlusRow::Manage(PlusSub::Routines)));
+        assert_eq!(m.plus_sub(PlusSub::Recent).len(), 2);
+        m.skills.clear();
+        assert_eq!(
+            m.plus_sub(PlusSub::Skills),
+            vec![PlusRow::Manage(PlusSub::Skills)]
+        );
+        // Many, they're all there to scroll and find.
+        m.skills = (0..40).map(|n| skill(&format!("skill-{n}"), "x")).collect();
+        assert_eq!(m.plus_sub(PlusSub::Skills).len(), 41);
+        assert_eq!(m.plus_groups("skill-39", false)[0].len(), 1);
+    }
+
+    #[test]
+    fn a_recent_file_goes_with_the_message_without_going_up_again() {
+        let mut m = Model::new();
+        let f = FileRef {
+            file: "abc".into(),
+            name: "notes.md".into(),
+            mime: "text/markdown".into(),
+            size: 9,
+        };
+        assert!(m.attach_sent(&f));
+        assert!(!m.attach_sent(&f));
+        assert_eq!(m.attachments.len(), 1);
+        assert!(!m.uploading());
+        assert_eq!(skill_mention("review").0, "loom:skill/review");
     }
 
     #[test]

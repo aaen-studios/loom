@@ -152,6 +152,10 @@ struct MarkdownView: View {
                 }
                 out = Text("\(out)\(Text(verbatim: name).foregroundStyle(ink).fontWeight(.medium))")
                 continue
+            case .skill:
+                // A skill from the + menu: its name, a little weathered, not a link.
+                out = Text("\(out)\(Text(verbatim: String(piece.characters)).fontWeight(.medium))")
+                continue
             case .file(_, let path) where first:
                 out = Text("\(out)\(fileIcon(path))\u{00A0}")
             case .attached where first:

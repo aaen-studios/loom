@@ -159,7 +159,7 @@ struct ChatView: View {
         case .attached(let sha):
             session.send(model.openAttached(sha))
             return .handled
-        case .agent:
+        case .agent, .skill:
             return .handled
         case .page, .other:
             return .systemAction

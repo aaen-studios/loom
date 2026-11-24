@@ -153,6 +153,15 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 later(0.1) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(found)]])
                 }
+            // What the composer's + menu lists.
+            case "skill.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["skills": .array(Sample.skills)]])
+            case "routine.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(Sample.routines)]])
+            case "files.recent":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(Sample.recent)]])
+            case "routine.run":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
             case "agent.file":
                 let path = f["args"]["path"].text
                 let name = (path as NSString).lastPathComponent
@@ -277,6 +286,25 @@ enum Sample {
         ["path": "notes/watering.md", "name": "watering.md", "where": "notes"],
         ["path": "notes/harvest 2026.md", "name": "harvest 2026.md", "where": "notes"],
         ["path": "/Users/sample/Shared/balcony plan.png", "name": "balcony plan.png", "where": "shared"],
+    ]
+
+    /// The person's skills, routines and the files sent lately, for the + menu.
+    static let skills: [JSON] = [
+        ["name": "release-notes", "description": "When a version ships and its notes need writing", "at": 1795187131000],
+        ["name": "review", "description": "Before a pull request merges", "at": 1795187131000],
+        ["name": "watering", "description": "When the balcony plants need a schedule", "at": 1795187131000],
+    ]
+
+    static let routines: [JSON] = [
+        ["id": "rt_1", "name": "Morning news", "agent": "a_3", "prompt": "", "schedule": ["daily": "08:00"], "on": true,
+         "last": ["status": "done", "at": 1795165200000]],
+        ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
+         "last": ["status": "failed", "at": 1795100000000]],
+    ]
+
+    static let recent: [JSON] = [
+        ["file": "sample-leaf", "name": "leaf.png", "mime": "image/png", "size": 48_213, "at": 1795180000000, "conversation": "c_4"],
+        ["file": "sample-notes", "name": "release notes.md", "mime": "text/markdown", "size": 2_400, "at": 1795170000000, "conversation": "c_1"],
     ]
 
     static let conversations: [JSON] = [
