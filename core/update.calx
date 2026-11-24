@@ -20,7 +20,7 @@ import std.random.{Random}
 import std.time.{Instant}
 import shared.files.{safe_name}
 import shared.obj.{Obj, at, str_at}
-import shared.release.{RELEASE_KEY, check_manifest, newer}
+import shared.release.{RELEASE_KEY, check_manifest, newer, signature_url}
 
 const FIRST_CHECK_NS: u64 = 10000000000          // 10 s after the start
 const EVERY_NS: u64 = 600000000000               // then every 10 minutes
@@ -189,7 +189,8 @@ impl Updater {
                 self.fetched += 1
                 self.body = mres.body.copy()
                 self.body_etag = etag
-                self.step = Step.Signature(self.woken(get("{self.url}.sig", List<Header>(), 60000, 4096)))
+                // From the release the manifest names, not through the latest link again.
+                self.step = Step.Signature(self.woken(get(signature_url(self.url.copy(), self.body.copy()), List<Header>(), 60000, 4096)))
                 return none
             },
             Step.Signature(s) => {
