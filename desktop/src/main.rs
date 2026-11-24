@@ -6,6 +6,7 @@
 //! (PLAN.md, "Architecture").
 
 mod app;
+mod autoscroll;
 mod core;
 #[cfg(target_os = "macos")]
 mod mac;
