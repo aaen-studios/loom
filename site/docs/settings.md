@@ -3,7 +3,7 @@
 The gear at the bottom of the sidebar opens Settings, as a popup over the chat. Its pages are down the left, under three headings:
 
 - **You**: About you, Appearance, Chat, and App & notifications.
-- **Agents**: Defaults, Rules, Brains, Skills, Proposals, MCP servers and Plugins.
+- **Agents**: Defaults, Rules, Brains, Skills, Proposals, MCP servers, Secrets and Plugins.
 - **Work**: Routines and Tasks.
 
 Import sits under them. Click outside the popup, or press Esc, to close it.

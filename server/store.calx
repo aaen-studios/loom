@@ -516,8 +516,8 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"), [t(key), t(value)])
     }
 
-    pub fn delete_meta(self, key: str) ! Error {
-        _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(String(key))])
+    pub fn delete_meta(self, key: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(key)])
     }
 
     // Work that lands together or not at all: a savepoint, in a transaction of its own

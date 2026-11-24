@@ -184,21 +184,26 @@ impl Task for Worker {
                         },
                     }
                     // The page's host and address as the call left it, for the person's
-                    // rules on sites and to open it again after a close; the instance
-                    // takes them off before the agent gets the result.
-                    var site = String()
+                    // rules on sites and to open it again after a close, and whether it
+                    // wants a password or a code, for what the agent's told of secrets;
+                    // the instance takes them off before the agent gets the result. A
+                    // preview's page isn't the agent's, so it says no site.
+                    var head = Obj.new()
                     var url = String()
                     if op.name != "preview" and w.page != none {
+                        var site = String()
                         if let ok(u) = w.url() {
                             site = host_of(u.copy())
                             if kept_page(u.copy()) { w.was_on = u.copy() }
                             url = w.was_on.copy()
                         }
+                        let field = op.name != "screenshot" and w.wants_secret()
+                        head = head.s("loom_site", site).b("loom_field", field)
                     }
                     // And the browser the instance fetched for itself to start it, once, for the activity log.
                     let fetched = w.fetched.copy()
                     w.fetched = String()
-                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).s("loom_url", url).s("loom_fetched", fetched).done())))
+                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, head.s("loom_url", url).s("loom_fetched", fetched).done())))
                 },
                 some(In.Record(on)) => w.record(on),
                 some(In.Watch(on)) => {
@@ -817,6 +822,15 @@ impl Worker {
         return (what, bool_at(v, "secret") ?? false)
     }
 
+    // Whether the page shows a field for a password or a one-time code.
+    fn wants_secret(w: mut Worker) -> bool {
+        let r = match w.call("Runtime.evaluate", Obj.new().s("expression", String(WANTS_SECRET)).b("returnByValue", true).done()) {
+            ok(r) => r,
+            err(_) => return false,
+        }
+        return at(at(r, "result"), "value") == Json.Bool(true)
+    }
+
     // Starts the browser, and opens the DevTools connection to its page. Gives
     // the fonts it still lacks, on Linux before the agent's been told of them,
     // and none otherwise.
@@ -1226,28 +1240,39 @@ impl Worker {
             }
             return text(String("Typed."))
         }
-        // A secret, typed into a field without the agent seeing it. With
-        // `hosts`, only on a page of one of them; otherwise the result names
-        // the host it needs (`needs`), for the person's yes.
+        // A secret, typed into a field without the agent seeing it: one
+        // (`ref`, `name`, `value`), or several (`fills`, each of those), the
+        // last submitted with `submit`. With `hosts`, only on a page of one of
+        // them; otherwise the result names the host it needs (`needs`), for
+        // the person's yes. `said` says what went in, in place of the names,
+        // and `then` follows it.
         if name == "fill" {
-            let label = str_at(args.copy(), "name") ?? String()
-            let value = str_at(args.copy(), "value") ?? String()
             if let Json.Array(hosts) = at(args.copy(), "hosts") {
                 let here = try w.host()
                 if not hosts.contains(Json.Str(here.copy())) { return Obj.new().s("needs", here).done() }
             }
-            let id = try w.node(args.copy())
-            _ = try w.call("DOM.focus", Obj.new().i("backendNodeId", id).done())
-            let found = try w.call("DOM.resolveNode", Obj.new().i("backendNodeId", id).done())
-            _ = try w.call("Runtime.callFunctionOn", Obj.new().s("objectId", str_at(at(found, "object"), "objectId") ?? String()).s("functionDeclaration", String(SELECT_ALL)).done())
-            if not w.hidden.contains((value.copy(), label.copy())) { w.hidden.push((value.copy(), label.copy())) }
-            _ = try w.call("Input.insertText", Obj.new().s("text", value).done())
+            var fills = List<Json>()
+            if let Json.Array(many) = at(args.copy(), "fills") { fills = many.copy() } else { fills.push(args.copy()) }
+            var labels = List<String>()
+            for f in fills {
+                let label = str_at(f.copy(), "name") ?? String()
+                let value = str_at(f.copy(), "value") ?? String()
+                let id = try w.node(f.copy())
+                _ = try w.call("DOM.focus", Obj.new().i("backendNodeId", id).done())
+                let found = try w.call("DOM.resolveNode", Obj.new().i("backendNodeId", id).done())
+                _ = try w.call("Runtime.callFunctionOn", Obj.new().s("objectId", str_at(at(found, "object"), "objectId") ?? String()).s("functionDeclaration", String(SELECT_ALL)).done())
+                if not w.hidden.contains((value.copy(), label.copy())) { w.hidden.push((value.copy(), label.copy())) }
+                _ = try w.call("Input.insertText", Obj.new().s("text", value).done())
+                if not labels.contains(label.copy()) { labels.push(label) }
+            }
+            let said = str_at(args.copy(), "said") ?? "Filled in {labels.join(" and ")}"
+            let then = str_at(args.copy(), "then") ?? String()
             if bool_at(args, "submit") ?? false {
                 try w.press_key(String("Enter"))
                 w.settle()
-                return text("Filled in {label}, and submitted.\n\n{try w.outline()}")
+                return text("{said}, and submitted.{then}\n\n{try w.outline()}")
             }
-            return text("Filled in {label}.")
+            return text("{said}.{then}")
         }
         if name == "press" {
             try w.press_key(str_at(args, "key") ?? String())
@@ -1432,6 +1457,11 @@ pub fn console_line(event: String, p: Json) -> String? {
 // How many steps a recording keeps, and how long a step's text gets.
 pub const STEPS_MOST: usize = 300
 const STEP_TEXT_MOST: usize = 500
+
+// Whether the page shows a field for a password or a one-time code.
+const WANTS_SECRET: str = #"
+[...document.querySelectorAll('input[type=password i], input[autocomplete~="one-time-code" i], input[autocomplete~="current-password" i]')].some((e) => e.getClientRects().length > 0)
+"#
 
 // Names the part of the page an element is in, as an outline would: its role,
 // its name, and whether it takes a secret (a password or a one-time code).

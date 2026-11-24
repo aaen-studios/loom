@@ -146,6 +146,15 @@ struct Card: Equatable, Sendable {
     var tools: [String] = []
     /// Loom's own cards' server's badge (`shared/badge.calx`).
     var badge: Badge?
+    /// For `secret_ask`: the agent that asked, the site, the fields, the names what was
+    /// given is kept as, whether the answer is on its way, and what the instance said to
+    /// one it refused.
+    var agent = ""
+    var site = ""
+    var fields: [CardField] = []
+    var saved: [String] = []
+    var sending = false
+    var error = ""
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// That the chat has gone on past its reply: choices no longer answer then, and a
@@ -166,7 +175,13 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "checklist", "table", "progress", "facts", "sign_in", "mcp_add"].contains(type) else { return nil }
+        guard ["choices", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask"].contains(type) else { return nil }
+        agent = c["agent"].text
+        site = c["site"].text
+        fields = c["fields"].array.map {
+            CardField(label: $0["label"].text, kind: $0["kind"].text, masked: $0["masked"].bool ?? false, save: $0["save"].text)
+        }
+        saved = c["saved"].array.map(\.text)
         call = c["call"].text
         url = c["url"].text
         command = c["command"].text
@@ -231,6 +246,23 @@ struct CardSetting: Equatable, Sendable {
 
     /// A secret the person types on the card before Add.
     var wanted: Bool { !secret.isEmpty && !have }
+}
+
+/// A field the person fills in on a card: what it's for, whether it's hidden as it's
+/// typed, and the name it's offered to be kept as among their secrets ("" for none).
+struct CardField: Equatable, Sendable {
+    var label: String
+    var kind: String
+    var masked: Bool
+    var save: String
+}
+
+/// One of the person's secrets, by name, and the sites it may be filled in on in their
+/// agents' browsers ("" for a file on the instance's computer).
+struct SecretItem: Equatable, Sendable, Identifiable {
+    var name: String
+    var sites: [String]
+    var id: String { name }
 }
 
 /// Which of a reply's blocks sit inside a subagent call of the same reply, as
@@ -690,6 +722,13 @@ final class Model {
     var toOpen: URL?
     /// A stack of pictures shown big, to page through.
     var viewing: Viewing?
+    /// The person's secrets, for the Secrets page, read again when they change.
+    var secrets: [SecretItem] = []
+    private var secretsStale = false
+    /// Secret cards whose answer went and hasn't come back, and what the instance said to
+    /// one it refused, by call.
+    private var secretSending: Set<String> = []
+    private var secretErrors: [String: String] = [:]
     /// When an agent's reply last grew, and when its last run finished or failed.
     var lastDelta: [String: Date] = [:]
     var finished: [String: Date] = [:]
@@ -759,6 +798,10 @@ final class Model {
                     c.signedAs = mcpSignedIn[c.server]
                     c.signing = mcpSigning.contains(c.server)
                     c.signInError = mcpSignInErrors[c.server]
+                }
+                if c.type == "secret_ask" {
+                    c.sending = secretSending.contains(c.call)
+                    c.error = secretErrors[c.call] ?? ""
                 }
                 c.passed = next != nil
                 out[i].blocks[j].card = c
@@ -904,6 +947,13 @@ final class Model {
             guard let card = Card(f["card"]), block >= 0 else { break }
             // Whether the person signed in since, for a card that signs in.
             if card.signsIn { mcpStale = true }
+            // A secret card that's answered waits on nothing, and the secrets are read
+            // again once one is kept.
+            if card.type == "secret_ask" && card.state != "asking" {
+                secretSending.remove(card.call)
+                secretErrors[card.call] = nil
+                if !card.saved.isEmpty { secretsStale = true }
+            }
             var blocks = live.removeValue(forKey: message) ?? []
             while blocks.count <= block { blocks.append(.text("", "")) }
             blocks[block] = Block(kind: "card", text: "", call: nil, file: nil, card: card)
@@ -996,7 +1046,28 @@ final class Model {
 
     private func result(_ f: JSON) {
         if mcpResult(f) { return }
-        if !f["error"].isNull { notice = f["error"]["message"].string }
+        let error = f["error"].isNull ? nil : f["error"]["message"].string
+        switch f["id"].text {
+        case let id where id.hasPrefix("app.secret_fill:"):
+            // The card's own frame says how it went; a refusal shows on the card, which
+            // still asks.
+            if let error {
+                let call = String(id.dropFirst("app.secret_fill:".count))
+                secretSending.remove(call)
+                secretErrors[call] = error
+            }
+        case let id where id.hasPrefix("app.secrets"):
+            if let error {
+                notice = error
+            } else {
+                secrets = f["value"]["secrets"].array.map { SecretItem(name: $0["name"].text, sites: $0["sites"].array.map(\.text)) }
+            }
+        case let id where id.hasPrefix("app.secret_"):
+            if let error { notice = error }
+            secretsStale = true
+        default:
+            if let error { notice = error }
+        }
     }
 
     private func data(_ f: JSON) {
@@ -1170,6 +1241,10 @@ final class Model {
                 out.append(["t": "core.get", "id": JSON("app.\(l.rawValue)"), "what": JSON(l.rawValue)])
             }
         }
+        if secretsStale {
+            secretsStale = false
+            out.append(["t": "cmd", "id": JSON(id("app.secrets")), "name": "secret.list"])
+        }
         let wanted = shown.flatMap(\.blocks).compactMap(\.file).filter(\.isImage).map(\.file)
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
@@ -1272,6 +1347,54 @@ final class Model {
     func answerMcpAdd(_ call: String, _ answer: String, secrets: [String: String] = [:]) -> JSON {
         ["t": "cmd", "id": JSON(id("app.mcp_add")), "name": "mcp.add_answer",
          "args": ["call": JSON(call), "answer": JSON(answer), "secrets": .object(secrets.mapValues { JSON($0) })]]
+    }
+
+    /// What the person filled in on the secret card for `call`, which `agent` asked for:
+    /// each field's value, and the name to keep it as where Save as is on (`keep`). Nil,
+    /// saying so on the card, while a field is empty, since Fill with nothing would be a no.
+    func answerSecret(agent: String, call: String, values: [String], names: [String], keep: [Bool]) -> JSON? {
+        if values.isEmpty || values.contains(where: \.isEmpty) {
+            secretErrors[call] = "Fill in each field, or say Not now."
+            return nil
+        }
+        let fields: [JSON] = values.indices.map { (k) -> JSON in
+            let name = k < names.count ? names[k].trimmingCharacters(in: .whitespaces) : ""
+            let kept = k < keep.count && keep[k] && !name.isEmpty
+            return kept ? ["value": JSON(values[k]), "save": JSON(name)] : ["value": JSON(values[k])]
+        }
+        secretErrors[call] = nil
+        secretSending.insert(call)
+        return ["t": "cmd", "id": JSON("app.secret_fill:\(call)"), "name": "browser.secret",
+                "args": ["agent": JSON(agent), "fields": .array(fields)]]
+    }
+
+    /// Not now, on the secret card for `call`.
+    func declineSecret(agent: String, call: String) -> JSON {
+        secretErrors[call] = nil
+        secretSending.insert(call)
+        return ["t": "cmd", "id": JSON("app.secret_fill:\(call)"), "name": "browser.secret",
+                "args": ["agent": JSON(agent), "fields": .array([])]]
+    }
+
+    /// Has the Secrets page's list read again.
+    func loadSecrets() { secretsStale = true }
+
+    func putSecret(_ name: String, _ value: String) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.secret_put")), "name": "secret.put",
+         "args": ["name": JSON(name.trimmingCharacters(in: .whitespaces)), "value": JSON(value)]]
+    }
+
+    func deleteSecret(_ name: String) -> JSON {
+        secrets.removeAll { $0.name == name }
+        return ["t": "cmd", "id": JSON(id("app.secret_delete")), "name": "secret.delete", "args": ["name": JSON(name)]]
+    }
+
+    /// Takes the site `site` off where the secret `name` may be filled in.
+    func removeSecretSite(_ name: String, _ site: String) -> JSON? {
+        guard let i = secrets.firstIndex(where: { $0.name == name }) else { return nil }
+        secrets[i].sites.removeAll { $0 == site }
+        return ["t": "cmd", "id": JSON(id("app.secret_sites")), "name": "secret.sites",
+                "args": ["name": JSON(name), "sites": JSON(secrets[i].sites)]]
     }
 
     /// Asks the instance where to sign in to the person's MCP server `server`, with the

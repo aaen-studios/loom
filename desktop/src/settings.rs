@@ -52,6 +52,7 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                     Screen::Proposals,
                 ),
                 ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
+                ("pop-secrets", Ico::KeyRound, "Secrets", Screen::Secrets),
                 ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
             ],
         ),
@@ -89,7 +90,8 @@ fn page_words(screen: Screen) -> &'static str {
         }
         Screen::Skills => "skills how to",
         Screen::Proposals => "proposals proposed suggestions suggested keep drop notes skills learn teach recorded",
-        Screen::Mcp => "mcp servers tools keys connectors",
+        Screen::Mcp => "mcp servers tools connectors",
+        Screen::Secrets => "secrets keys passwords sites bank sealed",
         Screen::Plugins => "plugins panels",
         Screen::Routines => "routines schedule every day cron webhook",
         Screen::Tasks => "tasks jobs long work",

@@ -461,6 +461,7 @@ struct CardView: View {
         case "choices": choices
         case "sign_in": signIn
         case "mcp_add": McpAddCard(card: card, tint: tint, agent: agent)
+        case "secret_ask": SecretAskCard(card: card, tint: tint)
         case "checklist": checklist
         case "progress": progress
         case "facts":
@@ -896,6 +897,144 @@ struct McpAddCard: View {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         let secrets = answer == "add" ? typed.filter { name, _ in card.settings.contains { $0.secret == name && $0.wanted } } : [:]
         session.send(session.model.answerMcpAdd(card.call, answer, secrets: secrets))
+    }
+}
+
+/// Loom's own card for something an agent's page wants that only the person knows: the
+/// site's badge, or a key for a file, what's asked, with the site under it, and a field
+/// for each thing asked, its label over its box so the box has the card's width, masked
+/// as the card says, with Save as and the name it's kept as where it can be kept; then
+/// Fill and Not now. Once it's answered, one quiet line says how.
+struct SecretAskCard: View {
+    @Environment(Session.self) private var session
+    var card: Card
+    var tint: Color
+    /// What the person typed in each field, the name each is kept as, and whether Save as
+    /// is on for each, by the field's place.
+    @State private var typed: [Int: String] = [:]
+    @State private var names: [Int: String] = [:]
+    @State private var off: Set<Int> = []
+
+    var body: some View {
+        switch card.state {
+        case "filled":
+            CardDone(badge: card.badge, icon: "checkmark", how: "Filled in", what: card.saved.isEmpty ? card.site : "\(card.site), kept as \(card.saved.joined(separator: ", "))")
+        case "declined":
+            CardDone(badge: card.badge, icon: "xmark", how: "Not now", what: card.title)
+        case "closed":
+            CardDone(badge: card.badge, icon: "xmark", how: "Not answered", what: card.title)
+        default:
+            CardFrame(card.title, sub: card.site, lead: AnyView(lead), tint: tint, waits: true) {
+                VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                    ForEach(Array(card.fields.enumerated()), id: \.offset) { k, f in
+                        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+                            Text(f.label).foregroundStyle(P.ink3).lineLimit(1)
+                            Group {
+                                if f.masked {
+                                    SecureField(f.label, text: bound(k, in: $typed))
+                                } else {
+                                    TextField(f.label, text: bound(k, in: $typed))
+                                        .keyboardType(f.kind == "code" ? .numberPad : f.kind == "username" ? .emailAddress : .default)
+                                }
+                            }
+                            .textContentType(f.kind == "code" ? .oneTimeCode : f.kind == "username" ? .username : .password)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                            .boxed()
+                            if !f.save.isEmpty {
+                                HStack(spacing: Tokens.Space.s) {
+                                    Toggle(isOn: Binding(get: { !off.contains(k) }, set: { on in if on { off.remove(k) } else { off.insert(k) } })) {
+                                        Text("Save as")
+                                    }
+                                    .toggleStyle(Tick())
+                                    .foregroundStyle(P.ink2)
+                                    .fixedSize()
+                                    if !off.contains(k) {
+                                        TextField("Name", text: Binding(get: { names[k] ?? f.save }, set: { names[k] = $0 }))
+                                            .textInputAutocapitalization(.never)
+                                            .autocorrectionDisabled()
+                                            .boxed()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .font(Fonts.small)
+                if !card.error.isEmpty {
+                    Text(card.error).font(Fonts.small).foregroundStyle(P.bad)
+                }
+                Flow {
+                    Button(card.sending ? "Filling in…" : "Fill") { fill() }.buttonStyle(CardButtonStyle(primary: true))
+                    Button("Not now") { notNow() }.buttonStyle(CardButtonStyle())
+                }
+                .padding(.top, Tokens.Space.xs)
+            }
+        }
+    }
+
+    /// The site's badge, or a key for a file on this computer.
+    @ViewBuilder private var lead: some View {
+        if let badge = card.badge {
+            BadgeView(badge: badge)
+        } else {
+            CardIcon(icon: "key", tint: tint)
+        }
+    }
+
+    private func bound(_ k: Int, in map: Binding<[Int: String]>) -> Binding<String> {
+        Binding(get: { map.wrappedValue[k] ?? "" }, set: { map.wrappedValue[k] = $0 })
+    }
+
+    private func fill() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let values = card.fields.indices.map { typed[$0] ?? "" }
+        let kept = card.fields.indices.map { names[$0] ?? card.fields[$0].save }
+        let keep = card.fields.indices.map { !card.fields[$0].save.isEmpty && !off.contains($0) }
+        if let f = session.model.answerSecret(agent: card.agent, call: card.call, values: values, names: kept, keep: keep) {
+            session.send(f)
+        }
+    }
+
+    private func notNow() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        session.send(session.model.declineSecret(agent: card.agent, call: card.call))
+    }
+}
+
+/// A tick before its words, as Save as has.
+private struct Tick: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(configuration.isOn ? P.button : Color.clear)
+                    .strokeBorder(configuration.isOn ? Color.clear : P.lineStrong, lineWidth: 1)
+                    .frame(width: 16, height: 16)
+                    .overlay {
+                        if configuration.isOn {
+                            Image(systemName: "checkmark").font(.system(size: 8, weight: .bold)).foregroundStyle(P.buttonInk)
+                        }
+                    }
+                configuration.label.lineLimit(1)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(configuration.isOn ? .isSelected : [])
+    }
+}
+
+private extension View {
+    /// A field on a card, in its box, as the MCP server card's key is.
+    func boxed() -> some View {
+        self
+            .padding(.horizontal, Tokens.Space.m)
+            .frame(minHeight: Tokens.Control.buttonSmall)
+            .background(P.bg, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
     }
 }
 
