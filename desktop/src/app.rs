@@ -454,6 +454,9 @@ pub struct Loom {
     /// it was last drawn from.
     side_view: Option<Entity<SidebarView>>,
     side_key: Option<SidebarKey>,
+    /// Whether a Mac's traffic lights are in the window's top left, as they are unless
+    /// it's full screen, where they leave with the title bar. Read at each frame.
+    lights: bool,
     /// The pages whose rows are drawn as a list, only those on screen built
     /// (`list_page`), by name, and the frames drawn, for knowing a page just opened.
     lists: HashMap<&'static str, PageList>,
@@ -1245,6 +1248,7 @@ ACTA_KEY=secret:ACTA_KEY",
             chat_view: None,
             side_view: None,
             side_key: None,
+            lights: false,
             lists: HashMap::new(),
             frames: 0,
             activity_lines: ((0, None, None, chrono::NaiveDate::MIN), Rc::default()),
@@ -5389,7 +5393,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .items_center()
                     .justify_between()
                     // On a Mac, after the traffic lights.
-                    .pl(px(LIGHTS_END.max(space::L)))
+                    .pl(px(if self.lights { LIGHTS_END } else { space::L }))
                     .pr(px(space::M))
                     // The knot, and the wordmark beside it (design/logo/README.md).
                     .child(
@@ -5508,15 +5512,16 @@ ACTA_KEY=secret:ACTA_KEY",
             });
             self.side_key = Some(key);
         }
+        // Beside a Mac's traffic lights the rail draws its own colour, under the title
+        // bar, which crosses the window over it (`rail`).
+        let own = !(railed && self.lights);
         div()
             .w(px(width))
             .h_full()
             .flex_none()
             .relative()
             .overflow_hidden()
-            .bg(p.side)
-            .border_r_1()
-            .border_color(p.line)
+            .when(own, |d| d.bg(p.side).border_r_1().border_color(p.line))
             // Its top drags the window. The view has this too, but what a view drawn from
             // its cache had in its window's title bar isn't kept, so it's here as well,
             // under the view, whose buttons keep the pointer from it.
@@ -5547,6 +5552,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let behind = self.behind();
         SidebarKey {
             railed,
+            lights: self.lights,
             p: self.p,
             agents: model
                 .agents
@@ -5604,19 +5610,12 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The control that collapses the sidebar to the rail (`rail` false), or opens it
-    /// from the rail. On the rail it's loom's knot until the pointer comes onto the
-    /// rail, and then fades into the control; a click on either opens the sidebar. The
-    /// button keeps the rail from hearing the pointer while it's on the button, so its
-    /// own hover counts too.
+    /// from the rail: at the top of the rail, or beside a Mac's traffic lights in the
+    /// title bar. It's always there, and says what it does out to its right, in the
+    /// title bar, rather than under the pointer, over the chat.
     fn bar_button(&self, rail: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
-        let shown = if rail {
-            let key = SharedString::from(RAIL_HOVER);
-            let on = motion::hovered(&key) || motion::hovered(&motion::hover_key("bar-open"));
-            motion::level(&key, on, 0.12)
-        } else {
-            1.0
-        };
+        let id = if rail { "bar-open" } else { "bar-collapse" };
         let icon = Icon::new(if rail {
             Ico::PanelLeftOpen
         } else {
@@ -5624,7 +5623,7 @@ ACTA_KEY=secret:ACTA_KEY",
         })
         .small();
         div()
-            .id(if rail { "bar-open" } else { "bar-collapse" })
+            .id(id)
             .role(Role::Button)
             .aria_label(if rail {
                 "Open sidebar"
@@ -5641,20 +5640,14 @@ ACTA_KEY=secret:ACTA_KEY",
             .cursor_pointer()
             .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
             .relative()
-            .when(rail, |d| {
-                d.child(
-                    div()
-                        .absolute()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .opacity(1.0 - shown)
-                        .child(svg().path("logo/knot.svg").size(px(20.0)).text_color(p.ink)),
-                )
-            })
-            .child(div().opacity(shown).child(icon))
-            .tooltip(tip(if rail { BAR_OPEN } else { BAR_COLLAPSE }))
+            .child(icon)
+            .children(tip_beside(
+                p,
+                &motion::hover_key(id),
+                if rail { BAR_OPEN } else { BAR_COLLAPSE }.into(),
+                control::ICON_SMALL,
+                control::ICON_SMALL,
+            ))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_bar(window, cx)))
     }
 
@@ -5716,9 +5709,11 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
     }
 
-    /// The sidebar collapsed: the control that opens it, the +, each agent as its thread
-    /// (with a dot while a reply waits, and its name under the pointer), and at the foot
-    /// the update icon over the gear over the server's yarn.
+    /// The sidebar collapsed: the control that opens it (beside a Mac's traffic lights,
+    /// in the title bar), each agent as its thread, the pinned ones first and a short
+    /// line under them, with a dot while a reply waits and its name out to its right
+    /// under the pointer, and at the foot the update icon over the gear over the server's
+    /// yarn.
     fn rail(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div()
@@ -5728,61 +5723,74 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(2.0))
             .py(px(space::XS));
         let agents = self.model.agents.clone();
-        for a in agents.iter() {
+        for (n, a) in agents.iter().enumerate() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
             let unread = self.model.unread.contains(&a.id);
             let id = a.id.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("rail-{}", a.id)))
-                    .role(Role::Button)
-                    .aria_label(a.name.clone())
-                    .relative()
-                    .size(px(RAIL_ROW))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded(px(radius::ROW))
-                    .cursor_pointer()
-                    .when(selected, |d| d.bg(p.active))
-                    .when(!selected, move |d| {
-                        d.soft_hover(transparent_black(), p.hover, None)
+            let el = SharedString::from(format!("rail-{}", a.id));
+            let hover = motion::hover_key(el.clone());
+            // The pinned agents come first (model.rs): a line ends them.
+            if n > 0 && agents[n - 1].pinned.is_some() && a.pinned.is_none() {
+                list = list.child(
+                    div()
+                        .w(px(space::L))
+                        .h(px(1.0))
+                        .my(px(space::XS))
+                        .flex_none()
+                        .bg(p.line_strong),
+                );
+            }
+            let tile = div()
+                .id(el)
+                .role(Role::Button)
+                .aria_label(a.name.clone())
+                .relative()
+                .size(px(RAIL_ROW))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::ROW))
+                .cursor_pointer()
+                .when(selected, |d| d.bg(p.active))
+                .when(!selected, move |d| {
+                    d.soft_hover(transparent_black(), p.hover, None)
+                })
+                .children(tip_beside(
+                    p,
+                    &hover,
+                    a.name.clone().into(),
+                    RAIL_ROW,
+                    RAIL_ROW,
+                ))
+                .on_mouse_down(MouseButton::Right, {
+                    let id = id.clone();
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.agent_menu_at(id.clone(), e.position, cx);
                     })
-                    .tooltip(tip_text(a.name.clone()))
-                    .on_mouse_down(MouseButton::Right, {
-                        let id = id.clone();
-                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.agent_menu_at(id.clone(), e.position, cx);
-                        })
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-                    .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
-                    .on_drop(self.drop_agent(&a.id, cx))
-                    .child(thread::strand(
-                        format!("side-{}", a.id),
-                        self.model.mood(&a.id),
-                        thread::color(&a.color, p.dark),
-                        a.outline(),
-                        26.0,
-                        10.0,
-                        self.model.finished_at(&a.id),
-                    ))
-                    .when(unread, |d| d.child(rail_dot(p)))
-                    .when(a.pinned.is_some(), |d| {
-                        d.child(
-                            div()
-                                .absolute()
-                                .bottom(px(2.0))
-                                .right(px(2.0))
-                                .text_color(p.ink_3)
-                                .child(Icon::new(Ico::Pin).xsmall()),
-                        )
-                    }),
-            );
+                })
+                .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+                .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
+                .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
+                .on_drop(self.drop_agent(&a.id, cx))
+                .child(thread::strand(
+                    format!("side-{}", a.id),
+                    self.model.mood(&a.id),
+                    thread::color(&a.color, p.dark),
+                    a.outline(),
+                    26.0,
+                    10.0,
+                    self.model.finished_at(&a.id),
+                ))
+                .when(unread, |d| d.child(rail_dot(p)));
+            // The one on screen has no hover to fade, so its name keeps the pointer itself.
+            list = list.child(if selected {
+                motion::tracks_hover(tile, hover)
+            } else {
+                tile
+            });
         }
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
@@ -5845,6 +5853,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XS))
             .children(others)
             .children(mine);
+        let lights = self.lights;
         let body = div()
             .id("rail")
             .w(px(layout::RAIL))
@@ -5852,31 +5861,21 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .flex_col()
             .items_center()
-            // A Mac's traffic lights take the top, so the knot goes under them.
-            .when(cfg!(target_os = "macos"), |d| {
+            // Beside a Mac's traffic lights, the control is in the title bar, after them.
+            .when(!lights, |d| {
                 d.child(
                     div()
-                        .id("rail-lights")
+                        .id("rail-top")
                         .window_control_area(WindowControlArea::Drag)
                         .w_full()
-                        .h(px(layout::TITLEBAR)),
+                        .h(px(layout::TITLEBAR))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(self.bar_button(true, cx)),
                 )
             })
-            .child(
-                div()
-                    .id("rail-top")
-                    .window_control_area(WindowControlArea::Drag)
-                    .w_full()
-                    .h(px(if cfg!(target_os = "macos") {
-                        RAIL_ROW
-                    } else {
-                        layout::TITLEBAR
-                    }))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(self.bar_button(true, cx)),
-            )
             .child(
                 div()
                     .id("rail-list")
@@ -5897,9 +5896,37 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(self.gear(settings_open, cx))
                     .child(yarns),
             );
+        if !lights {
+            return div().h_full().child(body);
+        }
+        // A Mac's traffic lights reach past the rail, so the title bar crosses the window
+        // over it, as a Mac's does when its sidebar is put away, with the lights and the
+        // control at its start, and the rail begins under it, level with the chat.
         div()
-            .h_full()
-            .child(motion::tracks_hover(body, RAIL_HOVER.into()))
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .id("rail-lights")
+                    .window_control_area(WindowControlArea::Drag)
+                    .w_full()
+                    .h(px(layout::TITLEBAR))
+                    .flex_none()
+                    .bg(p.bg)
+                    .border_b_1()
+                    .border_color(p.line),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(p.side)
+                    .border_r_1()
+                    .border_color(p.line)
+                    .child(body),
+            )
     }
 
     // --- The update icon (core/updates.calx decides; this draws it) ---
@@ -16327,13 +16354,24 @@ impl Render for Loom {
             cx.notify();
         }
         let railed = self.railed(ww);
-        // Beside the rail, a Mac's traffic lights reach past it, so the header starts
-        // where the knot does in the whole sidebar, after them.
-        let header = self
-            .header(cx)
-            .when(railed && cfg!(target_os = "macos"), |d| {
-                d.pl(px(LIGHTS_END - layout::RAIL))
-            });
+        self.lights = cfg!(target_os = "macos") && !lights_gone(window);
+        // Beside the rail, a Mac's traffic lights reach past it, so the title bar has the
+        // control that opens the sidebar after them, its icon where the knot is in the
+        // whole sidebar, and then the header.
+        let header = if railed && self.lights {
+            let inset = (control::ICON_SMALL - ICON_GLYPH) / 2.0;
+            div()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .flex()
+                .items_center()
+                .pl(px(LIGHTS_END - inset - layout::RAIL))
+                .child(self.bar_button(true, cx))
+                .child(self.header(cx).pl(px(space::XS)))
+        } else {
+            self.header(cx)
+        };
         // Drawn last, over the sheet that takes the pointer while it's open.
         // From a right-click in the sidebar, it opens at the pointer instead.
         let menu = self.menu_panel(cx).map(|m| match self.menu_at {
@@ -16920,22 +16958,84 @@ pub(crate) const CHAT_LEAST: f32 = 420.0;
 /// title bar (main.rs), the three, each 14 px, in the middle of its height.
 pub(crate) const LIGHTS: (f32, f32) = (16.0, 17.0);
 /// Where what's beside the traffic lights starts, past the three (23 px apart) and a
-/// gap: the knot in the sidebar's top. Windows draws its buttons at the other end, so
-/// nothing moves there.
-const LIGHTS_END: f32 = if cfg!(target_os = "macos") {
-    LIGHTS.0 + 60.0 + space::M
-} else {
-    0.0
-};
+/// gap as wide as the one before them: the knot in the sidebar's top, and with the
+/// sidebar put away, the control that opens it. Windows draws its buttons at the other
+/// end, so nothing moves there.
+const LIGHTS_END: f32 = LIGHTS.0 + 60.0 + LIGHTS.0;
+/// How wide a small icon is drawn, in its button.
+const ICON_GLYPH: f32 = 14.0;
 
-/// An agent's square on the rail, and the + over them.
+/// Whether a Mac's traffic lights are gone from the window's corner: full screen, where
+/// they leave with the title bar.
+fn lights_gone(window: &Window) -> bool {
+    window.is_fullscreen()
+}
+
+/// What a control on the sidebar's edge says while the pointer rests on it: out to its
+/// right and level with it, so it lands in the title bar or just past the rail rather
+/// than under the pointer, over the chat. It comes after a moment, as a tooltip does,
+/// so a pointer passing over doesn't flash it. `key` is the control's hover key, and
+/// `w` and `h` its size.
+fn tip_beside(
+    p: Palette,
+    key: &SharedString,
+    words: SharedString,
+    w: f32,
+    h: f32,
+) -> Option<AnyElement> {
+    let on = motion::hovered(key);
+    // Kept with the control's hover, which is forgotten once it isn't drawn.
+    motion::level(key, on, motion::HOVER);
+    let k = motion::level(&SharedString::from(format!("{key}-tip")), on, TIP_WAIT);
+    // From 0.85 (about half a second in) to 0.95, easing out as `level` does; going
+    // away it's gone at once.
+    let shown = ((k - 0.85) / 0.1).clamp(0.0, 1.0);
+    if shown <= 0.0 {
+        return None;
+    }
+    // Placed from the control's top left corner, wherever its own children sit.
+    Some(
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .child(
+                deferred(
+                    anchored()
+                        .position_mode(AnchoredPositionMode::Local)
+                        .position(point(px(w + space::XS), px(0.0)))
+                        .child(
+                            div().h(px(h)).flex().items_center().opacity(shown).child(
+                                div()
+                                    .px(px(space::S))
+                                    .py(px(2.0))
+                                    .rounded(px(radius::INPUT))
+                                    .bg(p.raised)
+                                    .border_1()
+                                    .border_color(p.line_strong)
+                                    .shadow_md()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .whitespace_nowrap()
+                                    .child(words),
+                            ),
+                        ),
+                )
+                .with_priority(1),
+            )
+            .into_any_element(),
+    )
+}
+
+/// How long `tip_beside`'s level takes to come all the way on, in seconds.
+const TIP_WAIT: f32 = 1.2;
+
+/// An agent's square on the rail.
 const RAIL_ROW: f32 = 40.0;
 /// A pinned agent's tile: three across the sidebar, inside its sides, a little apart.
 const TILE: f32 = ((layout::SIDEBAR - 2.0 * space::S - 2.0 * space::XS) / 3.0) as i32 as f32;
 /// The box a tile draws the agent's thread in.
 const TILE_THREAD: (f32, f32) = (52.0, 36.0);
-/// The key the folded rail keeps the pointer's being on it under.
-const RAIL_HOVER: &str = "rail-hover";
 
 /// How far the rail's update icon is from the window's bottom, over the gear over the
 /// yarns of `servers` servers, for the update popup to sit level with it.
@@ -17207,6 +17307,7 @@ type SidebarHit = (String, String, Vec<std::ops::Range<usize>>, bool, i64);
 #[derive(PartialEq)]
 struct SidebarKey {
     railed: bool,
+    lights: bool,
     p: Palette,
     agents: Vec<SidebarAgent>,
     /// The agent whose chat is on screen.
