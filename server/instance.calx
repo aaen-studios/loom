@@ -484,12 +484,14 @@ struct Browser {
     asks: List<String>    // browser_ask_person calls, answered when the person hands it back
     held: List<browser.Op>    // the agent's calls while the person has it
     actions: i64    // the person's clicks and keys since they took over
-    secret_ask: Json    // browser_ask_secret, while it waits: its call, why, ref and submit; or null
+    secret_ask: Json    // browser_ask_secret, while it waits: its call, run, why, site, fields (each with its ref), submit and card; or null
     site: String    // the host of the page it's on, as its last call left it, for rules on sites
     recording: bool    // whether what the person does is being recorded, to teach the agent
     steps: i64    // how many steps the recording has
     record_by: String    // the device that started it
     told: String    // the site whose notes the agent was told of last
+    hinted: String?    // the host the agent was last told of secrets for, or none yet
+    hinted_field: bool    // whether it's been told, on that host, that a page wants a password
     cast: (i64, i64)    // the size its frames are asked for now, as watch_changed last told it
 }
 
@@ -615,6 +617,7 @@ const TASK_RESULT_MOST: usize = 2000
 const PROPOSALS_WAITING_MOST: usize = 50
 const TASK_RESTARTED: str = "[loom: The instance restarted while you worked on this task. Carry on from where you were.]"
 const TASK_RESUMED: str = "[loom: Your person paused this task, and has resumed it now. Carry on from where you stopped.]"
+const SECRETS_TOLD: str = "[loom: Never ask your person for a password or a code in the chat. When a page in your browser wants one, fill in one they keep with browser_fill_secret, or ask with browser_ask_secret: they type it on a card in your reply, it goes into the page without you seeing it, and they can keep it for next time.]"
 const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
 // How much of what a webhook was sent goes to the agent.
 const HOOK_MOST: usize = 20000
@@ -1131,12 +1134,7 @@ fn own_auth(server: Json) -> bool {
 
 // A secret's name: letters, digits, _, - and ., up to 64.
 fn valid_secret(name: String) -> bool {
-    if name.len() == 0 or name.len() > 64 { return false }
-    for r in name.runes() {
-        let fine = (r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') or r == '_' or r == '-' or r == '.'
-        if not fine { return false }
-    }
-    return true
+    return cards.good_secret_name(name)
 }
 
 // An MCP server's env or headers, if each value is text or {"secret": NAME}.
@@ -2177,15 +2175,18 @@ impl Instance {
                         if fetched.len() > 0 {
                             if let slash = key.find("/") { i.log(key[..slash].copy(), key[slash + 1..].copy(), "browser", "Fetched a browser for this computer, which had none: {fetched}", String()) }
                         }
-                        let given = without(without(without(done, "loom_site"), "loom_url"), "loom_fetched")
+                        let field = bool_at(done.copy(), "loom_field") ?? false
+                        let given = without(without(without(without(done, "loom_site"), "loom_url"), "loom_field"), "loom_fetched")
                         if let b = mut i.browsers.find(key.copy()) {
                             b.busy -= 1
                             b.used = now()
                             if let s = site.copy() { b.site = s }
                             if page_url.len() > 0 { i.browser_pages.insert(key.copy(), page_url) }
                         }
-                        // A page on a site with notes tied to it: the agent is shown them, once a visit.
-                        let result = i.with_site_notes(key, site ?? String(), given)
+                        // A page on a site with notes tied to it: the agent is shown them, once a visit;
+                        // and what it should know of secrets there.
+                        let noted = i.with_site_notes(key.copy(), site.copy() ?? String(), given)
+                        let result = if let host = site { i.with_secret_hints(key, host, field, noted) } else { noted }
                         // A secret for a site it hasn't gone to waits for the person's yes.
                         let needs = str_at(result.copy(), "needs")
                         let fill = i.fills.remove(call.copy())
@@ -2194,6 +2195,10 @@ impl Instance {
                                 i.fill_needs_yes(call, f, host)
                                 continue
                             }
+                        } else if let host = needs {
+                            // What the person typed on a card, for a page that went elsewhere meanwhile.
+                            i.answer_call(call, tool_error("The page went to {if host.len() > 0 { host } else { String("a file on this computer") }} before what your person typed went in, so none of it was filled in. Ask again on the page that needs it."))
+                            continue
                         }
                         i.answer_call(call, result)
                     },
@@ -2331,6 +2336,20 @@ impl Instance {
             if not b.open { return some(tool_error(String("Your browser isn't open. Open the page first, then ask."))) }
             if op == "ask_secret" and b.secret_ask != Json.Null { return some(tool_error(String("You're asking your person for a secret already. Wait for that one."))) }
         }
+        // browser_ask_secret asks on a card in the agent's reply, so there has to be
+        // one the person sees; its fields are what the card shows and the page takes.
+        var asking_run = String()
+        var ask_fields = List<Json>()
+        var ask_site = String()
+        if op == "ask_secret" {
+            asking_run = i.calling_run(g.copy())
+            if asking_run.len() == 0 { return some(tool_error(String("You aren't answering in a chat right now, so there's no card to ask your person on. Fill in a secret they keep with browser_fill_secret."))) }
+            if i.quiet_turns.contains(asking_run.copy()) { return some(tool_error(String("You're answering for a routine, which your person doesn't see, so they can't be asked here. Fill in a secret they keep with browser_fill_secret, or tell them what you need with routine_post."))) }
+            if let b = i.browsers.find(key.copy()) { ask_site = b.site.copy() }
+            let (fields, bad) = cards.ask_fields(args.copy(), ask_site.copy())
+            if bad.len() > 0 { return some(tool_error(bad)) }
+            ask_fields = fields
+        }
         // A secret goes to the browser with the sites the person has let it go to.
         var wire = op.copy()
         var wire_args = args.copy()
@@ -2372,7 +2391,7 @@ impl Instance {
             var before: Thread? = none
             if let m = i.closing_browsers.remove(key.copy()) { before = i.stopped_browsers.remove(m) }
             let (to, thread) = browser.start(n, key.copy(), try fs.absolute(i.data.copy()), profile, i.isolated(g.user.copy(), agent), proxy, reopen, before, browser.BackTo { to: i.browser_to.copy(), waker: i.waker })
-            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, n: n, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String(), cast: (0, 0) })
+            i.browsers.insert(key.copy(), Browser { to: to, thread: thread, n: n, busy: 0, used: now(), open: false, person: false, asked: String(), asks: List<String>(), held: List<browser.Op>(), actions: 0, secret_ask: Json.Null, site: String(), recording: false, steps: 0, record_by: String(), told: String(), hinted: none, hinted_field: false, cast: (0, 0) })
             i.watch_changed(key.copy())
         }
         let call = try i.store.new_id("bc")
@@ -2394,15 +2413,19 @@ impl Instance {
             return none
         }
         if op == "ask_secret" {
-            // Answered once the person types it in the app (browser.secret).
+            // A card in the agent's reply, answered once the person fills it in
+            // there (browser.secret).
+            let asked = if why.len() > 0 { why.copy() } else { String("It needs something only you know.") }
+            let card = cards.secret_card(call.copy(), g.agent.copy(), asked.copy(), ask_site.copy(), ask_fields.copy())
             if let b = mut i.browsers.find(key.copy()) {
                 b.busy += 1
                 b.used = now()
-                b.secret_ask = Obj.new().s("call", call).s("why", if why.len() > 0 { why.copy() } else { String("It needs something only you know.") }).s("ref", str_at(args.copy(), "ref") ?? String()).b("submit", bool_at(args.copy(), "submit") ?? false).done()
+                b.secret_ask = Obj.new().s("call", call).s("run", asking_run.copy()).s("why", asked.copy()).s("site", ask_site.copy()).j("fields", Json.Array(ask_fields)).b("submit", bool_at(args.copy(), "submit") ?? false).j("card", card.copy()).done()
             }
+            _ = i.put_own_card(asking_run, card)
             let title = "{i.agent_name(g.user.copy(), g.agent.copy())} needs something from you"
-            i.log(g.user.copy(), g.agent.copy(), "browser", "Asked you for a secret: {cut_short(why.copy(), 200)}", g.agent.copy())
-            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", if why.len() > 0 { why } else { String("Type it into its browser.") }).done())
+            i.log(g.user.copy(), g.agent.copy(), "browser", "Asked you for a secret: {cut_short(asked.copy(), 200)}", g.agent.copy())
+            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", asked).done())
             i.browser_state(key)
             return none
         }
@@ -2424,6 +2447,65 @@ impl Instance {
             ok(j) => j,
             err(_) => Json.Array(List<Json>()),
         }
+    }
+
+    // Lets `user`'s secret `name` be filled on `site`, as well as where it was.
+    fn allow_secret_on(i: Instance, user: String, name: String, site: String) ! Error {
+        var hosts = List<Json>()
+        if let Json.Array(had) = try i.secret_hosts(user.copy(), name.copy()) { hosts = had }
+        if hosts.contains(Json.Str(site.copy())) { return }
+        hosts.push(Json.Str(site.copy()))
+        try i.store.set_meta("secret_hosts/{user}/{name}", "{Json.Array(hosts)}")
+    }
+
+    // The names of `user`'s secrets that may be filled on `host`.
+    fn secrets_for(i: Instance, user: String, host: String) -> List<String> ! Error {
+        var out = List<String>()
+        for s in try i.store.secret_names(user.copy()) {
+            let name = str_at(s, "name") ?? String()
+            if let Json.Array(hosts) = try i.secret_hosts(user.copy(), name.copy()) {
+                if hosts.contains(Json.Str(host.copy())) { out.push(name) }
+            }
+        }
+        return out
+    }
+
+    // Keeps `value` as `user`'s secret `name`, sealed, as secret.put does.
+    fn keep_secret(i: mut Instance, user: String, name: String, value: String) ! Error {
+        let nonce = random_bytes(24)
+        let sealed = i.sealer.encrypt(nonce.copy(), value.to_bytes(), secret_aad(user.copy(), name.copy()))
+        try i.store.put_secret(user.copy(), name, bytes.hex(nonce), bytes.hex(sealed))
+        i.reopen_secrets(user.copy())
+        i.stop_idle_of(user)
+    }
+
+    // Puts one of loom's own cards in run `run_id`'s reply, after what's there so
+    // far, or in place of the one with its id, and sends it to the person's
+    // devices. Gives whether the run was there to take it.
+    fn put_own_card(i: mut Instance, run_id: String, card: Json) -> bool {
+        let id = str_at(card.copy(), "id") ?? String()
+        var frame = Json.Null
+        var user = String()
+        if let r = mut i.runs.find(run_id) {
+            var place = r.blocks.len()
+            var k: usize = 0
+            for b in r.blocks {
+                if b.kind == "card" and str_at(b.card.copy(), "id") == some(id.copy()) { place = k }
+                k += 1
+            }
+            if place == r.blocks.len() {
+                var b = new_block("card")
+                b.card = card.copy()
+                r.blocks.push(b)
+            } else {
+                r.blocks[place].card = card.copy()
+            }
+            frame = Obj.new().s("t", String("card")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(place))).j("card", card).done()
+            user = r.user.copy()
+        }
+        if user.len() == 0 { return false }
+        i.publish(user, frame)
+        return true
     }
 
     // browser_fill_secret on a site its secret hasn't gone to: the person is
@@ -2485,6 +2567,8 @@ impl Instance {
         for call in waiting {
             i.answer_call(call, tool_error(String("The browser closed.")))
         }
+        // A secret it asked for on a card can't be answered now.
+        if let run = str_at(b.secret_ask.copy(), "run") { _ = i.put_own_card(run, cards.secret_card_now(at(b.secret_ask.copy(), "card"), "closed", List<String>())) }
         i.stopped_browsers.insert(b.n, b.thread)
         i.closing_browsers.insert(key.copy(), b.n)
         i.browser_state(key)
@@ -2634,26 +2718,77 @@ impl Instance {
             return Answer.Value(i.browser_status(key).done())
         }
         if name == "browser.secret" {
-            // What the person typed for browser_ask_secret goes into the field;
-            // the agent hears it's in, never what it is.
-            let value = str_at(args.copy(), "value") ?? String()
+            // What the person filled in on browser_ask_secret's card goes into the
+            // page, and each they said to keep, into their secrets, with the site
+            // allowed for it. The agent hears it's in, never what it is.
             var ask = Json.Null
-            if let b = mut i.browsers.find(key.copy()) {
-                ask = b.secret_ask.copy()
-                b.secret_ask = Json.Null
-                if ask != Json.Null and value.len() > 0 {
-                    let o = browser.Op { call: str_at(ask.copy(), "call") ?? String(), name: String("fill"), args: Obj.new().s("ref", str_at(ask.copy(), "ref") ?? String()).b("submit", bool_at(ask.copy(), "submit") ?? false).s("name", String("what your person typed")).s("value", value.copy()).done() }
-                    if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
+            if let b = i.browsers.find(key.copy()) { ask = b.secret_ask.copy() }
+            if ask == Json.Null { return Answer.Refused(String("not_asked"), String("The agent isn't asking for anything.")) }
+            var fields = List<Json>()
+            if let Json.Array(f) = at(ask.copy(), "fields") { fields = f.copy() }
+            // Each field's value and the name to keep it as: `fields`, or `value`
+            // for the only one, as an app from before cards sends it.
+            var given = List<(String, String)>()
+            if let Json.Array(list) = at(args.copy(), "fields") {
+                for f in list {
+                    given.push((str_at(f.copy(), "value") ?? String(), (str_at(f, "save") ?? String()).trim().copy()))
+                }
+            } else if let v = str_at(args.copy(), "value") {
+                given.push((v, String()))
+            }
+            var filled = false
+            var all = true
+            for (v, _) in given {
+                if v.len() > 0 { filled = true } else { all = false }
+            }
+            if filled {
+                if given.len() != fields.len() or not all { return Answer.Refused(String("bad_request"), String("Fill in each field, or say Not now.")) }
+                for (_, keep_as) in given {
+                    if keep_as.len() > 0 and not valid_secret(keep_as.copy()) { return Answer.Refused(String("bad_request"), "\"{keep_as}\" can't name a secret: use letters, digits, _, - and ., such as ntnu-password.") }
                 }
             }
-            if ask == Json.Null { return Answer.Refused(String("not_asked"), String("The agent isn't asking for anything.")) }
-            if value.len() == 0 {
+            if let b = mut i.browsers.find(key.copy()) { b.secret_ask = Json.Null }
+            let call = str_at(ask.copy(), "call") ?? String()
+            let run = str_at(ask.copy(), "run") ?? String()
+            let card = at(ask.copy(), "card")
+            if not filled {
                 if let b = mut i.browsers.find(key.copy()) { b.busy -= 1 }
-                i.answer_call(str_at(ask, "call") ?? String(), tool_error(String("Your person didn't give it.")))
+                i.answer_call(call, tool_error(String("Your person said not now, so nothing went in. Don't ask them for it in the chat: carry on without it, or ask them what they'd like to do.")))
+                _ = i.put_own_card(run, cards.secret_card_now(card, "declined", List<String>()))
+                i.log(user, agent, "browser", String("You said not now to what it asked for"), String())
+                i.browser_state(key.copy())
+                return Answer.Value(i.browser_status(key).done())
             }
-            i.log(user, agent, "browser", String(if value.len() > 0 { "You typed in what it asked for" } else { "You didn't give what it asked for" }), String())
+            let site = str_at(ask.copy(), "site") ?? String()
+            var saved = List<String>()
+            var fills = List<Json>()
+            for (k, (value, save)) in given.enumerate() {
+                var label = String("what your person typed")
+                if save.len() > 0 {
+                    try i.keep_secret(user.copy(), save.copy(), value.copy())
+                    try i.allow_secret_on(user.copy(), save.copy(), site.copy())
+                    if not saved.contains(save.copy()) { saved.push(save.copy()) }
+                    label = save.copy()
+                }
+                fills.push(Obj.new().s("ref", str_at(fields[k].copy(), "ref") ?? String()).s("name", label).s("value", value.copy()).done())
+            }
+            let place = if site.len() > 0 { site.copy() } else { String("files on this computer") }
+            let said = if fills.len() == 1 { String("Filled in what your person typed") } else { "Filled in the {fills.len()} fields with what your person typed" }
+            var then = String()
+            if saved.len() > 0 { then = " They kept {if saved.len() == 1 { "it" } else { "them" }} as {saved.join(" and ")} for {place}, so from now on browser_fill_secret fills {if saved.len() == 1 { "it" } else { "them" }} in there without asking." }
+            // Only on the site the card named: a page that went elsewhere meanwhile gets none of it.
+            let o = browser.Op { call: call, name: String("fill"), args: Obj.new().j("fills", Json.Array(fills)).b("submit", bool_at(ask.copy(), "submit") ?? false).s("said", said).s("then", then).j("hosts", Json.Array([Json.Str(site.copy())])).done() }
+            if let b = mut i.browsers.find(key.copy()) {
+                if b.person { b.held.push(o) } else { b.to.send(browser.In.Do(o)) }
+            }
+            _ = i.put_own_card(run, cards.secret_card_now(card, "filled", saved.copy()))
+            i.log(user, agent, "browser", if saved.len() > 0 { "You filled in what it asked for, and kept it as {saved.join(", ")} for {place}" } else { String("You filled in what it asked for") }, String())
             i.browser_state(key.copy())
-            return Answer.Value(i.browser_status(key).done())
+            var names = List<Json>()
+            for kept in saved {
+                names.push(Json.Str(kept.copy()))
+            }
+            return Answer.Value(i.browser_status(key).j("saved", Json.Array(names)).done())
         }
         if name == "browser.record" {
             // Teaching a task: what the person does while they have the
@@ -2761,6 +2896,47 @@ impl Instance {
         var content = List<Json>()
         if let Json.Array(had) = at(plain.copy(), "content") { content = had }
         content.push(Obj.new().s("type", String("text")).s("text", "[loom: Your notes for {here}, kept for when you're on it:\n{lines.join("\n")}]").done())
+        return merge(plain, Obj.new().j("content", Json.Array(content)).done())
+    }
+
+    // A browser call's result, with what the agent should know of secrets on
+    // `host`, where its page is now (PLAN.md, "The agent's browser"): the names
+    // of those its person keeps for it, the first call there since it was on
+    // another; and, the first time a page there wants a password or a code
+    // (`field`), that it fills one or asks for it on a card, never in the chat.
+    fn with_secret_hints(i: mut Instance, key: String, host: String, field: bool, result: own Json) -> Json {
+        if result.get(String("content")) == none or result.get(String("isError")) != none { return result }
+        let plain = result
+        var arrived = false
+        var wants = false
+        if let b = mut i.browsers.find(key.copy()) {
+            if b.hinted != some(host.copy()) {
+                b.hinted = some(host.copy())
+                b.hinted_field = false
+                arrived = true
+            }
+            if field and not b.hinted_field {
+                b.hinted_field = true
+                wants = true
+            }
+        }
+        if not arrived and not wants { return plain }
+        let (user, _) = key.split_once("/") ?? (String(), String())
+        let kept = match i.secrets_for(user, host.copy()) {
+            ok(n) => n,
+            err(e) => {
+                eprintln("loom: secrets for a site: {e}")
+                List<String>()
+            },
+        }
+        let place = if host.len() > 0 { host.copy() } else { String("files on this computer") }
+        var said = List<String>()
+        if kept.len() > 0 and (arrived or wants) { said.push("Your person keeps {if kept.len() == 1 { "a secret" } else { "secrets" }} for {place}: {kept.join(", ")}. When a page there asks for {if kept.len() == 1 { "it" } else { "one" }}, fill it in with browser_fill_secret, which asks no one.") }
+        if wants { said.push(String("This page wants a password or a code. Never ask your person for one in the chat: fill in one they keep with browser_fill_secret, or ask with browser_ask_secret, which asks them on a card, types it in without you seeing it, and can keep it for next time.")) }
+        if said.len() == 0 { return plain }
+        var content = List<Json>()
+        if let Json.Array(had) = at(plain.copy(), "content") { content = had }
+        content.push(Obj.new().s("type", String("text")).s("text", "[loom: {said.join(" ")}]").done())
         return merge(plain, Obj.new().j("content", Json.Array(content)).done())
     }
 
@@ -8454,6 +8630,13 @@ impl Instance {
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_of(user.copy(), agent.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
             p.told.insert(shared_told, String("1"))
         }
+        // That a password or a code is never asked for in the chat (PLAN.md, "The
+        // agent's browser"), once a session.
+        let secrets_told = "{session}#secrets"
+        if let _ = p.told.find(secrets_told.copy()) {} else {
+            prompt.push(Obj.new().s("type", String("text")).s("text", String(SECRETS_TOLD)).done())
+            p.told.insert(secrets_told, String("1"))
+        }
         // The instructions every agent of the person's follows (PLAN.md,
         // "Agent defaults"), when the session hasn't had them as they are now.
         let every = match i.store.defaults(user.copy()) {
@@ -9862,6 +10045,21 @@ impl Instance {
             i.answer_call(call.copy(), tool_error(String("The run ended before your person answered.")))
             try i.event(r.user.copy(), "approval.answered", Obj.new().s("call", call).b("allow", false).b("always", false).s("by", String("cancel")).done())
         }
+        // A secret it asked for on a card that its person hasn't answered goes with
+        // the turn, and the card says so (below).
+        let browser_key = "{r.user}/{r.agent}"
+        var asked_call = String()
+        if let b = mut i.browsers.find(browser_key.copy()) {
+            if str_at(b.secret_ask.copy(), "run") == some(run_id.copy()) {
+                asked_call = str_at(b.secret_ask.copy(), "call") ?? String()
+                b.secret_ask = Json.Null
+                b.busy -= 1
+            }
+        }
+        if asked_call.len() > 0 {
+            i.answer_call(asked_call, tool_error(String("The turn ended before your person answered.")))
+            i.browser_state(browser_key)
+        }
         // A call nothing finished, as one a rule said no to that its program never
         // reported on, ends with the turn, so the kept reply never shows it running.
         for (call, ended, refused) in try i.store.run_calls(r.user.copy(), run_id.copy(), r.since) {
@@ -9881,7 +10079,7 @@ impl Instance {
             } else if b.kind == "file" {
                 blocks.push(b.file.copy())
             } else if b.kind == "card" {
-                blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", b.card.copy()).done())
+                blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", cards.ended(b.card.copy())).done())
             } else {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).maybe("parent", inside).done())
                 if b.kind == "text" and b.parent.len() == 0 { said.push_str(b.text.copy()) }
@@ -10936,23 +11134,42 @@ impl Instance {
             return Answer.Value(empty)
         }
         if name == "secret.list" {
-            return Answer.Value(Obj.new().j("secrets", Json.Array(try i.store.secret_names(user))).done())
+            // Each with the sites it may be filled on in the agents' browsers.
+            var listed = List<Json>()
+            for s in try i.store.secret_names(user.copy()) {
+                let secret_name = str_at(s.copy(), "name") ?? String()
+                listed.push(merge(s, Obj.new().j("sites", try i.secret_hosts(user.copy(), secret_name)).done()))
+            }
+            return Answer.Value(Obj.new().j("secrets", Json.Array(listed)).done())
         }
         if name == "secret.put" {
             let secret_name = str_at(args.copy(), "name") ?? String()
             let value = str_at(args, "value") ?? String()
             if not valid_secret(secret_name.copy()) { return Answer.Refused(String("bad_request"), String("A secret's name is letters, digits, _, - and ., such as ACTA_KEY.")) }
             if value.len() == 0 { return Answer.Refused(String("bad_request"), String("The secret is empty.")) }
-            let nonce = random_bytes(24)
-            let sealed = i.sealer.encrypt(nonce.copy(), value.to_bytes(), secret_aad(user.copy(), secret_name.copy()))
-            try i.store.put_secret(user.copy(), secret_name.copy(), bytes.hex(nonce), bytes.hex(sealed))
-            i.reopen_secrets(user.copy())
-            i.stop_idle_of(user)
+            try i.keep_secret(user, secret_name.copy(), value)
             return Answer.Value(Obj.new().s("name", secret_name).done())
+        }
+        if name == "secret.sites" {
+            // Where a secret may be filled in the agents' browsers, as the person
+            // keeps it: each host, or "" for a file on the instance's computer.
+            let secret_name = str_at(args.copy(), "name") ?? String()
+            if try i.store.sealed_secret(user.copy(), secret_name.copy()) == none { return Answer.Refused(String("not_found"), "There's no secret {secret_name}.") }
+            let Json.Array(asked) = at(args, "sites") else return Answer.Refused(String("bad_request"), String("sites is a list of hosts, such as innsida.ntnu.no."))
+            var sites = List<Json>()
+            for s in asked {
+                let given = s.as_str() else return Answer.Refused(String("bad_request"), String("sites is a list of hosts, such as innsida.ntnu.no."))
+                let host = if given.trim().len() == 0 { String() } else { browser.host_of("https://{given.trim()}") }
+                if not sites.contains(Json.Str(host.copy())) { sites.push(Json.Str(host)) }
+            }
+            try i.store.set_meta("secret_hosts/{user}/{secret_name}", "{Json.Array(sites.copy())}")
+            return Answer.Value(Obj.new().s("name", secret_name).j("sites", Json.Array(sites)).done())
         }
         if name == "secret.delete" {
             let secret_name = str_at(args, "name") ?? String()
             if not try i.store.delete_secret(user.copy(), secret_name.copy()) { return Answer.Refused(String("not_found"), "There's no secret {secret_name}.") }
+            // A secret made again by this name starts with no sites.
+            try i.store.delete_meta("secret_hosts/{user}/{secret_name}")
             i.reopen_secrets(user.copy())
             i.stop_idle_of(user)
             return Answer.Value(empty)

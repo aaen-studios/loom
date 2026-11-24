@@ -14,7 +14,7 @@ module server.cards
 // it later in the same reply. What's here only checks and tidies the JSON the
 // agent gave; the instance keeps it as a `card` block.
 import std.json.{Json}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, bool_at, merge, without, str_at}
 import shared.badge
 
 pub const TYPES: str = "choices checklist table progress facts"
@@ -210,6 +210,178 @@ fn makes_the_mcp_add_card() {
     assert("{at(ready, "tools")}" == #"["list_issues","create_issue","search"]"#)
     let (_, why) = card_of(Obj.new().s("type", String("mcp_add")).done(), String("card_1"))
     assert(why.starts_with("type is \"mcp_add\""))
+}
+
+// The kinds of thing browser_ask_secret asks for, each a field on its card:
+// `password` (hidden as it's typed, and offered to keep), `username` (an
+// email or a user name: shown, and offered to keep) and `code` (a one-time
+// code: shown, and not offered, since it's good once).
+pub const SECRET_KINDS: str = "password username code"
+
+// The states a secret_ask card goes through: `asking` (Fill and Not now),
+// `filled` (it went into the page; `saved` has the names it's kept as),
+// `declined` (Not now) and `closed` (the browser closed, or the turn ended,
+// before the person answered).
+pub const SECRET_STATES: str = "asking filled declined closed"
+
+const FIELDS_MOST: usize = 4
+
+// Whether `name` can name a secret: letters, digits, _, - and ., up to 64.
+pub fn good_secret_name(name: String) -> bool {
+    if name.len() == 0 or name.len() > 64 { return false }
+    for r in name.runes() {
+        let fine = (r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') or r == '_' or r == '-' or r == '.'
+        if not fine { return false }
+    }
+    return true
+}
+
+// The name a secret for `site` is offered to be kept as: the site's own name
+// and what it is, such as ntnu-password for innsida.ntnu.no, or
+// microsoftonline-username for login.microsoftonline.com. A file's is only
+// what it is. A code is never offered, so it has none.
+pub fn save_name(site: String, kind: String) -> String {
+    if kind == "code" { return String() }
+    let what = if kind == "username" { String("username") } else { String("password") }
+    var host = site.trim().to_lower_root()
+    if host.starts_with("[") { return what }
+    if let k = host.find(":") { host = host[..k].copy() }
+    var labels = List<String>()
+    for label in host.split(".") {
+        if label.len() > 0 { labels.push(label.copy()) }
+    }
+    if labels.len() > 0 and labels[0] == "www" { _ = labels.remove(0) }
+    if labels.len() == 0 { return what }
+    // An address is itself; a name is its label before the top-level one, or
+    // before both of one such as co.uk.
+    var name = labels[labels.len() - 1].copy()
+    var numeric = true
+    for r in host.runes() {
+        if not ((r >= '0' and r <= '9') or r == '.') { numeric = false }
+    }
+    if numeric {
+        name = host.copy()
+    } else if labels.len() >= 2 {
+        name = labels[labels.len() - 2].copy()
+        let second = " co com org net ac gov edu "
+        if labels.len() >= 3 and second.contains(" {name} ") and labels[labels.len() - 1].len() == 2 { name = labels[labels.len() - 3].copy() }
+    }
+    let out = "{name}-{what}"
+    return if good_secret_name(out.copy()) { out } else { what }
+}
+
+// A field of a card the person fills in: what it's for (`label`), its
+// `kind`, whether it's hidden as it's typed (`masked`), and `save`, the name
+// it's offered to be kept as among the person's secrets, or "" when it isn't.
+// A form's card could take the same.
+pub fn field(label: String, kind: String, masked: bool, save: String) -> Json {
+    return Obj.new().s("label", tidy(label, OPTION_MOST)).s("kind", kind).b("masked", masked).s("save", save).done()
+}
+
+fn kind_label(kind: String) -> String {
+    if kind == "username" { return String("Email or user name") }
+    if kind == "code" { return String("Code") }
+    return String("Password")
+}
+
+// browser_ask_secret's fields, from its `ref`, `kind`, `masked` and `save`,
+// or its `fields` (each a ref, label, kind, masked and save) for several on
+// one page, each with its `ref`; or why they can't be. `site` is the page's
+// host, which names what each is offered to be kept as.
+pub fn ask_fields(args: Json, site: String) -> (List<Json>, String) {
+    var given = List<Json>()
+    var many = false
+    if let Json.Array(asked) = at(args.copy(), "fields") {
+        given = asked.copy()
+        many = true
+        if given.len() == 0 or given.len() > FIELDS_MOST { return (List<Json>(), "fields has {given.len()}: give 1 to {FIELDS_MOST}, each \{\"ref\", \"label\", \"kind\"\}.") }
+    } else {
+        given.push(args.copy())
+    }
+    var out = List<Json>()
+    for g in given {
+        let r = (str_at(g.copy(), "ref") ?? String()).trim().copy()
+        if r.len() == 0 { return (List<Json>(), if many { String("Each of fields needs the ref of its field on the page, such as e12.") } else { String("ref is missing: give the field's ref, such as e12, from the page's outline.") }) }
+        let kind = (str_at(g.copy(), "kind") ?? String("password")).trim().copy()
+        if not " {SECRET_KINDS} ".contains(" {kind} ") { return (List<Json>(), "kind is \"{kind}\": it's password, username (an email or a user name) or code (a one-time code).") }
+        let masked = bool_at(g.copy(), "masked") ?? (kind == "password")
+        var save = save_name(site.copy(), kind.copy())
+        if let asked = str_at(g.copy(), "save") {
+            save = asked.trim().copy()
+            if save.len() > 0 and not good_secret_name(save.copy()) { return (List<Json>(), "save is \"{save}\": a secret's name is letters, digits, _, - and ., such as ntnu-password.") }
+        }
+        let label = (str_at(g, "label") ?? String()).trim().copy()
+        let f = field(if label.len() > 0 { label } else { kind_label(kind.copy()) }, kind, masked, save)
+        out.push(merge(f, Obj.new().s("ref", r).done()))
+    }
+    return (out, String())
+}
+
+// The card browser_ask_secret puts in the agent's reply (PLAN.md, "The
+// agent's browser"): what's asked (`title`), on which site, and its fields,
+// with how it stands and the names what was given is kept as. Never a value.
+// Agents can't make one with show_card.
+pub fn secret_card(call: String, agent: String, why: String, site: String, fields: List<Json>) -> Json {
+    var shown = List<Json>()
+    for f in fields {
+        shown.push(without(f, "ref"))
+    }
+    let place = if site.len() > 0 { site.copy() } else { String("a file on this computer") }
+    return Obj.new().s("id", "secret_{call}").s("type", String("secret_ask")).s("title", tidy(why, TITLE_MOST)).s("call", call).s("agent", agent).s("site", place).j("fields", Json.Array(shown)).s("state", String("asking")).j("saved", Json.Array(List<Json>())).done()
+}
+
+// A secret_ask card as it stands now: `state`, and the names kept.
+pub fn secret_card_now(card: Json, state: str, saved: List<String>) -> Json {
+    var names = List<Json>()
+    for s in saved {
+        names.push(Json.Str(s.copy()))
+    }
+    return merge(card, Obj.new().s("state", String(state)).j("saved", Json.Array(names)).done())
+}
+
+// A card as a reply keeps it once its turn is over: a secret_ask still
+// asking is closed, since nothing can answer it now.
+pub fn ended(card: own Json) -> Json {
+    if str_at(card.copy(), "type") == some(String("secret_ask")) and str_at(card.copy(), "state") == some(String("asking")) { return secret_card_now(card, "closed", List<String>()) }
+    return card
+}
+
+@test
+fn names_what_a_secret_is_kept_as() {
+    assert(save_name(String("innsida.ntnu.no"), String("password")) == "ntnu-password")
+    assert(save_name(String("login.microsoftonline.com"), String("username")) == "microsoftonline-username")
+    assert(save_name(String("www.shop.example.co.uk"), String("password")) == "example-password")
+    assert(save_name(String("localhost:8080"), String("password")) == "localhost-password")
+    assert(save_name(String("10.0.0.5:3000"), String("password")) == "10.0.0.5-password")
+    assert(save_name(String("[::1]:8080"), String("password")) == "password")
+    assert(save_name(String(), String("password")) == "password")
+    assert(save_name(String("bank.example"), String("code")) == "")
+    assert(good_secret_name(String("ntnu-password")) and not good_secret_name(String("my password")) and not good_secret_name(String()))
+}
+
+@test
+fn makes_the_secret_card() {
+    let (one, none_why) = ask_fields(Obj.new().s("ref", String("e12")).done(), String("innsida.ntnu.no"))
+    assert(none_why.len() == 0)
+    assert("{one[0]}" == "\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\",\"ref\":\"e12\"\}")
+    let (two, _) = ask_fields(Obj.new().j("fields", Json.Array([Obj.new().s("ref", String("e3")).s("kind", String("username")).s("label", String("Email")).done(), Obj.new().s("ref", String("e4")).s("save", String("")).done()])).done(), String("innsida.ntnu.no"))
+    assert(two.len() == 2 and str_at(two[0].copy(), "label") == some(String("Email")) and at(two[0].copy(), "masked") == Json.Bool(false) and str_at(two[0].copy(), "save") == some(String("ntnu-username")) and str_at(two[1].copy(), "save") == some(String("")))
+    let (code, _) = ask_fields(Obj.new().s("ref", String("e5")).s("kind", String("code")).done(), String("bank.example"))
+    assert(str_at(code[0].copy(), "label") == some(String("Code")) and at(code[0].copy(), "masked") == Json.Bool(false) and str_at(code[0].copy(), "save") == some(String("")))
+    let (_, no_ref) = ask_fields(Obj.new().done(), String())
+    assert(no_ref.starts_with("ref is missing"))
+    let (_, odd) = ask_fields(Obj.new().s("ref", String("e1")).s("kind", String("pin")).done(), String())
+    assert(odd.starts_with("kind is \"pin\""))
+    let (_, bad_name) = ask_fields(Obj.new().s("ref", String("e1")).s("save", String("my password")).done(), String())
+    assert(bad_name.starts_with("save is \"my password\""))
+    let card = secret_card(String("bc_7"), String("a_1"), String(" Your NTNU password "), String("innsida.ntnu.no"), one)
+    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
+    let filled = secret_card_now(card.copy(), "filled", [String("ntnu-password")])
+    assert(str_at(filled.copy(), "state") == some(String("filled")) and "{at(filled.copy(), "saved")}" == "[\"ntnu-password\"]")
+    assert(str_at(ended(card.copy()), "state") == some(String("closed")) and str_at(ended(filled), "state") == some(String("filled")))
+    assert(str_at(secret_card(String("bc_8"), String("a_1"), String("Code"), String(), List<Json>()), "site") == some(String("a file on this computer")))
+    let (_, why) = card_of(Obj.new().s("type", String("secret_ask")).done(), String("card_1"))
+    assert(why.starts_with("type is \"secret_ask\""))
 }
 
 @test
