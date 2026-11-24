@@ -1426,6 +1426,41 @@ pub enum CardBody {
         /// Once it's ready, the tools it offers.
         tools: Vec<String>,
     },
+    /// Something an agent's page wants that only the person knows, asked for with
+    /// browser_ask_secret (loom's own card): which agent and call, the site, the
+    /// fields, how it stands (`asking`, `filled`, `declined` or `closed`), the names
+    /// what was given is kept as, whether the answer is on its way, and what the
+    /// instance said to one it refused.
+    SecretAsk {
+        call: String,
+        agent: String,
+        site: String,
+        fields: Vec<Field>,
+        state: String,
+        saved: Vec<String>,
+        sending: bool,
+        error: String,
+    },
+}
+
+/// A field the person fills in on a card: what it's for, whether it's hidden as it's
+/// typed, the name it's offered to be kept as among their secrets ("" for none), and
+/// whether Save as is ticked.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    pub label: String,
+    pub kind: String,
+    pub masked: bool,
+    pub save: String,
+    pub keep: bool,
+}
+
+/// One of the person's secrets, by name, and the sites it may be filled in on in their
+/// agents' browsers ("" for a file on the instance's computer).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Secret {
+    pub name: String,
+    pub sites: Vec<String>,
 }
 
 /// A header or environment variable a proposed MCP server is given: its text, or the
@@ -1499,6 +1534,30 @@ impl Card {
                 signed: false,
                 signing: false,
                 tools: strings(v.get("tools")),
+            },
+            "secret_ask" => CardBody::SecretAsk {
+                call: s(v, "call"),
+                agent: s(v, "agent"),
+                site: s(v, "site"),
+                fields: v
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(|xs| {
+                        xs.iter()
+                            .map(|x| Field {
+                                label: s(x, "label"),
+                                kind: s(x, "kind"),
+                                masked: x.get("masked") == Some(&Value::Bool(true)),
+                                save: s(x, "save"),
+                                keep: !s(x, "save").is_empty(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                state: s(v, "state"),
+                saved: strings(v.get("saved")),
+                sending: false,
+                error: String::new(),
             },
             "facts" => CardBody::Facts(
                 items?
@@ -2653,10 +2712,9 @@ pub struct Browser {
     pub open: bool,
     /// Whether the person has taken it over.
     pub person: bool,
-    /// What the agent asked the person for, while it waits.
+    /// What the agent asked the person for, while it waits. A secret it asks for is a
+    /// card in its reply (`CardBody::SecretAsk`).
     pub asked: String,
-    /// What the agent asked the person to type into its page, while it waits.
-    pub secret: String,
     /// Whether what the person does in it is recorded, to teach the agent a task, and
     /// how many steps the recording has.
     pub recording: bool,
@@ -3015,10 +3073,17 @@ pub struct Model {
     /// the ones it found in the ssh config and on the tailnet that aren't added yet.
     pub hosts: Vec<Host>,
     pub hosts_found: Vec<Host>,
-    /// The person's MCP servers, and the names of their secrets.
+    /// The person's MCP servers, and their secrets, by name, with where each may be
+    /// filled in.
     pub mcp_servers: Vec<McpServer>,
-    pub secrets: Vec<String>,
+    pub secrets: Vec<Secret>,
     mcp_stale: bool,
+    /// The fields of secret cards the person unticked Save as on, as `call/field`; the
+    /// cards whose answer went and hasn't come back; and what the instance said to one
+    /// it refused.
+    secret_unkept: HashSet<String>,
+    secret_sending: HashSet<String>,
+    secret_errors: HashMap<String, String>,
     /// The last test of each MCP server, by its name.
     pub mcp_tests: HashMap<String, McpTest>,
     /// MCP servers whose sign-in is under way, while the person's browser is away.
@@ -4029,6 +4094,20 @@ impl Model {
         if matches!(card.body, CardBody::SignIn { .. } | CardBody::McpAdd { .. }) {
             self.mcp_stale = true;
         }
+        // A secret card that's answered isn't waiting on its answer any more, and the
+        // secrets are read again once one is kept.
+        if let CardBody::SecretAsk {
+            call, state, saved, ..
+        } = &card.body
+        {
+            if state != "asking" {
+                self.secret_sending.remove(call);
+                self.secret_errors.remove(call);
+            }
+            if !saved.is_empty() {
+                self.mcp_stale = true;
+            }
+        }
         let message = s(f, "message");
         let block = f.get("block").and_then(Value::as_u64).unwrap_or(0) as usize;
         let blocks = self.live.entry(message).or_default();
@@ -4047,7 +4126,6 @@ impl Model {
             open: f.get("open").and_then(Value::as_bool).unwrap_or(false),
             person: f.get("person").and_then(Value::as_bool).unwrap_or(false),
             asked: s(f, "asked"),
-            secret: s(f, "secret"),
             recording: f.get("recording").and_then(Value::as_bool).unwrap_or(false),
             steps: f.get("steps").and_then(Value::as_i64).unwrap_or(0),
         };
@@ -4130,17 +4208,57 @@ impl Model {
         self.page_moved = true;
     }
 
-    /// What the person typed for the selected agent's browser_ask_secret, or
-    /// "" for no.
-    pub fn give_secret(&mut self, value: &str) -> Option<Value> {
-        let agent = self.selected.clone()?;
-        if let Some(b) = self.browsers.get_mut(&agent) {
-            b.secret.clear();
+    /// Ticks or unticks Save as on field `field` of the secret card for `call`.
+    pub fn toggle_secret_keep(&mut self, call: &str, field: usize) {
+        let key = format!("{call}/{field}");
+        if !self.secret_unkept.remove(&key) {
+            self.secret_unkept.insert(key);
         }
-        let id = self.id("browser.hand");
+    }
+
+    /// What the person filled in on the secret card for `call`, which `agent` asked
+    /// for: each field's value, and the name to keep it as where Save as is ticked
+    /// (`names`, as the card's Save as fields read now). None, saying so on the card,
+    /// while a field is empty, since Fill with nothing would be a no.
+    pub fn answer_secret(
+        &mut self,
+        agent: &str,
+        call: &str,
+        values: &[String],
+        names: &[String],
+    ) -> Option<Value> {
+        if values.is_empty() || values.iter().any(|v| v.is_empty()) {
+            self.secret_errors.insert(
+                call.to_string(),
+                "Fill in each field, or say Not now.".into(),
+            );
+            return None;
+        }
+        let fields: Vec<Value> = values
+            .iter()
+            .enumerate()
+            .map(|(k, value)| {
+                let kept = !self.secret_unkept.contains(&format!("{call}/{k}"));
+                let name = names.get(k).map(|n| n.trim()).unwrap_or_default();
+                if kept && !name.is_empty() {
+                    json!({"value": value, "save": name})
+                } else {
+                    json!({"value": value})
+                }
+            })
+            .collect();
+        self.secret_errors.remove(call);
+        self.secret_sending.insert(call.to_string());
         Some(
-            json!({"t": "cmd", "id": id, "name": "browser.secret", "args": {"agent": agent, "value": value}}),
+            json!({"t": "cmd", "id": format!("app.secret_fill:{call}"), "name": "browser.secret", "args": {"agent": agent, "fields": fields}}),
         )
+    }
+
+    /// Not now, on the secret card for `call`.
+    pub fn decline_secret(&mut self, agent: &str, call: &str) -> Value {
+        self.secret_errors.remove(call);
+        self.secret_sending.insert(call.to_string());
+        json!({"t": "cmd", "id": format!("app.secret_fill:{call}"), "name": "browser.secret", "args": {"agent": agent, "fields": []}})
     }
 
     /// Starts or stops recording what the person does in the watched browser, which
@@ -4226,6 +4344,15 @@ impl Model {
         if id.starts_with("browser.input") {
             if let Some(e) = f.get("error") {
                 self.not_theirs(&s(e, "code"));
+            }
+            return;
+        }
+        // The answer on a secret card: the card's own frame says how it went, and a
+        // refusal shows on the card, which still asks.
+        if let Some(call) = id.strip_prefix("app.secret_fill:") {
+            if let Some(e) = f.get("error") {
+                self.secret_sending.remove(call);
+                self.secret_errors.insert(call.to_string(), s(e, "message"));
             }
             return;
         }
@@ -4928,7 +5055,22 @@ impl Model {
             self.secrets = f
                 .pointer("/value/secrets")
                 .and_then(Value::as_array)
-                .map(|ss| ss.iter().map(|k| s(k, "name")).collect())
+                .map(|ss| {
+                    ss.iter()
+                        .map(|k| Secret {
+                            name: s(k, "name"),
+                            sites: k
+                                .get("sites")
+                                .and_then(Value::as_array)
+                                .map(|xs| {
+                                    xs.iter()
+                                        .map(|x| x.as_str().unwrap_or_default().to_string())
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
         } else if id.starts_with("app.mcp_") || id.starts_with("app.secret_") {
             if let Some(e) = f.get("error") {
@@ -5377,6 +5519,26 @@ impl Model {
                     }) => {
                         *signed = self.mcp_signed_as(server).is_some();
                         *signing = self.mcp_signing.contains(server.as_str());
+                    }
+                    // A secret card keeps what the person unticked, and says while its
+                    // answer is on the way, or what the instance said to it.
+                    Some(CardBody::SecretAsk {
+                        call,
+                        fields,
+                        sending,
+                        error,
+                        ..
+                    }) => {
+                        for (k, f) in fields.iter_mut().enumerate() {
+                            f.keep = !f.save.is_empty()
+                                && !self.secret_unkept.contains(&format!("{call}/{k}"));
+                        }
+                        *sending = self.secret_sending.contains(call.as_str());
+                        *error = self
+                            .secret_errors
+                            .get(call.as_str())
+                            .cloned()
+                            .unwrap_or_default();
                     }
                     _ => {}
                 }
@@ -6057,6 +6219,17 @@ impl Model {
     pub fn delete_secret(&mut self, name: &str) -> Value {
         let id = self.id("app.secret_delete");
         json!({"t": "cmd", "id": id, "name": "secret.delete", "args": {"name": name}})
+    }
+
+    /// Takes the site `site` off where the secret `name` may be filled in.
+    pub fn remove_secret_site(&mut self, name: &str, site: &str) -> Option<Value> {
+        let secret = self.secrets.iter_mut().find(|s| s.name == name)?;
+        secret.sites.retain(|s| s != site);
+        let sites = secret.sites.clone();
+        let id = self.id("app.secret_sites");
+        Some(
+            json!({"t": "cmd", "id": id, "name": "secret.sites", "args": {"name": name, "sites": sites}}),
+        )
     }
 
     /// Gives the agent being edited the MCP server `name`, or takes it away.
@@ -6942,6 +7115,110 @@ mod tests {
             m.mcp_stale,
             "the servers are loaded, for whether it's signed in"
         );
+    }
+
+    #[test]
+    fn a_secret_card_fills_and_keeps_what_the_person_says() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        let card = json!({"id": "secret_bc_7", "type": "secret_ask", "title": "Your NTNU sign-in", "call": "bc_7", "agent": "a_1", "site": "innsida.ntnu.no", "fields": [
+            {"label": "Email", "kind": "username", "masked": false, "save": "ntnu-username"},
+            {"label": "Password", "kind": "password", "masked": true, "save": "ntnu-password"},
+            {"label": "Code", "kind": "code", "masked": false, "save": ""}], "state": "asking", "saved": []});
+        let reply = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 1, "blocks": [{"kind": "card", "card": card}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": reply}));
+        let shown = |m: &Model| -> (Vec<bool>, bool, String) {
+            match m.shown()[0].blocks[0].card.clone().map(|c| c.body) {
+                Some(CardBody::SecretAsk {
+                    fields,
+                    sending,
+                    error,
+                    ..
+                }) => (fields.iter().map(|f| f.keep).collect(), sending, error),
+                other => panic!("a secret card, not {other:?}"),
+            }
+        };
+        // Save as is ticked where there's a name to keep it as.
+        assert_eq!(shown(&m), (vec![true, true, false], false, String::new()));
+        m.toggle_secret_keep("bc_7", 0);
+        assert_eq!(shown(&m).0, vec![false, true, false]);
+        // Fill with a field left empty would be a no, so it says so on the card instead.
+        let names = vec![
+            "ntnu-username".to_string(),
+            " ntnu-password ".to_string(),
+            String::new(),
+        ];
+        assert!(m
+            .answer_secret(
+                "a_1",
+                "bc_7",
+                &["ada".into(), "pw".into(), String::new()],
+                &names
+            )
+            .is_none());
+        assert_eq!(shown(&m).2, "Fill in each field, or say Not now.");
+        let f = m
+            .answer_secret(
+                "a_1",
+                "bc_7",
+                &["ada".into(), "pw".into(), "123456".into()],
+                &names,
+            )
+            .unwrap();
+        assert_eq!(f["name"], "browser.secret");
+        assert_eq!(
+            f["args"],
+            json!({"agent": "a_1", "fields": [{"value": "ada"}, {"value": "pw", "save": "ntnu-password"}, {"value": "123456"}]})
+        );
+        assert_eq!(shown(&m), (vec![false, true, false], true, String::new()));
+        // A refusal shows on the card, which still asks.
+        m.take(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "bad_request", "message": "Fill in each field, or say Not now."}}));
+        assert_eq!(
+            shown(&m),
+            (
+                vec![false, true, false],
+                false,
+                "Fill in each field, or say Not now.".to_string()
+            )
+        );
+        assert_eq!(
+            m.decline_secret("a_1", "bc_7")["args"],
+            json!({"agent": "a_1", "fields": []})
+        );
+        // Filled, the secrets are read again for the one kept.
+        let mut filled = card.clone();
+        filled["state"] = json!("filled");
+        filled["saved"] = json!(["ntnu-password"]);
+        m.take(
+            &json!({"t": "card", "run": "run_1", "message": "msg_1", "block": 0, "card": filled}),
+        );
+        assert!(m.mcp_stale && !m.secret_sending.contains("bc_7"));
+        m.take(&json!({"t": "result", "id": "app.secrets_1", "ok": true, "value": {"secrets": [{"name": "ntnu-password", "at": 1, "sites": ["innsida.ntnu.no", ""]}]}}));
+        assert_eq!(
+            m.secrets,
+            vec![Secret {
+                name: "ntnu-password".into(),
+                sites: vec!["innsida.ntnu.no".into(), String::new()]
+            }]
+        );
+        let f = m.remove_secret_site("ntnu-password", "").unwrap();
+        assert_eq!(f["name"], "secret.sites");
+        assert_eq!(
+            f["args"],
+            json!({"name": "ntnu-password", "sites": ["innsida.ntnu.no"]})
+        );
+        assert!(m.remove_secret_site("nope", "").is_none());
     }
 
     #[test]

@@ -165,6 +165,7 @@ enum Screen {
     Hosts,
     AddPhone,
     Mcp,
+    Secrets,
     Plugins,
     Move,
     People,
@@ -302,9 +303,10 @@ pub struct Loom {
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
-    secret_in: Entity<InputState>,
     /// A masked field for each secret an MCP server an agent proposed needs that the
-    /// person doesn't have, by its card's call and the secret's name ("tc_4/ACTA_KEY").
+    /// person doesn't have, by its card's call and the secret's name ("tc_4/ACTA_KEY");
+    /// and for each field of a card asking for a secret, by its call and the field's
+    /// place, with its Save as name beside it ("bc_7/0" and "bc_7/0/save").
     card_secrets: Rc<HashMap<String, Entity<InputState>>>,
     queue_in: Entity<InputState>,
     /// A side question being written.
@@ -783,18 +785,6 @@ impl Loom {
             },
         )
         .detach();
-        // What an agent asked for with browser_ask_secret: Enter sends it to the page.
-        let secret_in = input(window, cx, "Type it here", true);
-        cx.subscribe_in(
-            &secret_in,
-            window,
-            |this: &mut Loom, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { .. } = event {
-                    this.give_secret(true, window, cx);
-                }
-            },
-        )
-        .detach();
         // A queued message being edited: Enter saves it.
         let queue_in = input(window, cx, "", false);
         cx.subscribe_in(
@@ -868,7 +858,7 @@ impl Loom {
                 .auto_grow(4, 14)
                 .placeholder("What the agent is asked each time.")
         });
-        let set_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
+        let set_key_in = input(window, cx, "ntnu-password", false);
         let mcp_name_in = input(window, cx, "acta", false);
         let rule_in = input(window, cx, "git push", false);
         let rule_note_in = input(window, cx, "Why, for you later", false);
@@ -1206,7 +1196,6 @@ ACTA_KEY=secret:ACTA_KEY",
             server_in,
             user_in,
             pass_in,
-            secret_in,
             card_secrets: Rc::default(),
             queue_in,
             aside_in,
@@ -1562,7 +1551,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 self.program_open = None;
             }
-            Screen::Mcp => {
+            Screen::Mcp | Screen::Secrets => {
                 for f in self.model.load_mcp() {
                     self.send(f);
                 }
@@ -3020,6 +3009,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::People => self.people_page(cx),
             Screen::AddPhone => self.add_phone_page(cx),
             Screen::Mcp => self.mcp_page(cx),
+            Screen::Secrets => self.secrets_page(cx),
             Screen::Plugins => self.plugins_page(cx),
             Screen::Import => self.import_page(cx),
             Screen::Appearance => self.appearance_page(cx),
@@ -4696,66 +4686,126 @@ ACTA_KEY=secret:ACTA_KEY",
         (header, screen, footer)
     }
 
-    /// Sends what the person typed for the agent's browser_ask_secret, or says
-    /// they won't, and clears the box either way.
-    fn give_secret(&mut self, give: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let value = if give {
-            self.secret_in.read(cx).value().to_string()
+    /// Fill on the card asking for a secret for `call`: what's typed in each field, and
+    /// each one's Save as name, go to the page and, where Save as is ticked, the
+    /// person's secrets. With `fill` false, Not now.
+    fn answer_secret(&mut self, agent: &str, call: &str, fill: bool, cx: &mut Context<Self>) {
+        let frame = if fill {
+            let read = |k: String| {
+                self.card_secrets
+                    .get(&k)
+                    .map(|i| i.read(cx).value().to_string())
+                    .unwrap_or_default()
+            };
+            let count = (0..)
+                .take_while(|k| self.card_secrets.contains_key(&format!("{call}/{k}")))
+                .count();
+            let values: Vec<String> = (0..count).map(|k| read(format!("{call}/{k}"))).collect();
+            let names: Vec<String> = (0..count)
+                .map(|k| read(format!("{call}/{k}/save")))
+                .collect();
+            self.model.answer_secret(agent, call, &values, &names)
         } else {
-            String::new()
+            Some(self.model.decline_secret(agent, call))
         };
-        if give && value.is_empty() {
-            return;
-        }
-        if let Some(f) = self.model.give_secret(&value) {
+        if let Some(f) = frame {
             self.send(f);
         }
-        self.secret_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
+        // The card says its answer is on the way, or what to fix.
+        self.rows_dirty = true;
         cx.notify();
     }
 
-    /// The masked fields the chat's proposed MCP servers need: one for each secret a
-    /// card still asking names that the person doesn't have, kept while it asks.
+    /// Ticks or unticks Save as on field `field` of the card asking for a secret for `call`.
+    fn toggle_secret_keep(&mut self, call: &str, field: usize, cx: &mut Context<Self>) {
+        self.model.toggle_secret_keep(call, field);
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
+    /// The fields the chat's cards still asking need, kept while they ask: a masked one
+    /// for each secret a proposed MCP server names that the person doesn't have, and
+    /// for a card asking for a secret, one for each of its fields, masked or not as it
+    /// says, with one for its Save as name, filled in with the name it's offered.
     fn card_secrets(
         &mut self,
         rows: &[Row],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Rc<HashMap<String, Entity<InputState>>> {
-        let wanted: HashSet<String> = rows
+        // Each field's key, what it says while it's empty, whether it's masked, and
+        // what it starts with.
+        let mut wanted: Vec<(String, String, bool, String)> = Vec::new();
+        let cards = rows
             .iter()
             .filter_map(|r| match r {
                 Row::Message(m) => Some(m),
                 Row::Approval(_) => None,
             })
             .flat_map(|m| m.blocks.iter())
-            .filter_map(|b| match b.card.as_ref().map(|c| &c.body) {
-                Some(model::CardBody::McpAdd {
+            .filter_map(|b| b.card.as_ref().map(|c| &c.body));
+        for body in cards {
+            match body {
+                model::CardBody::McpAdd {
                     call,
                     settings,
                     state,
                     ..
-                }) if state == "asking" => Some((call, settings)),
-                _ => None,
-            })
-            .flat_map(|(call, settings)| {
-                settings
-                    .iter()
-                    .filter(|s| s.wanted())
-                    .map(move |s| format!("{call}/{}", s.secret))
-            })
-            .collect();
+                } if state == "asking" => {
+                    for s in settings.iter().filter(|s| s.wanted()) {
+                        // Named as it's kept, the secret's name.
+                        let key = format!("{call}/{}", s.secret);
+                        if !wanted.iter().any(|(k, ..)| *k == key) {
+                            wanted.push((key, s.secret.clone(), true, String::new()));
+                        }
+                    }
+                }
+                model::CardBody::SecretAsk {
+                    call,
+                    fields,
+                    state,
+                    ..
+                } if state == "asking" => {
+                    for (k, f) in fields.iter().enumerate() {
+                        wanted.push((
+                            format!("{call}/{k}"),
+                            f.label.clone(),
+                            f.masked,
+                            String::new(),
+                        ));
+                        if !f.save.is_empty() {
+                            wanted.push((
+                                format!("{call}/{k}/save"),
+                                "Name".into(),
+                                false,
+                                f.save.clone(),
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         if wanted.len() != self.card_secrets.len()
-            || !wanted.iter().all(|k| self.card_secrets.contains_key(k))
+            || !wanted
+                .iter()
+                .all(|(k, ..)| self.card_secrets.contains_key(k))
         {
             let mut kept = HashMap::new();
-            for key in wanted {
-                // Named as it's kept, the secret's name.
-                let name = key.split_once('/').map_or("", |(_, n)| n).to_string();
+            for (key, placeholder, masked, start) in wanted {
                 let input = match self.card_secrets.get(&key) {
                     Some(input) => input.clone(),
-                    None => cx.new(|cx| InputState::new(window, cx).placeholder(name).masked(true)),
+                    None => {
+                        let input = cx.new(|cx| {
+                            InputState::new(window, cx)
+                                .placeholder(placeholder)
+                                .masked(masked)
+                        });
+                        if !start.is_empty() {
+                            input.update(cx, |s, cx| s.set_value(start, window, cx));
+                        }
+                        input
+                    }
                 };
                 kept.insert(key, input);
             }
@@ -4951,38 +5001,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 .pb(px(space::XS))
                 .child(list),
         )
-    }
-
-    /// The agent asking for something only the person should know, typed straight into
-    /// its page: a card above the composer with a masked box.
-    fn secret_ask(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Div> {
-        let state = self.model.browser(&agent.id);
-        if state.secret.is_empty() {
-            return None;
-        }
-        let p = self.p;
-        let tint = thread::color(&agent.color, p.dark);
-        let card =
-            CardFrame::new()
-                .lead(card_icon(p, Ico::ShieldCheck, tint))
-                .title(state.secret.clone())
-                .row(Input::new(&self.secret_in))
-                .row(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(format!(
-                            "It goes into the page. {} never sees it.",
-                            agent.name
-                        )),
-                )
-                .action(card_button(p, "secret-give", "Fill it in", true).on_click(
-                    cx.listener(|this, _, window, cx| this.give_secret(true, window, cx)),
-                ))
-                .action(card_button(p, "secret-skip", "Not now", false).on_click(
-                    cx.listener(|this, _, window, cx| this.give_secret(false, window, cx)),
-                ));
-        Some(self.above_composer(card.draw(p, 1.0)))
     }
 
     /// The agent asking for the person in its browser, above the composer while
@@ -7457,7 +7475,6 @@ ACTA_KEY=secret:ACTA_KEY",
             (None, None) => None,
         };
         let ask = agent.as_ref().and_then(|a| self.browser_ask(a, cx));
-        let secret = agent.as_ref().and_then(|a| self.secret_ask(a, cx));
         let queue = agent.as_ref().and_then(|a| self.queue_view(a, cx));
         // Named "Branch" until the list of conversations has it.
         let branch_title = self.model.open_branch.as_ref().map(|_| {
@@ -7871,7 +7888,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .when_some(mini, |d, m| d.child(m)),
             )
             .when_some(ask, |d, a| d.child(a))
-            .when_some(secret, |d, a| d.child(a))
             .when_some(queue, |d, q| d.child(q))
             .when_some(composer, |d, c| {
                 d.child(
@@ -10097,17 +10113,26 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             groups.push(self.group(None, rows));
         }
-        // The keys settings name, sealed on the instance: only their names come here.
+        let action = (!self.model.mcp_servers.is_empty())
+            .then(|| new_server(self, cx, false).into_any_element());
+        self.settings_page("mcp-page", "MCP servers", action, groups)
+    }
+
+    /// The Secrets page: the person's secrets, sealed on the instance, of which only the
+    /// names come here, each with the sites its agents' browsers may fill it in on,
+    /// which can be taken off; and a form for one more.
+    fn secrets_page(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
         let mut keys = Vec::new();
-        for k in self.model.secrets.clone() {
-            let name = k.clone();
+        for secret in self.model.secrets.clone() {
+            let name = secret.name.clone();
             keys.push(
                 self.row(
                     Some(self.tile(Ico::KeyRound)),
-                    k.clone(),
-                    Some("••••••••".into()),
+                    secret.name.clone(),
+                    None,
                     Some(
-                        self.small_button(format!("secret-{k}"), "Remove", false)
+                        self.small_button(format!("secret-{}", secret.name), "Remove", false)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let f = this.model.delete_secret(&name);
                                 this.send(f);
@@ -10118,6 +10143,38 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .into_any_element(),
             );
+            // Where it's filled in, a line each under it.
+            for site in &secret.sites {
+                let (name, site) = (secret.name.clone(), site.clone());
+                let shown = if site.is_empty() {
+                    "Files on this computer".to_string()
+                } else {
+                    site.clone()
+                };
+                keys.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .pl(px(space::L + control::LEAD + space::M))
+                        .pr(px(space::L))
+                        .py(px(space::XS + 2.0))
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_2)
+                        .child(Icon::new(Ico::Globe).xsmall())
+                        .child(div().flex_1().min_w_0().truncate().child(shown))
+                        .child(
+                            self.small_button(format!("site-{name}-{site}"), "Take off", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(f) = this.model.remove_secret_site(&name, &site) {
+                                        this.send(f);
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
         }
         keys.push(
             div()
@@ -10129,7 +10186,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .child(div().flex_1().child(Input::new(&self.set_key_in)))
                 .child(div().flex_1().child(Input::new(&self.set_value_in)))
                 .child(
-                    self.small_button("save-secret", "Add key", false)
+                    self.small_button("save-secret", "Add", false)
                         .on_click(cx.listener(|this, _, window, cx| {
                             let name = this.set_key_in.read(cx).value().to_string();
                             let value = this.set_value_in.read(cx).value().to_string();
@@ -10146,10 +10203,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .into_any_element(),
         );
-        groups.push(self.group(Some("Keys, sealed on the instance"), keys));
-        let action = (!self.model.mcp_servers.is_empty())
-            .then(|| new_server(self, cx, false).into_any_element());
-        self.settings_page("mcp-page", "MCP servers", action, groups)
+        let groups = vec![self.group(None, keys)];
+        self.settings_page("secrets-page", "Secrets", None, groups)
     }
 
     /// The skills page: the person's skills, which every agent reads when a task fits one,
@@ -15511,6 +15566,7 @@ fn card_view(
         }
         CardBody::SignIn { .. } => sign_in_card(p, card, key, tint, scale, this),
         CardBody::McpAdd { .. } => mcp_add_card(p, card, key, name, tint, scale, secrets, this),
+        CardBody::SecretAsk { .. } => secret_ask_card(p, card, key, tint, scale, secrets, this),
         _ => shown_card(p, card, tint, scale),
     }
 }
@@ -15957,6 +16013,142 @@ fn mcp_add_card(
     div().max_w(px(CARD_MOST)).child(frame.draw(p, scale))
 }
 
+/// Loom's own card for something an agent's page wants that only the person knows: the
+/// site's badge, or a key for a file, what's asked, with the site under it, and a field
+/// for each thing asked, its label over its box so the box keeps its width beside the
+/// browser, masked as the card says, with Save as and the name it's kept as where it can
+/// be kept; then Fill and Not now. Once it's answered, one quiet line says how.
+fn secret_ask_card(
+    p: Palette,
+    card: &model::Card,
+    key: &str,
+    tint: Hsla,
+    scale: f32,
+    secrets: &HashMap<String, Entity<InputState>>,
+    this: WeakEntity<Loom>,
+) -> Div {
+    let model::CardBody::SecretAsk {
+        call,
+        agent,
+        site,
+        fields,
+        state,
+        saved,
+        sending,
+        error,
+    } = &card.body
+    else {
+        return div();
+    };
+    let badge = card.badge.as_ref();
+    let done = |icon: Ico, how: &str, what: String| {
+        div().child(card_done(p, done_lead(p, badge, icon), how, &what, scale))
+    };
+    match state.as_str() {
+        "filled" if saved.is_empty() => return done(Ico::Check, "Filled in", site.clone()),
+        "filled" => {
+            return done(
+                Ico::Check,
+                "Filled in",
+                format!("{site}, kept as {}", saved.join(", ")),
+            )
+        }
+        "declined" => return done(Ico::X, "Not now", card.title.clone()),
+        "closed" => return done(Ico::X, "Not answered", card.title.clone()),
+        _ => {}
+    }
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap(px(space::S))
+        .text_size(px(size::SMALL * scale));
+    for (k, f) in fields.iter().enumerate() {
+        let mut one = div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XS))
+            .child(div().truncate().text_color(p.ink_3).child(f.label.clone()));
+        if let Some(input) = secrets.get(&format!("{call}/{k}")) {
+            one = one.child(div().w_full().child(Input::new(input).small()));
+        }
+        if f.save.is_empty() {
+            list = list.child(one);
+            continue;
+        }
+        // Save as: a tick, and the name it's kept as while it's ticked.
+        let tick = {
+            let this = this.clone();
+            let call = call.clone();
+            div()
+                .id(SharedString::from(format!("secret-keep-{key}-{k}")))
+                .role(Role::CheckBox)
+                .aria_label("Save as")
+                .size(px(16.0))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(4.0))
+                .border_1()
+                .cursor_pointer()
+                .when(f.keep, |d| {
+                    d.border_color(p.button)
+                        .bg(p.button)
+                        .text_color(p.button_ink)
+                        .child(Icon::new(Ico::Check).xsmall())
+                })
+                .when(!f.keep, |d| d.border_color(p.line_strong))
+                .on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |loom, cx| loom.toggle_secret_keep(&call, k, cx));
+                })
+        };
+        let name = secrets
+            .get(&format!("{call}/{k}/save"))
+            .filter(|_| f.keep)
+            .map(|input| div().flex_1().min_w_0().child(Input::new(input).small()));
+        one = one.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.0))
+                .child(tick)
+                .child(div().flex_none().text_color(p.ink_2).child("Save as"))
+                .children(name),
+        );
+        list = list.child(one);
+    }
+    let lead = match badge {
+        Some(b) => badge_view(p, b, BADGE),
+        None => card_icon(p, Ico::KeyRound, tint),
+    };
+    let mut frame = CardFrame::new()
+        .lead(lead)
+        .title(card.title.clone())
+        .sub(site.clone())
+        .mark(card_mark(key, true, tint))
+        .waits(tint)
+        .row(list);
+    if !error.is_empty() {
+        frame = frame.row(
+            div()
+                .text_size(px(size::SMALL * scale))
+                .text_color(p.bad)
+                .child(error.clone()),
+        );
+    }
+    let answer = |label: &str, fill: bool| {
+        let this = this.clone();
+        let (agent, call) = (agent.clone(), call.clone());
+        card_button(p, format!("secret-{fill}-{key}"), label, fill).on_click(move |_, _, cx| {
+            let _ = this.update(cx, |loom, cx| loom.answer_secret(&agent, &call, fill, cx));
+        })
+    };
+    frame = frame
+        .action(answer(if *sending { "Filling in…" } else { "Fill" }, true))
+        .action(answer("Not now", false));
+    div().max_w(px(CARD_MOST)).child(frame.draw(p, scale))
+}
+
 /// A card that only shows: a checklist, progress, facts, or a table, in the card frame.
 fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
     use model::CardBody;
@@ -16096,7 +16288,10 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
             }
             frame = frame.row(table);
         }
-        CardBody::Choices { .. } | CardBody::SignIn { .. } | CardBody::McpAdd { .. } => {}
+        CardBody::Choices { .. }
+        | CardBody::SignIn { .. }
+        | CardBody::McpAdd { .. }
+        | CardBody::SecretAsk { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
     let wide = matches!(card.body, CardBody::Table { .. });

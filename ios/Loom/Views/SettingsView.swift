@@ -1,7 +1,8 @@
 import SwiftUI
 import UserNotifications
 
-/// The account, the instance, how the chat looks, notifications, and signing out.
+/// The account, the instance, the secrets, how the chat looks, notifications, and
+/// signing out.
 struct SettingsView: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -36,6 +37,13 @@ struct SettingsView: View {
                                 }
                             }
                         }
+                    }
+                }
+                Section {
+                    NavigationLink {
+                        SecretsView()
+                    } label: {
+                        Text("Secrets").font(Fonts.body).foregroundStyle(P.ink)
                     }
                 }
                 Section("Chat") {
@@ -128,6 +136,62 @@ struct SettingsView: View {
         case "macos": return "laptopcomputer"
         case "cli": return "terminal"
         default: return "desktopcomputer"
+        }
+    }
+}
+
+/// The person's secrets, sealed on the instance, of which only the names come here, each
+/// with the sites their agents' browsers may fill it in on: a swipe takes a site off, or
+/// removes the secret. And a form for one more.
+struct SecretsView: View {
+    @Environment(Session.self) private var session
+    @State private var name = ""
+    @State private var value = ""
+
+    var body: some View {
+        let model = session.model
+        List {
+            ForEach(model.secrets) { s in
+                Section {
+                    HStack {
+                        Image(systemName: "key").foregroundStyle(P.ink3).frame(width: 22)
+                        Text(s.name).font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                    .swipeActions {
+                        Button("Remove", role: .destructive) { session.send(model.deleteSecret(s.name)) }
+                    }
+                    ForEach(s.sites, id: \.self) { site in
+                        HStack {
+                            Image(systemName: "globe").foregroundStyle(P.ink3).frame(width: 22)
+                            Text(site.isEmpty ? "Files on this computer" : site).font(Fonts.small).foregroundStyle(P.ink2).lineLimit(1)
+                        }
+                        .swipeActions {
+                            Button("Take off", role: .destructive) { session.send(model.removeSecretSite(s.name, site)) }
+                        }
+                    }
+                }
+            }
+            Section {
+                TextField("ntnu-password", text: $name)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                SecureField("Its value", text: $value)
+                Button("Add") {
+                    session.send(model.putSecret(name, value))
+                    name = ""
+                    value = ""
+                }
+                .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || value.isEmpty)
+            }
+            .font(Fonts.body)
+        }
+        .scrollContentBackground(.hidden)
+        .background(P.side)
+        .navigationTitle("Secrets")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            model.loadSecrets()
+            session.flush()
         }
     }
 }

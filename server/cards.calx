@@ -243,15 +243,25 @@ pub fn good_secret_name(name: String) -> bool {
 pub fn save_name(site: String, kind: String) -> String {
     if kind == "code" { return String() }
     let what = if kind == "username" { String("username") } else { String("password") }
+    let name = site_name(site)
+    if name.len() == 0 { return what }
+    let out = "{name}-{what}"
+    return if good_secret_name(out.copy()) { out } else { what }
+}
+
+// A site's own name, as its badge shows it: ntnu for innsida.ntnu.no, example
+// for www.shop.example.co.uk, and an address for itself. A file has none, and
+// neither has an IPv6 address.
+pub fn site_name(site: String) -> String {
     var host = site.trim().to_lower_root()
-    if host.starts_with("[") { return what }
+    if host.starts_with("[") { return String() }
     if let k = host.find(":") { host = host[..k].copy() }
     var labels = List<String>()
     for label in host.split(".") {
         if label.len() > 0 { labels.push(label.copy()) }
     }
     if labels.len() > 0 and labels[0] == "www" { _ = labels.remove(0) }
-    if labels.len() == 0 { return what }
+    if labels.len() == 0 { return String() }
     // An address is itself; a name is its label before the top-level one, or
     // before both of one such as co.uk.
     var name = labels[labels.len() - 1].copy()
@@ -266,8 +276,7 @@ pub fn save_name(site: String, kind: String) -> String {
         let second = " co com org net ac gov edu "
         if labels.len() >= 3 and second.contains(" {name} ") and labels[labels.len() - 1].len() == 2 { name = labels[labels.len() - 3].copy() }
     }
-    let out = "{name}-{what}"
-    return if good_secret_name(out.copy()) { out } else { what }
+    return name
 }
 
 // A field of a card the person fills in: what it's for (`label`), its
@@ -320,14 +329,18 @@ pub fn ask_fields(args: Json, site: String) -> (List<Json>, String) {
 // The card browser_ask_secret puts in the agent's reply (PLAN.md, "The
 // agent's browser"): what's asked (`title`), on which site, and its fields,
 // with how it stands and the names what was given is kept as. Never a value.
-// Agents can't make one with show_card.
+// A site with a name has its badge (`shared/badge.calx`). Agents can't make
+// one with show_card.
 pub fn secret_card(call: String, agent: String, why: String, site: String, fields: List<Json>) -> Json {
     var shown = List<Json>()
     for f in fields {
         shown.push(without(f, "ref"))
     }
     let place = if site.len() > 0 { site.copy() } else { String("a file on this computer") }
-    return Obj.new().s("id", "secret_{call}").s("type", String("secret_ask")).s("title", tidy(why, TITLE_MOST)).s("call", call).s("agent", agent).s("site", place).j("fields", Json.Array(shown)).s("state", String("asking")).j("saved", Json.Array(List<Json>())).done()
+    var card = Obj.new().s("id", "secret_{call}").s("type", String("secret_ask")).s("title", tidy(why, TITLE_MOST)).s("call", call).s("agent", agent).s("site", place)
+    let name = site_name(site)
+    if name.len() > 0 { card = card.j("badge", badge.badge(name, String())) }
+    return card.j("fields", Json.Array(shown)).s("state", String("asking")).j("saved", Json.Array(List<Json>())).done()
 }
 
 // A secret_ask card as it stands now: `state`, and the names kept.
@@ -375,11 +388,13 @@ fn makes_the_secret_card() {
     let (_, bad_name) = ask_fields(Obj.new().s("ref", String("e1")).s("save", String("my password")).done(), String())
     assert(bad_name.starts_with("save is \"my password\""))
     let card = secret_card(String("bc_7"), String("a_1"), String(" Your NTNU password "), String("innsida.ntnu.no"), one)
-    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
+    assert("{card}" == "\{\"id\":\"secret_bc_7\",\"type\":\"secret_ask\",\"title\":\"Your NTNU password\",\"call\":\"bc_7\",\"agent\":\"a_1\",\"site\":\"innsida.ntnu.no\",\"badge\":{badge.badge(String("ntnu"), String())},\"fields\":[\{\"label\":\"Password\",\"kind\":\"password\",\"masked\":true,\"save\":\"ntnu-password\"\}],\"state\":\"asking\",\"saved\":[]\}")
     let filled = secret_card_now(card.copy(), "filled", [String("ntnu-password")])
     assert(str_at(filled.copy(), "state") == some(String("filled")) and "{at(filled.copy(), "saved")}" == "[\"ntnu-password\"]")
     assert(str_at(ended(card.copy()), "state") == some(String("closed")) and str_at(ended(filled), "state") == some(String("filled")))
-    assert(str_at(secret_card(String("bc_8"), String("a_1"), String("Code"), String(), List<Json>()), "site") == some(String("a file on this computer")))
+    let file = secret_card(String("bc_8"), String("a_1"), String("Code"), String(), List<Json>())
+    assert(str_at(file.copy(), "site") == some(String("a file on this computer")) and at(file, "badge") == Json.Null)
+    assert(site_name(String("www.shop.example.co.uk")) == "example" and site_name(String("10.0.0.5:3000")) == "10.0.0.5" and site_name(String("[::1]:80")) == "")
     let (_, why) = card_of(Obj.new().s("type", String("secret_ask")).done(), String("card_1"))
     assert(why.starts_with("type is \"secret_ask\""))
 }

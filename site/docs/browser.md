@@ -18,7 +18,9 @@ Once you have it, the page has the agent's colour round it, and your clicks, scr
 
 ## Secrets
 
-An agent can type one of your secrets into a page by its name, without seeing it. Or it can ask you for one: a card in the chat says what it needs, and you type it there and choose **Fill it in**, or **Not now**. Either way, the agent is told it's filled, never what it was.
+An agent never asks for a password or a code in the chat. It types one of your secrets into a page by its name, without seeing it, and the first time a secret goes to a site, you're asked. When it needs one you don't keep, a card in its reply says what for and on which site: type it in, and leave **Save as** ticked, with the name it's given (such as `ntnu-password`) or one of your own, to keep it for that site. **Fill** puts it into the page, and next time the agent fills it there without asking. **Not now** tells the agent no. An email and a password can come on one card, and a one-time code is never kept. Either way, the agent is told it's in, and what it was kept as, never what it was.
+
+Your secrets are on the **Secrets** page in Settings, each with the sites it's filled in on. Take a site off, remove a secret, or add one yourself.
 
 ## Teaching a task
 
