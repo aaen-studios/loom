@@ -21,7 +21,7 @@ module tests.protocol.code
 import std.fs
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, bool_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, calx, check}
 
@@ -199,12 +199,45 @@ fn run(i: Instance) ! Error {
     }
     try check(asked_about == 3, "in auto, the person was asked only about add_server and the two calls, never about a script itself")
 
+    // --- Always allow keeps allowing the tool, with a rule the Rules page shows ---
+    n += 1
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", chat.copy()).s("text", script(ADDS)).done())
+    let offered = try app.until("event", "approval.needed", LONG)
+    try check(bool_at(offered.copy(), "can_always") == some(true), "an ask about an MCP server's tool offers Always allow")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(offered, "call") ?? String()).b("allow", true).b("always", true).done())
+    let updated = try app.until("event", "rules.updated", LONG)
+    let answered = try app.until("event", "approval.answered", LONG)
+    try check(bool_at(answered, "always") == some(true), "a yes for always is answered as one")
+    try check(try reply_in(mut app, chat.copy()) == "run_code: Returned:\n5", "and lets this call go on")
+    var kept = Json.Null
+    if let Json.Array(list) = at(updated, "rules") {
+        for r in list {
+            if str_at(r.copy(), "tool") == some(String("fake.add")) { kept = r.copy() }
+        }
+    }
+    try check(str_at(kept.copy(), "then") == some(String("allow")) and str_at(kept.copy(), "agent") == some(id.copy()) and str_at(kept.copy(), "said") == some(String("Allow the tool fake.add")), "it adds a rule allowing that tool for that agent, as the Rules page would")
+    let before_next = app.frames.len()
+    n += 1
+    try check(try say(mut app, chat.copy(), "m_{n}", script(ADDS)) == "run_code: Returned:\n5", "the next call goes at once")
+    var asked_again = false
+    for frame in app.frames[before_next..] {
+        if str_at(frame.copy(), "kind") == some(String("approval.needed")) { asked_again = true }
+    }
+    try check(not asked_again, "without asking")
+    _ = try app.cmd("q_11", "rule.delete", Obj.new().s("id", str_at(kept, "id") ?? String()).done())
+    n += 1
+    try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", chat.copy()).s("text", script(REFUSED)).done())
+    let asks_again = try app.until("event", "approval.needed", LONG)
+    try check(str_at(asks_again.copy(), "title") == some(String("Use add on the MCP server fake")), "with the rule removed, it asks again")
+    try app.send(Obj.new().s("t", String("approve")).s("call", str_at(asks_again, "call") ?? String()).b("allow", false).done())
+    try check(try reply_in(mut app, chat.copy()) == "run_code: Returned:\nrefused: Your person said no.", "and a no still throws")
+
     // --- In ask, which asks about everything, a script waits for a yes first ---
     _ = try app.cmd("q_9", "agent.update", Obj.new().s("agent", id.copy()).s("permission", String("ask")).done())
     n += 1
     try app.send(Obj.new().s("t", String("send")).s("cid", "m_{n}").s("conversation", chat.copy()).s("text", script(#"return 6 * 7;"#)).done())
     let first_ask = try app.until("event", "approval.needed", LONG)
-    try check(str_at(first_ask.copy(), "title") == some(String("Run a script")) and "{at(first_ask.copy(), "detail")}".contains("6 * 7"), "in ask, the person is asked before a script runs, and sees it")
+    try check(str_at(first_ask.copy(), "title") == some(String("Run a script")) and "{at(first_ask.copy(), "detail")}".contains("6 * 7") and bool_at(first_ask.copy(), "can_always") == some(false), "in ask, the person is asked before a script runs, and sees it, with no always, since each script differs")
     try app.send(Obj.new().s("t", String("approve")).s("call", str_at(first_ask, "call") ?? String()).b("allow", true).done())
     try check(try reply_in(mut app, chat.copy()) == "run_code: Returned:\n42", "a yes runs it")
     n += 1
