@@ -214,7 +214,7 @@ struct PersonMessage: View {
     var body: some View {
         let model = session.model
         let files = fileParts(message)
-        // A stack's pictures only listed by name are left out of the words: the stack
+        // A fan's pictures only listed by name are left out of the words: the fan
         // shows them, and the viewer their names.
         let stacked = files.flatMap { part -> [FileRef] in
             guard case .pictures(let run) = part else { return [] }
@@ -240,7 +240,7 @@ struct PersonMessage: View {
             ForEach(Array(files.enumerated()), id: \.offset) { _, part in
                 switch part {
                 case .pictures(let run):
-                    PictureStack(files: run.compactMap { message.blocks[$0].file })
+                    PictureFan(files: run.compactMap { message.blocks[$0].file })
                 case .block(let i):
                     if let f = message.blocks[i].file { FileView(file: f) }
                 default:
@@ -363,7 +363,7 @@ struct Reply: View {
         case .block(let i):
             block(message.blocks[i], key: "\(message.id)/\(i)")
         case .pictures(let run):
-            PictureStack(files: run.compactMap { message.blocks[$0].file })
+            PictureFan(files: run.compactMap { message.blocks[$0].file })
         case .fold(let words, let working, let steps):
             Steps(words: words, working: working, open: openThoughts.contains(foldKey), canOpen: !steps.isEmpty) {
                 if openThoughts.contains(foldKey) { openThoughts.remove(foldKey) } else { openThoughts.insert(foldKey) }
@@ -576,30 +576,42 @@ struct FileView: View {
     }
 }
 
-/// Two or more pictures in a message as one stack of a fixed size, however many there
-/// are, as the desktop draws it: the first on top, up to two more peeking out behind it,
-/// and how many there are in its corner. Tapping it shows them big, to page through.
-struct PictureStack: View {
+/// Two or more pictures in a message as one fan of a fixed size, however many there are,
+/// as the desktop draws it at rest: the first in front, up to four more tilted behind it
+/// either side (`fanCards`), and what `fanCount` says in its corner. It keeps the room its
+/// tilted cards reach into. Tapping it opens the viewer at the first.
+struct PictureFan: View {
     @Environment(Session.self) private var session
     var files: [FileRef]
 
+    /// The front card's size.
     static let size = CGSize(width: 240, height: 180)
-    /// How far each picture behind peeks out.
-    static let step: CGFloat = 6
+    /// The room kept past the cards for their shadows.
+    static let shadowRoom: CGFloat = 8
 
     var body: some View {
-        let behind = min(max(files.count - 1, 0), 2)
-        let room = Self.step * CGFloat(behind)
+        let (w, h) = (Self.size.width, Self.size.height)
+        let reach = fanReach(files.count, aspect: h / w)
+        let (left, right) = ((reach.left * w).rounded(.up) + Self.shadowRoom, (reach.right * w).rounded(.up) + Self.shadowRoom)
+        let up = (reach.up * w).rounded(.up) + Self.shadowRoom
         Button {
             session.model.view(files)
         } label: {
-            ZStack(alignment: .bottomLeading) {
-                ForEach((0...behind).reversed(), id: \.self) { layer in
-                    StackCard(file: files[layer], behind: layer > 0, count: layer == 0 ? files.count : nil)
-                        .offset(x: Self.step * CGFloat(layer), y: -Self.step * CGFloat(layer))
+            ZStack {
+                ForEach(fanCards(files.count), id: \.picture) { c in
+                    FanPicture(file: files[c.picture], behind: true, count: nil)
+                        .scaleEffect(c.scale)
+                        .rotationEffect(.degrees(c.tilt))
+                        .offset(x: c.x * w)
+                        .fanShadow()
                 }
+                FanPicture(file: files[0], behind: false, count: fanCount(files.count))
+                    .fanShadow()
             }
-            .frame(width: Self.size.width + room, height: Self.size.height + room, alignment: .bottomLeading)
+            .frame(width: w, height: h)
+            .padding(.leading, left)
+            .padding(.trailing, right)
+            .padding(.vertical, up)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -607,13 +619,21 @@ struct PictureStack: View {
     }
 }
 
-/// One picture of a stack, filling its place: the ones behind a step back, toward the
-/// page, and the top one with the count.
-private struct StackCard: View {
+private extension View {
+    /// A fan card's soft shadow: black at 14%, 3 points down, a blur of 10 as the desktop
+    /// measures it, which is a radius of 5 here.
+    func fanShadow() -> some View {
+        shadow(color: .black.opacity(0.14), radius: 5, x: 0, y: 3)
+    }
+}
+
+/// One picture of a fan, filling the front card's place, with the bubble's corners and a
+/// fine edge: the ones behind a little quieter, and the front one with the count.
+private struct FanPicture: View {
     @Environment(Session.self) private var session
     var file: FileRef
     var behind: Bool
-    var count: Int?
+    var count: String?
     @State private var thumb: UIImage?
 
     var body: some View {
@@ -627,13 +647,14 @@ private struct StackCard: View {
                 P.bubble
             }
         }
-        .frame(width: PictureStack.size.width, height: PictureStack.size.height)
-        .overlay { if behind { P.bg.opacity(0.35) } }
+        .frame(width: PictureFan.size.width, height: PictureFan.size.height)
+        .saturation(behind ? 0.88 : 1)
+        .colorMultiply(Color(white: behind ? 0.97 : 1))
         .clipShape(shape)
         .overlay(shape.strokeBorder(P.line, lineWidth: 1))
         .overlay(alignment: .bottomTrailing) {
             if let count {
-                Text("\(count)")
+                Text(count)
                     .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
                     .monospacedDigit()
                     .foregroundStyle(.white)

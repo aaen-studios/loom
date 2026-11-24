@@ -349,6 +349,16 @@ enum Sample {
             // Mentions of an agent and of a file in the agent's folder.
             ["id": "msg_44", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187180000,
              "blocks": [["kind": "text", "text": "Once they're watered, note it in [watering.md](loom:file/a_4/notes/watering.md) and tell [@Scribe](loom:agent/a_2)."]]],
+            // A fan of more than five pictures, whose corner says how many more.
+            ["id": "msg_45", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_45", "at": 1795187240000,
+             "blocks": [["kind": "text", "text": "Noted, and Scribe knows. Here's the balcony this week, a picture a day."],
+                        ["kind": "file", "file": "sample-noon", "name": "monday.png", "mime": "image/png", "size": 380_000],
+                        ["kind": "file", "file": "sample-rain", "name": "tuesday.png", "mime": "image/png", "size": 372_000],
+                        ["kind": "file", "file": "sample-dusk", "name": "wednesday.png", "mime": "image/png", "size": 398_000],
+                        ["kind": "file", "file": "sample-night", "name": "thursday.png", "mime": "image/png", "size": 344_000],
+                        ["kind": "file", "file": "sample-sprout", "name": "friday.png", "mime": "image/png", "size": 361_000],
+                        ["kind": "file", "file": "sample-leaf", "name": "saturday.png", "mime": "image/png", "size": 351_000],
+                        ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000]]],
         ],
     ]
 
@@ -361,7 +371,7 @@ enum Sample {
     /// The file of a sample picture, drawn the first time it's asked for.
     static func picture(_ sha: String) -> String? {
         // The sky, the ground and the tomato of each: a tall one by day, a wide one at
-        // dusk, and leaves.
+        // dusk, leaves, and the rest of a week's.
         let looks: [String: (size: CGSize, sky: UIColor, ground: UIColor, fruit: UIColor)] = [
             "sample-tall": (CGSize(width: 300, height: 800), UIColor(red: 0.55, green: 0.75, blue: 0.95, alpha: 1),
                             UIColor(red: 0.3, green: 0.6, blue: 0.3, alpha: 1), UIColor(red: 0.95, green: 0.45, blue: 0.2, alpha: 1)),
@@ -369,6 +379,14 @@ enum Sample {
                             UIColor(red: 0.25, green: 0.35, blue: 0.3, alpha: 1), UIColor(red: 0.85, green: 0.25, blue: 0.15, alpha: 1)),
             "sample-leaf": (CGSize(width: 600, height: 600), UIColor(red: 0.45, green: 0.65, blue: 0.4, alpha: 1),
                             UIColor(red: 0.2, green: 0.45, blue: 0.25, alpha: 1), UIColor(red: 0.9, green: 0.6, blue: 0.2, alpha: 1)),
+            "sample-noon": (CGSize(width: 800, height: 600), UIColor(red: 0.4, green: 0.7, blue: 1, alpha: 1),
+                            UIColor(red: 0.35, green: 0.65, blue: 0.3, alpha: 1), UIColor(red: 0.95, green: 0.35, blue: 0.2, alpha: 1)),
+            "sample-rain": (CGSize(width: 600, height: 800), UIColor(red: 0.6, green: 0.65, blue: 0.7, alpha: 1),
+                            UIColor(red: 0.3, green: 0.4, blue: 0.35, alpha: 1), UIColor(red: 0.8, green: 0.4, blue: 0.25, alpha: 1)),
+            "sample-night": (CGSize(width: 800, height: 600), UIColor(red: 0.15, green: 0.18, blue: 0.35, alpha: 1),
+                             UIColor(red: 0.1, green: 0.2, blue: 0.15, alpha: 1), UIColor(red: 0.6, green: 0.2, blue: 0.15, alpha: 1)),
+            "sample-sprout": (CGSize(width: 600, height: 600), UIColor(red: 0.95, green: 0.85, blue: 0.6, alpha: 1),
+                              UIColor(red: 0.5, green: 0.35, blue: 0.2, alpha: 1), UIColor(red: 0.5, green: 0.75, blue: 0.3, alpha: 1)),
         ]
         guard let look = looks[sha] else { return nil }
         let path = FileManager.default.temporaryDirectory.appendingPathComponent("loom-\(sha).png").path

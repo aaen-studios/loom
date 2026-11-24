@@ -64,12 +64,21 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 # A panel's web view (src/panel.rs): its content rule list, data store and settings.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "WKContentRuleList", "WKContentRuleListStore", "WKPreferences", "WKUserContentController", "WKWebViewConfiguration", "WKWebsiteDataStore"] }
 
-# GPUI's Windows platform, as 0.3.12 with two changes (marked "loom:"): its vsync thread
+# GPUI's Windows platform, as 0.3.12 with three changes (marked "loom:"): its vsync thread
 # doesn't tell a hidden or minimised window to paint at every vblank, and looks five times
-# a second while no window is on screen; and it tells a window on screen to paint only
-# when it has something new to draw. vendor/README.md says more.
+# a second while no window is on screen; it tells a window on screen to paint only when it
+# has something new to draw; and its shader draws an image moved by a transformation, as
+# gpui-pre below asks. vendor/README.md says more.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # GPUI Base, as 0.10.0 with one change (marked "loom:"): an inline <span> in Markdown can
 # give its text a color and weight, for an agent's name where a message mentions it.
 gpui-base = { path = "vendor/gpui-base" }
+# GPUI, as 0.3.12 with one change (marked "loom:"): an image can be drawn rotated, as an SVG
+# icon can, through Window::paint_image_transformed, for the tilted cards of a message's
+# pictures. Its Metal and wgpu renderers below draw it on the Mac and on Linux.
+gpui-pre = { path = "vendor/gpui-pre" }
+# GPUI's Metal renderer, as 0.3.12 with the same change (marked "loom:") in its shaders.
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+# GPUI's wgpu renderer, as 0.3.12 with the same change (marked "loom:") in its shaders.
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
