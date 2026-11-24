@@ -44,6 +44,7 @@ import server.hashing
 import server.importer
 import server.hashing.{Done, Job}
 import server.installer
+import server.icons
 import server.mcptest
 import server.oauth
 import server.move
@@ -3394,7 +3395,11 @@ impl Instance {
         let grant = if keyed { Json.Null } else { i.grant_of(user.copy(), server_name.copy()) }
         i.next_job += 1
         i.mcp_tests.insert(i.next_job, McpTest { waiter: w.copy(), user: user.copy(), server: server_name.copy(), own_auth: keyed })
-        i.mcp_test_to.send(mcptest.Job { id: i.next_job, spec: spec, grant: grant })
+        let known = match i.store.mcp_icon(user.copy(), server_name.copy()) {
+            ok(some(had)) => had.0.copy(),
+            _ => String(),
+        }
+        i.mcp_test_to.send(mcptest.Job { id: i.next_job, spec: spec, grant: grant, icon: known })
     }
 
     // A test's answer: the tools, and whether it's signed in, or why it didn't
@@ -3413,12 +3418,54 @@ impl Instance {
             i.answer_cmd(t.waiter, Answer.Refused(String("mcp_failed"), d.error.copy()))
             return
         }
+        // Its icons first, so a card that shows it ready has them.
+        try i.took_icons(t.user.copy(), t.server.copy(), d.icon)
         var names = List<Json>()
         for n in d.tools { names.push(Json.Str(n.copy())) }
         var value = Obj.new().j("tools", Json.Array(names))
         let grant = if t.own_auth { Json.Null } else { i.grant_of(t.user.copy(), t.server.copy()) }
         if oauth.signed_in(grant.copy()) { value = value.b("signed_in", true).maybe("signed_in_as", str_at(grant, "who")) }
         i.answer_cmd(t.waiter, Answer.Value(value.done()))
+    }
+
+    // --- MCP servers' own icons (PLAN.md, "Cards in the chat") ---
+
+    // The icons kept for the person's server `name`, as its badge has them:
+    // its own, and the one for a dark background, each a file's SHA-256 or "".
+    fn icon_of(i: Instance, user: String, name: String) -> (String, String) {
+        return match i.store.mcp_icon(user, name) {
+            ok(some(had)) => (had.1.copy(), had.2.copy()),
+            _ => (String(), String()),
+        }
+    }
+
+    // A server's icons, as a test or `loom mcp` fetched them when they
+    // changed: each checked and kept as the person's file, and the server's
+    // badge has them from now on. An icon that isn't a picture is left out,
+    // and one that couldn't be fetched is tried again the next time.
+    fn took_icons(i: mut Instance, user: String, server: String, got: icons.Got) ! Error {
+        if not got.fresh or server.len() == 0 { return }
+        if got.key.len() > 0 and got.light.len() == 0 and got.dark.len() == 0 { return }
+        let light = try i.keep_icon(user.copy(), server.copy(), got.light)
+        let dark = try i.keep_icon(user.copy(), server.copy(), got.dark)
+        let (icon, icon_dark) = if light.len() > 0 { (light, dark) } else { (dark, String()) }
+        try i.store.put_mcp_icon(user, server, got.key, icon, icon_dark)
+    }
+
+    // One icon, checked and made small (`files.icon_png`), kept as the
+    // person's file: its SHA-256, or "" when it isn't a picture.
+    fn keep_icon(i: mut Instance, user: String, server: String, data: List<u8>) -> String ! Error {
+        if data.len() == 0 { return String() }
+        let png = match files.icon_png(data) {
+            ok(p) => p,
+            err(e) => {
+                eprintln("loom: {server}'s icon: {e}")
+                return String()
+            },
+        }
+        let sha = bytes.hex(sha256(png.copy()))
+        try i.keep_file(user, sha.copy(), "{server}.png", String("image/png"), png)
+        return sha
     }
 
     // --- Signing in to MCP servers (PLAN.md, "Signing in to MCP servers") ---
@@ -3676,7 +3723,8 @@ impl Instance {
     fn sign_in_card(i: mut Instance, g: Grant, server: String) {
         let run_id = i.calling_run(g)
         if run_id.len() == 0 { return }
-        let card = cards.sign_in_card(server)
+        let (icon, dark) = i.icon_of(g.user.copy(), server.copy())
+        let card = cards.sign_in_card(server, icon, dark)
         let id = str_at(card.copy(), "id") ?? String()
         var frame = Json.Null
         var user = String()
@@ -4011,7 +4059,7 @@ impl Instance {
             if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
             return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
-        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in"] {
+        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon"] {
             if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
@@ -4084,7 +4132,15 @@ impl Instance {
             for (_, p) in i.procs {
                 if p.agent == g.agent { boxed = p.boxed }
             }
-            return some(json_response(200, Obj.new().j("servers", Json.Array(i.agent_servers(g.user, agent, true, boxed))).done()))
+            let servers = i.agent_servers(g.user.copy(), agent, true, boxed)
+            // What the icons kept of each are known by, so loom mcp fetches
+            // them only when the server gives others.
+            var known = LinkedMap<String, Json>()
+            for s in servers {
+                let name = str_at(s, "name") ?? String()
+                if let ok(some(had)) = i.store.mcp_icon(g.user.copy(), name.copy()) { known.insert(name, Json.Str(had.0.copy())) }
+            }
+            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).done()))
         }
         if req.path == "/api/mcp/deno" and req.method == "GET" {
             return try i.deno_for(req)
@@ -4093,6 +4149,21 @@ impl Instance {
         let body = match parse(req.text() ?? String()) {
             ok(j) => j,
             err(_) => return some(http_error(400, "bad_request", String("The body isn't JSON."))),
+        }
+        // A server's icons, which loom mcp fetched where the agent runs (in its
+        // sandbox, for a member's) once the server gave others than the ones
+        // kept: each checked here, as anything from a sandbox is.
+        if req.path == "/api/mcp/icon" {
+            let name = str_at(body.copy(), "server") ?? String()
+            if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
+            var got = icons.Got { key: str_at(body.copy(), "key") ?? String(), fresh: true, light: List<u8>(), dark: List<u8>() }
+            for (field, light) in [("icon", true), ("icon_dark", false)] {
+                let data = bytes.from_base64(str_at(body.copy(), field) ?? String()) ?? List<u8>()
+                if data.len() > icons.MOST { return some(http_error(400, "bad_request", "{field} is over {icons.MOST / 1024} KiB.")) }
+                if light { got.light = data } else { got.dark = data }
+            }
+            try i.took_icons(g.user, name, got)
+            return some(json_response(200, Obj.new().done()))
         }
         if req.path == "/api/mcp/done" {
             let act = int_at(body.copy(), "act") ?? 0
@@ -4165,7 +4236,10 @@ impl Instance {
             return some(json_response(200, merge(tool_text(said), Obj.new().i("act", act).done())))
         }
         let place = if server.starts_with("plugin-") { "the plugin {server[7..]}" } else { "the MCP server {server}" }
-        let action = Obj.new().s("name", String("code.call")).j("args", Obj.new().s("server", server.copy()).s("tool", tool.copy()).j("arguments", args).i("act", act).done()).done()
+        // With the server's own icons, for its badge on the question.
+        let (icon, icon_dark) = i.icon_of(g.user.copy(), server.copy())
+        let asked = Obj.new().s("server", server.copy()).s("tool", tool.copy()).j("arguments", args).i("act", act).maybe("icon", if icon.len() > 0 { some(icon) } else { none }).maybe("icon_dark", if icon_dark.len() > 0 { some(icon_dark) } else { none })
+        let action = Obj.new().s("name", String("code.call")).j("args", asked.done()).done()
         // Always allow keeps allowing the tool with a rule, except where a rule
         // asked: an allow rule wouldn't get past it.
         let always = if v.then == "ask" { String() } else { "{server}.{tool}" }
@@ -6873,8 +6947,9 @@ impl Instance {
             said = a.said.copy()
         }
         if run_id.len() == 0 { return false }
-        let have = try i.secret_names_of(user)
-        return i.place_card(run_id, cards.mcp_add_card(call, spec, have, state, said))
+        let have = try i.secret_names_of(user.copy())
+        let (icon, dark) = i.icon_of(user, str_at(spec.copy(), "name") ?? String())
+        return i.place_card(run_id, cards.mcp_add_card(call, spec, have, state, said, icon, dark))
     }
 
     // Moves the proposal `call` to `state`, with `said` its card's line, and

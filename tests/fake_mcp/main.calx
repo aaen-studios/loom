@@ -9,11 +9,15 @@ module tests.fake_mcp.main
 //     key_length          says how long its FAKE_KEY environment variable is,
 //                         so a test sees the key reached the server, not the script
 //
+// Its serverInfo gives the icons FAKE_ICON names (`icons`).
+//
 // It ends when its input does. It needs only the standard library, since loom
 // mcp starts it from an agent's folder.
 //
 //     calx tests/fake_mcp/main.calx
+import std.bytes
 import std.env
+import std.image.{Color, Image, Kind}
 import std.io
 import std.json.{Json, parse}
 
@@ -81,6 +85,40 @@ fn call(params: Json) -> Json {
     return object([("content", content("no tool {name}")), ("isError", Json.Bool(true))])
 }
 
+// The picture an icon is, as a test makes it too: 64 pixels a side, in one colour.
+fn picture(r: u8, g: u8, b: u8) -> List<u8> {
+    return Image.new(64, 64, Kind.Rgba, Color.rgba(r, g, b, 255)).encode_png()
+}
+
+fn data_uri(mime: str, data: List<u8>) -> Json {
+    return Json.Str("data:{mime};base64,{bytes.base64(data)}")
+}
+
+fn icon(src: own Json, mime: str, theme: str) -> Json {
+    var pairs: List<(str, Json)> = [("src", src), ("mimeType", text(mime)), ("sizes", Json.Array([text("64x64")]))]
+    if theme.len() > 0 { pairs.push(("theme", text(theme))) }
+    return object(pairs)
+}
+
+// The icons its serverInfo gives, as FAKE_ICON says: `good` (one for a light
+// background and one for a dark), `blue`, `bad` (not a picture), `huge` (over
+// what loom fetches), `svg` (only an SVG), or none.
+fn icons() -> Json {
+    let which = env.variable(String("FAKE_ICON")) ?? String()
+    if which == "good" { return Json.Array([icon(data_uri("image/png", picture(220, 80, 40)), "image/png", ""), icon(data_uri("image/png", picture(240, 240, 240)), "image/png", "dark")]) }
+    if which == "blue" { return Json.Array([icon(data_uri("image/png", picture(30, 90, 220)), "image/png", "")]) }
+    if which == "bad" { return Json.Array([icon(data_uri("image/png", "not a picture".to_bytes()), "image/png", "")]) }
+    if which == "huge" {
+        var big = picture(0, 0, 0)
+        while big.len() < 300000 {
+            big.push(0)
+        }
+        return Json.Array([icon(data_uri("image/png", big), "image/png", "")])
+    }
+    if which == "svg" { return Json.Array([icon(data_uri("image/svg+xml", "<svg xmlns='http://www.w3.org/2000/svg'/>".to_bytes()), "image/svg+xml", "")]) }
+    return Json.Array(List<Json>())
+}
+
 fn main() {
     var input = io.Lines()
     while let line = input.next() {
@@ -92,7 +130,7 @@ fn main() {
         let method = (m.get(String("method")) ?? Json.Null).as_str() ?? String()
         let params = m.get(String("params")) ?? Json.Null
         let result = if method == "initialize" {
-            object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("fake")), ("version", text("1"))]))])
+            object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("fake")), ("version", text("1")), ("icons", icons())]))])
         } else if method == "tools/list" {
             tools()
         } else if method == "tools/call" {

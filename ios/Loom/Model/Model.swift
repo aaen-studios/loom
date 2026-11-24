@@ -594,12 +594,14 @@ struct Shown: Equatable, Sendable {
 }
 
 /// A service's badge on a card (`shared/badge.calx`): its initial on one of the thread
-/// colours, by name, or its own icon.
+/// colours, by name, or an MCP server's own icon, a file's SHA-256, with the one it gave
+/// for a dark background when it gave one.
 struct Badge: Equatable, Sendable {
     var name: String
     var initial: String
     var color: String
     var icon: String
+    var iconDark: String
 
     init?(_ j: JSON) {
         name = j["name"].text
@@ -607,7 +609,16 @@ struct Badge: Equatable, Sendable {
         initial = j["initial"].text
         color = j["color"].text
         icon = j["icon"].text
+        iconDark = j["icon_dark"].text
     }
+
+    /// The icon it's drawn with in the theme, or "" for its initial.
+    func icon(dark: Bool) -> String {
+        dark && !iconDark.isEmpty ? iconDark : icon
+    }
+
+    /// Every icon it has, for fetching.
+    var icons: [String] { [icon, iconDark].filter { !$0.isEmpty } }
 }
 
 struct Approval: Identifiable, Equatable, Sendable {
@@ -1245,7 +1256,11 @@ final class Model {
             secretsStale = false
             out.append(["t": "cmd", "id": JSON(id("app.secrets")), "name": "secret.list"])
         }
-        let wanted = shown.flatMap(\.blocks).compactMap(\.file).filter(\.isImage).map(\.file)
+        var wanted = shown.flatMap(\.blocks).compactMap(\.file).filter(\.isImage).map(\.file)
+        // The icons of the badges on its cards and its questions.
+        let cardBadges = shown.flatMap(\.blocks).compactMap { $0.card?.badge }
+        let askBadges = approvals.flatMap { $0.shown.badges + $0.shown.steps.compactMap(\.badge) }
+        wanted += (cardBadges + askBadges).flatMap(\.icons)
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }

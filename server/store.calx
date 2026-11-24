@@ -97,6 +97,9 @@ CREATE TABLE IF NOT EXISTS mcp_auth (
     sealed TEXT NOT NULL, due INTEGER NOT NULL DEFAULT 0, at INTEGER NOT NULL,
     PRIMARY KEY (user, name));
 CREATE INDEX IF NOT EXISTS mcp_auth_due ON mcp_auth (due);
+CREATE TABLE IF NOT EXISTS mcp_icons (
+    user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, key TEXT NOT NULL,
+    icon TEXT NOT NULL, dark TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
 CREATE TABLE IF NOT EXISTS skills (
     user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, description TEXT NOT NULL,
     body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
@@ -1579,7 +1582,21 @@ impl Store {
     }
 
     pub fn delete_mcp_server(self, user: String, name: String) -> bool ! Error {
+        _ = try self.db.execute(String("DELETE FROM mcp_icons WHERE user = ? AND name = ?"), [t(user.copy()), t(name.copy())])
         return try self.db.execute(String("DELETE FROM mcp_servers WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
+    }
+
+    // A person's MCP server's own icons (PLAN.md, "Cards in the chat"): what
+    // the ones it gave are known by (`icons.key`), and the files kept of them,
+    // by SHA-256, for a light background and a dark one, each "" for none.
+    pub fn put_mcp_icon(self, user: String, name: String, key: String, icon: String, dark: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO mcp_icons (user, name, key, icon, dark, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, name) DO UPDATE SET key = excluded.key, icon = excluded.icon, dark = excluded.dark, at = excluded.at"), [t(user), t(name), t(key), t(icon), t(dark), Value.Int(now())])
+    }
+
+    // The icons kept for a person's MCP server: (key, icon, dark), or none.
+    pub fn mcp_icon(self, user: String, name: String) -> (String, String, String)? ! Error {
+        let r = try self.db.query_one(String("SELECT key, icon, dark FROM mcp_icons WHERE user = ? AND name = ?"), [t(user), t(name)]) else return none
+        return some((text(r[0].copy()), text(r[1].copy()), text(r[2].copy())))
     }
 
     // A sign-in to a person's MCP server (PLAN.md, "Signing in to MCP
@@ -2191,7 +2208,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

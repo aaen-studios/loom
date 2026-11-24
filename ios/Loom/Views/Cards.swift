@@ -89,14 +89,38 @@ struct CardMark: View {
 /// A service's badge (`shared/badge.calx`): its initial on its colour. Something with a
 /// name and no badge of its own gets its initial on a quiet square.
 struct BadgeView: View {
+    @Environment(Session.self) private var session
+    @Environment(\.colorScheme) private var scheme
     var badge: Badge?
     var name = ""
     var size: CGFloat = Tokens.Control.iconLarge
+    /// An MCP server's own icon, read and decoded off the main thread.
+    @State private var picture: UIImage?
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size >= Tokens.Control.iconLarge ? Tokens.Radius.card : Tokens.Radius.row, style: .continuous)
+        // Its own icon, once it's fetched, in the initial's place.
+        let path = badge.map { $0.icon(dark: scheme == .dark) }.flatMap { $0.isEmpty ? nil : session.model.files["\($0).thumb"] }
+        if let image = path.flatMap({ picture ?? Pictures.kept($0) }) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .padding((size * 0.14).rounded())
+                .frame(width: size, height: size)
+                .background(shape.fill(P.cardInset).overlay(shape.strokeBorder(P.line, lineWidth: 1)))
+                .accessibilityHidden(true)
+        } else {
+            initialView(shape)
+                .task(id: path) {
+                    guard let path, Pictures.kept(path) == nil else { return }
+                    picture = await Pictures.load(path)
+                }
+        }
+    }
+
+    private func initialView(_ shape: RoundedRectangle) -> some View {
         let initial = badge?.initial ?? name.first(where: { $0.isLetter || $0.isNumber }).map { String($0).uppercased() } ?? "?"
-        Text(initial.isEmpty ? "?" : initial)
+        return Text(initial.isEmpty ? "?" : initial)
             .font(Fonts.ui((size * 0.44).rounded(), .semibold))
             .foregroundStyle(badge == nil ? P.ink2 : P.buttonInk)
             .frame(width: size, height: size)

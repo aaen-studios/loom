@@ -1,0 +1,162 @@
+module tests.protocol.mcp_icons
+
+// MCP servers' own icons on their badges (PLAN.md, "Cards in the chat"). The
+// fake MCP server's serverInfo gives the icons its FAKE_ICON setting names
+// (tests/fake_mcp). A server added from a card is tried, and its icon, one for
+// a light background and one for a dark, is fetched, checked, kept as the
+// person's file and put on the card's badge; one that isn't a picture, is too
+// big, or is only an SVG leaves the badge its initial. A question about a
+// script's call to the server has the icon on its badge too. A server an agent
+// just has, never tested, gets its icon when its Code Mode session starts it:
+// `loom mcp` fetches it where the agent runs and gives it to the instance.
+//
+//     calx tests/protocol/mcp_icons.calx
+import std.bytes
+import std.fs
+import std.hash.{sha256}
+import std.image.{Color, Image, Kind}
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session}
+import server.files
+import tests.kit.{Instance, calx, check, fetch}
+
+// The first script waits while the instance fetches Deno.
+const LONG: u32 = 600000
+
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", LONG)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn send(app: Session, conversation: String, cid: String, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation).s("text", text).done())
+}
+
+// The newest card for `server`'s proposal once it's in `state`, among the
+// frames from `mark` on, or those still to come.
+fn card_in(app: mut Session, mark: usize, server: String, state: str) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            let c = at(f.copy(), "card")
+            if str_at(f, "t") == some(String("card")) and str_at(c.copy(), "type") == some(String("mcp_add")) and str_at(c.copy(), "server") == some(server.copy()) and str_at(c.copy(), "state") == some(String(state)) { return c }
+        }
+        _ = try app.until("card", "", 120000)
+    }
+}
+
+// The fake server named `name`, offering the icons `icon` says.
+fn spec(name: str, icon: str) -> Json ! Error {
+    let server = try fs.absolute(String("tests/fake_mcp/main.calx"))
+    return Obj.new().s("name", String(name)).s("command", calx()).j("args", Json.Array([Json.Str(server)])).j("env", Obj.new().s("FAKE_ICON", String(icon)).done()).done()
+}
+
+// The badge on the card of `name`, proposed by the agent and added by the
+// person, once it's ready.
+fn added(app: mut Session, chat: String, n: i64, name: str, icon: str) -> Json ! Error {
+    let mark = app.frames.len()
+    try send(app, chat.copy(), "m_{n}", "/mcpkeep add_mcp_server {try spec(name, icon)}")
+    let asking = try card_in(mut app, mark, String(name), "asking")
+    let took = try app.cmd("q_add", "mcp.add_answer", Obj.new().s("call", str_at(asking, "call") ?? String()).s("answer", String("add")).done())
+    if at(took.copy(), "ok") != Json.Bool(true) { fail "Add wasn't taken: {took}" }
+    let ready = try card_in(mut app, mark, String(name), "ready")
+    _ = try reply_in(mut app, chat)
+    return at(ready, "badge")
+}
+
+// The SHA-256 loom keeps the fake's one-colour picture under, once it's made
+// an icon (`files.icon_png`).
+fn kept_sha(r: u8, g: u8, b: u8) -> String ! Error {
+    let png = try files.icon_png(Image.new(64, 64, Kind.Rgba, Color.rgba(r, g, b, 255)).encode_png())
+    return bytes.hex(sha256(png))
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Iconic")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+
+    // --- A server with its own icons, added from a card ---
+    let good = try added(mut app, chat.copy(), 1, "fake", "good")
+    let icon = str_at(good.copy(), "icon") ?? String()
+    let dark = str_at(good.copy(), "icon_dark") ?? String()
+    try check(icon == try kept_sha(220, 80, 40) and dark == try kept_sha(240, 240, 240), "the ready card's badge has the server's icon and its icon for a dark background, each as a kept file's SHA-256")
+    try check(str_at(good, "initial") == some(String("F")), "and still its initial, for the apps to draw until they have the icon")
+    let (status, mime, body) = try fetch(i.base.copy(), i.token.copy(), "/files/{icon}")
+    let picture = match Image.decode(body) {
+        ok(p) => p,
+        err(_) => Image.new(1, 1, Kind.Gray, Color.gray(0)),
+    }
+    try check(status == 200 and mime == "image/png" and picture.width() == 64 and picture.height() == 64, "the icon is the person's file, a PNG the apps fetch as any other")
+
+    // --- Icons a badge doesn't draw ---
+    let bad = try added(mut app, chat.copy(), 2, "broken", "bad")
+    try check(str_at(bad.copy(), "icon") == none and str_at(bad, "initial") == some(String("B")), "an icon that isn't a picture leaves the badge its initial")
+    let huge = try added(mut app, chat.copy(), 3, "huge", "huge")
+    try check(str_at(huge, "icon") == none, "and so does one over what loom fetches")
+    let svg = try added(mut app, chat.copy(), 4, "drawn", "svg")
+    try check(str_at(svg, "icon") == none, "and one that's only an SVG")
+    let plain = try added(mut app, chat.copy(), 5, "plain", "")
+    try check(str_at(plain, "icon") == none, "and a server with no icons has its initial")
+
+    // --- A question about a script's call, with the server's badge ---
+    try send(app, chat.copy(), String("m_6"), "/mcpkeep run_code {Obj.new().s("code", String(#"return await mcp.fake.add({a: 1, b: 2});"#)).done()}")
+    loop {
+        let e = try app.until("event", "", LONG)
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if kind == "approval.needed" {
+            let detail = at(e.copy(), "detail")
+            try check(str_at(detail.copy(), "icon") == some(icon.copy()) and str_at(detail, "icon_dark") == some(dark.copy()), "a script's call to the server asks with its icons, which the core puts on the question's badge")
+            try app.send(Obj.new().s("t", String("approve")).s("call", str_at(e, "call") ?? String()).b("allow", true).done())
+            _ = try reply_in(mut app, chat.copy())
+            break
+        }
+        if kind == "message.created" and str_at(at(e.copy(), "message"), "role") == some(String("agent")) {
+            println("skip  a question's badge: the script didn't run here ({str_at(at(e, "message"), "text") ?? String()})")
+            break
+        }
+    }
+
+    // --- A server the agent has, started by its session ---
+    let blue = try kept_sha(30, 90, 220)
+    let put = try app.cmd("q_3", "mcp.put", try spec("later", "blue"))
+    try check(at(put, "ok") == Json.Bool(true), "the person adds a server on the MCP servers page, without testing it")
+    let (before, _, _) = try fetch(i.base.copy(), i.token.copy(), "/files/{blue}")
+    try check(before == 404, "it has no icon kept yet")
+    _ = try app.cmd("q_4", "agent.update", Obj.new().s("agent", agent.copy()).j("mcp", Json.Array([Json.Str(String("fake")), Json.Str(String("later"))])).done())
+    let fresh = str_at(at(try app.cmd("q_5", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    try send(app, fresh.copy(), String("m_7"), String(#"/mcpkeep search_tools {"query":"echo text back"}"#))
+    _ = try reply_in(mut app, fresh)
+    var kept: u32 = 0
+    for _ in 0..100 {
+        let (now_status, _, _) = try fetch(i.base.copy(), i.token.copy(), "/files/{blue}")
+        kept = now_status
+        if kept == 200 { break }
+        unsafe { sleep(100000000) }
+    }
+    try check(kept == 200, "its Code Mode session starts it, and loom mcp gives the instance its icon, which is kept as the person's")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmcp_icons: all good")
+}

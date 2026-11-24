@@ -9,9 +9,13 @@ module server.mcptest
 // sent its access token. One that ends soon is renewed first, and so is one the
 // server answers 401 to, once; the renewed grant comes back for the instance
 // to keep.
+//
+// A server that answers gives its icons too (`server/icons.calx`), which are
+// fetched here, off the loop, when they aren't the ones the instance has.
 import std.json.{Json}
 import std.thread.{Task}
 import shared.obj.{str_at}
+import server.icons
 import server.mcpclient
 import server.oauth
 import server.oauth.{Refreshed}
@@ -21,6 +25,7 @@ pub struct Job {
     pub id: i64
     pub spec: Json    // as ACP's session/new takes it, with its secrets filled in
     pub grant: Json    // the person's sign-in to it, or null
+    pub icon: String    // what the icons the instance has are known by (icons.key), or ""
 }
 
 pub struct Done {
@@ -30,6 +35,11 @@ pub struct Done {
     pub sign_in: bool    // it answered 401, with no token, or none that it took
     pub grant: Json    // the sign-in, renewed, or null when it wasn't
     pub ended: bool    // the sign-in couldn't be renewed: the person signs in again
+    pub icon: icons.Got    // its icons, fetched when they changed (`fresh`)
+}
+
+fn no_icon() -> icons.Got {
+    return icons.Got { key: String(), fresh: false, light: List<u8>(), dark: List<u8>() }
 }
 
 struct Worker {
@@ -93,7 +103,7 @@ fn test(job: Job) -> Done {
     if oauth.signed_in(grant.copy()) and due > 0 and due <= now() {
         let (g, why, ended) = renewed(grant.copy())
         if g == Json.Null {
-            return Done { id: id, tools: List<String>(), error: "The sign-in couldn't be renewed: {why}", sign_in: ended, grant: Json.Null, ended: ended }
+            return Done { id: id, tools: List<String>(), error: "The sign-in couldn't be renewed: {why}", sign_in: ended, grant: Json.Null, ended: ended, icon: no_icon() }
         }
         grant = g.copy()
         fresh = g
@@ -101,38 +111,45 @@ fn test(job: Job) -> Done {
     let signed = oauth.signed_in(grant.copy())
     let spec = if signed { with_token(job.spec.copy(), str_at(grant.copy(), "access") ?? String()) } else { job.spec.copy() }
     match names(spec) {
-        ok(tools) => return Done { id: id, tools: tools, error: String(), sign_in: false, grant: fresh, ended: false },
+        ok(got) => {
+            let (tools, info) = got
+            return Done { id: id, tools: tools, error: String(), sign_in: false, grant: fresh, ended: false, icon: icons.of_server(info, job.icon) }
+        },
         err(e) => {
             let failed = "{e}"
             if not mcpclient.asks_sign_in(failed.copy()) or not signed {
-                return Done { id: id, tools: List<String>(), error: failed.copy(), sign_in: mcpclient.asks_sign_in(failed), grant: fresh, ended: false }
+                return Done { id: id, tools: List<String>(), error: failed.copy(), sign_in: mcpclient.asks_sign_in(failed), grant: fresh, ended: false, icon: no_icon() }
             }
         },
     }
     // A 401 with a token: it's renewed, and the server asked again, once.
     let (g, why, ended) = renewed(grant)
     if g == Json.Null {
-        return Done { id: id, tools: List<String>(), error: "The sign-in couldn't be renewed: {why}", sign_in: ended, grant: Json.Null, ended: ended }
+        return Done { id: id, tools: List<String>(), error: "The sign-in couldn't be renewed: {why}", sign_in: ended, grant: Json.Null, ended: ended, icon: no_icon() }
     }
     let again = with_token(job.spec, str_at(g.copy(), "access") ?? String())
     return match names(again) {
-        ok(tools) => Done { id: id, tools: tools, error: String(), sign_in: false, grant: g, ended: false },
-        err(e) => Done { id: id, tools: List<String>(), error: "{e}", sign_in: mcpclient.asks_sign_in("{e}"), grant: g, ended: false },
+        ok(got) => {
+            let (tools, info) = got
+            Done { id: id, tools: tools, error: String(), sign_in: false, grant: g, ended: false, icon: icons.of_server(info, job.icon) }
+        },
+        err(e) => Done { id: id, tools: List<String>(), error: "{e}", sign_in: mcpclient.asks_sign_in("{e}"), grant: g, ended: false, icon: no_icon() },
     }
 }
 
-// The names of the tools the server at `spec` offers.
-fn names(spec: Json) -> List<String> ! Error {
+// The names of the tools the server at `spec` offers, and its serverInfo.
+fn names(spec: Json) -> (List<String>, Json) ! Error {
     var server = try mcpclient.start(spec)
     let (listed, failed) = match server.tools() {
         ok(l) => (l, String()),
         err(e) => (List<Json>(), "{e}"),
     }
+    let info = server.info.copy()
     server.stop()
     if failed.len() > 0 { fail "{failed}" }
     var out = List<String>()
     for t in listed {
         if let n = str_at(t, "name") { out.push(n) }
     }
-    return out
+    return (out, info)
 }

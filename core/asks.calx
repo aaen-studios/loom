@@ -26,7 +26,8 @@ module core.asks
 // - `place`: where it goes, small: the server and the tool ("acta · search"),
 //   the device and the tool, or empty.
 // - `badges`: the services it reaches (`shared/badge.calx`), at most two: a
-//   call's steps' services, or else its server's.
+//   call's steps' services, or else its server's, with the server's own
+//   icons when the call's detail has them (`icon`, `icon_dark`).
 // - `effect`: what loom knows it does, `{"kind", "words"}`, from its kind (an ACP
 //   tool kind, or `read` for an MCP tool marked readOnlyHint): `reads` ("Only
 //   reads"), `changes`, `deletes` or `runs`, or both empty when it doesn't know.
@@ -420,7 +421,7 @@ fn chips_of(args: Json) -> (List<Json>, i64) {
 // The steps of a call that runs the tools in `list`, each with its title, its
 // badge, its chips and how many more it was given; the services they reach,
 // once each, in order; and how many more steps there were than shown.
-fn steps_of(list: Json, server: String) -> (List<Json>, List<String>, i64) {
+fn steps_of(list: Json, server: String, icon: (String, String)) -> (List<Json>, List<String>, i64) {
     var steps = List<Json>()
     var services = List<String>()
     var more: i64 = 0
@@ -435,8 +436,8 @@ fn steps_of(list: Json, server: String) -> (List<Json>, List<String>, i64) {
             }
             let (chips, more_chips) = chips_of(args_of(x.copy()))
             let title = if service.len() > 0 { "{action} in {service_name(service.copy())}" } else { action }
-            let reached = if service.len() > 0 { service } else { server.copy() }
-            steps.push(Obj.new().s("title", title).j("badge", badge.badge(reached, String())).j("chips", Json.Array(chips)).i("more", more_chips).done())
+            let (reached, its_icon, its_dark) = if service.len() > 0 { (service, String(), String()) } else { (server.copy(), icon.0.copy(), icon.1.copy()) }
+            steps.push(Obj.new().s("title", title).j("badge", badge.badge(reached, its_icon, its_dark)).j("chips", Json.Array(chips)).i("more", more_chips).done())
         }
     }
     return (steps, services, more)
@@ -552,6 +553,9 @@ pub fn shown(e: Json) -> Json {
     // Where it goes, and the tool, for a tool of a server, a plugin or a device.
     let server = str_at(detail.copy(), "server") ?? str_at(detail.copy(), "device") ?? String()
     let tool = if what == "mcp" or what == "plugin" or what == "device" { str_at(detail.copy(), "tool") ?? String() } else { String() }
+    // The server's own icons, which the instance gives with the call when it has them.
+    let icon = if what == "mcp" { str_at(detail.copy(), "icon") ?? String() } else { String() }
+    let icon_dark = if what == "mcp" { str_at(detail.copy(), "icon_dark") ?? String() } else { String() }
     let place = if tool.len() > 0 and server.len() > 0 { "{server.trim_prefix("plugin-")} · {tool}" } else { String() }
     // Why the agent makes it, in its own words: said once, as the reason.
     let (reason, reason_key) = reason_of(given.copy())
@@ -563,7 +567,7 @@ pub fn shown(e: Json) -> Json {
     if what == "mcp" or what == "plugin" {
         if let key = steps_key(given.copy()) {
             if let list = given.find(key.copy()) {
-                let (ss, found, more_steps) = steps_of(list.copy(), server.copy())
+                let (ss, found, more_steps) = steps_of(list.copy(), server.copy(), (icon.copy(), icon_dark.copy()))
                 steps = ss
                 services = found
                 steps_more = more_steps
@@ -589,10 +593,10 @@ pub fn shown(e: Json) -> Json {
     // The services it reaches: its steps', or its server's.
     var badges = List<Json>()
     for s in services {
-        if badges.len() < 2 { badges.push(badge.badge(s.copy(), String())) }
+        if badges.len() < 2 { badges.push(badge.badge(s.copy(), String(), String())) }
     }
     if badges.len() == 0 and (what == "mcp" or what == "plugin") and server.len() > 0 {
-        badges.push(badge.badge(server.trim_prefix("plugin-").copy(), String()))
+        badges.push(badge.badge(server.trim_prefix("plugin-").copy(), icon, icon_dark))
     }
     let (effect, effect_words) = effect_of(kind, what.copy())
     // A command the title already says whole isn't said again.
@@ -711,6 +715,12 @@ fn says_a_tool_in_words_with_its_service_s_badge() {
     let plugin = ask(#"{"tool": "other", "title": "x", "detail": {"server": "plugin-board", "tool": "addCard", "arguments": {"title": "Ship it"}}}"#)
     assert(str_at(plugin.copy(), "place") == some(String("board · addCard")) and badges_text(plugin.copy()) == "board")
     assert(str_at(plugin, "title") == some(String("Add card")))
+    // The server's own icons, which the instance gives with the call, are on its
+    // badge, and not on a service's it reaches, nor among what the call is given.
+    let iconed = ask(#"{"tool": "read", "title": "x", "detail": {"server": "acta", "tool": "search_issues", "arguments": {"query": "a"}, "act": 0, "icon": "ab12", "icon_dark": "cd34"}}"#)
+    assert("{at(iconed.copy(), "badges")}".contains(#""icon":"ab12","icon_dark":"cd34""#) and not "{at(iconed, "lines")}".contains("ab12"))
+    let reached = ask(#"{"tool": "other", "title": "x", "detail": {"server": "composio", "tool": "GMAIL_SEND_EMAIL", "arguments": {}, "icon": "ab12"}}"#)
+    assert(not "{at(reached, "badges")}".contains("icon"))
 }
 
 @test

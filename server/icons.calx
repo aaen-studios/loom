@@ -1,0 +1,199 @@
+module server.icons
+
+// An MCP server's own icon, for its badge (PLAN.md, "Cards in the chat"): the
+// one its `initialize` names in `serverInfo.icons` that suits a badge best,
+// fetched with a cap on its size and its time. The instance checks it's a
+// picture and keeps it as the person's file (`files.icon_png`).
+//
+// MCP gives each icon as `{src, mimeType?, sizes?, theme?}`: `src` an https
+// address or a data: URI, `sizes` such as "48x48" or "any", and `theme`
+// "light" or "dark", the background it's made for. Only pictures both apps
+// draw count: PNG and JPEG, and one whose type isn't said, which the
+// instance then checks. An SVG is passed over, since loom can't turn one into
+// a picture yet.
+import std.bytes
+import std.hash.{sha256}
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.url.{Url}
+import shared.obj.{str_at}
+
+// The most an icon may be, in bytes.
+pub const MOST: usize = 262144
+const WAIT_MS: u32 = 5000
+// The size, in pixels, a badge is drawn best from.
+const BEST: i64 = 64
+
+// The type an icon says it is, from its mimeType, its data: URI or the end of
+// its address: `png`, `jpeg`, `?` for one that doesn't say, or "" for
+// one loom doesn't draw.
+fn kind_of(icon: Json) -> String {
+    let src = (str_at(icon.copy(), "src") ?? String()).trim().to_lower_root()
+    var mime = (str_at(icon, "mimeType") ?? String()).trim().to_lower_root()
+    if mime.len() == 0 and src.starts_with("data:") {
+        let end = src.find(";") ?? src.find(",") ?? src.len()
+        mime = src[5..end].copy()
+    }
+    if mime.len() == 0 {
+        let path = src.split("?")[0].copy()
+        if path.ends_with(".png") { return String("png") }
+        if path.ends_with(".jpg") or path.ends_with(".jpeg") { return String("jpeg") }
+        if path.ends_with(".svg") or path.ends_with(".webp") or path.ends_with(".gif") or path.ends_with(".ico") { return String() }
+        return String("?")
+    }
+    if mime == "image/png" { return String("png") }
+    if mime == "image/jpeg" or mime == "image/jpg" { return String("jpeg") }
+    return String()
+}
+
+// How far an icon's sizes are from what a badge wants: a smaller one counts
+// twice, since it's drawn blurred. One that doesn't say is taken as middling.
+fn size_off(icon: Json) -> i64 {
+    var best: i64 = 32
+    var said = false
+    if let Json.Array(sizes) = icon.get(String("sizes")) ?? Json.Null {
+        for s in sizes {
+            let text = (s.as_str() ?? String()).trim().to_lower_root()
+            let off: i64 = if text == "any" { 0 } else {
+                let w = i64.parse(text.split("x")[0].copy()) ?? 0
+                if w <= 0 { continue }
+                if w >= BEST { w - BEST } else { (BEST - w) * 2 }
+            }
+            if not said or off < best { best = off }
+            said = true
+        }
+    }
+    return best
+}
+
+// How well an icon suits a badge, lower being better, or none for one loom
+// doesn't draw.
+fn score(icon: Json) -> i64? {
+    let kind = kind_of(icon.copy())
+    if kind.len() == 0 or (str_at(icon.copy(), "src") ?? String()).trim().len() == 0 { return none }
+    let by_kind: i64 = if kind == "png" { 0 } else if kind == "?" { 40 } else { 8 }
+    return some(size_off(icon) + by_kind)
+}
+
+// The icons a badge draws, from `serverInfo.icons`: the best for a light
+// background and the best for a dark one, each by its `src`. With icons for
+// only one, it's the first, and the second is "".
+pub fn pick(icons: Json) -> (String, String) {
+    var light = String()
+    var dark = String()
+    var light_score: i64 = 0
+    var dark_score: i64 = 0
+    if let Json.Array(list) = icons {
+        for icon in list {
+            let s = score(icon.copy()) else continue
+            let src = (str_at(icon.copy(), "src") ?? String()).trim().copy()
+            if str_at(icon, "theme") == some(String("dark")) {
+                if dark.len() == 0 or s < dark_score {
+                    dark = src
+                    dark_score = s
+                }
+            } else if light.len() == 0 or s < light_score {
+                light = src
+                light_score = s
+            }
+        }
+    }
+    if light.len() == 0 { return (dark, String()) }
+    return (light, dark)
+}
+
+// What a server's chosen icons are known by, so they're fetched again only
+// when they change: a data: URI can be long.
+pub fn key(light: String, dark: String) -> String {
+    if light.len() == 0 and dark.len() == 0 { return String() }
+    return bytes.hex(sha256("{light}\n{dark}".to_bytes()))[..32].copy()
+}
+
+fn loopback(host: String) -> bool {
+    return host == "127.0.0.1" or host == "localhost" or host == "::1"
+}
+
+// The icon at `src`: a data: URI's bytes, or what an https address gives
+// within 5 seconds, of at most `MOST` bytes. An http address is fetched only
+// on this computer, as a test's server gives.
+pub fn fetch(src: String) -> List<u8> ! Error {
+    if src.to_lower_root().starts_with("data:") {
+        let comma = src.find(",") else { fail "the data: URI has no data" }
+        if not src[..comma].to_lower_root().ends_with(";base64") { fail "the data: URI isn't base64" }
+        if comma + 1 + (MOST / 3 + 1) * 4 < src.len() { fail "the icon is over {MOST / 1024} KiB" }
+        return bytes.from_base64(src[comma + 1..].trim().copy()) ?? { fail "the data: URI isn't base64" }
+    }
+    let url = match Url.parse(src.copy()) {
+        ok(u) => u,
+        err(why) => fail "the icon's address isn't one: {why}",
+    }
+    let host = url.host ?? String()
+    if url.scheme != "https" and not (url.scheme == "http" and loopback(host)) { fail "the icon isn't at an https address" }
+    var req = get(src, List<Header>(), WAIT_MS, MOST)
+    let r = try req.wait()
+    if r.status != 200 { fail "the icon's address answered {r.status}" }
+    return r.body
+}
+
+// A server's icons as its `initialize` gave them, fetched: the light one and
+// the dark one, each empty where there's none or it couldn't be had, and what
+// they're known by. `known` is what the instance has, so they're fetched only
+// when they've changed; then `fresh` is false.
+pub struct Got {
+    pub key: String
+    pub fresh: bool
+    pub light: List<u8>
+    pub dark: List<u8>
+}
+
+pub fn of_server(info: Json, known: String) -> Got {
+    let (light, dark) = pick(info.get(String("icons")) ?? Json.Null)
+    let k = key(light.copy(), dark.copy())
+    var got = Got { key: k.copy(), fresh: k != known, light: List<u8>(), dark: List<u8>() }
+    if not got.fresh { return got }
+    if light.len() > 0 { got.light = fetched(light) }
+    if dark.len() > 0 { got.dark = fetched(dark) }
+    return got
+}
+
+// The icon at `src`, or nothing when it couldn't be had.
+fn fetched(src: String) -> List<u8> {
+    return match fetch(src) {
+        ok(data) => data,
+        err(_) => List<u8>(),
+    }
+}
+
+@test
+fn picks_the_icon_a_badge_draws_best() {
+    let icons = #"
+        [{"src": "https://a.example/16.png", "mimeType": "image/png", "sizes": ["16x16"]},
+        {"src": "https://a.example/logo.svg", "mimeType": "image/svg+xml", "sizes": ["any"]},
+        {"src": "https://a.example/64.png", "sizes": ["64x64"]},
+        {"src": "https://a.example/256.jpg", "mimeType": "image/jpeg", "sizes": ["256x256"]},
+        {"src": "https://a.example/dark48.png", "mimeType": "image/png", "sizes": ["48x48"], "theme": "dark"},
+        {"src": "https://a.example/dark128.png", "mimeType": "image/png", "sizes": ["128x128"], "theme": "dark"}]
+        "#
+    let (light, dark) = pick(parse(String(icons))!)
+    assert(light == "https://a.example/64.png" and dark == "https://a.example/dark48.png")
+    // Only an SVG: nothing a badge draws.
+    let (none_light, none_dark) = pick(parse(String(#"[{"src": "https://a.example/a.svg"}]"#))!)
+    assert(none_light.len() == 0 and none_dark.len() == 0 and key(none_light, none_dark).len() == 0)
+    // Only a dark one: it's the one.
+    let (only, other) = pick(parse(String(#"[{"src": "data:image/png;base64,AAAA", "theme": "dark"}]"#))!)
+    assert(only == "data:image/png;base64,AAAA" and other.len() == 0)
+    assert(key(String("a"), String("b")) == key(String("a"), String("b")) and key(String("a"), String("b")) != key(String("a"), String()))
+}
+
+@test
+fn fetches_a_data_uri_and_turns_away_the_rest() {
+    assert(fetched(String("data:image/png;base64,iVBORw0K")) == [137u8, 80, 78, 71, 13, 10])
+    assert(fetched(String("data:image/png,raw")).len() == 0)
+    assert(fetched(String("http://icons.example/a.png")).len() == 0)
+    assert(fetched(String("file:///etc/passwd")).len() == 0)
+    var long = String("data:image/png;base64,")
+    for _ in 0..(MOST / 3 + 8) {
+        long.push_str("AAAA")
+    }
+    assert(fetched(long).len() == 0)
+}

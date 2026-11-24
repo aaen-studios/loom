@@ -27,6 +27,7 @@ pub struct Server {
     url: String
     headers: List<Header>
     session: String    // Mcp-Session-Id, over HTTP
+    pub info: Json    // its serverInfo, as initialize gave it: its name, version and icons
     next: i64
 }
 
@@ -49,7 +50,7 @@ fn millis_since(from: Instant) -> u64 {
 // {name, command, args, env} or {name, url, headers}, and says initialize.
 pub fn start(spec: Json) -> Server ! Error {
     let name = str_at(spec.copy(), "name") ?? String()
-    var s = Server { name: name.copy(), child: none, url: String(), headers: List<Header>(), session: String(), next: 0 }
+    var s = Server { name: name.copy(), child: none, url: String(), headers: List<Header>(), session: String(), info: Json.Null, next: 0 }
     if let address = str_at(spec.copy(), "url") {
         s.url = address
         for (k, v) in pairs(at(spec.copy(), "headers")) {
@@ -73,7 +74,8 @@ pub fn start(spec: Json) -> Server ! Error {
         s.child = some(try c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).own_group().spawn())
     }
     let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
-    _ = try s.request("initialize", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done(), START_MS)
+    let began = try s.request("initialize", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done(), START_MS)
+    s.info = at(began, "serverInfo")
     try s.notify("notifications/initialized")
     return s
 }

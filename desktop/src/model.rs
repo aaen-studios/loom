@@ -2571,13 +2571,15 @@ pub struct Shown {
 }
 
 /// A service's badge on a card (`shared/badge.calx`): its initial on one of the thread
-/// colours, by name, or its own icon.
+/// colours, by name, or an MCP server's own icon, a file's SHA-256, with the one it gave
+/// for a dark background when it gave one.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct Badge {
     pub name: String,
     pub initial: String,
     pub color: String,
     pub icon: String,
+    pub icon_dark: String,
 }
 
 impl Badge {
@@ -2590,8 +2592,25 @@ impl Badge {
             initial: s(v, "initial"),
             color: s(v, "color"),
             icon: s(v, "icon"),
+            icon_dark: s(v, "icon_dark"),
             name,
         })
+    }
+
+    /// The icon it's drawn with in the theme, or "" for its initial.
+    pub fn icon_for(&self, dark: bool) -> &str {
+        if dark && !self.icon_dark.is_empty() {
+            &self.icon_dark
+        } else {
+            &self.icon
+        }
+    }
+
+    /// Every icon it has, for fetching.
+    fn icons(&self) -> impl Iterator<Item = &String> {
+        [&self.icon, &self.icon_dark]
+            .into_iter()
+            .filter(|i| !i.is_empty())
     }
 }
 
@@ -5746,16 +5765,31 @@ impl Model {
         out
     }
 
-    /// The thumbnails the shown chat needs and doesn't have yet.
+    /// The thumbnails the shown chat needs and doesn't have yet: its pictures', and the
+    /// icons of the badges on its cards and its questions.
     pub fn file_fetches(&mut self) -> Vec<Value> {
         let mut out = Vec::new();
-        let wanted: Vec<String> = self
-            .shown_blocks()
-            .into_iter()
+        let blocks = self.shown_blocks();
+        let mut wanted: Vec<String> = blocks
+            .iter()
             .filter_map(|b| b.file.as_ref())
             .filter(|f| f.image())
             .map(|f| f.file.clone())
             .collect();
+        let cards = blocks
+            .iter()
+            .filter_map(|b| b.card.as_ref()?.badge.as_ref());
+        let asks = self.approvals.iter().flat_map(|a| {
+            a.shown
+                .badges
+                .iter()
+                .chain(a.shown.steps.iter().filter_map(|s| s.badge.as_ref()))
+        });
+        for icon in cards.chain(asks).flat_map(Badge::icons) {
+            if !wanted.contains(icon) {
+                wanted.push(icon.clone());
+            }
+        }
         for sha in wanted {
             let key = format!("{sha}.thumb");
             if self.files.contains_key(&key) || self.getting.values().any(|(k, _)| k == &key) {
@@ -7273,6 +7307,29 @@ mod tests {
     }
 
     #[test]
+    fn a_badge_s_own_icons_are_fetched_as_thumbnails() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "approvals", "items": [
+            {"call": "tc_1", "run": "run_1", "tool": "other", "title": "x", "detail": {},
+             "shown": {"what": "mcp", "lines": [], "more": 0, "code": "", "raw": "", "title": "Search", "place": "acta · search",
+                       "badges": [{"name": "acta", "initial": "A", "color": "mint", "icon": "ab12", "icon_dark": "cd34"}]}}]}));
+        let b = &m.approvals[0].shown.badges[0];
+        assert_eq!((b.icon_for(false), b.icon_for(true)), ("ab12", "cd34"));
+        let asked = m.file_fetches();
+        let files: Vec<&str> = asked.iter().filter_map(|f| f["file"].as_str()).collect();
+        assert_eq!(files, vec!["ab12", "cd34"]);
+        assert!(asked.iter().all(|f| f["thumb"] == true));
+        // Asked for once, not again while they come.
+        assert!(m.file_fetches().is_empty());
+        // A badge without a dark one draws its own in both themes.
+        let plain = Badge {
+            icon: "ab12".into(),
+            ..Badge::default()
+        };
+        assert_eq!(plain.icon_for(true), "ab12");
+    }
+
+    #[test]
     fn a_question_shows_what_the_core_put_in_words() {
         let mut m = Model::new();
         m.take(&json!({"t": "core.data", "what": "approvals", "items": [
@@ -7289,13 +7346,13 @@ mod tests {
             name: "acta".into(),
             initial: "A".into(),
             color: "mint".into(),
-            icon: String::new(),
+            ..Badge::default()
         };
         let gmail = Badge {
             name: "gmail".into(),
             initial: "G".into(),
             color: "teal".into(),
-            icon: String::new(),
+            ..Badge::default()
         };
         assert_eq!(
             m.approvals[0].shown,
