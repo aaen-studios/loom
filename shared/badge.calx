@@ -1,0 +1,58 @@
+module shared.badge
+
+// A service's badge on a card (PLAN.md, "Cards in the chat"): an MCP server, a
+// plugin, or a service a step of a call reaches, such as Gmail in Composio's
+// GMAIL_FETCH_EMAILS. The instance puts one on its own cards and the core on a
+// question's, so both apps draw the same:
+//
+//     {"name": "gmail", "initial": "G", "color": "coral"}
+//
+// `color` is one of the agents' thread colours (design/tokens.toml), chosen from
+// the name, so a service has the same colour wherever it shows. `icon`, when
+// there is one, is the service's own (MCP `icons`), and the apps draw it in the
+// initial's place.
+import std.json.{Json}
+import shared.obj.{Obj}
+
+// The thread colours, in the order design/tokens.toml lists them, but grey: a
+// badge always has a colour.
+const COLORS: str = "periwinkle mint apricot pink sky gold lavender coral moss teal plum"
+
+// The first letter or digit of `name`, in capitals, or "?" for a name without one.
+pub fn initial(name: String) -> String {
+    for r in name.runes() {
+        let letter = (r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') or r > '\u{7f}'
+        if letter {
+            var one = String()
+            one.push(r)
+            return one.to_upper_root()
+        }
+    }
+    return String("?")
+}
+
+// The colour a name's badge takes: the same for the same name, whatever its case.
+pub fn color(name: String) -> String {
+    var h: usize = 7
+    for b in name.trim().to_lower_root().to_bytes() {
+        h = (h * 31 + usize(b)) % 1000003
+    }
+    let names = COLORS.split(" ")
+    return names[h % names.len()].copy()
+}
+
+// The badge for `name`, with `icon` when the service has its own.
+pub fn badge(name: String, icon: String) -> Json {
+    var b = Obj.new().s("name", name.copy()).s("initial", initial(name.copy())).s("color", color(name))
+    if icon.len() > 0 { b = b.s("icon", icon) }
+    return b.done()
+}
+
+@test
+fn a_name_keeps_its_badge() {
+    assert("{badge(String("gmail"), String())}" == "\{\"name\":\"gmail\",\"initial\":\"G\",\"color\":\"{color(String("gmail"))}\"\}")
+    assert(color(String("Outlook")) == color(String("outlook ")))
+    assert(initial(String("_acta")) == "A" and initial(String("--")) == "?" and initial(String("élan")) == "É")
+    assert(COLORS.split(" ").contains(color(String("composio"))))
+    assert("{badge(String("acta"), String("ab12"))}".contains("\"icon\":\"ab12\""))
+}

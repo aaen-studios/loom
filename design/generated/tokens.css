@@ -108,6 +108,7 @@
   --bubble: #1c1c1f;
   --ok: #6ccf9a;
   --bad: #ff7a6b;
+  --warn: #f2a77a;
   --thread-periwinkle: #9ea8ff;
   --thread-mint: #74d6a6;
   --thread-apricot: #f2a77a;
@@ -141,6 +142,7 @@
     --bubble: #f1f1f3;
     --ok: #1f8a55;
     --bad: #d4442f;
+    --warn: #c2621f;
     --thread-periwinkle: #5763e0;
     --thread-mint: #18a06a;
     --thread-apricot: #e07a3d;
@@ -174,6 +176,7 @@
   --bubble: #f1f1f3;
   --ok: #1f8a55;
   --bad: #d4442f;
+  --warn: #c2621f;
   --thread-periwinkle: #5763e0;
   --thread-mint: #18a06a;
   --thread-apricot: #e07a3d;

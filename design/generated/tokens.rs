@@ -110,6 +110,7 @@ pub mod color_dark {
     pub const BUBBLE: u32 = 0x1c1c1f;
     pub const OK: u32 = 0x6ccf9a;
     pub const BAD: u32 = 0xff7a6b;
+    pub const WARN: u32 = 0xf2a77a;
 }
 
 pub mod color_light {
@@ -129,6 +130,7 @@ pub mod color_light {
     pub const BUBBLE: u32 = 0xf1f1f3;
     pub const OK: u32 = 0x1f8a55;
     pub const BAD: u32 = 0xd4442f;
+    pub const WARN: u32 = 0xc2621f;
 }
 
 pub mod thread_color_dark {

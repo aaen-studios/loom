@@ -296,7 +296,11 @@ enum Sample {
              "blocks": [["kind": "text", "text": "Two things need you:\n\n1. The VPS invoice is due Friday.\n2. Ola asked whether Saturday still works."],
                         ["kind": "card", "card": ["id": "card_1", "type": "facts", "title": "Inbox, today", "items": [["label": "Unread", "value": "14"], ["label": "Need you", "value": "2"], ["label": "Newsletters", "value": "9, all archived"]]]],
                         ["kind": "card", "card": ["id": "card_2", "type": "choices", "title": "Shall I tell Ola yes?", "options": ["Yes", "Not yet"]]],
-                        ["kind": "card", "card": ["id": "sign_in_vercel", "type": "sign_in", "title": "vercel needs you to sign in", "server": "vercel"]]]],
+                        ["kind": "card", "card": ["id": "sign_in_vercel", "type": "sign_in", "title": "Sign in to vercel", "server": "vercel", "badge": ["name": "vercel", "initial": "V", "color": "sky"]]],
+                        ["kind": "card", "card": ["id": "mcp_add_tc_29", "type": "mcp_add", "title": "Add the MCP server tracker", "call": "tc_29", "server": "tracker",
+                                                  "badge": ["name": "tracker", "initial": "T", "color": "mint"], "url": "https://mcp.tracker.example/mcp",
+                                                  "settings": [["name": "Authorization", "in": "header", "secret": "TRACKER_TOKEN", "have": false], ["name": "X-Team", "in": "header", "value": "design"]],
+                                                  "state": "asking"]]]],
         ],
         "c_4": [
             ["id": "msg_40", "conversation": "c_4", "role": "person", "from": "a_1", "at": 1795160000000,
@@ -367,11 +371,26 @@ enum Sample {
     /// Questions as `core.get` gives them, each with what its card shows (core/asks.calx).
     static let approvals: [JSON] = [
         ["call": "tc_30", "run": "run_30", "tool": "edit", "title": "Edit notes/2026-11.md", "detail": "+ ## 21 November\n+ Shipped the iPhone app's first build.", "can_always": true,
-         "shown": ["what": "", "lines": [], "more": 0, "code": "+ ## 21 November\n+ Shipped the iPhone app's first build.", "raw": ""]],
+         "shown": ["what": "", "lines": [], "more": 0, "code": "+ ## 21 November\n+ Shipped the iPhone app's first build.", "raw": "",
+                   "title": "Edit notes/2026-11.md", "place": "", "badges": [], "effect": ["kind": "changes", "words": "Changes files"], "steps": [], "steps_more": 0, "reason": ""]],
         ["call": "tc_31", "run": "run_30", "tool": "other", "title": "Use GMAIL_SEND_EMAIL on the MCP server composio", "can_always": true,
          "detail": ["server": "composio", "tool": "GMAIL_SEND_EMAIL", "arguments": ["recipient_email": "ola@example.com", "subject": "Saturday", "body": "Saturday still works. I'll bring the cake.", "is_html": false]],
          "shown": ["what": "mcp", "more": 0, "code": "",
                    "lines": [["label": "Recipient email", "value": "ola@example.com"], ["label": "Subject", "value": "Saturday"], ["label": "Body", "value": "Saturday still works. I'll bring the cake."], ["label": "Is HTML", "value": "No"]],
-                   "raw": ""]],
+                   "raw": "", "title": "Send email in Gmail", "place": "composio · GMAIL_SEND_EMAIL",
+                   "badges": [["name": "gmail", "initial": "G", "color": "teal"]], "effect": ["kind": "changes", "words": "Can change"], "steps": [], "steps_more": 0, "reason": ""]],
+        ["call": "tc_32", "run": "run_30", "tool": "other", "title": "Use COMPOSIO_MULTI_EXECUTE_TOOL on the MCP server composio", "can_always": true,
+         "detail": ["server": "composio", "tool": "COMPOSIO_MULTI_EXECUTE_TOOL", "arguments": [
+            "tools": [["tool_slug": "OUTLOOK_OUTLOOK_SEARCH_MESSAGES", "arguments": ["query": "invoice", "top": 10]],
+                      ["tool_slug": "GMAIL_FETCH_EMAILS", "arguments": ["query": "from:billing", "max_results": 5]]],
+            "thought": "Find last month's invoices in both inboxes so I can total them."]],
+         "shown": ["what": "mcp", "lines": [], "more": 0, "code": "",
+                   "raw": "{\n  \"tools\": [\n    {\n      \"tool_slug\": \"OUTLOOK_OUTLOOK_SEARCH_MESSAGES\",\n      \"arguments\": {\n        \"query\": \"invoice\",\n        \"top\": 10\n      }\n    },\n    {\n      \"tool_slug\": \"GMAIL_FETCH_EMAILS\",\n      \"arguments\": {\n        \"query\": \"from:billing\",\n        \"max_results\": 5\n      }\n    }\n  ],\n  \"thought\": \"Find last month's invoices in both inboxes so I can total them.\"\n}",
+                   "title": "Search messages in Outlook and fetch emails in Gmail", "place": "composio · COMPOSIO_MULTI_EXECUTE_TOOL",
+                   "badges": [["name": "outlook", "initial": "O", "color": "sky"], ["name": "gmail", "initial": "G", "color": "teal"]],
+                   "effect": ["kind": "changes", "words": "Can change"],
+                   "steps": [["title": "Search messages in Outlook", "badge": ["name": "outlook", "initial": "O", "color": "sky"], "chips": [["label": "query", "value": "invoice"], ["label": "top", "value": "10"]], "more": 0],
+                             ["title": "Fetch emails in Gmail", "badge": ["name": "gmail", "initial": "G", "color": "teal"], "chips": [["label": "query", "value": "from:billing"], ["label": "max results", "value": "5"]], "more": 0]],
+                   "steps_more": 0, "reason": "Find last month's invoices in both inboxes so I can total them."]],
     ]
 }

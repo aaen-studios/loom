@@ -1375,6 +1375,8 @@ pub struct Card {
     pub id: String,
     pub title: String,
     pub body: CardBody,
+    /// Loom's own cards' server's badge (`shared/badge.calx`).
+    pub badge: Option<Badge>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1421,6 +1423,8 @@ pub enum CardBody {
         said: String,
         signed: bool,
         signing: bool,
+        /// Once it's ready, the tools it offers.
+        tools: Vec<String>,
     },
 }
 
@@ -1494,6 +1498,7 @@ impl Card {
                 said: s(v, "said"),
                 signed: false,
                 signing: false,
+                tools: strings(v.get("tools")),
             },
             "facts" => CardBody::Facts(
                 items?
@@ -1523,6 +1528,7 @@ impl Card {
             id: s(v, "id"),
             title: s(v, "title"),
             body,
+            badge: v.get("badge").and_then(Badge::of),
         })
     }
 }
@@ -1845,6 +1851,22 @@ pub struct Message {
 }
 
 impl Message {
+    /// Whether one of its cards waits for the person, so its thread moves: choices in the
+    /// chat's newest message (`newest`), a sign-in not done while the chat hasn't gone on,
+    /// or an MCP server an agent proposed that's asking, being added or wants a sign-in.
+    pub fn card_waits(&self, newest: bool) -> bool {
+        self.blocks
+            .iter()
+            .any(|b| match b.card.as_ref().map(|c| &c.body) {
+                Some(CardBody::Choices { .. }) => newest,
+                Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
+                Some(CardBody::McpAdd { state, .. }) => {
+                    matches!(state.as_str(), "asking" | "adding" | "sign_in")
+                }
+                _ => false,
+            })
+    }
+
     /// A turn that didn't end by itself: stopped, failed, or out of tokens. Such a reply
     /// keeps everything it had in view, since there's no answer to fold its steps under.
     pub fn cut_short(&self) -> bool {
@@ -2474,6 +2496,54 @@ pub struct Shown {
     pub more: u64,
     pub code: String,
     pub raw: String,
+    /// What it does in plain words, and where it goes, small ("acta · search").
+    pub title: String,
+    pub place: String,
+    /// The services it reaches, at most two.
+    pub badges: Vec<Badge>,
+    /// What loom knows it does: `reads`, `changes`, `deletes` or `runs`, and how the
+    /// card says it, or both empty.
+    pub effect: (String, String),
+    /// The tools it runs, and how many more there were than these.
+    pub steps: Vec<Step>,
+    pub steps_more: u64,
+    /// Why the agent makes the call, in its own words.
+    pub reason: String,
+}
+
+/// A service's badge on a card (`shared/badge.calx`): its initial on one of the thread
+/// colours, by name, or its own icon.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Badge {
+    pub name: String,
+    pub initial: String,
+    pub color: String,
+    pub icon: String,
+}
+
+impl Badge {
+    pub fn of(v: &Value) -> Option<Badge> {
+        let name = s(v, "name");
+        if name.is_empty() {
+            return None;
+        }
+        Some(Badge {
+            initial: s(v, "initial"),
+            color: s(v, "color"),
+            icon: s(v, "icon"),
+            name,
+        })
+    }
+}
+
+/// One tool a call runs: what it does, the service it reaches, a few of its arguments
+/// as chips, and how many more it was given.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Step {
+    pub title: String,
+    pub badge: Option<Badge>,
+    pub chips: Vec<(String, String)>,
+    pub more: u64,
 }
 
 impl Shown {
@@ -2488,19 +2558,49 @@ impl Shown {
             };
             return Shown {
                 raw,
+                title: s(a, "title"),
                 ..Shown::default()
             };
         };
+        let pairs = |v: Option<&Value>| -> Vec<(String, String)> {
+            v.and_then(Value::as_array)
+                .map(|ls| ls.iter().map(|l| (s(l, "label"), s(l, "value"))).collect())
+                .unwrap_or_default()
+        };
+        let effect = v.get("effect").unwrap_or(&Value::Null);
         Shown {
             what: s(v, "what"),
-            lines: v
-                .get("lines")
-                .and_then(Value::as_array)
-                .map(|ls| ls.iter().map(|l| (s(l, "label"), s(l, "value"))).collect())
-                .unwrap_or_default(),
+            lines: pairs(v.get("lines")),
             more: v.get("more").and_then(Value::as_u64).unwrap_or(0),
             code: s(v, "code"),
             raw: s(v, "raw"),
+            // A question shaped before the core said its title keeps the one it came with.
+            title: Some(s(v, "title"))
+                .filter(|t| !t.is_empty())
+                .unwrap_or_else(|| s(a, "title")),
+            place: s(v, "place"),
+            badges: v
+                .get("badges")
+                .and_then(Value::as_array)
+                .map(|bs| bs.iter().filter_map(Badge::of).collect())
+                .unwrap_or_default(),
+            effect: (s(effect, "kind"), s(effect, "words")),
+            steps: v
+                .get("steps")
+                .and_then(Value::as_array)
+                .map(|ss| {
+                    ss.iter()
+                        .map(|st| Step {
+                            title: s(st, "title"),
+                            badge: st.get("badge").and_then(Badge::of),
+                            chips: pairs(st.get("chips")),
+                            more: st.get("more").and_then(Value::as_u64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+            steps_more: v.get("steps_more").and_then(Value::as_u64).unwrap_or(0),
+            reason: s(v, "reason"),
         }
     }
 }
@@ -6901,17 +7001,47 @@ mod tests {
         m.take(&json!({"t": "core.data", "what": "approvals", "items": [
             {"call": "tc_1", "run": "run_1", "tool": "other", "title": "Use search on the MCP server acta", "can_always": true,
              "detail": {"server": "acta", "tool": "search", "arguments": {"query": "invoices"}},
-             "shown": {"what": "mcp", "lines": [{"label": "Query", "value": "invoices"}], "more": 0, "code": "", "raw": ""}},
+             "shown": {"what": "mcp", "lines": [{"label": "Query", "value": "invoices"}], "more": 0, "code": "", "raw": "",
+                       "title": "Search", "place": "acta · search", "badges": [{"name": "acta", "initial": "A", "color": "mint"}],
+                       "effect": {"kind": "changes", "words": "Can change"}, "reason": "To total them",
+                       "steps": [{"title": "Fetch emails in Gmail", "badge": {"name": "gmail", "initial": "G", "color": "teal"},
+                                  "chips": [{"label": "query", "value": "from:billing"}], "more": 2}], "steps_more": 1}},
             {"call": "tc_2", "run": "run_1", "tool": "execute", "title": "Run ls", "detail": {"command": "ls"}}]}));
         assert_eq!(m.approvals[0].kind, "other");
+        let acta = Badge {
+            name: "acta".into(),
+            initial: "A".into(),
+            color: "mint".into(),
+            icon: String::new(),
+        };
+        let gmail = Badge {
+            name: "gmail".into(),
+            initial: "G".into(),
+            color: "teal".into(),
+            icon: String::new(),
+        };
         assert_eq!(
             m.approvals[0].shown,
             Shown {
                 what: "mcp".into(),
                 lines: vec![("Query".into(), "invoices".into())],
+                title: "Search".into(),
+                place: "acta · search".into(),
+                badges: vec![acta],
+                effect: ("changes".into(), "Can change".into()),
+                steps: vec![Step {
+                    title: "Fetch emails in Gmail".into(),
+                    badge: Some(gmail),
+                    chips: vec![("query".into(), "from:billing".into())],
+                    more: 2,
+                }],
+                steps_more: 1,
+                reason: "To total them".into(),
                 ..Shown::default()
             }
         );
+        // One the core didn't title takes the question's own title.
+        assert_eq!(m.approvals[1].shown.title, "Run ls");
         // One the core didn't put in words still shows all of it, under Details.
         assert_eq!(m.approvals[1].shown.raw, "{\n  \"command\": \"ls\"\n}");
         // Answered here, it says how until the instance takes it away.

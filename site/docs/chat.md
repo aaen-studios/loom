@@ -6,7 +6,7 @@ Each agent has one chat that never ends. Choose an agent in the sidebar to talk 
 
 An agent can put cards in its reply, drawn in the chat's own look:
 
-- **Choices**: two to six answers to the agent's question, each a button. Click one and it goes as your next message. The buttons answer only while that reply is the newest in the chat.
+- **Choices**: two to six answers to the agent's question, as tiles. Click one, or on the desktop press Ctrl (⌘ on a Mac) and its number, and it goes as your next message. The tiles answer only while that reply is the newest in the chat.
 - **Checklist**: up to 30 items, each done or not.
 - **Table**: up to 8 columns and 50 rows.
 - **Progress**: a bar with a label.
@@ -14,7 +14,7 @@ An agent can put cards in its reply, drawn in the chat's own look:
 
 A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
 
-When one of the agent's MCP servers needs you to sign in, loom puts its own card in the reply, "acta needs you to sign in", with **Sign in** ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). The agent is told to wait for you rather than try to sign in itself.
+When one of the agent's MCP servers needs you to sign in, loom puts its own card in the reply, "Sign in to acta", with **Sign in** ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). The agent is told to wait for you rather than try to sign in itself.
 
 Anything bigger, such as a report or a chart, comes as a page in the chat instead, which opens beside it.
 

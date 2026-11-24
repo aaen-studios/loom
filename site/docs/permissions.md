@@ -12,6 +12,8 @@ Each agent has a permission mode, set on its edit page under **Brain**, or on th
 
 Whatever the mode, some things always ask: sending, paying, deleting, letting people in, changing permissions and moving the instance. An agent can't loosen its own mode, delete itself or answer its own approval.
 
+A question comes as a card in the chat. It says what the agent wants to do in plain words, with the badge of each service it reaches, and the server and tool under it. A pill says what loom knows the call does, such as **Only reads**, **Can change** or **Deletes**. A call that runs several tools lists each as a step, and the agent's reason, when it gave one, is under them. **Details** shows everything the call was given. **Allow** lets this one call go, and the arrow beside it has **Always allow**, where that's offered, which makes a rule. **Deny** stops it.
+
 ## Rules
 
 Rules say what happens when an agent touches something particular, whatever its mode. They're on the **Rules** page, under Agents in Settings.

@@ -6,8 +6,8 @@
 // its subagent did inside it (model.rs, inside). The moods, what the sidebar says after an agent's name on its
 // one line ("Thinking", the tool's title, "Wants to …"), or under the pointer on a pinned agent's
 // tile, and the wording are the app's. Clicking
-// Allow once, Always allow or Deny answers the approval, which says how in one quiet line before
-// it goes; left alone, it's allowed after a moment.
+// Allow, Always allow (under the arrow beside Allow) or Deny answers the approval, which says how
+// in one quiet line before it goes; left alone, it's allowed after a moment.
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs).
@@ -19,7 +19,8 @@ const SEND = 'Is main green? If it is, ship it.';
 const TOOL = 'Fetch github.com/acme/shop/actions';
 const ANSWER = 'Main is green. The last run passed at 09:12, with all four jobs.';
 const ASK = 'Run ./deploy.sh production';
-const COMMAND = './deploy.sh production';
+/** What loom knows the call does, as the core says it for a command (core/asks.calx). */
+const EFFECT = 'Runs a command';
 const SHIPPED = 'Shipped. 2.4.1 is live, and its health check answers.';
 const HELD = "Okay, I won't deploy. Main stays as it is.";
 
@@ -185,19 +186,30 @@ export function play(app: HTMLElement) {
 	/** The approval, answered by a click or, after a while, by itself. */
 	function approve(id: number) {
 		const row = tpl('demo-approval');
-		row.querySelector('.card-title')!.textContent = `${ASK}?`;
-		row.querySelector('.card-cmd')!.textContent = COMMAND;
+		// The title says the command whole, so the card doesn't say it again (core/asks.calx).
+		row.querySelector('.card-title .words')!.textContent = ASK;
+		row.querySelector('.pill')!.textContent = EFFECT;
 		msgs.append(row);
+		threadsIn(row);
+		// The arrow beside Allow opens Always allow.
+		const more = row.querySelector<HTMLButtonElement>('[data-more]')!;
+		const menu = row.querySelector<HTMLElement>('.menu')!;
+		more.addEventListener('click', () => {
+			menu.hidden = !menu.hidden;
+			more.setAttribute('aria-expanded', String(!menu.hidden));
+		});
 		return new Promise<'allow' | 'deny'>((done, fail) => {
 			let answered = false;
 			const answer = (a: string, button: HTMLElement) => {
 				if (answered) return;
 				answered = true;
 				button.classList.add('pressed');
+				menu.hidden = true;
 				// One quiet line says how, until the question goes, as in the app.
 				setTimeout(() => {
 					const how = a === 'deny' ? 'Denied' : a === 'always' ? 'Always allowed' : 'Allowed once';
-					row.querySelector('.card-done span')!.textContent = `${how} · ${ASK}`;
+					row.querySelector('.card-done b')!.textContent = how;
+					row.querySelector('.card-done .what')!.textContent = ` · ${ASK}`;
 					if (a === 'deny') row.querySelector('.card-done path')!.setAttribute('d', 'M18 6 6 18M6 6l12 12');
 					row.classList.add('answered');
 					setTimeout(() => {

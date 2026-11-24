@@ -328,7 +328,9 @@ gpui_kit::assets::icon_assets!(
         Palette,
         MessageSquare,
         ArrowRightLeft,
-        Lightbulb
+        Lightbulb,
+        ArrowUpRight,
+        Lock
     ]
 );
 

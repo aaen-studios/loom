@@ -1,75 +1,170 @@
 import SwiftUI
 
-// The cards in a chat, all in one frame, as the desktop's `CardFrame`: a small square at
-// its start, its title with what goes beside it, its rows, and its buttons. An agent's
-// `show_card`, loom's sign-in, and the questions an agent waits on all use it.
+// The cards in a chat, all in one frame, as the desktop's `CardFrame`: the services it
+// reaches as badges, its title with the agent's thread beside it, where it goes in small
+// mono, what loom knows it does in a pill, then its rows and its buttons. An agent's
+// `show_card`, loom's own cards, and the questions an agent waits on all use it.
 
-/// The frame every card in the chat shares.
+/// The frame every card in the chat shares. While it waits for the person, the agent's
+/// thread beside the title tugs and the edge takes the agent's colour.
 struct CardFrame<Content: View>: View {
     var title: String
+    var sub = ""
     var lead: AnyView?
     var side: AnyView?
+    /// The agent's colour, for the thread beside the title, or none for no thread.
+    var tint: Color?
+    var waits = false
     var content: Content
 
-    init(_ title: String, lead: AnyView? = nil, side: AnyView? = nil, @ViewBuilder content: () -> Content) {
+    init(_ title: String, sub: String = "", lead: AnyView? = nil, side: AnyView? = nil, tint: Color? = nil, waits: Bool = false, @ViewBuilder content: () -> Content) {
         self.title = title
+        self.sub = sub
         self.lead = lead
         self.side = side
+        self.tint = tint
+        self.waits = waits
         self.content = content()
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: Tokens.Space.m) {
-            if let lead { lead }
-            VStack(alignment: .leading, spacing: Tokens.Space.s) {
-                HStack(spacing: Tokens.Space.s) {
-                    Text(title)
-                        .font(Fonts.ui(Tokens.PhoneSize.body, .medium))
-                        .foregroundStyle(P.ink)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if let side { side }
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous)
+        VStack(alignment: .leading, spacing: Tokens.Space.m) {
+            if !title.isEmpty || lead != nil || side != nil {
+                // On a phone the title takes the head's width: with a line under it, what
+                // goes beside it goes on that line.
+                HStack(alignment: sub.isEmpty ? .center : .top, spacing: Tokens.Space.m) {
+                    if let lead { lead }
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(alignment: .top, spacing: Tokens.Space.s) {
+                            Text(title)
+                                .font(Fonts.ui(Tokens.PhoneSize.body, .semibold))
+                                .foregroundStyle(P.ink)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let tint { CardMark(tint: tint, waits: waits).padding(.top, 4) }
+                        }
+                        if !sub.isEmpty {
+                            HStack(spacing: Tokens.Space.s) {
+                                Text(sub)
+                                    .font(Fonts.mono(Tokens.PhoneSize.caption - 0.5, relativeTo: .caption))
+                                    .foregroundStyle(P.ink3)
+                                    .lineLimit(1)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                if let side { side }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    if sub.isEmpty, let side { side }
                 }
-                .frame(minHeight: Tokens.Control.iconSmall)
-                content
             }
+            content
         }
-        .padding(.horizontal, Tokens.Space.l)
-        .padding(.vertical, Tokens.Space.m)
+        .padding(Tokens.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(P.cardFill, in: RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous).strokeBorder(P.cardEdge, lineWidth: 1))
+        .background(P.cardFill, in: shape)
+        .overlay(shape.strokeBorder(waits ? (tint ?? P.cardEdge).opacity(0.4) : P.cardEdge, lineWidth: 1))
+        .shadow(color: .black.opacity(0.07), radius: 14, y: 8)
     }
 }
 
 extension CardFrame where Content == EmptyView {
-    init(_ title: String, lead: AnyView? = nil, side: AnyView? = nil) {
-        self.init(title, lead: lead, side: side) { EmptyView() }
+    init(_ title: String, sub: String = "", lead: AnyView? = nil, side: AnyView? = nil, tint: Color? = nil, waits: Bool = false) {
+        self.init(title, sub: sub, lead: lead, side: side, tint: tint, waits: waits) { EmptyView() }
     }
 }
 
-/// The small square at a card's start: an icon, in the agent's colour on a question, or
-/// the initial of something with a name and no icon, such as an MCP server.
-struct CardLead: View {
-    var icon: String?
-    var initial: String?
-    var tint: Color = P.ink2
-
-    static func of(_ name: String) -> CardLead {
-        CardLead(initial: name.first(where: { $0.isLetter || $0.isNumber }).map { String($0).uppercased() } ?? "?")
-    }
+/// The agent's thread beside a card's title: tugging while the card waits for the
+/// person, settled once it's answered.
+struct CardMark: View {
+    var tint: Color
+    var waits: Bool
 
     var body: some View {
-        RoundedRectangle(cornerRadius: Tokens.Radius.row, style: .continuous)
-            .fill(P.cardInset)
-            .frame(width: Tokens.Control.iconSmall, height: Tokens.Control.iconSmall)
-            .overlay {
-                if let icon {
-                    Image(systemName: icon).font(.system(size: 12, weight: .medium)).foregroundStyle(tint)
+        ThreadView(mood: waits ? .waiting : .idle, color: tint)
+            .frame(width: 26, height: 14)
+    }
+}
+
+/// A service's badge (`shared/badge.calx`): its initial on its colour. Something with a
+/// name and no badge of its own gets its initial on a quiet square.
+struct BadgeView: View {
+    var badge: Badge?
+    var name = ""
+    var size: CGFloat = Tokens.Control.iconLarge
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: size >= Tokens.Control.iconLarge ? Tokens.Radius.card : Tokens.Radius.row, style: .continuous)
+        let initial = badge?.initial ?? name.first(where: { $0.isLetter || $0.isNumber }).map { String($0).uppercased() } ?? "?"
+        Text(initial.isEmpty ? "?" : initial)
+            .font(Fonts.ui((size * 0.44).rounded(), .semibold))
+            .foregroundStyle(badge == nil ? P.ink2 : P.buttonInk)
+            .frame(width: size, height: size)
+            .background {
+                if let badge {
+                    shape.fill(P.thread(badge.color))
                 } else {
-                    Text(initial ?? "?").font(Fonts.ui(Tokens.PhoneSize.caption, .semibold)).foregroundStyle(P.ink2)
+                    shape.fill(P.cardInset).overlay(shape.strokeBorder(P.line, lineWidth: 1))
                 }
             }
             .accessibilityHidden(true)
+    }
+}
+
+/// A card's badges at its start: one, or two overlapped for a call that reaches two
+/// services, each ringed in the card's colour where they cross.
+struct Badges: View {
+    var badges: [Badge]
+
+    var body: some View {
+        if badges.count >= 2 {
+            // Far enough apart that the first's initial shows.
+            let small = (Tokens.Control.iconLarge * 0.7).rounded()
+            let box = Tokens.Control.iconLarge + 6
+            let ring = RoundedRectangle(cornerRadius: Tokens.Radius.row, style: .continuous)
+            ZStack(alignment: .topLeading) {
+                ForEach(0..<2, id: \.self) { i in
+                    BadgeView(badge: badges[i], size: small)
+                        .overlay(ring.stroke(P.cardFill, lineWidth: 2))
+                        .offset(x: i == 0 ? 0 : box - small, y: i == 0 ? 0 : box - small)
+                }
+            }
+            .frame(width: box, height: box, alignment: .topLeading)
+        } else if let one = badges.first {
+            BadgeView(badge: one)
+        }
+    }
+}
+
+/// A card's icon, for a call that reaches no service: its kind, in the agent's colour.
+struct CardIcon: View {
+    var icon: String
+    var tint: Color
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+            .fill(P.cardInset)
+            .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
+            .overlay(Image(systemName: icon).font(.system(size: 14, weight: .medium)).foregroundStyle(tint))
+            .accessibilityHidden(true)
+    }
+}
+
+/// What a call does, as loom knows it, in a pill: green when it only reads, amber when
+/// it can change or run something, red when it deletes.
+struct EffectPill: View {
+    var kind: String
+    var words: String
+
+    var body: some View {
+        let ink = kind == "reads" ? P.ok : kind == "deletes" ? P.bad : P.warn
+        Text(words)
+            .font(Fonts.ui(Tokens.PhoneSize.caption - 1, .medium, relativeTo: .caption))
+            .foregroundStyle(ink)
+            .lineLimit(1)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
+            .overlay(Capsule().strokeBorder(ink.opacity(0.7), lineWidth: 1))
     }
 }
 
@@ -108,77 +203,200 @@ struct CardCode: View {
     }
 }
 
-/// Details, folded until it's tapped: all of what a card shows only some of, in a box
-/// that scrolls past a few lines.
-struct CardDetails: View {
-    var raw: String
-    @State private var open = false
+/// A short value in a card, in mono on a chip: a step's argument, a tool's name.
+struct CardChip: View {
+    var label = ""
+    var value: String
+    var tint: Color?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Tokens.Space.s) {
-            Button {
-                open.toggle()
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 9, weight: .semibold))
-                        .rotationEffect(.degrees(open ? 90 : 0))
-                    Text("Details")
-                }
-                .font(Fonts.caption)
-                .foregroundStyle(P.ink3)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            if open {
-                let text = Text(raw)
-                    .font(Fonts.code)
-                    .foregroundStyle(P.ink2)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, Tokens.Space.m)
-                    .padding(.vertical, Tokens.Space.s)
-                ViewThatFits(in: .vertical) {
-                    text
-                    ScrollView { text }
-                }
-                .frame(maxHeight: 240)
-                .background(P.cardInset, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
+        HStack(spacing: 4) {
+            if !label.isEmpty { Text(label).foregroundStyle(P.ink3) }
+            Text(value).foregroundStyle(tint == nil ? P.ink2 : P.ink)
+        }
+        .font(Fonts.mono(Tokens.PhoneSize.caption - 1, relativeTo: .caption))
+        .lineLimit(1)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: Tokens.Radius.chip, style: .continuous)
+            if let tint {
+                shape.fill(tint.opacity(0.08)).overlay(shape.strokeBorder(tint.opacity(0.35), lineWidth: 1))
+            } else {
+                shape.fill(P.bubble)
             }
         }
-        .animation(.easeOut(duration: 0.15), value: open)
     }
 }
 
-/// A card once it's answered, or once the chat has gone on: one quiet line saying how.
-struct CardDone: View {
-    var icon: String
-    var words: String
+/// The tools a call runs, one row each in a box of their own: the service's badge, what
+/// the step does, and a few of its arguments as chips.
+struct CardSteps: View {
+    var steps: [Shown.Step]
+    var more: Int
 
     var body: some View {
-        HStack(spacing: Tokens.Space.s) {
-            Image(systemName: icon).font(.system(size: 10, weight: .semibold))
-            Text(words).lineLimit(1).truncationMode(.tail)
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { i, step in
+                if i > 0 { Rectangle().fill(P.line).frame(height: 1) }
+                HStack(alignment: .top, spacing: Tokens.Space.m - 2) {
+                    BadgeView(badge: step.badge, name: step.title, size: 22)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(step.title).font(Fonts.small).foregroundStyle(P.ink)
+                        if !step.chips.isEmpty || step.more > 0 {
+                            Flow(spacing: 5) {
+                                ForEach(Array(step.chips.enumerated()), id: \.offset) { _, c in
+                                    CardChip(label: c.label, value: c.value)
+                                }
+                                if step.more > 0 { CardChip(value: "+\(step.more)") }
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, Tokens.Space.m)
+                .padding(.vertical, Tokens.Space.m - 2)
+                .accessibilityElement(children: .combine)
+            }
+            if more > 0 {
+                Rectangle().fill(P.line).frame(height: 1)
+                Text(more == 1 ? "1 more step" : "\(more) more steps")
+                    .font(Fonts.caption)
+                    .foregroundStyle(P.ink3)
+                    .padding(.horizontal, Tokens.Space.m)
+                    .padding(.vertical, Tokens.Space.s)
+            }
+        }
+        .background(P.cardInset)
+        .clipShape(shape)
+        .overlay(shape.strokeBorder(P.line, lineWidth: 1))
+    }
+}
+
+/// Why the agent makes the call, in its own words: a quote line in its colour.
+struct CardReason: View {
+    var text: String
+    var tint: Color
+
+    var body: some View {
+        Text(text)
+            .font(Fonts.small)
+            .foregroundStyle(P.ink2)
+            .lineSpacing(2)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, Tokens.Space.m)
+            .overlay(alignment: .leading) { Rectangle().fill(tint.opacity(0.45)).frame(width: 2) }
+    }
+}
+
+/// All of what a card shows only some of, in a box that scrolls past a few lines.
+struct CardRaw: View {
+    var raw: String
+
+    var body: some View {
+        let text = Text(raw)
+            .font(Fonts.code)
+            .foregroundStyle(P.ink2)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, Tokens.Space.m)
+            .padding(.vertical, Tokens.Space.s)
+        ViewThatFits(in: .vertical) {
+            text
+            ScrollView { text }
+        }
+        .frame(maxHeight: 240)
+        .background(P.cardInset, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
+    }
+}
+
+/// Details' toggle, quiet at the far end of a card's buttons.
+struct DetailsToggle: View {
+    @Binding var open: Bool
+
+    var body: some View {
+        Button {
+            open.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Text("Details")
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .rotationEffect(.degrees(open ? 90 : 0))
+            }
+            .font(Fonts.caption)
+            .foregroundStyle(P.ink3)
+            .frame(minHeight: Tokens.Control.button)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+/// A card once it's answered, or once the chat has gone on: one quiet line, with the
+/// service's badge, how it went, and what it was.
+struct CardDone<Trailing: View>: View {
+    var badge: Badge?
+    var name = ""
+    var icon: String
+    var how: String
+    var what = ""
+    var trailing: Trailing
+
+    init(badge: Badge? = nil, name: String = "", icon: String, how: String, what: String = "", @ViewBuilder trailing: () -> Trailing = { EmptyView() }) {
+        self.badge = badge
+        self.name = name
+        self.icon = icon
+        self.how = how
+        self.what = what
+        self.trailing = trailing()
+    }
+
+    var body: some View {
+        HStack(spacing: Tokens.Space.s + 2) {
+            Group {
+                if badge != nil || !name.isEmpty {
+                    BadgeView(badge: badge, name: name, size: 20)
+                } else {
+                    Image(systemName: icon)
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 20, height: 20)
+                }
+            }
+            (Text(how).foregroundStyle(P.ink2).fontWeight(.medium) + Text(what.isEmpty ? "" : " · \(what)").foregroundStyle(P.ink3))
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+            trailing
         }
         .font(Fonts.small)
         .foregroundStyle(P.ink3)
+        .padding(.horizontal, 4)
         .accessibilityElement(children: .combine)
     }
 }
 
-/// A card's button: the main one filled, the rest outlined, smaller than a page's.
+/// A card's button: the main one filled, the rest outlined, smaller than a page's. Half
+/// of a split button rounds only its own end.
 struct CardButtonStyle: ButtonStyle {
+    enum Half { case whole, leading, trailing }
     var primary = false
+    var half = Half.whole
 
     func makeBody(configuration: Configuration) -> some View {
+        let r = Tokens.Radius.button
+        let shape = UnevenRoundedRectangle(
+            topLeadingRadius: half == .trailing ? 0 : r, bottomLeadingRadius: half == .trailing ? 0 : r,
+            bottomTrailingRadius: half == .leading ? 0 : r, topTrailingRadius: half == .leading ? 0 : r, style: .continuous)
         configuration.label
             .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
             .lineLimit(1)
-            .padding(.horizontal, Tokens.Space.m)
+            .padding(.horizontal, half == .trailing ? Tokens.Space.s + 1 : Tokens.Space.m + 2)
             .frame(minHeight: Tokens.Control.button)
             .foregroundStyle(primary ? P.buttonInk : P.ink)
             .background {
-                RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
+                shape
                     .fill(primary ? P.button : Color.clear)
                     .strokeBorder(primary ? Color.clear : P.lineStrong, lineWidth: 1)
             }
@@ -188,7 +406,7 @@ struct CardButtonStyle: ButtonStyle {
 }
 
 /// Views in a row that goes on to the next line where it runs out: a card's buttons, and
-/// a choices card's answers.
+/// chips.
 struct Flow: Layout {
     var spacing = Tokens.Space.s
 
@@ -227,19 +445,22 @@ struct Flow: Layout {
 
 // MARK: - Agents' cards
 
-/// A card an agent put in its reply (PLAN.md, "Cards in the chat"), or loom's own
-/// sign-in: choices as buttons that answer, and the rest in the card frame.
+/// A card an agent put in its reply (PLAN.md, "Cards in the chat"), or loom's own: choices
+/// as tiles that answer, loom's sign-in and the MCP server an agent proposed, and the rest
+/// in the card frame.
 struct CardView: View {
     @Environment(Session.self) private var session
     var card: Card
     /// The agent's colour, its one hint on a card.
     var tint: Color
+    /// The agent's name, for what a card says about it.
+    var agent = ""
 
     var body: some View {
         switch card.type {
         case "choices": choices
         case "sign_in": signIn
-        case "mcp_add": McpAddCard(card: card)
+        case "mcp_add": McpAddCard(card: card, tint: tint, agent: agent)
         case "checklist": checklist
         case "progress": progress
         case "facts":
@@ -251,51 +472,80 @@ struct CardView: View {
         }
     }
 
-    /// The question, then its answers, which answer while the reply is the chat's newest.
+    /// The question with the agent's thread beside it, tugging while it waits, then the
+    /// answers as tiles, two to a row, which answer while the reply is the chat's newest.
     /// Once the chat has gone on, the one the person sent stays marked and the rest go
     /// quiet.
     private var choices: some View {
-        VStack(alignment: .leading, spacing: Tokens.Space.s) {
-            if !card.title.isEmpty {
-                Text(card.title).font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink2)
-            }
-            Flow {
-                ForEach(Array(card.options.enumerated()), id: \.offset) { i, option in
-                    if !card.passed {
-                        Button {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            session.send(session.model.choose(option))
-                        } label: {
-                            Text(option).chip(edge: tint.opacity(0.55), ink: P.ink)
+        let rows = stride(from: 0, to: card.options.count, by: 2).map { Array(card.options.indices)[$0..<min($0 + 2, card.options.count)] }
+        return CardFrame(card.title, tint: tint, waits: !card.passed) {
+            Grid(horizontalSpacing: Tokens.Space.s, verticalSpacing: Tokens.Space.s) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
+                    GridRow {
+                        ForEach(Array(row), id: \.self) { i in
+                            tile(i).gridCellColumns(row.count == 1 ? 2 : 1)
                         }
-                        .buttonStyle(.plain)
-                    } else if card.chosen == i {
-                        HStack(spacing: 6) {
-                            Image(systemName: "checkmark").font(.system(size: 10, weight: .semibold))
-                            Text(option)
-                        }
-                        .chip(edge: P.lineStrong, ink: P.ink2, fill: P.cardInset)
-                    } else {
-                        Text(option).chip(edge: P.line, ink: P.ink3)
                     }
                 }
             }
         }
     }
 
-    /// Loom's own card for an MCP server that needs the person to sign in, as the
-    /// desktop draws it: the server by its initial, and Sign in, which opens its sign-in
-    /// page over the app. Once they have, one quiet line says so, as whom when the
-    /// sign-in said; and once the chat has gone on without it, one quiet line keeps a
-    /// small Sign in. A sign-in that didn't finish says why under it.
+    @ViewBuilder
+    private func tile(_ i: Int) -> some View {
+        let option = card.options[i]
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+        let words = Text(option)
+            .font(Fonts.ui(Tokens.PhoneSize.small, card.passed && card.chosen != i ? .regular : .medium))
+            .multilineTextAlignment(.leading)
+            .lineLimit(3)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        if !card.passed {
+            Button {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                session.send(session.model.choose(option))
+            } label: {
+                words
+                    .foregroundStyle(P.ink)
+                    .padding(.horizontal, Tokens.Space.m)
+                    .padding(.vertical, Tokens.Space.m - 1)
+                    .frame(minHeight: 44)
+                    .background(shape.fill(P.cardFill).overlay(shape.strokeBorder(P.lineStrong, lineWidth: 1)))
+                    .contentShape(shape)
+            }
+            .buttonStyle(.plain)
+        } else if card.chosen == i {
+            HStack(alignment: .top, spacing: Tokens.Space.s) {
+                words.foregroundStyle(P.ink)
+                Image(systemName: "checkmark").font(.system(size: 11, weight: .semibold)).foregroundStyle(tint).padding(.top, 2)
+            }
+            .padding(.horizontal, Tokens.Space.m)
+            .padding(.vertical, Tokens.Space.m - 1)
+            .frame(minHeight: 44)
+            .background(shape.fill(tint.opacity(0.08)).overlay(shape.strokeBorder(tint.opacity(0.6), lineWidth: 1)))
+            .accessibilityAddTraits(.isSelected)
+        } else {
+            words
+                .foregroundStyle(P.ink3)
+                .padding(.horizontal, Tokens.Space.m)
+                .padding(.vertical, Tokens.Space.m - 1)
+                .frame(minHeight: 44)
+                .background(shape.strokeBorder(P.line, lineWidth: 1))
+        }
+    }
+
+    /// Loom's own card for an MCP server that needs the person to sign in, as the desktop
+    /// draws it: the server's badge, "Sign in to acta", and Sign in, which opens its
+    /// sign-in page over the app. Once they have, one quiet line says so, as whom when the
+    /// sign-in said; and once the chat has gone on without it, one quiet line keeps a small
+    /// Sign in. A sign-in that didn't finish says why under it.
     @ViewBuilder
     private var signIn: some View {
         if let who = card.signedAs {
-            CardDone(icon: "checkmark", words: who.isEmpty ? "Signed in to \(card.server)" : "Signed in to \(card.server) as \(who)")
+            CardDone(badge: card.badge, name: card.server, icon: "checkmark", how: "Signed in", what: who.isEmpty ? card.server : "\(card.server) as \(who)")
         } else if card.passed {
             VStack(alignment: .leading, spacing: Tokens.Space.xs) {
-                HStack(spacing: Tokens.Space.s) {
-                    CardDone(icon: "key", words: card.title)
+                CardDone(badge: card.badge, name: card.server, icon: "key", how: card.title) {
                     Button(card.signing ? "Signing in…" : "Sign in") { startSignIn() }
                         .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
                         .foregroundStyle(P.ink2)
@@ -305,11 +555,16 @@ struct CardView: View {
                 signInError
             }
         } else {
-            CardFrame(card.title, lead: AnyView(CardLead.of(card.server)), side: AnyView(
-                Button(card.signing ? "Signing in…" : "Sign in") { startSignIn() }
-                    .buttonStyle(CardButtonStyle(primary: true))
-                    .disabled(card.signing)
-            )) {
+            CardFrame(card.title, lead: AnyView(BadgeView(badge: card.badge, name: card.server)), side: AnyView(
+                Button { startSignIn() } label: {
+                    HStack(spacing: 5) {
+                        Text(card.signing ? "Signing in…" : "Sign in")
+                        Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .semibold))
+                    }
+                }
+                .buttonStyle(CardButtonStyle(primary: true))
+                .disabled(card.signing)
+            ), tint: tint, waits: true) {
                 signInError
             }
         }
@@ -396,23 +651,123 @@ struct CardView: View {
     }
 }
 
-/// Loom's own card for an MCP server an agent proposed, in the card frame: its address
-/// or command and each setting, a masked field for each key the person doesn't have yet,
-/// and Add or Cancel; then Sign in and Later for one that needs it. Once it's settled,
-/// one quiet line says how it went.
+/// loom's mark, the knot (design/logo/knot.svg): one thread with a loop that crosses
+/// itself, the falling stroke passing over the rising one.
+struct Knot: View {
+    var body: some View {
+        Canvas { ctx, size in
+            let k = min(size.width, size.height) / 32
+            ctx.scaleBy(x: k, y: k)
+            let style = StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round)
+            var rising = Path()
+            rising.move(to: CGPoint(x: 3, y: 24.5))
+            rising.addLine(to: CGPoint(x: 12, y: 24.5))
+            rising.addCurve(to: CGPoint(x: 22, y: 14), control1: CGPoint(x: 19, y: 24.5), control2: CGPoint(x: 22, y: 18.5))
+            rising.addCurve(to: CGPoint(x: 16, y: 7), control1: CGPoint(x: 22, y: 9.5), control2: CGPoint(x: 19, y: 7))
+            rising.addCurve(to: CGPoint(x: 10, y: 14), control1: CGPoint(x: 13, y: 7), control2: CGPoint(x: 10, y: 9.5))
+            var gap = Path()
+            gap.move(to: CGPoint(x: 13.67, y: 22.24))
+            gap.addCurve(to: CGPoint(x: 18.14, y: 24.34), control1: CGPoint(x: 14.8, y: 23.3), control2: CGPoint(x: 16.3, y: 24.1))
+            var falling = Path()
+            falling.move(to: CGPoint(x: 10, y: 14))
+            falling.addCurve(to: CGPoint(x: 20, y: 24.5), control1: CGPoint(x: 10, y: 19), control2: CGPoint(x: 13.5, y: 24.5))
+            falling.addLine(to: CGPoint(x: 29, y: 24.5))
+            ctx.drawLayer { layer in
+                layer.stroke(rising, with: .color(P.ink), style: style)
+                layer.blendMode = .destinationOut
+                layer.stroke(gap, with: .color(.black), style: StrokeStyle(lineWidth: 5.6, lineCap: .round))
+            }
+            ctx.stroke(falling, with: .color(P.ink), style: style)
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// The agent's thread from loom's knot to a server's badge: slack and drifting while the
+/// server waits to be added, pulled straight, with a twang, once it's connected.
+struct SpanView: View {
+    var taut: Bool
+    var tint: Color
+    @State private var sag: Double = 1
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: taut)) { context in
+            Span(sag: sag, phase: context.date.timeIntervalSinceReferenceDate)
+                .stroke(tint, style: StrokeStyle(lineWidth: Tokens.ThreadStroke.small, lineCap: .round))
+        }
+        .frame(height: 24)
+        .onAppear { sag = taut ? 0 : 1 }
+        .onChange(of: taut) { _, now in
+            withAnimation(.spring(response: 0.55, dampingFraction: 0.3)) { sag = now ? 0 : 1 }
+        }
+        .accessibilityHidden(true)
+    }
+
+    private struct Span: Shape {
+        var sag: Double
+        var phase: Double
+        var animatableData: Double {
+            get { sag }
+            set { sag = newValue }
+        }
+
+        func path(in r: CGRect) -> Path {
+            var p = Path()
+            let steps = max(Int(r.width / 3), 8)
+            for i in 0...steps {
+                let u = Double(i) / Double(steps)
+                let hang = sin(.pi * u) * 0.6
+                let drift = sin(2 * .pi * (u * 1.5 - phase * 0.2)) * 0.25 * sin(.pi * u)
+                let pt = CGPoint(x: r.minX + u * r.width, y: r.midY + (hang + drift) * sag * r.height / 2)
+                if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
+            }
+            return p
+        }
+    }
+}
+
+/// Loom's own card for an MCP server an agent proposed: loom's knot and the server's
+/// badge joined by the agent's thread, slack while it waits and pulled straight once it's
+/// connected; what would be added, with a masked field for each key the person doesn't
+/// have yet; and Add or Cancel, then Sign in and Later for one that needs it. Connected,
+/// it lists its tools; settled otherwise, it's one quiet line.
 struct McpAddCard: View {
     @Environment(Session.self) private var session
     var card: Card
+    var tint: Color
+    var agent: String
     /// What the person typed for each secret it needs, by the secret's name.
     @State private var typed: [String: String] = [:]
 
     var body: some View {
         let signed = card.signedAs != nil
         if let done = done(signed: signed) {
-            CardDone(icon: done.icon, words: done.words)
+            CardDone(badge: card.badge, name: card.server, icon: done.icon, how: done.how, what: card.server)
+        } else if card.state == "ready" {
+            CardFrame("") {
+                link
+                Label("\(card.server) is connected", systemImage: "checkmark")
+                    .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+                    .foregroundStyle(P.ok)
+                if !card.tools.isEmpty {
+                    Flow(spacing: 6) {
+                        ForEach(Array(card.tools.prefix(6).enumerated()), id: \.offset) { _, t in
+                            CardChip(value: t, tint: tint)
+                        }
+                        if card.tools.count > 6 { CardChip(value: "+ \(card.tools.count - 6)") }
+                    }
+                }
+            }
         } else {
-            CardFrame(card.title, lead: AnyView(CardLead.of(card.server))) {
-                what
+            let waits = ["asking", "adding", "sign_in"].contains(card.state)
+            CardFrame(card.title, sub: card.url.isEmpty ? ([card.command] + card.args).joined(separator: " ") : card.url, tint: tint, waits: waits) {
+                link
+                if !card.settings.isEmpty { fields }
+                if typing {
+                    Text("The key goes to your secrets. \(agent.isEmpty ? "The agent" : agent) never sees it.")
+                        .font(Fonts.caption)
+                        .foregroundStyle(P.ink3)
+                }
                 if let line = line {
                     Text(line.text).font(Fonts.small).foregroundStyle(line.bad ? P.bad : P.ink3)
                 }
@@ -421,41 +776,54 @@ struct McpAddCard: View {
         }
     }
 
+    /// loom's knot, the thread, and the server's badge.
+    private var link: some View {
+        HStack(spacing: Tokens.Space.xs) {
+            Knot()
+                .frame(width: 20, height: 20)
+                .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
+                .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
+            SpanView(taut: card.state == "ready", tint: tint)
+            BadgeView(badge: card.badge, name: card.server)
+        }
+    }
+
     /// The one quiet line of a settled card.
-    private func done(signed: Bool) -> (icon: String, words: String)? {
+    private func done(signed: Bool) -> (icon: String, how: String)? {
         switch card.state {
-        case "ready": return ("checkmark", card.said.isEmpty ? "Added \(card.server)" : "Added \(card.server) · \(card.said)")
-        case "added": return ("checkmark", "Added \(card.server)")
-        case "later" where signed: return ("checkmark", "Added \(card.server), signed in")
-        case "cancelled": return ("xmark", "Not added · \(card.server)")
+        case "added": return ("checkmark", "Added")
+        case "later" where signed: return ("checkmark", "Added and signed in")
+        case "cancelled": return ("xmark", "Not added")
         default: return nil
         }
     }
 
-    /// What would be added: its address or command, and each setting.
-    private var what: some View {
-        Grid(alignment: .leading, horizontalSpacing: Tokens.Space.m, verticalSpacing: Tokens.Space.xs) {
-            GridRow {
-                Text(card.url.isEmpty ? "Command" : "Address").foregroundStyle(P.ink3)
-                Text(card.url.isEmpty ? ([card.command] + card.args).joined(separator: " ") : card.url)
-                    .foregroundStyle(P.ink)
-                    .lineLimit(1)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
+    /// Whether a key is being typed in here.
+    private var typing: Bool {
+        card.state == "asking" && card.settings.contains { !$0.secret.isEmpty && $0.wanted }
+    }
+
+    /// Each setting: its value, or a masked field for a key the person doesn't have yet.
+    private var fields: some View {
+        Grid(alignment: .leading, horizontalSpacing: Tokens.Space.m, verticalSpacing: Tokens.Space.s) {
             ForEach(Array(card.settings.enumerated()), id: \.offset) { i, s in
                 GridRow {
                     Text(s.name).foregroundStyle(P.ink3).lineLimit(1)
                     Group {
                         if s.secret.isEmpty {
-                            Text(s.value).foregroundStyle(P.ink).lineLimit(1)
+                            Text(s.value).font(Fonts.code).foregroundStyle(P.ink2).lineLimit(1)
                         } else if card.state == "asking" && s.wanted && first(i) {
-                            SecureField(s.secret, text: typing(s.secret))
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .padding(.horizontal, Tokens.Space.m)
-                                .padding(.vertical, Tokens.Space.s)
-                                .background(P.bg, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
-                                .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
+                            HStack(spacing: Tokens.Space.s) {
+                                Image(systemName: "lock").font(.system(size: 11, weight: .medium)).foregroundStyle(P.ink3)
+                                SecureField(s.secret, text: typing(s.secret))
+                                    .font(Fonts.code)
+                                    .textInputAutocapitalization(.never)
+                                    .autocorrectionDisabled()
+                            }
+                            .padding(.horizontal, Tokens.Space.m)
+                            .frame(minHeight: Tokens.Control.buttonSmall)
+                            .background(P.bg, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
                         } else {
                             Text(s.have ? "Your secret \(s.secret)" : "Secret \(s.secret)").foregroundStyle(P.ink3).lineLimit(1)
                         }
@@ -481,9 +849,9 @@ struct McpAddCard: View {
         // A sign-in here that didn't finish says why.
         if card.signsIn, let why = card.signInError { return (why, true) }
         switch card.state {
-        case "adding": return ("Starting \(card.server)", false)
+        case "adding": return ("Starting \(card.server)…", false)
         case "sign_in": return card.said.isEmpty ? nil : (card.said, true)
-        case "later": return ("Added \(card.server). Sign in to use it.", false)
+        case "later": return ("Added. Sign in to use \(card.server).", false)
         case "failed": return ("It didn't start: \(card.said)", true)
         default: return nil
         }
@@ -497,18 +865,31 @@ struct McpAddCard: View {
                 Button("Add") { answer("add") }.buttonStyle(CardButtonStyle(primary: true))
                 Button("Cancel") { answer("cancel") }.buttonStyle(CardButtonStyle())
             }
-            .padding(.top, Tokens.Space.xs)
         case "sign_in":
             Flow {
                 signInButton
                 Button("Later") { answer("later") }.buttonStyle(CardButtonStyle())
             }
-            .padding(.top, Tokens.Space.xs)
         case "later":
-            signInButton.padding(.top, Tokens.Space.xs)
+            signInButton
         default:
             EmptyView()
         }
+    }
+
+    /// Sign in, which opens the server's sign-in page over the app, as on a sign-in card.
+    private var signInButton: some View {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            session.signIn(card.server)
+        } label: {
+            HStack(spacing: 5) {
+                Text(card.signing ? "Signing in…" : "Sign in")
+                Image(systemName: "arrow.up.right").font(.system(size: 10, weight: .semibold))
+            }
+        }
+        .buttonStyle(CardButtonStyle(primary: true))
+        .disabled(card.signing)
     }
 
     private func answer(_ answer: String) {
@@ -516,74 +897,78 @@ struct McpAddCard: View {
         let secrets = answer == "add" ? typed.filter { name, _ in card.settings.contains { $0.secret == name && $0.wanted } } : [:]
         session.send(session.model.answerMcpAdd(card.call, answer, secrets: secrets))
     }
-
-    /// Sign in, which opens the server's sign-in page over the app, as on a sign-in card.
-    private var signInButton: some View {
-        Button(card.signing ? "Signing in…" : "Sign in") {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            session.signIn(card.server)
-        }
-        .buttonStyle(CardButtonStyle(primary: true))
-        .disabled(card.signing)
-    }
-}
-
-private extension View {
-    /// An answer on a choices card.
-    func chip(edge: Color, ink: Color, fill: Color = .clear) -> some View {
-        self
-            .font(Fonts.small)
-            .lineLimit(1)
-            .foregroundStyle(ink)
-            .padding(.horizontal, Tokens.Space.m)
-            .frame(minHeight: Tokens.Control.button)
-            .background {
-                RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
-                    .fill(fill)
-                    .strokeBorder(edge, lineWidth: 1)
-            }
-            .contentShape(Rectangle())
-    }
 }
 
 // MARK: - Questions
 
-/// A question the agent waits on (PLAN.md, "Permissions"), in the card frame: what it
-/// would do, as the core put it in words (core/asks.calx), with Details for all of it,
-/// then Allow once, Always allow where it's offered, and Deny. Answered here, it's one
-/// quiet line saying how, until the instance takes the question away.
+/// A question the agent waits on (PLAN.md, "Permissions"), in the card frame, as the core
+/// put the call in words (core/asks.calx): the services it reaches as badges, what it
+/// does in plain words with the agent's thread tugging beside it, where it goes in small
+/// mono, and what loom knows it does in a pill; then the tools it runs as steps, or its
+/// arguments as lines, the command or script it runs, and why the agent makes it. Allow
+/// is a split button, its menu holding Always allow where that's offered, then Deny, and
+/// Details for all of it. Answered here, it's one quiet line, until the instance takes
+/// the question away.
 struct ApprovalCard: View {
     @Environment(Session.self) private var session
     var approval: Approval
     var tint: Color
+    @State private var open = false
 
     var body: some View {
+        let shown = approval.shown
+        let title = !shown.title.isEmpty ? shown.title : approval.title.isEmpty ? "Can it go ahead?" : approval.title
         if let a = approval.answered {
             let how = !a.allow ? "Denied" : a.always ? "Always allowed" : "Allowed once"
-            CardDone(icon: a.allow ? "checkmark" : "xmark", words: approval.title.isEmpty ? how : "\(how) · \(approval.title)")
+            CardDone(badge: shown.badges.first, icon: a.allow ? "checkmark" : "xmark", how: how, what: title)
         } else {
-            CardFrame(approval.title.isEmpty ? "Can it go ahead?" : "\(approval.title)?", lead: AnyView(CardLead(icon: icon, tint: tint))) {
-                let shown = approval.shown
+            CardFrame(
+                title, sub: shown.place,
+                lead: AnyView(Group {
+                    if shown.badges.isEmpty { CardIcon(icon: icon, tint: tint) } else { Badges(badges: shown.badges) }
+                }),
+                side: shown.effectWords.isEmpty ? nil : AnyView(EffectPill(kind: shown.effect, words: shown.effectWords)),
+                tint: tint, waits: true
+            ) {
+                if !shown.steps.isEmpty {
+                    CardSteps(steps: shown.steps, more: shown.stepsMore)
+                }
                 if !shown.lines.isEmpty {
                     CardLines(lines: shown.lines)
                 }
                 if !shown.code.isEmpty {
                     CardCode(text: shown.code)
                 }
-                if !shown.raw.isEmpty {
-                    CardDetails(raw: shown.raw)
+                if !shown.reason.isEmpty {
+                    CardReason(text: shown.reason, tint: tint)
                 }
-                Flow {
-                    Button("Allow once") { answer(true) }
-                        .buttonStyle(CardButtonStyle(primary: true))
-                    if approval.canAlways {
-                        Button("Always allow") { answer(true, always: true) }
-                            .buttonStyle(CardButtonStyle())
+                if open && !shown.raw.isEmpty {
+                    CardRaw(raw: shown.raw)
+                }
+                HStack(spacing: Tokens.Space.s) {
+                    HStack(spacing: 1) {
+                        Button("Allow") { answer(true) }
+                            .buttonStyle(CardButtonStyle(primary: true, half: approval.canAlways ? .leading : .whole))
+                        if approval.canAlways {
+                            Menu {
+                                Button { answer(true, always: true) } label: {
+                                    Label("Always allow", systemImage: "checkmark.shield")
+                                }
+                            } label: {
+                                Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
+                            }
+                            .buttonStyle(CardButtonStyle(primary: true, half: .trailing))
+                            .accessibilityLabel("More ways to allow")
+                        }
                     }
                     Button("Deny") { answer(false) }
                         .buttonStyle(CardButtonStyle())
+                    Spacer(minLength: 0)
+                    if !shown.raw.isEmpty {
+                        DetailsToggle(open: $open)
+                    }
                 }
-                .padding(.top, Tokens.Space.xs)
+                .animation(.easeOut(duration: 0.15), value: open)
             }
         }
     }
