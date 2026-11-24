@@ -9973,34 +9973,15 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 }))
         };
-        // A browser the agent drives, through Microsoft's Playwright MCP server. It needs
-        // Node on the instance's computer.
-        let add_browser = |this: &Self, cx: &mut Context<Self>, primary: bool| {
-            this.small_button("add-browser", "Add a browser", primary)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let f = this.model.put_mcp(crate::model::server_args(
-                        "browser",
-                        "npx -y @playwright/mcp@latest",
-                        "",
-                    ));
-                    this.send(f);
-                    cx.notify();
-                }))
-        };
+        // The agents' browser isn't one of these: it's loom's own.
         let mut groups = Vec::new();
         let servers = self.model.mcp_servers.clone();
-        let has_browser = servers.iter().any(|m| m.name == "browser");
         if servers.is_empty() {
-            let actions = div()
-                .flex()
-                .gap(px(space::S))
-                .child(add_browser(self, cx, true))
-                .child(new_server(self, cx, false))
-                .into_any_element();
+            let actions = new_server(self, cx, true).into_any_element();
             groups.push(self.empty(
                 Ico::Plug,
                 "No MCP servers yet",
-                "Tools your agents can use, such as a browser, GitHub or your calendar",
+                "Tools your agents can use, such as GitHub or your calendar",
                 Some(actions),
             ));
         } else {
@@ -10112,17 +10093,6 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         }))
                         .into_any_element(),
-                );
-            }
-            if !has_browser {
-                rows.push(
-                    self.row(
-                        Some(self.tile(Ico::Globe)),
-                        "A browser",
-                        Some("Your agents open and use web pages. Needs Node".into()),
-                        Some(add_browser(self, cx, false).into_any_element()),
-                    )
-                    .into_any_element(),
                 );
             }
             groups.push(self.group(None, rows));

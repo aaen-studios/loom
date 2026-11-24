@@ -60,6 +60,8 @@ Set up MCP servers once, on the **MCP servers** page, and pick which each agent 
 
 In Code Mode, loom connects to the agent's MCP servers for it, and the agent reaches their tools through its scripts. With Code Mode off, the agent connects to them itself.
 
+Every agent already has a browser, which is part of loom ([The agent's browser](browser.md)), so it isn't an MCP server. If you added one with the old **Add a browser** button, loom removes it when it updates, and your agents use loom's own.
+
 **Test** on a server starts it as an agent would and says the tools it offers, or why it didn't start.
 
 ### Servers you sign in to

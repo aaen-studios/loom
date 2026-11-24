@@ -1,0 +1,135 @@
+module tests.protocol.mcp_browser
+
+// The MCP server Add a browser set up goes once (PLAN.md, "The agent's
+// browser"): an instance from before keeps Microsoft's Playwright MCP, named
+// browser, as each person who pressed the button has it. Started again, it
+// takes it out, and each agent's pick of it, says so in the activity, and
+// leaves every other server, and a browser server set up any other way, as
+// they were. Set up again after, it stays.
+//
+//     calx tests/protocol/mcp_browser.calx
+import std.json.{Json}
+import std.process.{Stdio, exit}
+import std.sqlite.{Database}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check, loom}
+
+const BUTTON: str = "npx -y @playwright/mcp@latest"
+
+fn put(app: mut Session, id: str, name: str, args: List<str>) ! Error {
+    var list = List<Json>()
+    for a in args { list.push(Json.Str(String(a))) }
+    let r = try app.cmd(id, "mcp.put", Obj.new().s("name", String(name)).s("command", String("npx")).j("args", Json.Array(list)).done())
+    if bool_at(r.copy(), "ok") != some(true) { fail "mcp.put {name}: {r}" }
+}
+
+// The person's MCP servers, as "name:args name:args".
+fn servers(app: mut Session, id: str) -> String ! Error {
+    let r = try app.cmd(id, "mcp.list", Obj.new().done())
+    var out = List<String>()
+    if let Json.Array(list) = at(at(r, "value"), "servers") {
+        for s in list {
+            var args = List<String>()
+            if let Json.Array(given) = at(s.copy(), "args") {
+                for a in given { args.push(a.as_str() ?? String()) }
+            }
+            out.push("{str_at(s, "name") ?? String()}:{args.join(" ")}")
+        }
+    }
+    return out.join(" ")
+}
+
+// Kills the instance, as an update's restart would leave it, and starts it
+// again on the same data, with `before` done to its database first.
+fn restart(i: own Instance, first: str) -> Instance ! Error {
+    var old = i.server
+    old.kill_tree()
+    _ = old.wait()
+    if first.len() > 0 {
+        let db = try Database.open("{i.data}/loom.db")
+        try db.execute_script(String(first))
+    }
+    let server = try loom(i.data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).own_group().stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), 120000) else {
+        server.kill_tree()
+        fail "the server didn't start again"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    return Instance { server: server, data: i.data, base: base, token: i.token }
+}
+
+// Before the update. Gives the event to pick up from, the agent, and the other
+// person's token.
+fn before(inst: Instance) -> (i64, String, String) ! Error {
+    var app = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
+    // As an instance from before had them: the button's browser, picked by an
+    // agent with another server beside it; and someone else's own browser.
+    try put(mut app, "q_1", "browser", ["-y", "@playwright/mcp@latest"])
+    try put(mut app, "q_2", "other", ["-y", "some-mcp"])
+    let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).j("mcp", Json.Array([Json.Str(String("browser")), Json.Str(String("other"))])).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let theirs_token = try inst.second_account("sam")
+    var theirs = try Session.connect(inst.base.copy(), theirs_token.copy(), 0)
+    try put(mut theirs, "q_1", "browser", ["-y", "@playwright/mcp@latest", "--headless"])
+    theirs.close()
+    let seq = app.seq
+    app.close()
+    return (seq, agent, theirs_token)
+}
+
+fn after(back: Instance, seq: i64, agent: String, theirs_token: String) ! Error {
+    var app2 = try Session.connect(back.base.copy(), back.token.copy(), seq)
+    try check(try servers(mut app2, "q_4") == "other:-y some-mcp", "the browser Add a browser set up is gone, and the person's other server stays")
+    // The catch-up after `seq`, which came before the session was synced.
+    var picks = String()
+    for f in app2.frames {
+        let a = at(f.copy(), "agent")
+        if str_at(f.copy(), "kind") == some(String("agent.updated")) and str_at(a.copy(), "id") == some(agent.copy()) { picks = "{at(a, "mcp")}" }
+    }
+    try check(picks == #"["other"]"#, "and the agent that picked it has only its other server")
+    let log = try app2.cmd("q_5", "activity.list", Obj.new().done())
+    try check("{at(log, "value")}".contains("Removed the MCP server browser"), "the activity says it was removed")
+    var theirs2 = try Session.connect(back.base.copy(), theirs_token.copy(), 0)
+    try check(try servers(mut theirs2, "q_2") == "browser:-y @playwright/mcp@latest --headless", "a browser server set up any other way stays")
+    theirs2.close()
+
+    // Set up again, it isn't taken out at the next start.
+    try put(mut app2, "q_6", "browser", ["-y", "@playwright/mcp@latest"])
+    app2.close()
+}
+
+fn once(again: Instance) ! Error {
+    var app3 = try Session.connect(again.base.copy(), again.token.copy(), 0)
+    let listed = try servers(mut app3, "q_7")
+    try check(listed.contains("browser:-y @playwright/mcp@latest"), "it goes once: one set up after stays")
+    app3.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let (seq, agent, theirs_token) = match before(inst.copy()) {
+        ok(got) => got,
+        err(e) => {
+            inst.copy().stop()
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+    // The update: this instance's database is as one from before this release.
+    let back = try restart(inst, "DELETE FROM meta WHERE key = 'mcp_browser_dropped';")
+    if let err(e) = after(back.copy(), seq, agent, theirs_token) {
+        back.copy().stop()
+        eprintln("\n{e}")
+        exit(1)
+    }
+    let again = try restart(back, "")
+    if let err(e) = once(again.copy()) {
+        again.copy().stop()
+        eprintln("\n{e}")
+        exit(1)
+    }
+    again.stop()
+    println("\nmcp_browser: all good ({BUTTON} goes once)")
+}

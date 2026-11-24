@@ -159,6 +159,7 @@ struct Worker {
     was_on: String    // the page the last call left it on
     reopen: String    // the page to open again when the browser starts, where it was before it closed
     told_fonts: bool    // whether the agent's been told the computer has no fonts
+    fetched: String    // the browser the instance fetched for itself to start this one, until a call's result says so, or ""
     ack: i64       // the last frame's session, to answer
     ack_at: i64    // when to answer it, or 0
     navigating: bool    // a new page has been asked for since the act began
@@ -194,7 +195,10 @@ impl Task for Worker {
                             url = w.was_on.copy()
                         }
                     }
-                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).s("loom_url", url).done())))
+                    // And the browser the instance fetched for itself to start it, once, for the activity log.
+                    let fetched = w.fetched.copy()
+                    w.fetched = String()
+                    w.back.send(Back.Done(w.key.copy(), op.call.copy(), merge(result, Obj.new().s("loom_site", site).s("loom_url", url).s("loom_fetched", fetched).done())))
                 },
                 some(In.Record(on)) => w.record(on),
                 some(In.Watch(on)) => {
@@ -228,19 +232,22 @@ impl Task for Worker {
 pub fn start(n: u64, key: String, data: String, profile: String, guarded: bool, proxy: u16, reopen: String, before: own Thread?, back: BackTo) -> (Sender<In>, Thread) {
     let inbox = Receiver<In>()
     let to = inbox.sender()
-    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, fresh: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, ack: 0, ack_at: 0, navigating: false, loaded: false, before: before }) }
+    let t = unsafe { Thread.spawn(Worker { n: n, key: key.copy(), data: data.copy(), profile: profile.copy(), guarded: guarded, proxy: proxy, inbox: inbox, back: back.copy(), child: none, page: none, port: String(), next_id: 0, refs: Map<String, i64>(), hidden: List<(String, String)>(), watch: unwatched(), casting: false, cast_width: 0, cast_height: 0, fresh: false, recording: false, steps: List<Json>(), last_url: String(), was_on: String(), reopen: reopen.copy(), told_fonts: false, fetched: String(), ack: 0, ack_at: 0, navigating: false, loaded: false, before: before }) }
     return (to, t)
 }
 
 // The browser to run: LOOM_BROWSER, or the first Chrome, Edge or Chromium found
 // where they're installed, or on PATH. On Linux, a snap's comes last: a snap
-// can't keep its profile in a service's folder, as /var/lib/loom.
+// can't keep its profile in a service's folder, as /var/lib/loom. Windows
+// always has Edge; where it isn't in the usual folders, the registry's App
+// Paths, which its installer writes, say where it is. A Mac with neither
+// fetches Chrome's headless shell instead (server/chrome.calx).
 pub fn find() -> String? {
     if let set = env.variable(String("LOOM_BROWSER")) {
         if set.trim().len() > 0 { return some(set.trim().copy()) }
     }
     var places = List<String>()
-    for base in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+    for base in ["PROGRAMFILES", "PROGRAMFILES(X86)", "ProgramW6432", "LOCALAPPDATA"] {
         if let root = env.variable(String(base)) {
             places.push("{root}\\Google\\Chrome\\Application\\chrome.exe")
             places.push("{root}\\Microsoft\\Edge\\Application\\msedge.exe")
@@ -250,8 +257,20 @@ pub fn find() -> String? {
     places.push(String("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
     places.push(String("/Applications/Chromium.app/Contents/MacOS/Chromium"))
     places.push(String("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"))
+    if let home = env.variable(String("HOME")) {
+        places.push("{home}/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        places.push("{home}/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge")
+    }
     for p in places {
         if fs.is_file(p.copy()) { return some(p.copy()) }
+    }
+    if env.os() == "windows" {
+        // Edge first: Chrome's App Paths may be a Canary's, of another channel.
+        for name in ["msedge.exe", "chrome.exe"] {
+            for hive in ["HKCU", "HKLM"] {
+                if let p = app_path(String(hive), String(name)) { return some(p) }
+            }
+        }
     }
     var snaps = List<String>()
     for name in ["chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "microsoft-edge", "chrome"] {
@@ -261,6 +280,47 @@ pub fn find() -> String? {
         }
     }
     if snaps.len() > 0 { return some(snaps[0].copy()) }
+    return none
+}
+
+// The browser a Mac with neither Chrome nor Edge runs: the headless shell loom
+// pins, in the instance's `data`, fetched now if it isn't there. Gives its
+// program, and what was fetched for it, or "" when it was there already.
+pub fn mac_fetch(data: String) -> (String, String) ! Error {
+    let pin = chrome.mac_pin(env.native_arch()) else fail "There's no Chrome or Edge on this Mac. Your person can install one, or set LOOM_BROWSER to the one to use. Don't open pages on their devices instead unless they ask you to."
+    let had = fs.is_file(chrome.pinned_program(data.copy(), pin.copy()))
+    let version = pin.version.copy()
+    let exe = match chrome.fetch_pinned(data, pin) {
+        ok(p) => p,
+        err(e) => fail "There's no Chrome or Edge on this Mac, and loom couldn't fetch its own browser: {e}. Your person can install Chrome, or set LOOM_BROWSER to the browser to use. Don't open pages on their devices instead unless they ask you to.",
+    }
+    return (exe, if had { String() } else { "Chrome's headless shell {version}" })
+}
+
+// Where Windows' registry says the program `name` is, under App Paths in
+// `hive` (HKCU for one installed for this user, HKLM for everyone), when it's
+// there.
+fn app_path(hive: String, name: String) -> String? {
+    let key = "{hive}\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\{name}"
+    let out = match Command.new(String("reg")).args([String("query"), key, String("/ve")]).stdin(Stdio.Null).timeout(10000).output() {
+        ok(o) => o,
+        err(_) => return none,
+    }
+    if not out.status.success() { return none }
+    let p = default_value(out.text()) else return none
+    return if fs.is_file(p.copy()) { some(p) } else { none }
+}
+
+// The default value in what `reg query KEY /ve` printed, without quotes.
+pub fn default_value(printed: String) -> String? {
+    for line in printed.lines() {
+        let at_type = line.find("REG_SZ") ?? line.find("REG_EXPAND_SZ") else continue
+        if not line.trim().starts_with("(") { continue }
+        let rest = line[at_type..].copy()
+        let gap = rest.find(" ") else continue
+        let value = rest[gap..].trim().trim_prefix("\"").trim_suffix("\"").copy()
+        if value.len() > 0 { return some(value) }
+    }
     return none
 }
 
@@ -819,11 +879,17 @@ impl Worker {
         return gaps
     }
 
-    // The browser to start: the computer's own, or on a Linux server without one,
-    // the one the instance fetched for itself, fetched now if it hasn't been, or
-    // again once it's old.
-    fn program(w: Worker) -> String ! Error {
+    // The browser to start: the computer's own, or on a Mac or a Linux server
+    // without one, the one the instance fetched for itself, fetched now if it
+    // hasn't been: on a Mac the build loom pins, and on Linux the newest, again
+    // once it's old.
+    fn program(w: mut Worker) -> String ! Error {
         if let exe = find() { return exe }
+        if env.os() == "macos" {
+            let (exe, fetched) = try mac_fetch(w.data.copy())
+            w.fetched = fetched
+            return exe
+        }
         if env.os() != "linux" { fail "There's no Chrome, Edge or Chromium on the computer the instance runs on. Your person can install one, or set LOOM_BROWSER to the one to use. Don't open pages on their devices instead unless they ask you to." }
         var exe = String()
         if let (had, old) = chrome.fetched(w.data.copy()) {
@@ -836,7 +902,10 @@ impl Worker {
             }
         } else {
             exe = match chrome.fetch_browser(w.data.copy()) {
-                ok(got) => got,
+                ok(got) => {
+                    w.fetched = String("Chrome's headless shell")
+                    got
+                },
                 err(e) => fail "There's no Chrome or Chromium on the server the instance runs on, and it couldn't fetch one for itself: {e}. {missing_text(missing())} Or set LOOM_BROWSER to the browser to use. Don't open pages on your person's devices instead unless they ask you to.",
             }
         }
@@ -1091,6 +1160,10 @@ impl Worker {
                 if gaps.len() > 0 { eprintln("loom: {missing_text(gaps)}") }
                 // Without any font, a picture of a page has no words in it, though its outline does.
                 if gaps.len() > 0 and gaps[0] == "fonts" { note = "[loom: {missing_text(gaps)} Until then, pictures of pages show no text: read pages with browser_snapshot.]" }
+            }
+            if w.fetched.len() > 0 {
+                let first = "[loom: There was no Chrome or Edge here, so loom fetched a browser of its own first, {w.fetched}. It's kept for next time.]"
+                note = if note.len() > 0 { "{note}\n{first}" } else { first }
             }
             let back_to = w.reopen.copy()
             w.reopen = String()
@@ -1715,6 +1788,15 @@ fn a_frame_from_before_the_size_changed_is_known() {
     assert(not at_cast_size(640, 400, 1280, 800, 1280, 800))
     // A page smaller than it's shown at.
     assert(at_cast_size(300, 200, 300, 200, 1280, 800))
+}
+
+@test
+fn the_registry_says_where_edge_is() {
+    let printed = "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\msedge.exe\r\n    (Default)    REG_SZ    C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe\r\n\r\n"
+    assert(default_value(String(printed)) == some(String("C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe")))
+    assert(default_value(String("    (Default)    REG_SZ    \"C:\\Edge\\msedge.exe\"\r\n")) == some(String("C:\\Edge\\msedge.exe")))
+    assert(default_value(String("    Path    REG_SZ    C:\\Edge\r\n")) == none)
+    assert(default_value(String("ERROR: The system was unable to find the specified registry key or value.")) == none)
 }
 
 @test
