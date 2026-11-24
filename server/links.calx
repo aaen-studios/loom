@@ -1,0 +1,498 @@
+module server.links
+
+// Links in the chat (PLAN.md, "Links and sources"): the addresses in a
+// message, the Sources list at the end of an agent's reply, which comes out
+// of its text and goes under the reply as a tab, and each page's title and
+// its site's icon, which the instance looks up so the apps show a link by
+// its page and its site.
+//
+// Pages are looked up only over https, on a thread of their own, as the
+// person's agents could name any address. A redirect never leaves https, so
+// a lookup reaches only a host with a certificate for its name: not the
+// person's router, their other computers or the instance itself. An address
+// of a network of the person's own, or a name only it knows, isn't looked
+// up at all.
+import std.json.{Json}
+import std.http.{Header, get}
+import std.net.{Ip}
+import std.thread.{Task}
+import std.text.utf8.{decode_lossy}
+import std.url.{Url}
+import shared.obj.{Obj, str_at}
+
+// The most links in one message that are looked up.
+pub const MOST: usize = 12
+// The most of a page that's read for its title, and how long it's waited for.
+const PAGE_MOST: usize = 2097152
+const ICON_MOST: usize = 262144
+const WAIT_MS: u32 = 6000
+// The longest title kept.
+const TITLE_MOST: usize = 160
+
+// --- What's in a message ---
+
+fn rune_len(r: rune) -> usize {
+    let n = u32(r)
+    return if n < 0x80 { 1 } else if n < 0x800 { 2 } else if n < 0x10000 { 3 } else { 4 }
+}
+
+fn url_end(r: rune) -> bool {
+    return r == ' ' or r == '\n' or r == '\t' or r == '\r' or r == '<' or r == '>' or r == '"' or r == '`'
+}
+
+// An address as it's written in text, without what usually ends a sentence
+// after it: a full stop, a comma, a closing bracket it didn't open.
+fn trimmed(raw: String) -> String {
+    var s = raw.copy()
+    loop {
+        if s.len() == 0 { break }
+        let last = s[s.len() - 1..].copy()
+        if ".,;:!?'*_".contains(last.copy()) {
+            s = s[..s.len() - 1].copy()
+            continue
+        }
+        if last == ")" and s.split("(").len() <= s.split(")").len() - 1 {
+            s = s[..s.len() - 1].copy()
+            continue
+        }
+        break
+    }
+    return s
+}
+
+/// The http and https addresses in `text`, in the order they come, each once:
+/// a Markdown link's and a bare one's.
+pub fn urls_in(text: String) -> List<String> {
+    var out = List<String>()
+    var rest = text.copy()
+    loop {
+        let a = rest.find("http://")
+        let b = rest.find("https://")
+        let at = match (a, b) {
+            (some(x), some(y)) => if x < y { x } else { y },
+            (some(x), none) => x,
+            (none, some(y)) => y,
+            (none, none) => break,
+        }
+        var end = at
+        for r in rest[at..].runes() {
+            if url_end(r) { break }
+            end += rune_len(r)
+        }
+        let url = trimmed(rest[at..end].copy())
+        if url.len() > 8 and not out.contains(url.copy()) { out.push(url) }
+        rest = rest[end..].copy()
+    }
+    return out
+}
+
+/// The site an address is on, as it's shown: its host without `www.`.
+pub fn site_of(url: String) -> String {
+    let u = match Url.parse(url) {
+        ok(x) => x,
+        err(_) => return String(),
+    }
+    let host = u.host ?? String()
+    return if host.starts_with("www.") { host[4..].copy() } else { host }
+}
+
+// A Sources list's item: `- [title](url)`, `- title: url`, `- url`, or a
+// numbered one. Gives the source, or none for a line that isn't one.
+fn source_line(line: String) -> Json? {
+    var s = line.trim().copy()
+    if s.starts_with("- ") or s.starts_with("* ") or s.starts_with("• ") {
+        s = s[s.find(" ")! + 1..].trim().copy()
+    } else {
+        var digits: usize = 0
+        for r in s.runes() {
+            if r >= '0' and r <= '9' { digits += 1 } else { break }
+        }
+        if digits > 0 and (s[digits..].starts_with(". ") or s[digits..].starts_with(") ")) { s = s[digits + 2..].trim().copy() }
+    }
+    if s.starts_with("[") {
+        let close = s.find("](") else return none
+        let rest = s[close + 2..].copy()
+        let end = rest.find(")") else return none
+        let url = rest[..end].trim().copy()
+        if not url.starts_with("https://") and not url.starts_with("http://") { return none }
+        return some(Obj.new().s("url", url.copy()).s("title", s[1..close].trim().copy()).s("site", site_of(url)).done())
+    }
+    let urls = urls_in(s.copy())
+    if urls.len() != 1 { return none }
+    let url = urls[0].copy()
+    var title = s.replace(url.copy(), String()).trim().copy()
+    while title.ends_with(":") or title.ends_with("-") or title.ends_with("–") or title.ends_with("—") {
+        title = title[..title.len() - if title.ends_with(":") or title.ends_with("-") { 1usize } else { 3usize }].trim().copy()
+    }
+    return some(Obj.new().s("url", url.copy()).s("title", title).s("site", site_of(url)).done())
+}
+
+// Whether `line` heads a Sources list: "Sources", "Sources:", "**Sources**",
+// "## Sources", and the same for "Source" and "References".
+fn sources_heading(line: String) -> bool {
+    var s = line.trim().to_lower_root()
+    while s.starts_with("#") { s = s[1..].trim().copy() }
+    s = s.replace(String("*"), String()).replace(String("_"), String()).trim().copy()
+    if s.ends_with(":") { s = s[..s.len() - 1].trim().copy() }
+    return s == "sources" or s == "source" or s == "references" or s == "kilder"
+}
+
+/// A reply's text without the Sources list at its end, and the sources in
+/// it, each `{url, title, site}`. A list that has anything but links under
+/// its heading, or isn't at the end, stays in the text.
+pub fn split_sources(text: String) -> (String, List<Json>) {
+    let lines = text.split("\n")
+    var k = lines.len()
+    // Past the blank lines at the end.
+    while k > 0 and lines[k - 1].trim().len() == 0 { k -= 1 }
+    var found = List<Json>()
+    while k > 0 {
+        let line = lines[k - 1].copy()
+        if line.trim().len() == 0 {
+            k -= 1
+            continue
+        }
+        if sources_heading(line.copy()) {
+            if found.len() == 0 { return (text.copy(), List<Json>()) }
+            var kept = List<String>()
+            for l in lines[..k - 1] { kept.push(l.copy()) }
+            var sources = List<Json>()
+            var k2 = found.len()
+            while k2 > 0 {
+                sources.push(found[k2 - 1].copy())
+                k2 -= 1
+            }
+            return (kept.join("\n").trim_end().copy(), sources)
+        }
+        let source = source_line(line) else return (text.copy(), List<Json>())
+        found.push(source)
+        k -= 1
+    }
+    return (text.copy(), List<Json>())
+}
+
+// --- Which pages are looked up ---
+
+// A name only the person's own network knows: one with no dot, or under a
+// name kept for local networks.
+fn local_name(host: String) -> bool {
+    if not host.contains(".") { return true }
+    for end in [".local", ".localhost", ".lan", ".home", ".internal", ".intranet", ".corp", ".home.arpa", ".test", ".invalid", ".example"] {
+        if host.ends_with(end) { return true }
+    }
+    return false
+}
+
+/// Whether the page at `url` is looked up: an https address of a public
+/// host, by its name, on the usual port.
+pub fn lookable(url: String) -> bool {
+    let u = match Url.parse(url) {
+        ok(x) => x,
+        err(_) => return false,
+    }
+    if u.scheme != "https" { return false }
+    if let _ = u.user { return false }
+    if let port = u.port {
+        if port != 443 { return false }
+    }
+    let host = (u.host ?? String()).trim_suffix(".").copy()
+    if host.len() == 0 or local_name(host.copy()) { return false }
+    // An address, not a name: only a name has a certificate a stranger can't fake.
+    if Ip.parse(host) != none { return false }
+    return true
+}
+
+// --- A page's title and icon ---
+
+fn entity(name: String) -> String? {
+    let named = [("amp", "&"), ("lt", "<"), ("gt", ">"), ("quot", "\""), ("apos", "'"), ("nbsp", " "), ("ndash", "–"), ("mdash", "—"), ("hellip", "…"), ("rsquo", "’"), ("lsquo", "‘"), ("ldquo", "“"), ("rdquo", "”")]
+    for (n, v) in named {
+        if name == n { return some(String(v)) }
+    }
+    if not name.starts_with("#") { return none }
+    let hex = name.starts_with("#x") or name.starts_with("#X")
+    let digits = if hex { name[2..].copy() } else { name[1..].copy() }
+    let code = (if hex { u32.parse_radix(digits, 16) } else { u32.parse(digits) }) else return none
+    let r = rune.try_from(code) else return none
+    var one = String()
+    one.push(r)
+    return some(one)
+}
+
+// Text from HTML: its entities read, and its white space one space.
+fn text_of(html: String) -> String {
+    var out = String()
+    var rest = html.copy()
+    loop {
+        let amp = rest.find("&") else {
+            out.push_str(rest.copy())
+            break
+        }
+        out.push_str(rest[..amp].copy())
+        let after = rest[amp + 1..].copy()
+        if let semi = after.find(";") {
+            if semi <= 10 {
+                if let e = entity(after[..semi].copy()) {
+                    out.push_str(e)
+                    rest = after[semi + 1..].copy()
+                    continue
+                }
+            }
+        }
+        out.push_str(String("&"))
+        rest = after
+    }
+    var spaced = String()
+    var space = false
+    for r in out.runes() {
+        if r == ' ' or r == '\n' or r == '\t' or r == '\r' {
+            space = true
+            continue
+        }
+        if space and spaced.len() > 0 { spaced.push_str(String(" ")) }
+        space = false
+        spaced.push(r)
+    }
+    return spaced
+}
+
+// An attribute's value in a tag, as `name="v"`, `name='v'` or `name=v`.
+fn attr(tag: String, name: str) -> String? {
+    let low = tag.to_lower_root()
+    var from: usize = 0
+    loop {
+        let at = low[from..].find(name) else return none
+        let k = from + at
+        from = k + name.len()
+        // The name stands alone: a space before it, and = after.
+        if k == 0 or not " \t\n\r".contains(low[k - 1..k].copy()) { continue }
+        var rest = tag[k + name.len()..].trim_start().copy()
+        if not rest.starts_with("=") { continue }
+        rest = rest[1..].trim_start().copy()
+        if rest.starts_with("\"") or rest.starts_with("'") {
+            let q = rest[..1].copy()
+            let end = rest[1..].find(q) else return none
+            return some(rest[1..end + 1].copy())
+        }
+        var end: usize = 0
+        for r in rest.runes() {
+            if r == ' ' or r == '>' or r == '/' or r == '\t' or r == '\n' { break }
+            end += rune_len(r)
+        }
+        return some(rest[..end].copy())
+    }
+}
+
+// Each tag of a kind in `html`, as `<name ...>`.
+fn tags(html: String, name: str) -> List<String> {
+    let low = html.to_lower_root()
+    var out = List<String>()
+    var from: usize = 0
+    let open = "<{name}"
+    loop {
+        let at = low[from..].find(open.copy()) else break
+        let k = from + at
+        let end = low[k..].find(">") else break
+        out.push(html[k..k + end + 1].copy())
+        from = k + end + 1
+        if out.len() >= 200 { break }
+    }
+    return out
+}
+
+/// A page's title: its `og:title`, or else its `<title>`, read as text and cut
+/// short, or "" when it has none.
+pub fn title_of(html: String) -> String {
+    var title = String()
+    for m in tags(html.copy(), "meta") {
+        let p = (attr(m.copy(), "property") ?? attr(m.copy(), "name") ?? String()).to_lower_root()
+        if p == "og:title" {
+            title = attr(m, "content") ?? String()
+            break
+        }
+    }
+    if title.trim().len() == 0 {
+        let low = html.to_lower_root()
+        if let open = low.find("<title") {
+            if let gt = low[open..].find(">") {
+                let from = open + gt + 1
+                let close = low[from..].find("</title") ?? 0
+                title = html[from..from + close].copy()
+            }
+        }
+    }
+    var t = text_of(title).trim().copy()
+    if t.len() > TITLE_MOST {
+        var cut: usize = 0
+        for r in t.runes() {
+            if cut + rune_len(r) > TITLE_MOST { break }
+            cut += rune_len(r)
+        }
+        t = "{t[..cut].trim_end()}…"
+    }
+    return t
+}
+
+/// Where a page's icon may be, best first: the icons it names that loom can
+/// draw (not an SVG), then the site's `/favicon.ico`. Each an https address.
+pub fn icons_of(html: String, page: String) -> List<String> {
+    let base = match Url.parse(page) {
+        ok(x) => x,
+        err(_) => return List<String>(),
+    }
+    var named = List<(i64, String)>()
+    for l in tags(html, "link") {
+        let rel = (attr(l.copy(), "rel") ?? String()).to_lower_root()
+        if not rel.contains("icon") or rel.contains("mask-icon") { continue }
+        let href = (attr(l.copy(), "href") ?? String()).trim().copy()
+        if href.len() == 0 or href.starts_with("data:") { continue }
+        let kind = (attr(l.copy(), "type") ?? String()).to_lower_root()
+        if kind.contains("svg") or href.to_lower_root().split("?")[0].ends_with(".svg") { continue }
+        let full = match base.join(href) {
+            ok(x) => x,
+            err(_) => continue,
+        }
+        // Bigger than drawn, for a sharp icon, but not a whole picture.
+        let sizes = (attr(l, "sizes") ?? String()).to_lower_root()
+        let w = i64.parse(sizes.split("x")[0].copy()) ?? 0
+        let score: i64 = if rel.contains("apple-touch") { 40 } else if w == 0 { 20 } else if w >= 32 { w - 32 } else { (32 - w) * 3 }
+        named.push((score, "{full}"))
+    }
+    named.sort_by(|a, b| a.0.cmp(b.0))
+    var out = List<String>()
+    for (_, u) in named {
+        if lookable(u.copy()) and not out.contains(u.copy()) { out.push(u.copy()) }
+    }
+    let host = base.host ?? String()
+    let fav = "https://{host}/favicon.ico"
+    if not out.contains(fav.copy()) { out.push(fav) }
+    return out
+}
+
+// --- The lookups, on a thread of their own ---
+
+pub struct Job {
+    pub url: String
+    pub icon: bool    // the site's icon is wanted too: the instance has none for it yet
+}
+
+pub struct Done {
+    pub url: String
+    pub title: String    // "" when the page has none, or couldn't be had
+    pub icon: List<u8>    // the icon's bytes, as they came, or empty
+    pub icon_asked: bool    // the job asked for it, so empty means the site has none
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            w.done.send(look_up(job))
+        }
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+fn fetch(url: String, most: usize, accept: str) -> List<u8> ! Error {
+    var req = get(url, [Header { name: String("Accept"), value: String(accept) }, Header { name: String("User-Agent"), value: String("Mozilla/5.0 (compatible; loom)") }], WAIT_MS, most)
+    let r = try req.wait()
+    if r.status != 200 { fail "it answered {r.status}" }
+    return r.body
+}
+
+fn look_up(job: Job) -> Done {
+    var done = Done { url: job.url.copy(), title: String(), icon: List<u8>(), icon_asked: job.icon }
+    if not lookable(job.url.copy()) { return done }
+    // Only the page's start, where its head is: a page over the limit isn't read at all.
+    let page = match fetch(job.url.copy(), PAGE_MOST, "text/html,application/xhtml+xml") {
+        ok(b) => decode_lossy(b.copy(), 0, b.len()),
+        err(_) => String(),
+    }
+    done.title = title_of(page.copy())
+    if not job.icon { return done }
+    let base = if page.len() > 0 { job.url.copy() } else { "https://{site_of(job.url.copy())}/" }
+    for src in icons_of(page, base) {
+        match fetch(src, ICON_MOST, "image/*") {
+            ok(b) => {
+                if b.len() > 0 {
+                    done.icon = b
+                    break
+                }
+            },
+            err(_) => {},
+        }
+    }
+    return done
+}
+
+@test
+fn finds_the_addresses_in_a_message() {
+    let text = "See https://9to5google.com/2026/11/18/neon/, and [the notes](https://ai.google.dev/notes) (https://x.example.org/a_(b)). Again: https://9to5google.com/2026/11/18/neon/"
+    let urls = urls_in(String(text))
+    assert(urls.len() == 3)
+    assert(urls[0] == "https://9to5google.com/2026/11/18/neon/")
+    assert(urls[1] == "https://ai.google.dev/notes")
+    assert(urls[2] == "https://x.example.org/a_(b)")
+    assert(site_of(String("https://www.theverge.com/x")) == "theverge.com")
+}
+
+@test
+fn takes_the_sources_off_the_end_of_a_reply() {
+    let reply = "Yes. Google has picked up the pace.\n\nGood for you either way.\n\nSources:\n\n- [9to5Google: Gemini 4 Neon](https://9to5google.com/neon)\n- The Decoder: Neon vs. flagship: https://the-decoder.com/neon\n3. https://www.techtarget.com/x\n"
+    let (text, sources) = split_sources(String(reply))
+    assert(text == "Yes. Google has picked up the pace.\n\nGood for you either way.")
+    assert(sources.len() == 3)
+    assert(str_at(sources[0].copy(), "title") == some(String("9to5Google: Gemini 4 Neon")) and str_at(sources[0].copy(), "site") == some(String("9to5google.com")))
+    assert(str_at(sources[1].copy(), "title") == some(String("The Decoder: Neon vs. flagship")) and str_at(sources[1].copy(), "url") == some(String("https://the-decoder.com/neon")))
+    assert(str_at(sources[2].copy(), "title") == some(String("")) and str_at(sources[2].copy(), "site") == some(String("techtarget.com")))
+    // A heading in bold or as a heading, too.
+    let (_, bold) = split_sources(String("Hi.\n\n**Sources**\n- https://a.example.org/x"))
+    assert(bold.len() == 1)
+    // A list with something else in it, or that isn't at the end, stays.
+    let mixed = "Hi.\n\nSources:\n- https://a.example.org/x\n- and my own guess"
+    assert(split_sources(String(mixed)).0 == mixed)
+    let middle = "Sources:\n- https://a.example.org/x\n\nThen more words."
+    assert(split_sources(String(middle)).1.len() == 0)
+    assert(split_sources(String("Sources:")).1.len() == 0)
+}
+
+@test
+fn looks_up_only_public_https_pages() {
+    assert(lookable(String("https://9to5google.com/neon")))
+    assert(not lookable(String("http://9to5google.com/neon")))
+    assert(not lookable(String("https://192.168.1.1/")))
+    assert(not lookable(String("https://[::1]/")))
+    assert(not lookable(String("https://localhost/")))
+    assert(not lookable(String("https://router/")))
+    assert(not lookable(String("https://nas.local/")))
+    assert(not lookable(String("https://example.com:8443/")))
+    assert(not lookable(String("https://me:pw@example.com/")))
+}
+
+@test
+fn reads_a_pages_title_and_icons() {
+    let html = "<html><head><title>\n  Gemini 4 Neon &amp; you &#8211; 9to5Google\n</title><link rel=\"icon\" href=\"/i/16.png\" sizes=\"16x16\"><link rel='icon' type='image/png' sizes='32x32' href='/i/32.png'><link rel=\"icon\" href=\"/i.svg\" type=\"image/svg+xml\"><link rel=\"apple-touch-icon\" href=\"https://cdn.9to5google.com/t.png\"></head>"
+    assert(title_of(String(html)) == "Gemini 4 Neon & you – 9to5Google")
+    let og = "<meta name=\"x\" content=\"y\"><meta property=\"og:title\" content=\"Neon, explained\"><title>Other</title>"
+    assert(title_of(String(og)) == "Neon, explained")
+    assert(title_of(String("<p>no title</p>")) == "")
+    let icons = icons_of(String(html), String("https://9to5google.com/2026/neon"))
+    assert(icons.len() == 4)
+    assert(icons[0] == "https://9to5google.com/i/32.png")
+    // A big touch icon, made small, before one smaller than it's drawn.
+    assert(icons[1] == "https://cdn.9to5google.com/t.png")
+    assert(icons[2] == "https://9to5google.com/i/16.png")
+    assert(icons[3] == "https://9to5google.com/favicon.ico")
+}

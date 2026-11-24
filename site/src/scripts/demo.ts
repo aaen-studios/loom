@@ -3,7 +3,8 @@
 // finishes. While the turn runs, one quiet line under the reply says the step it's on; once it's
 // done, its last words are the answer and the steps before them fold under one line that opens
 // (desktop/src/model.rs, parts), and a subagent's call in the earlier reply opens to show what
-// its subagent did inside it (model.rs, inside). The moods, what the sidebar says after an agent's name on its
+// its subagent did inside it (model.rs, inside). The earlier reply's sources tab opens their
+// list (app.rs, sources_tab). The moods, what the sidebar says after an agent's name on its
 // one line ("Thinking", the tool's title, "Wants to …"), or under the pointer on a pinned agent's
 // tile, and the wording are the app's. Clicking
 // Allow, Always allow (under the arrow beside Allow) or Deny answers the approval, which says how
@@ -67,6 +68,24 @@ export function play(app: HTMLElement) {
 			inside.hidden = !inside.hidden;
 			line.setAttribute('aria-expanded', String(!inside.hidden));
 			line.querySelector('.chevron')!.textContent = inside.hidden ? '›' : '⌄';
+		});
+	}
+	// A reply's sources tab opens its list, and a click anywhere else shuts it.
+	for (const tab of msgs.querySelectorAll<HTMLButtonElement>('[data-sources]')) {
+		const list = tab.nextElementSibling as HTMLElement;
+		const chat = app.querySelector<HTMLElement>('.chat')!;
+		const show = (open: boolean) => {
+			list.hidden = !open;
+			// Kept inside the chat, as the app keeps it in the window: above the tab when
+			// there's no room under it.
+			list.classList.remove('up');
+			if (open && list.getBoundingClientRect().bottom > chat.getBoundingClientRect().bottom) list.classList.add('up');
+			tab.setAttribute('aria-expanded', String(open));
+			tab.querySelector('.chev path')!.setAttribute('d', open ? 'm18 15-6-6-6 6' : 'm6 9 6 6 6-6');
+		};
+		tab.addEventListener('click', () => show(list.hidden));
+		document.addEventListener('pointerdown', (e) => {
+			if (!list.hidden && !tab.parentElement!.contains(e.target as Node)) show(false);
 		});
 	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;

@@ -17,6 +17,9 @@ const pinned = agents.filter((a) => a.pinned);
 const rest = agents.filter((a) => !a.pinned);
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
 const [claude] = await brains(['claude-acp']);
+// GitHub's mark, as its site icon on the reply's link and sources.
+const GITHUB =
+	'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z';
 ---
 
 <div class="app" data-demo role="region" aria-label="loom's desktop app, with an agent at work">
@@ -133,8 +136,27 @@ const [claude] = await brains(['claude-acp']);
 								</div>
 							</div>
 						</div>
-						<div class="said">
-							<p>Two things. The notes for 2.4 are due at 15:00, and Biscuit is waiting on your review of the billing fix. Both are at the top of your list.</p>
+						<div class="said-wrap">
+							<div class="sources">
+								<button type="button" class="sources-tab" aria-expanded="false" data-sources
+									><span class="site-icons"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg></span>2 sources<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button
+								>
+								<div class="sources-list" hidden>
+									<span class="source"
+										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="t">Pull requests · acme/shop</span><span class="d">github.com</span></span
+									>
+									<span class="source"
+										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="t">Fix double charge on retries</span><span class="d">github.com</span></span
+									>
+								</div>
+							</div>
+							<div class="said">
+								<p>
+									Two things. The notes for 2.4 are due at 15:00, and Biscuit is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
+										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>the billing fix</span
+									>. Both are at the top of your list.
+								</p>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -899,6 +921,150 @@ const [claude] = await brains(['claude-acp']);
 	}
 	.said :global(p + p) {
 		margin-top: 12px;
+	}
+	/* A link: its site's icon before it, underlined, its whole address on hover. */
+	.link {
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		text-decoration-color: var(--line-strong);
+		white-space: nowrap;
+	}
+	.site-icon {
+		width: 14px;
+		height: 14px;
+		flex: none;
+		border-radius: 3px;
+	}
+	.site-icon.gh {
+		fill: var(--ink);
+	}
+	.link .site-icon {
+		display: inline-block;
+		vertical-align: -2px;
+		margin-right: 4px;
+	}
+
+	/* A reply's sources (desktop/src/app.rs, sources_tab): a tab hanging from its bubble's
+	   bottom-left corner, tucked under it, a shade lighter than the bubble; open, a shade
+	   darker. Its list opens under it, a line each. */
+	.said-wrap {
+		position: relative;
+		align-self: flex-start;
+		max-width: 94%;
+		padding-bottom: 19px;
+	}
+	.said-wrap .said {
+		position: relative;
+		max-width: 100%;
+	}
+	.sources {
+		position: absolute;
+		left: 14px;
+		bottom: 0;
+	}
+	.sources-tab {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: 26px;
+		padding: 7px 8px 0 5px;
+		border: 1px solid #e4e4e8;
+		border-radius: var(--radius-button);
+		background: #f7f7f8;
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+		cursor: pointer;
+		transition: background-color 0.12s;
+	}
+	.sources-tab:hover,
+	.sources-tab[aria-expanded='true'] {
+		background: #eaeaed;
+	}
+	.sources-tab .site-icon {
+		width: 16px;
+		height: 16px;
+		border-radius: 4px;
+	}
+	.site-icons {
+		display: flex;
+		gap: 3px;
+	}
+	.sources-list {
+		position: absolute;
+		left: 0;
+		top: calc(100% + 4px);
+		z-index: 5;
+		width: 340px;
+		max-width: calc(100vw - 64px);
+		display: grid;
+		padding: 4px;
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.1);
+	}
+	.sources-list.up {
+		top: auto;
+		bottom: calc(100% + 4px);
+	}
+	.source {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		height: 32px;
+		padding: 0 8px;
+		border-radius: var(--radius-row);
+		transition: background-color 0.12s;
+	}
+	.source:hover {
+		background: var(--hover);
+	}
+	.source .site-icon {
+		width: 16px;
+		height: 16px;
+		border-radius: 4px;
+	}
+	.source .t {
+		flex: 1;
+		min-width: 0;
+		max-width: 210px;
+		font-size: var(--size-small);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.source .d {
+		margin-left: auto;
+		max-width: 120px;
+		font: 11.5px var(--font-mono);
+		color: var(--ink-3);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	@media (prefers-color-scheme: dark) {
+		:root:not([data-theme='light']) .sources-tab {
+			background: #222226;
+			border-color: #2e2e33;
+		}
+		:root:not([data-theme='light']) .sources-tab:hover,
+		:root:not([data-theme='light']) .sources-tab[aria-expanded='true'] {
+			background: #2c2c31;
+		}
+		:root:not([data-theme='light']) .sources-list {
+			box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
+		}
+	}
+	:root[data-theme='dark'] .sources-tab {
+		background: #222226;
+		border-color: #2e2e33;
+	}
+	:root[data-theme='dark'] .sources-tab:hover,
+	:root[data-theme='dark'] .sources-tab[aria-expanded='true'] {
+		background: #2c2c31;
+	}
+	:root[data-theme='dark'] .sources-list {
+		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
 	}
 
 	/* An approval: its own row after the messages, lined up with the reply's text, in the

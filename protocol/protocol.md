@@ -638,6 +638,15 @@ A message is a list of **content blocks**:
 
 A reply that names files in its text, in `code` like `notes/hours.md`, also has `mentions`: each of them (ten at most) that is a file in its agent's folder or the shared folder, with `path` as the reply wrote it, `name` and `size`. The apps show them as chips, and `agent.file` opens one.
 
+A reply whose words end in a Sources list (a line such as `Sources:`, `**Sources**` or `## Sources`, then only links: `- [title](url)`, `- title: url` or `- url`) has it taken out of its last text block, and has `sources` instead: each `{url, title, site}` in order, `title` as the reply wrote it, maybe empty, and `site` the host without `www.` ([PLAN.md](../PLAN.md#links-and-sources)).
+
+A message that links to pages, in its words or its `sources`, has `links` for those the instance has looked up: by each address, `{title, site, icon?}`, `title` the page's own (maybe empty) and `icon` the site's icon, a PNG kept as the person's file, to fetch with `file.get`. Only https pages of public hosts are looked up, twelve a message at most. One looked up after the message was kept comes with `message.updated`.
+
+```json
+"sources": [ { "url": "https://9to5google.com/2026/11/18/neon/", "title": "Gemini 4 Neon", "site": "9to5google.com" } ],
+"links": { "https://9to5google.com/2026/11/18/neon/": { "title": "Google launches Gemini 4 Neon", "site": "9to5google.com", "icon": "6c1f…" } }
+```
+
 - `role` is `person` or `agent`. A person's message has `from` (a device id) instead of `agent` and `run`. A message one agent sent another with `message_agent` is a `person` message too, in the other agent's conversation, with the sending agent's id as `from`. One a plugin's panel sent with `plugin.message` has `plugin:<id>` as `from`, and one brought over with `import.run` has `import:openbot` or `import:grokbot`, as its pin's `by` does. An imported agent's reply has `agent` and no `run`. What a routine's agent posted with `routine_post` is an `agent` message with `routine` (the routine's id), `routine_name` (its name when it posted; posts from before have none) and no `run`. The apps say over it which routine it's from, by the name the routine has now, or else `routine_name` ([PLAN.md](../PLAN.md#routines)). A `person` message with a routine's id as `from` is a routine's prompt kept before routines ran quietly: it stays stored, and the apps don't show it.
 - An agent's reply to a run has `status`, how its turn ended, as `run.finished` says it: `done`, `cancelled`, `failed` or `limit`. The apps show a reply that ended `done` as one answer, its last words, with what it said and did on the way folded under one line, and keep everything in view for one that ended any other way ([PLAN.md](../PLAN.md#one-answer-at-the-end)). A reply kept before replies said, or an imported one, has none, and reads as `done`.
 - Block kinds in version 1: `text` (Markdown), `thought` (the agent's reasoning, shown folded), `tool` (a tool call, whose details are in its `tool.*` events), `plan` (the agent's plan, as `entries` with `content` and `status`), `file` (`file`, `name`, `mime`, `size`) and `card` (`card`: an agent's card, below). `notice` (`text`) is one line from loom in an agent's reply, not the agent's own words, such as that another program took the chat over ([A backup brain](#a-backup-brain)); the apps show it small and quiet, and a transcript or a summary of the chat leaves it out.
@@ -671,7 +680,7 @@ Version 1's kinds. Each event also has `seq`, `kind` and `at`.
 | `conversation.updated` | `conversation` (`id` and what changed: `title`, or `program`) | Renamed, or moved to another program, by hand or to its agent's backup |
 | `conversation.deleted` | `conversation` (the id) | Deleted |
 | `message.created` | `conversation`, `message` (the whole message) | A person's message is stored, or an agent's reply is finished |
-| `message.updated` | `conversation`, `message` (the whole message, as it is now) | A stored message changed: it was pinned (it has `pinned`: `at` and `by`) or unpinned (it hasn't) |
+| `message.updated` | `conversation`, `message` (the whole message, as it is now) | A stored message changed: it was pinned (it has `pinned`: `at` and `by`) or unpinned (it hasn't), or a page it links to was looked up (its `links` has it) |
 | `message.deleted` | `conversation`, `message` (its id) | A stored message is gone |
 
 ### Runs

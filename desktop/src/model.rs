@@ -1903,6 +1903,11 @@ pub struct Message {
     pub pinned: bool,
     /// Files the reply names that are in its agent's folder, shown as chips.
     pub mentions: Vec<Mention>,
+    /// The Sources list the instance took off the end of a reply's words, shown on a tab
+    /// under its bubble.
+    pub sources: Vec<Source>,
+    /// The pages it links to that the instance has looked up, by address.
+    pub links: HashMap<String, Link>,
     /// How an agent's turn ended (`done`, `cancelled`, `failed` or `limit`), or empty
     /// when the message doesn't say: a person's, one still being written, or one kept
     /// before messages said.
@@ -1952,6 +1957,7 @@ impl Message {
             && !self.live
             && !self.pinned
             && self.mentions.is_empty()
+            && self.sources.is_empty()
             && self
                 .blocks
                 .iter()
@@ -1977,6 +1983,197 @@ impl Mention {
             .map(|(_, ext)| ext.to_uppercase())
             .unwrap_or_default()
     }
+}
+
+/// One of a reply's sources (PLAN.md, "Links and sources").
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    pub url: String,
+    /// As the reply wrote it, maybe empty.
+    pub title: String,
+    pub site: String,
+}
+
+/// A page a message links to, as the instance looked it up.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Link {
+    /// The page's own, maybe empty.
+    pub title: String,
+    pub site: String,
+    /// Its site's icon, a file to fetch.
+    pub icon: Option<String>,
+}
+
+impl Message {
+    /// A source as the tab and its list show it: the title the reply gave, or else the
+    /// page's own, or else its site; and the site's icon, if the instance found one.
+    pub fn source_shown(&self, s: &Source) -> (String, String, Option<String>) {
+        let link = self.links.get(&s.url);
+        let title = [
+            s.title.trim(),
+            link.map(|l| l.title.trim()).unwrap_or(""),
+            s.site.as_str(),
+        ]
+        .into_iter()
+        .find(|t| !t.is_empty())
+        .unwrap_or(s.url.as_str())
+        .to_string();
+        (title, s.site.clone(), link.and_then(|l| l.icon.clone()))
+    }
+
+    /// The site icons its sources and links need.
+    pub fn link_icons(&self) -> impl Iterator<Item = &String> {
+        self.links.values().filter_map(|l| l.icon.as_ref())
+    }
+}
+
+fn sources_of(m: &Value) -> Vec<Source> {
+    m.get("sources")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(|v| Source {
+                    url: s(v, "url"),
+                    title: s(v, "title"),
+                    site: s(v, "site"),
+                })
+                .filter(|s| !s.url.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn links_of(m: &Value) -> HashMap<String, Link> {
+    m.get("links")
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .map(|(url, v)| {
+                    let icon = s(v, "icon");
+                    let link = Link {
+                        title: s(v, "title"),
+                        site: s(v, "site"),
+                        icon: (!icon.is_empty()).then_some(icon),
+                    };
+                    (url.clone(), link)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A message's words with its links as the chat shows them (PLAN.md, "Links and
+/// sources"): each looked-up link with its site's icon before it, as an image the
+/// Markdown view draws (`icon_src` gives its address, or none while it isn't fetched),
+/// and a bare address with its page's title in place of the address. Code stays as it
+/// is.
+pub fn with_link_icons(
+    text: &str,
+    links: &HashMap<String, Link>,
+    icon_src: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    if links.is_empty() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut fenced = false;
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+            out.push_str(line);
+            continue;
+        }
+        if fenced {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&line_links(line, links, icon_src));
+    }
+    out
+}
+
+fn line_links(
+    line: &str,
+    links: &HashMap<String, Link>,
+    icon_src: &dyn Fn(&str) -> Option<String>,
+) -> String {
+    let icon = |url: &str| -> String {
+        links
+            .get(url)
+            .and_then(|l| l.icon.as_deref())
+            .and_then(icon_src)
+            .map(|src| format!("<img src=\"{src}\" width=\"14\" height=\"14\" /> "))
+            .unwrap_or_default()
+    };
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while !rest.is_empty() {
+        // Inline code stays as written.
+        if let Some(after) = rest.strip_prefix('`') {
+            match after.find('`') {
+                Some(end) => {
+                    out.push_str(&rest[..end + 2]);
+                    rest = &after[end + 1..];
+                }
+                None => {
+                    out.push_str(rest);
+                    rest = "";
+                }
+            }
+            continue;
+        }
+        // A Markdown link, [words](url): its icon before it.
+        if rest.starts_with('[') {
+            if let Some((len, url)) = md_link(rest) {
+                out.push_str(&icon(url));
+                out.push_str(&rest[..len]);
+                rest = &rest[len..];
+                continue;
+            }
+        }
+        // A bare address: its icon, and its page's title linking to it.
+        if rest.starts_with("https://") || rest.starts_with("http://") {
+            let end = rest
+                .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`'))
+                .unwrap_or(rest.len());
+            let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'']);
+            let url = if url.is_empty() { &rest[..end] } else { url };
+            match links.get(url).filter(|l| !l.title.trim().is_empty()) {
+                Some(l) => {
+                    let title = l.title.trim().replace(['[', ']'], "");
+                    out.push_str(&icon(url));
+                    out.push_str(&format!("[{title}]({url})"));
+                }
+                None => {
+                    out.push_str(&icon(url));
+                    out.push_str(url);
+                }
+            }
+            rest = &rest[url.len()..];
+            continue;
+        }
+        let c = rest.chars().next().unwrap_or(' ');
+        out.push(c);
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
+/// A Markdown link at the start of `s`: its length, and its address.
+fn md_link(s: &str) -> Option<(usize, &str)> {
+    let close = s.find("](")?;
+    if s[1..close].contains('\n') {
+        return None;
+    }
+    let after = &s[close + 2..];
+    let end = after.find(')')?;
+    let url = after[..end].trim();
+    let url = url.split_whitespace().next().unwrap_or("");
+    (url.starts_with("http://") || url.starts_with("https://"))
+        .then_some((close + 2 + end + 1, url))
 }
 
 fn mentions_of(m: &Value) -> Vec<Mention> {
@@ -3628,6 +3825,8 @@ impl Model {
             queued: false,
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
             mentions: mentions_of(m),
+            sources: sources_of(m),
+            links: links_of(m),
             status: s(m, "status"),
             routine: s(m, "routine"),
             routine_name: s(m, "routine_name"),
@@ -5466,6 +5665,8 @@ impl Model {
                     routine: String::new(),
                     routine_name: String::new(),
                     mentions: Vec::new(),
+                    sources: Vec::new(),
+                    links: HashMap::new(),
                     status: String::new(),
                     pinned: false,
                 });
@@ -5516,6 +5717,8 @@ impl Model {
                 routine: String::new(),
                 routine_name: String::new(),
                 mentions: Vec::new(),
+                sources: Vec::new(),
+                links: HashMap::new(),
                 status: String::new(),
                 pinned: false,
             });
@@ -5791,8 +5994,8 @@ impl Model {
         out
     }
 
-    /// The thumbnails the shown chat needs and doesn't have yet: its pictures', and the
-    /// icons of the badges on its cards and its questions.
+    /// The thumbnails the shown chat needs and doesn't have yet: its pictures', the
+    /// icons of the badges on its cards and its questions, and its links' sites'.
     pub fn file_fetches(&mut self) -> Vec<Value> {
         let mut out = Vec::new();
         let blocks = self.shown_blocks();
@@ -5811,7 +6014,8 @@ impl Model {
                 .iter()
                 .chain(a.shown.steps.iter().filter_map(|s| s.badge.as_ref()))
         });
-        for icon in cards.chain(asks).flat_map(Badge::icons) {
+        let sites = self.messages.iter().flat_map(Message::link_icons);
+        for icon in cards.chain(asks).flat_map(Badge::icons).chain(sites) {
             if !wanted.contains(icon) {
                 wanted.push(icon.clone());
             }
@@ -7095,6 +7299,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_replys_sources_and_links_come_with_it() {
+        let m = Model::new().message_of(&json!({
+            "id": "m1", "role": "agent", "at": 1, "blocks": [],
+            "sources": [
+                {"url": "https://a.example/x", "title": "", "site": "a.example"},
+                {"url": "https://b.example/y", "title": "B's own", "site": "b.example"}
+            ],
+            "links": {"https://a.example/x": {"title": "A page", "site": "a.example", "icon": "abc"}}
+        }));
+        assert_eq!(m.sources.len(), 2);
+        assert_eq!(
+            m.source_shown(&m.sources[0]),
+            ("A page".into(), "a.example".into(), Some("abc".into()))
+        );
+        assert_eq!(
+            m.source_shown(&m.sources[1]),
+            ("B's own".into(), "b.example".into(), None)
+        );
+        assert_eq!(m.link_icons().collect::<Vec<_>>(), vec!["abc"]);
+    }
+
+    #[test]
+    fn a_link_shows_its_sites_icon_and_a_bare_address_its_pages_title() {
+        let mut links = HashMap::new();
+        let page = |title: &str, icon: Option<&str>| Link {
+            title: title.into(),
+            site: "a.example".into(),
+            icon: icon.map(Into::into),
+        };
+        links.insert(
+            "https://a.example/x".to_string(),
+            page("A page", Some("abc")),
+        );
+        links.insert("https://a.example/y".to_string(), page("", None));
+        let src = |sha: &str| (sha == "abc").then(|| "/icons/abc".to_string());
+        let img = "<img src=\"/icons/abc\" width=\"14\" height=\"14\" /> ";
+        assert_eq!(
+            with_link_icons("See https://a.example/x.", &links, &src),
+            format!("See {img}[A page](https://a.example/x).")
+        );
+        assert_eq!(
+            with_link_icons("Read [this](https://a.example/x) now", &links, &src),
+            format!("Read {img}[this](https://a.example/x) now")
+        );
+        // Not looked up, or no title: as written.
+        assert_eq!(
+            with_link_icons(
+                "at https://a.example/y and https://c.example/",
+                &links,
+                &src
+            ),
+            "at https://a.example/y and https://c.example/"
+        );
+        // Code stays as it is.
+        assert_eq!(
+            with_link_icons(
+                "`https://a.example/x`\n```\nhttps://a.example/x\n```",
+                &links,
+                &src
+            ),
+            "`https://a.example/x`\n```\nhttps://a.example/x\n```"
+        );
+    }
+
+    #[test]
     fn a_file_put_aside_still_goes_up_and_comes_back() {
         let mut m = Model::new();
         let _ = m.attach("C:/notes.txt");
@@ -7644,6 +7913,8 @@ mod tests {
             routine: String::new(),
             routine_name: String::new(),
             mentions: Vec::new(),
+            sources: Vec::new(),
+            links: HashMap::new(),
             status: String::new(),
             pinned: false,
         };
@@ -7681,6 +7952,8 @@ mod tests {
             routine: String::new(),
             routine_name: String::new(),
             mentions: Vec::new(),
+            sources: Vec::new(),
+            links: HashMap::new(),
             pinned: false,
             status: status.into(),
         }

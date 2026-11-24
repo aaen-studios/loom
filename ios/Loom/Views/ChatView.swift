@@ -215,7 +215,7 @@ struct PersonMessage: View {
                 }
             }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(text, keepBreaks: true, font: Fonts.body)
+                MarkdownView(titledLinks(text, message.links), keepBreaks: true, font: Fonts.body, icons: linkIcons(message, session.model.files))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Tokens.Space.l)
                     .padding(.vertical, Tokens.Space.s + 3)
@@ -261,8 +261,23 @@ struct Reply: View {
             ForEach(Array(laid.enumerated()), id: \.offset) { _, part in
                 self.part(part, onTheWay: false)
             }
+            if !message.sources.isEmpty && sourcesAt(laid) == nil {
+                SourcesTab(message: message)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var icons: [String: String] { linkIcons(message, session.model.files) }
+
+    /// The block whose bubble the reply's sources hang from: its last words.
+    private var sourcesAt: Int? { message.sources.isEmpty ? nil : sourcesAt(parts(message, tools: session.model.tools)) }
+
+    private func sourcesAt(_ laid: [Part]) -> Int? {
+        for part in laid.reversed() {
+            if case .words(let run) = part { return run.last }
+        }
+        return nil
     }
 
     @ViewBuilder
@@ -280,12 +295,23 @@ struct Reply: View {
                 } else if replies == Prefs.bubbles {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
-                    MarkdownView(b.text, live: live)
+                    let bubble = MarkdownView(titledLinks(b.text, message.links), live: live, icons: icons)
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
                         .background(P.bubble, in: UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubbleJoined, bottomLeadingRadius: Tokens.Radius.bubble, bottomTrailingRadius: Tokens.Radius.bubble, topTrailingRadius: Tokens.Radius.bubble, style: .continuous))
+                    if i == sourcesAt {
+                        // Its sources on a tab hanging from its bottom-left corner, tucked
+                        // under it.
+                        ZStack(alignment: .bottomLeading) {
+                            SourcesTab(message: message).padding(.leading, 14)
+                            bubble.padding(.bottom, SourcesTab.hang)
+                        }
+                    } else {
+                        bubble
+                    }
                 } else {
-                    MarkdownView(b.text, live: live)
+                    MarkdownView(titledLinks(b.text, message.links), live: live, icons: icons)
+                    if i == sourcesAt { SourcesTab(message: message) }
                 }
             }
         case .tools(let run):
@@ -665,6 +691,133 @@ private struct WholePicture: View {
         .task(id: path) {
             guard let path else { return }
             image = await Pictures.load(path, side: Self.side)
+        }
+    }
+}
+
+// MARK: - Links and sources
+
+/// Where the site icons of a message's links are, by address, once they're fetched.
+func linkIcons(_ m: Message, _ files: [String: String]) -> [String: String] {
+    m.links.reduce(into: [:]) { out, e in
+        if let icon = e.value.icon, let path = files["\(icon).thumb"] { out[e.key] = path }
+    }
+}
+
+/// A site's icon, once it's fetched, with loom's small radius; a globe until then.
+struct SiteIcon: View {
+    @Environment(Session.self) private var session
+    var icon: String?
+    var size: CGFloat = 16
+    @State private var picture: UIImage?
+
+    var body: some View {
+        let path = icon.flatMap { session.model.files["\($0).thumb"] }
+        if let image = path.flatMap({ picture ?? Pictures.kept($0) }) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: "globe")
+                .font(.system(size: size * 0.75))
+                .foregroundStyle(P.ink3)
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+                .task(id: path) {
+                    guard let path, Pictures.kept(path) == nil else { return }
+                    picture = await Pictures.load(path)
+                }
+        }
+    }
+}
+
+/// The tab with a reply's sources (PLAN.md, "Links and sources"): the first three sites'
+/// icons and how many there are, or the site of one alone. A tap opens their list in a
+/// sheet, a line each, which opens the page.
+struct SourcesTab: View {
+    var message: Message
+    @State private var open = false
+
+    /// How far it hangs below its bubble, and how much of it is tucked under the bubble.
+    static let hang: CGFloat = 21
+    static let tuck: CGFloat = 7
+
+    private static let fill = Color.loom(0xf7f7f8, 0x222226)
+    private static let edge = Color.loom(0xe4e4e8, 0x2e2e33)
+    private static let pressed = Color.loom(0xeaeaed, 0x2c2c31)
+
+    var body: some View {
+        let shown = message.sources.map { message.shown($0) }
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
+        Button { open = true } label: {
+            HStack(spacing: 6) {
+                HStack(spacing: 3) {
+                    // Each site's icon once, the first three.
+                    let icons = shown.compactMap(\.icon).reduce(into: [String]()) { out, i in if !out.contains(i) { out.append(i) } }.prefix(3)
+                    if icons.isEmpty {
+                        SiteIcon(icon: nil)
+                    } else {
+                        ForEach(Array(icons.enumerated()), id: \.offset) { _, icon in SiteIcon(icon: icon) }
+                    }
+                }
+                if shown.count == 1, let one = shown.first {
+                    Text(one.site).font(Fonts.mono(Tokens.PhoneSize.caption - 1, relativeTo: .caption))
+                } else {
+                    Text("\(shown.count) sources").font(Fonts.caption)
+                }
+                Image(systemName: "chevron.down").font(.system(size: 10, weight: .semibold)).foregroundStyle(P.ink3)
+            }
+            .foregroundStyle(P.ink2)
+            .padding(.top, SourcesTab.tuck)
+            .padding(.leading, 5)
+            .padding(.trailing, Tokens.Space.s)
+            .frame(height: SourcesTab.hang + SourcesTab.tuck)
+            .background(open ? SourcesTab.pressed : SourcesTab.fill, in: shape)
+            .overlay(shape.strokeBorder(SourcesTab.edge, lineWidth: 1))
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(shown.count == 1 ? "Source, \(shown[0].site)" : "\(shown.count) sources")
+        .sheet(isPresented: $open) {
+            SourcesSheet(message: message)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+/// A reply's sources, a line each: its site's icon, its title, and its site.
+private struct SourcesSheet: View {
+    @Environment(\.openURL) private var openURL
+    @Environment(\.dismiss) private var dismiss
+    var message: Message
+
+    var body: some View {
+        NavigationStack {
+            List {
+                ForEach(Array(message.sources.enumerated()), id: \.offset) { _, s in
+                    let shown = message.shown(s)
+                    Button {
+                        if let url = URL(string: s.url) { openURL(url) }
+                        dismiss()
+                    } label: {
+                        HStack(spacing: Tokens.Space.m) {
+                            SiteIcon(icon: shown.icon, size: 20)
+                            Text(shown.title).font(Fonts.body).foregroundStyle(P.ink).lineLimit(1)
+                            Spacer(minLength: Tokens.Space.s)
+                            Text(shown.site).font(Fonts.mono(Tokens.PhoneSize.caption, relativeTo: .caption)).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.tail)
+                        }
+                    }
+                    .listRowBackground(P.raised)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(P.bg)
+            .navigationTitle("Sources")
+            .navigationBarTitleDisplayMode(.inline)
         }
     }
 }

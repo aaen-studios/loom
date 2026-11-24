@@ -13,6 +13,8 @@ struct MarkdownView: View {
     var ink: Color = P.ink
     /// Still being written, so it grows at the end.
     var live = false
+    /// The site icons of the pages it links to, by address: where each icon's file is.
+    var icons: [String: String] = [:]
 
     var body: some View {
         let parts = live && !keepBreaks ? MarkdownView.growing(text) : MarkdownView.parse(text, keepBreaks: keepBreaks)
@@ -20,7 +22,7 @@ struct MarkdownView: View {
             // Each part is its own view, compared before it's drawn again: as a reply is
             // written, only its last part changes.
             ForEach(parts.indices, id: \.self) { i in
-                PartView(part: parts[i], font: font, ink: ink).equatable()
+                PartView(part: parts[i], font: font, ink: ink, icons: icons).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -109,6 +111,39 @@ struct MarkdownView: View {
         return out
     }
 
+    /// Inline Markdown with each link's site icon before it, where `icons` has one.
+    static func text(_ s: String, icons: [String: String]) -> Text {
+        let a = inline(s)
+        guard !icons.isEmpty else { return Text(a) }
+        var out = Text("")
+        var last: URL?
+        for run in a.runs {
+            if let url = run.link, url != last, let path = icons[url.absoluteString], let icon = siteIcon(path) {
+                out = Text("\(out)\(Text(Image(uiImage: icon)).baselineOffset(-2)) ")
+            }
+            last = run.link
+            out = Text("\(out)\(Text(AttributedString(a[run.range])))")
+        }
+        return out
+    }
+
+    /// A site's icon at 14 points, with loom's small radius, kept once it's made.
+    static func siteIcon(_ path: String) -> UIImage? {
+        let key = path as NSString
+        if let kept = siteIcons.object(forKey: key) { return kept }
+        guard let image = UIImage(contentsOfFile: path) else { return nil }
+        let side: CGFloat = 14
+        let made = UIGraphicsImageRenderer(size: CGSize(width: side, height: side)).image { _ in
+            let box = CGRect(x: 0, y: 0, width: side, height: side)
+            UIBezierPath(roundedRect: box, cornerRadius: 3).addClip()
+            image.draw(in: box)
+        }
+        siteIcons.setObject(made, forKey: key)
+        return made
+    }
+
+    nonisolated(unsafe) private static let siteIcons = NSCache<NSString, UIImage>()
+
     private final class Kept {
         let value: AttributedString
         init(_ value: AttributedString) { self.value = value }
@@ -126,24 +161,25 @@ private struct PartView: View, Equatable {
     var part: MarkdownView.Part
     var font: Font
     var ink: Color
+    var icons: [String: String]
 
     var body: some View {
         switch part {
         case .paragraph(let s):
-            Text(MarkdownView.inline(s)).font(font).foregroundStyle(ink).lineSpacing(4)
+            MarkdownView.text(s, icons: icons).font(font).foregroundStyle(ink).lineSpacing(4)
         case .heading(let level, let s):
-            Text(MarkdownView.inline(s))
+            MarkdownView.text(s, icons: icons)
                 .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
                 .foregroundStyle(P.ink)
                 .padding(.top, 4)
         case .item(let indent, let mark, let s):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
-                Text(MarkdownView.inline(s)).font(font).foregroundStyle(ink).lineSpacing(4)
+                MarkdownView.text(s, icons: icons).font(font).foregroundStyle(ink).lineSpacing(4)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .quote(let s):
-            Text(MarkdownView.inline(s))
+            MarkdownView.text(s, icons: icons)
                 .font(font).foregroundStyle(P.ink2).lineSpacing(4)
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 2) }
@@ -267,12 +303,13 @@ extension MarkdownView {
 }
 
 extension MarkdownView {
-    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false) {
+    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false, icons: [String: String] = [:]) {
         self.text = text
         self.keepBreaks = keepBreaks
         self.font = font
         self.ink = ink
         self.live = live
+        self.icons = icons
     }
 }
 

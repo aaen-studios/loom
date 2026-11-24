@@ -287,8 +287,23 @@ struct Message: Identifiable, Equatable, Sendable {
     /// How a reply's turn ended: `done`, or `cancelled`, `failed` or `limit` for one cut
     /// short.
     var status = ""
+    /// The Sources list the instance took off the end of a reply's words, shown on a tab
+    /// under its bubble.
+    var sources: [Source] = []
+    /// The pages it links to that the instance has looked up, by address.
+    var links: [String: PageLink] = [:]
 
     var isPerson: Bool { role == "person" }
+
+    /// A source as the tab and its list show it: the title the reply gave, or else the
+    /// page's own, or else its site; and its site's icon, if the instance found one.
+    func shown(_ s: Source) -> (title: String, site: String, icon: String?) {
+        let link = links[s.url]
+        let title = [s.title, link?.title ?? "", s.site, s.url]
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? s.url
+        return (title, s.site, link?.icon)
+    }
 
     /// A turn that didn't end by itself, which keeps everything it had in view, since
     /// there's no answer to fold its steps under.
@@ -298,6 +313,89 @@ struct Message: Identifiable, Equatable, Sendable {
     var text: String {
         blocks.filter { $0.kind == "text" && $0.parent == nil && !$0.text.isEmpty }.map(\.text).joined(separator: "\n\n")
     }
+}
+
+/// One of a reply's sources (PLAN.md, "Links and sources").
+struct Source: Equatable, Sendable {
+    var url: String
+    /// As the reply wrote it, maybe empty.
+    var title: String
+    var site: String
+
+    static func of(_ j: JSON) -> Source {
+        Source(url: j["url"].text, title: j["title"].text, site: j["site"].text)
+    }
+}
+
+/// A page a message links to, as the instance looked it up.
+struct PageLink: Equatable, Sendable {
+    /// The page's own, maybe empty.
+    var title: String
+    var site: String
+    /// Its site's icon, a file to fetch.
+    var icon: String?
+
+    static func all(_ j: JSON) -> [String: PageLink] {
+        guard case .object(let o) = j else { return [:] }
+        return o.mapValues { v in
+            PageLink(title: v["title"].text, site: v["site"].text, icon: v["icon"].string.flatMap { $0.isEmpty ? nil : $0 })
+        }
+    }
+}
+
+/// A message's words with each bare address that was looked up as its page's title,
+/// linking to it, as desktop/src/model.rs's `with_link_icons` does. Code stays as it is.
+func titledLinks(_ text: String, _ links: [String: PageLink]) -> String {
+    guard !links.isEmpty, text.contains("http") else { return text }
+    var out: [String] = []
+    var fenced = false
+    for line in text.components(separatedBy: "\n") {
+        let t = line.trimmingCharacters(in: .whitespaces)
+        if t.hasPrefix("```") || t.hasPrefix("~~~") {
+            fenced.toggle()
+            out.append(line)
+            continue
+        }
+        out.append(fenced ? line : titledLine(line, links))
+    }
+    return out.joined(separator: "\n")
+}
+
+private func titledLine(_ line: String, _ links: [String: PageLink]) -> String {
+    var out = ""
+    var rest = Substring(line)
+    while let c = rest.first {
+        // Inline code and Markdown links stay as written.
+        if c == "`" {
+            let after = rest.dropFirst()
+            guard let end = after.firstIndex(of: "`") else { out += rest; break }
+            out += rest[...end]
+            rest = after[after.index(after: end)...]
+            continue
+        }
+        if c == "[", let close = rest.range(of: "]("), let end = rest[close.upperBound...].firstIndex(of: ")"), !rest[..<close.lowerBound].contains("\n") {
+            out += rest[...end]
+            rest = rest[rest.index(after: end)...]
+            continue
+        }
+        if rest.hasPrefix("https://") || rest.hasPrefix("http://") {
+            let end = rest.firstIndex { $0.isWhitespace || "<>\"`".contains($0) } ?? rest.endIndex
+            var url = rest[..<end]
+            while let last = url.last, ".,;:!?)'".contains(last) { url = url.dropLast() }
+            if url.isEmpty { url = rest[..<end] }
+            if let title = links[String(url)]?.title.trimmingCharacters(in: .whitespaces), !title.isEmpty {
+                let plain = title.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+                out += "[\(plain)](\(url))"
+            } else {
+                out += url
+            }
+            rest = rest[url.endIndex...]
+            continue
+        }
+        out.append(c)
+        rest = rest.dropFirst()
+    }
+    return out
 }
 
 struct Tool: Equatable, Sendable {
@@ -1141,7 +1239,7 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), status: m["status"].text)
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]))
             }
             placeQueued()
             // The tool calls these messages name.
@@ -1285,6 +1383,8 @@ final class Model {
         let cardBadges = shown.flatMap(\.blocks).compactMap { $0.card?.badge }
         let askBadges = approvals.flatMap { $0.shown.badges + $0.shown.steps.compactMap(\.badge) }
         wanted += (cardBadges + askBadges).flatMap(\.icons)
+        // The icons of the sites its messages link to.
+        wanted += shown.flatMap { $0.links.values.compactMap(\.icon) }
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }

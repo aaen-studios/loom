@@ -7,7 +7,7 @@ module tests.fake_agent.main
 // out. Each line of the prompt is one step:
 //
 //     plain text          says that line, streamed a word at a time
-//     /say TEXT           the same
+//     /say TEXT           the same, with each \n in it a line break
 //     /think TEXT         an agent_thought_chunk
 //     /plan A; B; C       a plan with those entries
 //     /tool TITLE         a tool call that runs and completes
@@ -161,7 +161,7 @@ pub fn script(text: String) -> List<Step> {
         }
         let (word, rest) = split_word(line.copy())
         if word == "/say" {
-            steps.push(Step.Say(rest))
+            steps.push(Step.Say(rest.replace(String("\\n"), String("\n"))))
         } else if word == "/think" {
             steps.push(Step.Think(rest))
         } else if word == "/plan" {

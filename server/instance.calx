@@ -46,6 +46,7 @@ import server.hashing.{Done, Job}
 import server.installer
 import server.icons
 import server.mcptest
+import server.links
 import server.oauth
 import server.move
 import server.noise
@@ -377,6 +378,11 @@ pub struct Instance {
     mcp_test_to: Sender<mcptest.Job>    // the thread that tests an MCP server
     mcp_test_done: Receiver<mcptest.Done>
     mcp_tests: Map<i64, McpTest>    // the command waiting on each test
+    link_to: Sender<links.Job>    // the thread that looks pages up (server/links.calx)
+    link_done: Receiver<links.Done>
+    link_pages: Map<String, Json>    // each page looked up since the instance started -> {title, site}
+    site_icons: Map<String, List<u8>>    // each site's icon, as a PNG, or empty when it has none
+    link_waiting: Map<String, List<(String, String)>>    // a page being looked up -> each (user, message) to give it to
     oauth_to: Sender<oauth.Job>    // the thread that signs in to MCP servers and renews their tokens
     oauth_done: Receiver<oauth.Done>
     oauth_jobs: Map<i64, OauthJob>
@@ -1451,6 +1457,7 @@ impl Instance {
         let dummy = "$argon2id$v=19$m={h.memory_kib},t={h.iterations},p={h.parallelism}${bytes.base64(random_bytes(h.salt_len)).replace("=", "")}${bytes.base64(random_bytes(h.hash_len)).replace("=", "")}"
         let (install_to, install_done) = installer.start()
         let (mcp_test_to, mcp_test_done) = mcptest.start()
+        let (link_to, link_done) = links.start()
         let (oauth_to, oauth_done) = oauth.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
         let (move_to, move_done) = move.start()
@@ -1464,7 +1471,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2145,6 +2152,12 @@ impl Instance {
                 match i.installed(d) {
                     ok => {},
                     err(e) => eprintln("loom: installing: {e}"),
+                }
+            }
+            while let d = i.link_done.next() {
+                match i.link_found(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: looking a page up: {e}"),
                 }
             }
             while let d = i.mcp_test_done.next() {
@@ -4881,6 +4894,103 @@ impl Instance {
 
     // The files a reply names that are in its agent's folder or the shared
     // one: each `path` as the reply wrote it, its `name` and its `size`.
+    // --- Links and sources (PLAN.md, "Links and sources") ---
+
+    // The pages a message names: the links in its own words (not a subagent's)
+    // and its sources.
+    fn pages_in(message: Json) -> List<String> {
+        var urls = List<String>()
+        if let Json.Array(blocks) = at(message.copy(), "blocks") {
+            for b in blocks {
+                if str_at(b.copy(), "kind") != some(String("text")) or at(b.copy(), "parent") != Json.Null { continue }
+                for u in links.urls_in(str_at(b, "text") ?? String()) {
+                    if not urls.contains(u.copy()) { urls.push(u.copy()) }
+                }
+            }
+        }
+        if let Json.Array(sources) = at(message, "sources") {
+            for s in sources {
+                let u = str_at(s, "url") ?? String()
+                if u.len() > 0 and not urls.contains(u.copy()) { urls.push(u) }
+            }
+        }
+        return urls
+    }
+
+    // What a message says of page `url`, looked up: its title, its site, and
+    // the site's icon, kept as `user`'s file.
+    fn link_of(i: mut Instance, user: String, page_url: String) -> Json ! Error {
+        let site = links.site_of(page_url.copy())
+        var title = String()
+        if let page = i.link_pages.find(page_url.copy()) { title = str_at(page.copy(), "title") ?? String() }
+        var o = Obj.new().s("title", title).s("site", site.copy())
+        var png = List<u8>()
+        if let p = i.site_icons.find(site.copy()) { png = p.copy() }
+        if png.len() > 0 {
+            let sha = bytes.hex(sha256(png.copy()))
+            try i.keep_file(user, sha.copy(), "{site}.png", String("image/png"), png)
+            o = o.s("icon", sha)
+        }
+        return o.done()
+    }
+
+    // `message` with `links` for each page in it the instance has looked up.
+    // The rest are looked up, and the message is updated as each comes.
+    fn with_links(i: mut Instance, user: String, message: Json) -> Json ! Error {
+        let id = str_at(message.copy(), "id") ?? String()
+        var known = Obj.new()
+        var any = false
+        var asked: usize = 0
+        for u in Instance.pages_in(message.copy()) {
+            if not links.lookable(u.copy()) { continue }
+            if i.link_pages.contains(u.copy()) {
+                let link = try i.link_of(user.copy(), u.copy())
+                known.m.insert(u.copy(), link)
+                any = true
+                continue
+            }
+            if asked >= links.MOST { continue }
+            asked += 1
+            var waiting = i.link_waiting.remove(u.copy()) ?? List<(String, String)>()
+            if waiting.len() == 0 { i.link_to.send(links.Job { url: u.copy(), icon: not i.site_icons.contains(links.site_of(u.copy())) }) }
+            waiting.push((user.copy(), id.copy()))
+            i.link_waiting.insert(u.copy(), waiting)
+        }
+        if not any { return message.copy() }
+        return merge(message.copy(), Obj.new().j("links", known.done()).done())
+    }
+
+    // A page looked up: kept for the next message that names it, and given to
+    // each message waiting on it, which every device is told of.
+    fn link_found(i: mut Instance, d: links.Done) ! Error {
+        let site = links.site_of(d.url.copy())
+        i.link_pages.insert(d.url.copy(), Obj.new().s("title", d.title.copy()).s("site", site.copy()).done())
+        if d.icon_asked and not i.site_icons.contains(site.copy()) {
+            let png = if d.icon.len() == 0 { List<u8>() } else {
+                match files.site_icon_png(d.icon.copy()) {
+                    ok(p) => p,
+                    err(e) => {
+                        eprintln("loom: {site}'s icon: {e}")
+                        List<u8>()
+                    },
+                }
+            }
+            i.site_icons.insert(site.copy(), png)
+        }
+        let waiting = i.link_waiting.remove(d.url.copy()) ?? List<(String, String)>()
+        for (user, id) in waiting {
+            let message = try i.store.message(user.copy(), id.copy()) else continue
+            let link = try i.link_of(user.copy(), d.url.copy())
+            var had = at(message.copy(), "links")
+            if had == Json.Null { had = Obj.new().done() }
+            var one = Obj.new()
+            one.m.insert(d.url.copy(), link)
+            let changed = merge(message, Obj.new().j("links", merge(had, one.done())).done())
+            try i.store.put_message(user.copy(), changed.copy())
+            try i.event(user, "message.updated", Obj.new().s("conversation", str_at(changed.copy(), "conversation") ?? String()).j("message", changed).done())
+        }
+    }
+
     fn mentions(i: Instance, user: String, agent: String, said: String) -> List<Json> {
         var out = List<Json>()
         let named = named_paths(said)
@@ -7922,7 +8032,7 @@ impl Instance {
         for file in sent_files {
             blocks.push(merge(Obj.new().s("kind", String("file")).done(), file.copy()))
         }
-        let message = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done()
+        let message = try i.with_links(user.copy(), Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done())
         try i.store.put_message(user.copy(), message.copy())
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let from = try i.writing_from(user.copy(), device)
@@ -10216,11 +10326,27 @@ impl Instance {
         }
         if keep {
             // How the turn ended goes with it, so an app reads a stopped one as it was.
+            // The Sources list at the end of its words comes out of them, and goes
+            // under the reply as its sources.
+            var sources = List<Json>()
+            var last = blocks.len()
+            for k in 0usize..blocks.len() {
+                if str_at(blocks[k].copy(), "kind") == some(String("text")) and at(blocks[k].copy(), "parent") == Json.Null { last = k }
+            }
+            if last < blocks.len() {
+                let (text, found) = links.split_sources(str_at(blocks[last].copy(), "text") ?? String())
+                if found.len() > 0 {
+                    blocks[last] = merge(blocks[last].copy(), Obj.new().s("text", text).done())
+                    sources = found
+                }
+            }
             var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks))
+            if sources.len() > 0 { o = o.j("sources", Json.Array(sources)) }
             // Files it names that are there, for the app to show as chips.
             let mentions = i.mentions(r.user.copy(), r.agent.copy(), said.copy())
             if mentions.len() > 0 { o = o.j("mentions", Json.Array(mentions)) }
-            let message = o.done()
+            // And each page it links to, by its title and its site's icon.
+            let message = try i.with_links(r.user.copy(), o.done())
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
         }
