@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
-use gpui_kit::component::input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, MoveDown, MoveUp,
+    Paste, Textarea, TextareaState,
+};
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{TextView, TextViewState};
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
@@ -296,6 +299,11 @@ pub struct Loom {
     /// the next draw, which has the window: a file's `[name]` as it's attached and
     /// taken off.
     composer_edits: Vec<(bool, String)>,
+    /// The @ being typed in the composer, for its picker: where it is and what follows
+    /// it (PLAN.md, "Mentions").
+    mention: Option<(usize, String)>,
+    /// Which of the @ picker's choices is lit.
+    mention_lit: usize,
     /// What's written and attached but not sent in each chat the person left, by
     /// `draft_key`, and the chat the composer holds now.
     drafts: HashMap<String, (String, Vec<String>)>,
@@ -659,14 +667,18 @@ impl Loom {
             |this: &mut Loom, state, event: &InputEvent, window, cx| {
                 match event {
                     InputEvent::PressEnter { shift: false, .. } => {
-                        let text = state.read(cx).value().to_string();
+                        let text = composer_text(state.read(cx));
                         if let Some(frame) = this.model.send(&text) {
                             this.core.send(&frame.to_string());
                             state.update(cx, |s, cx| s.set_value("", window, cx));
                         }
                     }
-                    // The agent's thread thinks along while there's something typed.
-                    InputEvent::Change => cx.notify(),
+                    // The agent's thread thinks along while there's something typed, and
+                    // the @ picker follows what's typed after an @.
+                    InputEvent::Change => {
+                        this.track_mention(cx);
+                        cx.notify()
+                    }
                     _ => {}
                 }
             },
@@ -1194,6 +1206,8 @@ ACTA_KEY=secret:ACTA_KEY",
             scroller,
             composer,
             composer_edits: Vec::new(),
+            mention: None,
+            mention_lit: 0,
             drafts: HashMap::new(),
             draft_for: String::new(),
             server_in,
@@ -6613,6 +6627,187 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(div().flex_1().child(title.to_string()))
     }
 
+    /// The @ picker's choices for what's typed after the @ (PLAN.md, "Mentions").
+    fn mention_picks(&self) -> Vec<model::Pick> {
+        self.mention
+            .as_ref()
+            .map(|(_, q)| self.model.picks(q))
+            .unwrap_or_default()
+    }
+
+    /// Follows the @ being typed in the composer, and asks for the files that match it.
+    fn track_mention(&mut self, cx: &mut Context<Self>) {
+        let c = self.composer.read(cx);
+        let (text, cursor) = (c.value(), c.cursor());
+        // An @ in a mention already made isn't a new one.
+        let found = model::mention_query(&text, cursor)
+            .filter(|(at, _)| !c.tokens().iter().any(|t| t.range().contains(at)));
+        if found.as_ref().map(|f| f.0) != self.mention.as_ref().map(|m| m.0) {
+            self.mention_lit = 0;
+        }
+        self.mention = found;
+        if let Some((_, q)) = &self.mention {
+            if let Some(f) = self.model.find_files(q) {
+                self.send(f);
+            }
+        }
+    }
+
+    /// Puts what the @ picker chose in the composer, in place of the @ and what follows
+    /// it, as one piece.
+    fn pick_mention(&mut self, pick: &model::Pick, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((at, _)), Some(agent)) = (self.mention.take(), self.model.selected.clone())
+        else {
+            return;
+        };
+        let (link, words) = match pick {
+            model::Pick::Agent { id, name, .. } => model::agent_mention(id, name),
+            model::Pick::File(f) => model::file_mention(&agent, &f.path, &f.name),
+        };
+        self.composer.update(cx, |c, cx| {
+            let end = c.cursor().max(at);
+            if c.replace_range_with_token(at..end, InlineToken::new(link, words), window, cx)
+                .is_ok()
+            {
+                c.insert(" ", window, cx);
+            }
+            c.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The @ picker, over the composer: the person's other agents that match, then the
+    /// files in this agent's folder and the shared one.
+    fn mention_menu(&self, picks: &[model::Pick], cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let k = motion::arrive(&SharedString::from("mention-menu"), 0.16);
+        let mut panel = div()
+            .occlude()
+            .opacity(k)
+            .mb(px(space::S - 6.0 * (1.0 - k)))
+            .w(px(layout::MENU_WIDE + 60.0))
+            .p(px(space::XS))
+            .flex()
+            .flex_col()
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.mention = None;
+                cx.notify();
+            }));
+        let agents = self.model.agents.clone();
+        for (n, pick) in picks.iter().enumerate() {
+            let (glyph, title, about): (AnyElement, AnyElement, String) = match pick {
+                model::Pick::Agent {
+                    id,
+                    name,
+                    color,
+                    about,
+                } => {
+                    let hex = mention_color(p, color);
+                    let glyph = agents
+                        .iter()
+                        .find(|a| &a.id == id)
+                        .and_then(|a| mention_thread(a, &hex))
+                        .map(|path| {
+                            img(std::path::PathBuf::from(path))
+                                .w(px(16.0))
+                                .h(px(12.0))
+                                .into_any_element()
+                        })
+                        .unwrap_or_else(|| div().into_any_element());
+                    let title = div()
+                        .text_color(hex_color(&hex).unwrap_or(p.ink))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(name.clone())
+                        .into_any_element();
+                    (glyph, title, about.clone())
+                }
+                model::Pick::File(f) => {
+                    let glyph = mention_file_icon(&f.name, &hex_of(p.ink_3))
+                        .map(|path| {
+                            img(std::path::PathBuf::from(path))
+                                .size(px(14.0))
+                                .into_any_element()
+                        })
+                        .unwrap_or_else(|| div().into_any_element());
+                    (
+                        glyph,
+                        div().child(f.name.clone()).into_any_element(),
+                        f.place.clone(),
+                    )
+                }
+            };
+            let chosen = pick.clone();
+            panel = panel.child(
+                div()
+                    .id(SharedString::from(format!("mention-{n}")))
+                    .role(Role::MenuItem)
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .px(px(space::M))
+                    .py(px(space::XS + 2.0))
+                    .rounded(px(radius::ROW))
+                    .cursor_pointer()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink)
+                    .when(n == self.mention_lit, |d| d.bg(p.hover))
+                    .child(
+                        div()
+                            .w(px(16.0))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(glyph),
+                    )
+                    .child(div().flex_none().child(title))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(p.ink_3)
+                            .child(about),
+                    )
+                    .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                        if this.mention_lit != n {
+                            this.mention_lit = n;
+                            cx.notify();
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.pick_mention(&chosen, window, cx);
+                    })),
+            );
+        }
+        panel
+    }
+
+    /// The @ picker's keys while it's open: up and down to choose, Enter or Tab to take
+    /// it, Escape to shut it. Shut, they go on to the composer.
+    fn mention_key(&mut self, key: MentionKey, window: &mut Window, cx: &mut Context<Self>) {
+        let picks = self.mention_picks();
+        if self.mention.is_none() || picks.is_empty() {
+            return;
+        }
+        let n = picks.len();
+        match key {
+            MentionKey::Up => self.mention_lit = (self.mention_lit + n - 1) % n,
+            MentionKey::Down => self.mention_lit = (self.mention_lit + 1) % n,
+            MentionKey::Take => {
+                let pick = picks[self.mention_lit.min(n - 1)].clone();
+                self.pick_mention(&pick, window, cx);
+            }
+            MentionKey::Shut => self.mention = None,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     /// The composer's + menu: attach files, start the message with one of the
     /// person's skills, or run one of this agent's routines now.
     fn plus_menu(&self, which: Plus, cx: &mut Context<Self>) -> Div {
@@ -7694,6 +7889,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let has_attachments = !self.model.attachments.is_empty();
         let plus_open = self.plus.is_some();
         let plus_menu = self.plus.map(|which| self.plus_menu(which, cx));
+        let picks = self.mention_picks();
+        let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let mut composer = Some(
             div()
                 .w_full()
@@ -7710,6 +7907,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 // The plus menu opens just above the composer, from its left edge.
                 .relative()
                 .when_some(plus_menu, |d, menu| {
+                    d.child(div().absolute().top_0().left_0().child(deferred(
+                        anchored().anchor(Anchor::BottomLeft).child(menu),
+                    )))
+                })
+                // And the @ picker, the same.
+                .when_some(mention_menu, |d, menu| {
                     d.child(div().absolute().top_0().left_0().child(deferred(
                         anchored().anchor(Anchor::BottomLeft).child(menu),
                     )))
@@ -7763,7 +7966,37 @@ ACTA_KEY=secret:ACTA_KEY",
                                         cx.stop_propagation();
                                     }
                                 }))
-                                .child(Textarea::new(&self.composer).appearance(false)),
+                                // The @ picker's keys, before the textarea's own.
+                                .capture_action(cx.listener(|this, e: &Enter, window, cx| {
+                                    if !e.shift {
+                                        this.mention_key(MentionKey::Take, window, cx)
+                                    }
+                                }))
+                                .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
+                                    this.mention_key(MentionKey::Take, window, cx)
+                                }))
+                                .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                                    this.mention_key(MentionKey::Up, window, cx)
+                                }))
+                                .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
+                                    this.mention_key(MentionKey::Down, window, cx)
+                                }))
+                                .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                                    this.mention_key(MentionKey::Shut, window, cx)
+                                }))
+                                .child({
+                                    let agents = self.model.agents.clone();
+                                    Textarea::new(&self.composer).appearance(false).token(
+                                        move |t, _, _| {
+                                            mention_token(
+                                                p,
+                                                &agents,
+                                                t.token().id(),
+                                                t.token().text(),
+                                            )
+                                        },
+                                    )
+                                }),
                         )
                         // Dictation: the system's own voice typing, into the composer.
                         .when(cfg!(any(windows, target_os = "macos")), |d| {
@@ -7832,7 +8065,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                         }
                                         return;
                                     }
-                                    let text = this.composer.read(cx).value().to_string();
+                                    let text = composer_text(this.composer.read(cx));
                                     if let Some(frame) = this.model.send(&text) {
                                         this.send(frame);
                                         this.composer
@@ -14308,13 +14541,31 @@ fn person(
         .flex_col()
         .items_end()
         .gap(px(space::XS));
-    // Another agent wrote this one, handing work over.
-    if let Some(from) = &m.from_agent {
+    // Another agent wrote this one, handing work over: its thread and its name over it,
+    // the name in its colour as a mention's is, and the bubble a breath of that colour.
+    let sender = m.from_agent.as_ref().map(|from| {
+        let agents = MENTION_AGENTS.with(|a| a.borrow().clone());
+        let a = agents.iter().find(|a| &a.name == from).cloned();
+        (from.clone(), a)
+    });
+    if let Some((from, a)) = &sender {
+        let hex = a.as_ref().map(|a| mention_color(p, &a.color));
+        let glyph = a
+            .as_ref()
+            .zip(hex.as_ref())
+            .and_then(|(a, hex)| mention_thread(a, hex));
         out = out.child(
             div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
                 .text_size(px(size::CAPTION))
-                .text_color(p.ink_3)
-                .child(format!("From {from}")),
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(hex.as_deref().and_then(hex_color).unwrap_or(p.ink_3))
+                .when_some(glyph, |d, path| {
+                    d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(10.0)))
+                })
+                .child(from.clone()),
         );
     }
     // Its files over its words, two or more pictures as one stack.
@@ -14358,6 +14609,7 @@ fn person(
     let text = model::unmark_stacked(&text, &stacked).replace('\n', "  \n");
     let attached: Vec<model::FileRef> = m.blocks.iter().filter_map(|b| b.file.clone()).collect();
     let words = linked_words(
+        p,
         &model::link_files(&model::literal_html(&text), &attached),
         m,
     );
@@ -14377,16 +14629,25 @@ fn person(
                 });
             }
         }
+        // A file it mentions opens as one a reply names does.
+        None if url.starts_with("loom:file/") => {
+            let _ = opener.update(cx, |loom, _| {
+                if let Some(frame) = loom.model.open_file_mention(url) {
+                    loom.send(frame);
+                }
+            });
+        }
+        None if url.starts_with("loom:") => {}
         None => cx.open_url(url),
     };
     // Its corners on the right smaller where it joins the person's messages either side.
-    // What the person wrote takes the agent's colour; what a routine or another agent
-    // sent is plain grey.
+    // What the person wrote takes the agent's colour; what another agent sent, that
+    // agent's, a little.
     let c = model::corners(true, joined);
-    let bg = if m.from_agent.is_some() {
-        p.bubble
-    } else {
-        person_bubble(p, tint, vibrant)
+    let bg = match &sender {
+        Some((_, Some(a))) => motion::mix(p.bubble, thread::color(&a.color, p.dark), 0.1),
+        Some((_, None)) => p.bubble,
+        None => person_bubble(p, tint, vibrant),
     };
     let ink = motion::ink_on(bg, p.ink, p.bg);
     out.when(!text.trim().is_empty(), |d| {
@@ -16361,9 +16622,201 @@ const SITE_ICON: &str = "loom-icon:";
 
 /// A message's words as the chat shows them: each link it has looked up with its site's
 /// icon before it, and a bare address as its page's title (`model::with_link_icons`).
-fn linked_words(text: &str, m: &Message) -> String {
-    model::with_link_icons(text, &m.links, &|sha| {
-        badge_icon(sha).map(|path| format!("{SITE_ICON}{path}"))
+fn linked_words(p: Palette, text: &str, m: &Message) -> String {
+    let agents = MENTION_AGENTS.with(|a| a.borrow().clone());
+    let icon_src = |sha: &str| badge_icon(sha).map(|path| format!("{SITE_ICON}{path}"));
+    let agent = |id: &str| {
+        let a = agents.iter().find(|a| a.id == id)?;
+        let color = mention_color(p, &a.color);
+        let thread = mention_thread(a, &color)?;
+        Some((format!("#{color}"), format!("{SITE_ICON}{thread}")))
+    };
+    let file_icon = |name: &str| {
+        mention_file_icon(name, &hex_of(p.ink_3))
+            .map(|path| format!("{SITE_ICON}{path}"))
+            .unwrap_or_default()
+    };
+    model::with_link_icons(
+        text,
+        &model::Inline {
+            links: &m.links,
+            icon_src: &icon_src,
+            agent: &agent,
+            file_icon: &file_icon,
+        },
+    )
+}
+
+thread_local! {
+    /// The agents of the server on screen, for the mentions in its messages
+    /// (`linked_words`). Shared, as `BADGE_FILES` is.
+    static MENTION_AGENTS: RefCell<Rc<Vec<model::Agent>>> = RefCell::new(Rc::new(Vec::new()));
+}
+
+/// Gives `linked_words` the agents of the server on screen.
+fn sync_mention_agents(agents: &Rc<Vec<model::Agent>>) {
+    MENTION_AGENTS.with(|a| {
+        if !Rc::ptr_eq(&a.borrow(), agents) {
+            *a.borrow_mut() = agents.clone();
+        }
+    });
+}
+
+/// A key the @ picker takes while it's open (`Loom::mention_key`).
+#[derive(Clone, Copy)]
+enum MentionKey {
+    Up,
+    Down,
+    Take,
+    Shut,
+}
+
+/// What's in the composer as it's sent: each mention in it as its link (PLAN.md,
+/// "Mentions").
+fn composer_text(c: &TextareaState) -> String {
+    let content = c.content();
+    let tokens: Vec<_> = content
+        .tokens()
+        .iter()
+        .map(|t| {
+            (
+                t.range(),
+                t.token().id().to_string(),
+                t.token().text().to_string(),
+            )
+        })
+        .collect();
+    model::with_mention_links(content.text(), &tokens)
+}
+
+/// A mention in the composer: an agent as its thread and its name in its colour, a file
+/// as its icon and its name.
+fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -> AnyElement {
+    let row = div().flex().items_center().gap(px(3.0)).px(px(1.0));
+    if let Some(id) = link.strip_prefix("loom:agent/") {
+        let name = words.trim_start_matches('@').to_string();
+        let Some(a) = agents.iter().find(|a| a.id == id) else {
+            return row.child(format!("@{name}")).into_any_element();
+        };
+        let hex = mention_color(p, &a.color);
+        return row
+            .when_some(mention_thread(a, &hex), |d, path| {
+                d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(10.0)))
+            })
+            .child(
+                div()
+                    .text_color(hex_color(&hex).unwrap_or(p.ink))
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(name),
+            )
+            .into_any_element();
+    }
+    row.when_some(mention_file_icon(words, &hex_of(p.ink_3)), |d, path| {
+        d.child(img(std::path::PathBuf::from(path)).size(px(14.0)))
+    })
+    .child(div().underline().child(words.to_string()))
+    .into_any_element()
+}
+
+/// A colour from `rrggbb`.
+fn hex_color(hex: &str) -> Option<Hsla> {
+    u32::from_str_radix(hex.trim_start_matches('#'), 16)
+        .ok()
+        .map(|c| rgb(c).into())
+}
+
+/// A colour as `rrggbb`.
+fn hex_of(c: Hsla) -> String {
+    let c = Rgba::from(c);
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
+}
+
+/// An agent's name where a message mentions it: its colour, a little weathered toward
+/// the quiet ink, as `rrggbb`.
+fn mention_color(p: Palette, color: &str) -> String {
+    hex_of(motion::mix(thread::color(color, p.dark), p.ink_3, 0.3))
+}
+
+/// The folder the mentions' small pictures are drawn into, made once.
+fn mention_dir() -> Option<String> {
+    static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = format!("{}/cache/mentions", data_dir());
+        std::fs::create_dir_all(&dir).ok().map(|_| dir)
+    })
+    .clone()
+}
+
+/// An SVG file named `name` in `mention_dir`, written the first time it's asked for.
+fn mention_svg(name: &str, svg: impl FnOnce() -> String) -> Option<String> {
+    let path = format!("{}/{name}.svg", mention_dir()?);
+    if !std::path::Path::new(&path).exists() {
+        std::fs::write(&path, svg()).ok()?;
+    }
+    Some(path)
+}
+
+/// An agent's thread in its shape and `color`, 14 by 10, still, as an SVG file.
+fn mention_thread(a: &model::Agent, color: &str) -> Option<String> {
+    use std::hash::{Hash, Hasher};
+    let pts = model::outline_of(&a.shape, &a.drawing);
+    let mut h = std::hash::DefaultHasher::new();
+    format!("{pts:?}").hash(&mut h);
+    let name = format!("thread-{color}-{:x}", h.finish());
+    mention_svg(&name, || {
+        let d = match pts {
+            Some(pts) => {
+                // Fitted into the box by its widest side, as the sidebar draws it.
+                let (mut sx, mut sy) = (0.0f32, 0.0f32);
+                for (x, y) in pts {
+                    sx = sx.max(x.abs());
+                    sy = sy.max(y.abs());
+                }
+                let scale = (6.0 / sx.max(0.1)).min(4.0 / sy.max(0.1));
+                let mut d = String::new();
+                for (i, (x, y)) in pts.iter().enumerate() {
+                    let cmd = if i == 0 { 'M' } else { 'L' };
+                    d.push_str(&format!(
+                        "{cmd}{:.2} {:.2} ",
+                        7.0 + x * scale,
+                        5.0 + y * scale
+                    ));
+                }
+                d
+            }
+            None => "M1 6 C 3.5 2, 5.5 2, 7 5 S 10.5 8.5, 13 4".to_string(),
+        };
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"20\" viewBox=\"0 0 14 10\">\
+             <path d=\"{d}\" fill=\"none\" stroke=\"#{color}\" stroke-width=\"1.6\" \
+             stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
+        )
+    })
+}
+
+/// The icon for a file of this name in a message, in `color`: a picture's, or a page's.
+fn mention_file_icon(name: &str, color: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    let picture = [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".svg",
+    ]
+    .iter()
+    .any(|t| lower.ends_with(t));
+    let kind = if picture { "picture" } else { "file" };
+    mention_svg(&format!("{kind}-{color}"), || {
+        let body = if picture {
+            "<rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\"/>\
+             <circle cx=\"9\" cy=\"9\" r=\"2\"/><path d=\"m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21\"/>"
+        } else {
+            "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"/>\
+             <path d=\"M14 2v4a2 2 0 0 0 2 2h4\"/>"
+        };
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"28\" viewBox=\"0 0 24 24\" \
+             fill=\"none\" stroke=\"#{color}\" stroke-width=\"2\" stroke-linecap=\"round\" \
+             stroke-linejoin=\"round\">{body}</svg>"
+        )
     })
 }
 
@@ -16614,7 +17067,7 @@ impl ReplyDraw<'_> {
                 .text_color(p.ink)
                 .child(KeptText::new(
                     SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    linked_words(&self.m.blocks[i].text, self.m),
+                    linked_words(p, &self.m.blocks[i].text, self.m),
                     |v| with_links(v.selectable(true)),
                 ));
             let sources = (self.sources_at == Some(i)).then(|| self.sources_tab());
@@ -17892,6 +18345,7 @@ impl Render for Loom {
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
         sync_badge_files(&self.model.files);
+        sync_mention_agents(&self.model.agents);
         self.finish_weaving(window, cx);
         if std::mem::take(&mut self.rows_dirty) {
             self.refresh_rows(cx);

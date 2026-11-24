@@ -138,7 +138,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             }
         case "cmd":
             // The person's MCP servers, as the sample's sign-in card needs them, and a
-            // sign-in, which sample servers can't do.
+            // sign-in, which sample servers can't do. The files the composer's @ picker
+            // finds, and a file a message mentions, kept as the person's.
             switch f["name"].text {
             case "mcp.list":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["servers": [["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed"]]]])
@@ -146,6 +147,17 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 later(0.4) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "sign_in_failed", "message": "Sample servers can't be signed in to."]])
                 }
+            case "agent.files":
+                let query = f["args"]["query"].text.lowercased()
+                let found = Sample.folder.filter { query.isEmpty || $0["path"].text.lowercased().contains(query) }
+                later(0.1) { [self] in
+                    tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(found)]])
+                }
+            case "agent.file":
+                let path = f["args"]["path"].text
+                let name = (path as NSString).lastPathComponent
+                let picture = isPicture(name)
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["file": ["file": JSON(picture ? "sample-leaf" : "sample-\(name)"), "name": JSON(name), "mime": JSON(picture ? "image/png" : "text/markdown"), "size": 2_400]]])
             default:
                 break
             }
@@ -249,10 +261,22 @@ enum Sample {
     """
 
     static let agents: [JSON] = [
-        ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask"],
-        ["id": "a_2", "name": "Scribe", "color": "mint", "shape": "heart", "acp_agent": "claude", "permission": "auto"],
-        ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask"],
-        ["id": "a_4", "name": "Gardener", "color": "pink", "shape": "star", "acp_agent": "gemini", "permission": "allow"],
+        ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask",
+         "instructions": "Builds loom, runs its tests and writes the release notes."],
+        ["id": "a_2", "name": "Scribe", "color": "mint", "shape": "heart", "acp_agent": "claude", "permission": "auto",
+         "instructions": "Keeps the notes: plans, meetings and the week's log."],
+        ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask",
+         "instructions": "Reads the mail in every inbox and says what needs me."],
+        ["id": "a_4", "name": "Gardener", "color": "pink", "shape": "star", "acp_agent": "gemini", "permission": "allow",
+         "instructions": "Looks after the balcony garden."],
+    ]
+
+    /// The files the composer's @ picker finds, as `agent.files` gives them: in the
+    /// agent's folder, and the shared one.
+    static let folder: [JSON] = [
+        ["path": "notes/watering.md", "name": "watering.md", "where": "notes"],
+        ["path": "notes/harvest 2026.md", "name": "harvest 2026.md", "where": "notes"],
+        ["path": "/Users/sample/Shared/balcony plan.png", "name": "balcony plan.png", "where": "shared"],
     ]
 
     static let conversations: [JSON] = [
@@ -304,11 +328,9 @@ enum Sample {
                                                   "state": "asking"]]]],
         ],
         "c_4": [
-            ["id": "msg_40", "conversation": "c_4", "role": "person", "from": "a_1", "at": 1795160000000,
-             "blocks": [["kind": "text", "text": "Water the tomatoes on the balcony when the forecast says no rain."]]],
             ["id": "msg_41", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187000000,
              "blocks": [["kind": "file", "file": "sample-tall", "name": "balcony.png", "mime": "image/png", "size": 412_000],
-                        ["kind": "text", "text": "Is this one ready to pick?"]]],
+                        ["kind": "text", "text": "Is [balcony.png] ready to pick?"]]],
             ["id": "msg_42", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_41", "at": 1795187060000,
              "blocks": [
                 ["kind": "tool", "call": "tc_40"],
@@ -321,6 +343,12 @@ enum Sample {
                         ["kind": "file", "file": "sample-leaf", "name": "leaves.png", "mime": "image/png", "size": 351_000],
                         ["kind": "file", "file": "sample-tall", "name": "balcony.png", "mime": "image/png", "size": 412_000],
                         ["kind": "text", "text": "[balcony 2.png] [leaves.png] [balcony.png] And these, from this evening?"]]],
+            // Another agent's message (`message_agent`), on the person's side in its colour.
+            ["id": "msg_40", "conversation": "c_4", "role": "person", "from": "a_1", "at": 1795187150000,
+             "blocks": [["kind": "text", "text": "Water the tomatoes on the balcony when the forecast says no rain."]]],
+            // Mentions of an agent and of a file in the agent's folder.
+            ["id": "msg_44", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187180000,
+             "blocks": [["kind": "text", "text": "Once they're watered, note it in [watering.md](loom:file/a_4/notes/watering.md) and tell [@Scribe](loom:agent/a_2)."]]],
         ],
     ]
 

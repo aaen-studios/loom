@@ -32,6 +32,14 @@ When an agent ends a reply with a list of its sources, the list comes off the re
 
 Loom looks the pages up itself, for their titles and icons. It looks up only https pages on the internet, never one on your own network, and at most twelve a message.
 
+## Mentions
+
+Type `@` in the message box to pick another of your agents, or a file in this agent's folder or the shared one. Keep typing to narrow the list, use the arrows and Enter or Tab to take one, or click it. Esc shuts the list.
+
+In the chat, an agent you mention shows as its thread and its name in its colour, and a file as its icon and its name, which opens it. The agent knows who and what you mean, so you can ask it to message another agent for you, hand over a file, or read one. A file you send shows the same way, with a tiny copy of itself when it's a picture.
+
+A message one agent sends another sits on your side of the chat, tinted with the sender's colour, with its thread and name over it.
+
 ## How an agent uses its tools
 
 Agents use their tools by writing small scripts, in Code Mode. Instead of being given every tool up front, an agent looks up the tools it needs and writes a script that calls them, so its context stays small. Only what the script gives back reaches the agent: it can read a whole document and pass on three lines.

@@ -79,6 +79,30 @@ enum P {
 
     nonisolated(unsafe) private static var personBubbles: [String: Color] = [:]    // drawn on the main thread only
 
+    /// An agent's name where a message mentions it, and over a message it sent: its
+    /// thread colour, a little weathered, 30% of the way to the quiet ink, as the
+    /// desktop's `mention_color`. Kept per colour, as `thread` is.
+    static func mention(_ name: String) -> Color {
+        mixed("mention:\(name)", thread(name), ink3, 0.3)
+    }
+
+    /// The bubble of a message another agent sent: the bubble grey with a breath of the
+    /// sender's thread colour, 10%, as the desktop's.
+    static func agentBubble(_ name: String) -> Color {
+        mixed("agent-bubble:\(name)", bubble, thread(name), 0.1)
+    }
+
+    /// `a` moved `k` of the way to `b`, in each appearance, kept by `key`.
+    private static func mixed(_ key: String, _ a: Color, _ b: Color, _ k: CGFloat) -> Color {
+        if let kept = mixes[key] { return kept }
+        let ua = UIColor(a), ub = UIColor(b)
+        let c = Color(UIColor { traits in mix(ua.resolvedColor(with: traits), ub.resolvedColor(with: traits), k) })
+        mixes[key] = c
+        return c
+    }
+
+    nonisolated(unsafe) private static var mixes: [String: Color] = [:]    // drawn on the main thread only
+
     /// `c` with its HSL lightness set to `l`, keeping its hue and saturation.
     private static func lightness(_ c: UIColor, _ l: CGFloat) -> UIColor {
         var (h, sv, v, a): (CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0)

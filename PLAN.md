@@ -617,6 +617,14 @@ What another agent app keeps on the instance's computer comes over in one go, fr
 - **Icons as they are.** A site's icon is drawn as the site made it, with the small radius loom's chips have and nothing behind it.
 - **Looked up by the instance.** The instance reads each page's title (its `og:title`, or else its `<title>`) and its site's icon (one the page names that loom can draw, or else `/favicon.ico`; a PNG, a JPEG or an ICO, kept at 64px as the person's file). It does so on a thread of its own, with a cap on size and time, and only for https pages of public hosts: a redirect never leaves https, so a lookup reaches only a host with a certificate for its name, never the person's router, their other computers or the instance itself. An address on a network of the person's own, or a name only it knows, isn't looked up. A page is looked up once while the instance runs.
 
+## Mentions
+
+- **@ in the composer.** Typing `@`, at the start or after a space, opens a picker over the composer: the person's other agents whose names match what follows, each with its thread and its name in its colour and the first line of its instructions, then the files that match in the agent's folder and the shared one, each with its icon, its name and its folder. Hidden folders, `node_modules`, `target` and `__pycache__` are left out. Up and down choose, Enter or Tab takes one, Esc shuts it, and a click takes one too. What's taken sits in the composer as one piece, which Backspace takes out whole.
+- **Kept as links.** A mention goes in the message as a link: `[@Casper](loom:agent/a_2)` for an agent, `[hours.md](loom:file/a_1/notes%2Fhours.md)` for a file, its path as a reply would name it. So the message keeps who and what it meant, whatever is renamed later.
+- **Read by the agent as words.** The agent reads `@Casper` and `` `notes/hours.md` ``, with a note telling it who each agent is and how to reach it (`message_agent` with its name), and that each file is in its folder or the shared one. The person can ask it to send another agent a message, hand over a file or read one, in their own words.
+- **Shown in the chat.** An agent mentioned shows as its thread and its name in its colour, a little weathered toward the quiet ink, with no @ and nothing behind it. A file shows its icon and its name, underlined, which opens it. A file sent with a message shows the same way where its name is, with a tiny copy of itself in place of the icon when it's a picture.
+- **Another agent's message.** A message one agent sends another with `message_agent` sits on the person's side of the chat, as the person's do, its bubble a breath of the sender's colour, with the sender's thread and name in its colour over it.
+
 ## Search
 
 Full-text search over every conversation, with FTS5 as memory uses, filtered by agent and date.

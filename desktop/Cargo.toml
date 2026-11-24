@@ -70,3 +70,6 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 # when it has something new to draw. vendor/README.md says more.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+# GPUI Base, as 0.10.0 with one change (marked "loom:"): an inline <span> in Markdown can
+# give its text a color and weight, for an agent's name where a message mentions it.
+gpui-base = { path = "vendor/gpui-base" }
