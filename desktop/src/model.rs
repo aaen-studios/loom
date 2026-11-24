@@ -2151,7 +2151,7 @@ fn line_links(line: &str, inline: &Inline) -> String {
                     let name = words.trim().trim_start_matches('@').replace(['<', '>'], "");
                     match (inline.agent)(id) {
                         Some((color, thread)) => {
-                            out.push_str(&img(&thread, 14, 10));
+                            out.push_str(&img(&thread, 14, 14));
                             out.push_str(&format!(
                                 "<span style=\"color: {color}; font-weight: 500\">{name}</span>"
                             ));
@@ -7786,7 +7786,7 @@ mod tests {
         };
         assert_eq!(
             with_link_icons("Ask [@Casper](loom:agent/a1) now", &inline),
-            "Ask <img src=\"/thread/a1\" width=\"14\" height=\"10\" /> \
+            "Ask <img src=\"/thread/a1\" width=\"14\" height=\"14\" /> \
              <span style=\"color: #9c8636; font-weight: 500\">Casper</span> now"
         );
         // An agent that's gone is its name.

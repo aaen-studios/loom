@@ -1782,8 +1782,10 @@ final class Model {
         for f in m.blocks.compactMap(\.file) where f.isImage {
             if let path = files["\(f.file).thumb"] { out.icons["loom-file:\(f.file)"] = path }
         }
-        if m.blocks.contains(where: { $0.text.contains("loom:agent/") }) {
-            for a in agents where m.blocks.contains(where: { $0.text.contains("loom:agent/\(a.id))") }) {
+        // A reply names agents as @Name, which become links only as it's shown.
+        let words = m.role == "agent" ? m.blocks.map { replyWords(m, $0.text) } : m.blocks.map(\.text)
+        if words.contains(where: { $0.contains("loom:agent/") }) {
+            for a in agents where words.contains(where: { $0.contains("loom:agent/\(a.id))") }) {
                 out.agents[a.id] = a
             }
         }

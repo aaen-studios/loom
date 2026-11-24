@@ -1,6 +1,6 @@
 # In the chat
 
-Each agent has one chat that never ends. Choose an agent in the sidebar to talk to it. Its name over the chat opens its menu: Edit agent, Activity, Memory, Ask on the side, Move to…, Start fresh and Delete agent. Start fresh and Delete agent can't be undone, so each asks for a second click.
+Each agent has one chat that never ends. Choose an agent in the sidebar to talk to it, and on the desktop start typing: the message box has the keys as a chat opens, and when you come back to the window. Its name over the chat opens its menu: Edit agent, Activity, Memory, Ask on the side, Move to…, Start fresh and Delete agent. Start fresh and Delete agent can't be undone, so each asks for a second click.
 
 ## Cards in replies
 
