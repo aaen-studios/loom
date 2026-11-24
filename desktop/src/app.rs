@@ -2425,14 +2425,22 @@ ACTA_KEY=secret:ACTA_KEY",
                 .or_insert_with(|| day_number(ms))
         };
         self.flow = Rc::new(model::flow(&messages, day));
+        // Every row that changed is measured again, not only the last ones: a card
+        // higher up that shrinks once it's answered, or grows with an error, would
+        // otherwise keep its old height and throw the scrolling off.
+        let first = old
+            .iter()
+            .zip(rows.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(old_len);
         self.rows = Rc::new(rows);
         self.scroller.update(cx, |s, cx| {
             if same_start && new_len >= old_len {
                 if new_len > old_len {
                     s.append(new_len - old_len, cx);
                 }
-                if old_len > 0 {
-                    s.remeasure_items(old_len.saturating_sub(2)..old_len, cx);
+                if first < old_len {
+                    s.remeasure_items(first..old_len, cx);
                 }
             } else {
                 s.reset(new_len, cx);
@@ -12496,10 +12504,11 @@ ACTA_KEY=secret:ACTA_KEY",
                             return;
                         }
                         cx.stop_propagation();
-                        if this.smooth.running {
+                        // Started again if the steps stopped coming, so a lost frame
+                        // can't leave the wheel scrolling nothing.
+                        if !this.smooth.start(Instant::now()) {
                             return;
                         }
-                        this.smooth.running = true;
                         // One step a frame the window shows, not on a timer of its own, so
                         // each frame moves as far as the time it took says.
                         let weak = cx.entity().downgrade();
@@ -15819,6 +15828,7 @@ fn mcp_add_card(
                     typing = true;
                     Input::new(input)
                         .small()
+                        .mask_toggle()
                         .prefix(
                             div()
                                 .text_color(p.ink_3)
@@ -15970,7 +15980,11 @@ fn secret_ask_card(
             .gap(px(space::XS))
             .child(div().truncate().text_color(p.ink_3).child(f.label.clone()));
         if let Some(input) = secrets.get(&format!("{call}/{k}")) {
-            one = one.child(div().w_full().child(Input::new(input).small()));
+            // A masked box has an eye, to see what's typed.
+            let input = Input::new(input)
+                .small()
+                .when(f.masked, |i| i.mask_toggle());
+            one = one.child(div().w_full().child(input));
         }
         if f.save.is_empty() {
             list = list.child(one);
@@ -19247,7 +19261,7 @@ fn smooth_step(this: WeakEntity<Loom>, last: Instant, window: &mut Window, cx: &
     let step = this
         .update(cx, |this, _| {
             let step = this.smooth.step(now - last);
-            this.smooth.running = step.is_some();
+            this.smooth.played(now, step.is_some());
             step
         })
         .ok()

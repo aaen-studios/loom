@@ -290,6 +290,23 @@ pub fn field(label: String, kind: String, masked: bool, save: String) -> Json {
     return Obj.new().s("label", tidy(label, OPTION_MOST)).s("kind", kind).b("masked", masked).s("save", save).done()
 }
 
+// The kind a field is when the agent didn't say, from what it wrote about it
+// (`said`: its label or why): a password if it says so, a code if it names
+// one, an email or a user name if it names one, and otherwise a password.
+pub fn kind_from(said: String) -> String {
+    let w = said.to_lower_root()
+    for p in ["password", "passord", "passphrase"] {
+        if w.contains(p) { return String("password") }
+    }
+    for c in ["code", "kode", "otp", "one-time", "2fa"] {
+        if w.contains(c) { return String("code") }
+    }
+    for u in ["email", "e-mail", "e-post", "epost", "user name", "username", "user id", "brukernavn", "login name", "@"] {
+        if w.contains(u) { return String("username") }
+    }
+    return String("password")
+}
+
 fn kind_label(kind: String) -> String {
     if kind == "username" { return String("Email or user name") }
     if kind == "code" { return String("Code") }
@@ -310,11 +327,14 @@ pub fn ask_fields(args: Json, site: String) -> (List<Json>, String) {
     } else {
         given.push(args.copy())
     }
+    let why = str_at(args.copy(), "why") ?? String()
     var out = List<Json>()
     for g in given {
         let r = (str_at(g.copy(), "ref") ?? String()).trim().copy()
         if r.len() == 0 { return (List<Json>(), if many { String("Each of fields needs the ref of its field on the page, such as e12.") } else { String("ref is missing: give the field's ref, such as e12, from the page's outline.") }) }
-        let kind = (str_at(g.copy(), "kind") ?? String("password")).trim().copy()
+        // Left out, the kind is what the label, or for one field the why, says it is.
+        let said = if many { str_at(g.copy(), "label") ?? String() } else { why.copy() }
+        let kind = (str_at(g.copy(), "kind") ?? kind_from(said)).trim().copy()
         if not " {SECRET_KINDS} ".contains(" {kind} ") { return (List<Json>(), "kind is \"{kind}\": it's password, username (an email or a user name) or code (a one-time code).") }
         let masked = bool_at(g.copy(), "masked") ?? (kind == "password")
         var save = save_name(site.copy(), kind.copy())
@@ -384,6 +404,12 @@ fn makes_the_secret_card() {
     assert(two.len() == 2 and str_at(two[0].copy(), "label") == some(String("Email")) and at(two[0].copy(), "masked") == Json.Bool(false) and str_at(two[0].copy(), "save") == some(String("ntnu-username")) and str_at(two[1].copy(), "save") == some(String("")))
     let (code, _) = ask_fields(Obj.new().s("ref", String("e5")).s("kind", String("code")).done(), String("bank.example"))
     assert(str_at(code[0].copy(), "label") == some(String("Code")) and at(code[0].copy(), "masked") == Json.Bool(false) and str_at(code[0].copy(), "save") == some(String("")))
+    // Without a kind, the why or the label says what it is.
+    let (email, _) = ask_fields(Obj.new().s("ref", String("e2")).s("why", String("Your NTNU email (user@ntnu.no) to sign in to Canvas")).done(), String("login.microsoftonline.com"))
+    assert(str_at(email[0].copy(), "kind") == some(String("username")) and str_at(email[0].copy(), "label") == some(String("Email or user name")) and at(email[0].copy(), "masked") == Json.Bool(false) and str_at(email[0].copy(), "save") == some(String("microsoftonline-username")))
+    let (labelled, _) = ask_fields(Obj.new().s("why", String("Sign in to NTNU")).j("fields", Json.Array([Obj.new().s("ref", String("e3")).s("label", String("Email")).done(), Obj.new().s("ref", String("e4")).s("label", String("Password")).done()])).done(), String("innsida.ntnu.no"))
+    assert(str_at(labelled[0].copy(), "kind") == some(String("username")) and str_at(labelled[1].copy(), "kind") == some(String("password")))
+    assert(kind_from(String("Your password for user@ntnu.no")) == "password" and kind_from(String("The code from your authenticator")) == "code" and kind_from(String("Your shopping account")) == "password")
     let (_, no_ref) = ask_fields(Obj.new().done(), String())
     assert(no_ref.starts_with("ref is missing"))
     let (_, odd) = ask_fields(Obj.new().s("ref", String("e1")).s("kind", String("pin")).done(), String())

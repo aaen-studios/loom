@@ -3260,6 +3260,14 @@ impl Model {
             out.push(self.programs());
             out.push(self.registry_cmd());
         }
+        // The brain chip shows its program's icon, which comes with the registry, so
+        // it's asked for once the app has caught up, not only when Settings opens. A
+        // registry that couldn't be reached isn't asked for again until it does.
+        if self.synced && self.registry_error.is_none() {
+            if let Some(asked) = self.warm_programs() {
+                out.extend(asked);
+            }
+        }
         if std::mem::take(&mut self.notes_stale) {
             if let Some(f) = self.load_notes() {
                 out.push(f);

@@ -938,6 +938,8 @@ struct SecretAskCard: View {
     @State private var typed: [Int: String] = [:]
     @State private var names: [Int: String] = [:]
     @State private var off: Set<Int> = []
+    /// The masked fields the person chose to see.
+    @State private var shown: Set<Int> = []
 
     var body: some View {
         switch card.state {
@@ -953,17 +955,29 @@ struct SecretAskCard: View {
                     ForEach(Array(card.fields.enumerated()), id: \.offset) { k, f in
                         VStack(alignment: .leading, spacing: Tokens.Space.xs) {
                             Text(f.label).foregroundStyle(P.ink3).lineLimit(1)
-                            Group {
+                            // A masked box has an eye, to see what's typed.
+                            HStack(spacing: Tokens.Space.xs) {
+                                Group {
+                                    if f.masked && !shown.contains(k) {
+                                        SecureField(f.label, text: bound(k, in: $typed))
+                                    } else {
+                                        TextField(f.label, text: bound(k, in: $typed))
+                                            .keyboardType(f.kind == "code" ? .numberPad : f.kind == "username" ? .emailAddress : .default)
+                                    }
+                                }
+                                .textContentType(f.kind == "code" ? .oneTimeCode : f.kind == "username" ? .username : .password)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
                                 if f.masked {
-                                    SecureField(f.label, text: bound(k, in: $typed))
-                                } else {
-                                    TextField(f.label, text: bound(k, in: $typed))
-                                        .keyboardType(f.kind == "code" ? .numberPad : f.kind == "username" ? .emailAddress : .default)
+                                    Button {
+                                        if shown.contains(k) { shown.remove(k) } else { shown.insert(k) }
+                                    } label: {
+                                        Image(systemName: shown.contains(k) ? "eye.slash" : "eye").foregroundStyle(P.ink3)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(shown.contains(k) ? "Hide" : "Show")
                                 }
                             }
-                            .textContentType(f.kind == "code" ? .oneTimeCode : f.kind == "username" ? .username : .password)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
                             .boxed()
                             if !f.save.isEmpty {
                                 HStack(spacing: Tokens.Space.s) {
