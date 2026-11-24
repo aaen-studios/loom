@@ -12504,10 +12504,11 @@ ACTA_KEY=secret:ACTA_KEY",
                             return;
                         }
                         cx.stop_propagation();
-                        if this.smooth.running {
+                        // Started again if the steps stopped coming, so a lost frame
+                        // can't leave the wheel scrolling nothing.
+                        if !this.smooth.start(Instant::now()) {
                             return;
                         }
-                        this.smooth.running = true;
                         // One step a frame the window shows, not on a timer of its own, so
                         // each frame moves as far as the time it took says.
                         let weak = cx.entity().downgrade();
@@ -19260,7 +19261,7 @@ fn smooth_step(this: WeakEntity<Loom>, last: Instant, window: &mut Window, cx: &
     let step = this
         .update(cx, |this, _| {
             let step = this.smooth.step(now - last);
-            this.smooth.running = step.is_some();
+            this.smooth.played(now, step.is_some());
             step
         })
         .ok()

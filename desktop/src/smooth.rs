@@ -2,7 +2,7 @@
 //! caught before anything scrolls and played out in pixels over the next frames, easing
 //! out, as a browser does. Trackpads and touch, already in pixels, pass as they are.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 
@@ -23,7 +23,14 @@ pub struct Smooth {
     modifiers: Modifiers,
     /// Whether steps are being played out.
     pub running: bool,
+    /// When the last step was played, or the playing started.
+    stepped: Option<Instant>,
 }
+
+/// How long without a step before the steps count as lost: a frame that never came, as
+/// for a window that was hidden, would otherwise leave every notch after it caught and
+/// none played, and nothing in the app would scroll by the wheel again.
+const STALL: Duration = Duration::from_millis(250);
 
 impl Smooth {
     /// Takes a wheel's notch, `line` pixels a line: true when it's caught, and the caller
@@ -46,6 +53,23 @@ impl Smooth {
         self.at = e.position;
         self.modifiers = e.modifiers;
         true
+    }
+
+    /// Whether steps should start being played out at `now`: none are, or they've stopped
+    /// coming. Marks them started.
+    pub fn start(&mut self, now: Instant) -> bool {
+        if self.running && self.stepped.is_some_and(|t| now - t < STALL) {
+            return false;
+        }
+        self.running = true;
+        self.stepped = Some(now);
+        true
+    }
+
+    /// A step was played at `now`, and `more` says whether others follow.
+    pub fn played(&mut self, now: Instant, more: bool) {
+        self.running = more;
+        self.stepped = Some(now);
     }
 
     /// The next step to scroll, in pixels, for `since` since the last one, or none once
@@ -121,6 +145,23 @@ mod tests {
         s.catch(&notch(1.0), 20.0);
         let total: f32 = played(&mut s).iter().sum();
         assert!((total - 20.0).abs() < 0.001, "only the new notch, {total}");
+    }
+
+    #[test]
+    fn lost_steps_start_again() {
+        let mut s = Smooth::default();
+        let at = std::time::Instant::now();
+        assert!(s.start(at), "the first notch starts the steps");
+        assert!(!s.start(at + super::FRAME), "steps are coming");
+        s.played(at + super::FRAME, true);
+        assert!(!s.start(at + 2 * super::FRAME), "still coming");
+        // No step for a while, as when the frame they waited for never came.
+        assert!(s.start(at + super::STALL * 2), "they start again");
+        s.played(at + super::STALL * 2, false);
+        assert!(
+            s.start(at + super::STALL * 2),
+            "played out, the next notch starts them"
+        );
     }
 
     #[test]
