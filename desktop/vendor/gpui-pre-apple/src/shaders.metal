@@ -672,10 +672,14 @@ fragment float4 monochrome_sprite_fragment(
   return color;
 }
 
+// loom: the image's own position (before it's moved) for the rounded corners, and the
+// texels its tile may be sampled from.
 struct PolychromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
   uint sprite_id [[flat]];
+  float2 local_position;
+  float4 tile_clamp [[flat]];
   float clip_distance [[clip_distance]][4];
 };
 
@@ -683,7 +687,19 @@ struct PolychromeSpriteFragmentInput {
   float4 position [[position]];
   float2 tile_position;
   uint sprite_id [[flat]];
+  float2 local_position;
+  float4 tile_clamp [[flat]];
 };
+
+// loom: whether a transformation moves anything.
+bool is_transformed(TransformationMatrix transformation) {
+  return transformation.rotation_scale[0][0] != 1. ||
+         transformation.rotation_scale[0][1] != 0. ||
+         transformation.rotation_scale[1][0] != 0. ||
+         transformation.rotation_scale[1][1] != 1. ||
+         transformation.translation[0] != 0. ||
+         transformation.translation[1] != 0.;
+}
 
 vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
     uint unit_vertex_id [[vertex_id]], uint sprite_id [[instance_id]],
@@ -696,15 +712,36 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
 
   float2 unit_vertex = unit_vertices[unit_vertex_id];
   PolychromeSprite sprite = sprites[sprite_id];
-  float4 device_position =
-      to_device_position(unit_vertex, sprite.bounds, viewport_size);
-  float4 clip_distance = distance_from_clip_rect(unit_vertex, sprite.bounds,
-                                                 sprite.content_mask.bounds);
+  float2 bounds_origin = float2(sprite.bounds.origin.x, sprite.bounds.origin.y);
+  float2 bounds_size = float2(sprite.bounds.size.width, sprite.bounds.size.height);
+  // loom: sampling stays inside the tile, which with no transformation it always is.
+  float4 tile_clamp = float4(0., 0., 1., 1.);
+  if (is_transformed(sprite.transformation)) {
+    // loom: a moved image's quad is a pixel larger each way in its own space, so its
+    // edges are smoothed outside as well as inside. Those pixels sample the tile's edge.
+    unit_vertex = (unit_vertex * (bounds_size + 2.) - 1.) / bounds_size;
+    float2 atlas = float2((float)atlas_size->width, (float)atlas_size->height);
+    float2 tile_origin =
+        float2(sprite.tile.bounds.origin.x, sprite.tile.bounds.origin.y);
+    float2 tile_size = max(
+        float2(sprite.tile.bounds.size.width, sprite.tile.bounds.size.height),
+        float2(1., 1.));
+    tile_clamp = float4(tile_origin + 0.5, tile_origin + tile_size - 0.5) /
+                 atlas.xyxy;
+  }
+  // loom: positioned with the transformation, as a monochrome sprite is.
+  float4 device_position = to_device_position_transformed(
+      unit_vertex, sprite.bounds, sprite.transformation, viewport_size);
+  float4 clip_distance = distance_from_clip_rect_transformed(
+      unit_vertex, sprite.bounds, sprite.content_mask.bounds,
+      sprite.transformation);
   float2 tile_position = to_tile_position(unit_vertex, sprite.tile, atlas_size);
   return PolychromeSpriteVertexOutput{
       device_position,
       tile_position,
       sprite_id,
+      unit_vertex * bounds_size + bounds_origin,
+      tile_clamp,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -715,10 +752,16 @@ fragment float4 polychrome_sprite_fragment(
   PolychromeSprite sprite = sprites[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
-  float4 sample =
-      atlas_texture.sample(atlas_texture_sampler, input.tile_position);
+  float4 sample = atlas_texture.sample(
+      atlas_texture_sampler,
+      clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw));
+  // loom: rounded in the image's own space, so the corners turn with it. An image that
+  // isn't moved keeps the screen position, so it's drawn to the bit as before.
+  float2 sdf_position = is_transformed(sprite.transformation)
+                            ? input.local_position
+                            : input.position.xy;
   float distance =
-      quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+      quad_sdf(sdf_position, sprite.bounds, sprite.corner_radii);
 
   float4 color = sample;
   if (sprite.grayscale) {

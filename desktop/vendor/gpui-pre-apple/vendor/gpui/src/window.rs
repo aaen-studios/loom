@@ -5222,6 +5222,8 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                // loom: drawn where it is.
+                transformation: TransformationMatrix::unit(),
             });
         }
         Ok(())
@@ -5309,6 +5311,35 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        // loom: an image drawn where it is is one transformed by the unit matrix.
+        self.paint_image_transformed(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// loom: paint an image as [`Self::paint_image`] does, then move it by `transformation`,
+    /// which works in scaled pixels as for [`Self::paint_svg`]. The corners are rounded and
+    /// the image cropped in its own rectangle, before it's moved, and the content mask clips
+    /// it where it ends up. [`TransformationMatrix::rotation_about`] makes a rotation about
+    /// a point.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_image_transformed(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        transformation: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let visible_bounds = bounds.intersect(&image_bounds);
@@ -5394,6 +5425,8 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity,
+            // loom: where it's moved to.
+            transformation,
         });
         Ok(())
     }

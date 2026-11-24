@@ -274,7 +274,10 @@ impl Transformation {
         self
     }
 
-    fn into_matrix(self, center: Point<Pixels>, scale_factor: f32) -> TransformationMatrix {
+    /// loom: public, so an image can be moved as an SVG is. The matrix for this transformation
+    /// about `center`, a point in logical pixels, for a window whose scale factor is
+    /// `scale_factor`.
+    pub fn into_matrix(self, center: Point<Pixels>, scale_factor: f32) -> TransformationMatrix {
         //Note: if you read this as a sequence of matrix multiplications, start from the bottom
         TransformationMatrix::unit()
             .translate(center.scale(scale_factor) + self.translate.scale(scale_factor))

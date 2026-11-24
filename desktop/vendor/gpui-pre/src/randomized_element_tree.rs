@@ -1715,12 +1715,14 @@ mod tests {
                 }))
                 .chain(scene.polychrome_sprites.iter().map(|sprite| {
                     format!(
-                        "polychrome {} {:?} {:?} {:?} {}",
+                        // loom: with where the image is moved to.
+                        "polychrome {} {:?} {:?} {:?} {} {:?}",
                         sprite.order,
                         sprite.bounds,
                         sprite.content_mask,
                         sprite.grayscale,
-                        sprite.opacity
+                        sprite.opacity,
+                        sprite.transformation
                     )
                 }))
                 .collect();

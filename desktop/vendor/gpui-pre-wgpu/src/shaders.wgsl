@@ -1268,39 +1268,70 @@ struct PolychromeSprite {
     bounds: Bounds,
     content_mask: Bounds,
     corner_radii: Corners,
+    // loom: where the image is moved to, as for a monochrome sprite.
+    transformation: TransformationMatrix,
 }
 
 
+// loom: the image's own position (before it's moved) for the rounded corners, and the
+// texels its tile may be sampled from.
 struct PolySpriteVarying {
     @builtin(position) position: vec4<f32>,
     @location(0) tile_position: vec2<f32>,
     @location(1) @interpolate(flat) sprite_id: u32,
     @location(3) clip_distances: vec4<f32>,
+    @location(4) local_position: vec2<f32>,
+    @location(5) @interpolate(flat) tile_clamp: vec4<f32>,
+}
+
+// loom: whether a transformation moves anything.
+fn is_transformed(transform: TransformationMatrix) -> bool {
+    return any(transform.rotation_scale[0] != vec2<f32>(1.0, 0.0))
+        || any(transform.rotation_scale[1] != vec2<f32>(0.0, 1.0))
+        || any(transform.translation != vec2<f32>(0.0));
 }
 
 @vertex
 fn vs_poly_sprite(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) instance_id: u32) -> PolySpriteVarying {
-    let unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
+    var unit_vertex = vec2<f32>(f32(vertex_id & 1u), 0.5 * f32(vertex_id & 2u));
     let sprite = load_poly_sprite(instance_id);
 
+    // loom: sampling stays inside the tile, which with no transformation it always is.
+    var tile_clamp = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    if (is_transformed(sprite.transformation)) {
+        // loom: a moved image's quad is a pixel larger each way in its own space, so its
+        // edges are smoothed outside as well as inside. Those pixels sample the tile's edge.
+        unit_vertex = (unit_vertex * (sprite.bounds.size + 2.0) - 1.0) / sprite.bounds.size;
+        let atlas_size = vec2<f32>(textureDimensions(t_sprite, 0));
+        let tile_origin = vec2<f32>(sprite.tile.bounds.origin);
+        let tile_size = max(vec2<f32>(sprite.tile.bounds.size), vec2<f32>(1.0));
+        tile_clamp = vec4<f32>(tile_origin + 0.5, tile_origin + tile_size - 0.5) / atlas_size.xyxy;
+    }
+
     var out = PolySpriteVarying();
-    out.position = to_device_position(unit_vertex, sprite.bounds);
+    // loom: positioned with the transformation, as a monochrome sprite is.
+    out.position = to_device_position_transformed(unit_vertex, sprite.bounds, sprite.transformation);
     out.tile_position = to_tile_position(unit_vertex, sprite.tile);
     out.sprite_id = instance_id;
-    out.clip_distances = distance_from_clip_rect(unit_vertex, sprite.bounds, sprite.content_mask);
+    out.clip_distances = distance_from_clip_rect_transformed(unit_vertex, sprite.bounds, sprite.content_mask, sprite.transformation);
+    out.local_position = unit_vertex * sprite.bounds.size + sprite.bounds.origin;
+    out.tile_clamp = tile_clamp;
     return out;
 }
 
 @fragment
 fn fs_poly_sprite(input: PolySpriteVarying) -> @location(0) vec4<f32> {
-    let sample = textureSample(t_sprite, s_sprite, input.tile_position);
+    let sample = textureSample(t_sprite, s_sprite, clamp(input.tile_position, input.tile_clamp.xy, input.tile_clamp.zw));
     // Alpha clip after using the derivatives.
     if (any(input.clip_distances < vec4<f32>(0.0))) {
         return vec4<f32>(0.0);
     }
 
     let sprite = load_poly_sprite(input.sprite_id);
-    let distance = quad_sdf(input.position.xy, sprite.bounds, sprite.corner_radii);
+    // loom: rounded in the image's own space, so the corners turn with it. An image that
+    // isn't moved keeps the screen position, so it's drawn to the bit as before.
+    let sdf_position = select(input.position.xy, input.local_position, is_transformed(sprite.transformation));
+    let distance = quad_sdf(sdf_position, sprite.bounds, sprite.corner_radii);
 
     var color = sample;
     if (sprite.grayscale != 0u) {

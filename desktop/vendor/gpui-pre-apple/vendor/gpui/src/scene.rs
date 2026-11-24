@@ -86,9 +86,17 @@ impl Scene {
 
     pub fn insert_primitive(&mut self, primitive: impl Into<Primitive>) {
         let mut primitive = primitive.into();
-        let clipped_bounds = primitive
-            .bounds()
-            .intersect(&primitive.content_mask().bounds);
+        // loom: a transformed image covers the box around its moved corners rather than its
+        // bounds, so that box is what's culled and what later primitives are ordered against.
+        let bounds = match &primitive {
+            Primitive::PolychromeSprite(sprite)
+                if sprite.transformation != TransformationMatrix::unit() =>
+            {
+                sprite.transformation.transform_bounds(sprite.bounds)
+            }
+            primitive => *primitive.bounds(),
+        };
+        let clipped_bounds = bounds.intersect(&primitive.content_mask().bounds);
 
         if clipped_bounds.is_empty() {
             return;
@@ -686,6 +694,44 @@ impl TransformationMatrix {
         }
     }
 
+    /// loom: a rotation by `angle` (clockwise, as [`Self::rotate`]) about `center`, a point in
+    /// logical pixels, for a window whose scale factor is `scale_factor`. The matrix works in
+    /// scaled pixels, as the scene does.
+    pub fn rotation_about(center: Point<Pixels>, angle: Radians, scale_factor: f32) -> Self {
+        Self::unit()
+            .translate(center.scale(scale_factor))
+            .rotate(angle)
+            .translate(center.scale(-scale_factor))
+    }
+
+    /// loom: the smallest rectangle holding `bounds` once transformed.
+    pub fn transform_bounds(&self, bounds: Bounds<ScaledPixels>) -> Bounds<ScaledPixels> {
+        let [[a, b], [c, d]] = self.rotation_scale;
+        let (x0, y0) = (bounds.origin.x.0, bounds.origin.y.0);
+        let (x1, y1) = (x0 + bounds.size.width.0, y0 + bounds.size.height.0);
+        let corners = [(x0, y0), (x1, y0), (x0, y1), (x1, y1)].map(|(x, y)| {
+            (
+                a * x + b * y + self.translation[0],
+                c * x + d * y + self.translation[1],
+            )
+        });
+        let (mut min_x, mut min_y) = corners[0];
+        let (mut max_x, mut max_y) = corners[0];
+        for (x, y) in corners {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        Bounds {
+            origin: Point::new(ScaledPixels(min_x), ScaledPixels(min_y)),
+            size: Size {
+                width: ScaledPixels(max_x - min_x),
+                height: ScaledPixels(max_y - min_y),
+            },
+        }
+    }
+
     /// Apply transformation to a point, mainly useful for debugging
     pub fn apply(&self, point: Point<Pixels>) -> Point<Pixels> {
         let input = [point.x.0, point.y.0];
@@ -755,6 +801,10 @@ pub struct PolychromeSprite {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
+    /// loom: where the image is drawn, in scaled pixels, as for a monochrome sprite. `bounds`
+    /// and `corner_radii` are the image's own rectangle before it's moved. Kept last so the
+    /// shaders' structs only gain a field at the end.
+    pub transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {
