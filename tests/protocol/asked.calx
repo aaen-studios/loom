@@ -1,0 +1,122 @@
+module tests.protocol.asked
+
+// Another agent's thread with an agent (PLAN.md, "Agents talk to each other"):
+// message_agent keeps one conversation for the two, `asked_by` the agent that
+// asks, and it's never the other agent's chat. A routine that posts in that
+// agent's chat posts in the person's own chat with it, however new the thread
+// is, and after a restart too. A thread an older instance kept, before threads
+// said who asks, is marked as the asker's when the instance starts, and the
+// devices hear so, as a change.
+//
+//     calx tests/protocol/asked.calx
+import std.json.{Json}
+import std.process.{exit}
+import std.sqlite.{Database, Value}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn agent(app: mut Session, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).b("code_mode", false).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+// Runs routine `routine` by hand, and gives the conversation what it posts lands in.
+fn posted_in(app: mut Session, q: str, routine: String) -> String ! Error {
+    _ = try app.cmd(q, "routine.run", Obj.new().s("id", routine).done())
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if reply_text(m.copy()) == "pulse" { return str_at(m, "conversation") ?? String() }
+    }
+}
+
+// Before the restart: gives the event to go on from, the routine, the person's
+// chat with Helper and Main's thread with it.
+fn before(i: Instance) -> (i64, String, String, String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let main_id = try agent(mut app, "q_1", "Main")
+    let helper_id = try agent(mut app, "q_2", "Helper")
+    // The person's chat with Helper, which has their history.
+    let c = try app.cmd("q_3", "conversation.create", Obj.new().s("agent", helper_id.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    try check(try say(mut app, chat.copy(), "m_1", String("hello")) == "hello", "the person talks with Helper")
+    let m = try app.cmd("q_4", "conversation.create", Obj.new().s("agent", main_id.copy()).done())
+    let mains = str_at(at(m, "value"), "conversation") ?? String()
+    let handed = try say(mut app, mains.copy(), "m_2", String(#"/mcp message_agent {"agent":"Helper","text":"hi from main"}"#))
+    try check(handed == "message_agent: hi from main", "Main messages Helper")
+    var thread = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) and str_at(at(f.copy(), "conversation"), "title") == some(String("From Main")) { thread = at(f.copy(), "conversation") }
+    }
+    let thread_id = str_at(thread.copy(), "id") ?? String()
+    try check(str_at(thread.copy(), "asked_by") == some(main_id.copy()) and str_at(thread, "agent") == some(helper_id.copy()) and thread_id != chat, "in a thread of their own, newer than the person's chat, which says Main asks")
+    _ = try say(mut app, mains.copy(), "m_3", String(#"/mcp message_agent {"agent":"Helper","text":"again"}"#))
+    var made = 0
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) and str_at(at(f.copy(), "conversation"), "title") == some(String("From Main")) { made += 1 }
+    }
+    try check(made == 1, "the next message goes to the same thread")
+    let put = try app.cmd("q_6", "routine.put", Obj.new().s("name", String("Pulse")).s("agent", String("Helper")).s("prompt", String(#"/mcp routine_post {"text": "pulse"}"#)).b("on", false).j("schedule", Obj.new().i("every", 60).done()).done())
+    let routine = str_at(at(at(put, "value"), "routine"), "id") ?? String()
+    try check(try posted_in(mut app, "q_7", routine.copy()) == chat, "a routine posting in Helper's chat posts in the person's chat, not Main's thread")
+    let seq = app.seq
+    app.close()
+    // As an older instance kept it: a thread that doesn't say who asks.
+    let db = try Database.open("{i.data}/loom.db")
+    _ = try db.execute(String("DELETE FROM asks WHERE conversation = ?"), [Value.Text(thread_id.copy())])
+    return (seq, routine, chat, thread_id)
+}
+
+fn after_restart(i: Instance, seq: i64, routine: String, chat: String, thread: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), seq)
+    // It comes with the events the device missed, which may have come already.
+    var changed = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) { changed = f.copy() }
+    }
+    if changed == Json.Null { changed = try app.until("event", "conversation.updated") }
+    try check(str_at(at(changed.copy(), "conversation"), "id") == some(thread.copy()) and str_at(at(changed, "conversation"), "asked_by") != none, "a thread an older instance kept is marked as the asker's when it starts, and the devices hear so")
+    try check(try posted_in(mut app, "q_9", routine) == chat, "after a restart, the routine still posts in the person's chat")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    var left: (i64, String, String, String) = (0, String(), String(), String())
+    match before(inst.copy()) {
+        ok(l) => left = l,
+        err(e) => failure = some("{e}"),
+    }
+    if failure != none {
+        inst.stop()
+    } else {
+        let (seq, routine, chat, thread) = left
+        let back = try inst.restart()
+        match after_restart(back.copy(), seq, routine, chat, thread) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        back.stop()
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nasked: all good")
+}
