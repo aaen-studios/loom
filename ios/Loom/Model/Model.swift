@@ -119,8 +119,8 @@ struct CardItem: Equatable, Sendable {
 }
 
 /// A card in a reply (PLAN.md, "Cards in the chat"): an agent's `show_card` (`choices`,
-/// `checklist`, `table`, `progress`, `facts`) or loom's own `sign_in`, with the fields
-/// its type has.
+/// `checklist`, `table`, `progress`, `facts`) or loom's own `sign_in` and `mcp_add`, with
+/// the fields its type has.
 struct Card: Equatable, Sendable {
     var id: String
     var type: String
@@ -132,6 +132,16 @@ struct Card: Equatable, Sendable {
     var label = ""
     var value = 0.0
     var server = ""
+    /// For `mcp_add`: the call `mcp.add_answer` names, the server's address, or the
+    /// command and arguments that start it, its settings, how it stands, and a line in
+    /// plain words.
+    var call = ""
+    var url = ""
+    var command = ""
+    var args: [String] = []
+    var settings: [CardSetting] = []
+    var state = ""
+    var said = ""
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// That the chat has gone on past its reply: choices no longer answer then, and a
@@ -140,7 +150,16 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "checklist", "table", "progress", "facts", "sign_in"].contains(type) else { return nil }
+        guard ["choices", "checklist", "table", "progress", "facts", "sign_in", "mcp_add"].contains(type) else { return nil }
+        call = c["call"].text
+        url = c["url"].text
+        command = c["command"].text
+        args = c["args"].array.map(\.text)
+        settings = c["settings"].array.map {
+            CardSetting(name: $0["name"].text, value: $0["value"].text, secret: $0["secret"].text, have: $0["have"].bool ?? false)
+        }
+        state = c["state"].text
+        said = c["said"].text
         id = c["id"].text
         title = c["title"].text
         options = c["options"].array.map(\.text)
@@ -182,6 +201,18 @@ struct Block: Equatable, Sendable {
             card: kind == "card" ? Card(b["card"]) : nil
         )
     }
+}
+
+/// A header or environment variable of an MCP server an agent proposed: its text, or the
+/// name of one of the person's secrets, and whether they have that secret yet.
+struct CardSetting: Equatable, Sendable {
+    var name: String
+    var value: String
+    var secret: String
+    var have: Bool
+
+    /// A secret the person types on the card before Add.
+    var wanted: Bool { !secret.isEmpty && !have }
 }
 
 /// Which of a reply's blocks sit inside a subagent call of the same reply, as
@@ -592,6 +623,10 @@ final class Model {
     var toOpen: URL?
     /// A stack of pictures shown big, to page through.
     var viewing: Viewing?
+    /// An MCP server's sign-in page, for the screen to open, and the servers the person
+    /// has signed in to from here since the app opened.
+    var toSignIn: URL?
+    var signedIn: Set<String> = []
     /// When an agent's reply last grew, and when its last run finished or failed.
     var lastDelta: [String: Date] = [:]
     var finished: [String: Date] = [:]
@@ -797,7 +832,7 @@ final class Model {
             // The instance moved, and the core followed it there (protocol.md, "moved").
             notice = "Your instance moved to \(f["address"].text). The app is connected there now."
         case "result":
-            if !f["error"].isNull { notice = f["error"]["message"].string }
+            result(f)
         case "error":
             // A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) says why
             // here too, and the app stays where it is.
@@ -874,6 +909,29 @@ final class Model {
             if lastDelta[r.agent].map({ now.timeIntervalSince($0) > 0.25 }) ?? true {
                 lastDelta[r.agent] = now
             }
+        }
+    }
+
+    private func result(_ f: JSON) {
+        let error = f["error"].isNull ? nil : f["error"]["message"].string
+        switch f["id"].text {
+        case let id where id.hasPrefix("app.mcp_sign_in"):
+            // Where the person signs in, for the sign-in sheet.
+            if let error {
+                notice = error
+            } else if let url = f["value"]["url"].string.flatMap(URL.init(string:)) {
+                toSignIn = url
+            }
+        case "app.mcp_signed_in":
+            if let error {
+                notice = error
+            } else {
+                let server = f["value"]["server"].text
+                signedIn.insert(server)
+                notice = "Signed in to \(server)"
+            }
+        default:
+            if let error { notice = error }
         }
     }
 
@@ -1089,6 +1147,29 @@ final class Model {
     func choose(_ answer: String) -> JSON? {
         guard let agent = selected else { return nil }
         return ["t": "send", "agent": JSON(agent), "text": JSON(answer)]
+    }
+
+    /// The person's answer to the MCP server an agent proposed on card `call`: `add`, with
+    /// each secret it needs that they don't have yet, `cancel`, or `later`, for one waiting
+    /// on a sign-in.
+    func answerMcpAdd(_ call: String, _ answer: String, secrets: [String: String] = [:]) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.mcp_add")), "name": "mcp.add_answer",
+         "args": ["call": JSON(call), "answer": JSON(answer), "secrets": .object(secrets.mapValues { JSON($0) })]]
+    }
+
+    /// Where the browser comes back to from an MCP server's sign-in: the sign-in sheet
+    /// catches it.
+    static let signInBack = "loom://mcp-signed-in"
+
+    /// Asks where to sign in to the MCP server `name`; the address goes to `toSignIn`.
+    func signInMcp(_ name: String) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.mcp_sign_in")), "name": "mcp.sign_in",
+         "args": ["name": JSON(name), "redirect": JSON(Model.signInBack)]]
+    }
+
+    /// What the sign-in page sent the browser back with, for the instance to finish it.
+    func signedIn(query: String) -> JSON {
+        ["t": "cmd", "id": "app.mcp_signed_in", "name": "mcp.signed_in", "args": ["query": JSON(query)]]
     }
 
     func startFresh() -> JSON? {

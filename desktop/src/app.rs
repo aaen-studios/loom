@@ -301,6 +301,9 @@ pub struct Loom {
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
     secret_in: Entity<InputState>,
+    /// A masked field for each secret an MCP server an agent proposed needs that the
+    /// person doesn't have, by its card's call and the secret's name ("tc_4/ACTA_KEY").
+    card_secrets: Rc<HashMap<String, Entity<InputState>>>,
     queue_in: Entity<InputState>,
     /// A side question being written.
     aside_in: Entity<InputState>,
@@ -1200,6 +1203,7 @@ ACTA_KEY=secret:ACTA_KEY",
             user_in,
             pass_in,
             secret_in,
+            card_secrets: Rc::default(),
             queue_in,
             aside_in,
             queue_editing: None,
@@ -4516,6 +4520,75 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// The masked fields the chat's proposed MCP servers need: one for each secret a
+    /// card still asking names that the person doesn't have, kept while it asks.
+    fn card_secrets(
+        &mut self,
+        rows: &[Row],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Rc<HashMap<String, Entity<InputState>>> {
+        let wanted: HashSet<String> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Message(m) => Some(m),
+                Row::Approval(_) => None,
+            })
+            .flat_map(|m| m.blocks.iter())
+            .filter_map(|b| match b.card.as_ref().map(|c| &c.body) {
+                Some(model::CardBody::McpAdd {
+                    call,
+                    settings,
+                    state,
+                    ..
+                }) if state == "asking" => Some((call, settings)),
+                _ => None,
+            })
+            .flat_map(|(call, settings)| {
+                settings
+                    .iter()
+                    .filter(|s| s.wanted())
+                    .map(move |s| format!("{call}/{}", s.secret))
+            })
+            .collect();
+        if wanted.len() != self.card_secrets.len()
+            || !wanted.iter().all(|k| self.card_secrets.contains_key(k))
+        {
+            let mut kept = HashMap::new();
+            for key in wanted {
+                // Named as it's kept, the secret's name.
+                let name = key.split_once('/').map_or("", |(_, n)| n).to_string();
+                let input = match self.card_secrets.get(&key) {
+                    Some(input) => input.clone(),
+                    None => cx.new(|cx| InputState::new(window, cx).placeholder(name).masked(true)),
+                };
+                kept.insert(key, input);
+            }
+            self.card_secrets = Rc::new(kept);
+        }
+        self.card_secrets.clone()
+    }
+
+    /// The person's answer to the MCP server an agent proposed on card `call`, with
+    /// the secrets typed on it for Add.
+    fn answer_mcp_add(&mut self, call: &str, answer: &str, cx: &mut Context<Self>) {
+        let prefix = format!("{call}/");
+        let secrets: Vec<(String, String)> = if answer == "add" {
+            self.card_secrets
+                .iter()
+                .filter_map(|(key, input)| {
+                    key.strip_prefix(&prefix)
+                        .map(|name| (name.to_string(), input.read(cx).value().to_string()))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let f = self.model.answer_mcp_add(call, answer, &secrets);
+        self.send(f);
+        cx.notify();
+    }
+
     /// Starts editing a queued message in place.
     fn edit_queued(
         &mut self,
@@ -7149,6 +7222,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let rows = self.rows.clone();
         let flow = self.flow.clone();
+        let secrets = self.card_secrets(&rows, window, cx);
         let agent = self
             .model
             .selected
@@ -7244,6 +7318,7 @@ ACTA_KEY=secret:ACTA_KEY",
             flow,
             tools,
             files,
+            secrets,
             branches,
             name,
             tint,
@@ -14874,6 +14949,7 @@ fn card_view(
     key: &str,
     tint: Hsla,
     show: Show,
+    secrets: &HashMap<String, Entity<InputState>>,
     this: WeakEntity<Loom>,
 ) -> Div {
     use model::CardBody;
@@ -14989,6 +15065,149 @@ fn card_view(
                 )
                 .draw(p, scale),
         );
+    }
+    // Loom's own card for an MCP server an agent proposed, in the card frame: what would
+    // be added, with a masked field for each key the person doesn't have yet, and Add or
+    // Cancel; then Sign in, for one that needs it. Once it's settled, one quiet line says
+    // how it went.
+    if let CardBody::McpAdd {
+        call,
+        server,
+        url,
+        command,
+        args,
+        settings,
+        state,
+        said,
+        signed,
+        signing,
+    } = &card.body
+    {
+        let done = |icon: Ico, words: String| div().child(card_done(p, icon, words, scale));
+        match state.as_str() {
+            "ready" if said.is_empty() => return done(Ico::Check, format!("Added {server}")),
+            "ready" => return done(Ico::Check, format!("Added {server} · {said}")),
+            "added" => return done(Ico::Check, format!("Added {server}")),
+            "later" if *signed => return done(Ico::Check, format!("Added {server}, signed in")),
+            "cancelled" => return done(Ico::X, format!("Not added · {server}")),
+            _ => {}
+        }
+        // A labelled line whose value is an element: a field, or quiet words.
+        let line = |label: String, value: AnyElement| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::M))
+                .text_size(px(size::SMALL * scale))
+                .child(
+                    div()
+                        .w(px(layout::FIELD_LABEL))
+                        .flex_none()
+                        .truncate()
+                        .text_color(p.ink_3)
+                        .child(label),
+                )
+                .child(div().flex_1().min_w_0().text_color(p.ink).child(value))
+        };
+        let mut list = div().flex().flex_col().gap(px(space::XS));
+        list = list.child(if url.is_empty() {
+            let words = std::iter::once(command)
+                .chain(args)
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            line(
+                "Command".into(),
+                div().truncate().child(words).into_any_element(),
+            )
+        } else {
+            line(
+                "Address".into(),
+                div().truncate().child(url.clone()).into_any_element(),
+            )
+        });
+        let asking = state == "asking";
+        // A secret two settings name is typed in once, at the first.
+        let mut typed = HashSet::new();
+        for s in settings {
+            let value = if s.secret.is_empty() {
+                div().truncate().child(s.value.clone()).into_any_element()
+            } else {
+                match secrets.get(&format!("{call}/{}", s.secret)) {
+                    Some(input) if asking && s.wanted() && typed.insert(&s.secret) => div()
+                        .w_full()
+                        .child(Input::new(input).small())
+                        .into_any_element(),
+                    _ => div()
+                        .truncate()
+                        .text_color(p.ink_3)
+                        .child(if s.have {
+                            format!("Your secret {}", s.secret)
+                        } else {
+                            format!("Secret {}", s.secret)
+                        })
+                        .into_any_element(),
+                }
+            };
+            list = list.child(line(s.name.clone(), value));
+        }
+        let mut frame = CardFrame::new()
+            .lead(card_initial(p, server))
+            .title(card.title.clone())
+            .row(list);
+        // How it stands, in a line: the trouble in the colour that says so.
+        let (words, bad) = match state.as_str() {
+            "adding" => (format!("Starting {server}"), false),
+            "sign_in" => (said.clone(), true),
+            "later" => (format!("Added {server}. Sign in to use it."), false),
+            "failed" => (format!("It didn't start: {said}"), true),
+            _ => (String::new(), false),
+        };
+        if !words.is_empty() {
+            frame = frame.row(
+                div()
+                    .text_size(px(size::SMALL * scale))
+                    .text_color(if bad { p.bad } else { p.ink_3 })
+                    .child(words),
+            );
+        }
+        let answer = |label: &str, answer: &'static str, primary: bool| {
+            let this = this.clone();
+            let call = call.clone();
+            card_button(p, format!("mcp-add-{answer}-{key}"), label, primary).on_click(
+                move |_, _, cx| {
+                    let _ = this.update(cx, |loom, cx| loom.answer_mcp_add(&call, answer, cx));
+                },
+            )
+        };
+        let sign_in = || {
+            let this = this.clone();
+            let server = server.clone();
+            card_button(
+                p,
+                format!("mcp-add-sign-in-{key}"),
+                if *signing { "Signing in…" } else { "Sign in" },
+                true,
+            )
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |loom, cx| loom.sign_in_mcp(&server, cx));
+            })
+        };
+        match state.as_str() {
+            "asking" => {
+                frame = frame
+                    .action(answer("Add", "add", true))
+                    .action(answer("Cancel", "cancel", false));
+            }
+            "sign_in" => {
+                frame = frame
+                    .action(sign_in())
+                    .action(answer("Later", "later", false));
+            }
+            "later" => frame = frame.action(sign_in()),
+            _ => {}
+        }
+        return div().max_w(px(CARD_MOST)).child(frame.draw(p, scale));
     }
     let mut frame = CardFrame::new().title(card.title.clone());
     match &card.body {
@@ -15126,7 +15345,7 @@ fn card_view(
             }
             frame = frame.row(table);
         }
-        CardBody::Choices { .. } | CardBody::SignIn { .. } => {}
+        CardBody::Choices { .. } | CardBody::SignIn { .. } | CardBody::McpAdd { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
     let wide = matches!(card.body, CardBody::Table { .. });
@@ -15360,6 +15579,7 @@ struct ReplyDraw<'a> {
     open: &'a HashSet<String>,
     tools: &'a model::Tools,
     files: &'a HashMap<String, String>,
+    secrets: &'a HashMap<String, Entity<InputState>>,
     show: Show,
     this: &'a WeakEntity<Loom>,
 }
@@ -15746,7 +15966,8 @@ impl ReplyDraw<'_> {
                 None => div().into_any_element(),
             },
             "card" => match &b.card {
-                Some(c) => card_view(p, c, &key, tint, show, self.this.clone()).into_any_element(),
+                Some(c) => card_view(p, c, &key, tint, show, self.secrets, self.this.clone())
+                    .into_any_element(),
                 None => div().into_any_element(),
             },
             _ => div().into_any_element(),
@@ -15765,6 +15986,7 @@ fn reply(
     open: &HashSet<String>,
     tools: &model::Tools,
     files: &HashMap<String, String>,
+    secrets: &HashMap<String, Entity<InputState>>,
     show: Show,
     this: WeakEntity<Loom>,
 ) -> Div {
@@ -15802,6 +16024,7 @@ fn reply(
         open,
         tools,
         files,
+        secrets,
         show,
         this: &this,
     };
@@ -17353,7 +17576,7 @@ fn svg_icon(path: SharedString, size: f32, ink: Hsla) -> AnyElement {
 
 #[cfg(test)]
 mod row_tests {
-    use super::{model, Message, Mood, Palette, Row, RowInputs, Show};
+    use super::{model, Entity, InputState, Message, Mood, Palette, Row, RowInputs, Show};
     use crate::prefs::{Thoughts, Tools};
     use std::collections::{HashMap, HashSet};
     use std::rc::Rc;
@@ -17401,6 +17624,7 @@ mod row_tests {
     thread_local! {
         // The chat's files, made once, as the chat keeps them until they change.
         static FILES: Rc<HashMap<String, String>> = Rc::new(HashMap::new());
+        static SECRETS: Rc<HashMap<String, Entity<InputState>>> = Rc::new(HashMap::new());
     }
 
     fn inputs(rows: Vec<Message>, ix: usize, tools: Vec<model::Tool>) -> RowInputs {
@@ -17422,6 +17646,7 @@ mod row_tests {
             tools,
             called,
             files: FILES.with(Rc::clone),
+            secrets: SECRETS.with(Rc::clone),
             gone_on: Vec::new(),
             name: "Fake".into(),
             tint: gpui_kit::hsla(0.6, 0.5, 0.5, 1.0),
@@ -17644,6 +17869,8 @@ struct ChatInputs {
     flow: Rc<Vec<model::Flow>>,
     tools: Rc<model::Tools>,
     files: Rc<HashMap<String, String>>,
+    /// The masked fields of the proposed MCP servers' cards (`Loom::card_secrets`).
+    secrets: Rc<HashMap<String, Entity<InputState>>>,
     branches: Rc<HashMap<String, Vec<(String, String)>>>,
     name: String,
     tint: Hsla,
@@ -17714,6 +17941,7 @@ struct RowInputs {
     /// The tool calls its blocks name, as they are: what it shows of `tools`.
     called: Vec<Option<model::Tool>>,
     files: Rc<HashMap<String, String>>,
+    secrets: Rc<HashMap<String, Entity<InputState>>>,
     /// The branches that go on from it.
     gone_on: Vec<(String, String)>,
     name: String,
@@ -17743,6 +17971,7 @@ impl RowInputs {
             && self.here == o.here
             && self.called == o.called
             && Rc::ptr_eq(&self.files, &o.files)
+            && Rc::ptr_eq(&self.secrets, &o.secrets)
             && self.gone_on == o.gone_on
             && self.name == o.name
             && self.tint == o.tint
@@ -17831,6 +18060,7 @@ fn chat_list(
         flow,
         tools,
         files,
+        secrets,
         branches,
         name,
         tint,
@@ -17866,6 +18096,7 @@ fn chat_list(
                     .collect()
             }),
             files: files.clone(),
+            secrets: secrets.clone(),
             gone_on: m
                 .and_then(|m| branches.get(&m.id).cloned())
                 .unwrap_or_default(),
@@ -17955,6 +18186,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         here,
         tools,
         files,
+        secrets,
         name,
         tint,
         mood,
@@ -18021,6 +18253,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             open,
             tools,
             files,
+            secrets,
             show,
             this.clone(),
         ),

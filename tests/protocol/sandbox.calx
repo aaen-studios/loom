@@ -108,7 +108,7 @@ echo none
 // acp/, and starts her MCP server there too, a program only the image has.
 // The script has no environment there either, and Deno runs in the sandbox,
 // under its limits, while a call waits for her yes.
-fn code_mode(runtime: String, ann: mut Session, ann_id: String) ! Error {
+fn code_mode(runtime: String, ann: mut Session, owner: mut Session, ann_id: String) ! Error {
     _ = try ann.cmd("q_10", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
     let fake = Obj.new().s("name", String("fake")).s("command", String("/usr/local/bin/fake-mcp")).j("args", Json.Array(List<Json>())).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
     _ = try ann.cmd("q_11", "mcp.put", fake)
@@ -117,7 +117,26 @@ fn code_mode(runtime: String, ann: mut Session, ann_id: String) ! Error {
     let chat = str_at(at(try ann.cmd("q_13", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
 
     try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", chat.copy()).s("text", String("/mcp list")).done())
-    try check(reply_text(try ann.reply()) == "tools: search_tools, run_code, search_messages, list_devices, use_device, show_card, add_server, install_server", "in Code Mode, her agent's loom mcp offers search_tools and run_code, and the app's tools beside them")
+    try check(reply_text(try ann.reply()) == "tools: search_tools, run_code, search_messages, list_devices, use_device, show_card, add_server, install_server, add_mcp_server", "in Code Mode, her agent's loom mcp offers search_tools and run_code, and the app's tools beside them")
+
+    // A server her agent proposes goes in her own list once she says Add on its
+    // card, never the owner's, and runs in her sandbox, where her session finds
+    // its tools at once (PLAN.md, "Signing in to MCP servers").
+    let extra = Obj.new().s("name", String("extra")).s("command", String("/usr/local/bin/fake-mcp")).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
+    try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_1a")).s("conversation", chat.copy()).s("text", "/mcpkeep add_mcp_server {extra}\n{#"/mcpkeep search_tools {"query":"echo text back"}"#}").done())
+    var card = Json.Null
+    while card == Json.Null {
+        let f = try ann.until("card", "", LONG)
+        let c = at(f, "card")
+        if str_at(c.copy(), "server") == some(String("extra")) and str_at(c.copy(), "state") == some(String("asking")) { card = c }
+    }
+    try check("{at(card.copy(), "settings")}".contains(#""secret":"FAKE_KEY","have":true"#), "her agent's proposal is on a card to her, which knows she has its key")
+    _ = try ann.cmd("q_11a", "mcp.add_answer", Obj.new().s("call", str_at(card, "call") ?? String()).s("answer", String("add")).done())
+    let proposed = reply_text(try reply_in(mut ann, LONG))
+    try check(proposed.contains("add_mcp_server: Your person added extra.") and proposed.contains("mcp.extra.echo("), "Add keeps it for her, and her session finds its tools in her sandbox")
+    let hers = "{try ann.cmd("q_11b", "mcp.list", Obj.new().done())}"
+    let theirs = "{try owner.cmd("q_11c", "mcp.list", Obj.new().done())}"
+    try check(hers.contains(#""name":"extra""#) and not theirs.contains(#""name":"extra""#), "it's in her own servers, not the owner's")
 
     try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_2")).s("conversation", chat.copy()).s("text", script(ECHO)).done())
     let ran = reply_text(try reply_in(mut ann, LONG))
@@ -198,7 +217,7 @@ fn run(runtime: String) ! Error {
     let own_key = reply_text(try ann.reply())
     try check(own_key.contains("OWNER_KEY=her own"), "with a key of her own, she's past no budget, and her key wins")
 
-    try code_mode(runtime.copy(), mut ann, ann_id.copy())
+    try code_mode(runtime.copy(), mut ann, mut owner, ann_id.copy())
 
     // An agent closed to the network (PLAN.md, "Rules, records and limits"):
     // one of hers with a list runs in a sandbox of its own, with no network but

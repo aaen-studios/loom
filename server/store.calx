@@ -2265,6 +2265,13 @@ impl Store {
         return text(r[0].copy())
     }
 
+    // Marks the session `conversation` has as one whose tools have changed since it
+    // started (a server added for its agent, which it has only from a session's
+    // start), so its next message goes to a fresh session.
+    pub fn stale_acp_session(self, user: String, conversation: String) ! Error {
+        _ = try self.db.execute(String("UPDATE acp_sessions SET tools = 'stale' WHERE user = ? AND conversation = ?"), [t(user), t(conversation)])
+    }
+
     pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String, tools: str) ! Error {
         _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at, tools) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, session = excluded.session, at = excluded.at, tools = excluded.tools"), [t(user), t(conversation), t(program), t(session), Value.Int(now()), t(String(tools))])
     }

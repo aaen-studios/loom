@@ -163,6 +163,31 @@ struct Setup {
     steps: List<(String, String, bool)>    // step, its line, done
 }
 
+// An MCP server an agent proposed with add_mcp_server (PLAN.md, "Signing in to
+// MCP servers"), from its card's ask until its turn ends: what it would add,
+// and how it stands. The agent's call is held under `call` until it hears.
+struct McpAdd {
+    user: String
+    agent: String
+    run: String
+    call: String
+    spec: Json    // the server, as mcp.put takes it
+    state: String    // as cards.MCP_ADD_STATES has them
+    said: String    // its card's line: the tools it offers, or what went wrong
+    answered: bool    // whether the agent's call has had its answer
+}
+
+// How many settings, env or headers, a server an agent proposes may have.
+const MCP_SETTINGS_MOST: usize = 20
+// The waiter a proposed server's test answers, before the proposal's call.
+const MCP_ADD_TEST: str = "mcp_add:"
+
+// What an agent hears of a server its person added that waits for them to
+// sign in.
+fn mcp_waits_text(server: String) -> String {
+    return "Your person added {server}. It waits for them to sign in, with Sign in on its card in the chat: don't sign in yourself, in your browser or any other way. Its tools are yours once they have, in your next search_tools or script."
+}
+
 struct Block {
     kind: String
     text: String
@@ -368,6 +393,7 @@ pub struct Instance {
     leftovers: List<String>    // folders of removed ACP agents and plugins, removed once their programs have let go
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     setups: Map<String, Setup>    // tc_ id -> loom going onto one of the person's hosts
+    mcp_adds: LinkedMap<String, McpAdd>    // tc_ id -> an MCP server an agent proposed, while its turn goes on
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
     minute_ms: i64
@@ -1131,6 +1157,42 @@ fn settings_of(j: Json) -> Json? {
     return some(o.done())
 }
 
+// The MCP server mcp.put's `args` describe, as it's kept but for a client of
+// the person's own, or why it can't be one. add_mcp_server checks with it too.
+fn mcp_spec(args: Json) -> (Json, String) {
+    let server_name = str_at(args.copy(), "name") ?? String()
+    if not valid_skill(server_name.copy()) or server_name == "loom" { return (Json.Null, String("An MCP server's name is lowercase letters, digits and hyphens, and isn't loom.")) }
+    let command = str_at(args.copy(), "command") ?? String()
+    let address = str_at(args.copy(), "url") ?? String()
+    if (command.len() == 0) == (address.len() == 0) { return (Json.Null, String("An MCP server has a command, or a url, and not both.")) }
+    if address.len() > 0 and not address.starts_with("https://") and not address.starts_with("http://") { return (Json.Null, "{address} isn't an http:// or https:// address.") }
+    let server = Obj.new().s("name", server_name)
+    if command.len() > 0 {
+        var list = List<Json>()
+        if let Json.Array(given) = at(args.copy(), "args") {
+            for a in given {
+                if let s = a.as_str() { list.push(Json.Str(s)) }
+            }
+        }
+        let env = settings_of(at(args, "env")) else return (Json.Null, String(#"Each value in env is text, or {"secret": NAME}."#))
+        return (server.s("command", command).j("args", Json.Array(list)).j("env", env).done(), String())
+    }
+    let headers = settings_of(at(args, "headers")) else return (Json.Null, String(#"Each value in headers is text, or {"secret": NAME}."#))
+    return (server.s("url", address).j("headers", headers).done(), String())
+}
+
+@test
+fn an_mcp_server_is_checked_once_for_both_ways_in() {
+    let (s, why) = mcp_spec(Obj.new().s("name", String("acta")).s("url", String("https://acta.example/mcp")).j("headers", Obj.new().j("Authorization", Obj.new().s("secret", String("ACTA_KEY")).done()).done()).done())
+    assert(why.len() == 0 and "{s}" == #"{"name":"acta","url":"https://acta.example/mcp","headers":{"Authorization":{"secret":"ACTA_KEY"}}}"#)
+    let (c, _) = mcp_spec(Obj.new().s("name", String("fake")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Int(3)])).done())
+    assert("{c}" == #"{"name":"fake","command":"npx","args":["-y"],"env":{}}"#)
+    for bad in [#"{"name":"loom","url":"https://x"}"#, #"{"name":"Bad Name","url":"https://x"}"#, #"{"name":"two","url":"https://x","command":"npx"}"#, #"{"name":"ftp","url":"ftp://x"}"#, #"{"name":"odd","command":"x","env":{"K":1}}"#] {
+        let (_, no) = mcp_spec(parse(String(bad))!)
+        assert(no.len() > 0)
+    }
+}
+
 // A list of names, keeping only the text ones.
 fn names_of(j: Json) -> Json {
     var out = List<Json>()
@@ -1356,7 +1418,7 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3260,19 +3322,25 @@ impl Instance {
         let p = i.sign_ins.remove(state) else return
         if let e = oauth.param(back.copy(), "error") {
             let about = oauth.param(back.copy(), "error_description") ?? e
-            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "{p.server} didn't sign you in: {about}"))
+            let why = "{p.server} didn't sign you in: {about}"
+            try i.mcp_add_signed(user.copy(), p.server.copy(), why.copy())
+            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), why))
             return
         }
         // The answer's issuer, when it says one, is the one loom sent the browser to (RFC 9207).
         if let iss = oauth.param(back.copy(), "iss") {
             if iss != (str_at(p.grant.copy(), "issuer") ?? String()) {
-                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "The sign-in came back from {iss}, not from where {p.server} signs in."))
+                let why = "The sign-in came back from {iss}, not from where {p.server} signs in."
+                try i.mcp_add_signed(user.copy(), p.server.copy(), why.copy())
+                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), why))
                 return
             }
         }
         let code = oauth.param(back, "code") ?? String()
         if code.len() == 0 {
-            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "{p.server} sent no code back: sign in again."))
+            let why = "{p.server} sent no code back: sign in again."
+            try i.mcp_add_signed(user.copy(), p.server.copy(), why.copy())
+            i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), why))
             return
         }
         i.next_job += 1
@@ -3338,7 +3406,9 @@ impl Instance {
         if job.kind == "begin" {
             let w = job.waiter else return
             if d.error.len() > 0 {
-                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), "{job.server} can't be signed in to: {d.error}"))
+                let why = "{job.server} can't be signed in to: {d.error}"
+                try i.mcp_add_signed(job.user.copy(), job.server.copy(), why.copy())
+                i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), why))
                 return
             }
             // Its client is kept now, so the next sign-in uses it again.
@@ -3354,12 +3424,15 @@ impl Instance {
         if job.kind == "exchange" {
             let w = job.waiter else return
             if d.error.len() > 0 {
+                try i.mcp_add_signed(job.user.copy(), job.server.copy(), d.error.copy())
                 i.answer_cmd(w, Answer.Refused(String("sign_in_failed"), d.error.copy()))
                 return
             }
             try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy())
             // Agents that aren't answering start again with it at their next message.
             i.stop_idle_of(job.user.copy())
+            // A card that waited for it goes on: the server is tried with it.
+            try i.mcp_add_signed(job.user.copy(), job.server.copy(), String())
             i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).maybe("signed_in_as", str_at(d.grant, "who")).done()))
             return
         }
@@ -3405,6 +3478,8 @@ impl Instance {
         if let r = mut i.runs.find(run_id) {
             for b in r.blocks {
                 if b.kind == "card" and str_at(b.card.copy(), "id") == some(id.copy()) { return }
+                // A server the agent proposed in this reply has Sign in on its own card.
+                if b.kind == "card" and str_at(b.card.copy(), "type") == some(String("mcp_add")) and str_at(b.card.copy(), "server") == some(server.copy()) { return }
             }
             var b = new_block("card")
             b.card = card.copy()
@@ -4028,6 +4103,9 @@ impl Instance {
             let action = Obj.new().s("name", String("server.offer")).j("args", offer.done()).done()
             let title = if code.len() > 0 { "Add the server {address} to your app, and sign in there" } else { "Add the server {address} to your app" }
             return try i.ask_person(req, g, title, "other", action)
+        }
+        if name == "add_mcp_server" {
+            return try i.propose_mcp(req, g, args)
         }
         if name == "install_server" {
             let domain = (str_at(args.copy(), "domain") ?? String()).trim().copy()
@@ -6470,6 +6548,306 @@ impl Instance {
         return (shown, String())
     }
 
+    // Puts `card`, made by loom, in the run `run_id`'s reply: in place of the
+    // card with its id, or after what's there so far. Whether the reply was
+    // still there to take it.
+    fn place_card(i: mut Instance, run_id: String, card: Json) -> bool {
+        let id = str_at(card.copy(), "id") ?? String()
+        var frame = Json.Null
+        var user = String()
+        if let r = mut i.runs.find(run_id) {
+            var place = r.blocks.len()
+            var k: usize = 0
+            for b in r.blocks {
+                if b.kind == "card" and str_at(b.card.copy(), "id") == some(id.copy()) { place = k }
+                k += 1
+            }
+            if place == r.blocks.len() {
+                var b = new_block("card")
+                b.card = card.copy()
+                r.blocks.push(b)
+            } else {
+                r.blocks[place].card = card.copy()
+            }
+            frame = Obj.new().s("t", String("card")).s("run", r.id.copy()).s("message", r.message.copy()).i("block", i64.wrap(u64(place))).j("card", card).done()
+            user = r.user.copy()
+        }
+        if user.len() == 0 { return false }
+        i.publish(user, frame)
+        return true
+    }
+
+    // --- An MCP server an agent proposes (add_mcp_server) ---
+
+    // The names of `user`'s secrets.
+    fn secret_names_of(i: Instance, user: String) -> List<String> ! Error {
+        var out = List<String>()
+        for s in try i.store.secret_names(user) { out.push(str_at(s, "name") ?? String()) }
+        return out
+    }
+
+    // add_mcp_server (PLAN.md, "Signing in to MCP servers"): the server the
+    // agent names, checked as mcp.put checks one, goes in its reply as a card
+    // with Add and Cancel. Nothing is kept until the person says Add, and a key
+    // it needs is theirs to fill in there. The agent's call waits for them, and
+    // ends with its turn. It always asks, whatever the agent's permission mode:
+    // a server is code that runs, or a place that's reached, with the person's
+    // keys.
+    fn propose_mcp(i: mut Instance, req: Request, g: Grant, args: Json) -> Json? ! Error {
+        let (spec, why) = mcp_spec(args)
+        if why.len() > 0 { return some(tool_error(why)) }
+        let server = str_at(spec.copy(), "name") ?? String()
+        if try i.store.mcp_server(g.user.copy(), server.copy()) != none { return some(tool_error("Your person has an MCP server named {server} already. Propose this one under another name, or, if it's the same, ask them to give it to you on your settings, under MCP servers.")) }
+        for key in ["env", "headers"] {
+            if let Json.Object(m) = at(spec.copy(), key) {
+                if m.len() > MCP_SETTINGS_MOST { return some(tool_error("{key} has {m.len()} settings: {MCP_SETTINGS_MOST} at most.")) }
+                for (_, v) in m {
+                    if let secret = str_at(v, "secret") {
+                        if not valid_secret(secret.copy()) { return some(tool_error("{secret} can't be a secret's name: it's letters, digits, _, - and ., such as ACTA_KEY.")) }
+                    }
+                }
+            }
+        }
+        let run_id = i.calling_run(g.copy())
+        if run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
+        for (_, a) in i.mcp_adds {
+            if a.run == run_id and a.state == "asking" { return some(tool_error(String("You've a server waiting for your person's answer in this reply already. Wait for that one."))) }
+        }
+        let call = try i.store.new_id("tc")
+        i.mcp_adds.insert(call.copy(), McpAdd { user: g.user.copy(), agent: g.agent.copy(), run: run_id, call: call.copy(), spec: spec, state: String("asking"), said: String(), answered: false })
+        if not try i.show_mcp_add(call.copy()) {
+            _ = i.mcp_adds.remove(call)
+            return some(tool_error(String("The reply ended before the card could go in it.")))
+        }
+        i.hold_call(call, req)
+        return none
+    }
+
+    // The card of the server proposed as `call`, as it stands now, in its
+    // reply. false once the reply has ended.
+    fn show_mcp_add(i: mut Instance, call: String) -> bool ! Error {
+        var run_id = String()
+        var user = String()
+        var spec = Json.Null
+        var state = String()
+        var said = String()
+        if let a = i.mcp_adds.find(call.copy()) {
+            run_id = a.run.copy()
+            user = a.user.copy()
+            spec = a.spec.copy()
+            state = a.state.copy()
+            said = a.said.copy()
+        }
+        if run_id.len() == 0 { return false }
+        let have = try i.secret_names_of(user)
+        return i.place_card(run_id, cards.mcp_add_card(call, spec, have, state, said))
+    }
+
+    // Moves the proposal `call` to `state`, with `said` its card's line, and
+    // shows it.
+    fn mcp_add_to(i: mut Instance, call: String, state: String, said: String) ! Error {
+        if let a = mut i.mcp_adds.find(call.copy()) {
+            a.state = state.copy()
+            a.said = said.copy()
+        }
+        _ = try i.show_mcp_add(call)
+    }
+
+    // Answers the agent's call for the proposal `call`, once.
+    fn mcp_add_tell(i: mut Instance, call: String, result: Json) {
+        var waits = false
+        if let a = mut i.mcp_adds.find(call.copy()) {
+            waits = not a.answered
+            a.answered = true
+        }
+        if waits { i.answer_call(call, result) }
+    }
+
+    // mcp.add_answer, from one of the person's devices: Add, with the secrets
+    // the server names that they don't have; Cancel; or Later, for one that
+    // waits for them to sign in.
+    fn mcp_add_answer(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        let call = str_at(args.copy(), "call") ?? String()
+        let answer = str_at(args.copy(), "answer") ?? String()
+        var mine = false
+        var state = String()
+        var spec = Json.Null
+        var agent = String()
+        var run_id = String()
+        if let a = i.mcp_adds.find(call.copy()) {
+            mine = a.user == user
+            state = a.state.copy()
+            spec = a.spec.copy()
+            agent = a.agent.copy()
+            run_id = a.run.copy()
+        }
+        if not mine { return Answer.Refused(String("not_found"), String("That card's turn is over.")) }
+        let server = str_at(spec.copy(), "name") ?? String()
+        if answer == "cancel" {
+            if state != "asking" { return Answer.Refused(String("not_now"), "{server} was added already. It's on the MCP servers page, to remove.") }
+            try i.mcp_add_to(call.copy(), "cancelled", String())
+            i.log(user.copy(), agent.copy(), "approval", "Didn't add the MCP server {server}", device)
+            i.mcp_add_tell(call.copy(), rule_refusal("person-said-no", "Your person said no: {server} wasn't added."))
+            _ = i.mcp_adds.remove(call)
+            return Answer.Value(Obj.new().done())
+        }
+        if answer == "later" {
+            if state != "sign_in" { return Answer.Refused(String("not_now"), String("It isn't waiting for a sign-in.")) }
+            try i.mcp_add_to(call.copy(), "later", String())
+            i.mcp_add_tell(call, tool_text(mcp_waits_text(server)))
+            return Answer.Value(Obj.new().done())
+        }
+        if answer != "add" { return Answer.Refused(String("bad_request"), String("answer is add, cancel or later.")) }
+        if state != "asking" { return Answer.Refused(String("not_now"), String("It was answered already.")) }
+        // The keys it needs that the person doesn't have yet: each is filled in on
+        // the card, and kept as their secret, sealed, which the agent never sees.
+        let given = at(args, "secrets")
+        var keep = List<(String, String)>()
+        for name in cards.secrets_missing(spec.copy(), try i.secret_names_of(user.copy())) {
+            let value = (given.get(name.copy()) ?? Json.Null).as_str() ?? String()
+            if value.len() == 0 { return Answer.Refused(String("bad_request"), "Fill in {name} first.") }
+            keep.push((name.copy(), value))
+        }
+        if try i.store.mcp_server(user.copy(), server.copy()) != none {
+            try i.mcp_add_to(call.copy(), "failed", "There's an MCP server named {server} already.")
+            i.mcp_add_tell(call, tool_error("Your person has an MCP server named {server} already, so this one wasn't added."))
+            return Answer.Value(Obj.new().done())
+        }
+        for (name, value) in keep {
+            if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("secret.put"), Obj.new().s("name", name).s("value", value).done()) { return Answer.Refused(code, message) }
+        }
+        if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("mcp.put"), spec.copy()) { return Answer.Refused(code, message) }
+        // The agent that asked gets it, as its edit page would give it.
+        if let a = try i.store.agent(user.copy(), agent.copy()) {
+            var names = List<Json>()
+            if let Json.Array(had) = at(a.copy(), "mcp") { names = had.copy() }
+            names.push(Json.Str(server.copy()))
+            _ = try i.command(user.copy(), device.copy(), String("agent.update"), Obj.new().s("agent", agent.copy()).j("mcp", Json.Array(names)).done())
+            // With Code Mode off, the agent program has its servers only from a session's
+            // start, so its chat's next message goes to a fresh session that has it.
+            if not (bool_at(a, "code_mode") ?? true) {
+                if let r = i.runs.find(run_id) { try i.store.stale_acp_session(user.copy(), r.conversation.copy()) }
+            }
+        }
+        i.log(user.copy(), agent.copy(), "approval", "Added the MCP server {server}, as {i.agent_name(user.copy(), agent.copy())} asked", device)
+        try i.mcp_add_to(call.copy(), "adding", String())
+        try i.try_mcp_add(call)
+        return Answer.Value(Obj.new().done())
+    }
+
+    // Tries a server just added, as Test does: its tools, or that it wants its
+    // person to sign in. A sandboxed person's servers run only in their
+    // sandboxes, so theirs is kept untried.
+    fn try_mcp_add(i: mut Instance, call: String) ! Error {
+        var user = String()
+        var server = String()
+        if let a = i.mcp_adds.find(call.copy()) {
+            user = a.user.copy()
+            server = str_at(a.spec.copy(), "name") ?? String()
+        }
+        if user.len() == 0 { return }
+        if i.sandboxed(user.copy()) {
+            try i.mcp_add_to(call.copy(), "added", String())
+            let said = i.mcp_ready_text(call.copy(), List<String>())
+            i.mcp_add_tell(call, tool_text(said))
+            return
+        }
+        try i.test_mcp(Waiter { socket: none, id: "{MCP_ADD_TEST}{call}" }, user, Obj.new().s("name", server).done())
+    }
+
+    // What the agent hears of a server it has now: its tools, which are its
+    // own at once in Code Mode, or from its next session without.
+    fn mcp_ready_text(i: Instance, call: String, offers: List<String>) -> String {
+        var server = String()
+        var code_mode = true
+        if let a = i.mcp_adds.find(call) {
+            server = str_at(a.spec.copy(), "name") ?? String()
+            match i.store.agent(a.user.copy(), a.agent.copy()) {
+                ok(some(agent)) => code_mode = bool_at(agent, "code_mode") ?? true,
+                _ => {},
+            }
+        }
+        let offered = if offers.len() > 0 { ", with the tools {offers.join(", ")}" } else { String() }
+        if not code_mode { return "Your person added {server}{offered}. Your tools come with your session, so its tools are yours from your person's next message, which starts a fresh one." }
+        return "Your person added {server}{offered}. They're yours now: search_tools finds them, under mcp.{codemode.ident(server.copy())}."
+    }
+
+    // What a test of a proposed server said (mcp.test's answer): ready with its
+    // tools, a sign-in it wants, or why it didn't start.
+    fn mcp_add_tested(i: mut Instance, call: String, result: Answer) ! Error {
+        if not i.mcp_adds.contains(call.copy()) { return }
+        match result {
+            Answer.Value(v) => {
+                var offers = List<String>()
+                if let Json.Array(names) = at(v, "tools") {
+                    for n in names { offers.push(n.as_str() ?? String()) }
+                }
+                try i.mcp_add_to(call.copy(), "ready", offers.join(", "))
+                let said = i.mcp_ready_text(call.copy(), offers)
+                i.mcp_add_tell(call, tool_text(said))
+            },
+            Answer.Refused(code, message) => {
+                if code == "sign_in_needed" {
+                    // The card goes on to Sign in, and the agent waits for it, or for Later.
+                    try i.mcp_add_to(call, "sign_in", String())
+                    return
+                }
+                var server = String()
+                if let a = i.mcp_adds.find(call.copy()) { server = str_at(a.spec.copy(), "name") ?? String() }
+                try i.mcp_add_to(call.copy(), "failed", message.copy())
+                i.mcp_add_tell(call, tool_error("Your person added {server}, but it didn't start: {message} They can change it on the MCP servers page."))
+            },
+        }
+    }
+
+    // A sign-in to `user`'s server `server` that a proposal's card waits for
+    // went through (`error` empty), and the server is tried again for its
+    // tools, or didn't, which its card says in plain words.
+    fn mcp_add_signed(i: mut Instance, user: String, server: String, error: String) ! Error {
+        var waiting = List<String>()
+        for (call, a) in i.mcp_adds {
+            if a.user == user and str_at(a.spec.copy(), "name") == some(server.copy()) and (a.state == "sign_in" or a.state == "later") { waiting.push(call.copy()) }
+        }
+        for call in waiting {
+            if error.len() > 0 {
+                if let a = mut i.mcp_adds.find(call.copy()) { a.said = error.copy() }
+                _ = try i.show_mcp_add(call)
+                continue
+            }
+            try i.mcp_add_to(call.copy(), "adding", String())
+            try i.try_mcp_add(call)
+        }
+    }
+
+    // A turn that ends, or is stopped, with servers its agent proposed: one its
+    // person never answered isn't added, and a call that still waits hears how
+    // things stand.
+    fn close_mcp_adds(i: mut Instance, run_id: String) ! Error {
+        var calls = List<String>()
+        for (call, a) in i.mcp_adds {
+            if a.run == run_id { calls.push(call.copy()) }
+        }
+        for call in calls {
+            var state = String()
+            var server = String()
+            if let a = i.mcp_adds.find(call.copy()) {
+                state = a.state.copy()
+                server = str_at(a.spec.copy(), "name") ?? String()
+            }
+            if state == "asking" {
+                try i.mcp_add_to(call.copy(), "cancelled", String())
+                i.mcp_add_tell(call.copy(), tool_error("Your turn ended before your person answered, so {server} wasn't added."))
+            } else if state == "sign_in" {
+                try i.mcp_add_to(call.copy(), "later", String())
+                i.mcp_add_tell(call.copy(), tool_text(mcp_waits_text(server)))
+            } else {
+                if state == "adding" { try i.mcp_add_to(call.copy(), "added", String()) }
+                i.mcp_add_tell(call.copy(), tool_text("Your person added {server}."))
+            }
+            _ = i.mcp_adds.remove(call)
+        }
+    }
+
     // A file an agent made: kept as the person's, and given as a file block.
     fn agent_file(i: mut Instance, user: String, name: String, mime: String, data: List<u8>) -> Json ! Error {
         let sha = bytes.hex(sha256(data))
@@ -7695,12 +8073,12 @@ impl Instance {
             let last = str_at(before[before.len() - 1].copy(), "id") ?? String()
             said = try i.transcript(user.copy(), conversation, some(last))
         }
-        let why = if full { "which grew too long, so this one starts fresh." } else { "which had other tools, since your person changed how you reach them, so this one starts fresh. Use the tools you have now, whatever the chat below used." }
+        let why = if full { "which grew too long, so this one starts fresh." } else { "which had other tools, since your person changed them, so this one starts fresh. Use the tools you have now, whatever the chat below used." }
         let carried = "[loom: Your chat with your person goes on from an earlier session, {why} To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
         if let r = mut i.runs.find(run_id) {
             r.note = if r.note.len() > 0 { "{carried}\n\n{r.note}" } else { carried }
         }
-        let logged = if full { "Carried the chat on in a fresh session: the last one's context was nearly full" } else { "Carried the chat on in a fresh session: the agent's Code Mode changed, and a session keeps its tools" }
+        let logged = if full { "Carried the chat on in a fresh session: the last one's context was nearly full" } else { "Carried the chat on in a fresh session: the agent's tools changed, and a session keeps its tools" }
         i.log(user, agent.copy(), "session", String(logged), agent)
     }
 
@@ -9153,6 +9531,21 @@ impl Instance {
             if let c = str_at(inner.copy(), "command") { a.command = some(c) }
             if let p = str_at(inner, "path") { a.paths.push(p) }
         }
+        // A server an agent proposes: the site it's reached at, or the command that
+        // starts it, with its arguments, so rules on either hold.
+        if name == "add_mcp_server" {
+            if let address = str_at(args.copy(), "url") {
+                a = rules.with_site(a, address)
+            } else if let c = str_at(args.copy(), "command") {
+                var line: List<String> = [c]
+                if let Json.Array(given) = at(args, "args") {
+                    for item in given {
+                        if let s = item.as_str() { line.push(s) }
+                    }
+                }
+                a.command = some(line.join(" "))
+            }
+        }
         return a
     }
 
@@ -9336,6 +9729,7 @@ impl Instance {
         for call in open {
             try i.answer_approval(call, false, false, String("cancel"))
         }
+        try i.close_mcp_adds(run_id.copy())
         if let p = i.procs.find(key) {
             var to = p.to.copy()
             if session.len() > 0 {
@@ -9352,6 +9746,8 @@ impl Instance {
     // reply or telling what waited on it fails: otherwise every app would show
     // the agent working until the instance restarted.
     fn finish(i: mut Instance, run_id: String, status: String, error: String?) ! Error {
+        // A server its agent proposed: its card says how it stands in the kept reply.
+        if let err(e) = i.close_mcp_adds(run_id.copy()) { eprintln("loom: ending run {run_id}: {e}") }
         let r = i.runs.remove(run_id.copy()) else return
         match i.wind_up(r, status.copy(), error.copy()) {
             ok(ends) => if not ends { return },
@@ -9539,6 +9935,14 @@ impl Instance {
             try i.signed_in(Waiter { socket: some(s), id: id }, user, args)
             return
         }
+        // The person's answer on the card of a server an agent proposed: only from
+        // one of their devices, so never through command, which agents, plugins and
+        // scripts reach.
+        if name == "mcp.add_answer" {
+            let answer = try i.mcp_add_answer(user, device, args)
+            i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
+            return
+        }
         if name == "chat.ask" {
             try i.side_question(Waiter { socket: some(s), id: id }, user, device, args)
             return
@@ -9584,6 +9988,11 @@ impl Instance {
 
     fn answer_cmd(i: mut Instance, w: Waiter, result: Answer) {
         let s = w.socket else {
+            // The test of a server an agent proposed: its card and its call hear.
+            if w.id.starts_with(MCP_ADD_TEST) {
+                if let err(e) = i.mcp_add_tested(w.id[MCP_ADD_TEST.len()..].copy(), result) { eprintln("loom: a proposed MCP server's test: {e}") }
+                return
+            }
             // An agent's run_command: its tool call gets the answer, and
             // when its person allowed it, the tool in its chat finishes.
             let out = answer_text(result)
@@ -10494,25 +10903,12 @@ impl Instance {
             return Answer.Value(Obj.new().j("servers", Json.Array(try i.listed_servers(user))).done())
         }
         if name == "mcp.put" {
-            let server_name = str_at(args.copy(), "name") ?? String()
-            if not valid_skill(server_name.copy()) or server_name == "loom" { return Answer.Refused(String("bad_request"), String("An MCP server's name is lowercase letters, digits and hyphens, and isn't loom.")) }
-            let command = str_at(args.copy(), "command") ?? String()
-            let address = str_at(args.copy(), "url") ?? String()
-            if (command.len() == 0) == (address.len() == 0) { return Answer.Refused(String("bad_request"), String("An MCP server has a command, or a url, and not both.")) }
-            if address.len() > 0 and not address.starts_with("https://") and not address.starts_with("http://") { return Answer.Refused(String("bad_request"), "{address} isn't an http:// or https:// address.") }
-            var server = Obj.new().s("name", server_name.copy())
-            if command.len() > 0 {
-                var list = List<Json>()
-                if let Json.Array(given) = at(args.copy(), "args") {
-                    for a in given {
-                        if let s = a.as_str() { list.push(Json.Str(s)) }
-                    }
-                }
-                let env = settings_of(at(args.copy(), "env")) else return Answer.Refused(String("bad_request"), String(#"Each value in env is text, or {"secret": NAME}."#))
-                server = server.s("command", command).j("args", Json.Array(list)).j("env", env)
-            } else {
-                let headers = settings_of(at(args.copy(), "headers")) else return Answer.Refused(String("bad_request"), String(#"Each value in headers is text, or {"secret": NAME}."#))
-                server = server.s("url", address.copy()).j("headers", headers)
+            let (spec, why) = mcp_spec(args.copy())
+            if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
+            let server_name = str_at(spec.copy(), "name") ?? String()
+            var server = Obj.new()
+            if let Json.Object(m) = spec.copy() { server.m = m.copy() }
+            if str_at(spec, "url") != none {
                 // A client of the person's own, for a server whose sign-in
                 // doesn't let apps sign up by themselves. Its secret, left
                 // out, stays as it was.

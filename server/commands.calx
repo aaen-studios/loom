@@ -86,7 +86,7 @@ const COMMANDS: [Command; 92] = [
     Command { name: "plugin.revisions", args: "id", does: "A plugin's revisions." },
     Command { name: "plugin.delete", args: "id", does: "Deletes a plugin and its panel's data." },
     Command { name: "mcp.list", args: "", does: "The person's MCP servers." },
-    Command { name: "mcp.put", args: "name, command with args? and env?, or url with headers?", does: "Adds or changes an MCP server, which agents that pick it run." },
+    Command { name: "mcp.put", args: "name, command with args? and env?, or url with headers?", does: "Adds or changes an MCP server, which agents that pick it run. To add one for yourself, use add_mcp_server, which shows your person a card." },
     Command { name: "mcp.test", args: "name", does: "Starts one of the person's MCP servers as a session would, with its secrets, and gives its tools' names, or why it didn't start." },
     Command { name: "mcp.delete", args: "name", does: "Removes an MCP server." },
     Command { name: "mcp.sign_out", args: "name", does: "Signs out of an MCP server your person signed in to. Only they sign in, in the app." },
@@ -125,6 +125,7 @@ pub fn access(name: String) -> Access {
     if name == "account.delete" or name == "password.reset" or name == "password.set" { return Access.Never(String("That's your person's own to do, in the app.")) }
     if name == "secret.put" { return Access.Never(String("A secret's value is never an agent's: ask your person to keep it in the app, or use browser_ask_secret.")) }
     if name == "mcp.sign_in" or name == "mcp.signed_in" { return Access.Never(String("Only your person signs in to an MCP server, in the app: loom shows them Sign in when a server needs it. Don't sign in yourself, in a browser or any other way.")) }
+    if name == "mcp.add_answer" { return Access.Never(String("Only your person answers an MCP server you proposed, on its card. To propose one, use add_mcp_server.")) }
     if name == "plugin.allow" { return Access.Never(String("Only your person allows what a plugin asks for, in the app.")) }
     if name == "plugin.message" or name == "chat.ask" { return Access.Never(String("Use message_agent.")) }
     if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
@@ -172,7 +173,7 @@ fn reading_runs_and_harm_asks() {
     assert(access(String("acp.install")) == Access.Asks(String("other")))
     assert(access(String("instance.move")) == Access.Asks(String("move")))
     assert(access(String("something.new")) == Access.Asks(String("other")))
-    for never in ["secret.put", "mcp.sign_in", "mcp.signed_in", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
+    for never in ["secret.put", "mcp.sign_in", "mcp.signed_in", "mcp.add_answer", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
         if let Access.Never(_) = access(String(never)) {} else { panic("an agent could run {never}") }
     }
     for c in COMMANDS {

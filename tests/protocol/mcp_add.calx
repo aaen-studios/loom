@@ -1,0 +1,318 @@
+module tests.protocol.mcp_add
+
+// An agent adds an MCP server (PLAN.md, "Signing in to MCP servers"): its
+// add_mcp_server puts a card in its reply, and nothing is kept until the
+// person says Add there. Cancel adds nothing. Add keeps the key the person
+// typed on the card as their secret, which the agent never sees, keeps the
+// server and gives it to the agent, whose Code Mode session finds its tools at
+// once, and can call them. A server that wants a sign-in (the fake OAuth
+// server, tests/fake_oauth) goes on to Sign in on the same card, and is ready
+// once the person has; one whose sign-in fails says why there, and Later lets
+// the agent go on. A turn stopped while it asks adds nothing. A rule that
+// denies stops it, the agent can't answer its own card, and another person
+// can't add to this one's servers by answering it. With Code Mode off, the
+// chat's next message goes to a fresh session that has the server.
+//
+//     calx tests/protocol/mcp_add.calx
+import std.bytes
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json}
+import std.process.{Child, Command, Stdio, exit}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+// Where a test's browser comes back to; nothing listens there, since the test
+// reads the address off the fake's consent page.
+const REDIRECT: str = "http://127.0.0.1:9/callback"
+// The first script waits while the instance fetches Deno.
+const LONG: u32 = 600000
+const SECRET: str = "s3cret-for-the-card"
+
+fn fetch_text(address: String) -> String ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return String.from_utf8(r.body) ?? String()
+}
+
+// What the browser brings back: the consent page's link, to the redirect.
+fn consent(address: String) -> String ! Error {
+    let page = try fetch_text(address)
+    let at_link = page.find("href=\"") else { fail "the sign-in page has no link: {page}" }
+    let rest = page[at_link + 6..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    return rest[..end].copy()
+}
+
+fn query_of(link: String) -> String {
+    let q = link.find("?") ?? link.len()
+    return if q < link.len() { link[q + 1..].copy() } else { String() }
+}
+
+fn ok_of(r: Json) -> bool {
+    return at(r, "ok") == Json.Bool(true)
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn message_of(r: Json) -> String {
+    return str_at(at(r, "error"), "message") ?? String()
+}
+
+fn names_in(list: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(servers) = at(at(list, "value"), "servers") {
+        for s in servers { out.push(str_at(s, "name") ?? String()) }
+    }
+    return out
+}
+
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", LONG)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn send(app: Session, conversation: String, cid: String, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation).s("text", text).done())
+}
+
+fn say(app: mut Session, conversation: String, cid: String, text: String) -> String ! Error {
+    try send(app, conversation.copy(), cid, text)
+    return reply_text(try reply_in(mut app, conversation))
+}
+
+// The newest card in `server`'s proposal, once it's in `state`: among the
+// frames from `mark` on, or those still to come.
+fn card_in(app: mut Session, mark: usize, server: str, state: str) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            let c = at(f.copy(), "card")
+            if str_at(f, "t") == some(String("card")) and str_at(c.copy(), "type") == some(String("mcp_add")) and str_at(c.copy(), "server") == some(String(server)) and str_at(c.copy(), "state") == some(String(state)) { return c }
+        }
+        _ = try app.until("card", "", 120000)
+    }
+}
+
+// The card a kept reply ends with, for `server`.
+fn kept_card(message: Json, server: str) -> Json {
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            let c = at(b, "card")
+            if str_at(c.copy(), "server") == some(String(server)) { return c }
+        }
+    }
+    return Json.Null
+}
+
+fn answer(app: mut Session, id: str, card: Json, what: str, secrets: Json) -> Json ! Error {
+    return try app.cmd(id, "mcp.add_answer", Obj.new().s("call", str_at(card, "call") ?? String()).s("answer", String(what)).j("secrets", secrets).done())
+}
+
+fn propose(spec: Json) -> String {
+    return "/mcpkeep add_mcp_server {spec}"
+}
+
+// Signs in to `name` as the app and the person's browser would.
+fn sign_in(app: mut Session, name: str, ids: (str, str)) -> Json ! Error {
+    let (first, second) = ids
+    let began = try app.cmd(first, "mcp.sign_in", Obj.new().s("name", String(name)).s("redirect", String(REDIRECT)).done())
+    if not ok_of(began.copy()) { return began }
+    let link = try consent(str_at(at(began, "value"), "url") ?? String())
+    return try app.cmd(second, "mcp.signed_in", Obj.new().s("query", query_of(link)).done())
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Adder")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    let server = try fs.absolute(String("tests/fake_mcp/main.calx"))
+    let spec = Obj.new().s("name", String("fake")).s("command", calx()).j("args", Json.Array([Json.Str(server)])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
+
+    // The session's loom mcp starts with no server of the person's.
+    let none_yet = try say(mut app, chat.copy(), String("m_1"), String(#"/mcpkeep search_tools {"query":"echo text back"}"#))
+    try check(not none_yet.contains("mcp.fake.echo("), "before, the agent's session has no fake server")
+
+    // --- Cancel ---
+    var mark = app.frames.len()
+    try send(app, chat.copy(), String("m_2"), propose(spec.copy()))
+    let asked = try card_in(mut app, mark, "fake", "asking")
+    try check(str_at(asked.copy(), "title") == some(String("Add the MCP server fake")) and str_at(asked.copy(), "command") == some(calx()) and "{at(asked.copy(), "settings")}" == #"[{"name":"FAKE_KEY","in":"env","secret":"FAKE_KEY","have":false}]"#, "add_mcp_server puts a card in the reply with what would be added, and the key it needs by name")
+    try check(names_in(try app.cmd("q_3", "mcp.list", Obj.new().done())).len() == 0, "nothing is added before the person answers")
+    try check(ok_of(try answer(mut app, "q_4", asked.copy(), "cancel", Json.Null)), "Cancel is taken")
+    let cancelled = try reply_in(mut app, chat.copy())
+    try check(reply_text(cancelled.copy()).contains("add_mcp_server failed: Your person said no: fake wasn't added."), "the agent hears it wasn't added")
+    try check(str_at(kept_card(cancelled, "fake"), "state") == some(String("cancelled")) and names_in(try app.cmd("q_5", "mcp.list", Obj.new().done())).len() == 0, "and Cancel adds nothing, as the kept card says")
+    try check(code_of(try answer(mut app, "q_6", asked, "add", Json.Null)) == "not_found", "a card whose turn is over can't be answered")
+
+    // --- Add ---
+    mark = app.frames.len()
+    try send(app, chat.copy(), String("m_3"), "{propose(spec.copy())}\n{#"/mcpkeep search_tools {"query":"echo text back"}"#}")
+    let asking = try card_in(mut app, mark, "fake", "asking")
+    let unfilled = try answer(mut app, "q_7", asking.copy(), "add", Json.Null)
+    try check(code_of(unfilled.copy()) == "bad_request" and message_of(unfilled) == "Fill in FAKE_KEY first.", "Add needs the key it names, when the person hasn't one")
+    try check(ok_of(try answer(mut app, "q_8", asking, "add", Obj.new().s("FAKE_KEY", String(SECRET)).done())), "Add with the key filled in is taken")
+    let ready = try card_in(mut app, mark, "fake", "ready")
+    try check(str_at(ready, "said") == some(String("echo, add, key_length")), "the card goes on to ready, with the tools it found")
+    let added = reply_text(try reply_in(mut app, chat.copy()))
+    try check(added.contains("add_mcp_server: Your person added fake, with the tools echo, add, key_length."), "the agent hears it was added, with its tools")
+    try check(added.contains("mcp.fake.echo("), "and its session finds them at once, without a new one")
+    let listed = "{try app.cmd("q_9", "mcp.list", Obj.new().done())}"
+    try check(listed.contains(#""name":"fake""#) and listed.contains(#""FAKE_KEY":{"secret":"FAKE_KEY"}"#), "the server is the person's, with its key as their secret")
+    try check("{try app.cmd("q_10", "secret.list", Obj.new().done())}".contains(#""name":"FAKE_KEY""#), "and the key they typed is kept with their secrets")
+    let agent_now = "{try app.cmd("q_11", "agent.revisions", Obj.new().s("agent", agent.copy()).done())}"
+    try check(agent_now.contains(#""mcp":["fake"]"#), "the agent that asked has it")
+    let ran = try say(mut app, chat.copy(), String("m_4"), "/mcpkeep run_code {Obj.new().s("code", String("return await mcp.fake.key_length();")).done()}")
+    if ran.contains("Deno couldn't be fetched") or ran.contains("Deno has no build") {
+        println("skip  calling its tool from a script: {ran}")
+    } else {
+        try check(ran == "run_code: Returned:\n{SECRET.len()}", "and calls its tool, which has the key, in the same session")
+    }
+
+    // --- A server that wants a sign-in ---
+    mark = app.frames.len()
+    try send(app, chat.copy(), String("m_5"), propose(Obj.new().s("name", String("acta")).s("url", "{fake}/mcp").done()))
+    let hosted = try card_in(mut app, mark, "acta", "asking")
+    try check(str_at(hosted.copy(), "url") == some("{fake}/mcp") and "{at(hosted.copy(), "settings")}" == "[]", "a hosted server's card shows its address")
+    try check(ok_of(try answer(mut app, "q_12", hosted, "add", Json.Null)), "Add is taken")
+    _ = try card_in(mut app, mark, "acta", "sign_in")
+    try check(true, "the card goes on to Sign in, as the server answers 401")
+    try check(ok_of(try sign_in(mut app, "acta", ("q_13", "q_14"))), "the person signs in, as the Sign in button does")
+    let signed = try card_in(mut app, mark, "acta", "ready")
+    try check(str_at(signed, "said") == some(String("whoami")), "the card is ready once they have, with the server's tools")
+    let after_sign_in = reply_text(try reply_in(mut app, chat.copy()))
+    try check(after_sign_in.contains("add_mcp_server: Your person added acta, with the tools whoami."), "and the agent, which waited, hears it's ready")
+    let found = try say(mut app, chat.copy(), String("m_6"), String(#"/mcpkeep search_tools {"query":"whoami"}"#))
+    try check(found.contains("mcp.acta.whoami("), "its session has the server's tools, with the sign-in")
+
+    // --- A sign-in that fails, and Later ---
+    mark = app.frames.len()
+    try send(app, chat.copy(), String("m_7"), propose(Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").done()))
+    let fixed = try card_in(mut app, mark, "fixed", "asking")
+    _ = try answer(mut app, "q_15", fixed.copy(), "add", Json.Null)
+    _ = try card_in(mut app, mark, "fixed", "sign_in")
+    let failed = try sign_in(mut app, "fixed", ("q_16", "q_17"))
+    try check(code_of(failed) == "sign_in_failed", "a sign-in the authorization server won't give fails")
+    var said_why = String()
+    var k = mark
+    while k < app.frames.len() {
+        let c = at(app.frames[k].copy(), "card")
+        if str_at(c.copy(), "server") == some(String("fixed")) and str_at(c.copy(), "state") == some(String("sign_in")) { said_why = str_at(c, "said") ?? String() }
+        k += 1
+    }
+    try check(said_why.contains("client ID"), "and the card says why, in plain words")
+    try check(ok_of(try answer(mut app, "q_18", fixed, "later", Json.Null)), "Later is taken")
+    let later = try reply_in(mut app, chat.copy())
+    try check(reply_text(later.copy()).contains("add_mcp_server: Your person added fixed. It waits for them to sign in") and str_at(kept_card(later, "fixed"), "state") == some(String("later")), "and the agent hears it waits for a sign-in, and goes on")
+
+    // --- A turn stopped while it asks ---
+    mark = app.frames.len()
+    try send(app, chat.copy(), String("m_8"), propose(Obj.new().s("name", String("stopped")).s("url", String("https://stopped.example/mcp")).done()))
+    let stopping = try card_in(mut app, mark, "stopped", "asking")
+    var run_id = String()
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("card")) and str_at(at(f.copy(), "card"), "server") == some(String("stopped")) { run_id = str_at(f, "run") ?? String() }
+    }
+    try app.send(Obj.new().s("t", String("cancel")).s("run", run_id).done())
+    let stopped = try reply_in(mut app, chat.copy())
+    try check(str_at(kept_card(stopped, "stopped"), "state") == some(String("cancelled")) and not names_in(try app.cmd("q_19", "mcp.list", Obj.new().done())).contains("stopped"), "a turn stopped while it asks adds nothing")
+    try check(code_of(try answer(mut app, "q_20", stopping, "add", Json.Null)) == "not_found", "and its card can't be answered after")
+
+    // --- Rules, and who answers ---
+    let rule = try app.cmd("q_21", "rule.put", Obj.new().s("then", String("deny")).s("tool", String("loom.add_mcp_server")).done())
+    mark = app.frames.len()
+    let denied = try say(mut app, chat.copy(), String("m_9"), propose(Obj.new().s("name", String("denied")).s("url", String("https://denied.example/mcp")).done()))
+    var carded = false
+    k = mark
+    while k < app.frames.len() {
+        if str_at(at(app.frames[k].copy(), "card"), "server") == some(String("denied")) { carded = true }
+        k += 1
+    }
+    try check(denied.contains("add_mcp_server failed:") and not carded and not names_in(try app.cmd("q_22", "mcp.list", Obj.new().done())).contains("denied"), "a rule that denies it refuses it, with no card")
+    _ = try app.cmd("q_23", "rule.delete", Obj.new().s("id", str_at(at(at(rule, "value"), "rule"), "id") ?? String()).done())
+    let itself = try say(mut app, chat.copy(), String("m_10"), "/mcpkeep run_command {Obj.new().s("name", String("mcp.add_answer")).j("args", Obj.new().s("call", String("tc_1")).s("answer", String("add")).done()).done()}")
+    try check(itself.contains("Only your person answers"), "an agent can't answer a card itself")
+
+    let ada_token = try i.second_account("ada")
+    var ada = try Session.connect(i.base.copy(), ada_token, 0)
+    mark = app.frames.len()
+    try send(app, chat.copy(), String("m_11"), propose(Obj.new().s("name", String("theirs")).s("url", String("https://theirs.example/mcp")).done()))
+    let theirs = try card_in(mut app, mark, "theirs", "asking")
+    try check(code_of(try answer(mut ada, "q_1", theirs.copy(), "add", Json.Null)) == "not_found", "a member can't add to another person's servers by answering their card")
+    try check(names_in(try ada.cmd("q_2", "mcp.list", Obj.new().done())).len() == 0, "and the servers added here aren't hers")
+    _ = try answer(mut app, "q_24", theirs, "cancel", Json.Null)
+    _ = try reply_in(mut app, chat.copy())
+    ada.close()
+
+    // --- With Code Mode off ---
+    let plain_made = try app.cmd("q_25", "agent.create", Obj.new().s("name", String("Plain")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).done())
+    let plain = str_at(at(at(plain_made, "value"), "agent"), "id") ?? String()
+    let plain_chat = str_at(at(try app.cmd("q_26", "conversation.create", Obj.new().s("agent", plain).done()), "value"), "conversation") ?? String()
+    let first = try say(mut app, plain_chat.copy(), String("m_12"), String("/session"))
+    mark = app.frames.len()
+    let plain_spec = Obj.new().s("name", String("plainfake")).s("command", calx()).j("args", Json.Array([Json.Str(try fs.absolute(String("tests/fake_mcp/main.calx")))])).done()
+    try send(app, plain_chat.copy(), String("m_13"), "/mcp add_mcp_server {plain_spec}")
+    let plain_card = try card_in(mut app, mark, "plainfake", "asking")
+    _ = try answer(mut app, "q_27", plain_card, "add", Json.Null)
+    let plain_added = reply_text(try reply_in(mut app, plain_chat.copy()))
+    try check(plain_added.contains("its tools are yours from your person's next message, which starts a fresh one"), "with Code Mode off, the agent hears its tools come with its next session")
+    let next = try say(mut app, plain_chat, String("m_14"), String("/session\n/servers"))
+    try check(not next.starts_with(first.copy()) and next.contains("plainfake {calx()} "), "and the chat's next message goes to a fresh session that has the server")
+
+    // --- The key is nowhere it shouldn't be ---
+    var seen = "{try app.cmd("q_28", "activity.list", Obj.new().done())}"
+    for f in app.frames {
+        seen = "{seen}\n{f}"
+    }
+    var database = List<u8>()
+    for name in ["loom.db", "loom.db-wal"] {
+        let path = "{i.data}/{name}"
+        if fs.exists(path.copy()) { database.extend(try fs.read(path)) }
+    }
+    try check(not seen.contains(SECRET) and bytes.find(database, SECRET.to_bytes()) == none, "the key typed on the card isn't in what the app was sent, the activity log or the database")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_oauth/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake oauth: "), 120000) else {
+        child.kill()
+        fail "the fake OAuth server didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmcp_add: all good")
+}

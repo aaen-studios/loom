@@ -239,6 +239,7 @@ struct CardView: View {
         switch card.type {
         case "choices": choices
         case "sign_in": signIn
+        case "mcp_add": McpAddCard(card: card)
         case "checklist": checklist
         case "progress": progress
         case "facts":
@@ -282,18 +283,25 @@ struct CardView: View {
         }
     }
 
-    /// Loom's own card for an MCP server that needs the person to sign in. The phone
-    /// can't sign in to one yet, so it says where to; once the chat has gone on, it's one
+    /// Loom's own card for an MCP server that needs the person to sign in: Sign in opens
+    /// its sign-in page in a sheet. Once they have, or once the chat has gone on, it's one
     /// quiet line.
     @ViewBuilder
     private var signIn: some View {
-        if card.passed {
+        if session.model.signedIn.contains(card.server) {
+            CardDone(icon: "checkmark", words: "Signed in to \(card.server)")
+        } else if card.passed {
             CardDone(icon: "key", words: card.title)
         } else {
-            CardFrame(card.title, lead: AnyView(CardLead.of(card.server))) {
-                Text("Sign in from the desktop app.").font(Fonts.caption).foregroundStyle(P.ink3)
-            }
+            CardFrame(card.title, lead: AnyView(CardLead.of(card.server)), side: AnyView(
+                Button("Sign in") { signInMcp() }.buttonStyle(CardButtonStyle(primary: true))
+            ))
         }
+    }
+
+    private func signInMcp() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        session.send(session.model.signInMcp(card.server))
     }
 
     private var checklist: some View {
@@ -362,6 +370,133 @@ struct CardView: View {
             }
             .lineLimit(1)
         }
+    }
+}
+
+/// Loom's own card for an MCP server an agent proposed, in the card frame: its address
+/// or command and each setting, a masked field for each key the person doesn't have yet,
+/// and Add or Cancel; then Sign in and Later for one that needs it. Once it's settled,
+/// one quiet line says how it went.
+struct McpAddCard: View {
+    @Environment(Session.self) private var session
+    var card: Card
+    /// What the person typed for each secret it needs, by the secret's name.
+    @State private var typed: [String: String] = [:]
+
+    var body: some View {
+        let signed = session.model.signedIn.contains(card.server)
+        if let done = done(signed: signed) {
+            CardDone(icon: done.icon, words: done.words)
+        } else {
+            CardFrame(card.title, lead: AnyView(CardLead.of(card.server))) {
+                what
+                if let line = line {
+                    Text(line.text).font(Fonts.small).foregroundStyle(line.bad ? P.bad : P.ink3)
+                }
+                actions
+            }
+        }
+    }
+
+    /// The one quiet line of a settled card.
+    private func done(signed: Bool) -> (icon: String, words: String)? {
+        switch card.state {
+        case "ready": return ("checkmark", card.said.isEmpty ? "Added \(card.server)" : "Added \(card.server) · \(card.said)")
+        case "added": return ("checkmark", "Added \(card.server)")
+        case "later" where signed: return ("checkmark", "Added \(card.server), signed in")
+        case "cancelled": return ("xmark", "Not added · \(card.server)")
+        default: return nil
+        }
+    }
+
+    /// What would be added: its address or command, and each setting.
+    private var what: some View {
+        Grid(alignment: .leading, horizontalSpacing: Tokens.Space.m, verticalSpacing: Tokens.Space.xs) {
+            GridRow {
+                Text(card.url.isEmpty ? "Command" : "Address").foregroundStyle(P.ink3)
+                Text(card.url.isEmpty ? ([card.command] + card.args).joined(separator: " ") : card.url)
+                    .foregroundStyle(P.ink)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            ForEach(Array(card.settings.enumerated()), id: \.offset) { i, s in
+                GridRow {
+                    Text(s.name).foregroundStyle(P.ink3).lineLimit(1)
+                    Group {
+                        if s.secret.isEmpty {
+                            Text(s.value).foregroundStyle(P.ink).lineLimit(1)
+                        } else if card.state == "asking" && s.wanted && first(i) {
+                            SecureField(s.secret, text: typing(s.secret))
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .padding(.horizontal, Tokens.Space.m)
+                                .padding(.vertical, Tokens.Space.s)
+                                .background(P.bg, in: RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous))
+                                .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.input, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
+                        } else {
+                            Text(s.have ? "Your secret \(s.secret)" : "Secret \(s.secret)").foregroundStyle(P.ink3).lineLimit(1)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .font(Fonts.small)
+    }
+
+    /// A secret two settings name is typed in once, at the first.
+    private func first(_ i: Int) -> Bool {
+        !card.settings[..<i].contains { $0.secret == card.settings[i].secret }
+    }
+
+    private func typing(_ secret: String) -> Binding<String> {
+        Binding(get: { typed[secret, default: ""] }, set: { typed[secret] = $0 })
+    }
+
+    /// How it stands, in a line, and whether it's trouble.
+    private var line: (text: String, bad: Bool)? {
+        switch card.state {
+        case "adding": return ("Starting \(card.server)", false)
+        case "sign_in": return card.said.isEmpty ? nil : (card.said, true)
+        case "later": return ("Added \(card.server). Sign in to use it.", false)
+        case "failed": return ("It didn't start: \(card.said)", true)
+        default: return nil
+        }
+    }
+
+    @ViewBuilder
+    private var actions: some View {
+        switch card.state {
+        case "asking":
+            Flow {
+                Button("Add") { answer("add") }.buttonStyle(CardButtonStyle(primary: true))
+                Button("Cancel") { answer("cancel") }.buttonStyle(CardButtonStyle())
+            }
+            .padding(.top, Tokens.Space.xs)
+        case "sign_in":
+            Flow {
+                Button("Sign in") { signIn() }.buttonStyle(CardButtonStyle(primary: true))
+                Button("Later") { answer("later") }.buttonStyle(CardButtonStyle())
+            }
+            .padding(.top, Tokens.Space.xs)
+        case "later":
+            Button("Sign in") { signIn() }
+                .buttonStyle(CardButtonStyle(primary: true))
+                .padding(.top, Tokens.Space.xs)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func answer(_ answer: String) {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let secrets = answer == "add" ? typed.filter { name, _ in card.settings.contains { $0.secret == name && $0.wanted } } : [:]
+        session.send(session.model.answerMcpAdd(card.call, answer, secrets: secrets))
+    }
+
+    private func signIn() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        session.send(session.model.signInMcp(card.server))
     }
 }
 

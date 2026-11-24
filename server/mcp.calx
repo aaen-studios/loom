@@ -145,6 +145,7 @@ struct Code {
     servers: Map<String, Server>
     trouble: List<String>    // servers that didn't start, and why
     signing: List<String>    // servers that wait for their person to sign in
+    added: bool    // an add_mcp_server call went, so the agent may have a server more
     runs: i64
     warm: Request?    // loom's own tools, asked for as the session starts
     folder: String    // the session's prelude and Deno's cache, made at the first
@@ -193,6 +194,10 @@ impl Code {
     fn load(self: mut Code, link: Link) {
         if self.loaded {
             if self.signing.len() > 0 { self.signed_since(link) }
+            if self.added {
+                self.added = false
+                self.take_added(link)
+            }
             return
         }
         self.loaded = true
@@ -211,39 +216,64 @@ impl Code {
                 Json.Null
             },
         }
-        // The servers start side by side, each on a thread of its own, and are
-        // taken in the order they were given.
-        if let Json.Array(specs) = at(given, "servers") {
-            var back = Receiver<Started>()
-            var n: usize = 0
-            for spec in specs {
-                _ = unsafe { Thread.spawn(Starter { at: n, spec: spec.copy(), back: back.sender() }) }
-                n += 1
-            }
-            var got = Map<usize, Started>()
-            while let s = back.wait() {
-                got.insert(s.at, s)
-                if got.len() == n { break }
-            }
-            for k in 0..n {
-                let s = got.remove(k) else { continue }
-                let name = s.name
-                let started = s.server
-                // A server that wants a sign-in gets a renewed token, when
-                // there's one to be had, or its person a card for it.
-                if mcpclient.asks_sign_in(s.trouble.copy()) {
-                    if let r = self.signed_start(link, name.copy(), specs[k].copy()) {
-                        let (server, listed) = r
-                        self.tools.extend(codemode.tools_of(name.copy(), listed))
-                        self.servers.insert(name, server)
-                    }
-                    continue
-                }
-                if s.trouble.len() > 0 { self.trouble.push(s.trouble) }
-                self.tools.extend(codemode.tools_of(name.copy(), s.tools))
-                if let server = started { self.servers.insert(name, server) }
-            }
+        if let Json.Array(specs) = at(given, "servers") { self.take_in(link, specs.copy()) }
+    }
+
+    // Starts the servers `specs` give, and takes in their tools. They start side
+    // by side, each on a thread of its own, and are taken in the order given.
+    fn take_in(self: mut Code, link: Link, specs: List<Json>) {
+        var back = Receiver<Started>()
+        var n: usize = 0
+        for spec in specs {
+            _ = unsafe { Thread.spawn(Starter { at: n, spec: spec.copy(), back: back.sender() }) }
+            n += 1
         }
+        if n == 0 { return }
+        var got = Map<usize, Started>()
+        while let s = back.wait() {
+            got.insert(s.at, s)
+            if got.len() == n { break }
+        }
+        for k in 0..n {
+            let s = got.remove(k) else { continue }
+            let name = s.name
+            let started = s.server
+            // A server that wants a sign-in gets a renewed token, when
+            // there's one to be had, or its person a card for it.
+            if mcpclient.asks_sign_in(s.trouble.copy()) {
+                if let r = self.signed_start(link, name.copy(), specs[k].copy()) {
+                    let (server, listed) = r
+                    self.tools.extend(codemode.tools_of(name.copy(), listed))
+                    self.servers.insert(name, server)
+                }
+                continue
+            }
+            if s.trouble.len() > 0 { self.trouble.push(s.trouble) }
+            self.tools.extend(codemode.tools_of(name.copy(), s.tools))
+            if let server = started { self.servers.insert(name, server) }
+        }
+    }
+
+    // After add_mcp_server (PLAN.md, "Signing in to MCP servers"): the servers
+    // the agent has now that this session hasn't started yet, started, so their
+    // tools are the agent's without a new session.
+    fn take_added(self: mut Code, link: Link) {
+        let given = match link.fetch("/api/mcp/servers", 30000) {
+            ok(g) => g,
+            err(_) => return,
+        }
+        let Json.Array(specs) = at(given, "servers") else return
+        var fresh = List<Json>()
+        for spec in specs {
+            let name = str_at(spec.copy(), "name") ?? String()
+            if self.servers.contains(name.copy()) or self.signing.contains(name.copy()) { continue }
+            var known = false
+            for t in self.tools {
+                if t.server == name { known = true }
+            }
+            if not known { fresh.push(spec.copy()) }
+        }
+        self.take_in(link, fresh)
     }
 
     // After a 401 (PLAN.md, "Signing in to MCP servers"): the instance
@@ -471,6 +501,7 @@ impl Code {
         let t = codemode.find(self.tools, path.copy()) else { fail "There's no tool {path}. search_tools finds them." }
         if self.signing.contains(t.server.copy()) { fail "{sign_in_text(t.server.copy())}" }
         if t.server == "loom" {
+            if t.name == "add_mcp_server" { self.added = true }
             let result = link.call(t.name.copy(), args)
             if is_error(result.copy()) { fail "{codemode.error_of(result)}" }
             return codemode.value_of(result)
@@ -624,6 +655,9 @@ fn handle(link: Link, c: mut Code, m: Json) {
             reply(id, c.run(link, arguments))
             c.tidy(link)
         } else {
+            // A server the agent proposed and its person added is started at
+            // its next search or script.
+            if name == "add_mcp_server" { c.added = true }
             reply_text(id, link.call_text(name, arguments))
         }
     } else {
@@ -636,7 +670,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
