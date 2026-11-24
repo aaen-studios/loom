@@ -19,12 +19,15 @@ import std.thread.{Task}
 import std.text.utf8.{decode_lossy}
 import std.url.{Url}
 import shared.obj.{Obj, str_at}
+import server.files
 
 // The most links in one message that are looked up.
 pub const MOST: usize = 12
 // The most of a page that's read for its title, and how long it's waited for.
 const PAGE_MOST: usize = 2097152
 const ICON_MOST: usize = 262144
+// The most of a page's preview picture that's read.
+const PICTURE_MOST: usize = 4194304
 const WAIT_MS: u32 = 6000
 // The longest title kept.
 const TITLE_MOST: usize = 160
@@ -369,11 +372,39 @@ pub fn icons_of(html: String, page: String) -> List<String> {
     return out
 }
 
+/// Where a page's preview picture is: its `og:image` (or `og:image:secure_url`,
+/// or `twitter:image`), as an https address of a public host, or none.
+pub fn picture_of(html: String, page: String) -> String? {
+    let base = match Url.parse(page) {
+        ok(x) => x,
+        err(_) => return none,
+    }
+    var found = String()
+    var rank = 9
+    for m in tags(html, "meta") {
+        let p = (attr(m.copy(), "property") ?? attr(m.copy(), "name") ?? String()).to_lower_root()
+        let r = if p == "og:image:secure_url" { 0 } else if p == "og:image" or p == "og:image:url" { 1 } else if p == "twitter:image" or p == "twitter:image:src" { 2 } else { 9 }
+        if r >= rank { continue }
+        let href = (attr(m, "content") ?? String()).trim().copy()
+        if href.len() == 0 or href.starts_with("data:") { continue }
+        let full = match base.join(href) {
+            ok(x) => x,
+            err(_) => continue,
+        }
+        let u = "{full}"
+        if not lookable(u.copy()) { continue }
+        found = u
+        rank = r
+    }
+    return if found.len() > 0 { some(found) } else { none }
+}
+
 // --- The lookups, on a thread of their own ---
 
 pub struct Job {
     pub url: String
     pub icon: bool    // the site's icon is wanted too: the instance has none for it yet
+    pub picture: bool    // its preview picture is wanted too, for a link pasted in the composer
 }
 
 pub struct Done {
@@ -381,6 +412,8 @@ pub struct Done {
     pub title: String    // "" when the page has none, or couldn't be had
     pub icon: List<u8>    // the icon's bytes, as they came, or empty
     pub icon_asked: bool    // the job asked for it, so empty means the site has none
+    pub picture: List<u8>    // its preview picture, made small (files.page_picture), or empty
+    pub picture_asked: bool
 }
 
 struct Worker {
@@ -413,7 +446,7 @@ fn fetch(url: String, most: usize, accept: str) -> List<u8> ! Error {
 }
 
 fn look_up(job: Job) -> Done {
-    var done = Done { url: job.url.copy(), title: String(), icon: List<u8>(), icon_asked: job.icon }
+    var done = Done { url: job.url.copy(), title: String(), icon: List<u8>(), icon_asked: job.icon, picture: List<u8>(), picture_asked: job.picture }
     if not lookable(job.url.copy()) { return done }
     // Only the page's start, where its head is: a page over the limit isn't read at all.
     let page = match fetch(job.url.copy(), PAGE_MOST, "text/html,application/xhtml+xml") {
@@ -421,6 +454,16 @@ fn look_up(job: Job) -> Done {
         err(_) => String(),
     }
     done.title = title_of(page.copy())
+    if job.picture {
+        if let src = picture_of(page.copy(), job.url.copy()) {
+            if let ok(b) = fetch(src, PICTURE_MOST, "image/*") {
+                match files.page_picture(b) {
+                    ok(small) => done.picture = small,
+                    err(_) => {},
+                }
+            }
+        }
+    }
     if not job.icon { return done }
     let base = if page.len() > 0 { job.url.copy() } else { "https://{site_of(job.url.copy())}/" }
     for src in icons_of(page, base) {
@@ -495,4 +538,19 @@ fn reads_a_pages_title_and_icons() {
     assert(icons[1] == "https://cdn.9to5google.com/t.png")
     assert(icons[2] == "https://9to5google.com/i/16.png")
     assert(icons[3] == "https://9to5google.com/favicon.ico")
+}
+
+@test
+fn finds_a_pages_preview_picture() {
+    let page = String("https://9to5google.com/2026/neon")
+    let og = "<meta name=\"twitter:image\" content=\"https://cdn.example.org/t.jpg\"><meta property=\"og:image\" content=\"/img/neon.jpg\">"
+    assert(picture_of(String(og), page.copy()) == some(String("https://9to5google.com/img/neon.jpg")))
+    // The secure one before the plain one, and twitter's when there's no other.
+    let both = "<meta property=\"og:image\" content=\"https://a.example.org/a.jpg\"><meta property=\"og:image:secure_url\" content=\"https://a.example.org/b.jpg\">"
+    assert(picture_of(String(both), page.copy()) == some(String("https://a.example.org/b.jpg")))
+    assert(picture_of(String("<meta name=\"twitter:image\" content=\"https://cdn.example.org/t.jpg\">"), page.copy()) == some(String("https://cdn.example.org/t.jpg")))
+    // Not over http, nor on the person's own network, nor none at all.
+    assert(picture_of(String("<meta property=\"og:image\" content=\"http://a.example.org/a.jpg\">"), page.copy()) == none)
+    assert(picture_of(String("<meta property=\"og:image\" content=\"https://192.168.1.2/a.jpg\">"), page.copy()) == none)
+    assert(picture_of(String("<title>x</title>"), page) == none)
 }

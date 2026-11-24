@@ -946,11 +946,20 @@ const GITHUB =
 	}
 	/* A link: its site's icon before it, underlined, its whole address on hover. */
 	/* An agent a message mentions (desktop/src/app.rs, linked_words): its thread and its name in
-	   its colour, a little weathered toward the quiet ink, with nothing behind it. */
+	   its colour, a little weathered toward the quiet ink, with nothing behind it. It opens the
+	   agent's chat, with the hand and a light background of its colour under the pointer. */
 	.mention {
 		color: color-mix(in srgb, var(--from) 70%, var(--ink-3));
 		font-weight: var(--weight-medium);
 		white-space: nowrap;
+		cursor: pointer;
+		border-radius: 4px;
+		padding: 0 2px;
+		margin: 0 -2px;
+		transition: background-color 120ms ease;
+	}
+	.mention:hover {
+		background: color-mix(in srgb, var(--from) 14%, transparent);
 	}
 	.mention-thread {
 		display: inline-block;

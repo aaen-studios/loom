@@ -64,6 +64,11 @@ objc2-user-notifications = { version = "0.3.2", default-features = false, featur
 # A panel's web view (src/panel.rs): its content rule list, data store and settings.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "WKContentRuleList", "WKContentRuleListStore", "WKPreferences", "WKUserContentController", "WKWebViewConfiguration", "WKWebsiteDataStore"] }
 
+# The composer's tests drive its editor in GPUI's test platform (`composer_tests` in
+# src/app.rs): the same GPUI, with what tests need.
+[dev-dependencies]
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }
+
 # GPUI's Windows platform, as 0.3.12 with three changes (marked "loom:"): its vsync thread
 # doesn't tell a hidden or minimised window to paint at every vblank, and looks five times
 # a second while no window is on screen; it tells a window on screen to paint only when it
@@ -71,8 +76,9 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std"
 # gpui-pre below asks. vendor/README.md says more.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
-# GPUI Base, as 0.10.0 with one change (marked "loom:"): an inline <span> in Markdown can
-# give its text a color and weight, for an agent's name where a message mentions it.
+# GPUI Base, as 0.10.0 with two changes (marked "loom:"): an inline <span> in Markdown can
+# give its text a color and weight, for an agent's name where a message mentions it, and a
+# link in such a span keeps that colour, with a light background of it under the pointer.
 gpui-base = { path = "vendor/gpui-base" }
 # GPUI, as 0.3.12 with one change (marked "loom:"): an image can be drawn rotated, as an SVG
 # icon can, through Window::paint_image_transformed, for the tilted cards of a message's

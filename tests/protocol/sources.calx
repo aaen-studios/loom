@@ -62,6 +62,15 @@ fn run(i: Instance) ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String(mixed)).done())
     let kept = try reply_in(mut app, chat.copy())
     try check(words(kept.copy()).contains("and my own guess") and at(kept, "sources") == Json.Null, "a Sources list with more than links in it stays in the words")
+
+    // --- A link pasted in the composer (PLAN.md, "Links in the composer") ---
+    let plain = try app.cmd("q_4", "link.preview", Obj.new().s("url", String("http://news.example.org/neon")).done())
+    let link = at(at(plain, "value"), "link")
+    try check(str_at(link.copy(), "site") == some(String("news.example.org")) and str_at(link, "title") == some(String("")), "a page that isn't looked up previews as its site, at once")
+    let local = try app.cmd("q_5", "link.preview", Obj.new().s("url", String("https://nas.local/x")).done())
+    try check(str_at(at(at(local, "value"), "link"), "site") == some(String("nas.local")), "and so does one on the person's own network")
+    let words_only = try app.cmd("q_6", "link.preview", Obj.new().s("url", String("not an address")).done())
+    try check(at(words_only, "error") != Json.Null, "words that aren't an address are refused")
     app.close()
 }
 
