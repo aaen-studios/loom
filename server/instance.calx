@@ -1248,6 +1248,10 @@ const ATTACH_BYTES_MOST: u64 = 67108864
 const ANSWER_FILES_MOST: usize = 10
 const ANSWER_FILE_BYTES_MOST: u64 = 26214400
 
+// How far before its turn started a file may say it was changed and still count as
+// made during it: Linux stamps files from a clock that can trail by a tick or two.
+const ANSWER_FILE_CLOCK_MS: i64 = 50
+
 // How many screenshots an agent took are kept for attach_files, the newest.
 const SHOTS_KEPT: usize = 10
 
@@ -7818,7 +7822,7 @@ impl Instance {
                     ok(m) => m,
                     err(_) => continue,
                 }
-                if meta.size > ANSWER_FILE_BYTES_MOST or meta.modified.unix_ms < r.started { continue }
+                if meta.size > ANSWER_FILE_BYTES_MOST or meta.modified.unix_ms + ANSWER_FILE_CLOCK_MS < r.started { continue }
                 data = match fs.read(path.copy()) {
                     ok(d) => d,
                     err(_) => continue,

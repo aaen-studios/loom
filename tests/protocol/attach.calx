@@ -12,6 +12,7 @@ import std.fs
 import std.image.{Color, Image, Kind}
 import std.json.{Json}
 import std.process.{exit}
+import std.thread.{sleep}
 import shared.obj.{Obj, at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check, fetch}
@@ -62,6 +63,8 @@ fn run(i: Instance) ! Error {
     // What's there from before the turns.
     try fs.write_text("{mine}/notes.md", String("# Notes"))
     try fs.write("{mine}/old.png", Image.new(1024, 512, Kind.Rgb, Color.rgb(30, 160, 90)).encode_png())
+    // Older than the turns by more than the clock's slack (ANSWER_FILE_CLOCK_MS).
+    unsafe { sleep(300000000) }
 
     // --- What its answer names ---
     let made_now = try say(mut app, chat.copy(), "m_1", "/write {mine}/out/report.md # Report\n/picture {mine}/out/chart.png 40 30\n/write {mine}/out/main.rs fn main() \{\}\nMade `out/report.md`, {mine}/out/chart.png and `out/main.rs`, from `notes.md`.")
