@@ -372,11 +372,15 @@ pub struct Loom {
     /// Whether the scroll being dispatched is the app's own, played out by the smooth
     /// wheel or the middle button, and not the person's.
     own_scroll: bool,
-    /// Whether the primary button is down: the chat's rows wait to change in a way that
-    /// moves them, as for older messages coming, until it's up, so a scrollbar being
-    /// dragged stays under the pointer.
+    /// Whether the primary button went down on the chat's list or its scrollbar and is
+    /// still down: the chat's rows wait to change in a way that moves them, as for older
+    /// messages coming, until it's up, so a scrollbar being dragged stays under the
+    /// pointer. Only there: a press on the title bar's drag area has its button-up taken
+    /// by the system's move.
     pressed: bool,
     rows_wait: bool,
+    /// Where the chat's list is, scrollbar and all, as last drawn; none while it isn't.
+    list_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
@@ -1312,6 +1316,7 @@ ACTA_KEY=secret:ACTA_KEY",
             own_scroll: false,
             pressed: false,
             rows_wait: false,
+            list_at: Rc::default(),
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
@@ -7942,9 +7947,24 @@ ACTA_KEY=secret:ACTA_KEY",
                         self.hero(agent.as_ref(), composer.take(), cx)
                             .into_any_element()
                     } else {
+                        let list_at = self.list_at.clone();
                         div()
                             .flex_1()
                             .min_h_0()
+                            .relative()
+                            // Where the list is, with its scrollbar: the primary button
+                            // down there holds off rows that would move under it
+                            // (`pointer_catcher`, `rebuild_rows`).
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| list_at.set(Some(bounds)),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full(),
+                            )
                             // The middle button scrolls the chat, as in a browser.
                             .on_mouse_down(
                                 MouseButton::Middle,
@@ -12621,10 +12641,10 @@ ACTA_KEY=secret:ACTA_KEY",
         .size_0()
     }
 
-    /// Follows the buttons for the chat's scrolling: whether the primary button is down,
-    /// which holds off rows that would move under a scrollbar being dragged
-    /// (`rebuild_rows`), and, while the middle button's scrolling is on, the pointer it
-    /// goes by and the click or button that stops it. A key stops it too (`Loom::new`).
+    /// Follows the buttons for the chat's scrolling: the primary button pressed on the
+    /// chat's list and when it comes up, which holds off rows that would move under a
+    /// scrollbar being dragged (`rebuild_rows`), and, while the middle button's scrolling
+    /// is on, the pointer it goes by and the click or button that stops it. A key stops it too (`Loom::new`).
     /// It draws nothing.
     fn pointer_catcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity().downgrade();
@@ -12645,7 +12665,12 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                             return;
                         }
-                        if e.button == MouseButton::Left {
+                        // Only on the chat's list and its scrollbar: a press on the title
+                        // bar's drag area has its button-up taken by the system's move,
+                        // which would leave it down.
+                        if e.button == MouseButton::Left
+                            && this.list_at.get().is_some_and(|b| b.contains(&e.position))
+                        {
                             this.pressed = true;
                         }
                     });
@@ -18117,6 +18142,8 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
         self.frames += 1;
+        // Set again as the chat's list is drawn, if it is.
+        self.list_at.set(None);
         let p = self.p;
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
@@ -19875,15 +19902,34 @@ fn auto_step(this: WeakEntity<Loom>, run: u64, last: Instant, window: &mut Windo
         return;
     };
     if dy != 0.0 {
+        // The list scrolls by what's under a scroll's position, and the window takes that
+        // position for the pointer's, hovering what's there. So the pointer is put back
+        // where it is before anything is drawn: the hover, its time and buttons and the
+        // cursor stay with the pointer, not the marker. The list (gpui-component's
+        // MessageScroller) has no way to scroll it by a distance from outside.
+        let (pointer, modifiers) = (window.mouse_position(), window.modifiers());
         let e = ScrollEvent {
             position: at,
             // Down the chat is a wheel turned towards the person.
             delta: ScrollDelta::Pixels(point(px(0.0), px(-dy))),
+            // Without Shift, which would make it scroll across.
             modifiers: Modifiers::default(),
             touch_phase: TouchPhase::Moved,
             source: ScrollSource::Pointer,
         };
         own_scroll(&this, e, window, cx);
+        if window.mouse_position() != pointer {
+            // No other button is down while it's on: a press stops it.
+            let held = this
+                .read_with(cx, |this, _| this.auto.held())
+                .unwrap_or(false);
+            let back = MouseMoveEvent {
+                position: pointer,
+                pressed_button: held.then_some(MouseButton::Middle),
+                modifiers,
+            };
+            window.dispatch_event(PlatformInput::MouseMove(back), cx);
+        }
     }
     window.on_next_frame(move |window, cx| auto_step(this, run, now, window, cx));
 }
