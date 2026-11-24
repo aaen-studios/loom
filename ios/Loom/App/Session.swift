@@ -90,6 +90,10 @@ final class Session {
                 model.take(f)
             }
         }
+        if let s = model.toSignIn {
+            model.toSignIn = nil
+            openSignIn(s.url, server: s.server)
+        }
         #if DEBUG
         fromLaunch()
         #endif
@@ -102,8 +106,10 @@ final class Session {
     /// What a debug build's launch arguments ask for, so tests/ios/live.calx can take the
     /// app through signing in, a reply and a question with no one to tap: `-link <qr>`
     /// joins with the code once the core is signed out, `-say <text>` sends it to the
-    /// agent `-open` opened once it's synced, and `-allow` answers that chat's questions
-    /// yes. Each does what its screen's button does.
+    /// agent `-open` opened once it's synced, `-allow` answers that chat's questions
+    /// yes, and `-signIn` taps Sign in on its sign-in cards. Each does what its screen's
+    /// button does. `-callback <url>` is what the browser brings back to the `loom:`
+    /// redirect, handed over as the system hands it, once a sign-in page is open.
     private func fromLaunch() {
         let args = ProcessInfo.processInfo.arguments
         func value(_ flag: String) -> String? {
@@ -122,8 +128,44 @@ final class Session {
                 send(model.approve(a.call, allow: true))
             }
         }
+        if args.contains("-signIn") {
+            for c in model.shown.flatMap(\.blocks).compactMap(\.card) where c.type == "sign_in" && c.signedAs == nil && launchDone.insert("-signIn \(c.server)").inserted {
+                signIn(c.server)
+            }
+        }
+        if signInPage.server != nil, let url = value("-callback").flatMap(URL.init(string:)), launchDone.insert("-callback").inserted {
+            opened(url)
+        }
     }
     #endif
+
+    // MARK: Signing in to MCP servers
+
+    @ObservationIgnored private let signInPage = SignInPage()
+
+    /// Signs in to the person's MCP server `server` from its card (PLAN.md, "Signing in
+    /// to MCP servers"): the instance gives its sign-in page, which opens over the app,
+    /// and what the browser brings back to the `loom:` redirect goes to the instance,
+    /// which swaps it for tokens.
+    func signIn(_ server: String) {
+        send(model.signIn(server, redirect: SignInPage.redirect))
+    }
+
+    private func openSignIn(_ url: URL, server: String) {
+        signInPage.open(url, server: server) { [weak self] server, ended in
+            guard let self else { return }
+            switch ended {
+            case .back(let query): self.send(self.model.signedIn(server, query: query))
+            case .failed(let why): self.model.signInEnded(server, error: why)
+            }
+        }
+    }
+
+    /// A `loom:` address the system opened the app with: the end of a sign-in, when one
+    /// is going.
+    func opened(_ url: URL) {
+        signInPage.took(url)
+    }
 
     // MARK: The system
 
