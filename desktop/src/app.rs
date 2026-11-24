@@ -10694,14 +10694,13 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.panel_opening.is_some() {
             return;
         }
-        // A Mac's web view passes the panel break-out test, but a link in a closed
-        // declarative shadow root, when clicked, still has WebKit connect to an address on
-        // this computer or its network, and only WebKit's private settings stop that
-        // (LOO-275). Until then, panels and pages don't open on a Mac.
-        if cfg!(target_os = "macos") {
+        // On a Mac, only a private WebKit setting stops a clicked link connecting to an
+        // address on this computer or its network (panel.rs, `no_hosts`). A macOS
+        // without it opens no panels or pages.
+        if !crate::panel::can_open() {
             self.model
                 .notices
-                .push("Panels and pages don't open in the Mac app yet.".into());
+                .push("Panels and pages don't open on this version of macOS.".into());
             if key.starts_with("page:") {
                 self.model.page = None;
             } else {

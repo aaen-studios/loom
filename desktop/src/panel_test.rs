@@ -22,7 +22,7 @@ use crate::panel::{self, Message, Panel, Source};
 const PAGE: &str = include_str!("../panels/breakout/index.html");
 const GIVE_UP: Duration = Duration::from_secs(90);
 /// How many ways out the panel tries, each of which it reports.
-const ATTEMPTS: usize = 30;
+const ATTEMPTS: usize = 32;
 
 /// What reached the listeners: the first line of each TCP connection, and each UDP
 /// datagram's sender.
@@ -99,7 +99,9 @@ pub fn run(out: std::path::PathBuf) {
                     let messages = Rc::new(RefCell::new(Vec::new()));
                     let refused = Rc::new(RefCell::new(Vec::new()));
                     let mut files = HashMap::new();
-                    files.insert(String::from("index.html"), PAGE.as_bytes().to_vec());
+                    // The links its own HTML declares aim at the TCP port too.
+                    let page = PAGE.replace("TCP_PORT", &tcp_port.to_string());
+                    files.insert(String::from("index.html"), page.into_bytes());
                     let source = Source {
                         id: String::from("breakout"),
                         files: Arc::new(files),

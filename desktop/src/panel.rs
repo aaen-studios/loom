@@ -408,10 +408,19 @@ fn refuse_the_rest(
     Ok(())
 }
 
-/// What WKWebView gives a panel's web view on a Mac, past what wry sets: a data store
-/// that keeps nothing, a content rule list that blocks every load but the panel's own
-/// (the Mac's `refuse_the_rest`), no windows opened by a script, no AirPlay, and no
-/// Safe Browsing lookups of where it goes.
+/// Whether a panel opens here: everywhere but on a Mac whose WebKit can't keep it off
+/// every host.
+pub fn can_open() -> bool {
+    #[cfg(target_os = "macos")]
+    return mac::walled_off();
+    #[cfg(not(target_os = "macos"))]
+    true
+}
+
+/// What WKWebView gives a panel's web view on a Mac, past what wry sets: no host to
+/// reach, a data store that keeps nothing and connects ahead to nothing, a content rule
+/// list that blocks every load but the panel's own (the Mac's `refuse_the_rest`), no
+/// windows opened by a script, no AirPlay, and no Safe Browsing lookups of where it goes.
 #[cfg(target_os = "macos")]
 mod mac {
     use std::cell::RefCell;
@@ -421,12 +430,12 @@ mod mac {
     use std::time::{Duration, Instant};
 
     use block2::RcBlock;
-    use objc2::rc::Retained;
-    use objc2::runtime::AnyObject;
-    use objc2::{msg_send, sel, MainThreadMarker};
+    use objc2::rc::{Allocated, Retained};
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::{msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
     use objc2_foundation::{
-        NSArray, NSDate, NSDefaultRunLoopMode, NSError, NSObjectProtocol, NSRunLoop, NSString,
-        NSURL,
+        NSArray, NSDate, NSDefaultRunLoopMode, NSError, NSObjectProtocol, NSRunLoop, NSSet,
+        NSString, NSURL,
     };
     use objc2_web_kit::{
         WKContentRuleList, WKContentRuleListStore, WKWebViewConfiguration, WKWebsiteDataStore,
@@ -458,7 +467,8 @@ mod mac {
         // SAFETY: WebKit's own setters, on the main thread, with objects it made.
         unsafe {
             let config = WKWebViewConfiguration::new(mtm);
-            let store = WKWebsiteDataStore::nonPersistentDataStore(mtm);
+            no_hosts(&config)?;
+            let store = private_store(mtm);
             dead_end(&store)?;
             config.setWebsiteDataStore(&store);
             config.userContentController().addContentRuleList(&rules);
@@ -467,6 +477,75 @@ mod mac {
             prefs.setJavaScriptCanOpenWindowsAutomatically(false);
             prefs.setFraudulentWebsiteWarningEnabled(false);
             Ok(config)
+        }
+    }
+
+    /// Whether this macOS has the setting that keeps a web view off every host
+    /// (`no_hosts`). Without it a panel doesn't open.
+    pub fn walled_off() -> bool {
+        WKWebViewConfiguration::class().responds_to(sel!(_setAllowedNetworkHosts:))
+            && WKWebViewConfiguration::class().responds_to(sel!(_allowedNetworkHosts))
+    }
+
+    /// Lets the web view reach no host over HTTP or WebSockets. WebKit checks this
+    /// before every load, and before it connects to a link's host as it's clicked,
+    /// which nothing else stops for this computer's addresses or its network's. It's
+    /// WebKit's private `_allowedNetworkHosts`, an empty set, so the panel doesn't open
+    /// when this macOS doesn't have it, or doesn't keep it.
+    fn no_hosts(config: &WKWebViewConfiguration) -> Result<(), String> {
+        const MISSING: &str = "this version of macOS can't keep a panel off the network";
+        if !walled_off() {
+            return Err(MISSING.into());
+        }
+        // SAFETY: the setter and getter WebKit's configuration was just checked for,
+        // which take and give a set of host names.
+        let kept = unsafe {
+            let none = NSSet::<NSString>::new();
+            let _: () = msg_send![config, _setAllowedNetworkHosts: &*none];
+            let kept: Option<Retained<NSSet<NSString>>> = msg_send![config, _allowedNetworkHosts];
+            kept
+        };
+        match kept {
+            Some(hosts) if hosts.count() == 0 => Ok(()),
+            _ => Err(MISSING.into()),
+        }
+    }
+
+    /// A data store that keeps nothing and, where this macOS lets it be said (WebKit's
+    /// private `allowsServerPreconnect`), connects to no host ahead of a load. That's a
+    /// second wall behind `no_hosts`, so without it the store is just one that keeps
+    /// nothing.
+    fn private_store(mtm: MainThreadMarker) -> Retained<WKWebsiteDataStore> {
+        no_preconnect_store(mtm).unwrap_or_else(|| {
+            // SAFETY: WebKit's constructor, on the main thread.
+            unsafe { WKWebsiteDataStore::nonPersistentDataStore(mtm) }
+        })
+    }
+
+    fn no_preconnect_store(mtm: MainThreadMarker) -> Option<Retained<WKWebsiteDataStore>> {
+        let class = AnyClass::get(c"_WKWebsiteDataStoreConfiguration")?;
+        if !class.responds_to(sel!(initNonPersistentConfiguration))
+            || !class.responds_to(sel!(setAllowsServerPreconnect:))
+            || !class.responds_to(sel!(allowsServerPreconnect))
+            || !WKWebsiteDataStore::class().responds_to(sel!(_initWithConfiguration:))
+        {
+            return None;
+        }
+        // SAFETY: the initializers and setters the classes were just checked for: a
+        // configuration for a store that keeps nothing, and a store made from it, on
+        // the main thread.
+        unsafe {
+            let made: Allocated<AnyObject> = msg_send![class, alloc];
+            let conf: Option<Retained<AnyObject>> = msg_send![made, initNonPersistentConfiguration];
+            let conf = conf?;
+            let _: () = msg_send![&*conf, setAllowsServerPreconnect: false];
+            let allows: bool = msg_send![&*conf, allowsServerPreconnect];
+            if allows {
+                return None;
+            }
+            let store: Option<Retained<WKWebsiteDataStore>> =
+                msg_send![WKWebsiteDataStore::alloc(mtm), _initWithConfiguration: &*conf];
+            store.filter(|s| !s.isPersistent())
         }
     }
 
@@ -607,5 +686,11 @@ mod tests {
         assert_eq!((m.id, m.op.as_str()), (3, "storage.get"));
         assert!(read_message(r#"{"op":"x"}"#).is_none());
         assert!(read_message("not json").is_none());
+    }
+
+    /// Fails on a macOS whose WebKit dropped the setting, where panels would stop opening.
+    #[test]
+    fn panels_open_on_this_system() {
+        assert!(can_open());
     }
 }
