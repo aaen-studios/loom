@@ -32,7 +32,7 @@ calx scripts/ios.calx --sim
 calx tests/ios/live.calx
 ```
 
-[`tests/ios/live.calx`](../tests/ios/live.calx) starts an instance with the fake agent ([tests/README.md](../tests/README.md)), builds the app, and runs it in the simulator, headless: it joins with the QR code's text, a reply streams in, it answers a question, and it follows the instance when it moves. Each step is checked on the instance, and each screen is a screenshot in `build/ios/live/`. With no one to tap, a debug build takes these from its launch arguments, each doing what its screen's button does: `-link <qr>` joins, `-say <text>` sends to the agent `-open` opened, and `-allow` answers its questions yes (`fromLaunch` in [`Session.swift`](Loom/App/Session.swift)).
+[`tests/ios/live.calx`](../tests/ios/live.calx) starts an instance with the fake agent ([tests/README.md](../tests/README.md)), builds the app, and runs it in the simulator, headless: it joins with the QR code's text, a reply streams in, it answers a question, and it follows the instance when it moves. Each step is checked on the instance, and each screen is a screenshot in `build/ios/live/`. With no one to tap, a debug build takes these from its launch arguments, each doing what its screen's button does: `-link <qr>` joins, `-say <text>` sends to the agent `-open` opened, `-allow` answers its questions yes, `-signIn` taps Sign in on its sign-in cards, and `-callback <url>` hands the app what a browser brought back to the `loom:` redirect (`fromLaunch` in [`Session.swift`](Loom/App/Session.swift)).
 
 ## Files
 

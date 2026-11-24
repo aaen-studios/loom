@@ -106,8 +106,10 @@ final class Session {
     /// What a debug build's launch arguments ask for, so tests/ios/live.calx can take the
     /// app through signing in, a reply and a question with no one to tap: `-link <qr>`
     /// joins with the code once the core is signed out, `-say <text>` sends it to the
-    /// agent `-open` opened once it's synced, and `-allow` answers that chat's questions
-    /// yes. Each does what its screen's button does.
+    /// agent `-open` opened once it's synced, `-allow` answers that chat's questions
+    /// yes, and `-signIn` taps Sign in on its sign-in cards. Each does what its screen's
+    /// button does. `-callback <url>` is what the browser brings back to the `loom:`
+    /// redirect, handed over as the system hands it, once a sign-in page is open.
     private func fromLaunch() {
         let args = ProcessInfo.processInfo.arguments
         func value(_ flag: String) -> String? {
@@ -125,6 +127,14 @@ final class Session {
             for a in model.shownApprovals where launchDone.insert(a.call).inserted {
                 send(model.approve(a.call, allow: true))
             }
+        }
+        if args.contains("-signIn") {
+            for c in model.shown.flatMap(\.blocks).compactMap(\.card) where c.type == "sign_in" && c.signedAs == nil && launchDone.insert("-signIn \(c.server)").inserted {
+                signIn(c.server)
+            }
+        }
+        if signInPage.server != nil, let url = value("-callback").flatMap(URL.init(string:)), launchDone.insert("-callback").inserted {
+            opened(url)
         }
     }
     #endif
