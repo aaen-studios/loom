@@ -138,7 +138,8 @@ impl Tray {
 }
 
 /// Starts the system's own dictation, which types what's said into the field that has
-/// the focus: Windows voice typing, which Win+H opens. False where there's none to start.
+/// the focus: Windows voice typing, which Win+H opens, or a Mac's dictation. False where
+/// there's none to start.
 #[cfg(windows)]
 pub fn dictate() -> bool {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
@@ -175,7 +176,12 @@ pub fn dictate() -> bool {
     sent == keys.len() as u32
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+pub fn dictate() -> bool {
+    crate::mac::dictate()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn dictate() -> bool {
     false
 }
@@ -221,7 +227,7 @@ pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
 }
 
 /// The notifications waiting for the window's task to post, which on a Mac goes through
-/// GPUI's own (UNUserNotificationCenter), on the main thread.
+/// UNUserNotificationCenter (`mac::notify`), on the main thread.
 #[cfg(target_os = "macos")]
 static TO_POST: std::sync::Mutex<Vec<Note>> = std::sync::Mutex::new(Vec::new());
 
@@ -229,7 +235,7 @@ static TO_POST: std::sync::Mutex<Vec<Note>> = std::sync::Mutex::new(Vec::new());
 #[cfg(target_os = "macos")]
 type Note = (String, String, Option<About>, bool);
 
-/// A system notification, with the person's alert sound or without. A click on it opens
+/// A system notification, with the person's notification sound or without. A click on it opens
 /// what it's about. It goes out from the window's task (`post_notifications`).
 #[cfg(target_os = "macos")]
 pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
@@ -262,7 +268,7 @@ fn about_of(tag: &str) -> Option<About> {
 
 /// Posts the notifications waiting, from the window's task.
 #[cfg(target_os = "macos")]
-pub fn post_notifications(cx: &gpui_kit::App) {
+pub fn post_notifications(_cx: &gpui_kit::App) {
     static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let waiting = TO_POST
         .lock()
@@ -270,15 +276,8 @@ pub fn post_notifications(cx: &gpui_kit::App) {
         .unwrap_or_default();
     for (title, body, about, sound) in waiting {
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        cx.show_system_notification(gpui_kit::SystemNotification {
-            tag: tag_of(n, &about.unwrap_or_default()).into(),
-            title: title.into(),
-            body: body.into(),
-            actions: Vec::new(),
-        });
-        if sound {
-            crate::mac::beep();
-        }
+        let tag = tag_of(n, &about.unwrap_or_default());
+        crate::mac::notify(&tag, &title, &body, sound);
     }
 }
 
@@ -287,9 +286,9 @@ pub fn post_notifications(_cx: &gpui_kit::App) {}
 
 /// Hears each click on loom's notifications, for `clicked`.
 #[cfg(target_os = "macos")]
-pub fn hear_notifications(cx: &gpui_kit::App) {
-    cx.on_system_notification_response(|r, _| {
-        if let (Some(a), Ok(mut c)) = (about_of(&r.tag), CLICKED.lock()) {
+pub fn hear_notifications(_cx: &gpui_kit::App) {
+    crate::mac::hear_notifications(|tag| {
+        if let (Some(a), Ok(mut c)) = (about_of(tag), CLICKED.lock()) {
             c.push(a);
         }
         crate::wake::wake();

@@ -1,17 +1,24 @@
 //! What loom reaches in macOS that GPUI doesn't give it: hiding the window to the menu
 //! bar and bringing it back, where the window was, keeping the Mac awake while an agent
-//! works, the alert sound under a notification, and where the app's bundle is.
+//! works, dictation, notifications with their sound, and where the app's bundle is.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::MainThreadMarker;
+use objc2::runtime::{Bool, ProtocolObject};
+use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSScreen, NSView, NSWindow};
 use objc2_foundation::{
-    NSActivityOptions, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString,
+    NSActivityOptions, NSBundle, NSError, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo,
+    NSRect, NSSize, NSString,
+};
+use objc2_user_notifications::{
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+    UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
 };
 
 use crate::place::{Place, Rect};
@@ -245,9 +252,121 @@ pub fn take_login_path() {
     }
 }
 
-/// The person's alert sound, for a notification that has one.
-pub fn beep() {
-    objc2_app_kit::NSBeep();
+/// Starts macOS's own dictation in the field that has the focus, as Edit → Start
+/// Dictation does: the system listens and types, so no audio goes through loom. False
+/// when nothing along the responder chain took it.
+pub fn dictate() -> bool {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return false;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    // SAFETY: `startDictation:` takes a sender, which may be nil, and a nil target sends
+    // it along the key window's responder chain to the application.
+    unsafe { app.sendAction_to_from(sel!(startDictation:), None, None) }
+}
+
+/// Whether this program may post notifications: macOS gives them only to an app with a
+/// bundle, and aborts one without that tries.
+fn bundled() -> bool {
+    NSBundle::mainBundle().bundleIdentifier().is_some()
+}
+
+define_class!(
+    // SAFETY: NSObject has no subclassing requirements, and Heard doesn't implement Drop.
+    #[unsafe(super(NSObject))]
+    #[name = "LoomNotificationDelegate"]
+    #[ivars = fn(&str)]
+    struct Heard;
+
+    unsafe impl NSObjectProtocol for Heard {}
+
+    unsafe impl UNUserNotificationCenterDelegate for Heard {
+        // A click on one of loom's notifications, maybe on another thread.
+        #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
+        fn clicked(
+            &self,
+            _center: &UNUserNotificationCenter,
+            response: &UNNotificationResponse,
+            done: &DynBlock<dyn Fn()>,
+        ) {
+            let tag = response.notification().request().identifier().to_string();
+            (self.ivars())(&tag);
+            done.call(());
+        }
+
+        // A notification while loom is in front shows and sounds as it would behind.
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn showing(
+            &self,
+            _center: &UNUserNotificationCenter,
+            _notification: &UNNotification,
+            done: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            done.call((UNNotificationPresentationOptions::Banner
+                | UNNotificationPresentationOptions::List
+                | UNNotificationPresentationOptions::Sound,));
+        }
+    }
+);
+
+/// Hands the tag of each loom notification clicked to `clicked`, for the app's lifetime.
+pub fn hear_notifications(clicked: fn(&str)) {
+    if !bundled() {
+        return;
+    }
+    let heard: Retained<Heard> = {
+        let this = Heard::alloc().set_ivars(clicked);
+        // SAFETY: NSObject's init is its designated initializer.
+        unsafe { msg_send![super(this), init] }
+    };
+    UNUserNotificationCenter::currentNotificationCenter()
+        .setDelegate(Some(ProtocolObject::from_ref(&*heard)));
+    // The center holds its delegate weakly, and this one is needed until loom quits.
+    std::mem::forget(heard);
+}
+
+/// A notification's content: its title, its body and, when it sounds, the person's
+/// notification sound, which macOS plays with it unless they or Focus silenced loom.
+fn content(title: &str, body: &str, sound: bool) -> Retained<UNMutableNotificationContent> {
+    let content = UNMutableNotificationContent::new();
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
+    if sound {
+        content.setSound(Some(&UNNotificationSound::defaultSound()));
+    }
+    content
+}
+
+/// Posts a notification, tagged `tag`, which comes back when it's clicked. The first one
+/// asks the person to allow loom's notifications and their sound.
+pub fn notify(tag: &str, title: &str, body: &str, sound: bool) {
+    static ASKED: AtomicBool = AtomicBool::new(false);
+    if !bundled() {
+        return;
+    }
+    let center = UNUserNotificationCenter::currentNotificationCenter();
+    if !ASKED.swap(true, Ordering::Relaxed) {
+        let answered = RcBlock::new(|_: Bool, _: *mut NSError| {});
+        center.requestAuthorizationWithOptions_completionHandler(
+            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+            &answered,
+        );
+    }
+    let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
+        &NSString::from_str(tag),
+        &content(title, body, sound),
+        None,
+    );
+    let done = RcBlock::new(|error: *mut NSError| {
+        // SAFETY: a non-null `error` is a valid NSError for the length of the call.
+        if let Some(e) = unsafe { error.as_ref() } {
+            eprintln!(
+                "loom: the notification didn't show: {}",
+                e.localizedDescription()
+            );
+        }
+    });
+    center.addNotificationRequest_withCompletionHandler(&request, Some(&done));
 }
 
 /// The `.app` bundle the program at `exe` is in: `…/loom.app` for
@@ -321,6 +440,21 @@ mod tests {
             ),
             "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         );
+    }
+
+    #[test]
+    fn app_kit_takes_start_dictation() {
+        let app = objc2::runtime::AnyClass::get(c"NSApplication").unwrap();
+        assert!(app.responds_to(objc2::sel!(startDictation:)));
+    }
+
+    #[test]
+    fn a_notification_carries_its_sound() {
+        let sounds = super::content("Juniper", "Done", true);
+        assert!(sounds.sound().is_some());
+        assert_eq!(sounds.title().to_string(), "Juniper");
+        assert_eq!(sounds.body().to_string(), "Done");
+        assert!(super::content("Juniper", "Done", false).sound().is_none());
     }
 
     #[test]
