@@ -415,6 +415,9 @@ pub struct Loom {
     /// Search over the settings, at the top of the popup's pages.
     settings_in: Entity<InputState>,
     open_thoughts: HashSet<String>,
+    /// A reply's list of sources just shut by a click outside it, and when: the click
+    /// that shut it, on its own tab, doesn't open it again.
+    sources_shut: Option<(String, Instant)>,
     tray: Option<shell::Tray>,
     hwnd: isize,
     /// Where the window was last kept (place.rs), so it's written only when it moves.
@@ -1308,6 +1311,7 @@ ACTA_KEY=secret:ACTA_KEY",
             search_in,
             settings_in,
             open_thoughts: HashSet::new(),
+            sources_shut: None,
             tray,
             hwnd,
             place,
@@ -14188,6 +14192,25 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Opens or shuts a reply's list of sources, from its tab.
+    pub fn toggle_sources(&mut self, key: String, cx: &mut Context<Self>) {
+        let just_shut = self
+            .sources_shut
+            .take()
+            .is_some_and(|(k, at)| k == key && at.elapsed() < Duration::from_millis(400));
+        if !just_shut {
+            self.toggle_thought(key, cx);
+        }
+    }
+
+    /// Shuts a reply's list of sources, on a click outside it.
+    pub fn shut_sources(&mut self, key: String, cx: &mut Context<Self>) {
+        if self.open_thoughts.contains(&key) {
+            self.sources_shut = Some((key.clone(), Instant::now()));
+            self.toggle_thought(key, cx);
+        }
+    }
+
     /// An answer picked on an agent's choices card: it goes as the person's message.
     pub fn choose(&mut self, answer: &str, cx: &mut Context<Self>) {
         if let Some(frame) = self.model.send_choice(answer) {
@@ -14334,7 +14357,10 @@ fn person(
     // What a person typed keeps its line breaks, which Markdown would join.
     let text = model::unmark_stacked(&text, &stacked).replace('\n', "  \n");
     let attached: Vec<model::FileRef> = m.blocks.iter().filter_map(|b| b.file.clone()).collect();
-    let words = model::link_files(&model::literal_html(&text), &attached);
+    let words = linked_words(
+        &model::link_files(&model::literal_html(&text), &attached),
+        m,
+    );
     let opener = this.clone();
     let on_link = move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| match url
         .strip_prefix("loom-file:")
@@ -14380,7 +14406,7 @@ fn person(
                 .child(KeptText::new(
                     SharedString::from(format!("m-{}-{room}", m.id)),
                     words,
-                    move |v| v.selectable(true).on_link_click(on_link),
+                    move |v| with_links(v.selectable(true).on_link_click(on_link)),
                 )),
         )
     })
@@ -16294,6 +16320,69 @@ fn badge_icon(sha: &str) -> Option<String> {
     BADGE_FILES.with(|b| b.borrow().get(&format!("{sha}.thumb")).cloned())
 }
 
+/// How far a reply's sources tab hangs below its bubble, and how much of it is tucked
+/// under the bubble.
+const SOURCES_HANG: f32 = 19.0;
+const SOURCES_TUCK: f32 = 7.0;
+
+/// The sources tab's colours: a shade lighter than the bubble, its edge, and a shade
+/// darker for when its list is open.
+fn sources_colors(p: Palette) -> (Hsla, Hsla, Hsla) {
+    let c = |hex: u32| -> Hsla { rgb(hex).into() };
+    if p.dark {
+        (c(0x222226), c(0x2e2e33), c(0x2c2c31))
+    } else {
+        (c(0xf7f7f8), c(0xe4e4e8), c(0xeaeaed))
+    }
+}
+
+/// A site's icon, once it's fetched, with loom's small radius; a globe until then.
+fn site_icon(p: Palette, sha: Option<&str>, size: f32) -> AnyElement {
+    match sha.and_then(badge_icon) {
+        Some(path) => img(std::path::PathBuf::from(path))
+            .flex_none()
+            .size(px(size))
+            .rounded(px(4.0))
+            .into_any_element(),
+        None => div()
+            .flex_none()
+            .size(px(size))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(p.ink_3)
+            .child(Icon::new(Ico::Globe).xsmall())
+            .into_any_element(),
+    }
+}
+
+/// How a site icon's file is named in a message's Markdown (`linked_words`).
+const SITE_ICON: &str = "loom-icon:";
+
+/// A message's words as the chat shows them: each link it has looked up with its site's
+/// icon before it, and a bare address as its page's title (`model::with_link_icons`).
+fn linked_words(text: &str, m: &Message) -> String {
+    model::with_link_icons(text, &m.links, &|sha| {
+        badge_icon(sha).map(|path| format!("{SITE_ICON}{path}"))
+    })
+}
+
+/// Draws the site icons `linked_words` put in, and a link's full address when the pointer
+/// is on it.
+fn with_links(v: TextView) -> TextView {
+    v.image_source(|uri| match uri.strip_prefix(SITE_ICON) {
+        Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
+        None => uri.clone().into(),
+    })
+    .link_tooltip(|url, window, cx| {
+        if url.starts_with("https://") || url.starts_with("http://") {
+            gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+        } else {
+            cx.new(|_| EmptyView).into()
+        }
+    })
+}
+
 /// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
 /// it has loaded, in memory and on the GPU, until the app ends; one that leaves this
 /// one goes from there too, and loads again if it's drawn again. With `cards`, they're
@@ -16467,6 +16556,8 @@ struct ReplyDraw<'a> {
     secrets: &'a HashMap<String, Entity<InputState>>,
     show: Show,
     this: &'a WeakEntity<Loom>,
+    /// The bubble the reply's sources hang from: its last words.
+    sources_at: Option<usize>,
 }
 
 impl ReplyDraw<'_> {
@@ -16523,30 +16614,203 @@ impl ReplyDraw<'_> {
                 .text_color(p.ink)
                 .child(KeptText::new(
                     SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    self.m.blocks[i].text.clone(),
-                    |v| v.selectable(true),
+                    linked_words(&self.m.blocks[i].text, self.m),
+                    |v| with_links(v.selectable(true)),
                 ));
+            let sources = (self.sources_at == Some(i)).then(|| self.sources_tab());
             group = group.child(if show.bubbles {
                 // A grey bubble, never the agent's colour, which is the person's: its
                 // corner by the thread squared off as a speech bubble's tail, and
                 // smaller where it joins the next.
                 let c = model::corners(false, model::Joined::at(k, run.len()));
-                div().flex().child(
-                    words
+                let bubble = words
+                    .px(px(space::L))
+                    .py(px(space::S + 2.0))
+                    .rounded_tl(px(c.tl))
+                    .rounded_tr(px(c.tr))
+                    .rounded_br(px(c.br))
+                    .rounded_bl(px(c.bl))
+                    .bg(p.bubble);
+                // Its sources on a tab hanging from its bottom-left corner, tucked
+                // under it: drawn first, so the bubble lies over its top.
+                div().flex().child(match sources {
+                    Some(tab) => div()
+                        .relative()
                         .max_w(relative(0.94))
-                        .px(px(space::L))
-                        .py(px(space::S + 2.0))
-                        .rounded_tl(px(c.tl))
-                        .rounded_tr(px(c.tr))
-                        .rounded_br(px(c.br))
-                        .rounded_bl(px(c.bl))
-                        .bg(p.bubble),
-                )
+                        .pb(px(SOURCES_HANG))
+                        .child(div().absolute().left(px(14.0)).bottom_0().child(tab))
+                        .child(bubble),
+                    None => bubble.max_w(relative(0.94)),
+                })
             } else {
-                words
+                match sources {
+                    Some(tab) => div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .gap(px(space::S))
+                        .child(words)
+                        .child(tab),
+                    None => words,
+                }
             });
         }
         group.into_any_element()
+    }
+
+    /// The tab with a reply's sources (PLAN.md, "Links and sources"): the first three
+    /// sites' icons and how many there are, or the site of one alone. A click opens
+    /// their list under it, a line each, which opens the page.
+    fn sources_tab(&self) -> AnyElement {
+        let (p, m) = (self.p, self.m);
+        let key = format!("sources/{}", m.id);
+        let opened = self.open.contains(&key);
+        let (bg, edge, pressed) = sources_colors(p);
+        let shown: Vec<(String, String, Option<String>, String)> = m
+            .sources
+            .iter()
+            .map(|s| {
+                let (title, site, icon) = m.source_shown(s);
+                (title, site, icon, s.url.clone())
+            })
+            .collect();
+        // Each site's icon once, the first three.
+        let mut sites: Vec<&str> = Vec::new();
+        for icon in shown.iter().filter_map(|s| s.2.as_deref()) {
+            if !sites.contains(&icon) && sites.len() < 3 {
+                sites.push(icon);
+            }
+        }
+        let mut icons = div().flex().items_center().gap(px(3.0));
+        for icon in sites {
+            icons = icons.child(site_icon(p, Some(icon), 16.0));
+        }
+        if shown.iter().all(|s| s.2.is_none()) {
+            icons = icons.child(
+                div()
+                    .text_color(p.ink_3)
+                    .child(Icon::new(Ico::Globe).xsmall()),
+            );
+        }
+        let label = match shown.as_slice() {
+            [(_, site, _, _)] => div()
+                .font_family(crate::prefs::mono_font())
+                .child(site.clone()),
+            all => div().child(format!("{} sources", all.len())),
+        };
+        let toggle = self.this.clone();
+        let k = key.clone();
+        let tab = div()
+            .id(SharedString::from(format!("sources-{}", m.id)))
+            .role(Role::Button)
+            .aria_label("Sources")
+            .h(px(SOURCES_HANG + SOURCES_TUCK))
+            .pt(px(SOURCES_TUCK))
+            .pl(px(5.0))
+            .pr(px(space::S))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .rounded(px(radius::BUTTON))
+            .border_1()
+            .border_color(edge)
+            .bg(if opened { pressed } else { bg })
+            .text_size(px(size::CAPTION))
+            .text_color(p.ink_2)
+            .cursor_pointer()
+            .when(!opened, |d| d.soft_hover(bg, pressed, None))
+            .child(icons)
+            .child(label)
+            .child(
+                div().text_color(p.ink_3).child(
+                    Icon::new(if opened {
+                        Ico::ChevronUp
+                    } else {
+                        Ico::ChevronDown
+                    })
+                    .xsmall(),
+                ),
+            )
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                cx.stop_propagation();
+                let _ = toggle.update(cx, |loom, cx| loom.toggle_sources(k.clone(), cx));
+            });
+        let list = opened.then(|| {
+            let mut list = div()
+                .occlude()
+                .mt(px(space::XS))
+                .w(px(340.0))
+                .p(px(space::XS))
+                .flex()
+                .flex_col()
+                .rounded(px(radius::CARD))
+                .border_1()
+                .border_color(p.line_strong)
+                .bg(p.raised)
+                .shadow(card_shadow(p));
+            let shut = self.this.clone();
+            let shut_key = key.clone();
+            list = list.on_mouse_down_out(move |_, _, cx| {
+                let _ = shut.update(cx, |loom, cx| loom.shut_sources(shut_key.clone(), cx));
+            });
+            for (n, (title, site, icon, url)) in shown.into_iter().enumerate() {
+                let close = self.this.clone();
+                let close_key = key.clone();
+                list = list.child(
+                    div()
+                        .id(SharedString::from(format!("source-{}-{n}", m.id)))
+                        .role(Role::Link)
+                        .aria_label(SharedString::from(title.clone()))
+                        .h(px(32.0))
+                        .px(px(space::S))
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .rounded(px(radius::ROW))
+                        .cursor_pointer()
+                        .soft_hover(transparent_black(), p.hover, None)
+                        .child(site_icon(p, icon.as_deref(), 16.0))
+                        .child(
+                            div().flex_1().min_w_0().child(
+                                div()
+                                    .max_w(px(210.0))
+                                    .truncate()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .child(title),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .max_w(px(120.0))
+                                .truncate()
+                                .font_family(crate::prefs::mono_font())
+                                .text_size(px(size::CAPTION - 0.5))
+                                .text_color(p.ink_3)
+                                .child(site),
+                        )
+                        .tooltip(tip_text(url.clone()))
+                        .on_click(move |_, _, cx| {
+                            cx.open_url(&url);
+                            let _ = close
+                                .update(cx, |loom, cx| loom.toggle_thought(close_key.clone(), cx));
+                        }),
+                );
+            }
+            deferred(
+                anchored()
+                    .anchor(Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(list),
+            )
+            .with_priority(1)
+        });
+        div()
+            .relative()
+            .child(tab)
+            .children(list.map(|l| div().absolute().top_full().left_0().child(l)))
+            .into_any_element()
     }
 
     /// A run of tool calls, as the person's prefs show them.
@@ -16911,6 +17175,16 @@ fn reply(
         tools: show.tools != Tools::Hidden,
         thoughts: show.thoughts != Thoughts::Hidden,
     };
+    let parts = model::parts(m, tools, shows);
+    // Its sources hang from the bubble of its last words, or else sit under it all.
+    let sources_at = (!m.sources.is_empty())
+        .then(|| {
+            parts.iter().rev().find_map(|part| match part {
+                model::Part::Bubbles(run) => run.last().copied(),
+                _ => None,
+            })
+        })
+        .flatten();
     let drawing = ReplyDraw {
         p,
         m,
@@ -16922,9 +17196,13 @@ fn reply(
         secrets,
         show,
         this: &this,
+        sources_at,
     };
-    for part in model::parts(m, tools, shows) {
-        body = body.child(drawing.part(&part));
+    for part in &parts {
+        body = body.child(drawing.part(part));
+    }
+    if sources_at.is_none() && !m.sources.is_empty() {
+        body = body.child(div().flex().child(drawing.sources_tab()));
     }
     // The files it names, each a chip with its type, which opens it.
     if !m.mentions.is_empty() {
@@ -18834,6 +19112,8 @@ mod row_tests {
             routine_name: String::new(),
             pinned: false,
             mentions: Vec::new(),
+            sources: Vec::new(),
+            links: HashMap::new(),
             status: "done".into(),
         }
     }

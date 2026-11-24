@@ -610,6 +610,13 @@ What another agent app keeps on the instance's computer comes over in one go, fr
 - **Photos from the iPhone** go up as JPEG, since the models agents use don't take HEIC.
 - **Space.** Files count toward each person's storage, which the owner can limit.
 
+## Links and sources
+
+- **Sources under the reply.** An agent that looked things up ends its reply with a Sources list of links. The instance takes the list out of the reply's words and keeps it with the message, and the apps show it as a tab on the bubble's bottom-left corner, hanging a little below it: the first three sites' icons and "5 sources", or the site itself when there's one. The tab is the bubble's colour, a shade lighter, with a faint edge and 8px corners; open, it's a shade darker than the bubble. A click opens the list under it, one row each: the site's icon, the title, and the site on the right, cut short when there's no room. A row opens the page in the browser; Esc, a click outside or the tab again closes it. On the iPhone a tap opens a sheet.
+- **Links by their page.** A link in any message, the person's or an agent's, has its site's icon in front of it. A bare address shows as the page's title, underlined, and the whole address shows on hover; a link the agent wrote words for keeps them. Before the page is looked up, a bare address shows as it was written.
+- **Icons as they are.** A site's icon is drawn as the site made it, with the small radius loom's chips have and nothing behind it.
+- **Looked up by the instance.** The instance reads each page's title (its `og:title`, or else its `<title>`) and its site's icon (one the page names that loom can draw, or else `/favicon.ico`; a PNG, a JPEG or an ICO, kept at 64px as the person's file). It does so on a thread of its own, with a cap on size and time, and only for https pages of public hosts: a redirect never leaves https, so a lookup reaches only a host with a certificate for its name, never the person's router, their other computers or the instance itself. An address on a network of the person's own, or a name only it knows, isn't looked up. A page is looked up once while the instance runs.
+
 ## Search
 
 Full-text search over every conversation, with FTS5 as memory uses, filtered by agent and date.

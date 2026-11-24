@@ -24,6 +24,14 @@ Anything bigger, such as a report or a chart, comes as a page in the chat instea
 
 Two or more pictures in one message, yours or an agent's, are one stack, with how many in its corner. Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
 
+## Links and sources
+
+A link in any message, yours or an agent's, has its site's icon before it, and a bare address shows as its page's title. Hover over it on the desktop to see the whole address.
+
+When an agent ends a reply with a list of its sources, the list comes off the reply and onto a tab under it, with the sites' icons and how many there are. Click the tab for the list, a line each with the page's title and its site, and click a line to open the page. On the iPhone, the list opens as a sheet.
+
+Loom looks the pages up itself, for their titles and icons. It looks up only https pages on the internet, never one on your own network, and at most twelve a message.
+
 ## How an agent uses its tools
 
 Agents use their tools by writing small scripts, in Code Mode. Instead of being given every tool up front, an agent looks up the tools it needs and writes a script that calls them, so its context stays small. Only what the script gives back reaches the agent: it can read a whole document and pass on three lines.

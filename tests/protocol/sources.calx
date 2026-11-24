@@ -1,0 +1,80 @@
+module tests.protocol.sources
+
+// A reply's sources (PLAN.md, "Links and sources"): the Sources list of links
+// at the end of an agent's reply comes out of its words and goes with the
+// message as its `sources`, each with its title and site, for the app to show
+// on a tab under the reply. A list that isn't at the end, or has more than
+// links in it, stays in the words. Pages are looked up only over https, so a
+// plain http address, or one on the person's own network, gets no `links`.
+//
+//     calx tests/protocol/sources.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+// The words of a message, all its text blocks together.
+fn words(m: Json) -> String {
+    var out = String()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("text")) { out.push_str(str_at(b, "text") ?? String()) }
+        }
+    }
+    return out
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // --- A reply ending in a Sources list ---
+    // The fake agent says it back, each \n a line break.
+    let said = "/say Neon came out on Nov 18.\\n\\nSources:\\n- [Gemini 4 Neon](http://news.example.org/neon)\\n- The Decoder: http://the-decoder.example.org/neon"
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String(said)).done())
+    let reply = try reply_in(mut app, chat.copy())
+    let text = words(reply.copy())
+    try check(not text.contains("Sources") and not text.contains("news.example.org") and text.contains("Neon came out on Nov 18."), "the Sources list comes out of the reply's words")
+    let sources = "{at(reply.copy(), "sources")}"
+    try check(sources.contains(#""url":"http://news.example.org/neon","title":"Gemini 4 Neon","site":"news.example.org""#), "and goes with it as a source, with its title and site")
+    try check(sources.contains(#""title":"The Decoder","site":"the-decoder.example.org""#), "a line with its title before the address too")
+    try check(at(reply.copy(), "links") == Json.Null, "pages over plain http aren't looked up")
+
+    // Kept that way: the conversation's messages have it too.
+    let listed = try app.cmd("q_3", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    try check("{at(listed, "value")}".contains(#""sources":[{"url":"http://news.example.org/neon""#), "and it's kept that way")
+
+    // --- A list that isn't only links stays ---
+    let mixed = "/say Here.\\n\\nSources:\\n- http://a.example.org/x\\n- and my own guess"
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", String(mixed)).done())
+    let kept = try reply_in(mut app, chat.copy())
+    try check(words(kept.copy()).contains("and my own guess") and at(kept, "sources") == Json.Null, "a Sources list with more than links in it stays in the words")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nsources: all good")
+}

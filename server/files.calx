@@ -7,7 +7,7 @@ module server.files
 // written beside the file as <sha256>.thumb.
 import std.bytes
 import std.fs
-import std.image.{Color, Image, Kind}
+import std.image.{Color, Image, Kind, decode_ico, encode_ico}
 import std.thread.{Task}
 
 /// The longest side of a thumbnail, in pixels.
@@ -118,6 +118,40 @@ pub fn icon_png(data: List<u8>) -> List<u8> ! Error {
     return im.thumbnail(ICON, ICON).encode_png()
 }
 
+/// The longest side of a site's icon as loom keeps it, in pixels: four times
+/// the 16 it's drawn at.
+pub const SITE_ICON: usize = 64
+
+/// A site's icon (PLAN.md, "Links and sources"), as its page or its
+/// `/favicon.ico` gave it: a PNG, a JPEG or an ICO, whose biggest picture is
+/// taken, made at most `SITE_ICON` pixels a side and written as a PNG.
+pub fn site_icon_png(data: List<u8>) -> List<u8> ! Error {
+    let n = data.len()
+    let ico = n >= 6 and data[0] == 0 and data[1] == 0 and data[2] == 1 and data[3] == 0
+    if not ico {
+        let png = try icon_png(data)
+        let im = match Image.decode(png) {
+            ok(i) => i,
+            err(why) => fail "it isn't a picture loom can read: {why}",
+        }
+        return im.thumbnail(SITE_ICON, SITE_ICON).encode_png()
+    }
+    let images = match decode_ico(data) {
+        ok(list) => list,
+        err(why) => fail "it isn't an icon loom can read: {why}",
+    }
+    var best = 0usize
+    var found = false
+    for k in 0usize..images.len() {
+        if not found or images[k].width() > images[best].width() {
+            best = k
+            found = true
+        }
+    }
+    if not found { fail "the icon has no pictures in it" }
+    return images[best].thumbnail(SITE_ICON, SITE_ICON).encode_png()
+}
+
 /// Whether loom makes thumbnails of this type.
 pub fn thumbable(mime: String) -> bool {
     return mime == "image/png" or mime == "image/jpeg"
@@ -151,6 +185,21 @@ fn an_icon_is_a_small_picture() {
     let cut = Image.new(32, 32, Kind.Rgb, Color.rgb(0, 0, 0)).encode_png()
     assert(refused(cut[..40]))
     assert(refused(Image.new(1100, 10, Kind.Gray, Color.gray(0)).encode_png()))
+}
+
+@test
+fn a_sites_icon_is_read_from_an_ico_too() {
+    // A favicon.ico with a 16 and a 48: the 48 is taken.
+    let ico = encode_ico([Image.new(16, 16, Kind.Rgba, Color.rgba(255, 0, 0, 255)), Image.new(48, 48, Kind.Rgba, Color.rgba(0, 0, 255, 255))])
+    let from_ico = Image.decode(site_icon_png(ico)!)!
+    assert(from_ico.width() == 48 and from_ico.height() == 48)
+    // A big PNG is made small.
+    let big = Image.decode(site_icon_png(Image.new(180, 180, Kind.Rgba, Color.rgba(0, 0, 0, 255)).encode_png())!)!
+    assert(big.width() == SITE_ICON)
+    assert(match site_icon_png("<svg></svg>".to_bytes()) {
+        ok(_) => false,
+        err(_) => true,
+    })
 }
 
 fn refused(data: List<u8>) -> bool {
