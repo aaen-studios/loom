@@ -52,13 +52,15 @@ winresource = "0.1.34"
 [target.'cfg(all(not(windows), not(target_os = "macos")))'.dependencies]
 notify-rust = "4.19.0"
 
-# The window, the Dock, keeping the Mac awake and the alert sound (src/mac.rs), through
-# the same objc2 crates GPUI's macOS platform uses.
+# The window, the Dock, keeping the Mac awake, dictation and notifications with their
+# sound (src/mac.rs), through the same objc2 crates GPUI's macOS platform uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.191"
+block2 = "0.6.2"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSGraphics", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSGeometry", "NSObject", "NSProcessInfo", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSError", "NSGeometry", "NSObject", "NSProcessInfo", "NSString"] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 
 # GPUI's Windows platform, as 0.3.12 with two changes (marked "loom:"): its vsync thread
 # doesn't tell a hidden or minimised window to paint at every vblank, and looks five times

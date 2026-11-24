@@ -7484,12 +7484,23 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .child(Textarea::new(&self.composer).appearance(false)),
                         )
                         // Dictation: the system's own voice typing, into the composer.
-                        .when(cfg!(windows), |d| {
+                        .when(cfg!(any(windows, target_os = "macos")), |d| {
+                            let (name, didnt) = if cfg!(target_os = "macos") {
+                                (
+                                    "Dictation",
+                                    "Dictation didn't start. Turn it on in System Settings → Keyboard.",
+                                )
+                            } else {
+                                (
+                                    "Voice typing",
+                                    "Voice typing didn't start. Press Windows+H in the message box.",
+                                )
+                            };
                             d.child(
                                 div()
                                     .id("dictate")
                                     .role(Role::Button)
-                                    .aria_label("Voice typing")
+                                    .aria_label(name)
                                     .size(px(control::ICON_COMPOSER))
                                     .flex_none()
                                     .flex()
@@ -7499,15 +7510,12 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .text_color(p.ink_2)
                                     .cursor_pointer()
                                     .soft_hover(transparent_black(), p.hover, None)
-                                    .tooltip(tip("Voice typing"))
+                                    .tooltip(tip(name))
                                     .child(Icon::new(Ico::Mic).small())
-                                    .on_click(cx.listener(|this, _, window, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.composer.update(cx, |c, cx| c.focus(window, cx));
                                         if !shell::dictate() {
-                                            this.model.notices.push(
-                                                "Voice typing didn't start. Press Windows+H in the message box."
-                                                    .into(),
-                                            );
+                                            this.model.notices.push(didnt.into());
                                             this.take_notice(cx);
                                         }
                                     })),
