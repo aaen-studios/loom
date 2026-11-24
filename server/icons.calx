@@ -10,7 +10,7 @@ module server.icons
 // "light" or "dark", the background it's made for. Only pictures both apps
 // draw count: PNG and JPEG, and one whose type isn't said, which the
 // instance then checks. An SVG is passed over, since loom can't turn one into
-// a picture yet.
+// a picture yet (CLX-450).
 import std.bytes
 import std.hash.{sha256}
 import std.http.{Header, get}
