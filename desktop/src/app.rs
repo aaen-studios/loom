@@ -13986,10 +13986,11 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 }
 
-/// The person's bubble in an agent's chat: the bubble grey with a breath of the agent's
-/// colour, a little more in the dark. With Vibrant bubbles it's the agent's colour itself,
-/// as saturated as it is, made light in the light theme and deep in the dark, so the
-/// words read on it whichever colour it is (`motion::ink_on` makes sure).
+/// The person's bubble in an agent's chat. With Vibrant bubbles, the default, it's the
+/// agent's colour itself, as saturated as it is, made light in the light theme and deep in
+/// the dark, so the words read on it whichever colour it is (`motion::ink_on` makes sure).
+/// Without, it's the bubble grey with a breath of the agent's colour, a little more in the
+/// dark.
 fn person_bubble(p: Palette, tint: Hsla, vibrant: bool) -> Hsla {
     if vibrant {
         return Hsla {

@@ -103,7 +103,7 @@ impl Default for Prefs {
             tools: Tools::Hidden,
             thoughts: Thoughts::Hidden,
             bubbles: true,
-            vibrant: false,
+            vibrant: true,
             ctrl_enter: false,
             tray: true,
             notify: true,
@@ -177,7 +177,13 @@ impl Prefs {
                 "bubbles" => true,
                 _ => d.bubbles,
             },
-            vibrant: b("vibrant_bubbles", d.vibrant),
+            // 0.2.6 kept `vibrant_bubbles`, false in every file whose person didn't touch
+            // it, so Vibrant bubbles, the default since, is kept under a new name.
+            vibrant: match s("your_bubbles") {
+                "vibrant" => true,
+                "soft" => false,
+                _ => d.vibrant,
+            },
             ctrl_enter: b("ctrl_enter", d.ctrl_enter),
             tray: b("tray", d.tray),
             notify: b("notify", d.notify),
@@ -244,7 +250,10 @@ impl Prefs {
             "replies".into(),
             json!(if self.bubbles { "bubbles" } else { "plain" }),
         );
-        m.insert("vibrant_bubbles".into(), json!(self.vibrant));
+        m.insert(
+            "your_bubbles".into(),
+            json!(if self.vibrant { "vibrant" } else { "soft" }),
+        );
         m.insert("ctrl_enter".into(), json!(self.ctrl_enter));
         m.insert("tray".into(), json!(self.tray));
         m.insert("notify".into(), json!(self.notify));
@@ -433,10 +442,14 @@ mod tests {
     }
 
     #[test]
-    fn the_persons_bubbles_take_a_breath_of_colour_until_they_pick_vibrant() {
-        assert!(!Prefs::default().vibrant);
+    fn the_persons_bubbles_are_vibrant_until_they_turn_it_off() {
+        assert!(Prefs::default().vibrant);
+        assert!(
+            Prefs::from_json(&json!({ "vibrant_bubbles": false })).vibrant,
+            "the off every 0.2.6 file kept is left behind"
+        );
         let picked = Prefs {
-            vibrant: true,
+            vibrant: false,
             ..Prefs::default()
         };
         assert_eq!(Prefs::from_json(&picked.to_json()), picked);
