@@ -74,6 +74,20 @@ fn file_url(path: String) -> String {
     return if p.starts_with("/") { "file://{p}" } else { "file:///{p}" }
 }
 
+// Watches `agent`'s browser shown `width` × `height`, or at the page's size with 0, and gives
+// the first frame that comes after browser.watch answers: its picture's size, then the page's.
+fn first_frame(app: mut Session, agent: String, width: i64, height: i64) -> (i64, i64, i64, i64) ! Error {
+    var args = Obj.new().s("agent", agent).b("on", true)
+    if width > 0 { args = args.i("width", width).i("height", height) }
+    _ = try app.cmd("q_z", "browser.watch", args.done())
+    let frame = try app.until("browser.frame", "")
+    let pixels = match Image.decode(app.body.copy()) {
+        ok(im) => im,
+        err(e) => fail "failed: a frame that isn't a picture: {e}",
+    }
+    return (i64.wrap(pixels.width()), i64.wrap(pixels.height()), int_at(frame.copy(), "width") ?? 0, int_at(frame, "height") ?? 0)
+}
+
 fn run(i: Instance) ! Error {
     let pages = try fs.temp_dir()
     try fs.write_text("{pages}/shop.html", String(#"
@@ -82,6 +96,8 @@ fn run(i: Instance) ! Error {
         <a href="second.html">Next page</a>
         "#))
     try fs.write_text("{pages}/second.html", String("<!doctype html><title>Second</title><h1>Second page</h1>"))
+    // A page that's never still, so its frames come all the time.
+    try fs.write_text("{pages}/moving.html", String(#"<!doctype html><title>Moving</title><style>@keyframes spin { to { transform: rotate(360deg) } } div { width: 200px; height: 200px; background: teal; animation: spin 1s linear infinite }</style><div></div>"#))
 
     var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Browser")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
@@ -229,6 +245,17 @@ fn run(i: Instance) ! Error {
     _ = try app.cmd("q_w4", "browser.give", Obj.new().s("agent", agent.copy()).done())
     let handed = try reply_in(mut app, conversation.copy())
     try see(handed.starts_with("browser_ask_person: Your person handed the browser back after 3 clicks and keys") and handed.contains("boots ("), "browser.give answers the agent, with what they did and the page", handed.copy())
+
+    // While frames come all the time, the first after the size it's shown at changes is
+    // already at that size: none from before it was asked comes after browser.watch answers.
+    let moving = try say(mut app, conversation.copy(), "m_9", "/mcp browser_open \{\"url\":\"{file_url("{pages}/moving.html")}\"\}")
+    try see(moving.contains("Page: Moving"), "a page that moves opens", moving.copy())
+    for n in 0..6 {
+        let (sw, sh, spw, sph) = try first_frame(mut app, agent.copy(), 640, 400)
+        try see(sw <= 640 and sh <= 400 and sw >= 600 and spw > 640, "the first frame after it's shown small is small", "{sw} × {sh} of {spw} × {sph}, time {n}")
+        let (fw, fh, fpw, fph) = try first_frame(mut app, agent.copy(), 0, 0)
+        try see(fw == fpw and fh == fph, "and the first after it's shown at the page's size is as big as the page", "{fw} × {fh} of {fpw} × {fph}, time {n}")
+    }
     _ = try app.cmd("q_w5", "browser.watch", Obj.new().s("agent", agent.copy()).b("on", false).done())
     try until_open(mut app, agent.copy(), false)
     try check(true, "once no one watches it after the turn, it closes")
