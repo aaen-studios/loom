@@ -1101,6 +1101,30 @@ fn matches_a_program_to_its_registry_agent() {
     assert(registry_match(registry, String("cursor")) == none)
 }
 
+// A program's name as people know it: its registry agent's, such as "Claude Agent"
+// for `claude-acp`, or none when the registry hasn't one for it.
+fn registry_title(registry: Json, program: String) -> String? {
+    let id = registry_match(registry.copy(), program) else return none
+    if let Json.Array(agents) = at(registry, "agents") {
+        for a in agents {
+            if str_at(a.copy(), "id") == some(id.copy()) {
+                let name = str_at(a, "name") ?? String()
+                return if name.len() > 0 { some(name) } else { none }
+            }
+        }
+    }
+    return none
+}
+
+@test
+fn titles_a_program_with_its_registry_name() {
+    let registry = parse(#"{"agents":[{"id":"claude-acp","name":"Claude Agent"},{"id":"gemini"}]}"#)!
+    assert(registry_title(registry.copy(), String("claude-acp")) == some(String("Claude Agent")))
+    assert(registry_title(registry.copy(), String("claude")) == some(String("Claude Agent")))
+    assert(registry_title(registry.copy(), String("gemini")) == none)
+    assert(registry_title(registry, String("cursor")) == none)
+}
+
 fn program_json(a: AcpAgent) -> Json {
     var settings = List<Json>()
     if let Json.Object(m) = a.env {
@@ -11505,8 +11529,15 @@ impl Instance {
             // The agent programs installed on the instance, for picking one when
             // an agent is made: the ones this person may use.
             var programs = List<Json>()
+            // Each with its `title`, the registry's name for it where it has one.
             for a in try i.store.acp_agents() {
-                if try i.may_use(user.copy(), a.name.copy()) { programs.push(try i.program_shared(user.copy(), a)) }
+                if not try i.may_use(user.copy(), a.name.copy()) { continue }
+                let title = registry_title(i.registry.copy(), a.name.copy())
+                var program = try i.program_shared(user.copy(), a)
+                if let t = title {
+                    if let Json.Object(m) = mut program { m.insert(String("title"), Json.Str(t)) }
+                }
+                programs.push(program)
             }
             // Whether they're the owner, who gives programs and their settings to people.
             return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).b("sandboxes", i.boxes != none).done())

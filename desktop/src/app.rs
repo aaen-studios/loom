@@ -733,7 +733,7 @@ impl Loom {
         )
         .detach();
         // A host for the agent's list: Enter adds it.
-        let host_in = input(window, cx, "github.com", false);
+        let host_in = input(window, cx, "github.com, or *.github.com", false);
         cx.subscribe_in(
             &host_in,
             window,
@@ -860,9 +860,9 @@ impl Loom {
         });
         let set_key_in = input(window, cx, "ntnu-password", false);
         let mcp_name_in = input(window, cx, "acta", false);
-        let rule_in = input(window, cx, "git push", false);
+        let rule_in = input(window, cx, "git push, or rm -rf *", false);
         let rule_note_in = input(window, cx, "Why, for you later", false);
-        let check_in = input(window, cx, "git push origin main", false);
+        let check_in = input(window, cx, "git push, or rm -rf *", false);
         let mcp_cmd_in = input(
             window,
             cx,
@@ -3299,15 +3299,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.send(f);
                     cx.notify();
                 }));
-        let sub = if u.can {
-            "Takes each new release once nothing runs, and tells you after".to_string()
-        } else {
-            u.why.clone()
-        };
+        // Why it can't, when it can't: what it does when it can is its name.
+        let sub = (!u.can).then(|| u.why.clone());
         let row = self.row(
             Some(self.tile(Ico::RotateCcw)),
             "Updates itself",
-            Some(sub),
+            sub,
             u.can.then(|| toggle.into_any_element()),
         );
         Some(self.group(None, vec![row.into_any_element()]))
@@ -3329,7 +3326,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .row(
                 Some(self.tile(Ico::SquareTerminal)),
                 "Scripts",
-                Some("Your scripts on that computer can use your agents".into()),
+                None,
                 self.model
                     .scripts
                     .is_some()
@@ -3353,7 +3350,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     None,
                     token.clone(),
-                    Some("Your token, shown this once".into()),
+                    Some("Shown once".into()),
                     Some(copy.into_any_element()),
                 )
                 .into_any_element(),
@@ -3367,7 +3364,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     None,
                     "Token",
-                    Some("Shown once, when it's made".into()),
+                    None,
                     Some(
                         self.small_button("scripts-new", "New token", false)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -3403,15 +3400,15 @@ ACTA_KEY=secret:ACTA_KEY",
             );
             // One an agent had saved to a file says where, and which agent asked.
             let about = match &self.model.status_saved {
-                Some((path, by)) if made && by.is_empty() => format!("Saved to {path}"),
-                Some((path, by)) if made => format!("Saved to {path} by {by}"),
-                _ => "Only reads your agents and routines".to_string(),
+                Some((path, by)) if made && by.is_empty() => Some(format!("Saved to {path}")),
+                Some((path, by)) if made => Some(format!("Saved to {path} by {by}")),
+                _ => None,
             };
             rows.push(
                 self.row(
                     None,
                     "Status token",
-                    Some(about),
+                    about,
                     Some(control.into_any_element()),
                 )
                 .into_any_element(),
@@ -3428,7 +3425,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     None,
                     token,
-                    Some("Your status token, shown this once".into()),
+                    Some("Shown once".into()),
                     Some(copy.into_any_element()),
                 )
                 .into_any_element(),
@@ -3599,31 +3596,16 @@ ACTA_KEY=secret:ACTA_KEY",
                             .small()
                             .text_color(tint),
                     )
+                    // Its icon says whether it's a routine's thread or a branch.
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(size::SMALL))
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(p.ink)
-                                    .child(title),
-                            )
-                            .child(
-                                div()
-                                    .truncate()
-                                    .text_size(px(size::CAPTION))
-                                    .text_color(p.ink_3)
-                                    .child(if routine {
-                                        "A routine's thread: each run posts here, not in the chat"
-                                    } else {
-                                        "A branch: the chat goes on as it was"
-                                    }),
-                            ),
+                            .truncate()
+                            .text_size(px(size::SMALL))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.ink)
+                            .child(title),
                     ),
             )
     }
@@ -3902,12 +3884,7 @@ ACTA_KEY=secret:ACTA_KEY",
             groups.push(self.group(None, rows));
         } else if !self.task_new {
             let action = new_task(self, cx, true);
-            groups.push(self.empty(
-                Ico::ListTodo,
-                "No tasks yet",
-                "Hand an agent a job to work on by itself, and come back to what it did",
-                Some(action),
-            ));
+            groups.push(self.empty(Ico::ListTodo, "No tasks yet", None, Some(action)));
         }
         let action =
             (!self.task_new && !self.model.tasks.is_empty()).then(|| new_task(self, cx, false));
@@ -5112,7 +5089,6 @@ ACTA_KEY=secret:ACTA_KEY",
         let (mark, half) = wordmark(p, 72.0);
         let reveal = self.enter(0.15, 1.3);
         let word = self.enter(0.7, 0.6);
-        let line = self.enter(1.1, 0.5);
         let buttons = self.enter(1.3, 0.5);
         let swapped = self.form_at.elapsed().as_secs_f32();
         let swap = |delay: f32| {
@@ -5124,13 +5100,6 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             column
                 .gap(px(space::XL))
-                .child(appear(
-                    div()
-                        .text_size(px(size::HEADING))
-                        .text_color(p.ink_2)
-                        .child("Little agents that live with you"),
-                    line.min(swap(0.0)),
-                ))
                 .child(
                     appear(
                         div()
@@ -8105,7 +8074,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_size(px(size::HEADING))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(p.ink)
-                            .child(program_title(&name)),
+                            .child(self.model.program_title(&name)),
                         if is_chosen { 1.0 - leaving } else { 1.0 },
                     ))
                     .child(appear(
@@ -8282,7 +8251,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.model.make_failed = false;
         let typed = self.name_in.read(cx).value().trim().to_string();
         let name = if typed.is_empty() {
-            program_title(&program)
+            self.model.program_title(&program)
         } else {
             typed
         };
@@ -9300,7 +9269,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         div()
                             .text_size(px(size::CAPTION))
                             .text_color(p.ink_3)
-                            .child("None yet. Set them up once, then pick them here."),
+                            .child("None yet"),
                     )
                     .child(
                         self.small_button("edit-mcp-setup", "Set up", false)
@@ -9331,24 +9300,17 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .and_then(|id| self.model.agent(id))
             .is_none_or(|a| a.code_mode);
-        let scripts = self.switch_row(
-            "edit-code-mode",
-            "Code Mode",
-            "Uses its tools by writing small scripts, which keeps its context small",
-            code_mode,
-            cx,
-            |this| {
-                let on = this
-                    .model
-                    .editing
-                    .as_ref()
-                    .and_then(|id| this.model.agent(id))
-                    .is_none_or(|a| a.code_mode);
-                if let Some(f) = this.model.set_code_mode(!on) {
-                    this.send(f);
-                }
-            },
-        );
+        let scripts = self.switch_row("edit-code-mode", "Code Mode", "", code_mode, cx, |this| {
+            let on = this
+                .model
+                .editing
+                .as_ref()
+                .and_then(|id| this.model.agent(id))
+                .is_none_or(|a| a.code_mode);
+            if let Some(f) = this.model.set_code_mode(!on) {
+                this.send(f);
+            }
+        });
         // Its model and reasoning effort, as the chat's picker has them, once its
         // program has said what it offers; then its permission mode, what a message
         // while it's busy does, and its backup. Each row's default is one of its chips.
@@ -9427,12 +9389,12 @@ ACTA_KEY=secret:ACTA_KEY",
             };
             let mut programs = vec![("none".to_string(), "None".to_string())];
             for name in self.model.programs.iter().filter(|n| **n != a.program) {
-                programs.push((name.clone(), program_title(name)));
+                programs.push((name.clone(), self.model.program_title(name)));
             }
             let backup_name = if default_backup == "none" {
                 "None".to_string()
             } else {
-                program_title(&default_backup)
+                self.model.program_title(&default_backup)
             };
             let agent_id = a.id.clone();
             let backups = self.choices(
@@ -9459,12 +9421,13 @@ ACTA_KEY=secret:ACTA_KEY",
             .unwrap_or((false, None));
         let member = !self.model.programs_owner;
         let locked = member || (!self.model.sandboxes && !isolated);
+        // A line only where the switch can't be moved, saying why.
         let isolate_how = if member {
-            "In a sandbox of your own, as every member's agents are"
+            "Always, for members"
         } else if !self.model.sandboxes && !isolated {
-            "Needs sandboxes, which this instance doesn't run. On Linux, start it with --sandboxes podman"
+            "Needs the instance started with --sandboxes podman, on Linux"
         } else {
-            "Runs in a sandbox, apart from the instance's files and your other agents"
+            ""
         };
         let isolate = if locked {
             self.row(
@@ -9547,34 +9510,23 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 );
             }
-            hosts_list = hosts_list
-                .child(chips)
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(space::S))
-                        .child(div().flex_1().child(Input::new(&self.host_in)))
-                        .child(
-                            self.button("edit-host-add", "Add", false)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let typed = this.host_in.read(cx).value().to_string();
-                                    if let Some(f) = this.model.add_host(&typed) {
-                                        this.send(f);
-                                    }
-                                    this.host_in.update(cx, |s, cx| s.set_value("", window, cx));
-                                    cx.notify();
-                                })),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(
-                            "A name, or *.example.com for every name under one. It reaches \
-                             nothing else, and never the instance's own computer.",
-                        ),
-                );
+            hosts_list = hosts_list.child(chips).child(
+                div()
+                    .flex()
+                    .gap(px(space::S))
+                    .child(div().flex_1().child(Input::new(&self.host_in)))
+                    .child(
+                        self.button("edit-host-add", "Add", false)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                let typed = this.host_in.read(cx).value().to_string();
+                                if let Some(f) = this.model.add_host(&typed) {
+                                    this.send(f);
+                                }
+                                this.host_in.update(cx, |s, cx| s.set_value("", window, cx));
+                                cx.notify();
+                            })),
+                    ),
+            );
         }
         // What it knows and does, counted, each opening where it's kept.
         let summary = self.model.summary.clone();
@@ -9658,7 +9610,7 @@ ACTA_KEY=secret:ACTA_KEY",
             brains = brains.child(
                 self.chip(
                     format!("edit-move-{name}"),
-                    &program_title(&name),
+                    &self.model.program_title(&name),
                     name == on,
                     false,
                 )
@@ -9950,11 +9902,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let mut fields = vec![
                 self.field_row("Name", Input::new(&self.mcp_name_in)),
                 self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
-                self.text_row(
-                    "Settings",
-                    Some("NAME=value, one a line. NAME=secret:KEY uses one of your keys"),
-                    Textarea::new(&self.mcp_settings_in),
-                ),
+                self.text_row("Settings", None, Textarea::new(&self.mcp_settings_in)),
             ];
             if self.mcp_cmd_in.read(cx).value().trim().starts_with("http") {
                 fields.push(self.field_row("Client ID", Input::new(&self.mcp_client_in)));
@@ -9994,12 +9942,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let servers = self.model.mcp_servers.clone();
         if servers.is_empty() {
             let actions = new_server(self, cx, true).into_any_element();
-            groups.push(self.empty(
-                Ico::Plug,
-                "No MCP servers yet",
-                "Tools your agents can use, such as GitHub or your calendar",
-                Some(actions),
-            ));
+            groups.push(self.empty(Ico::Plug, "No MCP servers yet", None, Some(actions)));
         } else {
             let mut rows = Vec::new();
             for m in servers {
@@ -10264,12 +10207,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         if self.model.skills.is_empty() {
             let action = self.new_skill_button(cx);
-            let groups = vec![self.empty(
-                Ico::BookOpen,
-                "No skills yet",
-                "How you like something done, which every agent reads when a job fits it",
-                Some(action),
-            )];
+            let groups = vec![self.empty(Ico::BookOpen, "No skills yet", None, Some(action))];
             return self.settings_page("skills-page", "Skills", None, groups);
         }
         // Its title over the skills, each a row of the one group, as a list.
@@ -10439,20 +10377,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let f = this.model.ask_proposals(&agent);
                     this.send(f);
-                    this.model.said.push(format!(
-                        "{name} is looking over your chats. What it proposes comes here."
-                    ));
+                    this.model
+                        .said
+                        .push(format!("{name} is looking over your chats"));
                     cx.notify();
                 }))
                 .into_any_element()
         });
         if self.model.proposals.is_empty() {
-            let groups = vec![self.empty(
-                Ico::Lightbulb,
-                "Nothing to look at",
-                "Skills and notes your agents propose from your chats, and tasks you teach them in their browser, wait here for your yes",
-                ask,
-            )];
+            let groups = vec![self.empty(Ico::Lightbulb, "Nothing to look at", None, ask)];
             return self.settings_page("proposals-page", "Proposals", None, groups);
         }
         let mut rows = Vec::new();
@@ -10642,12 +10575,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             groups.push(self.group(Some("Newest first"), rows));
         } else if self.model.tables.is_empty() {
-            groups.push(self.empty(
-                Ico::Sheet,
-                "No tables yet",
-                "Agents keep lists and records in tables, and share them with each other",
-                None,
-            ));
+            groups.push(self.empty(Ico::Sheet, "No tables yet", None, None));
         } else {
             let agent = self.model.selected.clone().unwrap_or_default();
             let (mine, shared): (Vec<model::SharedTable>, Vec<model::SharedTable>) = self
@@ -10759,13 +10687,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 .into_any_element(),
             );
         }
-        let mut groups = vec![self.group(Some("From another app"), rows)];
+        let mut groups = vec![self.group(None, rows)];
+        // What someone would expect to come and doesn't.
         groups.push(
             div()
                 .px(px(space::XS))
                 .text_size(px(size::CAPTION))
                 .text_color(p.ink_3)
-                .child("Agents, chats, memories, routines, skills and tables come over. Keys and logins don't.")
+                .child("Keys and logins don't come over")
                 .into_any_element(),
         );
         if let Some(done) = self.model.import_done.clone() {
@@ -10798,12 +10727,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         if self.model.plugins.is_empty() {
             let action = ask(self, cx, true);
-            let groups = vec![self.empty(
-                Ico::Puzzle,
-                "No plugins yet",
-                "Your agents build them: a panel beside the chat, or new tools for every agent",
-                Some(action),
-            )];
+            let groups = vec![self.empty(Ico::Puzzle, "No plugins yet", None, Some(action))];
             return self.settings_page("plugins-page", "Plugins", None, groups);
         }
         let mut rows = Vec::new();
@@ -10865,11 +10789,7 @@ ACTA_KEY=secret:ACTA_KEY",
             );
             if !pl.waiting.is_empty() {
                 rows.push(self.note_row(
-                    format!(
-                        "{} asks to {}. Until you allow it, it can't.",
-                        pl.name,
-                        model::asking(&pl.waiting)
-                    ),
+                    format!("{} asks to {}", pl.name, model::asking(&pl.waiting)),
                     p.ink_2,
                 ));
             }
@@ -11138,7 +11058,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let groups = vec![self.empty(
                 Ico::Clock,
                 "No routines yet",
-                "Something an agent does on a schedule, such as a summary each morning or a check every hour",
+                None,
                 Some(self.new_routine_button(cx)),
             )];
             return self.settings_page("routines-page", "Routines", None, groups);
@@ -11315,7 +11235,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         div()
                             .text_size(px(size::BODY))
                             .text_color(p.ink)
-                            .child("What it's asked each time"),
+                            .child("Prompt"),
                     )
                     .child(Textarea::new(&self.routine_prompt_in))
                     .into_any_element(),
@@ -11366,18 +11286,13 @@ ACTA_KEY=secret:ACTA_KEY",
             ],
         ));
         let mut options = vec![
-            self.switch_row(
-                "routine-on",
-                "On",
-                "A paused routine doesn't run",
-                self.routine_on,
-                cx,
-                |this| this.routine_on = !this.routine_on,
-            ),
+            self.switch_row("routine-on", "On", "", self.routine_on, cx, |this| {
+                this.routine_on = !this.routine_on
+            }),
             self.switch_row(
                 "routine-notify",
                 "Notify me",
-                "When it has something to say",
+                "",
                 self.routine_notify,
                 cx,
                 |this| this.routine_notify = !this.routine_notify,
@@ -11385,7 +11300,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.switch_row(
                 "routine-catch-up",
                 "Catch up",
-                "Run once for what it missed while off",
+                "",
                 self.routine_catch_up,
                 cx,
                 |this| this.routine_catch_up = !this.routine_catch_up,
@@ -11393,7 +11308,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.switch_row(
                 "routine-post",
                 "A thread of its own",
-                "Posts there instead of in the chat",
+                "",
                 self.routine_thread,
                 cx,
                 |this| this.routine_thread = !this.routine_thread,
@@ -11401,7 +11316,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.switch_row(
                 "routine-webhook",
                 "Webhook",
-                "GitHub or anything else can start it",
+                "",
                 self.routine_webhook,
                 cx,
                 |this| this.routine_webhook = !this.routine_webhook,
@@ -11646,7 +11561,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     None,
                     "Steps side by side",
-                    Some("An agent set this flow up, so it stays as it is".into()),
+                    Some("Set up by an agent".into()),
                     Some(
                         self.small_button("flow-off", "Take it off", false)
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -11721,7 +11636,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     None,
                     "Hand the answer on",
-                    Some("To another agent, and its answer to the next".into()),
+                    None,
                     Some(
                         self.small_button("flow-add", "Add a step", false)
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -11750,7 +11665,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Some(url) if !url.is_empty() => self.row(
                 Some(self.tile(Ico::Bell)),
                 "Push relay",
-                Some(format!("{url}, sealed end to end")),
+                Some(url),
                 Some(
                     self.small_button("relay-off", "Stop", false)
                         .on_click(cx.listener(|this, _, _, cx| {
@@ -11764,7 +11679,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Some(_) => self.row(
                 Some(self.tile(Ico::Bell)),
                 "Push relay",
-                Some("Notifications while loom is closed".into()),
+                None,
                 Some(
                     div()
                         .flex()
@@ -11807,7 +11722,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     Some(self.tile(Ico::Smartphone)),
                     "Phones can reach this computer",
-                    Some("Over Wi-Fi or Tailscale, encrypted end to end".into()),
+                    None,
                     Some(
                         self.switch("phones-switch", phones_on)
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -11841,17 +11756,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .py(px(space::XL))
                 .px(px(space::L));
             if let Some(name) = self.model.joined.clone() {
-                code = code
-                    .child(
-                        div()
-                            .text_size(px(size::BODY))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(p.ink)
-                            .child(format!("{name} joined")),
-                    )
-                    .child(caption(
-                        "It's signed in below, where you can sign it out".into(),
-                    ));
+                code = code.child(
+                    div()
+                        .text_size(px(size::BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink)
+                        .child(format!("{name} joined")),
+                );
             } else if let Some((text, expires)) = self.model.link.clone() {
                 code = code
                     .child(
@@ -11989,15 +11900,11 @@ ACTA_KEY=secret:ACTA_KEY",
             let (name, what, icon) = match tool.as_str() {
                 "run_command" => ("Run commands", "In PowerShell, as you", Ico::SquareTerminal),
                 "read_file" => ("Read files", "Any file you can read", Ico::FileText),
-                "list_files" => ("List folders", "What's in a folder", Ico::Folder),
-                "screenshot" => ("Take screenshots", "Of the main screen", Ico::Monitor),
-                "read_clipboard" => ("Read the clipboard", "The text you last copied", Ico::Copy),
-                "write_clipboard" => ("Copy to the clipboard", "Text for you to paste", Ico::Copy),
-                _ => (
-                    "Open files and links",
-                    "With their usual program",
-                    Ico::ExternalLink,
-                ),
+                "list_files" => ("List folders", "", Ico::Folder),
+                "screenshot" => ("Take screenshots", "", Ico::Monitor),
+                "read_clipboard" => ("Read the clipboard", "", Ico::Copy),
+                "write_clipboard" => ("Copy to the clipboard", "", Ico::Copy),
+                _ => ("Open files and links", "", Ico::ExternalLink),
             };
             let mut choices = Vec::new();
             for (choice, label) in [("off", "Off"), ("ask", "Ask"), ("allow", "Allow")] {
@@ -12029,10 +11936,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if allowed {
             rows.push(self.note_row("Agents can run any command here without asking", p.bad));
         }
-        let groups = vec![self.group(
-            Some("What agents may do here, Ask waits for your yes"),
-            rows,
-        )];
+        let groups = vec![self.group(None, rows)];
         self.settings_page("device-page", "This PC", None, groups)
     }
 
@@ -12218,7 +12122,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .row(
                         Some(self.tile(Ico::Monitor)),
                         "This computer",
-                        Some("Run loom here, with the agents it had".into()),
+                        None,
                         Some(start.into_any_element()),
                     )
                     .into_any_element()],
@@ -12300,7 +12204,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn people_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         if let Some(why) = self.model.people_refused.clone() {
-            let groups = vec![self.empty(Ico::Users, "Not for you", &why, None)];
+            let groups = vec![self.empty(Ico::Users, "Not for you", Some(&why), None)];
             return self.settings_page("people-page", "People", None, groups);
         }
         let mut groups = Vec::new();
@@ -12615,7 +12519,7 @@ ACTA_KEY=secret:ACTA_KEY",
     // Every page of the settings and server popups is built from these, the way the
     // system settings of macOS, iOS and Windows are: a title with the page's one
     // action beside it, then groups, each a box of rows with what it is on the left
-    // and its control on the right, and one short line under a name at most.
+    // and its control on the right, and nothing that says again what a name says.
 
     /// A settings page: its title, with its one action on the right, then its groups,
     /// in a column that scrolls.
@@ -12830,8 +12734,9 @@ ACTA_KEY=secret:ACTA_KEY",
             .into_any_element()
     }
 
-    /// A row: what it is on the left, with one short line under it, and its control
-    /// on the right.
+    /// A row: what it is on the left and its control on the right. The line under it is
+    /// for a value or state, or what someone would get wrong without it, never to say
+    /// again what the title does; an empty one isn't drawn.
     fn row(
         &self,
         lead: Option<AnyElement>,
@@ -12840,6 +12745,7 @@ ACTA_KEY=secret:ACTA_KEY",
         control: Option<AnyElement>,
     ) -> Div {
         let p = self.p;
+        let sub = sub.filter(|s| !s.is_empty());
         div()
             .min_h(px(control::ROW))
             .flex()
@@ -12990,9 +12896,15 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(label.to_string())
     }
 
-    /// What a page shows with nothing on it yet: what would be here, in a line, and
-    /// the way to make the first.
-    fn empty(&self, icon: Ico, title: &str, line: &str, action: Option<AnyElement>) -> AnyElement {
+    /// What a page shows with nothing on it yet: that it's empty, and the way to make the
+    /// first. A line under it only says why, where nothing can be made.
+    fn empty(
+        &self,
+        icon: Ico,
+        title: &str,
+        line: Option<&str>,
+        action: Option<AnyElement>,
+    ) -> AnyElement {
         let p = self.p;
         div()
             .flex()
@@ -13026,14 +12938,16 @@ ACTA_KEY=secret:ACTA_KEY",
                     .text_color(p.ink)
                     .child(title.to_string()),
             )
-            .child(
-                div()
-                    .max_w(px(340.0))
-                    .text_center()
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .child(line.to_string()),
-            )
+            .when_some(line, |d, line| {
+                d.child(
+                    div()
+                        .max_w(px(340.0))
+                        .text_center()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child(line.to_string()),
+                )
+            })
             .when_some(action, |d, a| d.child(div().pt(px(space::M)).child(a)))
             .into_any_element()
     }
@@ -13060,7 +12974,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let row = self.row(
             Some(self.tile(Ico::Bot)),
             "Let an agent do it",
-            Some("A prompt to paste to one of your agents".into()),
+            None,
             Some(copy.into_any_element()),
         );
         self.group(None, vec![row.into_any_element()])
@@ -13119,7 +13033,7 @@ ACTA_KEY=secret:ACTA_KEY",
             let shown = from_registry
                 .as_ref()
                 .or(listed.as_ref())
-                .map_or_else(|| program_title(&prog.name), |l| l.name.clone());
+                .map_or_else(|| self.model.program_title(&prog.name), |l| l.name.clone());
             let settings_words = match (&prog.share, prog.settings.len()) {
                 (Some(sh), _) => share_words(sh),
                 (None, 0) => "No settings".to_string(),
@@ -13279,7 +13193,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     Some(div().w(px(34.0)).flex_none().into_any_element()),
                     "Share it",
-                    Some("A budget for each".into()),
+                    None,
                     Some(share.into_any_element()),
                 )
                 .into_any_element(),
@@ -13375,12 +13289,7 @@ ACTA_KEY=secret:ACTA_KEY",
             );
         }
         if mine.is_empty() {
-            groups.push(self.empty(
-                Ico::Brain,
-                "No brains yet",
-                "The program an agent thinks with, such as Claude or Codex. Install one below",
-                None,
-            ));
+            groups.push(self.empty(Ico::Brain, "No brains yet", None, None));
         } else {
             groups.push(self.group(Some("Your brains"), mine));
         }
@@ -13484,7 +13393,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_size(px(size::CAPTION))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(p.ink_3)
-                        .child("More brains, from the ACP Registry"),
+                        .child("ACP Registry"),
                 )
                 .child(get_more)
                 .into_any_element(),
@@ -13518,7 +13427,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 items.push(
                     self.segment(
                         format!("default-brain-{name}"),
-                        &program_title(&name),
+                        &self.model.program_title(&name),
                         d.brain == name,
                     )
                     .on_click(put(serde_json::json!({"brain": name}))),
@@ -13536,7 +13445,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 items.push(
                     self.segment(
                         format!("default-backup-{name}"),
-                        &program_title(&name),
+                        &self.model.program_title(&name),
                         d.backup == name,
                     )
                     .on_click(put(serde_json::json!({"backup": name}))),
@@ -13544,26 +13453,13 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             self.segments(items).into_any_element()
         });
-        let brain_how = if d.brain.is_empty() {
-            "None picked yet: what an agent your agents make runs on"
-        } else {
-            "The program a new agent runs on"
-        };
         let mut rows = vec![self
-            .row(None, "Brain", Some(brain_how.into()), Some(brain))
+            .row(None, "Brain", None, Some(brain))
             .into_any_element()];
         if let Some(backup) = backup {
             rows.push(
-                self.row(
-                    None,
-                    "Backup program",
-                    Some(
-                        "Takes a turn over when an agent's own runs out of usage or doesn't start"
-                            .into(),
-                    ),
-                    Some(backup),
-                )
-                .into_any_element(),
+                self.row(None, "Backup program", None, Some(backup))
+                    .into_any_element(),
             );
         }
         let new_agents = self.group(Some("Brains"), rows);
@@ -13577,10 +13473,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .find(|a| a.program == name && !a.picks().is_empty())
                 .cloned()
             else {
+                // Why its models aren't here: someone would look for them.
                 picks.push(self.note_row(
                     format!(
-                        "{}: its models show here once an agent on it has started.",
-                        program_title(&name)
+                        "{}: its models show once an agent on it starts",
+                        self.model.program_title(&name)
                     ),
                     p.ink_3,
                 ));
@@ -13611,16 +13508,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     );
                 }
                 picks.push(self.text_row(
-                    &format!("{} · {}", program_title(&name), o.name),
+                    &format!("{} · {}", self.model.program_title(&name), o.name),
                     None,
                     row,
                 ));
             }
         }
-        let models = self.group(
-            Some("Model and effort, for agents that don't pick their own"),
-            picks,
-        );
+        let models = self.group(Some("Model and effort"), picks);
         // How agents ask, and what a message while one answers does.
         let mut mode_items = Vec::new();
         for mode in ["ask", "auto", "allow"] {
@@ -13646,34 +13540,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.row(
                     None,
                     "Permission",
-                    Some("For agents without a mode of their own".into()),
+                    None,
                     Some(self.segments(mode_items).into_any_element()),
                 )
                 .into_any_element(),
                 self.row(
                     None,
                     "A message while it answers",
-                    Some("Waits in the queue, or stops the turn and goes now".into()),
+                    None,
                     Some(self.segments(busy_items).into_any_element()),
                 )
                 .into_any_element(),
             ],
         );
         let instructions = self.group(
-            Some("Instructions every agent follows"),
-            vec![
-                div()
-                    .p(px(space::L))
-                    .child(Textarea::new(&self.every_in))
-                    .into_any_element(),
-                div()
-                    .px(px(space::L))
-                    .py(px(space::S + 2.0))
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child("Told to every agent beside About you, under their own heading")
-                    .into_any_element(),
-            ],
+            Some("Instructions"),
+            vec![div()
+                .p(px(space::L))
+                .child(Textarea::new(&self.every_in))
+                .into_any_element()],
         );
         let save = self
             .small_button("save-defaults", "Save", true)
@@ -13701,7 +13586,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Some((_, revision, by)) if *revision > 0 => {
                 format!("Revision {revision}, by {}", self.model.made_by(by))
             }
-            Some(_) => "Not written yet. Every agent starts with what you put here".to_string(),
+            Some(_) => "Not written yet".to_string(),
             None => "Loading…".to_string(),
         };
         let save = self
@@ -13714,7 +13599,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
             .into_any_element();
         let groups = vec![self.group(
-            Some("What every agent knows about you"),
+            None,
             vec![
                 div()
                     .p(px(space::L))
@@ -14045,7 +13930,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .pt(px(space::L))
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_3)
-                    .child("Nothing pinned yet. Pin a message from its corner."),
+                    .child("Nothing pinned yet"),
             );
         }
         for m in self.model.pins.clone() {
@@ -14161,9 +14046,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .pt(px(space::L))
                     .text_size(px(size::SMALL))
                     .text_color(p.ink_3)
-                    .child(format!(
-                        "Ask {agent} about this chat. The question and the answer stay out of it."
-                    )),
+                    .child(format!("Asks {agent}, and stays out of the chat")),
             );
         }
         for a in asides {
@@ -14551,7 +14434,7 @@ fn file_view(
                         div()
                             .text_size(px(size::CAPTION))
                             .text_color(p.ink_3)
-                            .child("Page · opens beside the chat"),
+                            .child("Page"),
                     ),
             )
             .into_any_element();
@@ -18317,7 +18200,6 @@ const SUGGESTIONS: [&str; 3] = [
     "Check something for me every morning",
 ];
 
-/// An agent program's name as a person reads it: claude as Claude.
 /// A tool's name as the person reads it: `show_card` is "Show card". Anything already in
 /// words, with a space in it or no underscore, is left as it is.
 fn readable_name(text: &str) -> String {
@@ -18334,11 +18216,12 @@ fn readable_name(text: &str) -> String {
         .filter(|w| !w.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
-    program_title(&words)
+    capitalized(&words)
 }
 
-fn program_title(name: &str) -> String {
-    let mut c = name.chars();
+/// `words` with a capital first letter.
+fn capitalized(words: &str) -> String {
+    let mut c = words.chars();
     match c.next() {
         Some(f) => f.to_uppercase().chain(c).collect(),
         None => String::new(),

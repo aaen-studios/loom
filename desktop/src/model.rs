@@ -2893,6 +2893,9 @@ pub struct Model {
     /// Answers given here, by call, until the instance takes them.
     answering: HashMap<String, (bool, bool)>,
     pub programs: Vec<String>,
+    /// Each program's name as people know it, the registry's ("Claude Agent" for
+    /// `claude-acp`), by its name, for those acp.list gave a `title`.
+    pub program_titles: HashMap<String, String>,
     /// Whether the instance has said which programs it has, since the last ask.
     pub programs_known: bool,
     /// The selected agent's messages, oldest first, with the queued ones last.
@@ -5150,6 +5153,18 @@ impl Model {
                 .and_then(Value::as_array)
                 .map(|ps| ps.iter().map(|p| s(p, "name")).collect())
                 .unwrap_or_default();
+            self.program_titles = f
+                .pointer("/value/programs")
+                .and_then(Value::as_array)
+                .map(|ps| {
+                    ps.iter()
+                        .filter_map(|p| {
+                            let title = p.get("title").and_then(Value::as_str)?;
+                            Some((s(p, "name"), title.to_string()))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             self.installed = f
                 .pointer("/value/programs")
                 .and_then(Value::as_array)
@@ -6340,6 +6355,22 @@ impl Model {
     fn registry_cmd(&mut self) -> Value {
         let id = self.id("app.registry");
         json!({"t": "cmd", "id": id, "name": "acp.registry"})
+    }
+
+    /// A program's name as people know it: the title the instance gave, or the
+    /// registry's name for it, or else its own with a capital, as `claude` is Claude.
+    pub fn program_title(&self, program: &str) -> String {
+        if let Some(t) = self.program_titles.get(program) {
+            return t.clone();
+        }
+        if let Some(l) = self.program_listed(program) {
+            return l.name.clone();
+        }
+        let mut c = program.chars();
+        match c.next() {
+            Some(f) => f.to_uppercase().chain(c).collect(),
+            None => String::new(),
+        }
     }
 
     /// The registry agent a program on the instance is, for its icon: the one the instance
@@ -9789,6 +9820,18 @@ mod tests {
             .notices
             .iter()
             .any(|n| n.contains("goes with the instance")));
+    }
+
+    #[test]
+    fn a_program_shows_by_the_name_people_know() {
+        let mut m = Model::new();
+        let list = m.programs();
+        m.result(&json!({"t": "result", "id": list["id"], "ok": true, "value": {"programs": [
+            {"name": "claude-acp", "title": "Claude Agent", "source": "claude-acp", "version": "1", "settings": []},
+            {"name": "codex", "source": "", "version": "", "settings": []}
+        ]}}));
+        assert_eq!(m.program_title("claude-acp"), "Claude Agent");
+        assert_eq!(m.program_title("codex"), "Codex");
     }
 
     #[test]

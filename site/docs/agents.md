@@ -48,7 +48,7 @@ The **Defaults** page, under Agents in Settings, sets what every agent of yours 
 - **Permission**: Asks first, Asks when it's risky, or Doesn't ask, for agents without a mode of their own. It's Asks first until you change it.
 - **A message while it answers**: waits its turn, or steers at once.
 - **Model and effort** for each program, for agents that don't pick their own. A program's models show here once an agent on it has started.
-- **Instructions every agent follows**, told to each agent beside About you, under their own heading. Choose **Save** to keep them.
+- **Instructions**: what every agent follows, told to each beside About you, under their own heading. Choose **Save** to keep them.
 
 The defaults are live: change one and every agent that follows it changes too. On an agent's edit page, each choice that follows the default says **Default:** and what that is. Pick it again to set the agent back to following.
 

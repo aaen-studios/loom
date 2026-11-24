@@ -45,7 +45,7 @@ Under **This computer**:
 
 - **Start at login**: loom starts when you log in, in the tray.
 - **Keep running when closed**: closing the window keeps loom in the tray, so routines and replies go on. On by default. Turn it off and closing the window quits loom.
-- **Keep the computer awake**: the computer doesn't sleep while an agent is working.
+- **Keep the computer awake while an agent works**: the computer doesn't sleep while one is working.
 
 Under **Notifications**:
 
