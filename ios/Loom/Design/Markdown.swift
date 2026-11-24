@@ -13,8 +13,9 @@ struct MarkdownView: View {
     var ink: Color = P.ink
     /// Still being written, so it grows at the end.
     var live = false
-    /// The site icons of the pages it links to, by address: where each icon's file is.
-    var icons: [String: String] = [:]
+    /// What its links and mentions show: the small pictures before links, and the agents
+    /// it mentions.
+    var links = Inline()
 
     var body: some View {
         let parts = live && !keepBreaks ? MarkdownView.growing(text) : MarkdownView.parse(text, keepBreaks: keepBreaks)
@@ -22,7 +23,7 @@ struct MarkdownView: View {
             // Each part is its own view, compared before it's drawn again: as a reply is
             // written, only its last part changes.
             ForEach(parts.indices, id: \.self) { i in
-                PartView(part: parts[i], font: font, ink: ink, icons: icons).equatable()
+                PartView(part: parts[i], font: font, ink: ink, links: links).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -111,20 +112,72 @@ struct MarkdownView: View {
         return out
     }
 
-    /// Inline Markdown with each link's site icon before it, where `icons` has one.
-    static func text(_ s: String, icons: [String: String]) -> Text {
+    /// Inline Markdown with its links and mentions as the chat shows them (PLAN.md,
+    /// "Links and sources" and "Mentions"), as desktop/src/model.rs's `with_link_icons`:
+    /// - a link with its site's icon before it, where `links` has one;
+    /// - an agent it mentions as its thread and its name in its colour, a little
+    ///   weathered, with no @, or `@Name` for one that's gone;
+    /// - a file it mentions, or one sent with it, with its icon before its name, or a
+    ///   tiny copy of a picture sent with it once it's fetched.
+    static func text(_ s: String, links: Inline) -> Text {
         let a = inline(s)
-        guard !icons.isEmpty else { return Text(a) }
+        guard !links.icons.isEmpty || s.contains("](loom") else { return Text(a) }
         var out = Text("")
         var last: URL?
         for run in a.runs {
-            if let url = run.link, url != last, let path = icons[url.absoluteString], let icon = siteIcon(path) {
-                out = Text("\(out)\(Text(Image(uiImage: icon)).baselineOffset(-2)) ")
+            let piece = AttributedString(a[run.range])
+            guard let url = run.link else {
+                last = nil
+                out = Text("\(out)\(Text(piece))")
+                continue
             }
-            last = run.link
-            out = Text("\(out)\(Text(AttributedString(a[run.range])))")
+            // A link's words can be more than one run, as when part of them is bold: what
+            // goes before it goes before its first.
+            let first = url != last
+            last = url
+            let address = url.absoluteString
+            // An icon and its name are joined by a no-break space, so a line never ends
+            // between them.
+            switch LinkTo(address) {
+            case .agent(let id):
+                var name = String(piece.characters)
+                if first { name = String(name.drop { $0 == "@" || $0.isWhitespace }) }
+                guard let agent = links.agents[id] else {
+                    out = Text("\(out)\(Text(verbatim: first ? "@\(name)" : name))")
+                    continue
+                }
+                let ink = P.mention(agent.color)
+                if first {
+                    out = Text("\(out)\(Text(Image(uiImage: MentionGlyph.thread(agent.outline)).renderingMode(.template)).foregroundStyle(ink).baselineOffset(-1))\u{00A0}")
+                }
+                out = Text("\(out)\(Text(verbatim: name).foregroundStyle(ink).fontWeight(.medium))")
+                continue
+            case .file(_, let path) where first:
+                out = Text("\(out)\(fileIcon(path))\u{00A0}")
+            case .attached where first:
+                if let path = links.icons[address], let icon = siteIcon(path) {
+                    out = Text("\(out)\(Text(Image(uiImage: icon)).baselineOffset(-2))\u{00A0}")
+                } else {
+                    out = Text("\(out)\(fileIcon(String(piece.characters)))\u{00A0}")
+                }
+            case .page where first:
+                if let path = links.icons[address], let icon = siteIcon(path) {
+                    out = Text("\(out)\(Text(Image(uiImage: icon)).baselineOffset(-2))\u{00A0}")
+                }
+            default:
+                break
+            }
+            out = Text("\(out)\(Text(piece))")
         }
         return out
+    }
+
+    /// The icon before a file's name in a message: a picture's, or a page's, in the
+    /// quiet ink.
+    private static func fileIcon(_ name: String) -> Text {
+        Text(Image(systemName: isPicture(name) ? "photo" : "doc"))
+            .font(.system(size: 12))
+            .foregroundStyle(P.ink3)
     }
 
     /// A site's icon at 14 points, with loom's small radius, kept once it's made.
@@ -161,25 +214,25 @@ private struct PartView: View, Equatable {
     var part: MarkdownView.Part
     var font: Font
     var ink: Color
-    var icons: [String: String]
+    var links: Inline
 
     var body: some View {
         switch part {
         case .paragraph(let s):
-            MarkdownView.text(s, icons: icons).font(font).foregroundStyle(ink).lineSpacing(4)
+            MarkdownView.text(s, links: links).font(font).foregroundStyle(ink).lineSpacing(4)
         case .heading(let level, let s):
-            MarkdownView.text(s, icons: icons)
+            MarkdownView.text(s, links: links)
                 .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
                 .foregroundStyle(P.ink)
                 .padding(.top, 4)
         case .item(let indent, let mark, let s):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
-                MarkdownView.text(s, icons: icons).font(font).foregroundStyle(ink).lineSpacing(4)
+                MarkdownView.text(s, links: links).font(font).foregroundStyle(ink).lineSpacing(4)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .quote(let s):
-            MarkdownView.text(s, icons: icons)
+            MarkdownView.text(s, links: links)
                 .font(font).foregroundStyle(P.ink2).lineSpacing(4)
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 2) }
@@ -303,13 +356,13 @@ extension MarkdownView {
 }
 
 extension MarkdownView {
-    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false, icons: [String: String] = [:]) {
+    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false, links: Inline = Inline()) {
         self.text = text
         self.keepBreaks = keepBreaks
         self.font = font
         self.ink = ink
         self.live = live
-        self.icons = icons
+        self.links = links
     }
 }
 
@@ -366,4 +419,40 @@ struct CodeBlock: View {
         MarkdownView(Sample.finished + "\n\n## A list\n\n- one `code`\n- two\n  - nested\n1. first\n2. second\n\n> A quote.\n\n| a | b |\n|---|---|\n| 1 | 2 |")
             .padding()
     }
+}
+
+/// The small pictures of mentions (PLAN.md, "Mentions").
+enum MentionGlyph {
+    /// An agent's thread in its shape, 14 by 10 points, still, as a template image to be
+    /// drawn in the agent's colour, as the desktop's `mention_thread`: fitted into the box
+    /// by its widest side, or for the plain thread a small wave. Kept per shape.
+    static func thread(_ outline: [CGPoint]?) -> UIImage {
+        let key = (outline.map { $0.map { "\($0.x),\($0.y)" }.joined(separator: " ") } ?? "") as NSString
+        if let kept = kept.object(forKey: key) { return kept }
+        let made = UIGraphicsImageRenderer(size: CGSize(width: 14, height: 10)).image { _ in
+            let path = UIBezierPath()
+            if let pts = outline, pts.count > 1 {
+                let sx = pts.map { abs($0.x) }.max() ?? 0
+                let sy = pts.map { abs($0.y) }.max() ?? 0
+                let scale = min(6 / max(sx, 0.1), 4 / max(sy, 0.1))
+                for (i, p) in pts.enumerated() {
+                    let q = CGPoint(x: 7 + p.x * scale, y: 5 + p.y * scale)
+                    if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
+                }
+            } else {
+                path.move(to: CGPoint(x: 1, y: 6))
+                path.addCurve(to: CGPoint(x: 7, y: 5), controlPoint1: CGPoint(x: 3.5, y: 2), controlPoint2: CGPoint(x: 5.5, y: 2))
+                path.addCurve(to: CGPoint(x: 13, y: 4), controlPoint1: CGPoint(x: 8.5, y: 8), controlPoint2: CGPoint(x: 10.5, y: 8.5))
+            }
+            path.lineWidth = 1.6
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            UIColor.black.setStroke()
+            path.stroke()
+        }.withRenderingMode(.alwaysTemplate)
+        kept.setObject(made, forKey: key)
+        return made
+    }
+
+    nonisolated(unsafe) private static let kept = NSCache<NSString, UIImage>()
 }

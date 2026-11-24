@@ -26,6 +26,8 @@ struct Agent: Identifiable, Equatable, Sendable {
     /// dragged it, if either.
     var pinned: Int?
     var order: Int?
+    /// What the person told it, which the composer's @ picker shows the first line of.
+    var instructions = ""
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
@@ -282,8 +284,9 @@ struct Message: Identifiable, Equatable, Sendable {
     var live = false
     /// Written here and waiting in the outbox.
     var queued = false
-    /// For a message another agent sent, who.
+    /// For a message another agent sent (`message_agent`), its name, and its id.
     var from: String?
+    var fromAgent: String?
     /// How a reply's turn ended: `done`, or `cancelled`, `failed` or `limit` for one cut
     /// short.
     var status = ""
@@ -407,6 +410,162 @@ private func titledLine(_ line: String, _ links: [String: PageLink]) -> String {
         rest = rest.dropFirst()
     }
     return out
+}
+
+// MARK: Mentions (PLAN.md, "Mentions")
+
+/// Where a link in a message's words goes, as desktop/src/model.rs's `line_links` tells
+/// them apart.
+enum LinkTo: Equatable, Sendable {
+    /// A page on the web.
+    case page
+    /// An agent it mentions, by id.
+    case agent(String)
+    /// A file it mentions, in the agent's folder or the shared one: the agent, and the
+    /// path as a reply would name it.
+    case file(agent: String, path: String)
+    /// A file sent with the message, by its SHA-256.
+    case attached(String)
+    case other
+
+    init(_ link: String) {
+        if link.hasPrefix("http://") || link.hasPrefix("https://") {
+            self = .page
+        } else if link.hasPrefix("loom:agent/") {
+            self = .agent(String(link.dropFirst("loom:agent/".count)))
+        } else if link.hasPrefix("loom:file/") {
+            let rest = link.dropFirst("loom:file/".count)
+            guard let cut = rest.firstIndex(of: "/") else {
+                self = .other
+                return
+            }
+            let path = String(rest[rest.index(after: cut)...])
+            self = .file(agent: String(rest[..<cut]), path: path.removingPercentEncoding ?? path)
+        } else if link.hasPrefix("loom-file:") {
+            self = .attached(String(link.dropFirst("loom-file:".count)))
+        } else {
+            self = .other
+        }
+    }
+}
+
+/// Whether a file of this name is a picture, by its type.
+func isPicture(_ name: String) -> Bool {
+    let lower = name.lowercased()
+    return [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".svg"].contains { lower.hasSuffix($0) }
+}
+
+/// A person's words with each of the message's files marked where it was attached
+/// (`[name]`) made a link to it, `loom-file:` and its SHA-256, which the chat opens, as
+/// desktop/src/model.rs's `link_files`. A name that can't be a link's words is left as
+/// it is.
+func linkFiles(_ text: String, _ files: [FileRef]) -> String {
+    var out = text
+    for f in files where !f.name.isEmpty && !f.name.contains(where: { "[]`\n".contains($0) }) {
+        let mark = "[\(f.name)]"
+        // Not one that's a link already.
+        var from = out.startIndex
+        while let r = out.range(of: mark, range: from..<out.endIndex) {
+            if out[r.upperBound...].hasPrefix("(") {
+                from = r.upperBound
+                continue
+            }
+            out.replaceSubrange(r, with: "\(mark)(loom-file:\(f.file))")
+            break
+        }
+    }
+    return out
+}
+
+/// A mention the composer put in: the words it put in the field, and the `loom:` link it
+/// goes as.
+struct Mention: Equatable, Sendable {
+    var words: String
+    var link: String
+}
+
+/// An agent as a mention: `@Casper`, going as `loom:agent/<id>`.
+func agentMention(id: String, name: String) -> Mention {
+    Mention(words: "@\(name)", link: "loom:agent/\(id)")
+}
+
+/// A file in `agent`'s folder or the shared one as a mention, its path as a reply would
+/// name it, escaped where a Markdown link needs it, as desktop/src/model.rs's
+/// `file_mention`.
+func fileMention(agent: String, path: String, name: String) -> Mention {
+    var escaped = ""
+    for c in path {
+        if " ()%[]<>\\".contains(c) {
+            for byte in String(c).utf8 { escaped += String(format: "%%%02X", byte) }
+        } else {
+            escaped.append(c)
+        }
+    }
+    return Mention(words: name, link: "loom:file/\(agent)/\(escaped)")
+}
+
+/// What the person typed with each mention the composer put in that's still there as
+/// it was, as the Markdown link it's sent as, as desktop/src/model.rs's
+/// `with_mention_links`. Each mention takes the first of its words not taken already.
+func withMentionLinks(_ text: String, _ mentions: [Mention]) -> String {
+    var taken: [(range: Range<String.Index>, mention: Mention)] = []
+    for m in mentions where !m.words.isEmpty {
+        var from = text.startIndex
+        while let r = text.range(of: m.words, range: from..<text.endIndex) {
+            if taken.contains(where: { $0.range.overlaps(r) }) {
+                from = r.upperBound
+                continue
+            }
+            taken.append((r, m))
+            break
+        }
+    }
+    var out = ""
+    var at = text.startIndex
+    for t in taken.sorted(by: { $0.range.lowerBound < $1.range.lowerBound }) {
+        out += text[at..<t.range.lowerBound]
+        let words = t.mention.words.replacingOccurrences(of: "[", with: "").replacingOccurrences(of: "]", with: "")
+        out += "[\(words)](\(t.mention.link))"
+        at = t.range.upperBound
+    }
+    out += text[at...]
+    return out
+}
+
+/// The @ being typed at the end of the composer's text, for the picker: how many
+/// characters come before it, and what comes after it. Nil unless it starts the text or
+/// follows a space, with no space since, as desktop/src/model.rs's `mention_query`.
+func mentionQuery(_ text: String) -> (at: Int, query: String)? {
+    guard let at = text.lastIndex(of: "@") else { return nil }
+    let query = text[text.index(after: at)...]
+    if query.contains(where: \.isWhitespace) || query.count > 40 { return nil }
+    if let before = text[..<at].last, !(before.isWhitespace || before == "(") { return nil }
+    return (text.distance(from: text.startIndex, to: at), String(query))
+}
+
+/// A file the composer's @ picker found (`agent.files`): its path as a reply would name
+/// it, its name, and its folder, as the picker shows it.
+struct FoundFile: Equatable, Sendable {
+    var path: String
+    var name: String
+    var place: String
+}
+
+/// One of the @ picker's choices: one of the person's other agents, with the first line
+/// of its instructions, or a file.
+enum Pick: Equatable, Sendable {
+    case agent(Agent, about: String)
+    case file(FoundFile)
+}
+
+/// What a message's words need to show their links and mentions, as
+/// desktop/src/model.rs's `Inline`.
+struct Inline: Equatable, Sendable {
+    /// Where the small picture before a link is, by its address: its site's icon, or a
+    /// picture sent with the message, once it's fetched.
+    var icons: [String: String] = [:]
+    /// The agents it mentions that are still there, by id.
+    var agents: [String: Agent] = [:]
 }
 
 struct Tool: Equatable, Sendable {
@@ -869,6 +1028,13 @@ final class Model {
     var toSignIn: (server: String, url: URL)?
     /// Whether `mcp.list` is to be asked again.
     private var mcpStale = false
+    /// The files the @ picker found: for which agent, for what, and the files.
+    private var foundFiles: (agent: String, query: String, files: [FoundFile]) = ("", "", [])
+    /// The `agent.files` asked for and not answered yet: its id, the agent and the query.
+    private var filesAsking: (id: String, agent: String, query: String)?
+    /// Frames the model has to send that no screen asked for, such as fetching a file a
+    /// message mentions once the instance has it ready: sent with the next fetches.
+    private var pending: [JSON] = []
 
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
@@ -1188,6 +1354,19 @@ final class Model {
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
         switch f["id"].text {
+        case let id where id.hasPrefix("app.agent_files"):
+            // The files the @ picker asked for, unless it has asked for others since.
+            guard let asking = filesAsking, asking.id == id else { break }
+            filesAsking = nil
+            let files = f["value"]["files"].array.map { FoundFile(path: $0["path"].text, name: $0["name"].text, place: $0["where"].text) }
+            foundFiles = (asking.agent, asking.query, files)
+        case let id where id.hasPrefix("app.agent_file"):
+            // A file a message mentions, kept as the person's: it opens once it's here.
+            if let error {
+                notice = error
+            } else if !f["value"]["file"].isNull, let frame = open(FileRef(f["value"]["file"])) {
+                pending.append(frame)
+            }
         case let id where id.hasPrefix("app.secret_fill:"):
             // The card's own frame says how it went; a refusal shows on the card, which
             // still asks.
@@ -1216,7 +1395,7 @@ final class Model {
         switch what {
         case .agents:
             agents = listed(items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int)
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, instructions: $0["instructions"].text)
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -1250,7 +1429,7 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]))
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]))
             }
             placeQueued()
             // The tool calls these messages name.
@@ -1355,7 +1534,8 @@ final class Model {
     /// The frames to send the core for the lists that changed, and the thumbnails the
     /// shown chat needs.
     func fetches() -> [JSON] {
-        var out: [JSON] = []
+        var out: [JSON] = pending
+        pending = []
         let lists = dirty
         dirty = []
         if mcpStale {
@@ -1406,11 +1586,12 @@ final class Model {
         return out
     }
 
-    /// The next message, with the attachments that are up. Nil while one is still going
-    /// up, or with nothing to send.
-    func send(_ text: String) -> JSON? {
+    /// The next message, with the attachments that are up and each mention the composer
+    /// put in that's still there as its link. Nil while one is still going up, or with
+    /// nothing to send.
+    func send(_ text: String, mentions: [Mention] = []) -> JSON? {
         guard let agent = selected, !uploading else { return nil }
-        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = withMentionLinks(text, mentions).trimmingCharacters(in: .whitespacesAndNewlines)
         let files = attachments.compactMap { $0.file?.file }
         if text.isEmpty && files.isEmpty { return nil }
         attachments = []
@@ -1439,6 +1620,88 @@ final class Model {
         let id = id("app.get")
         getting[id] = (f.file, true)
         return ["t": "file.get", "id": JSON(id), "file": JSON(f.file), "name": JSON(f.name)]
+    }
+
+    // MARK: Mentions
+
+    /// What a message's words need to show their links and mentions: the icons of the
+    /// sites it links to and the thumbnails of the pictures sent with it, once they're
+    /// fetched, and the agents it mentions.
+    func inline(_ m: Message) -> Inline {
+        var out = Inline()
+        for (url, link) in m.links {
+            if let icon = link.icon, let path = files["\(icon).thumb"] { out.icons[url] = path }
+        }
+        for f in m.blocks.compactMap(\.file) where f.isImage {
+            if let path = files["\(f.file).thumb"] { out.icons["loom-file:\(f.file)"] = path }
+        }
+        if m.blocks.contains(where: { $0.text.contains("loom:agent/") }) {
+            for a in agents where m.blocks.contains(where: { $0.text.contains("loom:agent/\(a.id))") }) {
+                out.agents[a.id] = a
+            }
+        }
+        return out
+    }
+
+    /// Asks for the files in the shown agent's folder and the shared one that match
+    /// `query`, for the composer's @ picker, unless it has them or is asking already.
+    func findFiles(_ query: String) -> JSON? {
+        guard let agent = selected else { return nil }
+        if foundFiles.agent == agent && foundFiles.query == query { return nil }
+        if let a = filesAsking, a.agent == agent, a.query == query { return nil }
+        let id = id("app.agent_files")
+        filesAsking = (id, agent, query)
+        return ["t": "cmd", "id": JSON(id), "name": "agent.files", "args": ["agent": JSON(agent), "query": JSON(query)]]
+    }
+
+    /// The @ picker's choices for `query`: the person's other agents whose names have it,
+    /// those starting with it first, at most five, then at most eight of the files found
+    /// for it.
+    func picks(_ query: String) -> [Pick] {
+        let q = query.lowercased()
+        // An empty query matches every agent, which `contains` wouldn't say.
+        let matching = agents.filter { $0.id != selected && (q.isEmpty || $0.name.lowercased().contains(q)) }
+        let starting = matching.filter { $0.name.lowercased().hasPrefix(q) }
+        let rest = matching.filter { !$0.name.lowercased().hasPrefix(q) }
+        var out: [Pick] = (starting + rest).prefix(5).map { a in
+            let line = a.instructions.split(separator: "\n").lazy.map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
+            let about = String(line.drop { $0 == "#" || $0 == " " }.prefix(48))
+            return .agent(a, about: about)
+        }
+        if foundFiles.agent == selected && foundFiles.query == query {
+            out += foundFiles.files.prefix(8).map { .file($0) }
+        }
+        return out
+    }
+
+    /// The composer's text with what the @ picker chose in place of the @ at `at` and
+    /// what follows it, and a space after, with the mention it put in.
+    func pick(_ pick: Pick, at: Int, in text: String) -> (text: String, mention: Mention)? {
+        guard let agent = selected, at <= text.count else { return nil }
+        let mention: Mention
+        switch pick {
+        case .agent(let a, _): mention = agentMention(id: a.id, name: a.name)
+        case .file(let f): mention = fileMention(agent: agent, path: f.path, name: f.name)
+        }
+        return (String(text.prefix(at)) + mention.words + " ", mention)
+    }
+
+    /// Opens a file a message mentions, from its `loom:file/AGENT/PATH` link: the
+    /// instance keeps it as the person's first, then it's fetched and shown.
+    func openFileMention(_ link: String) -> JSON? {
+        guard case .file(let agent, let path) = LinkTo(link) else { return nil }
+        return ["t": "cmd", "id": JSON(id("app.agent_file")), "name": "agent.file", "args": ["agent": JSON(agent), "path": JSON(path)]]
+    }
+
+    /// Opens a file sent with a message where its name links to it: a picture big, to
+    /// page through, and anything else once it's fetched.
+    func openAttached(_ sha: String) -> JSON? {
+        guard let f = shown.flatMap(\.blocks).compactMap(\.file).first(where: { $0.file == sha }) else { return nil }
+        if f.isImage {
+            view([f])
+            return nil
+        }
+        return open(f)
     }
 
     /// Shows a stack of pictures big, at its first.

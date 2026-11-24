@@ -61,6 +61,7 @@ struct ChatView: View {
                     }
                     Color.clear.frame(height: 1).id("end")
                 }
+                .environment(\.openURL, OpenURLAction { url in MainActor.assumeIsolated { follow(url) } })
                 .padding(.horizontal, Tokens.PhoneSpace.gutter)
                 .padding(.top, Tokens.Space.l)
                 .padding(.bottom, Tokens.Space.s)
@@ -147,6 +148,24 @@ struct ChatView: View {
         }
     }
 
+    /// A link tapped in a message: a file it mentions or one sent with it opens here, and
+    /// a page in the browser.
+    private func follow(_ url: URL) -> OpenURLAction.Result {
+        let model = session.model
+        switch LinkTo(url.absoluteString) {
+        case .file:
+            session.send(model.openFileMention(url.absoluteString))
+            return .handled
+        case .attached(let sha):
+            session.send(model.openAttached(sha))
+            return .handled
+        case .agent:
+            return .handled
+        case .page, .other:
+            return .systemAction
+        }
+    }
+
     /// What, when it changes, scrolls the chat along.
     private struct Follow: Equatable {
         var messages: [Message]
@@ -183,8 +202,9 @@ private struct SelectableText: UIViewRepresentable {
 // MARK: - Messages
 
 /// What the person wrote: a bubble on the right in the agent's colour, a breath of it or
-/// more with Vibrant bubbles, with its files above it. What another agent sent is plain
-/// grey.
+/// more with Vibrant bubbles, with its files above it. What another agent sent sits on
+/// the same side, its bubble a breath of the sender's colour, with the sender's thread
+/// and name in its colour over it.
 struct PersonMessage: View {
     @Environment(Session.self) private var session
     @AppStorage(Prefs.vibrant) private var vibrant = true
@@ -192,6 +212,7 @@ struct PersonMessage: View {
     var agent: Agent?
 
     var body: some View {
+        let model = session.model
         let files = fileParts(message)
         // A stack's pictures only listed by name are left out of the words: the stack
         // shows them, and the viewer their names.
@@ -200,9 +221,21 @@ struct PersonMessage: View {
             return run.compactMap { message.blocks[$0].file }
         }
         let text = unmarkStacked(message.blocks.filter { $0.kind == "text" }.map(\.text).joined(separator: "\n"), stacked)
+        // Each file reads as a link where it was attached, which opens it.
+        let words = linkFiles(text, message.blocks.compactMap(\.file))
+        let sender = message.fromAgent.flatMap { model.agent($0) }
         VStack(alignment: .trailing, spacing: Tokens.Space.xs + 2) {
             if let from = message.from {
-                Text("From \(from)").font(Fonts.caption).foregroundStyle(P.ink3)
+                HStack(spacing: Tokens.Space.xs) {
+                    if let sender {
+                        Image(uiImage: MentionGlyph.thread(sender.outline))
+                            .renderingMode(.template)
+                            .accessibilityHidden(true)
+                    }
+                    Text(from)
+                }
+                .font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption))
+                .foregroundStyle(sender.map { P.mention($0.color) } ?? P.ink3)
             }
             ForEach(Array(files.enumerated()), id: \.offset) { _, part in
                 switch part {
@@ -215,11 +248,11 @@ struct PersonMessage: View {
                 }
             }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(titledLinks(text, message.links), keepBreaks: true, font: Fonts.body, icons: linkIcons(message, session.model.files))
+                MarkdownView(titledLinks(words, message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, Tokens.Space.l)
                     .padding(.vertical, Tokens.Space.s + 3)
-                    .background(message.from == nil ? P.personBubble(agent?.color ?? "", vibrant: vibrant) : P.bubble, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
+                    .background(bubble(sender), in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
                     .opacity(message.queued ? 0.6 : 1)
             }
             if message.queued {
@@ -228,6 +261,13 @@ struct PersonMessage: View {
         }
         .frame(maxWidth: .infinity, alignment: .trailing)
         .padding(.leading, 48)
+    }
+
+    /// The person's own bubble in the agent's colour; another agent's, a breath of the
+    /// sender's, or grey for one that's gone.
+    private func bubble(_ sender: Agent?) -> Color {
+        if message.from == nil { return P.personBubble(agent?.color ?? "", vibrant: vibrant) }
+        return sender.map { P.agentBubble($0.color) } ?? P.bubble
     }
 }
 
@@ -268,7 +308,7 @@ struct Reply: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var icons: [String: String] { linkIcons(message, session.model.files) }
+    private var links: Inline { session.model.inline(message) }
 
     /// The block whose bubble the reply's sources hang from: its last words.
     private var sourcesAt: Int? { message.sources.isEmpty ? nil : sourcesAt(parts(message, tools: session.model.tools)) }
@@ -291,11 +331,11 @@ struct Reply: View {
                 if onTheWay {
                     // What it said on its way to the answer: smaller and quieter, never a
                     // bubble, so it doesn't read as a message.
-                    MarkdownView(b.text, font: Fonts.small, ink: P.ink2, live: live)
+                    MarkdownView(b.text, font: Fonts.small, ink: P.ink2, live: live, links: links)
                 } else if replies == Prefs.bubbles {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
-                    let bubble = MarkdownView(titledLinks(b.text, message.links), live: live, icons: icons)
+                    let bubble = MarkdownView(titledLinks(b.text, message.links), live: live, links: links)
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
                         .background(P.bubble, in: UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubbleJoined, bottomLeadingRadius: Tokens.Radius.bubble, bottomTrailingRadius: Tokens.Radius.bubble, topTrailingRadius: Tokens.Radius.bubble, style: .continuous))
@@ -310,7 +350,7 @@ struct Reply: View {
                         bubble
                     }
                 } else {
-                    MarkdownView(titledLinks(b.text, message.links), live: live, icons: icons)
+                    MarkdownView(titledLinks(b.text, message.links), live: live, links: links)
                     if i == sourcesAt { SourcesTab(message: message) }
                 }
             }
@@ -696,13 +736,6 @@ private struct WholePicture: View {
 }
 
 // MARK: - Links and sources
-
-/// Where the site icons of a message's links are, by address, once they're fetched.
-func linkIcons(_ m: Message, _ files: [String: String]) -> [String: String] {
-    m.links.reduce(into: [:]) { out, e in
-        if let icon = e.value.icon, let path = files["\(icon).thumb"] { out[e.key] = path }
-    }
-}
 
 /// A site's icon, once it's fetched, with loom's small radius; a globe until then.
 struct SiteIcon: View {

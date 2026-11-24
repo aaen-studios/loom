@@ -9,6 +9,8 @@ struct Composer: View {
     var agentName: String
     var sent: () -> Void
     @State private var text = ""
+    /// The mentions the @ picker put in the text, which go as links when it's sent.
+    @State private var mentions: [Mention] = []
     @State private var photos: [PhotosPickerItem] = []
     @State private var choosingPhotos = false
     @State private var choosingFiles = false
@@ -16,8 +18,33 @@ struct Composer: View {
 
     var body: some View {
         let model = session.model
+        let mention = mentionQuery(text)
+        let picks = mention.map { model.picks($0.query) } ?? []
+        VStack(spacing: Tokens.Space.xs) {
+            if let mention, !picks.isEmpty {
+                MentionPicker(picks: picks) { pick in
+                    guard let made = model.pick(pick, at: mention.at, in: text) else { return }
+                    text = made.text
+                    mentions.append(made.mention)
+                }
+                .padding(.horizontal, Tokens.Space.m)
+                .padding(.top, Tokens.Space.xs)
+            }
+            box
+        }
+        .background(P.bg)
+        .onChange(of: text) { _, now in
+            // Follows the @ being typed, and asks for the files that match it.
+            if let q = mentionQuery(now) { session.send(model.findFiles(q.query)) }
+            if now.isEmpty { mentions = [] }
+        }
+    }
+
+    /// The composer itself: attachments over the field, with + before it and Send after.
+    private var box: some View {
+        let model = session.model
         let busy = model.busy
-        VStack(alignment: .leading, spacing: Tokens.Space.s) {
+        return VStack(alignment: .leading, spacing: Tokens.Space.s) {
             if !model.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: Tokens.Space.s) {
@@ -59,9 +86,10 @@ struct Composer: View {
                 Button {
                     if busy && text.isEmpty && model.attachments.isEmpty {
                         session.send(model.cancel())
-                    } else if let frame = model.send(text) {
+                    } else if let frame = model.send(text, mentions: mentions) {
                         session.send(frame)
                         text = ""
+                        mentions = []
                         sent()
                     }
                 } label: {
@@ -85,7 +113,6 @@ struct Composer: View {
         .padding(.horizontal, Tokens.Space.m)
         .padding(.top, Tokens.Space.xs)
         .padding(.bottom, Tokens.Space.s)
-        .background(P.bg)
         .photosPicker(isPresented: $choosingPhotos, selection: $photos, maxSelectionCount: 10, matching: .images)
         .onChange(of: photos) { _, items in
             photos = []
@@ -199,5 +226,63 @@ private struct AttachmentChip: View {
             guard attachment.path.hasSuffix(".jpg"), Pictures.kept(attachment.path, side: Self.side) == nil else { return }
             picture = await Pictures.load(attachment.path, side: Self.side)
         }
+    }
+}
+
+/// The @ picker, over the composer (PLAN.md, "Mentions"): the person's other agents that
+/// match, each with its thread and its name in its colour and the first line of its
+/// instructions, then the files in this agent's folder and the shared one, each with its
+/// icon, its name and its folder. A tap takes one.
+private struct MentionPicker: View {
+    var picks: [Pick]
+    var take: (Pick) -> Void
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Array(picks.enumerated()), id: \.offset) { _, pick in
+                Button {
+                    take(pick)
+                } label: {
+                    row(pick)
+                        .padding(.horizontal, Tokens.Space.m)
+                        .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, Tokens.Space.xs)
+        .background(P.raised, in: shape)
+        .overlay(shape.strokeBorder(P.lineStrong, lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 12, y: 4)
+    }
+
+    @ViewBuilder
+    private func row(_ pick: Pick) -> some View {
+        HStack(spacing: Tokens.Space.s) {
+            switch pick {
+            case .agent(let a, let about):
+                Image(uiImage: MentionGlyph.thread(a.outline))
+                    .renderingMode(.template)
+                    .foregroundStyle(P.mention(a.color))
+                    .frame(width: 18)
+                Text(a.name)
+                    .font(Fonts.ui(Tokens.PhoneSize.small, .medium, relativeTo: .subheadline))
+                    .foregroundStyle(P.mention(a.color))
+                    .layoutPriority(1)
+                Text(about).font(Fonts.small).foregroundStyle(P.ink3)
+            case .file(let f):
+                Image(systemName: isPicture(f.name) ? "photo" : "doc")
+                    .font(.system(size: 13))
+                    .foregroundStyle(P.ink3)
+                    .frame(width: 18)
+                Text(f.name).font(Fonts.small).foregroundStyle(P.ink).layoutPriority(1)
+                Text(f.place).font(Fonts.small).foregroundStyle(P.ink3)
+            }
+        }
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .accessibilityElement(children: .combine)
     }
 }
