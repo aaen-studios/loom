@@ -349,9 +349,11 @@ enum Sample {
             // Mentions of an agent and of a file in the agent's folder.
             ["id": "msg_44", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187180000,
              "blocks": [["kind": "text", "text": "Once they're watered, note it in [watering.md](loom:file/a_4/notes/watering.md) and tell [@Scribe](loom:agent/a_2)."]]],
-            // A fan of more than five pictures, whose corner says how many more.
+            // A reply naming an agent and a file, shown as the person's mentions are, and a
+            // fan of more than five pictures, whose corner says how many more.
             ["id": "msg_45", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_45", "at": 1795187240000,
-             "blocks": [["kind": "text", "text": "Noted, and Scribe knows. Here's the balcony this week, a picture a day."],
+             "mentions": [["path": "notes/watering.md", "name": "watering.md"]],
+             "blocks": [["kind": "text", "text": "Noted in `notes/watering.md`, and @Scribe knows. Here's the balcony this week, a picture a day."],
                         ["kind": "file", "file": "sample-noon", "name": "monday.png", "mime": "image/png", "size": 380_000],
                         ["kind": "file", "file": "sample-rain", "name": "tuesday.png", "mime": "image/png", "size": 372_000],
                         ["kind": "file", "file": "sample-dusk", "name": "wednesday.png", "mime": "image/png", "size": 398_000],
