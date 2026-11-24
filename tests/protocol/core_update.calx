@@ -28,7 +28,7 @@ import core.conn.{Conn, ToApp}
 import core.updates.{Hub}
 import server.update
 import shared.client.{json_of}
-import tests.kit.{Instance, calx, check}
+import tests.kit.{Instance, calx, check, patched, write_program}
 
 struct Serving {
     server: Server
@@ -46,36 +46,6 @@ fn sh(program: String, args: List<String>) -> String ! Error {
     let out = try Command.new(program.copy()).args(args.copy()).output()
     if not out.status.success() { fail "{program} {args.join(" ")}: {out.error_text()}" }
     return out.text()
-}
-
-// `data` with every `from` in it written over with `to`, which is as long.
-fn patched(data: List<u8>, from: String, to: String) -> List<u8> ! Error {
-    let a = from.to_bytes()
-    let b = to.to_bytes()
-    if a.len() != b.len() or a.len() == 0 { fail "a version is patched with one as long" }
-    var out = data.copy()
-    var found: usize = 0
-    var k: usize = 0
-    while k + a.len() <= out.len() {
-        var same = true
-        for j in 0usize..a.len() {
-            if out[k + j] != a[j] {
-                same = false
-                break
-            }
-        }
-        if same {
-            for j in 0usize..b.len() {
-                out[k + j] = b[j]
-            }
-            found += 1
-            k += a.len()
-        } else {
-            k += 1
-        }
-    }
-    if found == 0 { fail "the program doesn't hold {from}" }
-    return out
 }
 
 // Writes a release of `exe` as `version` into `dir`, signed with `key`, served at `base`.
@@ -178,8 +148,7 @@ fn run(root: String, started: mut List<Child>) ! Error {
     if lead != "0" and lead != "1" and lead != "2" and lead != "3" and lead != "4" { fail "this test makes a newer version from one that starts with 0 to 4, not {v1}" }
     let v2 = "5{v1[1..]}"
     let p2 = "{root}/loom-5{if env.os() == "windows" { ".exe" } else { "" }}"
-    try fs.write(p2.copy(), try patched(try fs.read(exe.copy()), v1.copy(), v2.copy()))
-    if env.os() != "windows" { try fs.set_mode(p2.copy(), 0o755) }
+    try write_program(p2.copy(), try patched(try fs.read(exe.copy()), v1.copy(), v2.copy()))
 
     var http = try Server.listen(0)
     http.log = false

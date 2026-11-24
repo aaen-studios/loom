@@ -15,13 +15,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx (Linux)
-        if: runner.os == 'Linux'
+      - name: Install Calx (Linux and macOS)
+        if: runner.os != 'Windows'
         run: |
           curl -fsSL https://calxlang.com/install.sh | sh
           echo "$HOME/.calx/bin" >> "$GITHUB_PATH"

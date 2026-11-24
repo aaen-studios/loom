@@ -691,7 +691,7 @@ loom/
   scripts/    Calx: build, release, install
 ```
 
-**How the Calx code fits together.** The repository's root is the source root of every Calx module, so a file's module is its path: `server/main.calx` is `module server.main`, and imports `shared.protocol` from `shared/protocol.calx`. That needs no packages, so loom has no `calx.toml` until something outside the repository is a dependency (Calx has packages now, CLX-370). Scripts in `scripts/` stand alone. `calx scripts/check.calx` checks the formatting of every `.calx` file, checks each one builds, runs every file's tests and checks the design tokens are up to date. CI runs it on Linux and Windows on every push and pull request. On macOS, CI builds and tests the Mac app, and check.calx joins once its three tests that fail there pass ([LOO-265](https://acta.aaenz.no/aaen-studios/loom#LOO-265)).
+**How the Calx code fits together.** The repository's root is the source root of every Calx module, so a file's module is its path: `server/main.calx` is `module server.main`, and imports `shared.protocol` from `shared/protocol.calx`. That needs no packages, so loom has no `calx.toml` until something outside the repository is a dependency (Calx has packages now, CLX-370). Scripts in `scripts/` stand alone. `calx scripts/check.calx` checks the formatting of every `.calx` file, checks each one builds, runs every file's tests and checks the design tokens are up to date. CI runs it on Linux, Windows and macOS on every push and pull request.
 
 ## What Calx needs
 
