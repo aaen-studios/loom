@@ -15,6 +15,12 @@
 </style>
 <p>Trying to break out…</p>
 <div class="bg"></div>
+<!--
+  Links in closed shadow roots declared in the page's own HTML, which no script can
+  see into. The test puts the TCP port in for TCP_PORT before it serves the page.
+-->
+<div id="shadow-blank-host"><template shadowrootmode="closed"><a href="http://127.0.0.1:TCP_PORT/shadow-blank" target="_blank"><slot></slot></a></template><span id="shadow-blank">x</span></div>
+<div id="shadow-here-host"><template shadowrootmode="closed"><a href="http://127.0.0.1:TCP_PORT/shadow-here"><slot></slot></a></template><span id="shadow-here">x</span></div>
 <script>
 const q = new URLSearchParams(location.search);
 const canary = "http://127.0.0.1:" + q.get("c");
@@ -134,6 +140,16 @@ async function attempt(name, f) {
     await wait(500);
     return [true, "the app decides"];
   });
+  // A click on what a closed shadow root's link holds. WebKit connects to the link's
+  // host as it's clicked, and the prelude's link guard can't see the link.
+  const shadowLink = async (id) => {
+    if (document.getElementById(id + "-host").querySelector("template")) return [false, "no shadow root, so this tried nothing"];
+    document.getElementById(id).click();
+    await wait(1000);
+    return [true, "the listener decides"];
+  };
+  await attempt("a link to a new window in a closed shadow root", () => shadowLink("shadow-blank"));
+  await attempt("a link in a closed shadow root", () => shadowLink("shadow-here"));
   await attempt("a form", async () => {
     const f = document.createElement("form");
     f.method = "post";
