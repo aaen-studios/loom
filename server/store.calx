@@ -437,6 +437,13 @@ impl Store {
             if text(r[1].copy()) == "path" { saved = true }
         }
         if not saved { try s.db.execute_script(String("ALTER TABLE status_tokens ADD COLUMN path TEXT NOT NULL DEFAULT ''; ALTER TABLE status_tokens ADD COLUMN agent TEXT NOT NULL DEFAULT '';")) }
+        // Devices from before the instance kept when each was last connected get the
+        // column, 0 for not known.
+        var seen = false
+        for r in try s.db.query(String("PRAGMA table_info(devices)")) {
+            if text(r[1].copy()) == "seen" { seen = true }
+        }
+        if not seen { try s.db.execute_script(String("ALTER TABLE devices ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;")) }
         // A person's routine runs by when they started, which the status reads for the last 24 hours.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_routine ON runs (user, at) WHERE routine != '';"))
         // Client ids from before they kept when they came count from now, so they're
@@ -717,6 +724,21 @@ impl Store {
 
     pub fn rename_device(self, id: String, name: String) ! Error {
         _ = try self.db.execute(String("UPDATE devices SET name = ? WHERE id = ?"), [t(name), t(id)])
+    }
+
+    // Keeps `time` as when device `id` was last connected.
+    pub fn touch_device(self, id: String, time: i64) ! Error {
+        _ = try self.db.execute(String("UPDATE devices SET seen = ? WHERE id = ?"), [Value.Int(time), t(id)])
+    }
+
+    // `user`'s devices still signed in, oldest first: each `id`, `name`, `kind`, `at`
+    // (when it signed in) and `seen` (when it was last connected, or 0 for never).
+    pub fn devices(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, name, kind, at, seen FROM devices WHERE user = ? AND revoked = 0 ORDER BY at"), [t(user)]) {
+            out.push(Obj.new().s("id", text(r[0].copy())).s("name", text(r[1].copy())).s("kind", text(r[2].copy())).i("at", int(r[3].copy())).i("seen", int(r[4].copy())).done())
+        }
+        return out
     }
 
     pub fn update_device_tz(self, id: String, tz: String) ! Error {

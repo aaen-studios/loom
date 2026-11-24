@@ -5,9 +5,9 @@ module core.login
 // then looks at on each turn, so the socket and the app's messages are never
 // held up while a password is hashed.
 import std.http.{Header, Request, post}
-import std.net.{Waker}
+import std.net.{Ip, Waker, interfaces}
 import std.json.{Json, parse}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 
 const TIMEOUT_MS: u32 = 30000
 const LIMIT: usize = 1048576
@@ -16,6 +16,7 @@ pub enum Kind {
     Login
     Setup
     Link      // with the one-time code from another device's QR code
+    LinkWait  // asking again, while the person says yes on another device
     Join      // with an invite's code, as a new account
     Reset     // with a reset link's code, and a new password
     Logout
@@ -36,8 +37,61 @@ pub enum Outcome {
     /// The instance said no, or couldn't be reached: the code, the words and, for
     /// rate_limited, the seconds to wait.
     Refused(String, String, i64)
+    /// A device that used a code waits for the person's yes on another: what it asks
+    /// again with (empty when it asked again already), the check both show, and when
+    /// it stops waiting.
+    Waiting(String, String, i64)
     /// Logged out.
     Done
+}
+
+// The host in `server`, an http:// or https:// address.
+fn host_of(server: String) -> String {
+    var h = server.copy()
+    if let (_, rest) = h.split_once("://") { h = rest }
+    if let (before, _) = h.split_once("/") { h = before }
+    if h.starts_with("[") { return h }
+    if let (before, _) = h.split_once(":") { h = before }
+    return h.to_lower_root()
+}
+
+/// Whether `server` is only on a tailnet: a `….ts.net` name, or an address of
+/// Tailscale's, 100.64.0.0/10.
+pub fn on_tailscale(server: String) -> bool {
+    let h = host_of(server)
+    if h.ends_with(".ts.net") { return true }
+    let parts = h.split(".")
+    if parts.len() != 4 { return false }
+    let a = u8.parse(parts[0].copy()) ?? 0u8
+    let b = u8.parse(parts[1].copy()) ?? 0u8
+    return a == 100u8 and b >= 64u8 and b <= 127u8 and u8.parse(parts[2].copy()) != none and u8.parse(parts[3].copy()) != none
+}
+
+// Whether this device has an address on a tailnet.
+fn on_a_tailnet() -> bool {
+    let found = match interfaces() {
+        ok(list) => list,
+        err(_) => return true,
+    }
+    for i in found {
+        if not i.up or i.loopback { continue }
+        for ip in i.addresses {
+            if let Ip.V4(b) = ip {
+                if b[0] == 100u8 and b[1] >= 64u8 and b[1] <= 127u8 { return true }
+            }
+        }
+    }
+    return false
+}
+
+/// Why `server` couldn't be reached, in words: for one on a tailnet, whether this
+/// device is on one, since that's the usual reason.
+pub fn unreachable(server: String, e: String, tailnet: bool) -> (String, String) {
+    if on_tailscale(server.copy()) {
+        if not tailnet { return (String("tailscale"), String("This server is only reachable on Tailscale, and this device isn't on it. Turn Tailscale on here, then try again.")) }
+        return (String("unreachable"), "Can't reach {host_of(server)} on Tailscale. Check that the server is on and on your tailnet. ({e})")
+    }
+    return (String("unreachable"), e.copy())
 }
 
 /// `server` with no spaces or / at the end.
@@ -56,6 +110,7 @@ impl Pending {
         let path = match kind {
             Kind.Setup => String("/api/setup"),
             Kind.Link => String("/api/link"),
+            Kind.LinkWait => String("/api/link/wait"),
             Kind.Join => "/api/join/{str_at(payload.copy(), "code") ?? String()}",
             Kind.Reset => "/api/reset/{str_at(payload.copy(), "code") ?? String()}",
             _ => String("/api/login"),
@@ -86,7 +141,10 @@ impl Pending {
     pub fn outcome(mut self) -> Outcome {
         let r = match self.req.wait() {
             ok(r) => r,
-            err(e) => return Outcome.Refused(String("unreachable"), "{e}", 0),
+            err(e) => {
+                let (code, words) = unreachable(self.server.copy(), "{e}", on_a_tailnet())
+                return Outcome.Refused(code, words, 0)
+            },
         }
         if r.status == 204 or self.kind == Kind.Logout {
             return Outcome.Done
@@ -94,6 +152,9 @@ impl Pending {
         let answer = match parse(String.from_utf8(r.body.copy()) ?? String()) {
             ok(j) => j,
             err(_) => Json.Null,
+        }
+        if r.status == 202 and (self.kind == Kind.Link or self.kind == Kind.LinkWait) {
+            return Outcome.Waiting(str_at(answer.copy(), "waiting") ?? String(), str_at(answer.copy(), "check") ?? String(), int_at(answer, "expires") ?? 0)
         }
         if r.status == 200 {
             let token = str_at(answer.copy(), "token") else {
@@ -124,6 +185,21 @@ pub fn request_body(kind: Kind, m: Json) -> Json {
         o = o.j("device", device)
     }
     return o.done()
+}
+
+@test
+fn says_when_a_server_is_only_on_tailscale() {
+    assert(on_tailscale(String("https://vps.tail1a2b.ts.net:8443")))
+    assert(on_tailscale(String("http://100.101.7.3:8080/")))
+    assert(not on_tailscale(String("https://loom.example.com")))
+    assert(not on_tailscale(String("http://100.200.1.1")))
+    assert(not on_tailscale(String("http://192.168.1.4:8080")))
+    let (code, words) = unreachable(String("https://vps.tail1a2b.ts.net"), String("timed out"), false)
+    assert(code == "tailscale" and words.starts_with("This server is only reachable on Tailscale, and this device isn't on it."))
+    let (on, why) = unreachable(String("https://vps.tail1a2b.ts.net"), String("timed out"), true)
+    assert(on == "unreachable" and why.contains("vps.tail1a2b.ts.net on Tailscale"))
+    let (plain, said) = unreachable(String("https://loom.example.com"), String("timed out"), false)
+    assert(plain == "unreachable" and said == "timed out")
 }
 
 @test

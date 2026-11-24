@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 92] = [
+const COMMANDS: [Command; 93] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -106,6 +106,7 @@ const COMMANDS: [Command; 92] = [
     Command { name: "invite.list", args: "", does: "Invites still open." },
     Command { name: "invite.create", args: "role?, uses?, days?", does: "Makes an invite link for someone to join." },
     Command { name: "invite.delete", args: "invite", does: "Takes back an invite." },
+    Command { name: "device.list", args: "", does: "The person's devices signed in, with when each was last connected." },
     Command { name: "device.rename", args: "device, name", does: "Renames one of the person's devices." },
     Command { name: "device.revoke", args: "device", does: "Signs one of the person's devices out, for good." },
     Command { name: "link.create", args: "user? (someone else here, for the owner or an admin)", does: "A one-time code for a phone to join the account, or with user, a link code to sign in to theirs." },
@@ -122,7 +123,7 @@ const COMMANDS: [Command; 92] = [
 
 // Whether an agent may run `name`, and how.
 pub fn access(name: String) -> Access {
-    if name == "account.delete" or name == "password.reset" or name == "password.set" { return Access.Never(String("That's your person's own to do, in the app.")) }
+    if name == "account.delete" or name == "password.reset" or name == "password.set" or name == "link.answer" { return Access.Never(String("That's your person's own to do, in the app.")) }
     if name == "secret.put" { return Access.Never(String("A secret's value is never an agent's: ask your person to keep it in the app, or use browser_ask_secret.")) }
     if name == "secret.sites" { return Access.Never(String("Where a secret may be filled in is your person's to say: browser_fill_secret asks them the first time on a site.")) }
     if name == "mcp.sign_in" or name == "mcp.signed_in" { return Access.Never(String("Only your person signs in to an MCP server, in the app: loom shows them Sign in when a server needs it. Don't sign in yourself, in a browser or any other way.")) }
@@ -133,7 +134,7 @@ pub fn access(name: String) -> Access {
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry", "device.list"]
     if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
     for r in runs {
         if name == r { return Access.Runs }

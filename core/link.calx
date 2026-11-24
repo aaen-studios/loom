@@ -1,36 +1,59 @@
 module core.link
 
-// What goes in the QR code that adds a device (PLAN.md, "Connecting
-// devices"): a connected device's core makes it from the instance's answer to
-// `link.create`, and the new device's core reads it back. It's a URL,
+// What adds a device (PLAN.md, "Connecting devices"; protocol.md, "Adding a device"):
+// a signed-in device's core makes it from the instance's answer to `link.create`, and
+// the new device's core reads it back. The QR code, and the link that opens the app at
+// the step where the person says yes, is a URL,
 //
-//     loom://link?a=<the instance's address>&c=<one-time code>&i=<instance id>&k=<its key>
+//     loom://add?a=<the instance's address>&c=<one-time code>&i=<instance id>&k=<its key>
 //
-// so a phone's own camera can hand it to the app too.
+// so a phone's own camera can hand it to the app too. The code to paste or type is
+// shorter, the code and where the instance is: `K7QF-M2XD@loom.example.com`, with
+// https:// left out. Older apps' QR codes, `loom://link?…`, read the same.
 import std.url.{form_decode, form_encode}
 
-const PREFIX: str = "loom://link?"
+const PREFIX: str = "loom://add?"
+const OLD_PREFIX: str = "loom://link?"
 
 /// What a QR code holds.
 pub struct Link {
-    pub server: String      // the instance's http:// or https:// address
+    pub server: String      // the instance's http://, https:// or noise:// address
     pub code: String        // the one-time code, for POST /api/link
     pub instance: String    // the instance's id
     pub key: String         // its public key, base64
 }
 
-/// The text of the QR code for `l`.
+/// The text of the QR code for `l`, which is the link that opens the app too.
 pub fn qr(l: Link) -> String {
     let pairs: List<(String, String)> = [(String("a"), l.server.copy()), (String("c"), l.code.copy()), (String("i"), l.instance.copy()), (String("k"), l.key.copy())]
     return "{PREFIX}{form_encode(pairs)}"
 }
 
-/// What the QR code's `text` holds, or none when it isn't loom's.
+/// The code to paste or type for `l`: its code, `@`, and where the instance is, with
+/// https:// left out.
+pub fn paste(l: Link) -> String {
+    let at = if l.server.starts_with("https://") { l.server["https://".len()..].copy() } else { l.server.copy() }
+    return "{l.code}@{at}"
+}
+
+fn reachable(server: String) -> bool {
+    return server.starts_with("https://") or server.starts_with("http://") or server.starts_with("noise://")
+}
+
+/// What `text` holds: a QR code's text, the link, or the code to paste. None when it
+/// isn't loom's.
 pub fn read(text: String) -> Link? {
     let t = text.trim().copy()
-    if not t.starts_with(PREFIX) { return none }
+    var rest = String()
+    if t.starts_with(PREFIX) {
+        rest = t[PREFIX.len()..].copy()
+    } else if t.starts_with(OLD_PREFIX) {
+        rest = t[OLD_PREFIX.len()..].copy()
+    } else {
+        return pasted(t)
+    }
     var l = Link { server: String(), code: String(), instance: String(), key: String() }
-    for (k, v) in form_decode(t[PREFIX.len()..].copy()) {
+    for (k, v) in form_decode(rest) {
         if k == "a" {
             l.server = v.copy()
         } else if k == "c" {
@@ -41,22 +64,56 @@ pub fn read(text: String) -> Link? {
             l.key = v.copy()
         }
     }
-    if l.code.len() == 0 or not (l.server.starts_with("https://") or l.server.starts_with("http://") or l.server.starts_with("noise://")) { return none }
+    if l.code.len() == 0 or not reachable(l.server.copy()) { return none }
     return some(l)
+}
+
+// The code to paste: the code, `@` and the address, spaces around `@` let be.
+fn pasted(t: String) -> Link? {
+    let (code, at) = t.split_once("@") else return none
+    let c = code.trim().copy()
+    var server = at.trim().copy()
+    while server.ends_with("/") {
+        server = server[0..server.len() - 1].copy()
+    }
+    if c.len() == 0 or server.len() == 0 or c.contains(" ") or server.contains(" ") { return none }
+    if not server.contains("://") { server = "https://{server}" }
+    if not reachable(server.copy()) { return none }
+    return some(Link { server: server, code: c, instance: String(), key: String() })
 }
 
 @test
 fn reads_what_it_writes() {
-    let l = Link { server: String("https://loom.example.com"), code: String("0f3a"), instance: String("i_8sk2"), key: String("ab+/c=") }
-    let text = qr(l)
-    assert(text.starts_with("loom://link?a=https%3A%2F%2Floom.example.com&c=0f3a"))
-    let back = read(text) else panic("it didn't read back")
-    assert(back.server == "https://loom.example.com" and back.code == "0f3a" and back.instance == "i_8sk2" and back.key == "ab+/c=")
+    let l = Link { server: String("https://loom.example.com"), code: String("K7QF-M2XD"), instance: String("i_8sk2"), key: String("ab+/c=") }
+    let link = qr(l)
+    assert(link.starts_with("loom://add?a=https%3A%2F%2Floom.example.com&c=K7QF-M2XD"))
+    let back = read(link) else panic("it didn't read back")
+    assert(back.server == "https://loom.example.com" and back.code == "K7QF-M2XD" and back.instance == "i_8sk2" and back.key == "ab+/c=")
+}
+
+@test
+fn reads_the_code_to_paste() {
+    let l = Link { server: String("https://loom.example.com:8443"), code: String("K7QF-M2XD"), instance: String("i_1"), key: String("k") }
+    assert(paste(l) == "K7QF-M2XD@loom.example.com:8443")
+    let back = read(String(" K7QF-M2XD @ loom.example.com:8443/ ")) else panic("it didn't read back")
+    assert(back.server == "https://loom.example.com:8443" and back.code == "K7QF-M2XD")
+    let local = Link { server: String("http://127.0.0.1:8080"), code: String("AB"), instance: String(), key: String() }
+    assert(paste(local.copy()) == "AB@http://127.0.0.1:8080")
+    assert((read(paste(local)) ?? panic("no")).server == "http://127.0.0.1:8080")
+}
+
+@test
+fn reads_an_older_apps_qr_code() {
+    let back = read(String("loom://link?a=https%3A%2F%2Fx.example&c=0f3a")) else panic("it didn't read")
+    assert(back.server == "https://x.example" and back.code == "0f3a")
 }
 
 @test
 fn refuses_what_isnt_loom() {
     assert(read(String("https://example.com")) == none)
-    assert(read(String("loom://link?a=ftp%3A%2F%2Fx&c=1")) == none)
-    assert(read(String("loom://link?a=https%3A%2F%2Fx")) == none)
+    assert(read(String("loom://add?a=ftp%3A%2F%2Fx&c=1")) == none)
+    assert(read(String("loom://add?a=https%3A%2F%2Fx")) == none)
+    assert(read(String("elliot@example.com is me")) == none)
+    assert(read(String("@example.com")) == none)
+    assert(read(String("K7QF@ftp://x")) == none)
 }

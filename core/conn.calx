@@ -139,6 +139,17 @@ impl State {
     }
 }
 
+// How often a device waiting to be added asks again (protocol.md, "Adding a device").
+const ADDING_AGAIN_NS: u64 = 2000000000
+
+// A device that used a code, waiting for the person's yes on another of theirs.
+struct Adding {
+    server: String     // the instance it's being added to
+    secret: String     // what it asks again with
+    id: String?        // the app's id for the link, given back with each answer
+    at: Instant        // when it last asked
+}
+
 /// The connection, run by the core's thread.
 pub struct Conn {
     server: String?       // the instance's http:// or https:// address, once it's known
@@ -161,6 +172,7 @@ pub struct Conn {
     retry_at: Instant?
     wait: u64             // how long after retry_at to try again
     pending: Pending?     // a login, setup or logout on its way
+    adding: Adding?       // this device used a code, and waits for the person's yes on another
     inbox: Receiver<String>
     to_app: Sender<ToApp>
     random: Random
@@ -238,6 +250,7 @@ impl Conn {
             retry_at: none,
             wait: 0,
             pending: none,
+            adding: none,
             inbox: inbox,
             to_app: to_app,
             random: Random.system(),
@@ -1041,6 +1054,11 @@ impl Conn {
             self.join(m)
             return true
         }
+        // The person stopped waiting for a yes on their other device.
+        if t == "link.cancel" {
+            self.adding = none
+            return true
+        }
         if t == "invite.join" or t == "reset.use" {
             self.join_invite(m, t == "reset.use")
             return true
@@ -1239,7 +1257,7 @@ impl Conn {
             if key.len() == 32 and addresses.len() > 0 { server = relay.write(relay.Place { key: key, addresses: addresses }) }
         }
         let l = link.Link { server: server, code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v.copy(), "key") ?? String() }
-        self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l)).done())).done()))
+        self.tell(merge(f, Obj.new().j("value", merge(v, Obj.new().s("qr", link.qr(l.copy())).s("text", link.paste(l)).done())).done()))
     }
 
     /// The instance made an invite: the app gets the result with `link`, the address to
@@ -1311,9 +1329,11 @@ impl Conn {
             return
         }
         let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
-            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. Show the QR code on a device that's signed in, under Add a device.")).done()).done())
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. On a device that's signed in, open Settings, then Add a device.")).done()).done())
             return
         }
+        // A new code goes in place of one waiting for a yes.
+        self.adding = none
         if self.pending != none {
             self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("busy")).s("message", String("A login is already on its way.")).done()).done())
             return
@@ -1327,6 +1347,25 @@ impl Conn {
         self.pend(Pending.start(Kind.Link, server, base, id, given))
     }
 
+    /// Asks again whether the person said yes, every two seconds while this device
+    /// waits to be added and nothing else is on its way.
+    fn poll_adding(mut self) {
+        if self.pending != none { return }
+        var server = String()
+        var secret = String()
+        var id: String? = none
+        if let a = self.adding {
+            if unsafe { Instant.now() }.nanos_since(a.at) < ADDING_AGAIN_NS { return }
+            server = a.server.copy()
+            secret = a.secret.copy()
+            id = a.id.copy()
+        } else {
+            return
+        }
+        let base = self.reach(server.copy())
+        self.pend(Pending.start(Kind.LinkWait, server, base, id, Obj.new().s("waiting", secret).done()))
+    }
+
     /// Takes a login, setup or logout that has ended.
     fn poll(mut self) {
         let ready = match self.pending {
@@ -1338,8 +1377,20 @@ impl Conn {
         var p = taken
         let server = p.server.copy()
         let id = p.id.copy()
+        let kind = p.kind
+        // An answer to asking again after the person stopped waiting is let go.
+        if kind == Kind.LinkWait and self.adding == none { return }
         match p.outcome() {
+            Outcome.Waiting(secret, check, expires) => {
+                if kind == Kind.Link {
+                    self.adding = some(Adding { server: server, secret: secret, id: id.copy(), at: unsafe { Instant.now() } })
+                    self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).b("waiting", true).s("check", check).i("expires", expires).done())
+                } else if let a = mut self.adding {
+                    a.at = unsafe { Instant.now() }
+                }
+            },
             Outcome.Token(user, device, token) => {
+                self.adding = none
                 let user_id = user.copy()
                 var reply = Obj.new().s("t", String("core.login")).maybe("id", id).b("ok", true).s("user", user).s("device", device)
                 match keyring.set(self.keyring.copy(), relay.keyring_name(server.copy()), token.copy()) {
@@ -1375,6 +1426,13 @@ impl Conn {
                 self.connect()
             },
             Outcome.Refused(code, words, wait) => {
+                // Asking again over a network that came and went keeps waiting; the
+                // instance's own no, or a code that's gone, ends it.
+                if kind == Kind.LinkWait and code == "unreachable" {
+                    if let a = mut self.adding { a.at = unsafe { Instant.now() } }
+                    return
+                }
+                self.adding = none
                 var e = Obj.new().s("code", code).s("message", words)
                 if wait > 0 { e = e.i("retry_after", wait) }
                 self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", e.done()).done())
@@ -1848,6 +1906,12 @@ impl Conn {
                 if left < ms { ms = left }
             }
         }
+        if let a = self.adding {
+            let gone = unsafe { Instant.now() }.nanos_since(a.at)
+            var left: i64 = 0
+            if gone < ADDING_AGAIN_NS { left = i64.wrap((ADDING_AGAIN_NS - gone) / 1000000 + 1) }
+            if left < ms { ms = left }
+        }
         if let h = self.hub {
             if let left = h.due_ms() {
                 if left < ms { ms = left }
@@ -1900,6 +1964,7 @@ impl Task for Conn {
         loop {
             c.read(0)
             c.poll()
+            c.poll_adding()
             c.poll_transfers()
             c.poll_update()
             c.poll_device()

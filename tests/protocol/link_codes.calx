@@ -253,12 +253,27 @@ fn run(a: Instance, b: Fresh, desk: mut Core, folder: String) ! Error {
     let (_, signin, _) = try cli(b.data.copy(), [String("link")])
     let (in_status, signed_in) = try post_json(b.base.copy(), "/api/link", Obj.new().s("code", str_at(signin.copy(), "link_code") ?? String()).j("device", device("Phone")).done())
     try check(bool_at(signin, "owner") == some(false) and in_status == 200 and str_at(signed_in.copy(), "user") == some(owner_id.copy()) and bool_at(signed_in.copy(), "owner") == none, "on a server set up already, loom link signs in to the owner's account")
-    var owner_app = try Session.connect(b.base.copy(), str_at(signed_in, "token") ?? String(), 0)
+    let owner_token = str_at(signed_in, "token") ?? String()
+    var owner_app = try Session.connect(b.base.copy(), owner_token.copy(), 0)
+    var none_yet: bool? = none
+    for f in owner_app.frames {
+        if str_at(f.copy(), "t") == some(String("welcome")) { none_yet = bool_at(f, "has_password") }
+    }
+    try check(none_yet == some(false), "welcome says an owner a link code made has no password, so the app offers to set one")
     let weak = try owner_app.cmd("q_3", "password.set", Obj.new().s("password", String("short")).done())
     let set = try owner_app.cmd("q_4", "password.set", Obj.new().s("password", String("a fine password")).done())
+    let updated = try owner_app.event("account.updated")
     let twice = try owner_app.cmd("q_5", "password.set", Obj.new().s("password", String("another one here")).done())
     let (pw_status, _) = try post_json(b.base.copy(), "/api/login", Obj.new().s("username", String("elliot")).s("password", String("a fine password")).j("device", device("Laptop")).done())
     try check(error_code(weak) == "weak_password" and bool_at(set, "ok") == some(true) and error_code(twice) == "has_password" and pw_status == 200, "password.set gives it its first password, once, and then it logs in")
+    try check(bool_at(updated, "has_password") == some(true), "and account.updated tells each device it has one")
+    let reopened = try Session.connect(b.base.copy(), owner_token, 0)
+    var has_now: bool? = none
+    for f in reopened.frames {
+        if str_at(f.copy(), "t") == some(String("welcome")) { has_now = bool_at(f, "has_password") }
+    }
+    reopened.close()
+    try check(has_now == some(true), "as welcome does from then on")
 
     let added = try loom(b.data.copy(), [String("user"), String("add"), String("ann")]).input_text(String("their password\n")).output()
     if not added.status.success() { fail "user add failed: {added.error_text()}" }
