@@ -84,7 +84,7 @@ struct ChatView: View {
             .overlay {
                 // Only once its messages have come, not while it opens.
                 if messages.isEmpty && approvals.isEmpty && model.selected == agentId && model.messagesCame {
-                    Text("Nothing here yet. Say hello.")
+                    Text("Nothing here yet")
                         .font(Fonts.body).foregroundStyle(P.ink3)
                 }
             }

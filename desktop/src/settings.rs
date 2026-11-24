@@ -81,7 +81,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
         }
-        Screen::Programs => "brains models agent programs claude codex gemini opencode acp registry install tokens limits",
+        Screen::Programs => "brains models agent programs claude code codex gemini opencode acp registry install tokens limits share",
         Screen::Defaults => {
             "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer"
         }
@@ -277,39 +277,17 @@ impl Loom {
             self.group(
                 None,
                 vec![
-                    self.row(
-                        None,
-                        "Theme",
-                        Some("System follows Windows".into()),
-                        Some(theme),
-                    )
-                    .into_any_element(),
-                    self.row(
-                        None,
-                        "Chat text",
-                        Some("How big messages are".into()),
-                        Some(text),
-                    )
-                    .into_any_element(),
+                    self.row(None, "Theme", None, Some(theme))
+                        .into_any_element(),
+                    self.row(None, "Chat text", None, Some(text))
+                        .into_any_element(),
                 ],
             ),
             self.group(
                 Some("Fonts"),
                 vec![
-                    self.row(
-                        None,
-                        "Words",
-                        Some("loom's own, or Windows'".into()),
-                        Some(font),
-                    )
-                    .into_any_element(),
-                    self.row(
-                        None,
-                        "Code",
-                        Some("In replies and tool calls".into()),
-                        Some(mono),
-                    )
-                    .into_any_element(),
+                    self.row(None, "Words", None, Some(font)).into_any_element(),
+                    self.row(None, "Code", None, Some(mono)).into_any_element(),
                 ],
             ),
         ];
@@ -330,9 +308,9 @@ impl Loom {
             cx,
         );
         let tools_sub = match self.prefs.tools {
-            Tools::Hidden => "None, failed ones too",
-            Tools::Folded => "One line for each run, to open",
-            Tools::All => "Each on its own line",
+            Tools::Hidden => "Failed ones too",
+            Tools::Folded => "",
+            Tools::All => "",
         };
         let thoughts = self.pref_choice(
             "thoughts",
@@ -384,7 +362,7 @@ impl Loom {
         let composer = vec![self.pref_switch(
             "pref-ctrl-enter",
             "Send with Ctrl+Enter",
-            "Enter makes a new line",
+            "",
             self.prefs.ctrl_enter,
             |p, v| p.ctrl_enter = v,
             cx,
@@ -392,7 +370,7 @@ impl Loom {
         let sidebar = vec![self.pref_switch(
             "pref-search",
             "Search in the sidebar",
-            "Ctrl+F searches either way",
+            "",
             self.prefs.search,
             |p, v| p.search = v,
             cx,
@@ -423,22 +401,22 @@ impl Loom {
             self.row(
                 None,
                 "Start at login",
-                Some("In the tray, out of the way".into()),
+                None,
                 Some(login_toggle.into_any_element()),
             )
             .into_any_element(),
             self.pref_switch(
                 "pref-tray",
                 "Keep running when closed",
-                "In the tray, so routines and replies go on",
+                "",
                 self.prefs.tray,
                 |p, v| p.tray = v,
                 cx,
             ),
             self.pref_switch(
                 "pref-awake",
-                "Keep the computer awake",
-                "While an agent is working",
+                "Keep the computer awake while an agent works",
+                "",
                 self.prefs.awake,
                 |p, v| p.awake = v,
                 cx,
@@ -447,7 +425,7 @@ impl Loom {
         let mut notify = vec![self.pref_switch(
             "pref-notify",
             "Notifications",
-            "When an agent says something while you're away",
+            "",
             self.prefs.notify,
             |p, v| p.notify = v,
             cx,
@@ -456,7 +434,7 @@ impl Loom {
             notify.push(self.pref_switch(
                 "pref-preview",
                 "Show what was said",
-                "Otherwise only who it's from",
+                "",
                 self.prefs.preview,
                 |p, v| p.preview = v,
                 cx,
@@ -480,28 +458,25 @@ impl Loom {
                 );
                 cx.notify();
             }));
-        let status = self
-            .update_said
-            .clone()
-            .or_else(|| {
-                self.hub()
-                    .update
-                    .as_ref()
-                    .map(|(v, _)| format!("loom {v} is ready to restart into"))
-            })
-            .unwrap_or_else(|| "loom looks for a new version every few hours".into());
+        // A line only when there's news: what Check now found, or one ready to go in.
+        let status = self.update_said.clone().or_else(|| {
+            self.hub()
+                .update
+                .as_ref()
+                .map(|(v, _)| format!("loom {v} is ready to restart into"))
+        });
         let mut updates = vec![self
             .row(
                 None,
                 format!("loom {}", crate::VERSION),
-                Some(status),
+                status,
                 Some(check.into_any_element()),
             )
             .into_any_element()];
         updates.push(self.pref_switch(
             "pref-auto-update",
             "Update on its own",
-            "While loom is in the tray and no agent is working",
+            "While no agent is working",
             self.prefs.auto_update,
             |p, v| p.auto_update = v,
             cx,
@@ -549,6 +524,7 @@ mod tests {
         assert!(screens("dark") == vec![Screen::Appearance]);
         assert!(screens("Tool calls") == vec![Screen::ChatPrefs]);
         assert!(screens("brains") == vec![Screen::Programs]);
+        assert!(screens("claude code") == vec![Screen::Programs]);
         assert!(screens("steer") == vec![Screen::Defaults]);
         assert!(screens("webhook deny") == vec![Screen::Rules]);
         assert!(screens("zzz").is_empty());

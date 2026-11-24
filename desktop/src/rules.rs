@@ -89,13 +89,24 @@ impl Loom {
         for &(value, label) in choices {
             items.push(
                 self.segment(format!("{id}-{value}"), label, now == value)
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         set(this, value);
+                        this.rules_examples(window, cx);
                         cx.notify();
                     })),
             );
         }
         self.segments(items).into_any_element()
+    }
+
+    /// The rule's and the what-if's fields show an example of what goes in them, for
+    /// what each is on now.
+    fn rules_examples(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (rule, check) = (example(self.rule_on), example(self.check_on));
+        self.rule_in
+            .update(cx, |s, cx| s.set_placeholder(rule, window, cx));
+        self.check_in
+            .update(cx, |s, cx| s.set_placeholder(check, window, cx));
     }
 
     /// Every agent, or one of them, as small buttons that wrap.
@@ -149,7 +160,7 @@ impl Loom {
             groups.push(self.empty(
                 Ico::ShieldCheck,
                 "No rules yet",
-                "Allow, ask about or deny what agents touch: a command, a path, a site, a tool, or who started the turn",
+                None,
                 Some(new_rule(self, cx, true).into_any_element()),
             ));
         } else {
@@ -206,7 +217,7 @@ impl Loom {
                 .px(px(space::XS))
                 .text_size(px(size::CAPTION))
                 .text_color(p.ink_3)
-                .child("Deny wins, then ask, then allow. With no rule, the agent's permission mode decides, and a rule that can't be read denies.")
+                .child("Deny wins over ask, and ask over allow")
                 .into_any_element(),
         );
         let action = (!rules.is_empty()).then(|| new_rule(self, cx, false).into_any_element());
@@ -258,10 +269,7 @@ impl Loom {
             }));
         let (said, why) = match &self.model.what_if {
             Some(w) => (w.verdict().to_string(), Some(w.why.clone())),
-            None => (
-                "What would it get?".to_string(),
-                Some("Try an action, and see which rule or mode decides".to_string()),
-            ),
+            None => ("What would it get?".to_string(), None),
         };
         let label = ON
             .iter()
@@ -282,7 +290,6 @@ impl Loom {
 
     /// The form for a new rule.
     fn rule_form(&mut self, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
         let then = self.rules_choice(
             "rule-then",
             self.rule_then,
@@ -325,44 +332,17 @@ impl Loom {
             self.row(None, "Then", None, Some(then)).into_any_element(),
             self.row(None, "On", None, Some(on)).into_any_element(),
         ];
+        // Its example is the field's placeholder (`rules_examples`).
         if let Some((_, label)) = ON.iter().find(|(k, _)| *k == self.rule_on) {
-            // The field and its example in one row, the example under the field itself,
-            // past the label's width.
-            rows.push(
-                div()
-                    .flex()
-                    .flex_col()
-                    .child(self.field_row(label, Input::new(&self.rule_in)))
-                    .child(
-                        div()
-                            .pl(px(space::L + layout::FIELD_LABEL + space::M))
-                            .pr(px(space::L))
-                            .pb(px(space::S + 2.0))
-                            .mt(px(-space::XS))
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(format!("Such as {}", example(self.rule_on))),
-                    )
-                    .into_any_element(),
-            );
+            rows.push(self.field_row(label, Input::new(&self.rule_in)));
         }
         rows.push(
-            self.row(
-                None,
-                "What it does",
-                Some("Whether it only looks, or changes something".into()),
-                Some(effect),
-            )
-            .into_any_element(),
+            self.row(None, "What it does", None, Some(effect))
+                .into_any_element(),
         );
         rows.push(
-            self.row(
-                None,
-                "Started by",
-                Some("Who started the turn".into()),
-                Some(by),
-            )
-            .into_any_element(),
+            self.row(None, "Started by", None, Some(by))
+                .into_any_element(),
         );
         rows.push(self.text_row("For", None, agent));
         rows.push(self.field_row("Note", Input::new(&self.rule_note_in)));

@@ -21,7 +21,6 @@ struct SignInView: View {
                     ThreadView(mood: .writing, color: P.thread("periwinkle"), large: true)
                         .frame(width: 120, height: 16)
                     Text("loom").font(Fonts.hero).foregroundStyle(P.ink)
-                    Text("Sign in to your instance.").font(Fonts.body).foregroundStyle(P.ink3)
                 }
                 .padding(.top, 56)
 
@@ -138,18 +137,9 @@ struct ScanSheet: View {
                 if DataScannerViewController.isSupported && DataScannerViewController.isAvailable {
                     Scanner(found: found)
                         .ignoresSafeArea()
-                        .overlay(alignment: .bottom) {
-                            Text("Point the camera at the code on your computer.")
-                                .font(Fonts.small)
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, Tokens.Space.l)
-                                .padding(.vertical, Tokens.Space.s)
-                                .background(.black.opacity(0.55), in: Capsule())
-                                .padding(.bottom, Tokens.Space.xxl)
-                        }
                 } else {
                     VStack(alignment: .leading, spacing: Tokens.Space.l) {
-                        Text("This device has no camera to scan with. Paste the code's text instead: it starts with loom://link.")
+                        Text("No camera here: paste the code's text")
                             .font(Fonts.body)
                             .foregroundStyle(P.ink2)
                         TextField("loom://link?…", text: $pasted, axis: .vertical)

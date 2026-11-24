@@ -715,6 +715,10 @@ final class Model {
     /// Answers given here, by call, until the instance takes them.
     private var answering: [String: Approval.Answer] = [:]
     var devices: [Device] = []
+    /// Each agent program's name as people know it ("Claude Agent" for `claude-acp`), by
+    /// its name, as `acp.list` gives it.
+    var programTitles: [String: String] = [:]
+    private var programsWanted = false
     /// The selected agent's messages, oldest first, with the queued ones last.
     var messages: [Message] = []
     /// Whether the selected chat's messages have come since it was selected.
@@ -855,6 +859,12 @@ final class Model {
         return .idle
     }
 
+    /// An agent program's name as people know it: the instance's title for it, or its
+    /// own with a capital, as `claude` is Claude.
+    func programTitle(_ program: String) -> String {
+        programTitles[program] ?? program.prefix(1).uppercased() + program.dropFirst()
+    }
+
     /// What the agents list says under an agent's name.
     func preview(_ agent: Agent) -> String {
         // A question from any of its runs, a routine's quiet one too.
@@ -862,7 +872,7 @@ final class Model {
             return "Wants to \(a.title.prefix(1).lowercased())\(a.title.dropFirst())"
         }
         guard let r = runs.first(where: { $0.agent == agent.id && !$0.quiet }) else {
-            return mood(agent.id) == .failed ? "Couldn't finish" : agent.program
+            return mood(agent.id) == .failed ? "Couldn't finish" : programTitle(agent.program)
         }
         if let t = tools.last(where: { $0.run == r.id && $0.status == nil }) {
             return t.title
@@ -921,6 +931,7 @@ final class Model {
         case "synced":
             synced = true
             dirty.formUnion(CoreList.allCases)
+            programsWanted = true
             // The core tells what catching up brought here, not an event at a time
             // (core/README.md): the text of replies that ended meanwhile goes, and an
             // agent whose last run failed shows it.
@@ -1057,6 +1068,15 @@ final class Model {
 
     private func result(_ f: JSON) {
         if mcpResult(f) { return }
+        if f["id"].text == "app.acp" {
+            // Quietly: without the titles, programs show by their own names.
+            var titles: [String: String] = [:]
+            for p in f["value"]["programs"].array {
+                if let title = p["title"].string { titles[p["name"].text] = title }
+            }
+            programTitles = titles
+            return
+        }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
         switch f["id"].text {
         case let id where id.hasPrefix("app.secret_fill:"):
@@ -1232,6 +1252,10 @@ final class Model {
         if mcpStale {
             mcpStale = false
             out.append(["t": "cmd", "id": JSON(id("app.mcp_list")), "name": "mcp.list"])
+        }
+        if programsWanted {
+            programsWanted = false
+            out.append(["t": "cmd", "id": "app.acp", "name": "acp.list"])
         }
         for l in CoreList.allCases where lists.contains(l) {
             if l == .messages {

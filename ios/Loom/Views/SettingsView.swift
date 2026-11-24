@@ -82,10 +82,8 @@ struct SettingsView: View {
                             .font(Fonts.body)
                         }
                     }
-                } header: {
-                    Text("Notifications")
                 } footer: {
-                    Text("While loom is open, it tells you when a reply is done or an agent asks something. Notifications on the lock screen come once your instance sends push.")
+                    Text("The lock screen needs push on your instance")
                         .font(Fonts.caption)
                 }
                 Section {
@@ -114,7 +112,7 @@ struct SettingsView: View {
                     dismiss()
                 }
             } message: {
-                Text("This phone forgets its sign-in. Your agents and chats stay on the instance.")
+                Text("Your agents and chats stay on the instance")
             }
         }
         .task { notifications = await Notifications.status() }

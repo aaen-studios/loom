@@ -136,7 +136,7 @@ const faq = {
 						</div>
 					</div>
 					<div class="group">
-						<div class="group-label">More brains, from the ACP Registry</div>
+						<div class="group-label">ACP Registry</div>
 						<div class="cards">
 							{
 								cards.map((b, i) => (
@@ -207,7 +207,7 @@ const faq = {
 							<div class="row result">
 								<span class="row-text">
 									<span class="row-title" data-verdict>What would it get?</span>
-									<span class="row-sub" data-why>Try an action, and see which rule or mode decides</span>
+									<span class="row-sub" data-why></span>
 								</span>
 								<span class="btn-small primary" data-check>Check</span>
 							</div>
@@ -447,6 +447,10 @@ const faq = {
 		font-size: var(--size-caption);
 		line-height: 1.35;
 		color: var(--ink-3);
+	}
+	/* What if says why only once it has an answer, as the app does. */
+	.row-sub:empty {
+		display: none;
 	}
 	/* A brain's icon from the ACP Registry, drawn in the ink as the app draws it, in a square of its own. */
 	.tile {

@@ -27,7 +27,7 @@ struct AgentsView: View {
                 if model.agents.isEmpty && model.synced {
                     VStack(spacing: Tokens.Space.s) {
                         Text("No agents yet").font(Fonts.ui(Tokens.PhoneSize.body, .medium)).foregroundStyle(P.ink)
-                        Text("Make one in loom on your computer, and it shows here.")
+                        Text("Make one in loom on your computer")
                             .font(Fonts.small).foregroundStyle(P.ink3).multilineTextAlignment(.center)
                     }
                     .padding(Tokens.Space.xxl)
