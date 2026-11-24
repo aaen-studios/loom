@@ -423,27 +423,27 @@ struct CodeBlock: View {
 
 /// The small pictures of mentions (PLAN.md, "Mentions").
 enum MentionGlyph {
-    /// An agent's thread in its shape, 14 by 12 points, still, as a template image to be
+    /// An agent's thread in its shape, 14 by 14 points, still, as a template image to be
     /// drawn in the agent's colour, as the desktop's `mention_thread`: fitted into the box
-    /// by its widest side, so a round shape stands as tall as a file's icon, or for the
-    /// plain thread a small wave. Kept per shape.
+    /// by its widest side, so a round shape stands a little taller than the capitals, or
+    /// for the plain thread a small wave. Kept per shape.
     static func thread(_ outline: [CGPoint]?) -> UIImage {
         let key = (outline.map { $0.map { "\($0.x),\($0.y)" }.joined(separator: " ") } ?? "") as NSString
         if let kept = kept.object(forKey: key) { return kept }
-        let made = UIGraphicsImageRenderer(size: CGSize(width: 14, height: 12)).image { _ in
+        let made = UIGraphicsImageRenderer(size: CGSize(width: 14, height: 14)).image { _ in
             let path = UIBezierPath()
             if let pts = outline, pts.count > 1 {
                 let sx = pts.map { abs($0.x) }.max() ?? 0
                 let sy = pts.map { abs($0.y) }.max() ?? 0
-                let scale = min(6 / max(sx, 0.1), 5.2 / max(sy, 0.1))
+                let scale = min(6 / max(sx, 0.1), 6 / max(sy, 0.1))
                 for (i, p) in pts.enumerated() {
-                    let q = CGPoint(x: 7 + p.x * scale, y: 6 + p.y * scale)
+                    let q = CGPoint(x: 7 + p.x * scale, y: 7 + p.y * scale)
                     if i == 0 { path.move(to: q) } else { path.addLine(to: q) }
                 }
             } else {
-                path.move(to: CGPoint(x: 1, y: 7))
-                path.addCurve(to: CGPoint(x: 7, y: 6), controlPoint1: CGPoint(x: 3.5, y: 3), controlPoint2: CGPoint(x: 5.5, y: 3))
-                path.addCurve(to: CGPoint(x: 13, y: 5), controlPoint1: CGPoint(x: 8.5, y: 9), controlPoint2: CGPoint(x: 10.5, y: 9.5))
+                path.move(to: CGPoint(x: 1, y: 8))
+                path.addCurve(to: CGPoint(x: 7, y: 7), controlPoint1: CGPoint(x: 3.5, y: 4), controlPoint2: CGPoint(x: 5.5, y: 4))
+                path.addCurve(to: CGPoint(x: 13, y: 6), controlPoint1: CGPoint(x: 8.5, y: 10), controlPoint2: CGPoint(x: 10.5, y: 10.5))
             }
             path.lineWidth = 1.6
             path.lineCapStyle = .round

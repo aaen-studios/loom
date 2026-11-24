@@ -6805,8 +6805,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .and_then(|a| mention_thread(a, &hex))
                         .map(|path| {
                             img(std::path::PathBuf::from(path))
-                                .w(px(16.0))
-                                .h(px(14.0))
+                                .size(px(16.0))
                                 .into_any_element()
                         })
                         .unwrap_or_else(|| div().into_any_element());
@@ -14829,7 +14828,7 @@ fn person(
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(hex.as_deref().and_then(hex_color).unwrap_or(p.ink_3))
                 .when_some(glyph, |d, path| {
-                    d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(12.0)))
+                    d.child(img(std::path::PathBuf::from(path)).size(px(14.0)))
                 })
                 .child(from.clone()),
         );
@@ -17182,7 +17181,7 @@ fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -
         let hex = mention_color(p, &a.color);
         return row
             .when_some(mention_thread(a, &hex), |d, path| {
-                d.child(img(std::path::PathBuf::from(path)).w(px(14.0)).h(px(12.0)))
+                d.child(img(std::path::PathBuf::from(path)).size(px(14.0)))
             })
             .child(
                 div()
@@ -17238,9 +17237,9 @@ fn mention_svg(name: &str, svg: impl FnOnce() -> String) -> Option<String> {
     Some(path)
 }
 
-/// An agent's thread in its shape and `color`, 14 by 12, still, as an SVG file: a long
-/// shape fills the width, and a round one, a heart or a star, stands as tall as a
-/// file's icon.
+/// An agent's thread in its shape and `color`, 14 by 14, still, as an SVG file: a long
+/// shape fills the width, and a round one, a heart or a star, stands a little taller
+/// than the capitals beside it.
 fn mention_thread(a: &model::Agent, color: &str) -> Option<String> {
     use std::hash::{Hash, Hasher};
     let pts = model::outline_of(&a.shape, &a.drawing);
@@ -17256,22 +17255,22 @@ fn mention_thread(a: &model::Agent, color: &str) -> Option<String> {
                     sx = sx.max(x.abs());
                     sy = sy.max(y.abs());
                 }
-                let scale = (6.0 / sx.max(0.1)).min(5.2 / sy.max(0.1));
+                let scale = (6.0 / sx.max(0.1)).min(6.0 / sy.max(0.1));
                 let mut d = String::new();
                 for (i, (x, y)) in pts.iter().enumerate() {
                     let cmd = if i == 0 { 'M' } else { 'L' };
                     d.push_str(&format!(
                         "{cmd}{:.2} {:.2} ",
                         7.0 + x * scale,
-                        6.0 + y * scale
+                        7.0 + y * scale
                     ));
                 }
                 d
             }
-            None => "M1 7 C 3.5 3, 5.5 3, 7 6 S 10.5 9.5, 13 5".to_string(),
+            None => "M1 8 C 3.5 4, 5.5 4, 7 7 S 10.5 10.5, 13 6".to_string(),
         };
         format!(
-            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"24\" viewBox=\"0 0 14 12\">\
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"28\" height=\"28\" viewBox=\"0 0 14 14\">\
              <path d=\"{d}\" fill=\"none\" stroke=\"#{color}\" stroke-width=\"1.6\" \
              stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>"
         )
