@@ -2762,6 +2762,43 @@ pub fn person_joins(rows: &[Option<&Message>]) -> Vec<Joined> {
         .collect()
 }
 
+/// How the chat's rows moved from `old` to `new`, by their ids, so the list keeps the
+/// rows it has and the place being read: `drop` rows gone from the start, `front` new
+/// ones before the rows kept, then `kept` rows that stay, in order. Rows after those are
+/// replaced. None when none stay, as for another chat.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Shift {
+    pub drop: usize,
+    pub front: usize,
+    pub kept: usize,
+}
+
+pub fn shift<T: PartialEq>(old: &[T], new: &[T]) -> Option<Shift> {
+    let first = old.first()?;
+    let (drop, front) = match new.iter().position(|k| k == first) {
+        Some(front) => (0, front),
+        None => (old.iter().position(|k| Some(k) == new.first())?, 0),
+    };
+    let kept = old[drop..]
+        .iter()
+        .zip(&new[front..])
+        .take_while(|(a, b)| a == b)
+        .count();
+    Some(Shift { drop, front, kept })
+}
+
+impl Shift {
+    /// Where the row at `ix` of the old rows is in the new, with how far into it, for a
+    /// place in the list: a row that's gone leaves the place at the first row kept.
+    pub fn place(&self, ix: usize, into: f32) -> (usize, f32) {
+        if ix < self.drop {
+            (self.front, 0.0)
+        } else {
+            (ix - self.drop + self.front, into)
+        }
+    }
+}
+
 /// How long a pause between messages has a time line drawn across the chat.
 pub const LINE_GAP_MS: i64 = 30 * 60 * 1000;
 
@@ -9857,6 +9894,55 @@ mod tests {
         ]}}));
         assert_eq!(m.tasks.len(), 1);
         assert!(m.tasks_more);
+    }
+
+    #[test]
+    fn rows_that_move_keep_their_place() {
+        // Older messages came before those shown.
+        let s = shift(&["c", "d"], &["a", "b", "c", "d"]).unwrap();
+        assert_eq!(
+            s,
+            Shift {
+                drop: 0,
+                front: 2,
+                kept: 2
+            }
+        );
+        assert_eq!(s.place(1, 12.0), (3, 12.0), "the row read stays in view");
+        // A new message at the end, and the oldest shown let go.
+        let s = shift(&["a", "b", "c"], &["b", "c", "d"]).unwrap();
+        assert_eq!(
+            s,
+            Shift {
+                drop: 1,
+                front: 0,
+                kept: 2
+            }
+        );
+        assert_eq!(s.place(2, 5.0), (1, 5.0));
+        assert_eq!(s.place(0, 5.0), (0, 0.0), "a row gone: the first kept");
+        // Added at the end, as a reply comes.
+        assert_eq!(
+            shift(&["a", "b"], &["a", "b", "c"]),
+            Some(Shift {
+                drop: 0,
+                front: 0,
+                kept: 2
+            })
+        );
+        // The last replaced, as a message waiting to send is sent.
+        assert_eq!(
+            shift(&["a", "b", "q"], &["a", "b", "m"]),
+            Some(Shift {
+                drop: 0,
+                front: 0,
+                kept: 2
+            })
+        );
+        // Another chat, or none.
+        assert_eq!(shift(&["a", "b"], &["x", "y"]), None);
+        assert_eq!(shift::<&str>(&[], &["x"]), None);
+        assert_eq!(shift(&["a"], &[]), None);
     }
 
     #[test]

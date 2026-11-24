@@ -375,6 +375,20 @@ pub struct Loom {
     task_new: bool,
     // The mouse wheel's scrolling, played out smoothly.
     smooth: crate::smooth::Smooth,
+    /// The middle button's scrolling in the chat.
+    auto: crate::autoscroll::Auto,
+    /// Whether the scroll being dispatched is the app's own, played out by the smooth
+    /// wheel or the middle button, and not the person's.
+    own_scroll: bool,
+    /// Whether the primary button went down on the chat's list or its scrollbar and is
+    /// still down: the chat's rows wait to change in a way that moves them, as for older
+    /// messages coming, until it's up, so a scrollbar being dragged stays under the
+    /// pointer. Only there: a press on the title bar's drag area has its button-up taken
+    /// by the system's move.
+    pressed: bool,
+    rows_wait: bool,
+    /// Where the chat's list is, scrollbar and all, as last drawn; none while it isn't.
+    list_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     routine_notify: bool,
     routine_on: bool,
     routine_catch_up: bool,
@@ -1128,8 +1142,30 @@ ACTA_KEY=secret:ACTA_KEY",
         });
         // The core notifies only while no one is looking at the app.
         // The servers away aren't on screen, so they always may.
-        cx.observe_window_activation(window, |this: &mut Loom, window, _| {
+        // A key stops the middle button's scrolling, whatever has the focus, or nothing.
+        // Escape only stops it; another key does what it does as well.
+        let weak = cx.weak_entity();
+        cx.intercept_keystrokes(move |e, _, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.auto.at().is_none() {
+                    return;
+                }
+                this.auto.stop();
+                if e.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.observe_window_activation(window, |this: &mut Loom, window, cx| {
             this.send(serde_json::json!({"t": "app.active", "active": window.is_window_active()}));
+            // Away from the window, the buttons it knew were down may come up unseen.
+            if !window.is_window_active() {
+                this.auto.stop();
+                this.let_go(cx);
+                cx.notify();
+            }
         })
         .detach();
         let data = data_dir();
@@ -1290,6 +1326,11 @@ ACTA_KEY=secret:ACTA_KEY",
             task_agent: None,
             task_new: false,
             smooth: Default::default(),
+            auto: Default::default(),
+            own_scroll: false,
+            pressed: false,
+            rows_wait: false,
+            list_at: Rc::default(),
             routine_notify: true,
             routine_on: true,
             routine_catch_up: true,
@@ -2416,16 +2457,29 @@ ACTA_KEY=secret:ACTA_KEY",
         // list keeps them, so its cached drawing stays good. Compared from the end,
         // where a reply that's streaming differs at once.
         if rows.len() == self.rows.len() && rows.iter().rev().eq(self.rows.iter().rev()) {
+            self.rows_wait = false;
             return;
         }
         let old = self.rows.clone();
-        let same_start = rows.len() >= old.len()
-            && old.iter().zip(rows.iter()).all(|(a, b)| match (a, b) {
-                (Row::Message(a), Row::Message(b)) => a.id == b.id,
-                (Row::Approval(a), Row::Approval(b)) => a.call == b.call,
-                _ => false,
-            });
+        let key = |r: &Row| match r {
+            Row::Message(m) => (true, m.id.clone()),
+            Row::Approval(a) => (false, a.call.clone()),
+        };
+        let shift = model::shift(
+            &old.iter().map(key).collect::<Vec<_>>(),
+            &rows.iter().map(key).collect::<Vec<_>>(),
+        );
         let (old_len, new_len) = (old.len(), rows.len());
+        // Only rows added or changed at the end, as a reply streams in.
+        let at_end = shift.is_some_and(|s| s.drop == 0 && s.front == 0 && s.kept == old_len);
+        // Anything else moves the rows a scrollbar being dragged maps to: it waits until
+        // the button is up.
+        if self.pressed && !at_end {
+            self.rows_wait = true;
+            return;
+        }
+        self.rows_wait = false;
+        let old_flow = self.flow.clone();
         let messages: Vec<Option<&Message>> = rows
             .iter()
             .map(|r| match r {
@@ -2443,26 +2497,48 @@ ACTA_KEY=secret:ACTA_KEY",
                 .or_insert_with(|| day_number(ms))
         };
         self.flow = Rc::new(model::flow(&messages, day));
-        // Every row that changed is measured again, not only the last ones: a card
-        // higher up that shrinks once it's answered, or grows with an error, would
-        // otherwise keep its old height and throw the scrolling off.
-        let first = old
-            .iter()
-            .zip(rows.iter())
-            .position(|(a, b)| a != b)
-            .unwrap_or(old_len);
-        self.rows = Rc::new(rows);
-        self.scroller.update(cx, |s, cx| {
-            if same_start && new_len >= old_len {
-                if new_len > old_len {
-                    s.append(new_len - old_len, cx);
-                }
-                if first < old_len {
-                    s.remeasure_items(first..old_len, cx);
-                }
-            } else {
+        let Some(shift) = shift else {
+            self.rows = Rc::new(rows);
+            self.scroller.update(cx, |s, cx| {
                 s.reset(new_len, cx);
                 s.scroll_to_end(cx);
+            });
+            return;
+        };
+        let model::Shift { drop, front, kept } = shift;
+        // Every kept row that changed is measured again, not only the last ones: a card
+        // higher up that shrinks once it's answered, or grows with an error, or the row
+        // that older messages now come before, with a time line over it or not, would
+        // otherwise keep its old height and throw the scrolling off.
+        let first = (0..kept).find(|&i| {
+            old[drop + i] != rows[front + i] || old_flow.get(drop + i) != self.flow.get(front + i)
+        });
+        self.rows = Rc::new(rows);
+        self.scroller.update(cx, |s, cx| {
+            let top = s.logical_scroll_top();
+            let following = s.is_following_tail();
+            if drop > 0 || front > 0 {
+                s.splice(0..drop, front, cx);
+            }
+            // The rows after those kept: added, as a reply comes, or replaced.
+            let (from, gone) = (front + kept, old_len - drop - kept);
+            if gone > 0 || new_len > from {
+                s.splice(from..from + gone, new_len - from, cx);
+            }
+            if let Some(i) = first {
+                s.remeasure_items(front + i..front + kept, cx);
+            }
+            // The place being read stays where it was, with older messages above it,
+            // whether the list had a place of its own yet or not.
+            if (drop > 0 || front > 0) && !following && top.item_ix < old_len {
+                let (item_ix, into) = shift.place(top.item_ix, top.offset_in_item.as_f32());
+                s.scroll_to_offset(
+                    ListOffset {
+                        item_ix,
+                        offset_in_item: px(into),
+                    },
+                    cx,
+                );
             }
         });
     }
@@ -7592,6 +7668,14 @@ ACTA_KEY=secret:ACTA_KEY",
     /// after the chat widens (a panel closing, the window growing). A new id is a new
     /// text, which measures itself afresh.
     fn chat_room(&self, window: &Window) -> i32 {
+        self.chat_width(window)
+            .clamp(0.0, self.prefs.column())
+            .round() as i32
+    }
+
+    /// How wide the chat is, its column and what's either side: the window less the
+    /// sidebar and the panel beside the chat.
+    fn chat_width(&self, window: &Window) -> f32 {
         let w = window.viewport_size().width.as_f32();
         let side = match self.side {
             Some(side) => side_width(
@@ -7606,9 +7690,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             None => 0.0,
         };
-        (w - self.bar_width(w) - side)
-            .clamp(0.0, self.prefs.column())
-            .round() as i32
+        (w - self.bar_width(w) - side).max(0.0)
     }
 
     fn chat(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Div {
@@ -7729,6 +7811,7 @@ ACTA_KEY=secret:ACTA_KEY",
             newest,
             new_line,
             column,
+            width: self.chat_width(window),
             p,
             pad,
         };
@@ -8097,7 +8180,33 @@ ACTA_KEY=secret:ACTA_KEY",
                         self.hero(agent.as_ref(), composer.take(), cx)
                             .into_any_element()
                     } else {
-                        div().flex_1().min_h_0().child(list).into_any_element()
+                        let list_at = self.list_at.clone();
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            // Where the list is, with its scrollbar: the primary button
+                            // down there holds off rows that would move under it
+                            // (`pointer_catcher`, `rebuild_rows`).
+                            .child(
+                                canvas(
+                                    move |bounds, _, _| list_at.set(Some(bounds)),
+                                    |_, _, _, _| {},
+                                )
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full(),
+                            )
+                            // The middle button scrolls the chat, as in a browser.
+                            .on_mouse_down(
+                                MouseButton::Middle,
+                                cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                                    this.auto_press(e.position, window, cx);
+                                }),
+                            )
+                            .child(list)
+                            .into_any_element()
                     })
                     .when_some(mini, |d, m| d.child(m)),
             )
@@ -12737,6 +12846,11 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     let line = window.line_height().as_f32();
                     let _ = this.update(cx, |this, cx| {
+                        // The person's wheel stops the middle button's scrolling.
+                        if !this.own_scroll && this.auto.at().is_some() {
+                            this.auto.stop();
+                            cx.notify();
+                        }
                         if !this.smooth.catch(e, line) {
                             return;
                         }
@@ -12758,6 +12872,110 @@ ACTA_KEY=secret:ACTA_KEY",
         )
         .absolute()
         .size_0()
+    }
+
+    /// Follows the buttons for the chat's scrolling: the primary button pressed on the
+    /// chat's list and when it comes up, which holds off rows that would move under a
+    /// scrollbar being dragged (`rebuild_rows`), and, while the middle button's scrolling
+    /// is on, the pointer it goes by and the click or button that stops it. A key stops it too (`Loom::new`).
+    /// It draws nothing.
+    fn pointer_catcher(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let this = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let down = this.clone();
+                window.on_mouse_event(move |e: &MouseDownEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = down.update(cx, |this, cx| {
+                        // A click while it's on stops it, and does nothing else.
+                        if this.auto.at().is_some() {
+                            this.auto.stop();
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            cx.notify();
+                            return;
+                        }
+                        // Only on the chat's list and its scrollbar: a press on the title
+                        // bar's drag area has its button-up taken by the system's move,
+                        // which would leave it down.
+                        if e.button == MouseButton::Left
+                            && this.list_at.get().is_some_and(|b| b.contains(&e.position))
+                        {
+                            this.pressed = true;
+                        }
+                    });
+                });
+                let up = this.clone();
+                window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = up.update(cx, |this, cx| match e.button {
+                        MouseButton::Left => this.let_go(cx),
+                        MouseButton::Middle if this.auto.held() => {
+                            this.auto.release();
+                            cx.notify();
+                        }
+                        _ => {}
+                    });
+                });
+                let moved = this.clone();
+                window.on_mouse_event(move |e: &MouseMoveEvent, phase, window, cx| {
+                    if phase != DispatchPhase::Capture {
+                        return;
+                    }
+                    let _ = moved.update(cx, |this, cx| {
+                        // A button let go of outside the window comes as a move without it.
+                        if this.pressed && e.pressed_button != Some(MouseButton::Left) {
+                            this.let_go(cx);
+                        }
+                        if this.auto.at().is_none() {
+                            return;
+                        }
+                        if this.auto.held() && e.pressed_button != Some(MouseButton::Middle) {
+                            this.auto.release();
+                            cx.notify();
+                        }
+                        this.auto.moved(e.position);
+                        this.auto_run(window, cx);
+                    });
+                });
+            },
+        )
+        .absolute()
+        .size_0()
+    }
+
+    /// The primary button is up: rows that waited for it come.
+    fn let_go(&mut self, cx: &mut Context<Self>) {
+        self.pressed = false;
+        if self.rows_wait {
+            self.refresh_rows(cx);
+            cx.notify();
+        }
+    }
+
+    /// The middle button went down in the chat at `at`: the chat scrolls by where the
+    /// pointer is from there.
+    fn auto_press(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        self.auto.press(at);
+        self.auto_run(window, cx);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Starts the middle button's steps, one a frame, unless they're coming: started
+    /// again if they stopped, so a lost frame can't leave it on and scrolling nothing.
+    fn auto_run(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let now = Instant::now();
+        if let Some(run) = self.auto.start(now) {
+            let weak = cx.entity().downgrade();
+            let first = now - crate::smooth::FRAME;
+            window.on_next_frame(move |window, cx| auto_step(weak, run, first, window, cx));
+        }
     }
 
     // --- The settings kit ---
@@ -14526,6 +14744,7 @@ fn person(
     scale: f32,
     room: i32,
     joined: model::Joined,
+    beside: Option<Div>,
     this: WeakEntity<Loom>,
 ) -> Div {
     let text: String = m
@@ -14668,7 +14887,9 @@ fn person(
                     SharedString::from(format!("m-{}-{room}", m.id)),
                     words,
                     move |v| with_links(v.selectable(true).on_link_click(on_link)),
-                )),
+                ))
+                // Its time on hover, just left of it.
+                .when_some(beside, |d, t| d.relative().child(t)),
         )
     })
     .when(m.queued, |d| {
@@ -18310,8 +18531,41 @@ mod frame_tests {
 
 #[cfg(test)]
 mod when_tests {
-    use super::when_sent;
+    use super::{row_room, when_at, when_sent, WhenAt, ROW_SIDE};
     use chrono::TimeZone;
+
+    #[test]
+    fn a_wide_chat_has_the_time_outside_and_a_narrow_one_where_theres_room() {
+        let column = 740.0;
+        // Wide: the column, with room either side.
+        let (content, gutter) = row_room(1100.0, column);
+        assert_eq!((content, gutter), (740.0, 180.0));
+        assert_eq!(when_at(gutter, 90.0, false, None, content), WhenAt::Outside);
+        assert_eq!(
+            when_at(gutter, 90.0, true, Some(200.0), content),
+            WhenAt::Outside
+        );
+        // Narrow: only the row's sides are left of the content.
+        let (content, gutter) = row_room(500.0, column);
+        assert_eq!((content, gutter), (500.0 - 2.0 * ROW_SIDE, ROW_SIDE));
+        assert_eq!(
+            when_at(gutter, 30.0, false, None, content),
+            WhenAt::Outside,
+            "today's time is short enough"
+        );
+        // "Yesterday 22:01" isn't: right of a reply, left of the person's bubble.
+        assert_eq!(when_at(gutter, 90.0, false, None, content), WhenAt::Corner);
+        assert_eq!(
+            when_at(gutter, 90.0, true, Some(120.0), content),
+            WhenAt::BesideBubble
+        );
+        // A bubble across the row leaves no room beside it.
+        assert_eq!(
+            when_at(gutter, 90.0, true, Some(content), content),
+            WhenAt::Corner
+        );
+        assert_eq!(when_at(gutter, 90.0, true, None, content), WhenAt::Corner);
+    }
 
     #[test]
     fn a_messages_time_says_the_day_when_it_isnt_today() {
@@ -18341,6 +18595,8 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
         self.frames += 1;
+        // Set again as the chat's list is drawn, if it is.
+        self.list_at.set(None);
         let p = self.p;
         // Before anything is drawn from it: which server is on screen.
         self.settle_server(cx);
@@ -18458,6 +18714,15 @@ impl Render for Loom {
                 });
             })
             .detach();
+        }
+        // The middle button's scrolling goes with the chat it started in, and its steps
+        // start again should a frame they waited for have been lost.
+        if self.auto.at().is_some() {
+            if self.screen != Screen::Chat || self.popup.is_some() {
+                self.auto.stop();
+            } else {
+                self.auto_run(window, cx);
+            }
         }
         let h = window.viewport_size().height.as_f32();
         let splash = self.splash(h);
@@ -18618,6 +18883,7 @@ impl Render for Loom {
         let out = root
             .flex()
             .child(self.wheel_catcher(cx))
+            .child(self.pointer_catcher(cx))
             .when(self.side_drag.is_some(), |d| {
                 d.child(self.side_dragger(cx)).cursor_col_resize()
             })
@@ -18649,6 +18915,7 @@ impl Render for Loom {
             .when_some(ctx_menu, |d, m| d.child(m))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
+            .when_some(self.auto.at(), |d, at| d.child(auto_marker(p, at)))
             .child(motion_ticker());
         crate::perf::render_end();
         out
@@ -19628,6 +19895,7 @@ mod row_tests {
             p: Palette::new(false),
             line: None,
             when: Some("14:05".into()),
+            when_at: super::WhenAt::Outside,
         }
     }
 
@@ -19842,8 +20110,67 @@ struct ChatInputs {
     newest: Option<String>,
     new_line: Option<String>,
     column: f32,
+    /// How wide the chat is (`Loom::chat_width`).
+    width: f32,
     p: Palette,
     pad: Option<f32>,
+}
+
+/// Where a message's time shows while the pointer is over it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum WhenAt {
+    /// Just outside the row, left of the message, where a wide chat has room.
+    Outside,
+    /// Just left of the person's bubble, inside the row.
+    BesideBubble,
+    /// In the row's top corner across from where the message starts, on the chat's
+    /// colour: right of a reply, left of the person's message.
+    Corner,
+}
+
+/// What's either side of a chat row's content, as far as the content is from the
+/// chat's edge while it's narrower than the column: the list's side (`px_3`), the
+/// row's, and the strip for the hover's time and buttons (`HOVER_REACH`).
+const ROW_SIDE: f32 = 12.0 + space::XL + HOVER_REACH;
+
+/// How wide a chat row's content is in a chat `width` wide, at most `column`, and the
+/// room left of it, where its time goes.
+fn row_room(width: f32, column: f32) -> (f32, f32) {
+    let content = (width - 2.0 * ROW_SIDE).min(column).max(0.0);
+    (content, ((width - content) / 2.0).max(0.0))
+}
+
+/// Where a message's time goes: outside, left of it, while the room there (`gutter`)
+/// takes the time `time` wide; otherwise for the person's message left of its bubble,
+/// `bubble` wide, while the row's `content` has room for it there, and else in the
+/// corner.
+fn when_at(gutter: f32, time: f32, person: bool, bubble: Option<f32>, content: f32) -> WhenAt {
+    let need = time + space::M;
+    if gutter >= need {
+        WhenAt::Outside
+    } else if person && bubble.is_some_and(|b| content - b >= need) {
+        WhenAt::BesideBubble
+    } else {
+        WhenAt::Corner
+    }
+}
+
+/// How wide `text` is on one line at `size`, in the window's font.
+fn text_width(text: &str, size: f32, window: &Window) -> f32 {
+    let style = window.text_style();
+    let run = TextRun {
+        len: text.len(),
+        font: style.font(),
+        color: style.color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(SharedString::from(text.to_string()), px(size), &[run], None)
+        .width
+        .as_f32()
 }
 
 /// The chat's list, as a view of its own.
@@ -19916,9 +20243,10 @@ struct RowInputs {
     is_new: bool,
     column: f32,
     p: Palette,
-    /// The time line over it, and its time on hover.
+    /// The time line over it, and its time on hover, and where that shows.
     line: Option<String>,
     when: Option<String>,
+    when_at: WhenAt,
 }
 
 impl RowInputs {
@@ -19945,6 +20273,7 @@ impl RowInputs {
             && self.p == o.p
             && self.line == o.line
             && self.when == o.when
+            && self.when_at == o.when_at
     }
 }
 
@@ -20003,8 +20332,109 @@ fn smooth_step(this: WeakEntity<Loom>, last: Instant, window: &mut Window, cx: &
     let Some(step) = step else {
         return;
     };
-    window.dispatch_event(PlatformInput::Scroll(step), cx);
+    own_scroll(&this, step, window, cx);
     window.on_next_frame(move |window, cx| smooth_step(this, now, window, cx));
+}
+
+/// Scrolls by `e` as the app's own scrolling, which doesn't stop the middle button's.
+fn own_scroll(this: &WeakEntity<Loom>, e: ScrollEvent, window: &mut Window, cx: &mut App) {
+    let _ = this.update(cx, |this, _| this.own_scroll = true);
+    window.dispatch_event(PlatformInput::Scroll(e), cx);
+    let _ = this.update(cx, |this, _| this.own_scroll = false);
+}
+
+/// Plays the middle button's next step of `run`, as far as the time since `last` and
+/// the pointer's distance from the marker say, and the one after on the next frame, for
+/// as long as it's on (crate::autoscroll).
+fn auto_step(this: WeakEntity<Loom>, run: u64, last: Instant, window: &mut Window, cx: &mut App) {
+    let now = Instant::now();
+    let step = this
+        .update(cx, |this, _| this.auto.step(run, now, now - last))
+        .ok()
+        .flatten();
+    let Some((dy, at)) = step else {
+        return;
+    };
+    if dy != 0.0 {
+        // The list scrolls by what's under a scroll's position, and the window takes that
+        // position for the pointer's, hovering what's there. So the pointer is put back
+        // where it is before anything is drawn: the hover, its time and buttons and the
+        // cursor stay with the pointer, not the marker. The list (gpui-component's
+        // MessageScroller) has no way to scroll it by a distance from outside.
+        let (pointer, modifiers) = (window.mouse_position(), window.modifiers());
+        let e = ScrollEvent {
+            position: at,
+            // Down the chat is a wheel turned towards the person.
+            delta: ScrollDelta::Pixels(point(px(0.0), px(-dy))),
+            // Without Shift, which would make it scroll across.
+            modifiers: Modifiers::default(),
+            touch_phase: TouchPhase::Moved,
+            source: ScrollSource::Pointer,
+        };
+        own_scroll(&this, e, window, cx);
+        if window.mouse_position() != pointer {
+            // No other button is down while it's on: a press stops it.
+            let held = this
+                .read_with(cx, |this, _| this.auto.held())
+                .unwrap_or(false);
+            let back = MouseMoveEvent {
+                position: pointer,
+                pressed_button: held.then_some(MouseButton::Middle),
+                modifiers,
+            };
+            window.dispatch_event(PlatformInput::MouseMove(back), cx);
+        }
+    }
+    window.on_next_frame(move |window, cx| auto_step(this, run, now, window, cx));
+}
+
+/// The middle button's marker, where it was pressed: a round button with an arrow up and
+/// one down, and a dot between.
+fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
+    const SIZE: f32 = 30.0;
+    let ink = p.ink_2;
+    div()
+        .absolute()
+        .left(at.x - px(SIZE / 2.0))
+        .top(at.y - px(SIZE / 2.0))
+        .size(px(SIZE))
+        .rounded_full()
+        .bg(p.bg)
+        .border_1()
+        .border_color(p.line_strong)
+        .shadow(card_shadow(p))
+        .child(
+            canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    let c = bounds.center();
+                    // An arrow: its tip `dir` (−1 up, 1 down) from the middle.
+                    let arrow = |dir: f32| {
+                        let (tip, base, half) = (9.0 * dir, 4.5 * dir, 3.5);
+                        let mut b = PathBuilder::fill();
+                        b.move_to(point(c.x, c.y + px(tip)));
+                        b.line_to(point(c.x + px(half), c.y + px(base)));
+                        b.line_to(point(c.x - px(half), c.y + px(base)));
+                        b.close();
+                        b.build()
+                    };
+                    for dir in [-1.0, 1.0] {
+                        if let Ok(path) = arrow(dir) {
+                            window.paint_path(path, ink);
+                        }
+                    }
+                    let r = px(1.5);
+                    window.paint_quad(
+                        fill(
+                            Bounds::new(point(c.x - r, c.y - r), size(r * 2.0, r * 2.0)),
+                            ink,
+                        )
+                        .corner_radii(r),
+                    );
+                },
+            )
+            .size_full(),
+        )
 }
 
 /// The chat's messages, as its list draws them: each finished one from its own view in
@@ -20032,10 +20462,12 @@ fn chat_list(
         newest,
         new_line,
         column,
+        width,
         p,
         pad,
     } = i;
     let now = chrono::Local::now();
+    let (content, gutter) = row_room(width, column);
     MessageScroller::new("chat", scroller, move |ix, window, cx| {
         let Some(row) = rows.get(ix) else {
             return div().into_any_element();
@@ -20044,6 +20476,35 @@ fn chat_list(
         let m = match row {
             Row::Message(m) => Some(m),
             Row::Approval(_) => None,
+        };
+        // Its time, just outside its left edge while the pointer is over it, or where
+        // there's room for it in a narrow chat.
+        let when = m
+            .filter(|m| !m.live && !m.queued)
+            .map(|m| when_sent(m.at, now))
+            .filter(|w| !w.is_empty());
+        let when_at = match (&when, m) {
+            (Some(w), Some(m)) => {
+                let time = text_width(w, size::CAPTION, window);
+                let person = m.role == "person";
+                // The person's bubble hugs its longest line, up to its widest.
+                let lines = || {
+                    m.blocks
+                        .iter()
+                        .filter(|b| b.kind == "text")
+                        .flat_map(|b| b.text.lines())
+                };
+                let bubble = (person && time + space::M > gutter)
+                    .then(|| lines().max_by_key(|l| l.chars().count()))
+                    .flatten()
+                    .filter(|_| lines().any(|l| !l.trim().is_empty()))
+                    .map(|longest| {
+                        let words = text_width(longest, size::BODY * show.text_scale, window);
+                        (words + 2.0 * space::L).min(520.0).min(content)
+                    });
+                when_at(gutter, time, person, bubble, content)
+            }
+            _ => WhenAt::Outside,
         };
         let inputs = RowInputs {
             rows: rows.clone(),
@@ -20086,11 +20547,8 @@ fn chat_list(
             p,
             // Across the chat where it paused, or on a new day: when it went on.
             line: m.filter(|_| here.line).map(|m| line_of(m.at, now)),
-            // Its time, just outside its left edge while the pointer is over it.
-            when: m
-                .filter(|m| !m.live && !m.queued)
-                .map(|m| when_sent(m.at, now))
-                .filter(|w| !w.is_empty()),
+            when,
+            when_at,
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -20195,6 +20653,51 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .text_color(p.ink_3)
             .child(line)
     });
+    // Its time, while the pointer is over it: just outside its left edge, or in a narrow
+    // chat beside the person's bubble or in the row's corner (`WhenAt`).
+    let when_at = i.when_at;
+    let time = i.when.clone().map(|when| {
+        div()
+            .absolute()
+            .whitespace_nowrap()
+            .text_size(px(size::CAPTION))
+            .text_color(p.ink_3)
+            .opacity(0.0)
+            .group_hover("row", |s| s.opacity(1.0))
+            .child(when)
+    });
+    let top = if joined.above { 0.0 } else { space::XS } + 4.0;
+    let (beside, when) = match when_at {
+        WhenAt::BesideBubble => (
+            time.map(|t| t.top(px(4.0)).right(relative(1.0)).pr(px(space::M))),
+            None,
+        ),
+        WhenAt::Outside => (
+            None,
+            time.map(|t| {
+                t.top(px(top))
+                    .right(relative(1.0))
+                    .mr(px(-HOVER_REACH))
+                    .pr(px(space::M))
+            }),
+        ),
+        WhenAt::Corner => (
+            None,
+            time.map(|t| {
+                let t = t
+                    .top(px(top - 2.0))
+                    .px(px(space::XS))
+                    .py(px(2.0))
+                    .rounded(px(radius::ROW))
+                    .bg(p.bg);
+                if matches!(row, Row::Message(m) if m.role == "person") {
+                    t.left(px(HOVER_REACH - space::XS))
+                } else {
+                    t.right(px(HOVER_REACH - space::XS))
+                }
+            }),
+        ),
+    };
     let inner = match row {
         Row::Message(m) if m.role == "person" => person(
             p,
@@ -20205,6 +20708,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             show.text_scale,
             show.room,
             joined,
+            beside,
             this.clone(),
         ),
         Row::Message(m) => reply(
@@ -20233,9 +20737,6 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     // hover, a way to branch there.
     let gone_on = i.gone_on.clone();
     let branch_at = pin.as_ref().map(|(id, _)| id.clone());
-    // Its time, just outside its left edge while the pointer is over it. Time
-    // lines show only where the chat paused.
-    let when = i.when.clone();
     let to_branch = this.clone();
     let mut links =
         div()
@@ -20311,24 +20812,10 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 .pb(px(if joined.below { space::XS } else { space::S }))
                 .relative()
                 .group("row")
-                .when_some(when, |d, when| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(if joined.above { 0.0 } else { space::XS } + 4.0))
-                            .right(relative(1.0))
-                            .mr(px(-HOVER_REACH))
-                            .pr(px(space::M))
-                            .whitespace_nowrap()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .opacity(0.0)
-                            .group_hover("row", |s| s.opacity(1.0))
-                            .child(when),
-                    )
-                })
                 .child(inner)
                 .child(links)
+                // Over the message, where it's in the corner.
+                .children(when)
                 .when_some(branch_at, |d, id| {
                     d.child(
                         div()
