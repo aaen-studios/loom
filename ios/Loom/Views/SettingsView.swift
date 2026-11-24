@@ -8,7 +8,7 @@ struct SettingsView: View {
     @AppStorage("loom.server") private var server = ""
     @AppStorage("loom.username") private var username = ""
     @AppStorage(Prefs.replies) private var replies = Prefs.bubbles
-    @AppStorage(Prefs.vibrant) private var vibrant = false
+    @AppStorage(Prefs.vibrant) private var vibrant = true
     @State private var notifications: UNAuthorizationStatus = .notDetermined
     @State private var confirmSignOut = false
 

@@ -719,21 +719,22 @@ const [claude] = await brains(['claude-acp']);
 		display: flex;
 		justify-content: flex-end;
 	}
-	/* What the person wrote: a bubble with a breath of the agent's colour. */
+	/* What the person wrote: a bubble in the agent's colour itself, light in the light theme and
+	   deep in the dark, as the app's Vibrant bubbles, its default, draws it. */
 	.bubble {
 		max-width: 520px;
 		padding: 10px 16px;
 		border-radius: var(--radius-bubble);
-		background: color-mix(in srgb, var(--bubble) 93%, var(--tint));
+		background: hsl(from var(--tint) h s 80%);
 		overflow-wrap: anywhere;
 	}
 	@media (prefers-color-scheme: dark) {
 		:root:not([data-theme='light']) .bubble {
-			background: color-mix(in srgb, var(--bubble) 88%, var(--tint));
+			background: hsl(from var(--tint) h s 28%);
 		}
 	}
 	:root[data-theme='dark'] .bubble {
-		background: color-mix(in srgb, var(--bubble) 88%, var(--tint));
+		background: hsl(from var(--tint) h s 28%);
 	}
 	.reply {
 		display: flex;
