@@ -458,19 +458,24 @@ fn beside_chat(c: Json, chats: List<Json>) -> Json {
     return c.copy()
 }
 
-// An OpenBot schedule as loom's (every N minutes, daily or weekdays at a time),
-// and what changed on the way, or "" when nothing did. Null for none.
+// An OpenBot schedule as loom's (PLAN.md, "Routines"), and what changed on
+// the way, or "" when nothing did. Null for none.
 pub fn schedule_of(s: Json) -> (Json, String) {
     let kind = str_at(s.copy(), "kind") ?? String()
     let time = hhmm(str_at(s.copy(), "time") ?? String("09:00"))
     if kind == "daily" { return (Obj.new().s("daily", time).done(), String()) }
     if kind == "weekdays" { return (Obj.new().s("weekdays", time).done(), String()) }
     if kind == "hourly" {
+        // At its minute past each hour, on the clock.
         let minute = int_at(s, "minute") ?? 0
-        return (Obj.new().i("every", 60).done(), if minute == 0 { String() } else { "hourly at :{pad(minute)} became every 60 minutes." })
+        if minute <= 0 or minute > 59 { return (Obj.new().i("every", 60).done(), String()) }
+        return (Obj.new().i("every", 60).s("from", "00:{pad(minute)}").s("to", "23:{pad(minute)}").done(), String())
     }
-    if kind == "weekly" { return (Obj.new().s("daily", time.copy()).done(), "weekly on {weekday(s)} became daily at {time}: loom has every N minutes, daily and weekdays.") }
-    if kind == "monthly" { return (Obj.new().s("daily", time.copy()).done(), "monthly on day {int_at(s, "day") ?? 1} became daily at {time}: loom has every N minutes, daily and weekdays.") }
+    if kind == "weekly" {
+        if let day = day_key(s.copy()) { return (Obj.new().j("times", Json.Array([Json.Str(time.copy())])).j("days", Json.Array([Json.Str(day)])).done(), String()) }
+        return (Obj.new().s("daily", time.copy()).done(), "weekly on {weekday(s)} became daily at {time}: its day wasn't one loom knows.")
+    }
+    if kind == "monthly" { return (Obj.new().s("daily", time.copy()).done(), "monthly on day {int_at(s, "day") ?? 1} became daily at {time}: loom has no monthly schedules.") }
     if kind == "interval" {
         let amount = int_at(s.copy(), "amount") ?? 60
         let unit = str_at(s, "unit") ?? String("minutes")
@@ -492,6 +497,23 @@ fn weekday(s: Json) -> String {
         _ => {},
     }
     return String("a day")
+}
+
+// A weekly schedule's day as loom's schedules name it, "mon" to "sun": OpenBot
+// counts from Sunday, 0, or names the day.
+fn day_key(s: Json) -> String? {
+    let keys = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+    match at(s, "weekday") {
+        Json.Int(n) => if n >= 0 and n < 7 { return some(String(keys[usize.wrap(n)])) },
+        Json.Str(w) => {
+            let lower = w.to_lower_root()
+            for k in keys {
+                if lower.starts_with(k) { return some(String(k)) }
+            }
+        },
+        _ => {},
+    }
+    return none
 }
 
 fn pad(n: i64) -> String {
@@ -902,7 +924,11 @@ fn schedules_map_to_loom_s() {
     let (daily, same) = schedule_of(Obj.new().s("kind", String("daily")).s("time", String("7:05")).done())
     assert("{daily}" == "\{\"daily\":\"07:05\"\}" and same.len() == 0)
     let (weekly, changed) = schedule_of(Obj.new().s("kind", String("weekly")).i("weekday", 1).s("time", String("08:00")).done())
-    assert("{weekly}" == "\{\"daily\":\"08:00\"\}" and changed.contains("Monday"))
+    assert("{weekly}" == #"{"times":["08:00"],"days":["mon"]}"# and changed.len() == 0)
+    let (named, _) = schedule_of(Obj.new().s("kind", String("weekly")).s("weekday", String("Friday")).s("time", String("17:30")).done())
+    assert("{named}" == #"{"times":["17:30"],"days":["fri"]}"#)
+    let (hourly, kept) = schedule_of(Obj.new().s("kind", String("hourly")).i("minute", 15).done())
+    assert("{hourly}" == #"{"every":60,"from":"00:15","to":"23:15"}"# and kept.len() == 0)
     let (every, _) = schedule_of(Obj.new().s("kind", String("interval")).i("amount", 2).s("unit", String("hours")).done())
     assert("{every}" == "\{\"every\":120\}")
     let (short, why) = schedule_of(Obj.new().s("kind", String("interval")).i("amount", 1).s("unit", String("minutes")).done())
