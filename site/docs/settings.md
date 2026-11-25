@@ -8,7 +8,7 @@ The gear at the bottom of the sidebar opens Settings, as a popup over the chat. 
 
 Import sits under them. Click outside the popup, or press Esc, to close it.
 
-The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" finds Defaults.
+The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" or "group chats" finds Defaults.
 
 What's about the server rather than you (Add a device, People, Move, Add a server) is in the server popup instead. Click the server's name at the bottom of the sidebar to open it.
 

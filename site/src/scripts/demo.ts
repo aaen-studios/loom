@@ -19,6 +19,10 @@
 // Clicking Allow, Always allow (under the arrow beside Allow) or Deny answers the approval,
 // which says how in one quiet line before it goes; left alone, it's allowed after a moment.
 //
+// Then the Shop group chat opens from its row, and a message written there goes to the agent the
+// router picks: the line over the reply, "→ Biscuit · invoices", in Biscuit's shape and colour,
+// comes with it, before its words (room_view.rs, route_line). Its row opens it by hand too.
+//
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs). "From Biscuit" under Juniper opens Biscuit's
 // thread with it in the chat's place, to read, with Continue in your own chat for a composer.
@@ -42,6 +46,9 @@ const ASK = 'Run ./deploy.sh production';
 const EFFECT = 'Runs a command';
 const SHIPPED = 'Shipped. 2.4.1 is live, and its health check answers.';
 const HELD = "Okay, I won't deploy. Main stays as it is.";
+/** What the person writes in the Shop group chat, which the router gives Biscuit, and its answer. */
+const ROOM_ASK = 'Did the October invoice go out?';
+const ROOM_ANSWER = 'It did, on 1 November. Northwind paid it on the 14th.';
 
 /** A pause that ends early, with an error, when the demo is stopped. */
 class Stopped extends Error {}
@@ -285,11 +292,26 @@ export function play(app: HTMLElement) {
 	// read only; the strip's arrow, Continue in your own chat in the composer's place, or
 	// Juniper's own row, goes back to the person's chat (app.rs, open_thread, branch_strip,
 	// continue_button). The chat goes on meanwhile.
-	const inThread = (on: boolean) => app.classList.toggle('in-thread', on);
+	const inThread = (on: boolean) => {
+		if (on) inRoom(false);
+		app.classList.toggle('in-thread', on);
+	};
+	// The Shop group chat opens from its row in the chat's place, as the app's does
+	// (room_view.rs, open_room); Juniper's row goes back to its chat.
+	const roomMsgs = app.querySelector<HTMLElement>('.msgs.room')!;
+	const roomHistory = [...roomMsgs.children];
+	const inRoom = (on: boolean) => {
+		if (on) app.classList.remove('in-thread');
+		app.classList.toggle('in-room', on);
+	};
+	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => inRoom(true));
 	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));
 	app.querySelector('[data-back]')?.addEventListener('click', () => inThread(false));
 	app.querySelector('[data-continue]')?.addEventListener('click', () => inThread(false));
-	app.querySelector('.agent.on')?.addEventListener('click', () => inThread(false));
+	app.querySelector('.agent.on')?.addEventListener('click', () => {
+		inThread(false);
+		inRoom(false);
+	});
 	const tpl =(id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.
 	const preview = (agent: string, text: string, mood: Mood) => {
@@ -538,6 +560,50 @@ export function play(app: HTMLElement) {
 		});
 	}
 
+	/** Biscuit's reply in the group chat, under the line that says the router gave it the
+	 * message and why; `p` its answer's paragraph. */
+	function routedReply(fresh: boolean) {
+		const reply = tpl('demo-routed');
+		reply.classList.toggle('fresh', fresh);
+		roomMsgs.append(reply);
+		return { reply, p: reply.querySelector<HTMLElement>('.said p')!, thread: threadsIn(reply)[0] };
+	}
+
+	/** The person's message in the group chat. */
+	function roomSent(fresh: boolean) {
+		const you = tpl('demo-you');
+		you.classList.toggle('fresh', fresh);
+		you.querySelector('.bubble')!.textContent = ROOM_ASK;
+		roomMsgs.append(you);
+	}
+
+	/** The Shop group chat opened, a message written in it, and the router's pick answering:
+	 * the line over the reply comes with it, then the reply is written (PLAN.md, "Group chats"). */
+	async function roomScene(id: number) {
+		inRoom(true);
+		await wait(1100, id);
+		await type(ROOM_ASK, id);
+		await wait(450, id);
+		cleared();
+		roomSent(true);
+		// About a second for the router's pick, on its warm session.
+		await wait(900, id);
+		const { p, thread } = routedReply(true);
+		thread.set('thinking');
+		app.classList.add('busy');
+		await wait(1200, id);
+		thread.set('writing');
+		const words = ROOM_ANSWER.split(' ');
+		for (let i = 1; i <= words.length; i++) {
+			p.textContent = words.slice(0, i).join(' ');
+			await wait(45 + Math.random() * 70, id);
+		}
+		thread.set('idle');
+		app.classList.remove('busy');
+		await wait(5000, id);
+		inRoom(false);
+	}
+
 	async function scene(id: number) {
 		waitingOn('Juniper', false);
 		cleared();
@@ -629,12 +695,16 @@ export function play(app: HTMLElement) {
 			cleared();
 			msgs.append(cheer(true));
 		}
-		await wait(6000, id);
+		await wait(4000, id);
+		// Then the group chat, where the router picks who answers.
+		await roomScene(id);
+		await wait(1500, id);
 
 		// Back to the start, quietly, and again.
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.classList.add('leaving');
 		await wait(400, id);
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
+		for (const el of [...roomMsgs.children]) if (!roomHistory.includes(el)) el.remove();
 		quotes.clear();
 		undelete();
 	}
@@ -654,9 +724,14 @@ export function play(app: HTMLElement) {
 		run++;
 		toBottom();
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
+		for (const el of [...roomMsgs.children]) if (!roomHistory.includes(el)) el.remove();
+		inRoom(false);
 		quotes.clear();
 		undelete();
 		cleared();
+		// The group chat as it ends, for its row to open.
+		roomSent(false);
+		routedReply(false).p.textContent = ROOM_ANSWER;
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
 		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), part: false, ask: false });
 		const reply = tpl('demo-reply');

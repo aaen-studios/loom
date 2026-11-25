@@ -2,8 +2,9 @@
 // A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads
 // in their shapes under the group chats, the pinned ones as tiles over the rest, a folder, and an agent waiting on the
 // person at the top while it asks; an agent's chat with a message written with a link and a file
-// in it, and a reply that thinks, uses a tool, writes and asks before it deploys; and another
-// agent's thread with it, opened from its row. Its sizes, colours and words are the app's
+// in it, and a reply that thinks, uses a tool, writes and asks before it deploys; another
+// agent's thread with it, opened from its row; and a group chat, where the router picks who
+// answers each message and the line over the reply says so. Its sizes, colours and words are the app's
 // (desktop/src/app.rs, design/tokens.toml); the script that plays it is src/scripts/demo.ts. The
 // approval's buttons answer it, a reply's steps open, the thread's row opens it, the jump button
 // goes back down to the newest, and the sidebar collapses to the rail, as the app's do.
@@ -46,6 +47,8 @@ const rooms = [
 	{ name: 'Everyone', colors: ['apricot', 'lavender', 'sky', 'mint'] },
 	{ name: 'Shop', colors: ['sky', 'apricot'] },
 ];
+// The group chat the demo opens and writes in.
+const shop = rooms[1];
 function wave(k: number, n: number): string {
 	const phase = (k * Math.PI * 2) / n;
 	const pts: string[] = [];
@@ -92,7 +95,7 @@ const GITHUB =
 			</div>
 			{
 				rooms.map((r) => (
-					<div class="agent room">
+					<div class="agent room" data-room={r.name}>
 						<svg class="weave" width="26" height="14" viewBox="0 0 26 14">
 							{r.colors.map((c, k) => (
 								<path d={wave(k, r.colors.length)} style={`stroke: var(--thread-${c})`} />
@@ -212,6 +215,15 @@ const GITHUB =
 					<span>Juniper</span>
 					<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 				</span>
+				<!-- A group chat's head: its members' threads woven, its name and how many are in
+				     it, which opens its settings (room_view.rs, room_head). -->
+				<span class="room-btn">
+					<svg class="weave" width="26" height="14" viewBox="0 0 26 14">
+						{shop.colors.map((c, k) => <path d={wave(k, shop.colors.length)} style={`stroke: var(--thread-${c})`} />)}
+					</svg>
+					<span>{shop.name}</span>
+					<span class="room-count">{shop.colors.length} agents</span>
+				</span>
 				<span class="chips">
 					<span class="chip brain">
 						{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
@@ -310,6 +322,24 @@ const GITHUB =
 					</div>
 				</div>
 			</div>
+			<!-- The Shop group chat, opened from its row: each reply with the line over it that
+			     says how it came to its agent, in that agent's shape and colour (room_view.rs,
+			     route_line). -->
+			<div class="msgs room" aria-live="off">
+				<div class="time-line">Today 09:41</div>
+				<div class="row you"><div class="bubble">Is 2.4.1 out?</div></div>
+				<div class="row reply">
+					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
+					<div class="body">
+						<div class="routed" role="button" aria-label="Answered by Juniper, release question"
+							>→<span class="routed-who" style="--from: var(--thread-sky)"
+								><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={JUNIPER}></path></svg>Juniper</span
+							><span>· release question</span></div
+						>
+						<div class="said"><p>Yes, since 09:40. Its health check answers.</p></div>
+					</div>
+				</div>
+			</div>
 			<!-- While the chat isn't at its bottom: the way down to the newest, with how many came
 			     meanwhile (app.rs, jump_button). -->
 			<button type="button" class="jump" data-jump aria-label="Jump to latest" hidden
@@ -329,7 +359,11 @@ const GITHUB =
 				<div class="attached" data-attached hidden></div>
 				<div class="composer-row">
 					<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
-					<span class="field"><span class="typed"></span><span class="placeholder">Reply to Juniper</span></span>
+					<span class="field"
+						><span class="typed"></span><span class="placeholder agent-ph">Reply to Juniper</span><span class="placeholder room-ph"
+							>Message {shop.name}</span
+						></span
+					>
 					<!-- The smiley, which opens the emoji picker (app.rs, emoji_button). -->
 					<span class="icon-btn c"
 						><svg class="i" viewBox="0 0 24 24"
@@ -454,6 +488,21 @@ const GITHUB =
 				<div class="steps" hidden></div>
 			</div>
 			<div class="said"></div>
+		</div>
+	</div>
+</template>
+<!-- A reply in the group chat, which the router gave Biscuit: the line over it in Biscuit's
+     shape and colour, and its thread in Biscuit's colour. -->
+<template id="demo-routed">
+	<div class="row reply fresh">
+		<svg data-thread data-color="apricot" width="14" height="10" class="reply-thread"></svg>
+		<div class="body">
+			<div class="routed" role="button" aria-label="Answered by Biscuit, invoices"
+				>→<span class="routed-who" style="--from: var(--thread-apricot)"
+					><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
+				><span>· invoices</span></div
+			>
+			<div class="said"><p></p></div>
 		</div>
 	</div>
 </template>
@@ -698,6 +747,73 @@ const GITHUB =
 	}
 	.app.railed .room {
 		display: none;
+	}
+	.room {
+		cursor: pointer;
+	}
+	/* The Shop group chat, open in the chat's place: its row lit, its head, its messages and
+	   "Message Shop" in the composer. A group chat has no brain, mode or context of its own. */
+	.room-btn,
+	.msgs.room,
+	.room-ph,
+	.app.in-room .agent-btn,
+	.app.in-room .chips,
+	.app.in-room .msgs.mine,
+	.app.in-room .agent-ph,
+	.app.in-room .context {
+		display: none;
+	}
+	.app.in-room .msgs.room {
+		display: block;
+	}
+	.app.in-room .room-ph {
+		display: inline;
+	}
+	.app.in-room .typed:not(:empty) ~ .room-ph {
+		display: none;
+	}
+	.app.in-room .agent.on {
+		background: none;
+	}
+	.app.in-room .room[data-room='Shop'] {
+		background: var(--active);
+	}
+	.room-btn {
+		align-items: center;
+		gap: 8px;
+		border-radius: var(--radius-row);
+		padding: 4px 8px;
+		font-weight: var(--weight-medium);
+		white-space: nowrap;
+	}
+	.app.in-room .room-btn {
+		display: inline-flex;
+	}
+	.room-count {
+		font-size: var(--size-caption);
+		font-weight: var(--weight-regular);
+		color: var(--ink-3);
+	}
+	/* The line over a reply in a group chat, in its name's place: "→ Biscuit · invoices",
+	   quiet, with the agent's thread in its shape and its name in its colour. A click offers
+	   the chat's other members to send the message to instead. */
+	.routed {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--size-caption);
+		line-height: 1.4;
+		color: var(--ink-3);
+		cursor: pointer;
+	}
+	.routed-who {
+		display: inline-flex;
+		align-items: center;
+		font-weight: var(--weight-medium);
+		color: color-mix(in srgb, var(--from) 70%, var(--ink-3));
+	}
+	.routed-who .mention-thread {
+		margin-right: 4px;
 	}
 	/* Another agent's thread with the open one, under its row (app.rs, ask_row): the
 	   asker's thread, small, and "From NAME". */
