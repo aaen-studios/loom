@@ -21,6 +21,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
+use crate::meter;
 use crate::model::{
     self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate, SignIn,
 };
@@ -36,6 +37,9 @@ use settings::{settings_found, settings_groups, system_dark};
 
 #[path = "rules.rs"]
 mod rules;
+
+#[path = "routines.rs"]
+mod routines;
 
 /// What dropping a dragged agent on a row does.
 type DropAgent = Box<dyn Fn(&AgentDrag, &mut Window, &mut App) + 'static>;
@@ -445,7 +449,8 @@ pub struct Loom {
     invite_admin: bool,
     /// Whether the Add a device page is asking "delete my account?" before it does.
     confirm_delete: bool,
-    routine_at_in: Entity<InputState>,
+    /// The routine page's schedule fields, history and week (routines.rs).
+    routine_ui: routines::RoutineUi,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
     /// `Some(Some(id))` for one being changed. The form's agent and switches go with it.
@@ -483,8 +488,6 @@ pub struct Loom {
     /// A flow an agent made with steps side by side, which the form shows but doesn't
     /// edit: kept as it is unless the person takes it off.
     routine_flow_kept: Vec<model::FlowStep>,
-    /// The schedule the form shows: "every", "daily" or "weekdays".
-    routine_kind: String,
     /// The MCP server form: none, a new server, or the one with this name.
     mcp_open: Option<Option<String>>,
     mcp_name_in: Entity<InputState>,
@@ -1025,7 +1028,7 @@ impl Loom {
         let move_to_in = input(window, cx, "https://loom.example.com", false);
         let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
-        let routine_at_in = input(window, cx, "30", false);
+        let routine_ui = routines::RoutineUi::new(window, cx);
         let task_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 14)
@@ -1500,7 +1503,7 @@ ACTA_KEY=secret:ACTA_KEY",
             closing: None,
             form_at: Instant::now(),
             confirm_delete: false,
-            routine_at_in,
+            routine_ui,
             routine_prompt_in,
             routine_open: None,
             routine_agent: None,
@@ -1518,7 +1521,6 @@ ACTA_KEY=secret:ACTA_KEY",
             routine_catch_up: true,
             routine_thread: false,
             routine_webhook: false,
-            routine_kind: "every".into(),
             routine_flow: Vec::new(),
             routine_flow_kept: Vec::new(),
             program_open: None,
@@ -4246,6 +4248,35 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
+    /// In another agent's thread, in the composer's place: back to your own chat with
+    /// `agent`, ready to write.
+    fn continue_button(&self, agent: &str, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let agent = agent.to_string();
+        div().w_full().max_w(px(self.prefs.column())).child(
+            div()
+                .id("continue-own-chat")
+                .role(Role::Button)
+                .aria_label("Continue in your own chat")
+                .w_full()
+                // As tall as the composer, which it stands in for.
+                .h(px(control::ICON_COMPOSER + 2.0 * space::S + 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::COMPOSER))
+                .border_1()
+                .border_color(p.line)
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
+                .child("Continue in your own chat")
+                .on_click(cx.listener(move |this, _, _, cx| this.select(agent.clone(), cx))),
+        )
+    }
+
     /// The colour of the agent that keeps a thread with another: its thread's, or a plain
     /// ink for a plugin's panel or an agent that's gone.
     fn ask_tint(&self, k: &model::Ask) -> Hsla {
@@ -6772,6 +6803,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(self.update_pop(false, cx), |d, pop| d.child(pop))
+            .children(self.limit_boxes(cx))
             // The server, as its spool, on the left, and the settings on the right: each
             // opens the popup. While anything loom runs is behind, the update icon sits
             // just left of the gear.
@@ -6919,6 +6951,12 @@ ACTA_KEY=secret:ACTA_KEY",
             behind: behind.to_vec(),
             behind_all: self.hub().behind_all,
             update_open: !behind.is_empty() && self.update_pop_open(),
+            minute: if model.plan_limits().is_empty() {
+                0
+            } else {
+                chrono::Local::now().timestamp_millis() / 60_000
+            },
+            limits: model.plan_limits(),
         }
     }
 
@@ -6988,6 +7026,90 @@ ACTA_KEY=secret:ACTA_KEY",
             .soft_hover(transparent_black(), p.hover, None)
             .child(Icon::new(IconName::Plus).small())
             .on_click(cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)))
+    }
+
+    /// The limits of the person's plans, over the server's row: a box for each program
+    /// that reports them and that their agents run on, with its icon and its plan's name,
+    /// then a line each for the session and the week, a ring with how much is used and
+    /// when it resets. A click opens the program under Brains. The rail leaves them out.
+    fn limit_boxes(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        let now = chrono::Local::now();
+        let mut out = Vec::new();
+        for (name, limits) in self.model.plan_limits() {
+            let listed = self.model.program_listed(&name).cloned();
+            let plan = if limits.plan.is_empty() {
+                self.model.program_title(&name)
+            } else {
+                limits.plan.clone()
+            };
+            let mut lines = Vec::new();
+            for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
+                let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
+                    continue;
+                };
+                let ink = match meter::Level::of(w.used) {
+                    meter::Level::Bad => p.bad,
+                    meter::Level::Warn => p.warn,
+                    meter::Level::Quiet => p.ink_2,
+                };
+                lines.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(meter::ring(
+                            control::LIMIT_RING,
+                            w.fraction(),
+                            ink,
+                            p.line_strong,
+                        ))
+                        .child(div().flex_1().text_color(p.ink_2).child(label))
+                        .child(div().text_color(p.ink_3).child(w.words(now))),
+                );
+            }
+            let open = name.clone();
+            out.push(
+                div()
+                    .id(SharedString::from(format!("limits-{name}")))
+                    .role(Role::Button)
+                    .aria_label(format!("{plan} limits"))
+                    .mx(px(space::S))
+                    .mb(px(space::XS))
+                    .p(px(space::S))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .rounded(px(radius::BUTTON))
+                    .border_1()
+                    .border_color(p.line)
+                    .text_size(px(size::CAPTION))
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(self.brain_icon(listed.as_ref(), control::LIMIT_RING))
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(plan),
+                            ),
+                    )
+                    .children(lines)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // Brains opens on its list, so the program's page after.
+                        this.open(Screen::Programs, cx);
+                        this.program_open = Some(open.clone());
+                    }))
+                    .into_any_element(),
+            );
+        }
+        out
     }
 
     /// The settings gear, which opens the popup on the page last open.
@@ -9934,6 +10056,8 @@ ACTA_KEY=secret:ACTA_KEY",
             || self.menu.is_some()
             || self.browser_big
             || self.model.selected.is_none()
+            // Another agent's thread has no composer to type in.
+            || self.model.branch_open().is_some_and(|c| c.asked_by.is_some())
         {
             return;
         }
@@ -9991,6 +10115,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 .map(|c| c.title.clone())
                 .unwrap_or_else(|| "Branch".into())
         });
+        // Another agent's thread is read only: where the composer would be, the way to
+        // your own chat with the agent it's under.
+        let theirs = self.model.ask_open().is_some();
         let strip = match (
             self.model.task_open().cloned(),
             agent.as_ref(),
@@ -10392,16 +10519,25 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 ),
         );
+        let continue_button = match agent.as_ref() {
+            Some(a) if theirs => {
+                composer = None;
+                Some(self.continue_button(&a.id, cx))
+            }
+            _ => None,
+        };
         let column = div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.attach(paths.paths(), cx);
-            }))
-            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
+            .when(!theirs, |d| {
+                d.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    this.attach(paths.paths(), cx);
+                }))
+                .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
+            })
             .when_some(strip, |d, s| d.child(s))
             .child(
                 div()
@@ -10469,7 +10605,7 @@ ACTA_KEY=secret:ACTA_KEY",
             )
             .when_some(ask, |d, a| d.child(a))
             .when_some(queue, |d, q| d.child(q))
-            .when_some(composer, |d, c| {
+            .when_some(composer.or(continue_button), |d, c| {
                 d.child(
                     div()
                         .w_full()
@@ -13613,27 +13749,6 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    /// Opens the routine form, empty, for a new one.
-    fn new_routine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        _ = self.model.load_routine_runs(None);
-        self.routine_name_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.routine_at_in
-            .update(cx, |s, cx| s.set_value("30", window, cx));
-        self.routine_kind = "every".into();
-        self.routine_prompt_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.routine_agent = self.model.selected.clone();
-        self.routine_notify = true;
-        self.routine_on = true;
-        self.routine_catch_up = true;
-        self.routine_thread = false;
-        self.routine_webhook = false;
-        self.set_routine_flow(&[], window, cx);
-        self.routine_open = Some(None);
-        cx.notify();
-    }
-
     /// A row with a switch, for one of a form's yes-or-no choices.
     fn switch_row(
         &self,
@@ -13657,615 +13772,6 @@ ACTA_KEY=secret:ACTA_KEY",
             Some(toggle.into_any_element()),
         )
         .into_any_element()
-    }
-
-    /// The routines page: prompts the person's agents are sent on a schedule, each in a
-    /// conversation of its own, and the form for a new or changed one.
-    fn routines_page(&mut self, cx: &mut Context<Self>) -> Div {
-        if self.routine_open.is_some() {
-            return self.routine_form(cx);
-        }
-        if self.model.routines.is_empty() {
-            let groups = vec![self.empty(
-                Ico::Clock,
-                "No routines yet",
-                None,
-                Some(self.new_routine_button(cx)),
-            )];
-            return self.settings_page("routines-page", "Routines", None, groups);
-        }
-        // Its title over the routines, each a row of the one group, as a list.
-        let n = self.model.routines.len();
-        self.list_page(
-            "routines-page",
-            n + 1,
-            layout::SETTINGS,
-            |this, ix, cx| {
-                if ix == 0 {
-                    let action = Some(this.new_routine_button(cx));
-                    return this.list_head("Routines", action);
-                }
-                let n = this.model.routines.len();
-                match this.model.routines.get(ix - 1).cloned() {
-                    Some(r) => {
-                        let row = this.routine_row(r, cx);
-                        this.group_item(ix - 1, n, row)
-                    }
-                    None => div().into_any_element(),
-                }
-            },
-            cx,
-        )
-    }
-
-    /// One routine, as a row of the routines page: when it runs next and how its last
-    /// run went, or its flow's steps while it runs, which opens it to change.
-    fn routine_row(&self, r: model::Routine, cx: &mut Context<Self>) -> AnyElement {
-        let p = self.p;
-        let (agent, tint) = match self.model.agent(&r.agent) {
-            Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
-            None => ("a deleted agent".to_string(), p.ink_3),
-        };
-        let next = if !r.on || r.next == 0 {
-            "paused".to_string()
-        } else if day_of(r.next) == "Today" {
-            format!("next at {}", time_of(r.next))
-        } else {
-            format!("next {} at {}", day_of(r.next), time_of(r.next))
-        };
-        let last = match r.last_status.as_str() {
-            "" | "done" | "quiet" => String::new(),
-            "running" => " · running now".into(),
-            "waiting" => " · waiting for the chat".into(),
-            "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
-            _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
-        };
-        let mut sub = format!("{agent} · {} · {next}{last}", r.when);
-        // Its flow, while it runs: how far each step has got, and a Stop.
-        let running = self
-            .model
-            .flows
-            .iter()
-            .find(|f| f.routine == r.id)
-            .map(|f| {
-                let steps: Vec<String> = f
-                    .steps
-                    .iter()
-                    .skip(1)
-                    .map(|(name, _, status)| format!("step {name} {status}"))
-                    .collect();
-                (steps.join(" · "), f.stopped)
-            });
-        let mut controls = div().flex().gap(px(space::XS));
-        if let Some((text, stopped)) = running {
-            sub = text;
-            if !stopped {
-                let routine = r.id.clone();
-                controls = controls.child(
-                    self.small_button(format!("stop-flow-{}", r.id), "Stop", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            let f = this.model.stop_flow(&routine);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                );
-            }
-        }
-        // A routine with a thread of its own: the way there.
-        if r.post == "thread" && !r.conversation.is_empty() {
-            let conversation = r.conversation.clone();
-            let agent = r.agent.clone();
-            controls = controls.child(
-                self.small_button(format!("thread-{}", r.id), "Thread", false)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.open_thread(&agent, &conversation, cx);
-                    })),
-            );
-        }
-        let lead = div()
-            .size(px(control::LEAD))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::ROW))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.bg)
-            .text_color(if r.on { tint } else { p.ink_3 })
-            .child(Icon::new(Ico::Clock).small())
-            .into_any_element();
-        self.row(
-            Some(lead),
-            r.name.clone(),
-            Some(sub),
-            Some(controls.into_any_element()),
-        )
-        .id(SharedString::from(format!("routine-{}", r.id)))
-        .cursor_pointer()
-        .soft_hover(transparent_black(), p.hover, None)
-        .on_click(cx.listener(move |this, _, window, cx| {
-            this.routine_name_in
-                .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-            this.routine_at_in
-                .update(cx, |s, cx| s.set_value(r.at.clone(), window, cx));
-            this.routine_kind = if r.kind.is_empty() {
-                "every".into()
-            } else {
-                r.kind.clone()
-            };
-            this.routine_prompt_in
-                .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
-            this.routine_agent = Some(r.agent.clone());
-            this.routine_notify = r.notify;
-            this.routine_on = r.on;
-            this.routine_catch_up = r.catch_up;
-            this.routine_thread = r.post == "thread";
-            this.routine_webhook = !r.hook.is_empty();
-            this.set_routine_flow(&r.flow, window, cx);
-            if let Some(f) = this.model.load_routine_runs(Some(&r.id)) {
-                this.send(f);
-            }
-            this.routine_open = Some(Some(r.id.clone()));
-            cx.notify();
-        }))
-        .into_any_element()
-    }
-
-    /// The routines page's New routine, the page's own button while it has none.
-    fn new_routine_button(&self, cx: &mut Context<Self>) -> AnyElement {
-        self.small_button("new-routine", "New routine", self.model.routines.is_empty())
-            .on_click(cx.listener(|this, _, window, cx| this.new_routine(window, cx)))
-            .into_any_element()
-    }
-
-    /// The form for a new routine, or one being changed.
-    fn routine_form(&mut self, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let open = self.routine_open.clone().unwrap_or_default();
-        let mut groups = Vec::new();
-        let chips = self.agent_chips(
-            "routine-agent",
-            self.routine_agent.clone().as_deref(),
-            cx,
-            |this, id| this.routine_agent = Some(id),
-        );
-        groups.push(self.group(
-            None,
-            vec![
-                self.field_row("Name", Input::new(&self.routine_name_in)),
-                self.field_row("Agent", chips),
-                div()
-                    .p(px(space::L))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S))
-                    .child(
-                        div()
-                            .text_size(px(size::BODY))
-                            .text_color(p.ink)
-                            .child("Prompt"),
-                    )
-                    .child(Textarea::new(&self.routine_prompt_in))
-                    .into_any_element(),
-            ],
-        ));
-        let mut kinds = Vec::new();
-        for (kind, label) in [
-            ("every", "Every few minutes"),
-            ("daily", "Daily"),
-            ("weekdays", "Weekdays"),
-        ] {
-            kinds.push(
-                self.segment(
-                    format!("routine-kind-{kind}"),
-                    label,
-                    self.routine_kind == kind,
-                )
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    // From minutes to a time of day or back, the box gets an example of
-                    // the other kind, so it isn't left saying "30" for a daily routine.
-                    let was_minutes = this.routine_kind == "every";
-                    if was_minutes != (kind == "every") {
-                        let example = if kind == "every" { "30" } else { "08:00" };
-                        this.routine_at_in
-                            .update(cx, |s, cx| s.set_value(example, window, cx));
-                    }
-                    this.routine_kind = kind.into();
-                    cx.notify();
-                })),
-            );
-        }
-        let at_label = if self.routine_kind == "every" {
-            "Minutes"
-        } else {
-            "At (HH:MM)"
-        };
-        groups.push(self.group(
-            Some("When"),
-            vec![
-                self.row(
-                    None,
-                    "Repeats",
-                    None,
-                    Some(self.segments(kinds).into_any_element()),
-                )
-                .into_any_element(),
-                self.field_row(at_label, Input::new(&self.routine_at_in)),
-            ],
-        ));
-        let mut options = vec![
-            self.switch_row("routine-on", "On", "", self.routine_on, cx, |this| {
-                this.routine_on = !this.routine_on
-            }),
-            self.switch_row(
-                "routine-notify",
-                "Notify me",
-                "",
-                self.routine_notify,
-                cx,
-                |this| this.routine_notify = !this.routine_notify,
-            ),
-            self.switch_row(
-                "routine-catch-up",
-                "Catch up",
-                "",
-                self.routine_catch_up,
-                cx,
-                |this| this.routine_catch_up = !this.routine_catch_up,
-            ),
-            self.switch_row(
-                "routine-post",
-                "A thread of its own",
-                "",
-                self.routine_thread,
-                cx,
-                |this| this.routine_thread = !this.routine_thread,
-            ),
-            self.switch_row(
-                "routine-webhook",
-                "Webhook",
-                "",
-                self.routine_webhook,
-                cx,
-                |this| this.routine_webhook = !this.routine_webhook,
-            ),
-        ];
-        // Where to post, once it has a webhook: to give GitHub or anything else.
-        let hook = open
-            .as_ref()
-            .and_then(|id| self.model.routines.iter().find(|r| &r.id == id))
-            .filter(|r| !r.hook.is_empty() && self.routine_webhook)
-            .map(|r| (format!("/hooks/{}", r.hook), r.secret.clone()));
-        if let Some((path, secret)) = hook {
-            let copy_path = path.clone();
-            options.push(
-                self.row(
-                    None,
-                    path,
-                    Some("Bearer the secret, or signed as GitHub signs".into()),
-                    Some(
-                        div()
-                            .flex()
-                            .gap(px(space::XS))
-                            .child(
-                                self.small_button("copy-hook", "Copy address", false)
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_path.clone(),
-                                        ));
-                                    }),
-                            )
-                            .child(
-                                self.small_button("copy-secret", "Copy secret", false)
-                                    .on_click(move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            secret.clone(),
-                                        ));
-                                    }),
-                            )
-                            .into_any_element(),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
-        groups.push(self.group(Some("Options"), options));
-        groups.push(self.routine_flow_group(cx));
-        // Its runs, which leave nothing in the chat but what they post: how each ended,
-        // and what its agent posted or answered.
-        if open.is_some() && !self.model.routine_runs.is_empty() {
-            let now = chrono::Local::now();
-            let runs = self
-                .model
-                .routine_runs
-                .iter()
-                .map(|r| {
-                    let words = r.words();
-                    let when = div()
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_3)
-                        .child(when_sent(r.at, now))
-                        .into_any_element();
-                    self.row(
-                        None,
-                        r.outcome(),
-                        (!words.is_empty()).then_some(words),
-                        Some(when),
-                    )
-                    .into_any_element()
-                })
-                .collect();
-            groups.push(self.group(Some("Runs"), runs));
-        }
-        let editing = open.clone().unwrap_or_default();
-        let save = self
-            .small_button("save-routine", "Save", true)
-            .on_click(cx.listener(move |this, _, _, cx| {
-                let name = this.routine_name_in.read(cx).value().to_string();
-                let prompt = this.routine_prompt_in.read(cx).value().to_string();
-                let at = this.routine_at_in.read(cx).value().to_string();
-                let Some(agent) = this.routine_agent.clone() else {
-                    this.model.notices.push("Pick the agent it runs.".into());
-                    cx.notify();
-                    return;
-                };
-                if at.trim().is_empty() && !this.routine_webhook {
-                    this.model
-                        .notices
-                        .push("Needs a schedule or a webhook".into());
-                    cx.notify();
-                    return;
-                }
-                // The flow, one step after another; one an agent made
-                // with steps side by side stays as it is.
-                let flow = if this.routine_flow_kept.is_empty() {
-                    let mut steps = Vec::new();
-                    let mut before = "routine".to_string();
-                    for (k, (agent, prompt_in)) in this.routine_flow.iter().enumerate() {
-                        let Some(agent) = agent.clone() else {
-                            this.model
-                                .notices
-                                .push(format!("Pick step {}'s agent.", k + 1));
-                            cx.notify();
-                            return;
-                        };
-                        let name = (k + 1).to_string();
-                        steps.push(model::FlowStep {
-                            name: name.clone(),
-                            agent,
-                            prompt: prompt_in.read(cx).value().to_string(),
-                            after: vec![before],
-                        });
-                        before = name;
-                    }
-                    Some(steps)
-                } else {
-                    None
-                };
-                let form = model::RoutineForm {
-                    id: editing.clone(),
-                    name,
-                    agent,
-                    prompt,
-                    kind: this.routine_kind.clone(),
-                    at,
-                    notify: this.routine_notify,
-                    on: this.routine_on,
-                    catch_up: this.routine_catch_up,
-                    post: if this.routine_thread {
-                        "thread"
-                    } else {
-                        "chat"
-                    }
-                    .into(),
-                    webhook: this.routine_webhook,
-                    flow,
-                };
-                let f = this.model.save_routine(&form);
-                this.send(f);
-                this.routine_open = None;
-                cx.notify();
-            }));
-        let cancel = self
-            .small_button("cancel-routine", "Cancel", false)
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.routine_open = None;
-                cx.notify();
-            }));
-        let mut left = div().flex().gap(px(space::S));
-        if let Some(id) = open.clone() {
-            let run = id.clone();
-            left = left
-                .child(
-                    self.small_button("delete-routine", "Delete", false)
-                        .text_color(p.bad)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.delete_routine(&id);
-                            this.send(f);
-                            this.routine_open = None;
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.small_button("run-routine", "Run now", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.run_routine(&run);
-                            this.send(f);
-                            this.routine_open = None;
-                            cx.notify();
-                        })),
-                );
-        }
-        groups.push(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(left)
-                .child(div().flex().gap(px(space::S)).child(cancel).child(save))
-                .into_any_element(),
-        );
-        let title = if open.is_some() {
-            "Change routine"
-        } else {
-            "New routine"
-        };
-        self.settings_page("routines-page", title, None, groups)
-    }
-
-    /// Fills the routine form's flow from `flow`: steps it edits when they go one after
-    /// another, or kept as they are when an agent put some side by side.
-    fn set_routine_flow(
-        &mut self,
-        flow: &[model::FlowStep],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.routine_flow.clear();
-        self.routine_flow_kept.clear();
-        if !model::flow_is_chain(flow) {
-            self.routine_flow_kept = flow.to_vec();
-            return;
-        }
-        for step in flow {
-            let prompt = step.prompt.clone();
-            let input = cx.new(|cx| {
-                let mut t = TextareaState::new(window, cx)
-                    .auto_grow(2, 10)
-                    .placeholder("What this agent is asked, with the answer before it.");
-                t.set_value(prompt, window, cx);
-                t
-            });
-            self.routine_flow.push((Some(step.agent.clone()), input));
-        }
-    }
-
-    /// The routine form's flow (PLAN.md, "Routine flows"): who its answer goes to next,
-    /// step by step.
-    fn routine_flow_group(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let p = self.p;
-        let name_of = |id: &str| {
-            self.model
-                .agent(id)
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| "a deleted agent".into())
-        };
-        let mut rows = Vec::new();
-        if !self.routine_flow_kept.is_empty() {
-            let lines: Vec<String> = self
-                .routine_flow_kept
-                .iter()
-                .map(|s| {
-                    format!(
-                        "{} ({}), after {}: {}",
-                        s.name,
-                        name_of(&s.agent),
-                        s.after.join(" and "),
-                        s.prompt
-                    )
-                })
-                .collect();
-            rows.push(
-                self.row(
-                    None,
-                    "Steps side by side",
-                    Some("Set up by an agent".into()),
-                    Some(
-                        self.small_button("flow-off", "Take it off", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.routine_flow_kept.clear();
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    ),
-                )
-                .into_any_element(),
-            );
-            rows.push(self.note_row(lines.join("\n"), p.ink_2));
-            return self.group(Some("Then"), rows);
-        }
-        for (k, (picked, prompt_in)) in self.routine_flow.iter().enumerate() {
-            let from = if k == 0 {
-                "the routine's answer".to_string()
-            } else {
-                format!("step {k}'s answer")
-            };
-            let remove = self
-                .small_button(format!("flow-{k}-remove"), "Remove", false)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if k < this.routine_flow.len() {
-                        this.routine_flow.remove(k);
-                    }
-                    cx.notify();
-                }));
-            let mut pick = div().flex().flex_wrap().gap(px(space::XS));
-            let agents = self.model.agents.clone();
-            for a in agents.iter() {
-                let id = a.id.clone();
-                let on = picked.as_deref() == Some(a.id.as_str());
-                pick = pick.child(
-                    self.segment(format!("flow-{k}-agent-{}", a.id), &a.name, on)
-                        .when(!on, |d| d.border_1().border_color(p.line))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(step) = this.routine_flow.get_mut(k) {
-                                step.0 = Some(id.clone());
-                            }
-                            cx.notify();
-                        })),
-                );
-            }
-            rows.push(
-                div()
-                    .p(px(space::L))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(size::BODY))
-                                    .text_color(p.ink)
-                                    .child(format!("Step {}, with {from}", k + 1)),
-                            )
-                            .child(remove),
-                    )
-                    .child(pick)
-                    .child(Textarea::new(prompt_in))
-                    .into_any_element(),
-            );
-        }
-        if self.routine_flow.len() < 20 {
-            rows.push(
-                self.row(
-                    None,
-                    "Hand the answer on",
-                    None,
-                    Some(
-                        self.small_button("flow-add", "Add a step", false)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                let input = cx.new(|cx| {
-                                    TextareaState::new(window, cx).auto_grow(2, 10).placeholder(
-                                        "What this agent is asked, with the answer before it.",
-                                    )
-                                });
-                                this.routine_flow.push((None, input));
-                                cx.notify();
-                            }))
-                            .into_any_element(),
-                    ),
-                )
-                .into_any_element(),
-            );
-        }
-        self.group(Some("Then"), rows)
     }
 
     /// iPhone notifications through the push relay (PLAN.md, "The push relay"): whether the
@@ -24352,6 +23858,9 @@ struct SidebarKey {
     behind: Vec<model::Behind>,
     behind_all: bool,
     update_open: bool,
+    /// The limits of the person's plans, and the minute, for the 0% once one resets.
+    limits: Vec<(String, model::PlanLimits)>,
+    minute: i64,
 }
 
 /// An agent, as the sidebar shows it.
