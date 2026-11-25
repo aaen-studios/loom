@@ -5789,7 +5789,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .on_mouse_down(
                         MouseButton::Middle,
                         cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                            this.auto_press(e.position, window, cx);
+                            this.auto_press(e.position, false, window, cx);
                         }),
                     )
                     .on_mouse_down(
@@ -8255,7 +8255,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .on_mouse_down(
                                 MouseButton::Middle,
                                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                                    this.auto_press(e.position, window, cx);
+                                    this.auto_press(e.position, true, window, cx);
                                 }),
                             )
                             .child(list)
@@ -13013,10 +13013,18 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The middle button went down in the chat or the sidebar at `at`: what's under it
-    /// scrolls by where the pointer is from there. Not on a link, a pill or a button,
-    /// which have the pointing hand: the middle button does there what it does there.
-    fn auto_press(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
-        if window.hovered_cursor_style() == Some(CursorStyle::PointingHand) {
+    /// scrolls by where the pointer is from there. In the chat (`links`), not on a link or
+    /// a pill, which have the pointing hand there, as its buttons do: the middle button
+    /// opens a link, as it does in a browser. The sidebar's rows have the hand too, all of
+    /// it, and nothing there takes the middle button, so it starts anywhere there.
+    fn auto_press(
+        &mut self,
+        at: Point<Pixels>,
+        links: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if links && window.hovered_cursor_style() == Some(CursorStyle::PointingHand) {
             return;
         }
         self.auto.press(at);
@@ -16127,12 +16135,40 @@ fn details_toggle(p: Palette, key: &str, open: bool, this: WeakEntity<Loom>) -> 
 }
 
 /// All of what a card shows only some of, in a box of its own that scrolls past a few
-/// lines.
-fn details_box(p: Palette, key: &str, raw: &str, scale: f32) -> Stateful<Div> {
-    card_code(p, raw.to_string(), scale)
-        .id(SharedString::from(format!("r-{key}")))
-        .max_h(px(280.0))
-        .overflow_y_scroll()
+/// lines. The chat's list takes the wheel, and the middle button's scrolling, from
+/// anything inside it that doesn't claim them, so the box claims them, as a long code
+/// block does (`ScrollBounce`): under the pointer, the box scrolls and the chat stays.
+fn details_box(p: Palette, key: &str, raw: &str, scale: f32) -> impl IntoElement {
+    thread_local! {
+        /// Each box's scrolling, which outlives a frame, by the box's key. Few are open
+        /// at once; past a few dozen, the oldest go.
+        static SCROLLS: RefCell<Vec<(String, ScrollHandle)>> = const { RefCell::new(Vec::new()) };
+    }
+    let handle = SCROLLS.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some(i) = s.iter().position(|(k, _)| k == key) {
+            let kept = s.remove(i);
+            let handle = kept.1.clone();
+            s.push(kept);
+            return handle;
+        }
+        if s.len() >= 32 {
+            s.remove(0);
+        }
+        let handle = ScrollHandle::new();
+        s.push((key.to_string(), handle.clone()));
+        handle
+    });
+    let id = SharedString::from(format!("r-{key}"));
+    gpui_kit::base::ScrollBounce::new(
+        SharedString::from(format!("rb-{key}")),
+        &handle,
+        card_code(p, raw.to_string(), scale)
+            .id(id)
+            .max_h(px(280.0))
+            .overflow_y_scroll()
+            .track_scroll(&handle),
+    )
 }
 
 /// A card's button, as tall as an approval's: the main one filled, the rest outlined.
