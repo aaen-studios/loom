@@ -1,9 +1,16 @@
 module core.sidebar
 
 // How the sidebar groups the person's agents (PLAN.md, "The sidebar"), so the
-// desktop and the phone show the same: `arrange` takes the agents and folders
-// as the cache keeps them, and the agents waiting on the person, and gives the
-// sections in order, each `kind` with its `agents`' ids:
+// desktop and the phone show the same, with the group chats first. `arrange_with`
+// takes the group chats as the cache keeps them, then the agents and folders, and
+// the agents waiting on the person; a `rooms` section comes first, with each
+// group chat's `id`, `name`, `color` and `everyone`, Everyone first:
+//
+//     {"kind": "rooms", "rooms": [{"id": "c_4", "name": "Everyone", "color": "", "everyone": true}], "agents": []},
+//
+// then the agents' sections, as `arrange` gives them: it takes the agents and
+// folders as the cache keeps them, and the agents waiting on the person, and
+// gives the sections in order, each `kind` with its `agents`' ids:
 //
 //     [{"kind": "waiting", "agents": ["a_4"]},
 //      {"kind": "pinned", "agents": ["a_1"]},
@@ -51,6 +58,25 @@ pub fn ordered(agents: List<Json>) -> List<Json> {
         out.push(agents[usize.wrap(n)].copy())
     }
     return out
+}
+
+/// The group chats' section, then the agents' as `arrange` gives them.
+pub fn arrange_with(rooms: List<Json>, agents: List<Json>, groups: List<Json>, waiting: List<String>) -> Json {
+    var listed = List<Json>()
+    var rest = List<Json>()
+    for c in rooms {
+        let room = at(c.copy(), "room")
+        let everyone = bool_at(room.copy(), "everyone") ?? false
+        let one = Obj.new().s("id", str_at(c.copy(), "id") ?? String()).s("name", str_at(room.copy(), "name") ?? (str_at(c, "title") ?? String())).s("color", str_at(room, "color") ?? String()).b("everyone", everyone).done()
+        if everyone { listed.push(one) } else { rest.push(one) }
+    }
+    for r in rest { listed.push(r.copy()) }
+    var out = List<Json>()
+    out.push(Obj.new().s("kind", String("rooms")).j("rooms", Json.Array(listed)).j("agents", Json.Array(List<Json>())).done())
+    if let Json.Array(sections) = arrange(agents, groups, waiting) {
+        for s in sections { out.push(s.copy()) }
+    }
+    return Json.Array(out)
 }
 
 pub fn arrange(agents: List<Json>, groups: List<Json>, waiting: List<String>) -> Json {
@@ -167,4 +193,19 @@ fn pinned_ones_come_first_as_dragged_then_as_pinned() {
         got.push(str_at(a, "id") ?? String())
     }
     assert(got == [String("a_4"), String("a_2"), String("a_3"), String("a_1")])
+}
+
+@test
+fn the_group_chats_come_first_everyone_before_the_rest() {
+    let rooms: List<Json> = [
+        Obj.new().s("id", String("c_7")).j("room", Obj.new().s("name", String("Money")).s("color", String("amber")).done()).done(),
+        Obj.new().s("id", String("c_4")).j("room", Obj.new().s("name", String("Everyone")).b("everyone", true).done()).done(),
+    ]
+    let s = arrange_with(rooms, [agent("a_1").done()], List<Json>(), List<String>())
+    let Json.Array(all) = s.copy() else return
+    assert(all.len() == 5 and str_at(all[0].copy(), "kind") == some(String("rooms")))
+    let Json.Array(listed) = at(all[0].copy(), "rooms") else return
+    assert(listed.len() == 2 and str_at(listed[0].copy(), "id") == some(String("c_4")) and bool_at(listed[0].copy(), "everyone") == some(true))
+    assert(str_at(listed[1].copy(), "name") == some(String("Money")) and str_at(listed[1].copy(), "color") == some(String("amber")))
+    assert(in_section(s, "agents") == [String("a_1")])
 }
