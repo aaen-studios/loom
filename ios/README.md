@@ -51,7 +51,7 @@ calx tests/ios/live.calx
 
 When the instance moves, the core follows it and the app says so: "Your instance moved to …". A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) shows the core's reason, and the app stays where it was.
 
-For a screenshot of each screen, launch it with `-sample`, and `-signedOut`, `-open <agent id>` (with `-thread <conversation>` for another agent's thread with it, such as `-open a_4 -thread c_5`) or `-settings`: `xcrun simctl launch booted no.aaenz.loom -sample -open a_1`.
+For a screenshot of each screen, launch it with `-sample`, and `-signedOut`, `-open <agent id>` (with `-thread <conversation>` for another agent's thread with it, such as `-open a_4 -thread c_5`) or `-settings`: `xcrun simctl launch booted no.aaenz.loom -sample -open a_1`. With `-open`, `-plus` opens the composer's + sheet, and `-plus skills`, `-plus routines` or `-plus recent` that list in it.
 
 ## Push
 

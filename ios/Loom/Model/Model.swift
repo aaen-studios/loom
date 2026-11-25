@@ -553,6 +553,8 @@ enum LinkTo: Equatable, Sendable {
     case file(agent: String, path: String)
     /// A file sent with the message, by its SHA-256.
     case attached(String)
+    /// A skill picked from the + menu, by its name.
+    case skill(String)
     case other
 
     init(_ link: String) {
@@ -570,6 +572,8 @@ enum LinkTo: Equatable, Sendable {
             self = .file(agent: String(rest[..<cut]), path: path.removingPercentEncoding ?? path)
         } else if link.hasPrefix("loom-file:") {
             self = .attached(String(link.dropFirst("loom-file:".count)))
+        } else if link.hasPrefix("loom:skill/") {
+            self = .skill(String(link.dropFirst("loom:skill/".count)))
         } else {
             self = .other
         }
@@ -1203,6 +1207,60 @@ struct Device: Identifiable, Equatable, Sendable {
     var kind: String
 }
 
+/// One of the person's skills, as the + menu lists it.
+struct PlusSkill: Equatable, Sendable {
+    var name: String
+    var description: String
+}
+
+/// One of the person's routines, as the + menu lists it: how its last run went
+/// (`done`, `quiet`, `failed`, ..., or empty before the first) and when.
+struct PlusRoutine: Equatable, Sendable {
+    var id: String
+    var name: String
+    var agent: String
+    var status: String
+    var at: Int
+
+    /// How its last run went, in words, and whether it went wrong: "Ran 14:05 ✓".
+    var went: (String, Bool) {
+        let when = When.time(at)
+        switch status {
+        case "": return ("Not run yet", false)
+        case "running": return ("Running now", false)
+        case "waiting": return ("Waiting for its chat", false)
+        case "done", "quiet": return ("Ran \(when) ✓", false)
+        case "skipped": return ("Skipped \(when)", false)
+        default: return ("Failed \(when)", true)
+        }
+    }
+}
+
+/// A file sent or received lately in one of the person's chats (`files.recent`).
+struct RecentFile: Equatable, Sendable {
+    var file: FileRef
+    var at: Int
+}
+
+/// What a row of the + menu opens.
+enum PlusSub: Sendable {
+    case recent, skills, routines
+}
+
+/// One row of the composer's + menu.
+enum PlusRow: Equatable, Sendable {
+    case attach
+    case open(PlusSub)
+    case file(RecentFile)
+    case skill(PlusSkill)
+    case routine(PlusRoutine)
+}
+
+/// A skill picked from the + menu as a mention: its name, going as `loom:skill/<name>`.
+func skillMention(_ name: String) -> Mention {
+    Mention(words: name, link: "loom:skill/\(name)")
+}
+
 /// A file picked to go with the next message.
 struct Attachment: Identifiable, Equatable, Sendable {
     var id: String
@@ -1279,6 +1337,11 @@ final class Model {
     var notice: String?
     /// Files for the next message.
     var attachments: [Attachment] = []
+    /// What the composer's + menu lists: the person's skills, their routines, and the
+    /// files sent or received lately in their chats, newest first.
+    var skills: [PlusSkill] = []
+    var routines: [PlusRoutine] = []
+    var recentFiles: [RecentFile] = []
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     var files: [String: String] = [:]
     /// A file fetched to be opened, for the screen to show.
@@ -1700,6 +1763,14 @@ final class Model {
             filesAsking = nil
             let files = f["value"]["files"].array.map { FoundFile(path: $0["path"].text, name: $0["name"].text, place: $0["where"].text) }
             foundFiles = (asking.agent, asking.query, files)
+        case let id where id.hasPrefix("app.plus_skills"):
+            skills = f["value"]["skills"].array.map { PlusSkill(name: $0["name"].text, description: $0["description"].text) }
+        case let id where id.hasPrefix("app.plus_routines"):
+            routines = f["value"]["routines"].array.map {
+                PlusRoutine(id: $0["id"].text, name: $0["name"].text, agent: $0["agent"].text, status: $0["last"]["status"].text, at: $0["last"]["at"].int ?? 0)
+            }
+        case let id where id.hasPrefix("app.recent_files"):
+            recentFiles = f["value"]["files"].array.map { RecentFile(file: FileRef($0), at: $0["at"].int ?? 0) }
         case let id where id.hasPrefix("app.agent_file.pictures"):
             // One of the pictures a reply names, for the viewer: it opens on them once
             // they're all kept, without those that couldn't be.
@@ -2061,6 +2132,70 @@ final class Model {
         case .file(let f): mention = fileMention(agent: agent, path: f.path, name: f.name)
         }
         return (String(text.prefix(at)) + mention.words + " ", mention)
+    }
+
+    // MARK: The composer's + menu (PLAN.md, "The composer's + menu")
+
+    /// Asks for what the + menu lists: the person's skills, their routines, and the files
+    /// sent lately in their chats.
+    func loadPlus() -> [JSON] {
+        [
+            ["t": "cmd", "id": JSON(id("app.plus_skills")), "name": "skill.list", "args": [:]],
+            ["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]],
+            ["t": "cmd", "id": JSON(id("app.recent_files")), "name": "files.recent", "args": ["limit": 50]],
+        ]
+    }
+
+    /// The + menu's groups, in order: what adds to the message and what it does. With
+    /// something typed in its search, every group's rows that match it instead, the lists
+    /// beside the menu among them, names that start with it first, as
+    /// desktop/src/model.rs's `plus_groups`.
+    func plusGroups(_ query: String) -> [[PlusRow]] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty {
+            return [[.attach, .open(.recent)], [.open(.skills), .open(.routines)]]
+        }
+        func found<T>(_ rows: [T], _ name: (T) -> (String, String), _ row: (T) -> PlusRow) -> [PlusRow] {
+            let hits = rows.compactMap { r -> (Bool, T)? in
+                let (n, also) = name(r)
+                if n.lowercased().contains(q) { return (n.lowercased().hasPrefix(q), r) }
+                return also.lowercased().contains(q) ? (false, r) : nil
+            }
+            return (hits.filter(\.0) + hits.filter { !$0.0 }).map { row($0.1) }
+        }
+        var add: [PlusRow] = "attach files".contains(q) ? [.attach] : []
+        add += found(recentFiles, { ($0.file.name, "") }, PlusRow.file)
+        let act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
+            + found(plusRoutines, { ($0.name, "") }, PlusRow.routine)
+        return [add, act].filter { !$0.isEmpty }
+    }
+
+    /// The list a row of the + menu opens.
+    func plusSub(_ which: PlusSub) -> [PlusRow] {
+        switch which {
+        case .recent: recentFiles.map(PlusRow.file)
+        case .skills: skills.map(PlusRow.skill)
+        case .routines: plusRoutines.map(PlusRow.routine)
+        }
+    }
+
+    /// The person's routines as the + menu lists them, this agent's first.
+    var plusRoutines: [PlusRoutine] {
+        routines.filter { $0.agent == selected } + routines.filter { $0.agent != selected }
+    }
+
+    /// A file from the + menu's recent files, for the next message: it's on the instance
+    /// already, so nothing goes up. Whether it was added, which it isn't when it waits
+    /// already.
+    func attachSent(_ f: FileRef) -> Bool {
+        if attachments.contains(where: { $0.file?.file == f.file }) { return false }
+        attachments.append(Attachment(id: id("app.sent"), name: f.name, path: "", file: f))
+        return true
+    }
+
+    /// Runs a routine now, from the + menu.
+    func runRoutine(_ id: String) -> JSON {
+        ["t": "cmd", "id": JSON(self.id("app.routine_run")), "name": "routine.run", "args": ["id": JSON(id)]]
     }
 
     /// Opens a file a message mentions, from its `loom:file/AGENT/PATH` link: the

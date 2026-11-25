@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, MoveDown, MoveUp,
-    Paste, Textarea, TextareaState,
+    Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, MoveDown, MoveLeft,
+    MoveRight, MoveUp, Paste, Textarea, TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -205,12 +205,38 @@ enum Ctx {
     Folder(String),
 }
 
-/// The composer's + menu, open at its first list or at one it leads to.
+/// The composer's + menu while it's open (PLAN.md, "The composer's + menu").
+#[derive(Clone, Default)]
+struct PlusMenu {
+    /// The row lit in the menu, by its place among the menu's rows, all groups counted.
+    lit: usize,
+    /// The list open beside it, and the row lit in that once the keys have gone there.
+    sub: Option<model::PlusSub>,
+    sub_lit: Option<usize>,
+    /// The routine that asks "Run now?" in its row, by id.
+    confirm: Option<String>,
+    /// Whether the clipboard held a picture as it opened.
+    paste: bool,
+}
+
+/// Where the + menu's panels are on screen, for a click outside both, and each row
+/// that opens a list beside the menu, for the list to open by.
+#[derive(Default)]
+struct PlusBounds {
+    menu: Option<Bounds<Pixels>>,
+    sub: Option<Bounds<Pixels>>,
+    rows: HashMap<model::PlusSub, Bounds<Pixels>>,
+}
+
+/// A key in the + menu.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Plus {
-    Main,
-    Skills,
-    Routines,
+enum PlusKey {
+    Up,
+    Down,
+    Right,
+    Left,
+    Take,
+    Shut,
 }
 
 /// One row of the chat's list.
@@ -280,7 +306,15 @@ pub struct Loom {
     draw_drag: bool,
     draw_stroke: Vec<(f32, f32)>,
     draw_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
-    plus: Option<Plus>,
+    /// The composer's + menu while it's open, its search, when a click outside last
+    /// closed it, where its panels and the rows that open a list beside it are on
+    /// screen, and how far its lists are scrolled.
+    plus: Option<PlusMenu>,
+    plus_search: Entity<InputState>,
+    plus_closed_at: Option<Instant>,
+    plus_bounds: Rc<RefCell<PlusBounds>>,
+    plus_scroll: ScrollHandle,
+    plus_sub_scroll: ScrollHandle,
     /// The settings or server popup over the window, open at this page.
     popup: Option<Screen>,
     /// The panel beside the chat on the right: an agent's page, or a plugin's panel.
@@ -702,6 +736,11 @@ impl Loom {
                             state.update(cx, |s, cx| s.set_value("", window, cx));
                         }
                     }
+                    // A / alone in the composer opens the + menu, with its search.
+                    InputEvent::Change if state.read(cx).value() == "/" => {
+                        state.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.open_plus(window, cx);
+                    }
                     // The agent's thread thinks along while there's something typed, and
                     // the @ picker follows what's typed after an @.
                     InputEvent::Change => {
@@ -724,6 +763,23 @@ impl Loom {
                     .masked(masked)
             })
         };
+        // The + menu's search: what's typed finds rows in every group.
+        let plus_search = input(window, cx, "Find a file, skill or routine…", false);
+        cx.subscribe_in(
+            &plus_search,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let (InputEvent::Change, Some(menu)) = (event, this.plus.as_mut()) {
+                    menu.lit = 0;
+                    menu.sub = None;
+                    menu.sub_lit = None;
+                    menu.confirm = None;
+                    this.plus_scroll.scroll_to_item(0);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let server_in = input(window, cx, "Server address", false);
         let user_in = input(window, cx, "Username", false);
         let pass_in = input(window, cx, "Password", true);
@@ -1261,6 +1317,11 @@ ACTA_KEY=secret:ACTA_KEY",
             draw_stroke: Vec::new(),
             draw_bounds: Rc::new(std::cell::Cell::new(None)),
             plus: None,
+            plus_search,
+            plus_closed_at: None,
+            plus_bounds: Rc::default(),
+            plus_scroll: ScrollHandle::new(),
+            plus_sub_scroll: ScrollHandle::new(),
             popup: None,
             side: None,
             settings_last: Screen::Profile,
@@ -7449,18 +7510,476 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// The composer's + menu: attach files, start the message with one of the
-    /// person's skills, or run one of this agent's routines now.
-    fn plus_menu(&self, which: Plus, cx: &mut Context<Self>) -> Div {
+    // --- The composer's + menu (PLAN.md, "The composer's + menu") ---
+
+    /// Opens the + menu with its search empty and the keys in it, and asks for what it
+    /// lists, fresh.
+    fn open_plus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paste = cx.read_from_clipboard().is_some_and(|item| {
+            item.entries()
+                .iter()
+                .any(|e| matches!(e, ClipboardEntry::Image(_)))
+        });
+        self.plus = Some(PlusMenu {
+            paste,
+            ..PlusMenu::default()
+        });
+        self.mention = None;
+        for f in self.model.load_plus() {
+            self.send(f);
+        }
+        self.plus_search.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+        self.plus_scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    /// Shuts the + menu, and gives the composer the keys back.
+    fn shut_plus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.plus = None;
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        cx.notify();
+    }
+
+    /// The + menu's rows as it lists them, every group's one after another, and the
+    /// list open beside it.
+    fn plus_lists(
+        &self,
+        menu: &PlusMenu,
+        cx: &App,
+    ) -> (Vec<Vec<model::PlusRow>>, Vec<model::PlusRow>) {
+        let query = self.plus_search.read(cx).value().to_string();
+        let groups = self.model.plus_groups(&query, menu.paste);
+        let sub = menu.sub.map(|s| self.model.plus_sub(s)).unwrap_or_default();
+        (groups, sub)
+    }
+
+    /// The + menu's keys: up and down go through its rows, → opens the list a row has
+    /// beside it and ← goes back, Enter takes the row, and Escape steps back, then shuts
+    /// it. Left and right move in the search while something's typed.
+    fn plus_key(&mut self, key: PlusKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut menu) = self.plus.clone() else {
+            return;
+        };
+        let (groups, sub) = self.plus_lists(&menu, cx);
+        let rows: Vec<model::PlusRow> = groups.concat();
+        let typed = !self.plus_search.read(cx).value().is_empty();
+        match key {
+            PlusKey::Shut => {
+                if menu.confirm.is_some() {
+                    menu.confirm = None;
+                } else if menu.sub_lit.is_some() {
+                    menu.sub_lit = None;
+                    menu.sub = None;
+                } else {
+                    self.shut_plus(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            PlusKey::Up | PlusKey::Down => {
+                let down = key == PlusKey::Down;
+                let step = |at: usize, n: usize| {
+                    if down {
+                        (at + 1) % n
+                    } else {
+                        (at + n - 1) % n
+                    }
+                };
+                menu.confirm = None;
+                if let Some(at) = menu.sub_lit {
+                    if !sub.is_empty() {
+                        let next = step(at, sub.len());
+                        menu.sub_lit = Some(next);
+                        self.plus_sub_scroll.scroll_to_item(next);
+                    }
+                } else if !rows.is_empty() {
+                    menu.lit = step(menu.lit.min(rows.len() - 1), rows.len());
+                    menu.sub = None;
+                    self.plus_scroll
+                        .scroll_to_item(plus_child(&groups, menu.lit));
+                }
+            }
+            PlusKey::Right => {
+                let opens = rows.get(menu.lit).and_then(model::PlusRow::opens);
+                match opens {
+                    Some(s) if !typed && menu.sub_lit.is_none() => {
+                        menu.sub = Some(s);
+                        menu.sub_lit = Some(0);
+                        self.plus_sub_scroll.scroll_to_item(0);
+                    }
+                    _ if menu.sub_lit.is_some() => {}
+                    _ => return,
+                }
+            }
+            PlusKey::Left => {
+                if menu.sub_lit.is_none() {
+                    return;
+                }
+                menu.sub_lit = None;
+                menu.sub = None;
+            }
+            PlusKey::Take => {
+                if let Some(id) = menu.confirm.clone() {
+                    self.run_from_plus(&id, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                let row = match menu.sub_lit {
+                    Some(at) => sub.get(at).cloned(),
+                    None => rows.get(menu.lit).cloned(),
+                };
+                if let Some(row) = row {
+                    self.plus = Some(menu);
+                    self.plus_pick(row, true, window, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
+        self.plus = Some(menu);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Does what a row of the + menu says. `keys` is whether the keys chose it, so a
+    /// list it opens beside the menu has them.
+    fn plus_pick(
+        &mut self,
+        row: model::PlusRow,
+        keys: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use model::{PlusRow, PlusSub};
+        match row {
+            PlusRow::Attach => {
+                self.shut_plus(window, cx);
+                self.pick_files(cx);
+            }
+            PlusRow::PasteImage => {
+                self.shut_plus(window, cx);
+                self.paste_files(cx);
+            }
+            PlusRow::Open(s) => {
+                if let Some(menu) = self.plus.as_mut() {
+                    menu.sub = Some(s);
+                    menu.sub_lit = keys.then_some(0);
+                }
+                self.plus_sub_scroll.scroll_to_item(0);
+                cx.notify();
+            }
+            PlusRow::File(f) => {
+                // Its name goes in the words where the cursor is, as an attachment's does.
+                if self.model.attach_sent(&f.file) {
+                    self.composer_edits
+                        .push((true, format!("{} ", model::file_mark(&f.file.name))));
+                }
+                self.shut_plus(window, cx);
+            }
+            PlusRow::Skill(k) => {
+                // A pill where the cursor is, as a mention is.
+                let (link, words) = model::skill_mention(&k.name);
+                self.plus = None;
+                self.composer.update(cx, |c, cx| {
+                    let at = c.cursor();
+                    if c.replace_range_with_token(at..at, InlineToken::new(link, words), window, cx)
+                        .is_ok()
+                    {
+                        c.insert(" ", window, cx);
+                    }
+                    c.focus(window, cx);
+                });
+                cx.notify();
+            }
+            PlusRow::Routine(r) => {
+                if let Some(menu) = self.plus.as_mut() {
+                    menu.confirm = Some(r.id);
+                }
+                cx.notify();
+            }
+            PlusRow::Manage(s) => {
+                self.shut_plus(window, cx);
+                self.open(
+                    if s == PlusSub::Routines {
+                        Screen::Routines
+                    } else {
+                        Screen::Skills
+                    },
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Runs a routine the + menu asked "Run now?" about, once the person says so.
+    fn run_from_plus(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let f = self.model.run_routine(id);
+        self.send(f);
+        self.shut_plus(window, cx);
+    }
+
+    /// The highlight on the + menu's lit row: a breath of the agent's colour.
+    fn plus_tint(&self) -> Hsla {
         let p = self.p;
-        let k = motion::arrive(&SharedString::from("plus-menu"), 0.16);
-        let panel = div()
+        match self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|a| self.model.agent(a))
+        {
+            Some(a) => motion::mix(p.raised, thread::color(&a.color, p.dark), 0.16),
+            None => p.hover,
+        }
+    }
+
+    /// How a row of the + menu reads: its icon, its title, and its grey line, with the
+    /// line's colour.
+    fn plus_face(&self, row: &model::PlusRow) -> (Ico, String, Option<(String, Hsla)>) {
+        use model::{PlusRow, PlusSub};
+        let p = self.p;
+        let grey = |s: String| (!s.is_empty()).then_some((s, p.ink_3));
+        match row {
+            PlusRow::Attach => (Ico::Paperclip, "Attach files".into(), None),
+            PlusRow::PasteImage => (Ico::ClipboardPaste, "Paste image".into(), None),
+            PlusRow::Open(PlusSub::Recent) => (Ico::FileClock, "Recent files".into(), None),
+            PlusRow::Open(PlusSub::Skills) => (Ico::BookOpen, "Skills".into(), None),
+            PlusRow::Open(PlusSub::Routines) => (Ico::Clock, "Routines".into(), None),
+            PlusRow::File(f) => (
+                if f.file.image() {
+                    Ico::Image
+                } else {
+                    Ico::FileText
+                },
+                f.file.name.clone(),
+                grey(line_of(f.at, chrono::Local::now())),
+            ),
+            PlusRow::Skill(k) => (
+                Ico::BookOpen,
+                k.name.clone(),
+                grey(k.description.lines().next().unwrap_or_default().to_string()),
+            ),
+            PlusRow::Routine(r) => {
+                let (line, bad) = routine_went(r);
+                let mine = self.model.selected.as_deref() == Some(r.agent.as_str());
+                let line = match self.model.agent(&r.agent) {
+                    Some(a) if !mine => format!("{} · {line}", a.name),
+                    _ => line,
+                };
+                (
+                    Ico::Clock,
+                    r.name.clone(),
+                    Some((line, if bad { p.bad } else { p.ink_3 })),
+                )
+            }
+            PlusRow::Manage(s) => {
+                let none = self.model.plus_sub(*s).len() == 1;
+                let title = match (s, none) {
+                    (_, true) => "Make one…",
+                    (PlusSub::Routines, _) => "Manage routines…",
+                    _ => "Manage skills…",
+                };
+                (Ico::Settings, title.into(), None)
+            }
+        }
+    }
+
+    /// A row of the + menu, lit or not, with its keys or a chevron on the right.
+    fn plus_row(&self, id: SharedString, row: &model::PlusRow, lit: bool) -> Stateful<Div> {
+        let p = self.p;
+        let (icon, title, line) = self.plus_face(row);
+        let keys = |k: &str| {
+            let chord = if cfg!(target_os = "macos") {
+                format!("⌘{k}")
+            } else {
+                format!("Ctrl+{k}")
+            };
+            div()
+                .flex_none()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(chord)
+                .into_any_element()
+        };
+        let right = match row {
+            model::PlusRow::Attach => Some(keys("U")),
+            model::PlusRow::PasteImage => Some(keys("V")),
+            model::PlusRow::Open(_) => Some(
+                div()
+                    .flex_none()
+                    .text_color(p.ink_3)
+                    .child(Icon::new(IconName::ChevronRight).xsmall())
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
+        div()
+            .id(id)
+            .role(Role::MenuItem)
+            .aria_label(title.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(if line.is_some() {
+                space::XS + 1.0
+            } else {
+                space::S
+            }))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .text_size(px(size::SMALL))
+            .text_color(p.ink)
+            .when(lit, |d| d.bg(self.plus_tint()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(p.ink_2)
+                    .child(Icon::new(icon).small()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(title))
+                    .when_some(line, |d, (line, color)| {
+                        d.child(
+                            div()
+                                .truncate()
+                                .text_size(px(size::CAPTION))
+                                .text_color(color)
+                                .child(line),
+                        )
+                    }),
+            )
+            .when_some(right, |d, r| d.child(r))
+    }
+
+    /// A routine's row once it's picked: "Run it now?", with Run and Cancel.
+    fn plus_confirm(&self, r: &model::Routine, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let id = r.id.clone();
+        div()
+            .id(SharedString::from(format!("plus-confirm-{}", r.id)))
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pl(px(space::M))
+            .pr(px(space::XS))
+            .py(px(space::XS))
+            .rounded(px(radius::ROW))
+            .bg(self.plus_tint())
+            .text_size(px(size::SMALL))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(p.ink)
+                    .child(format!("Run {} now?", r.name)),
+            )
+            .child(
+                self.small_button("plus-confirm-no", "Cancel", false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(menu) = this.plus.as_mut() {
+                            menu.confirm = None;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(self.small_button("plus-confirm-run", "Run", true).on_click(
+                cx.listener(move |this, _, window, cx| this.run_from_plus(&id, window, cx)),
+            ))
+    }
+
+    /// One row of the + menu, or of the list beside it, as it's drawn: lit as the
+    /// pointer or the keys reach it, and taken on a click. `sub` is its place in the list
+    /// beside the menu, or None for the menu's own.
+    fn plus_item(
+        &self,
+        menu: &PlusMenu,
+        row: &model::PlusRow,
+        at: usize,
+        sub: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let model::PlusRow::Routine(r) = row {
+            if menu.confirm.as_deref() == Some(r.id.as_str()) {
+                return self.plus_confirm(r, cx).into_any_element();
+            }
+        }
+        let lit = if sub {
+            menu.sub_lit == Some(at)
+        } else {
+            menu.lit == at
+        };
+        let id = SharedString::from(format!("plus-{}-{at}", if sub { "sub" } else { "row" }));
+        let opens = row.opens();
+        let taken = row.clone();
+        let mut el = self
+            .plus_row(id, row, lit)
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                let Some(menu) = this.plus.as_mut() else {
+                    return;
+                };
+                let (was_lit, was_sub, was_sub_lit) = (menu.lit, menu.sub, menu.sub_lit);
+                if sub {
+                    menu.sub_lit = Some(at);
+                } else {
+                    menu.lit = at;
+                    menu.sub_lit = None;
+                    menu.sub = opens;
+                }
+                if (was_lit, was_sub, was_sub_lit) != (menu.lit, menu.sub, menu.sub_lit) {
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.plus_pick(taken.clone(), false, window, cx);
+            }));
+        // A row that opens a list beside the menu says where it is, for the list.
+        if let Some(s) = opens {
+            let bounds = self.plus_bounds.clone();
+            el = el.child(
+                canvas(
+                    move |b, _, _| {
+                        bounds.borrow_mut().rows.insert(s, b);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        }
+        el.into_any_element()
+    }
+
+    /// A grey line in the + menu where a list has nothing to show.
+    fn plus_none(&self, text: String) -> Div {
+        div()
+            .px(px(space::M))
+            .py(px(space::S))
+            .text_size(px(size::SMALL))
+            .text_color(self.p.ink_3)
+            .child(text)
+    }
+
+    /// A panel of the + menu: raised, with loom's radius and shadow, and shut by a click
+    /// outside it that isn't on the other panel.
+    fn plus_panel(&self, width: f32, sub: bool, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let bounds = self.plus_bounds.clone();
+        div()
             .occlude()
-            // It rises into place as it fades in.
-            .opacity(k)
-            .mb(px(space::S - 6.0 * (1.0 - k)))
-            .w(px(layout::MENU_WIDE))
-            .max_h(px(320.0))
+            .relative()
+            .w(px(width))
             .p(px(space::XS))
             .flex()
             .flex_col()
@@ -7469,125 +7988,180 @@ ACTA_KEY=secret:ACTA_KEY",
             .border_color(p.line_strong)
             .rounded(px(radius::CARD))
             .shadow_lg()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.plus = None;
-                cx.notify();
-            }));
-        let back = |this: &Self, cx: &mut Context<Self>| {
-            this.menu_item("plus-back", Ico::ArrowLeft, "Back", false)
-                .text_color(this.p.ink_2)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.plus = Some(Plus::Main);
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        let mut kept = bounds.borrow_mut();
+                        if sub {
+                            kept.sub = Some(b);
+                        } else {
+                            kept.menu = Some(b);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let kept = this.plus_bounds.borrow();
+                let other = if sub {
+                    kept.menu
+                } else {
+                    kept.sub
+                        .filter(|_| this.plus.as_ref().is_some_and(|m| m.sub.is_some()))
+                };
+                if other.is_some_and(|b| b.contains(&e.position)) {
+                    return;
+                }
+                drop(kept);
+                if this.plus.take().is_some() {
+                    this.plus_closed_at = Some(Instant::now());
                     cx.notify();
-                }))
-        };
-        let none = |text: &'static str| {
-            div()
-                .px(px(space::M))
-                .py(px(space::S))
-                .text_size(px(size::SMALL))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        match which {
-            Plus::Main => panel
-                .child(
-                    self.menu_item("plus-attach", Ico::Paperclip, "Attach files", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.plus = None;
-                            this.pick_files(cx);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.menu_item("plus-skill", Ico::BookOpen, "Use a skill", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.load_skills();
-                            this.send(f);
-                            this.plus = Some(Plus::Skills);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.menu_item("plus-routine", Ico::Clock, "Run a routine", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.load_routines();
-                            this.send(f);
-                            this.plus = Some(Plus::Routines);
-                            cx.notify();
-                        })),
-                ),
-            Plus::Skills => {
-                let mut list = div()
-                    .id("plus-skills")
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll();
-                if self.model.skills.is_empty() {
-                    list = list.child(none("No skills yet"));
                 }
-                for s in self.model.skills.clone() {
-                    let name = s.name.clone();
-                    list = list.child(
-                        self.menu_item(
-                            format!("plus-skill-{}", s.name),
-                            Ico::BookOpen,
-                            &s.name,
-                            false,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                let text = this.composer.read(cx).value().to_string();
-                                let next = model::with_skill(&name, &text);
-                                this.composer.update(cx, |c, cx| {
-                                    c.set_value(next, window, cx);
-                                    c.focus(window, cx);
-                                });
-                                this.plus = None;
-                                cx.notify();
-                            },
-                        )),
-                    );
-                }
-                panel.child(back(self, cx)).child(list)
+            }))
+    }
+
+    /// The composer's + menu: a search over every group, what adds to the message
+    /// (attach files, paste an image, a file sent lately) and what it does (a skill, a
+    /// routine run now), a group to each part with a line between, and the list a row
+    /// opens beside it.
+    fn plus_menu(&self, menu: &PlusMenu, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let k = motion::arrive(&SharedString::from("plus-menu"), 0.16);
+        let (groups, sub_rows) = self.plus_lists(menu, cx);
+        let query = self.plus_search.read(cx).value().to_string();
+        let search = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pl(px(space::M))
+            .pr(px(space::XS))
+            .pb(px(space::XS))
+            .text_size(px(size::SMALL))
+            .child(Icon::new(IconName::Search).small().text_color(p.ink_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                        this.plus_key(PlusKey::Up, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
+                        this.plus_key(PlusKey::Down, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                        this.plus_key(PlusKey::Right, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+                        this.plus_key(PlusKey::Left, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &Enter, window, cx| {
+                        this.plus_key(PlusKey::Take, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                        this.plus_key(PlusKey::Shut, window, cx)
+                    }))
+                    .child(Input::new(&self.plus_search).appearance(false).small()),
+            );
+        let mut list = div()
+            .id("plus-list")
+            .flex()
+            .flex_col()
+            .max_h(px(PLUS_TALL))
+            .overflow_y_scroll()
+            .track_scroll(&self.plus_scroll);
+        let mut at = 0;
+        for (g, group) in groups.iter().enumerate() {
+            if g > 0 {
+                list = list.child(plus_line(p));
             }
-            Plus::Routines => {
-                let agent = self.model.selected.clone().unwrap_or_default();
-                let mine: Vec<model::Routine> = self
-                    .model
-                    .routines
-                    .iter()
-                    .filter(|r| r.agent == agent)
-                    .cloned()
-                    .collect();
-                let mut list = div()
-                    .id("plus-routines")
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll();
-                if mine.is_empty() {
-                    list = list.child(none("No routines for this agent"));
-                }
-                for r in mine {
-                    let id = r.id.clone();
-                    list = list.child(
-                        self.menu_item(
-                            format!("plus-routine-{}", r.id),
-                            Ico::Clock,
-                            &r.name,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.run_routine(&id);
-                            this.send(f);
-                            this.plus = None;
-                            cx.notify();
-                        })),
-                    );
-                }
-                panel.child(back(self, cx)).child(list)
+            for row in group {
+                list = list.child(self.plus_item(menu, row, at, false, cx));
+                at += 1;
             }
         }
+        if groups.is_empty() {
+            list = list.child(self.plus_none(format!("Nothing matches “{}”.", query.trim())));
+        }
+        let main = self
+            .plus_panel(PLUS_WIDE, false, cx)
+            // It rises into place as it fades in.
+            .opacity(k)
+            .mb(px(space::S - 6.0 * (1.0 - k)))
+            .child(search)
+            .child(plus_line(p))
+            .child(list);
+        // The list a row opens, beside that row: to its right, or its left where the
+        // window has no room.
+        let beside = menu.sub.and_then(|s| {
+            let row = self.plus_bounds.borrow().rows.get(&s).copied()?;
+            Some(self.plus_sub(menu, s, &sub_rows, row, cx))
+        });
+        div().child(main).when_some(beside, |d, b| d.child(b))
+    }
+
+    /// The list beside the + menu: its rows, scrolled when there are many, then its
+    /// settings page, or what it says when it has nothing.
+    fn plus_sub(
+        &self,
+        menu: &PlusMenu,
+        which: model::PlusSub,
+        rows: &[model::PlusRow],
+        by: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use model::{PlusRow, PlusSub};
+        let p = self.p;
+        let k = motion::arrive(&SharedString::from(format!("plus-sub-{which:?}")), 0.12);
+        let items: Vec<&PlusRow> = rows
+            .iter()
+            .filter(|r| !matches!(r, PlusRow::Manage(_)))
+            .collect();
+        let mut list = div()
+            .id("plus-sub-list")
+            .flex()
+            .flex_col()
+            .max_h(px(PLUS_TALL))
+            .overflow_y_scroll()
+            .track_scroll(&self.plus_sub_scroll);
+        for (n, row) in items.iter().enumerate() {
+            list = list.child(self.plus_item(menu, row, n, true, cx));
+        }
+        let mut panel = self.plus_panel(PLUS_SUB_WIDE, true, cx).opacity(k);
+        if items.is_empty() {
+            panel = panel.child(
+                self.plus_none(
+                    match which {
+                        PlusSub::Recent => "No files sent yet.",
+                        PlusSub::Skills => "No skills yet.",
+                        PlusSub::Routines => "No routines yet.",
+                    }
+                    .into(),
+                ),
+            );
+        } else {
+            panel = panel.child(list);
+        }
+        if let Some(n) = rows.iter().position(|r| matches!(r, PlusRow::Manage(_))) {
+            if !items.is_empty() {
+                panel = panel.child(plus_line(p));
+            }
+            panel = panel.child(self.plus_item(menu, &rows[n], n, true, cx));
+        }
+        // The menu opens above the composer, so the list grows up from its row's foot,
+        // and down from its head where there's no room above.
+        deferred(
+            anchored()
+                .attach(by, Anchor::BottomRight)
+                .anchor(Anchor::BottomLeft)
+                .offset(point(px(space::XS), px(space::XS + 1.0)))
+                .child(panel),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     /// A menu entry for one of the permission modes, ticked when it's the agent's.
@@ -8653,7 +9227,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let has_attachments = !self.model.attachments.is_empty();
         let plus_open = self.plus.is_some();
-        let plus_menu = self.plus.map(|which| self.plus_menu(which, cx));
+        let plus_menu = self.plus.clone().map(|menu| self.plus_menu(&menu, cx));
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let mut composer = Some(
@@ -8710,13 +9284,17 @@ ACTA_KEY=secret:ACTA_KEY",
                                             d.tooltip(tip("Attach, skills and routines"))
                                         })
                                         .child(Icon::new(Ico::Plus).small())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.plus = if this.plus.is_some() {
-                                                None
-                                            } else {
-                                                Some(Plus::Main)
-                                            };
-                                            cx.notify();
+                                        // A click on it shuts the menu, which the click
+                                        // outside it did a moment before.
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let just_shut = this
+                                                .plus_closed_at
+                                                .is_some_and(|t| t.elapsed() < Duration::from_millis(300));
+                                            if this.plus.is_some() {
+                                                this.shut_plus(window, cx);
+                                            } else if !just_shut {
+                                                this.open_plus(window, cx);
+                                            }
                                         })),
                                 ),
                         )
@@ -18167,9 +18745,20 @@ fn picked_text(c: &TextareaState) -> String {
 }
 
 /// A mention in the composer: an agent as its thread and its name in its colour, a file
-/// as its icon and its name.
+/// as its icon and its name, and a skill from the + menu as its book and its name.
 fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -> AnyElement {
     let row = div().flex().items_center().gap(px(3.0)).px(px(1.0));
+    // A skill picked from the + menu: its book and its name.
+    if link.starts_with("loom:skill/") {
+        return row
+            .child(Icon::new(Ico::BookOpen).xsmall().text_color(p.ink_2))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(words.to_string()),
+            )
+            .into_any_element();
+    }
     if let Some(id) = link.strip_prefix("loom:agent/") {
         let name = words.trim_start_matches('@').to_string();
         let Some(a) = agents.iter().find(|a| a.id == id) else {
@@ -19518,6 +20107,53 @@ fn hold_button(
         })
 }
 
+/// How wide the + menu is, and the list beside it, and how tall either's rows go
+/// before they scroll.
+const PLUS_WIDE: f32 = layout::MENU_WIDE + 40.0;
+const PLUS_SUB_WIDE: f32 = layout::MENU_WIDE + 60.0;
+const PLUS_TALL: f32 = 320.0;
+
+/// The line between the + menu's groups.
+fn plus_line(p: Palette) -> Div {
+    div()
+        .flex_none()
+        .h(px(1.0))
+        .mx(px(space::S))
+        .my(px(space::XS))
+        .bg(p.line)
+}
+
+/// Where the + menu's row `lit` is among its list's children: after it, a line between
+/// each group.
+fn plus_child(groups: &[Vec<model::PlusRow>], lit: usize) -> usize {
+    let mut rows = 0;
+    for (g, group) in groups.iter().enumerate() {
+        if lit < rows + group.len() {
+            return lit + g;
+        }
+        rows += group.len();
+    }
+    lit
+}
+
+/// How a routine's last run went, for the + menu: "Ran 14:05 ✓", "Failed yesterday
+/// 09:30", and whether it went wrong.
+fn routine_went(r: &model::Routine) -> (String, bool) {
+    let when = when_sent(r.last_at, chrono::Local::now());
+    let when = match when.strip_prefix("Yesterday") {
+        Some(rest) => format!("yesterday{rest}"),
+        None => when,
+    };
+    match r.last_status.as_str() {
+        "" => ("Not run yet".into(), false),
+        "running" => ("Running now".into(), false),
+        "waiting" => ("Waiting for its chat".into(), false),
+        "done" | "quiet" => (format!("Ran {when} ✓"), false),
+        "skipped" => (format!("Skipped {when}"), false),
+        _ => (format!("Failed {when}"), true),
+    }
+}
+
 /// A button's name, shown under the pointer after a moment, for buttons that are only an icon.
 fn tip(words: &'static str) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
     move |window, cx| gpui_kit::component::tooltip::Tooltip::new(words).build(window, cx)
@@ -20215,6 +20851,13 @@ impl Render for Loom {
                     cx.stop_propagation();
                 } else if chord && k.key == "f" {
                     this.find(window, cx);
+                    cx.stop_propagation();
+                } else if chord && k.key == "u" && this.screen == Screen::Chat {
+                    // Ctrl+U (Cmd on a Mac) attaches files, as the + menu says.
+                    if this.plus.is_some() {
+                        this.shut_plus(window, cx);
+                    }
+                    this.pick_files(cx);
                     cx.stop_propagation();
                 } else if let Some(i) = k
                     .key
