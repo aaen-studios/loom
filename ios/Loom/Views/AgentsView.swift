@@ -9,11 +9,43 @@ struct AgentsView: View {
     /// Whether the hidden agents show, and the folder being named.
     @State private var hiddenOpen = false
     @State private var naming: Naming?
+    /// The sheet that makes a group chat.
+    @State private var newRoom = false
 
     var body: some View {
         let model = session.model
         NavigationStack(path: $path) {
             List {
+                // The group chats first, Everyone at the top, as the core orders them.
+                if !model.rooms.isEmpty || model.agents.count >= 2 {
+                    Section {
+                        ForEach(model.rooms) { r in
+                            NavigationLink(value: "room:" + r.id) {
+                                RoomRow(room: r)
+                            }
+                            .listRowBackground(P.bg)
+                            .listRowSeparatorTint(P.line)
+                            .listRowInsets(EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l))
+                            .contextMenu {
+                                if !r.everyone {
+                                    Button("Delete group chat", systemImage: "trash", role: .destructive) {
+                                        session.send(model.deleteRoom(r.id))
+                                    }
+                                }
+                            }
+                        }
+                    } header: {
+                        HStack {
+                            GroupHead(title: "Group chats")
+                            Button {
+                                newRoom = true
+                            } label: {
+                                Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).foregroundStyle(P.ink3)
+                            }
+                            .accessibilityLabel("New group chat")
+                        }
+                    }
+                }
                 if model.sidebar.isEmpty {
                     rows(model.agents)
                 }
@@ -110,12 +142,24 @@ struct AgentsView: View {
                 }
             }
             .navigationDestination(for: String.self) { id in
-                ChatView(agentId: id)
+                if id.hasPrefix("room:") {
+                    ChatView(agentId: "", roomId: String(id.dropFirst(5)))
+                } else {
+                    ChatView(agentId: id)
+                }
             }
             .toolbarBackground(P.bg, for: .navigationBar)
         }
         .sheet(isPresented: $settings) {
             SettingsView()
+        }
+        .sheet(isPresented: $newRoom) {
+            NewRoomSheet()
+        }
+        // A group chat made here opens.
+        .onChange(of: model.room) { _, id in
+            guard let id, path.last != "room:" + id, model.makingRoom == nil else { return }
+            if path.isEmpty { path = ["room:" + id] }
         }
         .background {
             Warmup(agent: model.synced && path.isEmpty ? model.shownAgents.first?.id : nil)

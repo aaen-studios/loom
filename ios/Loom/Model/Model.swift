@@ -31,6 +31,8 @@ struct Agent: Identifiable, Equatable, Sendable {
     var hidden = false
     /// What the person told it, which the composer's @ picker shows the first line of.
     var instructions = ""
+    /// What it's for, in one line: what a group chat's router reads to pick it.
+    var forLine = ""
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
@@ -94,6 +96,8 @@ struct Conversation: Equatable, Sendable {
     /// `plugin:ID` for a plugin's panel.
     var askedBy: String?
     var title = ""
+    /// For a group chat, its room (PLAN.md, "Group chats"). Never an agent's chat.
+    var room: Room?
 
     init(id: String, agent: String, isChat: Bool = true, askedBy: String? = nil, title: String = "") {
         self.id = id
@@ -108,7 +112,8 @@ struct Conversation: Equatable, Sendable {
         agent = c["agent"].text
         askedBy = c["asked_by"].string
         title = c["title"].text
-        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil
+        room = c["room"].isNull ? nil : Room(id: id, c["room"])
+        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && room == nil
     }
 }
 
@@ -442,6 +447,8 @@ struct Message: Identifiable, Equatable, Sendable {
     var named: [NamedFile] = []
     /// For a person's message that replies to another, what it replies to.
     var reply: ReplyTo?
+    /// For a reply in a group chat, its agent and how it came to it.
+    var routed: Routed?
 
     var isPerson: Bool { role == "person" }
 
@@ -1462,6 +1469,14 @@ final class Model {
     var selected: String?
     /// Another agent's thread with the selected agent, while it's shown in its chat's place.
     private(set) var thread: String?
+    /// The group chat shown in the chat's place, by its conversation.
+    var room: String?
+    /// The group chats' order in the sidebar, as the core gives it.
+    var roomOrder: [String] = []
+    /// The room.create sent last, to show the group chat once it's made.
+    var makingRoom: String?
+    /// How each reply still being written in a group chat came to its agent, by its message.
+    var routedLive: [String: Routed] = [:]
     /// This device's id and the account's, from `welcome`.
     var me: (user: String, device: String)?
     /// Something to tell the person, once.
@@ -1531,7 +1546,7 @@ final class Model {
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
     private var queued: [Queued] = []
-    private var dirty: Set<CoreList> = []
+    var dirty: Set<CoreList> = []
     private var getting: [String: (key: String, open: Bool)] = [:]
     private var nextId = 0
 
@@ -1539,7 +1554,7 @@ final class Model {
         dirty = [.agents, .conversations, .runs, .tools, .approvals, .outbox, .devices, .sidebar]
     }
 
-    private func id(_ prefix: String) -> String {
+    func id(_ prefix: String) -> String {
         nextId += 1
         return "\(prefix)_\(nextId)"
     }
@@ -1556,7 +1571,7 @@ final class Model {
     }
 
     /// The selected agent's chat, or another agent's thread with it while that's open.
-    var conversation: String? { thread ?? conversation(of: selected) }
+    var conversation: String? { room ?? thread ?? conversation(of: selected) }
 
     /// The threads other agents (and plugins' panels) keep with `agent`, newest first.
     func asks(_ agent: String) -> [Ask] {
@@ -1585,7 +1600,7 @@ final class Model {
             if out.contains(where: { $0.id == r.message }) { continue }
             var blocks = live[r.message] ?? []
             placeTools(&blocks, tools.filter { $0.run == r.id })
-            out.append(Message(id: r.message, role: "agent", at: .max, blocks: blocks, live: true))
+            out.append(Message(id: r.message, role: "agent", at: .max, blocks: blocks, live: true, routed: routedLive[r.message]))
         }
         // A choices card says which answer the person sent, as the message after it, and
         // a card goes quiet once the chat has gone on past its reply, as
@@ -1693,8 +1708,10 @@ final class Model {
     // MARK: Taking frames from the core
 
     func select(_ agent: String?) {
-        guard selected != agent else { return }
+        // Picking an agent leaves a group chat, even for one of its members.
+        guard selected != agent || room != nil else { return }
         selected = agent
+        room = nil
         thread = nil
         messages = []
         messagesCame = false
@@ -1912,6 +1929,8 @@ final class Model {
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
         switch f["id"].text {
+        case let id where id.hasPrefix("app.room_create"):
+            if let error { notice = error; makingRoom = nil } else { roomMade(f) }
         case let id where id.hasPrefix("app.preview:"):
             // A link pasted in the composer, looked up: its preview, or its site when
             // the lookup failed.
@@ -2016,9 +2035,11 @@ final class Model {
         switch what {
         case .sidebar:
             sidebar = items.compactMap(SideSection.init)
+            // Its group chats, first, as the core orders them.
+            roomOrder = items.filter { $0["kind"].text == "rooms" }.flatMap { $0["rooms"].array.map { $0["id"].text } }
         case .agents:
             agents = listed(items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text)
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text)
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -2029,6 +2050,7 @@ final class Model {
             runs = items.map {
                 Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text, quiet: !$0["routine"].text.isEmpty)
             }
+            routedLive = Dictionary(items.compactMap { r in Routed.of(r).map { (r["message"].text, $0) } }, uniquingKeysWith: { a, _ in a })
         case .tools:
             tools = items.map {
                 Tool(call: $0["call"].text, run: $0["run"].text, title: $0["title"].text, status: $0["status"].string, block: $0["block"].int, parent: $0["parent"].string)
@@ -2052,7 +2074,7 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m))
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), routed: Routed.of(m))
             }
             reaching = false
             placeQueued()
@@ -2164,7 +2186,7 @@ final class Model {
         dirty = []
         // The sidebar groups the agents by what they are, and who's waiting by the
         // questions open in their runs.
-        if !lists.isDisjoint(with: [.agents, .runs, .approvals]) { lists.insert(.sidebar) }
+        if !lists.isDisjoint(with: [.agents, .runs, .approvals, .conversations]) { lists.insert(.sidebar) }
         if mcpStale {
             mcpStale = false
             out.append(["t": "cmd", "id": JSON(id("app.mcp_list")), "name": "mcp.list"])
@@ -2236,6 +2258,11 @@ final class Model {
         attachments = []
         dropped = []
         var frame: [String: JSON] = ["t": "send", "agent": JSON(agent), "text": JSON(text)]
+        // Into a group chat, the instance picks who answers.
+        if let room {
+            frame.removeValue(forKey: "agent")
+            frame["conversation"] = JSON(room)
+        }
         if !files.isEmpty { frame["files"] = JSON(files) }
         if let r = replyingHere {
             var reply: [String: JSON] = ["message": JSON(r.message)]
@@ -2362,7 +2389,7 @@ final class Model {
     func picks(_ query: String) -> [Pick] {
         let q = query.lowercased()
         // An empty query matches every agent, which `contains` wouldn't say.
-        let matching = agents.filter { $0.id != selected && (q.isEmpty || $0.name.lowercased().contains(q)) }
+        let matching = agents.filter { (roomOpen.map { r in r.members.contains($0.id) } ?? ($0.id != selected)) && (q.isEmpty || $0.name.lowercased().contains(q)) }
         let starting = matching.filter { $0.name.lowercased().hasPrefix(q) }
         let rest = matching.filter { !$0.name.lowercased().hasPrefix(q) }
         var out: [Pick] = (starting + rest).prefix(5).map { a in
