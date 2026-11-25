@@ -10454,6 +10454,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                                 .px(px(space::M))
                                                 .py(px(space::XS))
                                                 .rounded_full()
+                                                .border_1()
+                                                .border_color(p.line)
                                                 .bg(p.bg)
                                                 .text_size(px(size::CAPTION))
                                                 .text_color(p.ink_3)
