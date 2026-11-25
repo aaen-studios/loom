@@ -111,6 +111,16 @@ Type to find a file, skill or routine in any of them. The arrows move, → opens
 
 On an iPhone, **+** opens a sheet with the same lists, and your newest photos in a row at the top.
 
+## Emoji
+
+Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
+
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. Shift+click takes one and keeps the picker open. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+
+A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
+
+Your own emoji are pictures you add in **Settings → Emoji**. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
+
 ## How an agent uses its tools
 
 Agents use their tools by writing small scripts, in Code Mode. Instead of being given every tool up front, an agent looks up the tools it needs and writes a script that calls them, so its context stays small. Only what the script gives back reaches the agent: it can read a whole document and pass on three lines.
