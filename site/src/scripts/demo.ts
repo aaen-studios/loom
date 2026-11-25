@@ -1,7 +1,9 @@
 // Plays the live copy of the app (src/components/AppDemo.astro) in a loop: the earlier answer's
 // Reply, by its corner on hover, puts it over the composer's words, and the message that goes
 // has its quote over its bubble, which goes back to the answer and lights it (desktop/src/app.rs,
-// reply_bar, quote_view, jump_to); a message's Reply, or words selected in one with the bar
+// reply_bar, quote_view, jump_to), while the reply comes: the round button at the bottom of the
+// chat counts it in the agent's colour and takes the chat back down (app.rs, jump_button); a
+// message's Reply, or words selected in one with the bar
 // that comes over them (Copy, Quote, Ask about this), does the same by hand. A message is typed,
 // with a link pasted and a file attached among its words, each a piece in them, the file with its
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
@@ -130,18 +132,44 @@ export function play(app: HTMLElement) {
 	for (const b of msgs.querySelectorAll<HTMLButtonElement>('.reply-btn')) {
 		b.addEventListener('click', () => replyTo(b.closest<HTMLElement>('.row')!));
 	}
-	/** Goes to the original a quote names: the chat moves to show it, lit, then back. */
+	// While the chat isn't at its bottom, a button goes down to the newest, with how many
+	// messages came meanwhile, not the person's, at its corner (app.rs, jump_button).
+	const jumpBtn = app.querySelector<HTMLButtonElement>('[data-jump]')!;
+	const jumpCount = jumpBtn.querySelector<HTMLElement>('.jump-count')!;
+	let came = 0;
+	let back: ReturnType<typeof setTimeout> | undefined;
+	const counted = () => {
+		jumpCount.textContent = String(came);
+		jumpCount.hidden = came === 0;
+	};
+	new MutationObserver((changes) => {
+		if (jumpBtn.hidden) return;
+		for (const c of changes) for (const n of c.addedNodes) if (n instanceof HTMLElement && n.classList.contains('reply')) came++;
+		counted();
+	}).observe(msgs, { childList: true });
+	/** Back to the bottom: the chat as it was, and the button gone. */
+	const toBottom = () => {
+		clearTimeout(back);
+		msgs.style.transform = '';
+		jumpBtn.hidden = true;
+		setTimeout(() => msgs.classList.remove('jumping'), 400);
+	};
+	jumpBtn.addEventListener('click', toBottom);
+	/** Goes to the original a quote names: the chat moves to show it, lit, and stays there
+	 * until the jump button takes it back down, or a few seconds pass. */
 	const jump = (row: HTMLElement) => {
 		const chat = app.querySelector<HTMLElement>('.chat')!;
 		const by = chat.getBoundingClientRect().top + 24 - row.getBoundingClientRect().top;
 		msgs.classList.add('jumping');
-		if (by > 0) msgs.style.transform = `translateY(${by}px)`;
 		row.classList.add('lit');
-		setTimeout(() => {
-			row.classList.remove('lit');
-			msgs.style.transform = '';
-			setTimeout(() => msgs.classList.remove('jumping'), 400);
-		}, 1800);
+		setTimeout(() => row.classList.remove('lit'), 1800);
+		if (by <= 0) return;
+		msgs.style.transform = `translateY(${by}px)`;
+		came = 0;
+		counted();
+		jumpBtn.hidden = false;
+		clearTimeout(back);
+		back = setTimeout(toBottom, 6000);
 	};
 	// Words selected in a message have a small bar where the selection ended.
 	let picked: HTMLElement | null = null;
@@ -499,7 +527,11 @@ export function play(app: HTMLElement) {
 		const to = replying;
 		cleared();
 		msgs.append(sent(true, to));
-		await wait(250, id);
+		await wait(450, id);
+		// Its quote goes back to the answer, and the reply comes while the chat is there: the
+		// jump button counts it, and takes the chat back down.
+		if (to) jump(to.row);
+		await wait(500, id);
 
 		const reply = tpl('demo-reply');
 		msgs.append(reply);
@@ -510,6 +542,7 @@ export function play(app: HTMLElement) {
 		preview('Juniper', 'Thinking', 'thinking');
 		say('Thinking…');
 		await wait(1700, id);
+		toBottom();
 
 		mood('tool', replyThread);
 		preview('Juniper', TOOL, 'tool');
@@ -574,6 +607,7 @@ export function play(app: HTMLElement) {
 	/** The finished chat, still, for reduced motion. */
 	function still() {
 		run++;
+		toBottom();
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
 		quotes.clear();
 		undelete();
