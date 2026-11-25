@@ -1,24 +1,26 @@
-//! Middle-click scrolling in the chat, as a browser has it. The middle button sets a
-//! marker where it's pressed, and the chat then scrolls each frame, faster the further the
-//! pointer is above or below it. Released after a drag, it stops; released where it was
-//! pressed, it stays on until the next click, key or wheel.
+//! Middle-click scrolling, as Chrome and Edge have it. The middle button sets a marker
+//! where it's pressed, and what's under the marker (the chat, the sidebar, a box of
+//! details) then scrolls each frame, faster the further the pointer is above or below it.
+//! The cursor shows which way. Moved out of the dead zone with the button held, it stops
+//! on release; released in the dead zone, it stays on until the next click, key or wheel.
+//!
+//! The speed is Chromium's (`autoscroll_controller.cc`, `fixed_velocity_curve.cc`):
+//! nothing within `DEAD` of the marker, then `RATE × distance ^ POWER` pixels a second,
+//! with the distance the whole of it, not only the part past the dead zone.
 
 use std::time::{Duration, Instant};
 
 use gpui_kit::*;
 
-/// How far from the marker, up or down, the pointer can be with nothing scrolling.
-pub const DEAD: f32 = 10.0;
+/// How far from the marker, up or down, the pointer can be with nothing scrolling: as far
+/// as the button can move, held, with letting go still a click.
+pub const DEAD: f32 = 15.0;
 
-/// Pixels a second for each pixel past `DEAD`.
-const RATE: f32 = 8.0;
+/// Pixels a second for the pointer 1 px from the marker, before the power.
+const RATE: f32 = 0.04;
 
-/// The fastest it scrolls, in pixels a second.
-const MOST: f32 = 4000.0;
-
-/// How far the pointer moves with the button held before letting go counts as the end of
-/// a drag, not a click.
-const SLOP: f32 = 6.0;
+/// How steeply the speed grows with the distance.
+const POWER: f32 = 2.2;
 
 /// The longest a frame counts as: a frame that comes late doesn't jump the chat.
 const LONGEST: Duration = Duration::from_millis(50);
@@ -30,11 +32,20 @@ const STALL: Duration = Duration::from_millis(250);
 /// How fast it scrolls for the pointer `dy` below the marker (above when negative), in
 /// pixels a second: down for a positive speed.
 pub fn speed(dy: f32) -> f32 {
-    let past = dy.abs() - DEAD;
-    if past <= 0.0 {
+    if dy.abs() <= DEAD {
         return 0.0;
     }
-    dy.signum() * (past * RATE).min(MOST)
+    dy.signum() * RATE * dy.abs().powf(POWER)
+}
+
+/// The cursor for the pointer `dy` below the marker: at rest in the dead zone, and
+/// otherwise the way it scrolls.
+pub fn cursor(dy: f32) -> PanCursor {
+    match speed(dy) {
+        s if s < 0.0 => PanCursor::Up,
+        s if s > 0.0 => PanCursor::Down,
+        _ => PanCursor::UpDown,
+    }
 }
 
 /// The middle button's scrolling.
@@ -45,7 +56,7 @@ pub struct Auto {
     /// Where the pointer is.
     pointer: Point<Pixels>,
     /// Whether the middle button is still down from the press that set the marker, and
-    /// whether the pointer has moved since then.
+    /// whether the pointer has left the dead zone since then.
     held: bool,
     dragged: bool,
     /// Whether steps are being played, and when the last was.
@@ -67,6 +78,11 @@ impl Auto {
         self.at.is_some() && self.held
     }
 
+    /// The cursor it shows, while it's on.
+    pub fn cursor(&self) -> Option<PanCursor> {
+        self.at.map(|at| cursor((self.pointer.y - at.y).as_f32()))
+    }
+
     /// The middle button went down at `at`: the marker goes there.
     pub fn press(&mut self, at: Point<Pixels>) {
         *self = Self {
@@ -78,12 +94,13 @@ impl Auto {
         };
     }
 
-    /// The pointer moved to `to`.
+    /// The pointer moved to `to`. Out of the dead zone with the button held, letting go
+    /// stops it.
     pub fn moved(&mut self, to: Point<Pixels>) {
         self.pointer = to;
         if let Some(at) = self.at.filter(|_| self.held) {
             let (dx, dy) = ((to.x - at.x).as_f32(), (to.y - at.y).as_f32());
-            if dx.hypot(dy) > SLOP {
+            if dx.abs() > DEAD || dy.abs() > DEAD {
                 self.dragged = true;
             }
         }
@@ -145,27 +162,45 @@ impl Auto {
 
 #[cfg(test)]
 mod tests {
-    use super::{speed, Auto, DEAD, MOST, STALL};
-    use gpui_kit::{point, px};
+    use super::{cursor, speed, Auto, DEAD, STALL};
+    use gpui_kit::{point, px, PanCursor};
     use std::time::{Duration, Instant};
 
     #[test]
-    fn the_speed_grows_with_the_distance_past_a_dead_zone() {
+    fn the_speed_is_chromes() {
         assert_eq!(speed(0.0), 0.0);
         assert_eq!(speed(DEAD), 0.0);
         assert_eq!(speed(-DEAD), 0.0);
-        let (near, far) = (speed(30.0), speed(120.0));
-        assert!(
-            near > 0.0 && far > near,
-            "down, and faster further: {near} {far}"
-        );
-        assert!(
-            (far / near - (120.0 - DEAD) / (30.0 - DEAD)).abs() < 0.001,
-            "in proportion"
-        );
-        assert_eq!(speed(-30.0), -near, "up the same");
-        assert_eq!(speed(100_000.0), MOST, "to a most");
-        assert_eq!(speed(-100_000.0), -MOST);
+        // Chromium's own numbers, in pixels a second: 0.04 × distance ^ 2.2.
+        for (dy, want) in [
+            (16.0, 17.83),
+            (30.0, 71.08),
+            (100.0, 1004.8),
+            (200.0, 4617.0),
+        ] {
+            let got = speed(dy);
+            assert!(
+                (got / want - 1.0).abs() < 0.01,
+                "{dy} px: {got}, not {want}"
+            );
+            assert_eq!(speed(-dy), -got, "up the same");
+        }
+        let (near, far) = (speed(50.0), speed(100.0));
+        assert!(far > near * 4.0, "it grows faster than the distance");
+    }
+
+    #[test]
+    fn the_cursor_shows_the_way_it_scrolls() {
+        assert_eq!(cursor(0.0), PanCursor::UpDown);
+        assert_eq!(cursor(DEAD), PanCursor::UpDown);
+        assert_eq!(cursor(-DEAD - 1.0), PanCursor::Up);
+        assert_eq!(cursor(DEAD + 1.0), PanCursor::Down);
+        let mut a = Auto::default();
+        assert_eq!(a.cursor(), None, "none while it's off");
+        a.press(point(px(100.0), px(100.0)));
+        assert_eq!(a.cursor(), Some(PanCursor::UpDown));
+        a.moved(point(px(100.0), px(40.0)));
+        assert_eq!(a.cursor(), Some(PanCursor::Up));
     }
 
     #[test]
@@ -173,15 +208,19 @@ mod tests {
         let at = point(px(100.0), px(100.0));
         let mut a = Auto::default();
         a.press(at);
-        a.moved(point(px(102.0), px(101.0)));
-        assert!(a.release(), "a click without moving leaves it on");
+        a.moved(point(px(110.0), px(112.0)));
+        assert!(a.release(), "let go in the dead zone, it stays on");
         a.moved(point(px(100.0), px(300.0)));
         assert_eq!(a.at(), Some(at), "moving after it doesn't make it a drag");
 
         a.press(at);
         a.moved(point(px(100.0), px(160.0)));
+        a.moved(point(px(100.0), px(100.0)));
         assert!(a.held());
-        assert!(!a.release(), "let go after a drag, it stops");
+        assert!(
+            !a.release(),
+            "out of the dead zone held, it stops on release, wherever that is"
+        );
         assert_eq!(a.at(), None);
     }
 
