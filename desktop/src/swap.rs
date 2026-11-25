@@ -29,6 +29,18 @@ pub fn put_back(target: &Path, new: &Path, aside: &Path) -> io::Result<()> {
     std::fs::rename(aside, target)
 }
 
+/// Keeps the release that didn't start once it went in, `version`, and why, in the
+/// core's folder for updates (`data/update/failed.json`, core/update.calx), so the old
+/// loom, started again, doesn't put it in again on its own.
+pub fn keep_failed(data: &Path, version: &str, why: &str) -> io::Result<()> {
+    let dir = data.join("update");
+    std::fs::create_dir_all(&dir)?;
+    let text = serde_json::json!({"version": version, "why": why}).to_string();
+    let part = dir.join("failed.json.part");
+    std::fs::write(&part, text)?;
+    std::fs::rename(part, dir.join("failed.json"))
+}
+
 #[cfg(target_os = "macos")]
 pub use mac::{hand_over, run, stage};
 
@@ -226,6 +238,10 @@ mod mac {
             return 0;
         };
         log(&format!("loom {version} {why}, so the old loom goes back"));
+        let data = crate::app::data_dir();
+        if let Err(e) = super::keep_failed(Path::new(&data), version, &why) {
+            log(&format!("can't keep that loom {version} didn't start: {e}"));
+        }
         match super::put_back(&target, &new, &aside) {
             Ok(()) => {
                 let _ = start(&target, background);
@@ -273,6 +289,19 @@ mod tests {
         assert!(super::swap_in(&target, &new, &aside).is_err());
         assert_eq!(version(&target), "0.2.5");
         assert!(!aside.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The release that didn't start is kept where the core looks for it.
+    #[test]
+    fn keeps_the_release_that_didnt_start() {
+        let dir = std::env::temp_dir().join(format!("loom-failed-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        super::keep_failed(&dir, "0.2.7", "ended at once, \"exit status: 3\"").unwrap();
+        let text = std::fs::read_to_string(dir.join("update/failed.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["version"], "0.2.7");
+        assert_eq!(v["why"], "ended at once, \"exit status: 3\"");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

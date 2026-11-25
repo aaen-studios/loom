@@ -8,7 +8,7 @@ module tests.protocol.endless
 //     calx tests/protocol/endless.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check}
 
@@ -51,9 +51,50 @@ fn run(i: Instance) ! Error {
     _ = try say(mut app, chat.copy(), "m_8", String("/usage 900 1000\n/compacted 100 1000\nfull, then compacted"))
     let compacted = try say(mut app, chat.copy(), "m_9", String("/session"))
     try check(compacted.starts_with(fresh[..first.len()].copy()), "a session compacted after its turn keeps going")
-    let listed = try app.cmd("q_3", "messages.list", Obj.new().s("conversation", chat).done())
+    // A compaction during a turn is a line in the chat, not a step of the reply.
+    let during = try say(mut app, chat.copy(), "m_10", String("/compact 700 50 1000\nstill here"))
+    try check(during.contains("still here"), "a turn that compacts goes on")
+    let listed = try app.cmd("q_3", "messages.list", Obj.new().s("conversation", chat.copy()).done())
     try check("{listed}".contains("The password hint is kiwi."), "the chat itself is one conversation, with everything in it")
+    try check(not "{listed}".contains("Compact conversation"), "a compaction isn't a call in the reply")
+
+    // The lines are kept with the chat: where a fresh session started, and
+    // where the context was compacted, with its tokens before and after.
+    var lines = List<String>()
+    if let Json.Array(items) = at(at(listed, "value"), "messages") {
+        for m in items {
+            if str_at(m.copy(), "role") != some(String("loom")) { continue }
+            lines.push("{at(m, "blocks")}")
+        }
+    }
+    if lines.len() != 3 { fail "three lines in the chat, not {lines.len()}: {lines}" }
+    try check(true, "three lines in the chat")
+    try check(lines[0].contains(#""mark":"fresh""#), "a fresh session starts where the last one was nearly full")
+    try check(lines[1].contains(#""mark":"compacted""#) and lines[1].contains(#""before":900"#) and lines[1].contains(#""after":100"#), "an idle compaction, from 900 to 100")
+    try check(lines[2].contains(#""before":700"#) and lines[2].contains(#""after":50"#), "a compaction in a turn, from 700 to 50")
+
+    // How full the context is goes to the apps with the conversation: from 0
+    // in a fresh session, and small again after a compaction.
+    var told = List<String>()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") != some(String("conversation.updated")) { continue }
+        let changed = at(f, "conversation")
+        if str_at(changed.copy(), "id") != some(chat.copy()) { continue }
+        let x = at(changed, "context")
+        told.push("{int_at(x.copy(), "used") ?? -1}/{int_at(x, "size") ?? -1}")
+    }
+    try check(told.len() > 0 and told[0] == "500/1000", "the context goes to the apps once the program says it")
+    try check(told.contains(String("0/1000")) and told.contains(String("100/1000")) and told[told.len() - 1] == "50/1000", "from nothing in a fresh session, and small after a compaction")
     app.close()
+
+    // A device that connects later has it with the conversation.
+    let later = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var seen = String()
+    for f in later.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) { seen = "{at(at(f, "conversation"), "context")}" }
+    }
+    try check(seen.contains(#""used":50"#), "a device that connects later has it")
+    later.close()
 }
 
 fn main() ! Error {
