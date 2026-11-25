@@ -311,7 +311,11 @@ export function play(app: HTMLElement) {
 	const roomMsgs = app.querySelector<HTMLElement>('.msgs.room')!;
 	const roomHistory = [...roomMsgs.children];
 	const inRoom = (on: boolean) => {
-		if (on) app.classList.remove('in-thread');
+		if (on) {
+			app.classList.remove('in-thread');
+			// Juniper's pins aren't the group chat's.
+			if (!pop.hidden) showPins(false);
+		}
 		app.classList.toggle('in-room', on);
 	};
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => inRoom(true));
