@@ -517,7 +517,7 @@ export function play(app: HTMLElement) {
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
 		cleared();
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
-		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), ask: false });
+		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), part: false, ask: false });
 		const reply = tpl('demo-reply');
 		reply.classList.remove('fresh');
 		const { steps, say } = foldOf(reply);
