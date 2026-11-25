@@ -255,6 +255,7 @@ struct Run {
     files: List<Json>    // the files sent with the prompt
     session: String    // the ACP session, once there is one
     blocks: List<Block>
+    ending: List<Block>    // cards that go after all its blocks once it's finished: questions (show_card's place end)
     tools: LinkedMap<String, String>    // ACP toolCallId -> tc_ id
     denied: List<String>
     from: String    // where the person is writing from, as the agent is told it
@@ -7272,31 +7273,38 @@ impl Instance {
         return tool_text("It's in the chat, as {title}, after what you've said so far. Your person opens it there.")
     }
 
-    // show_card (PLAN.md, "Cards in the chat"): a card goes in the reply after
-    // what the agent has said so far, or, given the id of one it showed earlier
-    // in the same reply, takes that one's place. The apps get each change at
-    // once, as a `card` frame, and the finished reply keeps the last of it.
+    // show_card (PLAN.md, "Cards in the chat"): a card goes in the reply where
+    // its `place` says, or, given the id of one it showed earlier in the same
+    // reply, takes that one's place, wherever that is. One `here` goes after
+    // what the agent has said so far, and the apps get each change at once, as
+    // a `card` frame. One at the `end`, a question's, waits for the reply to
+    // finish and goes after all its words, so the person reads them first. The
+    // finished reply keeps the last of each.
     fn show_card(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
         let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's nowhere to show it.")) }
         let asked = (str_at(args.copy(), "id") ?? String()).trim().copy()
-        let (shown, failed) = i.put_card(run_id, args)
+        let (shown, at_end, failed) = i.put_card(run_id, args)
         if failed.len() > 0 { return tool_error(failed) }
         if asked.len() > 0 { return tool_text("Changed {shown} in the chat.") }
+        if at_end { return tool_text("It goes at the end of your reply, as {shown}, after all you say, and shows once you've finished. To change it before then, call show_card again with id {shown} and the whole card as it is now.") }
         return tool_text("It's in the chat, as {shown}, after what you've said so far. To change it as things move along, call show_card again with id {shown} and the whole card as it is now.")
     }
 
-    // Puts the card `args` describes in the run `run_id`'s reply, after what's
-    // there so far, or in place of the card with `args`'s id. Its id, or why
-    // it couldn't.
-    fn put_card(i: mut Instance, run_id: String, args: Json) -> (String, String) {
+    // Puts the card `args` describes in the run `run_id`'s reply, as show_card
+    // says: its id, whether it waits for the reply's end, or why it couldn't.
+    fn put_card(i: mut Instance, run_id: String, args: Json) -> (String, bool, String) {
         let asked = (str_at(args.copy(), "id") ?? String()).trim().copy()
         var failed = String()
         var frame = Json.Null
         var user = String()
         var shown = String()
+        var at_end = false
         if let r = mut i.runs.find(run_id) {
+            // Where the card with its id is: among the blocks, or among those
+            // waiting for the end.
             var place = r.blocks.len()
+            var waiting = r.ending.len()
             var count: usize = 0
             var k: usize = 0
             for b in r.blocks {
@@ -7306,13 +7314,33 @@ impl Instance {
                 }
                 k += 1
             }
-            if asked.len() > 0 and place == r.blocks.len() {
+            k = 0
+            for b in r.ending {
+                count += 1
+                if asked.len() > 0 and str_at(b.card.copy(), "id") == some(asked.copy()) { waiting = k }
+                k += 1
+            }
+            let (wanted, bad_place) = cards.place_of(args.copy())
+            if asked.len() > 0 and place == r.blocks.len() and waiting == r.ending.len() {
                 failed = "There's no card {asked} in this reply. Leave id out to show a new one."
+            } else if asked.len() == 0 and bad_place.len() > 0 {
+                failed = bad_place
             } else {
                 let id = if asked.len() > 0 { asked.copy() } else { "card_{count + 1}" }
                 let (card, why) = cards.card_of(args, id.copy())
                 if why.len() > 0 {
                     failed = why
+                } else if waiting < r.ending.len() {
+                    // Changed by its id, it stays where it is: at the end.
+                    r.ending[waiting].card = card
+                    at_end = true
+                    shown = id
+                } else if asked.len() == 0 and wanted == "end" {
+                    var b = new_block("card")
+                    b.card = card
+                    r.ending.push(b)
+                    at_end = true
+                    shown = id
                 } else {
                     if place == r.blocks.len() {
                         var b = new_block("card")
@@ -7327,10 +7355,10 @@ impl Instance {
                 }
             }
         }
-        if failed.len() > 0 { return (String(), failed) }
-        if shown.len() == 0 { return (String(), String("The reply ended before the card could go in it.")) }
-        i.publish(user, frame)
-        return (shown, String())
+        if failed.len() > 0 { return (String(), false, failed) }
+        if shown.len() == 0 { return (String(), false, String("The reply ended before the card could go in it.")) }
+        if not at_end { i.publish(user, frame) }
+        return (shown, at_end, String())
     }
 
     // Puts `card`, made by loom, in the run `run_id`'s reply: in place of the
@@ -8531,7 +8559,7 @@ impl Instance {
     fn send(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
         let cid = str_at(f.copy(), "cid") ?? String()
         let conversation_id = str_at(f.copy(), "conversation") ?? String()
-        let text = str_at(f.copy(), "text") ?? String()
+        var text = str_at(f.copy(), "text") ?? String()
         if cid.len() == 0 {
             _ = i.server.send_text(s, error_frame("bad_frame", String("A send needs a cid."), none))
             return
@@ -8556,6 +8584,18 @@ impl Instance {
                 sent_files.push(file)
             }
         }
+        // A form's answers (PLAN.md, "Cards in the chat"): checked against its
+        // card, which keeps them, and said in the message's own words.
+        var form = Json.Null
+        if at(f.copy(), "form") != Json.Null {
+            let (said, kept, why) = try i.answer_form(user.copy(), conversation_id.copy(), at(f.copy(), "form"))
+            if why.len() > 0 {
+                _ = i.server.send_text(s, error_frame("bad_form", why, some(cid)))
+                return
+            }
+            text = said
+            form = kept
+        }
         if text.len() == 0 and sent_files.len() == 0 {
             _ = i.server.send_text(s, error_frame("bad_frame", String("A send needs text or files."), some(cid)))
             return
@@ -8568,7 +8608,9 @@ impl Instance {
         if let running = i.answering(user.copy(), conversation_id.copy()) {
             let agent = try i.store.agent(user.copy(), str_at(conversation.copy(), "agent") ?? String()) ?? Json.Null
             let steer = defaults.busy_of(agent, try i.store.defaults(user.copy())) == "steer"
-            let item = Obj.new().s("id", message_id.copy()).s("text", text).j("files", Json.Array(sent_files)).s("from", device.copy()).i("at", now()).done()
+            var queued = Obj.new().s("id", message_id.copy()).s("text", text).j("files", Json.Array(sent_files)).s("from", device.copy()).i("at", now())
+            if form != Json.Null { queued = queued.j("form", form.copy()) }
+            let item = queued.done()
             try i.store.put_queued(user.copy(), conversation_id.copy(), if steer { merge(item, Obj.new().b("steered", true).done()) } else { item }, steer)
             try i.store.remember_sent(device, cid.copy(), message_id.copy(), String())
             var ack = Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).b("queued", true)
@@ -8581,7 +8623,49 @@ impl Instance {
         let run_id = try i.store.new_id("run")
         try i.store.remember_sent(device.copy(), cid.copy(), message_id.copy(), run_id.copy())
         _ = i.server.send_text(s, "{Obj.new().s("t", String("ack")).s("cid", cid).s("message", message_id.copy()).s("run", run_id.copy()).done()}")
-        try i.person_says(user, conversation, device, message_id, run_id, text, sent_files, false)
+        try i.person_says(user, conversation, device, message_id, run_id, text, sent_files, form, false)
+    }
+
+    // A form's answers, sent with a person's message (`form`: the reply's
+    // `message`, its `card` and the `answers`, by each field's label), checked
+    // against the card (`cards.form_answer`). The card then keeps them, so every
+    // device draws it sent, with what was sent. The words the person's message
+    // says them in and what it keeps of them (`message`, `card`, `answers`), or
+    // why they can't be.
+    fn answer_form(i: Instance, user: String, conversation: String, form: Json) -> (String, Json, String) ! Error {
+        let message_id = str_at(form.copy(), "message") ?? String()
+        let card_id = str_at(form.copy(), "card") ?? String()
+        let m = try i.store.message(user.copy(), message_id.copy()) else return (String(), Json.Null, String("That form's reply isn't there, or isn't finished yet."))
+        if str_at(m.copy(), "conversation") != some(conversation.copy()) { return (String(), Json.Null, String("That form is in another chat.")) }
+        var blocks = List<Json>()
+        var found = false
+        var said = String()
+        var answers = Json.Null
+        var why = String()
+        if let Json.Array(bs) = at(m.copy(), "blocks") {
+            for b in bs {
+                let card = at(b.copy(), "card")
+                if not found and str_at(b.copy(), "kind") == some(String("card")) and str_at(card.copy(), "id") == some(card_id.copy()) {
+                    found = true
+                    let (given, words, w) = cards.form_answer(card.copy(), at(form.copy(), "answers"))
+                    if w.len() > 0 {
+                        why = w
+                    } else {
+                        blocks.push(merge(b.copy(), Obj.new().j("card", cards.form_answered(card, given.copy())).done()))
+                        answers = given
+                        said = words
+                        continue
+                    }
+                }
+                blocks.push(b.copy())
+            }
+        }
+        if not found { return (String(), Json.Null, "There's no form {card_id} in that reply.") }
+        if why.len() > 0 { return (String(), Json.Null, why) }
+        let changed = merge(m, Obj.new().j("blocks", Json.Array(blocks)).done())
+        try i.store.put_message(user.copy(), changed.copy())
+        try i.event(user, "message.updated", Obj.new().s("conversation", conversation).j("message", changed).done())
+        return (said, Obj.new().s("message", message_id).s("card", card_id).j("answers", answers).done(), String())
     }
 
     // The run answering in a conversation, if one is.
@@ -8593,8 +8677,9 @@ impl Instance {
     }
 
     // A person's message goes into the chat, and its agent's run starts. A
-    // steered one tells the agent it was stopped for it.
-    fn person_says(i: mut Instance, user: String, conversation: Json, device: String, message_id: String, run_id: String, text: String, sent_files: List<Json>, steered: bool) ! Error {
+    // steered one tells the agent it was stopped for it, and one that answers a
+    // form (`form`, or null) gives it the answers as JSON.
+    fn person_says(i: mut Instance, user: String, conversation: Json, device: String, message_id: String, run_id: String, text: String, sent_files: List<Json>, form: Json, steered: bool) ! Error {
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         var blocks = List<Json>()
         if text.len() > 0 {
@@ -8603,11 +8688,17 @@ impl Instance {
         for file in sent_files {
             blocks.push(merge(Obj.new().s("kind", String("file")).done(), file.copy()))
         }
-        let message = try i.with_links(user.copy(), Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", Json.Array(blocks)).done())
+        var kept = Obj.new().s("id", message_id.copy()).s("conversation", conversation_id.copy()).s("role", String("person")).s("from", device.copy()).i("at", now()).j("blocks", Json.Array(blocks))
+        if form != Json.Null { kept = kept.j("form", form.copy()) }
+        let message = try i.with_links(user.copy(), kept.done())
         try i.store.put_message(user.copy(), message.copy())
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let from = try i.writing_from(user.copy(), device)
         var note = if steered { String("[loom: Your person stopped you to say this. Carry on from where you were, with it in mind.]") } else { String() }
+        if form != Json.Null {
+            let answered = "[loom: This message is your person's answer to your form {str_at(form.copy(), "card") ?? String()}, by each field's label: {at(form, "answers")}]"
+            note = if note.len() > 0 { "{note}\n{answered}" } else { answered }
+        }
         // What it mentions, as the agent reads it (PLAN.md, "Mentions").
         let (said, mentioned) = mentions_in(text.copy())
         let told = try i.mentions_told(user.copy(), str_at(conversation.copy(), "agent") ?? String(), mentioned)
@@ -8772,7 +8863,7 @@ impl Instance {
         var attached = List<Json>()
         if let Json.Array(f) = at(first.copy(), "files") { attached = f }
         let run_id = try i.store.new_id("run")
-        try i.person_says(user, conversation, str_at(first.copy(), "from") ?? String(), id, run_id, str_at(first, "text") ?? String(), attached, steered)
+        try i.person_says(user, conversation, str_at(first.copy(), "from") ?? String(), id, run_id, str_at(first.copy(), "text") ?? String(), attached, at(first, "form"), steered)
     }
 
     // queue.list, queue.edit, queue.order, queue.drop and queue.steer.
@@ -8868,7 +8959,7 @@ impl Instance {
         // Where its events begin, so its calls are found when it ends.
         let since = try i.store.last_seq(user.copy())
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).maybe("routine", quiet_for).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since, started: now() })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since, started: now() })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
@@ -10095,7 +10186,9 @@ impl Instance {
         let run = run_id.copy()
         let title = acp.tool_title(tool_call.copy())
         // The person's rules on what it touches come first: deny, then ask, then allow.
-        let v = try i.judge(user.copy(), p.agent.copy(), run.copy(), rules.of_tool_call(tool_call.copy(), kind.copy(), i.agent_folder(user.copy(), agent)))
+        let touched = rules.of_tool_call(tool_call.copy(), kind.copy(), i.agent_folder(user.copy(), agent))
+        let risky = rules.risky(kind.copy(), touched.command.copy() ?? String(), Json.Null)
+        let v = try i.judge(user.copy(), p.agent.copy(), run.copy(), touched)
         if v.then == "deny" {
             let option = acp.pick_option(options, false, false) ?? String("reject_once")
             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("selected")).s("optionId", option).done()).done())))
@@ -10121,7 +10214,7 @@ impl Instance {
         // A yes for always would let the program stop asking, past the rule that asked.
         let can_always = v.then != "ask" and acp.pick_option(options.copy(), true, true) != acp.pick_option(options.copy(), true, false)
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run.copy(), agent: p.agent.copy(), rpc: rpc.copy(), options: options, title: title.copy(), action: Json.Null, proc: p.key.copy(), always: String() })
-        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", title).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always).maybe("rule", str_at(v.rule, "id")).done())
+        try i.event(user, "approval.needed", Obj.new().s("run", run).s("call", call).s("tool", kind).s("title", title).j("detail", cut_input(at(tool_call, "rawInput"))).b("can_always", can_always and not risky).b("risky", risky).maybe("rule", str_at(v.rule, "id")).done())
     }
 
     fn approve(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
@@ -10325,7 +10418,7 @@ impl Instance {
         }
         var args = Obj.new().s("type", String("checklist")).s("title", "loom on {host}").j("items", Json.Array(items))
         if id.len() > 0 { args = args.s("id", id) }
-        let (shown, why) = i.put_card(run_id, args.done())
+        let (shown, _, why) = i.put_card(run_id, args.done())
         if why.len() > 0 { fail why }
         return shown
     }
@@ -10780,7 +10873,9 @@ impl Instance {
         try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy(), proc: String(), always: tool.copy() })
         i.hold_call(call.copy(), req.copy())
-        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", tool.len() > 0).done())
+        // A risky one is allowed by holding Allow, not a click (PLAN.md, "Permissions").
+        let risky = rules.risky(String(kind), str_at(at(action.copy(), "args"), "command") ?? String(), action.copy())
+        try i.event(g.user, "approval.needed", Obj.new().s("run", run_id).s("call", call).s("tool", String(kind)).s("title", title).j("detail", cut_input(at(action, "args"))).b("can_always", tool.len() > 0).b("risky", risky).done())
         return none
     }
 
@@ -10960,6 +11055,10 @@ impl Instance {
             // Files its answer names that it made this turn go in the reply, as
             // attach_files would put them there (PLAN.md, "Files and images").
             for f in try i.answer_files(r.copy(), blocks.copy(), said.copy()) { blocks.push(f.copy()) }
+            // Its questions go after all of it, whenever the agent made them.
+            for b in r.ending {
+                blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", b.card.copy()).done())
+            }
             var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks.copy()))
             if sources.len() > 0 { o = o.j("sources", Json.Array(sources)) }
             // Files it names that are there, for the app to show where they're named,

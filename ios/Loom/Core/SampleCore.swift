@@ -430,12 +430,13 @@ enum Sample {
             ["id": "msg_21", "conversation": "c_3", "role": "agent", "agent": "a_3", "routine": "rt_1", "at": 1795170090000,
              "blocks": [["kind": "text", "text": "Two things need you:\n\n1. The VPS invoice is due Friday.\n2. Ola asked whether Saturday still works."],
                         ["kind": "card", "card": ["id": "card_1", "type": "facts", "title": "Inbox, today", "items": [["label": "Unread", "value": "14"], ["label": "Need you", "value": "2"], ["label": "Newsletters", "value": "9, all archived"]]]],
-                        ["kind": "card", "card": ["id": "card_2", "type": "choices", "title": "Shall I tell Ola yes?", "options": ["Yes", "Not yet"]]],
                         ["kind": "card", "card": ["id": "sign_in_vercel", "type": "sign_in", "title": "Sign in to vercel", "server": "vercel", "badge": ["name": "vercel", "initial": "V", "color": "sky"]]],
                         ["kind": "card", "card": ["id": "mcp_add_tc_29", "type": "mcp_add", "title": "Add the MCP server tracker", "call": "tc_29", "server": "tracker",
                                                   "badge": ["name": "tracker", "initial": "T", "color": "mint"], "url": "https://mcp.tracker.example/mcp",
                                                   "settings": [["name": "Authorization", "in": "header", "secret": "TRACKER_TOKEN", "have": false], ["name": "X-Team", "in": "header", "value": "design"]],
-                                                  "state": "asking"]]]],
+                                                  "state": "asking"]],
+                        // A question goes at the end of its reply, after all of it.
+                        ["kind": "card", "card": ["id": "card_2", "type": "choices", "title": "Shall I tell Ola yes?", "options": ["Yes", "Not yet"]]]]],
         ],
         "c_4": [
             ["id": "msg_41", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187000000,
@@ -470,7 +471,13 @@ enum Sample {
                         ["kind": "file", "file": "sample-night", "name": "thursday.png", "mime": "image/png", "size": 344_000],
                         ["kind": "file", "file": "sample-sprout", "name": "friday.png", "mime": "image/png", "size": 361_000],
                         ["kind": "file", "file": "sample-leaf", "name": "saturday.png", "mime": "image/png", "size": 351_000],
-                        ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000]]],
+                        ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000],
+                        // A form, at the end of the reply: several questions at once.
+                        ["kind": "card", "card": ["id": "card_1", "type": "form", "title": "Next watering", "fields": [
+                            ["label": "When", "kind": "choice", "required": true, "options": ["Morning", "Evening"], "value": "Evening", "placeholder": ""],
+                            ["label": "Litres", "kind": "number", "required": true, "value": 2, "placeholder": "2"],
+                            ["label": "Remind me", "kind": "toggle", "required": false, "value": true],
+                            ["label": "Note", "kind": "text", "required": false, "value": "", "placeholder": "For the plants on the left"]]]]]],
             // A reply naming a picture in the agent's folder, shown by its thumbnail.
             ["id": "msg_46", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_46", "at": 1795187300000,
              "mentions": [["path": "photos/seedlings.png", "name": "seedlings.png", "size": 361_000, "mime": "image/png", "thumb": "sample-sprout"]],
@@ -561,5 +568,9 @@ enum Sample {
                    "steps": [["title": "Search messages in Outlook", "badge": ["name": "outlook", "initial": "O", "color": "sky"], "chips": [["label": "query", "value": "invoice"], ["label": "top", "value": "10"]], "more": 0],
                              ["title": "Fetch emails in Gmail", "badge": ["name": "gmail", "initial": "G", "color": "teal"], "chips": [["label": "query", "value": "from:billing"], ["label": "max results", "value": "5"]], "more": 0]],
                    "steps_more": 0, "reason": "Find last month's invoices in both inboxes so I can total them."]],
+        // A risky one, which Allow is held for.
+        ["call": "tc_33", "run": "run_30", "tool": "execute", "title": "rm -rf build", "detail": ["command": "rm -rf build"], "can_always": false, "risky": true,
+         "shown": ["what": "", "lines": [], "more": 0, "code": "rm -rf build", "raw": "",
+                   "title": "Delete the build folder", "place": "", "badges": [], "effect": ["kind": "deletes", "words": "Risky"], "steps": [], "steps_more": 0, "reason": ""]],
     ]
 }
