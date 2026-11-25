@@ -126,6 +126,12 @@ CREATE INDEX IF NOT EXISTS runs_running ON runs (id) WHERE status = 'running';
 CREATE TABLE IF NOT EXISTS branches (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), from_conversation TEXT NOT NULL,
     from_message TEXT NOT NULL, handed INTEGER NOT NULL DEFAULT 0);
+-- Messages the person deleted that an agent in their chat hasn't been told of yet: the
+-- chat's agent, or each member of a group chat. said_by is the agent whose reply it was.
+CREATE TABLE IF NOT EXISTS deleted_untold (
+    message TEXT NOT NULL, agent TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id),
+    conversation TEXT NOT NULL, role TEXT NOT NULL, said_by TEXT NOT NULL, words TEXT NOT NULL,
+    at INTEGER NOT NULL, PRIMARY KEY (message, agent));
 CREATE TABLE IF NOT EXISTS conversation_programs (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL,
     summary_from TEXT NOT NULL DEFAULT '');
@@ -1117,6 +1123,7 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM routine_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM asks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM rooms WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
     }
@@ -2476,7 +2483,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "deleted_untold", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2728,6 +2735,92 @@ impl Store {
     pub fn message(self, user: String, id: String) -> Json? ! Error {
         let row = try self.db.query_one(String("SELECT json FROM messages WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
         return some(try parse(text(row[0].copy())))
+    }
+
+    // Deletes `user`'s message `id`, by `by` (a device, or an agent's id), and gives
+    // what's left of it in the chat, and the messages that reply to it as they are now
+    // (PLAN.md, "Deleting a message"). What's left is a mark where it was: its id,
+    // conversation, role, who said it and when, with `deleted` (`at`, `by`) and no
+    // blocks, so nothing it said is kept, searched or pinned. A reply to it loses the
+    // words it quoted and has `deleted: true` in its `reply`. Its agent is told it's gone
+    // with its next prompt there (`deleted_to_tell`). None when there's no such message.
+    pub fn delete_message(self, user: String, id: String, by: String) -> (Json, List<Json>)? ! Error {
+        let m = try self.message(user.copy(), id.copy()) else return none
+        let conversation = str_at(m.copy(), "conversation") ?? String()
+        if part_of(m.copy(), "deleted") != Json.Null { return some((m, List<Json>())) }
+        var words = String()
+        if let Json.Array(blocks) = part_of(m.copy(), "blocks") {
+            for b in blocks {
+                if str_at(b.copy(), "kind") == some(String("text")) and str_at(b.copy(), "parent") == none {
+                    words = str_at(b, "text") ?? String()
+                }
+            }
+        }
+        let role = str_at(m.copy(), "role") ?? String()
+        var kept = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", role.copy()).i("at", int_at(m.copy(), "at") ?? 0)
+        for key in ["agent", "from", "run", "status"] {
+            if let v = str_at(m.copy(), key) { kept = kept.s(key, v) }
+        }
+        let gone = kept.j("blocks", Json.Array(List<Json>())).j("deleted", Obj.new().i("at", now()).s("by", by).done()).done()
+        let began = try self.begin()
+        match self.deleting(user.copy(), gone.copy(), conversation.copy(), role, first_words(words, 200)) {
+            ok(replies) => {
+                try self.commit(began)
+                return some((gone, replies))
+            },
+            err(e) => {
+                self.rollback(began)
+                fail e
+            },
+        }
+    }
+
+    fn deleting(self, user: String, gone: Json, conversation: String, role: String, words: String) -> List<Json> ! Error {
+        let id = str_at(gone.copy(), "id") ?? String()
+        let said_by = str_at(gone.copy(), "agent") ?? String()
+        try self.put_message(user.copy(), gone)
+        // Who's told: each member of a group chat, or the chat's agent.
+        var agents = List<String>()
+        for r in try self.db.query(String("SELECT j.value FROM rooms rm, json_each(rm.json, '$.members') j WHERE rm.conversation = ? AND rm.user = ?"), [t(conversation.copy()), t(user.copy())]) {
+            let a = text(r[0].copy())
+            if a.len() > 0 and not agents.contains(a.copy()) { agents.push(a) }
+        }
+        if agents.len() == 0 {
+            if let r = try self.db.query_one(String("SELECT agent FROM conversations WHERE id = ? AND user = ?"), [t(conversation.copy()), t(user.copy())]) { agents.push(text(r[0].copy())) }
+        }
+        let at = now()
+        for agent in agents {
+            _ = try self.db.execute(String("INSERT OR REPLACE INTO deleted_untold (message, agent, user, conversation, role, said_by, words, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"), [t(id.copy()), t(agent), t(user.copy()), t(conversation.copy()), t(role.copy()), t(said_by.copy()), t(words.copy()), Value.Int(at)])
+        }
+        var replies = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM messages WHERE user = ? AND conversation = ? AND json_extract(json, '$.reply.message') = ?"), [t(user.copy()), t(conversation), t(id)]) {
+            let m = try parse(text(r[0].copy()))
+            let quoted = Obj.new().s("message", str_at(part_of(m.copy(), "reply"), "message") ?? String()).s("role", str_at(part_of(m.copy(), "reply"), "role") ?? String())
+            let from = part_of(part_of(m.copy(), "reply"), "from")
+            let agent = part_of(part_of(m.copy(), "reply"), "agent")
+            var reply = quoted.s("text", String()).b("deleted", true)
+            if from != Json.Null { reply = reply.j("from", from) }
+            if agent != Json.Null { reply = reply.j("agent", agent) }
+            let changed = merge(m, Obj.new().j("reply", reply.done()).done())
+            try self.put_message(user.copy(), changed.copy())
+            replies.push(changed)
+        }
+        return replies
+    }
+
+    // The messages deleted from `conversation` that `agent` hasn't been told of, oldest
+    // first: each its id, its role, the agent whose reply it was, and the start of its
+    // words.
+    pub fn deleted_to_tell(self, user: String, conversation: String, agent: String) -> List<(String, String, String, String)> ! Error {
+        var out = List<(String, String, String, String)>()
+        for r in try self.db.query(String("SELECT message, role, said_by, words FROM deleted_untold WHERE user = ? AND conversation = ? AND agent = ? ORDER BY at, rowid"), [t(user), t(conversation), t(agent)]) {
+            out.push((text(r[0].copy()), text(r[1].copy()), text(r[2].copy()), text(r[3].copy())))
+        }
+        return out
+    }
+
+    pub fn deleted_told(self, user: String, conversation: String, agent: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE user = ? AND conversation = ? AND agent = ?"), [t(user), t(conversation), t(agent)])
     }
 
     // The pinned messages in a conversation, the newest pin first (and of two in
@@ -3549,6 +3642,39 @@ fn search_finds_words_per_person() {
 }
 
 @test
+fn a_deleted_message_leaves_a_mark_and_its_words_go() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let c = s.add_conversation(a.id.copy(), String("a_1"), String("Chat"))!
+    let id = (c.get(String("id")) ?? Json.Null).as_str() ?? String()
+    s.put_message(a.id.copy(), text_message("msg_1", id.copy(), "a_1", "The deploy key is hunter2, keep it safe.", 100))!
+    let reply = Obj.new().s("id", String("msg_2")).s("conversation", id.copy()).s("role", String("person")).s("from", String("d_1")).i("at", 200).j("blocks", Json.Array([Obj.new().s("kind", String("text")).s("text", String("Thanks")).done()])).j("reply", Obj.new().s("message", String("msg_1")).s("role", String("agent")).s("agent", String("a_1")).s("text", String("hunter2")).done()).done()
+    s.put_message(a.id.copy(), reply)!
+    let (gone, replies) = s.delete_message(a.id.copy(), String("msg_1"), String("d_1"))! ?? panic("no message")
+    assert("{gone}".contains(#""deleted":{"#) and not "{gone}".contains("hunter2") and "{gone}".contains(#""agent":"a_1""#))
+    assert(not "{s.message(a.id.copy(), String("msg_1"))!}".contains("hunter2"))
+    assert(s.search(a.id.copy(), String("hunter2"), none, none, none, 10)!.len() == 0)
+    // A reply to it keeps no word of it, and says it's gone.
+    assert(replies.len() == 1 and "{replies[0]}".contains(#""deleted":true"#) and not "{replies[0]}".contains("hunter2"))
+    // Its agent is told once.
+    let told = s.deleted_to_tell(a.id.copy(), id.copy(), String("a_1"))!
+    assert(told.len() == 1 and told[0].0 == "msg_1" and told[0].2 == "a_1" and told[0].3.starts_with("The deploy key"))
+    s.deleted_told(a.id.copy(), id.copy(), String("a_1"))!
+    assert(s.deleted_to_tell(a.id.copy(), id.copy(), String("a_1"))!.len() == 0)
+    assert(s.delete_message(a.id.copy(), String("msg_9"), String("d_1"))! == none)
+    // In a group chat each member is told, on its own.
+    let g = s.add_conversation(a.id.copy(), String("a_1"), String("Group"))!
+    let gid = (g.get(String("id")) ?? Json.Null).as_str() ?? String()
+    s.put_room(a.id.copy(), gid.copy(), Obj.new().s("name", String("Group")).j("members", Json.Array([Json.Str(String("a_1")), Json.Str(String("a_2"))])).done())!
+    s.put_message(a.id.copy(), text_message("msg_3", gid.copy(), "a_2", "A reply in the group", 300))!
+    _ = s.delete_message(a.id.copy(), String("msg_3"), String("d_1"))! ?? panic("no message")
+    s.deleted_told(a.id.copy(), gid.copy(), String("a_1"))!
+    let other = s.deleted_to_tell(a.id.copy(), gid.copy(), String("a_2"))!
+    assert(other.len() == 1 and other[0].0 == "msg_3" and other[0].2 == "a_2")
+    assert(s.deleted_to_tell(a.id.copy(), gid.copy(), String("a_1"))!.len() == 0)
+}
+
+@test
 fn files_are_per_person() {
     let s = test_store()
     let a = s.add_user(String("a"), String("password1"), "owner")!
@@ -3766,4 +3892,21 @@ fn snippets_lose_their_markdown() {
     assert(plain_snippet("see [the {mark("guide")}](https://example.com/x) and ~~old~~") == "see the {mark("guide")} and old")
     assert(plain_snippet("# Title\n> quoted {mark("word")}\n1. first") == "Title quoted {mark("word")} first")
     assert(plain_snippet(String("snake_case stays, and so does a * b")) == "snake_case stays, and so does a * b")
+}
+
+// `j`'s `key`, as JSON, or null.
+fn part_of(j: Json, key: str) -> Json {
+    return j.get(String(key)) ?? Json.Null
+}
+// The start of `words`, on one line, at most about `most` bytes, with "…" when it's cut.
+fn first_words(words: String, most: usize) -> String {
+    var cut = String()
+    for r in words.split_whitespace().join(" ").runes() {
+        if cut.len() >= most {
+            cut.push_str("…")
+            break
+        }
+        cut.push(r)
+    }
+    return cut
 }

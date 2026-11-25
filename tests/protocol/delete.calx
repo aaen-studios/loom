@@ -1,0 +1,136 @@
+module tests.protocol.delete
+
+// Deleting a message (PLAN.md, "Deleting a message"): message.delete leaves a
+// mark where the message was, with its words gone from the chat and from
+// search, sent to every device as message.updated. A reply quoting it says the
+// original was deleted, and the agent is told once, with its next message,
+// that the message is gone.
+//
+//     calx tests/protocol/delete.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+// The next message made in `conversation` by `role`.
+fn next_in(app: mut Session, conversation: String, role: str) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String(role)) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+// The message.updated for `id`, among the frames read already (events come
+// before a command's result) or else the next.
+fn updated(app: mut Session, id: String) -> Json ! Error {
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("event")) and str_at(f.copy(), "kind") == some(String("message.updated")) {
+            let m = at(f.copy(), "message")
+            if str_at(m.copy(), "id") == some(id.copy()) { return m }
+        }
+    }
+    loop {
+        let changed = try app.until("event", "message.updated")
+        let m = at(changed, "message")
+        if str_at(m.copy(), "id") == some(id.copy()) { return m }
+    }
+}
+
+fn words(m: Json) -> String {
+    var out = String()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("text")) { out.push_str(str_at(b, "text") ?? String()) }
+        }
+    }
+    return out
+}
+
+fn block_count(m: Json) -> usize {
+    if let Json.Array(bs) = at(m, "blocks") { return bs.len() }
+    return 99
+}
+
+fn results(found: Json) -> usize {
+    if let Json.Array(rs) = at(at(found, "value"), "results") { return rs.len() }
+    return 0
+}
+
+fn send(app: Session, cid: str, chat: String, text: str, reply: Json) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", chat).s("text", String(text)).j("reply", reply).done())
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // A message and the agent's echo of it, then a reply quoting the echo.
+    try send(app, "m_1", chat.copy(), "The vault code is giraffe.", Json.Null)
+    _ = try next_in(mut app, chat.copy(), "person")
+    let answer = try next_in(mut app, chat.copy(), "agent")
+    let answer_id = str_at(answer.copy(), "id") ?? String()
+    _ = try app.until("event", "run.finished")
+    try send(app, "m_2", chat.copy(), "Thanks", Obj.new().s("message", answer_id.copy()).done())
+    let quoting = try next_in(mut app, chat.copy(), "person")
+    let quoting_id = str_at(quoting, "id") ?? String()
+    _ = try app.until("event", "run.finished")
+    let before = try app.cmd("q_3", "messages.search", Obj.new().s("query", String("giraffe")).done())
+    try check(results(before) == 2, "both the message and its echo are found before")
+
+    // --- Deleting the echo ---
+    let gone = try app.cmd("q_4", "message.delete", Obj.new().s("message", answer_id.copy()).done())
+    let mark = at(at(gone, "value"), "message")
+    try check(str_at(mark.copy(), "id") == some(answer_id.copy()) and str_at(mark.copy(), "role") == some(String("agent")) and block_count(mark.copy()) == 0, "message.delete answers with the mark, with no blocks")
+    try check(str_at(at(mark.copy(), "deleted"), "by") != none, "and when and from which device it was deleted")
+    let sent = try updated(mut app, answer_id.copy())
+    try check(block_count(sent.copy()) == 0 and at(sent, "deleted") != Json.Null, "every device gets the mark as message.updated")
+    let quote_now = try updated(mut app, quoting_id.copy())
+    let r = at(quote_now, "reply")
+    try check(bool_at(r.copy(), "deleted") == some(true) and str_at(r.copy(), "text") == some(String()) and str_at(r, "message") == some(answer_id.copy()), "a reply quoting it keeps who it answered, but says the original was deleted")
+    let after = try app.cmd("q_5", "messages.search", Obj.new().s("query", String("giraffe")).done())
+    try check(results(after) == 1, "its words can't be searched")
+    let listed = try app.cmd("q_6", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    var marked = false
+    if let Json.Array(ms) = at(at(listed, "value"), "messages") {
+        for m in ms {
+            if str_at(m.copy(), "id") == some(answer_id.copy()) { marked = at(m.copy(), "deleted") != Json.Null and not words(m).contains("giraffe") }
+        }
+    }
+    try check(marked, "and the chat keeps the mark in its place, without them")
+
+    // --- The agent is told, once ---
+    try send(app, "m_3", chat.copy(), "/context\nWhat now?", Json.Null)
+    let told = words(try next_in(mut app, chat.copy(), "agent"))
+    try check(told.contains("[loom: Your person deleted these messages from this chat: {answer_id}, your reply that began \"The vault code is giraffe.\"") and told.contains("They're gone"), "the agent is told which message is gone with the next message")
+    _ = try app.until("event", "run.finished")
+    try send(app, "m_4", chat.copy(), "/context\nAnd now?", Json.Null)
+    let later = words(try next_in(mut app, chat.copy(), "agent"))
+    try check(not later.contains("deleted these messages"), "and only once")
+    _ = try app.until("event", "run.finished")
+
+    // --- Again, and a message that isn't there ---
+    let twice = try app.cmd("q_7", "message.delete", Obj.new().s("message", answer_id.copy()).done())
+    try check(block_count(at(at(twice, "value"), "message")) == 0, "deleting it again changes nothing")
+    let missing = try app.cmd("q_8", "message.delete", Obj.new().s("message", String("msg_nope")).done())
+    try check(str_at(at(missing, "error"), "code") == some(String("not_found")), "a message that isn't there can't be deleted")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ndelete: all good")
+}

@@ -56,6 +56,12 @@ pub fn scoped<T>(view: EntityId, f: impl FnOnce() -> T) -> T {
     out
 }
 
+/// The view being built, drawn from its cache, to notify when something it drew finds
+/// it should be drawn again.
+pub fn scope() -> Option<EntityId> {
+    SCOPE.with(|s| s.get())
+}
+
 /// Fast at first, gentle at the end.
 fn ease(x: f32) -> f32 {
     1.0 - (1.0 - x.clamp(0.0, 1.0)).powi(3)

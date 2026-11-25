@@ -262,9 +262,11 @@ const GITHUB =
 				<div class="row you" data-msg>
 					<div class="bubble">What's on my plate today?</div>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 				</div>
 				<div class="row reply" data-msg>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
 						<div class="who">Juniper</div>
@@ -398,6 +400,19 @@ const GITHUB =
 		<button type="button" role="menuitem" data-pick="quote"><svg class="i" viewBox="0 0 24 24"><path d="M17 6H3M21 12H8M21 18H8M3 12v6"></path></svg>Quote</button>
 		<button type="button" role="menuitem" data-pick="ask"><svg class="i" viewBox="0 0 24 24"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"></path><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"></path></svg>Ask about this</button>
 	</div>
+</template>
+<!-- A message's menu, from the ⋯ by its corner (app.rs, ctx_menu): Delete in red, after a
+     line, goes at once and leaves a quiet mark where it was (deleted_mark). -->
+<template id="demo-more">
+	<div class="msg-menu" role="menu">
+		<button type="button" role="menuitem" data-act="reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg>Reply</button>
+		<button type="button" role="menuitem" data-act="copy"><svg class="i" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>Copy</button>
+		<div class="menu-line" role="separator"></div>
+		<button type="button" role="menuitem" data-act="delete" class="danger"><svg class="i" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Delete</button>
+	</div>
+</template>
+<template id="demo-gone">
+	<div class="gone"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg><span class="gone-words"></span></div>
 </template>
 <!-- A link pasted on its own, as one piece in the words: its site's icon and its page's
      title (app.rs, composer_token). The sent message shows it the same way. Under the
@@ -1646,23 +1661,113 @@ const GITHUB =
 		opacity: 0;
 		transition: opacity 0.12s, background-color 0.12s, color 0.12s;
 	}
-	.reply-btn .i {
+	.reply-btn .i,
+	.more-btn .i {
 		width: 14px;
 		height: 14px;
 	}
+	/* Under Reply, the ⋯ that opens the message's menu. */
+	.more-btn {
+		position: absolute;
+		top: 32px;
+		right: -32px;
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: transparent;
+		color: var(--ink-3);
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 0.12s, background-color 0.12s, color 0.12s;
+	}
 	.row:hover > .reply-btn,
 	.row.hovered > .reply-btn,
-	.reply-btn:focus-visible {
+	.reply-btn:focus-visible,
+	.row:hover > .more-btn,
+	.more-btn:focus-visible {
 		opacity: 1;
 	}
-	.reply-btn:hover {
+	.reply-btn:hover,
+	.more-btn:hover {
 		background: var(--hover);
 		color: var(--ink);
 	}
 	@media (max-width: 640px) {
-		.reply-btn {
+		.reply-btn,
+		.more-btn {
 			display: none;
 		}
+	}
+	.msg-menu {
+		position: absolute;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		width: 200px;
+		padding: 4px;
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 8px 24px rgb(0 0 0 / 0.12);
+	}
+	.msg-menu button {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 8px;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: transparent;
+		color: var(--ink);
+		font: inherit;
+		font-size: var(--size-small);
+		text-align: left;
+		cursor: pointer;
+	}
+	.msg-menu button:hover {
+		background: var(--hover);
+	}
+	.msg-menu .i {
+		width: 14px;
+		height: 14px;
+		color: var(--ink-2);
+	}
+	.msg-menu .danger,
+	.msg-menu .danger .i {
+		color: var(--bad);
+	}
+	.menu-line {
+		height: 1px;
+		margin: 4px 0;
+		background: var(--line);
+	}
+	/* What's left of a deleted message: a quiet line where it was, on its sender's side. */
+	.row.deleted > :not(.gone) {
+		display: none;
+	}
+	.gone {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.row.you .gone {
+		margin-left: auto;
+	}
+	.row.reply .gone {
+		padding-left: 26px;
+	}
+	.gone .i {
+		width: 12px;
+		height: 12px;
+	}
+	.quote.original-gone .q-words {
+		color: var(--ink-3);
 	}
 	/* Lit for a moment, once a quote went to it. */
 	.msgs .row.lit {

@@ -2752,6 +2752,8 @@ pub struct Message {
     /// name: as it was when posted, or as it is now (`Model::shown`).
     pub routine: String,
     pub routine_name: String,
+    /// Deleted (PLAN.md, "Deleting a message"): a mark in its place, with no blocks.
+    pub deleted: bool,
     /// Pinned in its conversation.
     pub pinned: bool,
     /// Files the reply names that are in its agent's folder, shown as chips.
@@ -2934,6 +2936,8 @@ pub struct ReplyTo {
     pub ask: bool,
     /// Its files, for the whole message.
     pub files: Vec<FileRef>,
+    /// The original was deleted since: who said it is kept, and its words are gone.
+    pub deleted: bool,
 }
 
 impl ReplyTo {
@@ -2952,6 +2956,7 @@ impl ReplyTo {
             text: s(r, "text"),
             part: r.get("part").and_then(Value::as_bool).unwrap_or(false),
             ask: r.get("ask").and_then(Value::as_bool).unwrap_or(false),
+            deleted: r.get("deleted").and_then(Value::as_bool).unwrap_or(false),
             files: r
                 .get("files")
                 .and_then(Value::as_array)
@@ -2988,6 +2993,7 @@ impl ReplyTo {
             text,
             part: quote.is_some(),
             ask: ask && quote.is_some(),
+            deleted: false,
             files: if quote.is_some() {
                 Vec::new()
             } else {
@@ -3088,9 +3094,11 @@ impl Message {
     }
 
     /// A finished reply of an agent's with nothing to show: no words, thoughts, tool
-    /// calls, plan, files or cards, and nothing it names or pins.
+    /// calls, plan, files or cards, and nothing it names or pins. A deleted one isn't:
+    /// its mark stays where it was.
     pub fn is_empty_reply(&self) -> bool {
         self.role == "agent"
+            && !self.deleted
             && !self.live
             && !self.pinned
             && self.mentions.is_empty()
@@ -3927,6 +3935,209 @@ pub fn spoken(md: &str) -> String {
 /// The most characters a quote's line keeps; the app cuts it to its width with "…".
 pub const QUOTE_MOST: usize = 240;
 
+/// A piece of a reply's words, as the chat draws them (PLAN.md, "Long messages and tables"):
+/// words, or a Markdown table with the line under it that counts its rows and copies it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Piece {
+    Words(String),
+    Table {
+        markdown: String,
+        rows: Vec<Vec<String>>,
+    },
+}
+
+/// A Markdown table row's cells, as written: `| a | b |` or `a | b`, a `\|` kept in
+/// its cell. None for a line that isn't one.
+fn table_cells(line: &str) -> Option<Vec<String>> {
+    let line = line.trim();
+    if !line.contains('|') {
+        return None;
+    }
+    let line = line.strip_prefix('|').unwrap_or(line);
+    let line = line
+        .strip_suffix('|')
+        .filter(|l| !l.ends_with('\\'))
+        .unwrap_or(line);
+    let mut cells = Vec::new();
+    let mut cell = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'|') {
+            cell.push('|');
+            chars.next();
+        } else if c == '|' {
+            cells.push(cell.trim().to_string());
+            cell.clear();
+        } else {
+            cell.push(c);
+        }
+    }
+    cells.push(cell.trim().to_string());
+    Some(cells)
+}
+
+/// Whether `line` is a table's divider, under its header: `|---|:--:|`.
+fn table_divider(line: &str) -> bool {
+    table_cells(line).is_some_and(|cells| {
+        cells.iter().all(|c| {
+            let c = c.trim_start_matches(':').trim_end_matches(':');
+            !c.is_empty() && c.chars().all(|ch| ch == '-')
+        })
+    })
+}
+
+/// A reply's words in pieces: each Markdown table (a header, its divider and the rows
+/// under them) on its own, outside code blocks, with its cells as plain words; and the
+/// words between them. One piece, the words, when there's no table.
+pub fn pieces(md: &str) -> Vec<Piece> {
+    let lines: Vec<&str> = md.lines().collect();
+    let mut out = Vec::new();
+    let mut words: Vec<&str> = Vec::new();
+    let mut fence: Option<String> = None;
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim_start();
+        if let Some(f) = &fence {
+            if trimmed.starts_with(f.as_str()) {
+                fence = None;
+            }
+            words.push(line);
+            i += 1;
+            continue;
+        }
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = Some(trimmed[..3].to_string());
+            words.push(line);
+            i += 1;
+            continue;
+        }
+        let header = table_cells(line);
+        if let Some(head) = header.filter(|_| i + 1 < lines.len() && table_divider(lines[i + 1])) {
+            let mut end = i + 2;
+            while end < lines.len()
+                && !lines[end].trim().is_empty()
+                && table_cells(lines[end]).is_some()
+            {
+                end += 1;
+            }
+            let said = words.join("\n");
+            if !said.trim().is_empty() {
+                out.push(Piece::Words(said));
+            }
+            words.clear();
+            let plain = |cells: Vec<String>| -> Vec<String> {
+                cells.iter().map(|c| spoken(c).trim().to_string()).collect()
+            };
+            let mut rows = vec![plain(head)];
+            for l in &lines[i + 2..end] {
+                rows.push(plain(table_cells(l).unwrap_or_default()));
+            }
+            out.push(Piece::Table {
+                markdown: lines[i..end].join("\n"),
+                rows,
+            });
+            i = end;
+            continue;
+        }
+        words.push(line);
+        i += 1;
+    }
+    let said = words.join("\n");
+    if !said.trim().is_empty() || out.is_empty() {
+        out.push(Piece::Words(if out.is_empty() {
+            md.to_string()
+        } else {
+            said
+        }));
+    }
+    out
+}
+
+/// How a table is copied, from the menu by its Copy button.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableAs {
+    Csv,
+    Markdown,
+    Text,
+}
+
+/// A table's rows, its header first, as CSV (RFC 4180, a cell with a comma, a quote or
+/// a line break in quotes), as a Markdown table, or as plain text in columns.
+pub fn table_copy(rows: &[Vec<String>], how: TableAs) -> String {
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let cell = |r: &Vec<String>, c: usize| r.get(c).cloned().unwrap_or_default();
+    match how {
+        TableAs::Csv => rows
+            .iter()
+            .map(|r| {
+                (0..width)
+                    .map(|c| {
+                        let v = cell(r, c);
+                        if v.contains([',', '"', '\n', '\r']) {
+                            format!("\"{}\"", v.replace('"', "\"\""))
+                        } else {
+                            v
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",")
+            })
+            .collect::<Vec<_>>()
+            .join("\r\n"),
+        TableAs::Markdown => {
+            let line = |cells: Vec<String>| format!("| {} |", cells.join(" | "));
+            let mut out = Vec::new();
+            for (n, r) in rows.iter().enumerate() {
+                out.push(line(
+                    (0..width).map(|c| cell(r, c).replace('|', "\\|")).collect(),
+                ));
+                if n == 0 {
+                    out.push(line(vec!["---".to_string(); width]));
+                }
+            }
+            out.join("\n")
+        }
+        TableAs::Text => {
+            let wide: Vec<usize> = (0..width)
+                .map(|c| {
+                    rows.iter()
+                        .map(|r| cell(r, c).chars().count())
+                        .max()
+                        .unwrap_or(0)
+                })
+                .collect();
+            rows.iter()
+                .map(|r| {
+                    (0..width)
+                        .map(|c| {
+                            let v = cell(r, c);
+                            if c + 1 == width {
+                                v
+                            } else {
+                                let pad = wide[c] - v.chars().count();
+                                format!("{v}{}", " ".repeat(pad))
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ")
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
+}
+
+/// "3 rows" under a table: its rows under the header.
+pub fn table_rows(rows: &[Vec<String>]) -> String {
+    match rows.len().saturating_sub(1) {
+        1 => "1 row".to_string(),
+        n => format!("{n} rows"),
+    }
+}
+
 /// Markdown on one plain line, as a quote over a message shows it: its words without
 /// their marks, list marks and rules, its lines run together with spaces, and cut at
 /// `QUOTE_MOST` characters with "…".
@@ -4375,8 +4586,9 @@ pub fn flow(rows: &[Option<&Message>], day: impl Fn(i64) -> i64) -> Vec<Flow> {
             }
             last = Some(m.at);
         }
-        // A line from loom across the chat is no one's reply.
-        if m.role != "person" && m.role != "loom" {
+        // A deleted reply's mark doesn't take its agent's name from the next, and a
+        // line from loom across the chat is no one's reply.
+        if m.role != "person" && m.role != "loom" && !m.deleted {
             out[i].head = !replied;
             replied = true;
         }
@@ -5829,6 +6041,7 @@ impl Model {
             routed: Routed::of(m),
             routine: s(m, "routine"),
             routine_name: s(m, "routine_name"),
+            deleted: m.get("deleted").is_some_and(|d| !d.is_null()),
             // `from` is a device, or the agent that sent it.
             from_agent: m
                 .get("from")
@@ -5875,6 +6088,12 @@ impl Model {
     /// Pins a message, or takes its pin off.
     pub fn pin(&mut self, message: &str, pinned: bool) -> Value {
         json!({"t": "cmd", "id": self.id("app.pin"), "name": "message.pin", "args": {"message": message, "pinned": pinned}})
+    }
+
+    /// Deletes a message for every device, leaving a mark in its place (PLAN.md,
+    /// "Deleting a message"). The mark comes back as `message.updated`.
+    pub fn delete_message(&mut self, message: &str) -> Value {
+        json!({"t": "cmd", "id": self.id("app.unsay"), "name": "message.delete", "args": {"message": message}})
     }
 
     /// Takes a frame from the core. Gives whether the screen should redraw.
@@ -6857,6 +7076,12 @@ impl Model {
                         )
                     }
                 }
+            }
+            return;
+        }
+        if id.starts_with("app.unsay_") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
             }
             return;
         }
@@ -7957,6 +8182,7 @@ impl Model {
                     routed: None,
                     routine: String::new(),
                     routine_name: String::new(),
+                    deleted: false,
                     mentions: Vec::new(),
                     sources: Vec::new(),
                     learned: Vec::new(),
@@ -8012,6 +8238,7 @@ impl Model {
                 routed: self.routed_live.get(&r.message).cloned(),
                 routine: String::new(),
                 routine_name: String::new(),
+                deleted: false,
                 mentions: Vec::new(),
                 sources: Vec::new(),
                 learned: Vec::new(),
@@ -10215,6 +10442,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_deleted_message_stays_as_its_mark_and_its_quotes_say_so() {
+        let model = Model::new();
+        let gone = model.message_of(&json!({
+            "id": "m1", "role": "agent", "at": 1, "blocks": [],
+            "deleted": {"at": 2, "by": "d_1"}
+        }));
+        assert!(gone.deleted && !gone.is_empty_reply());
+        let quoting = model.message_of(&json!({
+            "id": "m2", "role": "person", "at": 3, "blocks": [],
+            "reply": {"message": "m1", "role": "agent", "agent": "a_1", "text": "", "deleted": true}
+        }));
+        assert!(quoting
+            .reply
+            .is_some_and(|r| r.deleted && r.message == "m1" && r.text.is_empty()));
+        let kept = model.message_of(&json!({"id": "m3", "role": "agent", "at": 4, "blocks": []}));
+        assert!(!kept.deleted && kept.is_empty_reply());
+        let mut model = model;
+        let f = model.delete_message("m1");
+        assert_eq!(
+            (&f["name"], &f["args"]["message"]),
+            (&json!("message.delete"), &json!("m1"))
+        );
+    }
+
+    #[test]
+    fn a_table_in_a_reply_is_its_own_piece_with_its_cells_as_words() {
+        let md = "Here are the builds:\n\n| Build | Time |\n|---|:--:|\n| **main** | 14:02 |\n| fix\\|x | `3 s` |\n\nAll green.\n\n```\n| not | a table |\n|---|---|\n```";
+        let ps = pieces(md);
+        assert_eq!(ps.len(), 3);
+        assert_eq!(ps[0], Piece::Words("Here are the builds:\n".into()));
+        let Piece::Table { markdown, rows } = &ps[1] else {
+            panic!("no table: {ps:?}")
+        };
+        assert!(
+            markdown.starts_with("| Build | Time |") && markdown.ends_with("| fix\\|x | `3 s` |")
+        );
+        assert_eq!(
+            rows,
+            &vec![
+                vec!["Build".to_string(), "Time".into()],
+                vec!["main".into(), "14:02".into()],
+                vec!["fix|x".into(), "3 s".into()],
+            ]
+        );
+        assert!(
+            matches!(&ps[2], Piece::Words(w) if w.contains("All green.") && w.contains("| not | a table |"))
+        );
+        assert_eq!(table_rows(rows), "2 rows");
+        // Words with no table are one piece, as they were.
+        assert_eq!(pieces("a | b"), vec![Piece::Words("a | b".into())]);
+    }
+
+    #[test]
+    fn a_table_copies_as_csv_markdown_or_text() {
+        let rows = vec![
+            vec!["Name".to_string(), "Note".into()],
+            vec!["Ada".into(), "says \"hi\", twice".into()],
+            vec!["Bo".into(), "a|b".into()],
+        ];
+        assert_eq!(
+            table_copy(&rows, TableAs::Csv),
+            "Name,Note\r\nAda,\"says \"\"hi\"\", twice\"\r\nBo,a|b"
+        );
+        assert_eq!(
+            table_copy(&rows, TableAs::Markdown),
+            "| Name | Note |\n| --- | --- |\n| Ada | says \"hi\", twice |\n| Bo | a\\|b |"
+        );
+        assert_eq!(
+            table_copy(&rows, TableAs::Text),
+            "Name  Note\nAda   says \"hi\", twice\nBo    a|b"
+        );
+        assert_eq!(table_rows(&rows[..2]), "1 row");
+    }
+
+    #[test]
     fn a_replys_sources_and_links_come_with_it() {
         let m = Model::new().message_of(&json!({
             "id": "m1", "role": "agent", "at": 1, "blocks": [],
@@ -10907,6 +11209,7 @@ mod tests {
             routed: None,
             routine: String::new(),
             routine_name: String::new(),
+            deleted: false,
             mentions: Vec::new(),
             sources: Vec::new(),
             learned: Vec::new(),
@@ -11472,6 +11775,7 @@ mod tests {
             routed: None,
             routine: String::new(),
             routine_name: String::new(),
+            deleted: false,
             mentions: Vec::new(),
             sources: Vec::new(),
             learned: Vec::new(),
@@ -11514,6 +11818,7 @@ mod tests {
             routed: None,
             routine: String::new(),
             routine_name: String::new(),
+            deleted: false,
             mentions: Vec::new(),
             sources: Vec::new(),
             learned: Vec::new(),
@@ -11942,6 +12247,7 @@ mod tests {
             routed: None,
             routine: String::new(),
             routine_name: String::new(),
+            deleted: false,
             ..turn(&[text], false, "")
         };
         let rows = [
