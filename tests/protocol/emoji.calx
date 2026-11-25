@@ -1,0 +1,162 @@
+module tests.protocol.emoji
+
+// A person's own emoji (PLAN.md, "Emoji"; protocol.md, "Emoji"): a picture they
+// sent becomes one with emoji.add, made 128 pixels square, and every device hears
+// emoji.changed. Its name is checked and kept unique, a picture over 256 KB, a
+// GIF and a person's 201st are refused, and it's renamed, deleted and brought back.
+// GET /emoji/<id> gives its picture to anyone signed in, as long as it isn't
+// deleted. An agent reads it as `:name:` and is told the person's names, and what
+// it writes by name, `:tada:` or `:party:`, is kept as the emoji, but in code.
+//
+//     calx tests/protocol/emoji.calx
+import std.image.{Color, Image, Kind}
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check, fetch, upload}
+
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return reply_text(try reply_in(mut app, conversation))
+}
+
+fn code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+// The names in the newest emoji.changed the app heard.
+fn heard_names(app: Session) -> List<String> {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("emoji.changed")) { found = f.copy() }
+    }
+    var out = List<String>()
+    if let Json.Array(list) = at(found, "emoji") {
+        for e in list {
+            out.push(str_at(e, "name") ?? String())
+        }
+    }
+    return out
+}
+
+fn sent(i: Instance, name: str, mime: str, body: List<u8>) -> String ! Error {
+    let (status, answer) = try upload(i.base.copy(), i.token.copy(), name, mime, body)
+    try check(status == 200, "a picture goes up")
+    return str_at(answer, "file") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let wide = try sent(i.copy(), "party.png", "image/png", Image.new(300, 150, Kind.Rgb, Color.rgb(200, 10, 10)).encode_png())
+
+    // --- Adding one ---
+    let added = try app.cmd("q_1", "emoji.add", Obj.new().s("file", wide.copy()).s("name", String("Party")).done())
+    let e = at(at(added, "value"), "emoji")
+    let id = str_at(e.copy(), "id") ?? String()
+    try check(id.starts_with("e_") and str_at(e.copy(), "name") == some(String("party")) and bool_at(e.copy(), "animated") == some(false), "emoji.add makes one, its name in lowercase")
+    try check(heard_names(app) == [String("party")], "and every device hears emoji.changed with them all")
+    let (status, mime, png) = try fetch(i.base.copy(), i.token.copy(), "/emoji/{id}")
+    let picture = Image.decode(png)!
+    try check(status == 200 and mime == "image/png" and picture.width() == 128 and picture.height() == 128 and picture.get(0, 0).a == 0, "GET /emoji/<id> gives it 128 pixels square, the rest clear")
+    let other = try i.second_account("bea")
+    let (theirs, _, _) = try fetch(i.base.copy(), other, "/emoji/{id}")
+    let (nobody, _, _) = try fetch(i.base.copy(), String("nope"), "/emoji/{id}")
+    try check(theirs == 200 and nobody == 401, "anyone signed in sees it, as in a chat they share, and no one else")
+    let listed = try app.cmd("q_2", "emoji.list", Obj.new().done())
+    try check(at(at(listed.copy(), "value"), "emoji").len() == 1 and int_at(at(listed, "value"), "most") == some(200), "emoji.list gives them, and how many one may have")
+
+    // --- What's refused ---
+    try check(code(try app.cmd("q_3", "emoji.add", Obj.new().s("file", wide.copy()).s("name", String("party")).done())) == "name_taken", "a name is one emoji's")
+    try check(code(try app.cmd("q_4", "emoji.add", Obj.new().s("file", wide.copy()).s("name", String("no-dash")).done())) == "bad_name", "a name is a to z, 0 to 9 and _")
+    try check(code(try app.cmd("q_5", "emoji.add", Obj.new().s("file", wide.copy()).s("name", String("x")).done())) == "bad_name", "of 2 or more")
+    var big = Image.new(16, 16, Kind.Rgb, Color.rgb(1, 2, 3)).encode_png()
+    for _ in 0..262144 { big.push(0u8) }
+    let heavy = try sent(i.copy(), "big.png", "image/png", big)
+    let too_big = try app.cmd("q_6", "emoji.add", Obj.new().s("file", heavy).s("name", String("heavy")).done())
+    try check(code(too_big.copy()) == "bad_picture" and (str_at(at(too_big, "error"), "message") ?? String()).contains("256 KB"), "a picture over 256 KB isn't one")
+    let gif: List<u8> = [0x47u8, 0x49, 0x46, 0x38, 0x39, 0x61, 7, 0, 5, 0, 0, 0, 0, 0x3b]
+    let moving = try sent(i.copy(), "dance.gif", "image/gif", gif)
+    try check(code(try app.cmd("q_7", "emoji.add", Obj.new().s("file", moving).s("name", String("dance")).done())) == "bad_picture", "nor, yet, a GIF")
+    try check(code(try app.cmd("q_8", "emoji.add", Obj.new().s("file", String("0000000000000000000000000000000000000000000000000000000000000000")).s("name", String("ghost")).done())) == "not_found", "nor a file the person doesn't have")
+
+    // --- Renaming ---
+    let renamed = try app.cmd("q_9", "emoji.rename", Obj.new().s("emoji", id.copy()).s("name", String("party_cat")).done())
+    try check(str_at(at(at(renamed, "value"), "emoji"), "name") == some(String("party_cat")) and heard_names(app) == [String("party_cat")], "emoji.rename renames it, for every device")
+    let small = try sent(i.copy(), "dot.png", "image/png", Image.new(8, 8, Kind.Rgba, Color.rgba(0, 0, 255, 255)).encode_png())
+    let dot = str_at(at(at(try app.cmd("q_10", "emoji.add", Obj.new().s("file", small).s("name", String("dot")).done()), "value"), "emoji"), "id") ?? String()
+    try check(code(try app.cmd("q_11", "emoji.rename", Obj.new().s("emoji", dot.copy()).s("name", String("party_cat")).done())) == "name_taken", "but not to another's name")
+    try check(code(try app.cmd("q_12", "emoji.rename", Obj.new().s("emoji", String("e_999")).s("name", String("gone")).done())) == "not_found", "and only one that's there")
+
+    // --- What the agent reads, and writes ---
+    let made = try app.cmd("q_13", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_14", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+    let told = try say(mut app, chat.copy(), "m_1", String("/context"))
+    // The agent says it back, so what it was told by name comes back as the emoji.
+    try check(told.contains("by its name between colons, as 😭 or 👍") and told.contains("Your person's own emoji, written the same way: <:party_cat:{id}>, <:dot:{dot}>."), "a session is told how emoji are written, and the person's own")
+    let again = try say(mut app, chat.copy(), "m_2", String("/context"))
+    try check(not again.contains("written the same way"), "once, while they stay the same")
+    let echoed = try say(mut app, chat.copy(), "m_3", "so <:party_cat:{id}> today")
+    // It says it back a word at a time, as it read it.
+    var streamed = String()
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("delta")) { streamed.push_str(str_at(f.copy(), "text") ?? String()) }
+    }
+    try check(streamed.contains("so :party_cat: today") and echoed == "so <:party_cat:{id}> today", "the agent reads the person's emoji as :party_cat:, and what it writes so is kept as the emoji")
+    let built_in = try say(mut app, chat.copy(), "m_4", String("done :tada: :thumbsup: and `:tada:` at 12:30:45 :nope:"))
+    try check(built_in == "done 🎉 👍 and `:tada:` at 12:30:45 :nope:", "a built-in one by name is kept as itself, but in code or for a name it isn't")
+
+    // --- Deleting, and its undo ---
+    _ = try app.cmd("q_15", "emoji.delete", Obj.new().s("emoji", id.copy()).done())
+    let (gone, _, _) = try fetch(i.base.copy(), i.token.copy(), "/emoji/{id}")
+    try check(heard_names(app) == [String("dot")] and gone == 404, "emoji.delete takes it out, and its picture with it")
+    _ = try app.cmd("q_16", "emoji.restore", Obj.new().s("emoji", id.copy()).done())
+    let (back, _, _) = try fetch(i.base.copy(), i.token.copy(), "/emoji/{id}")
+    try check(heard_names(app) == [String("party_cat"), String("dot")] and back == 200, "emoji.restore brings it back, with its id, so the messages it's in show it again")
+    let soon = try app.cmd("q_17", "emoji.add", Obj.new().s("file", wide.copy()).s("name", String("party_cat")).done())
+    try check(code(soon) == "name_taken", "and its name with it")
+
+    // --- As many as one person may have ---
+    var n = 2
+    while n < 200 {
+        let a = try app.cmd("q_n", "emoji.add", Obj.new().s("file", wide.copy()).s("name", "e{n}").done())
+        if code(a) != "" { break }
+        n += 1
+    }
+    try check(n == 200, "a person has up to 200")
+    let over = try app.cmd("q_18", "emoji.add", Obj.new().s("file", wide.copy()).s("name", String("one_more")).done())
+    try check(code(over) == "too_many", "and no more")
+
+    // --- A device that connects has them ---
+    let other_app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var brought = 0usize
+    for f in other_app.frames {
+        if str_at(f.copy(), "t") == some(String("synced")) { brought = at(f.copy(), "emoji").len() }
+    }
+    try check(brought == 200, "synced brings the person's emoji whole")
+    other_app.close()
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nemoji: all good")
+}

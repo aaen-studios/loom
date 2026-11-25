@@ -460,6 +460,45 @@ pub fn place(dir: &Path, exe: &[u8], stub: &[u8], version: &str) -> Result<(), S
     Ok(())
 }
 
+/// Keeps the release that didn't start once it went in, `version`, and why, in the
+/// core's folder for updates (`update\failed.json` in the data folder, core/update.calx),
+/// so the old loom doesn't put it in again on its own, and the update icon says why.
+/// The app hands an update over with its environment, so LOOM_DATA names its data
+/// folder, as it does for the app, when it's set.
+pub fn keep_failed(version: &str, why: &str) -> Result<(), String> {
+    let data = match std::env::var_os("LOOM_DATA").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => data_dir()?,
+    };
+    let dir = data.join("update");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let text = format!(
+        r#"{{"version":{},"why":{}}}"#,
+        json_string(version),
+        json_string(why)
+    );
+    write_atomic(&dir.join("failed.json"), text.as_bytes())
+}
+
+/// `s` as a JSON string.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Puts loom.old.exe back, after a new version that didn't start.
 pub fn roll_back(dir: &Path, version: &str) -> Result<(), String> {
     let target = dir.join("loom.exe");
@@ -637,4 +676,16 @@ fn make_shortcut(exe: &Path, lnk: &Path) -> Result<(), String> {
             .map_err(fail)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn strings_go_into_json_escaped() {
+        assert_eq!(super::json_string("0.2.7"), r#""0.2.7""#);
+        assert_eq!(
+            super::json_string("it ended \"at once\"\\n\u{1}"),
+            r#""it ended \"at once\"\\n\u0001""#
+        );
+    }
 }

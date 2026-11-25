@@ -1819,6 +1819,8 @@ impl Block {
         Block {
             text: if kind == "plan" {
                 plan_text(b)
+            } else if kind == "mark" {
+                mark_text(b)
             } else {
                 s(b, "text")
             },
@@ -1832,6 +1834,81 @@ impl Block {
             parent: b.get("parent").and_then(Value::as_str).map(str::to_string),
             kind,
         }
+    }
+}
+
+/// What a line across the chat from loom says (a `loom` message's `mark` block): where
+/// the program compacted the context, with its tokens before and after where it said,
+/// or where loom started a fresh session for a full one (PLAN.md, "One endless chat").
+fn mark_text(b: &Value) -> String {
+    match s(b, "mark").as_str() {
+        "fresh" => "A fresh session starts here".into(),
+        "compacted" => {
+            let n = |k: &str| b.get(k).and_then(Value::as_i64).unwrap_or(0);
+            match (n("before"), n("after")) {
+                (0, _) | (_, 0) => "Context compacted".into(),
+                (before, after) => format!(
+                    "Context compacted · {} → {}",
+                    tokens_short(before),
+                    tokens_short(after)
+                ),
+            }
+        }
+        _ => String::new(),
+    }
+}
+
+/// A count of tokens as the context's ring and lines say it: 900, 16k, 182k, 1M, 1.5M.
+pub fn tokens_short(n: i64) -> String {
+    if n >= 1_000_000 {
+        let tenths = (n + 50_000) / 100_000;
+        if tenths % 10 == 0 {
+            format!("{}M", tenths / 10)
+        } else {
+            format!("{}.{}M", tenths / 10, tenths % 10)
+        }
+    } else if n >= 1000 {
+        format!("{}k", (n + 500) / 1000)
+    } else {
+        n.max(0).to_string()
+    }
+}
+
+/// How full the open chat's session context is, as its agent program last said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ContextFill {
+    pub used: i64,
+    pub size: i64,
+}
+
+/// How full a context may get before the chat's next message goes to a fresh session
+/// (the instance's `CONTEXT_RENEW_PERCENT`).
+pub const CONTEXT_RENEW_PERCENT: i64 = 80;
+
+impl ContextFill {
+    pub fn percent(self) -> i64 {
+        if self.size <= 0 {
+            return 0;
+        }
+        (self.used.max(0) * 100 / self.size).min(100)
+    }
+
+    /// How much of the ring is filled, from 0 to 1.
+    pub fn fraction(self) -> f32 {
+        if self.size <= 0 {
+            return 0.0;
+        }
+        (self.used.max(0) as f32 / self.size as f32).clamp(0.0, 1.0)
+    }
+
+    /// What the ring says under the pointer.
+    pub fn tip(self) -> String {
+        format!(
+            "Context {}%, {} of {}. A fresh session starts at {CONTEXT_RENEW_PERCENT}%.",
+            self.percent(),
+            tokens_short(self.used),
+            tokens_short(self.size)
+        )
     }
 }
 
@@ -4065,7 +4142,8 @@ pub fn flow(rows: &[Option<&Message>], day: impl Fn(i64) -> i64) -> Vec<Flow> {
             }
             last = Some(m.at);
         }
-        if m.role != "person" {
+        // A line from loom across the chat is no one's reply.
+        if m.role != "person" && m.role != "loom" {
             out[i].head = !replied;
             replied = true;
         }
@@ -4542,6 +4620,8 @@ pub struct Model {
     /// That time, by conversation id, so a message keeps the order without reading the
     /// list again.
     conversation_last: HashMap<String, i64>,
+    /// How full each conversation's session context is, as its program last said.
+    contexts: HashMap<String, ContextFill>,
     /// The list has come, so a chat with no conversation is known to be empty.
     conversations_known: bool,
     /// The conversation `messages` are of, once they've come.
@@ -4649,6 +4729,9 @@ pub struct Model {
     search_id: String,
     /// A newer release, downloaded and checked: its version and where it is.
     pub update: Option<(String, String)>,
+    /// Whether that release may go in on its own, with "put updates in on their own":
+    /// not one that didn't start the last time it went in, as the core says.
+    pub update_auto: bool,
     /// What a check the person asked for found, for the app to say.
     pub checked: Option<String>,
     /// The activity log as CSV, once `activity.export` gives it, for the app to save.
@@ -5095,6 +5178,11 @@ impl Model {
             }
         }
         out
+    }
+
+    /// How full the open chat's session context is, once its program has said.
+    pub fn context(&self) -> Option<ContextFill> {
+        self.contexts.get(&self.conversation()?).copied()
     }
 
     /// The conversation the chat shows: the open task's, or else the selected
@@ -5688,6 +5776,7 @@ impl Model {
                         ));
                     }
                     self.update = Some((version, path.to_string()));
+                    self.update_auto = f.get("auto").and_then(Value::as_bool) != Some(false);
                 } else if asked {
                     self.checked = Some(match f.get("error") {
                         // A build that doesn't update itself says so plainly.
@@ -7404,6 +7493,18 @@ impl Model {
                             s(c, "id"),
                             c.get("last").and_then(Value::as_i64).unwrap_or(0),
                         )
+                    })
+                    .collect();
+                self.contexts = items
+                    .iter()
+                    .filter_map(|c| {
+                        let x = c.get("context")?;
+                        let n = |k: &str| x.get(k).and_then(Value::as_i64).unwrap_or(0);
+                        let fill = ContextFill {
+                            used: n("used"),
+                            size: n("size"),
+                        };
+                        (fill.size > 0).then(|| (s(c, "id"), fill))
                     })
                     .collect();
                 self.conversations = items
@@ -10948,6 +11049,15 @@ mod tests {
     }
 
     #[test]
+    fn a_release_that_didnt_start_isnt_put_in_on_its_own() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.update", "version": "0.2.5", "path": "/u/0.2.5/loom-mac.dmg", "auto": true}));
+        assert!(m.update.is_some() && m.update_auto);
+        m.take(&json!({"t": "core.update", "version": "0.2.5", "path": "/u/0.2.5/loom-mac.dmg", "auto": false, "failed": "ended at once, exit status: 3"}));
+        assert!(m.update.is_some() && !m.update_auto);
+    }
+
+    #[test]
     fn a_server_behind_and_its_update() {
         let mut m = Model::new();
         m.take(&json!({"t": "core.server", "loom": "0.2.0", "latest": "0.2.1", "behind": true}));
@@ -11640,6 +11750,64 @@ mod tests {
 
     fn conversations(items: Value) -> Value {
         json!({"t": "core.data", "what": "conversations", "items": items})
+    }
+
+    #[test]
+    fn the_open_chat_says_how_full_its_context_is() {
+        let mut m = Model::new();
+        m.take(&conversations(json!([
+            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 112_000, "size": 200_000}},
+            {"id": "c_2", "agent": "a_2", "at": 1},
+        ])));
+        m.select(Some("a_1".into()));
+        let fill = m.context().expect("its program said");
+        assert_eq!(fill.percent(), 56);
+        assert_eq!(
+            fill.tip(),
+            "Context 56%, 112k of 200k. A fresh session starts at 80%."
+        );
+        m.select(Some("a_2".into()));
+        assert_eq!(m.context(), None, "nothing until its program says");
+        let at = |used| ContextFill {
+            used,
+            size: 1_000_000,
+        };
+        assert_eq!(at(750_000).percent(), 75);
+        assert_eq!(at(-5).fraction(), 0.0);
+        assert_eq!(at(2_000_000).fraction(), 1.0);
+        assert_eq!(tokens_short(900), "900");
+        assert_eq!(tokens_short(15_600), "16k");
+        assert_eq!(tokens_short(1_000_000), "1M");
+        assert_eq!(tokens_short(1_480_000), "1.5M");
+    }
+
+    #[test]
+    fn a_line_from_loom_says_where_the_context_was_compacted_or_started_fresh() {
+        let line = |block: Value| Block::of(&block).text;
+        assert_eq!(
+            line(json!({"kind": "mark", "mark": "compacted", "before": 182_000, "after": 16_000})),
+            "Context compacted · 182k → 16k"
+        );
+        assert_eq!(
+            line(json!({"kind": "mark", "mark": "compacted", "before": 182_000})),
+            "Context compacted"
+        );
+        assert_eq!(
+            line(json!({"kind": "mark", "mark": "fresh"})),
+            "A fresh session starts here"
+        );
+        // It's no one's reply: the agent's name goes over the reply after it.
+        let mark = Message {
+            role: "loom".into(),
+            at: 2,
+            ..turn(&[], false, "")
+        };
+        let reply = Message {
+            at: 3,
+            ..turn(&["text:Hi."], false, "done")
+        };
+        let f = flow(&[Some(&mark), Some(&reply)], |_| 0);
+        assert!(!f[0].head && f[1].head);
     }
 
     #[test]

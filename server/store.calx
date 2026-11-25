@@ -157,6 +157,11 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS acp_sessions (
     user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, program TEXT NOT NULL,
     session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', PRIMARY KEY (user, conversation));
+-- How full a conversation's session context is, as its program last said: the tokens
+-- in it of its window (PLAN.md, "One endless chat").
+CREATE TABLE IF NOT EXISTS contexts (
+    user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, used INTEGER NOT NULL,
+    size INTEGER NOT NULL, PRIMARY KEY (user, conversation));
 -- The limits of a person's plan with an agent program, as the program last reported them
 -- (PLAN.md, "Usage limits"): its plan's name, and how much of the session and the week
 -- is used, with when each resets.
@@ -251,6 +256,12 @@ CREATE TABLE IF NOT EXISTS status_tokens (
 CREATE TABLE IF NOT EXISTS imported (
     user TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, kind TEXT NOT NULL,
     id TEXT NOT NULL, loom TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, source, kind, id));
+-- Each person's own emoji (PLAN.md, "Emoji"): its picture is a file of theirs, 128 pixels
+-- square, and one deleted is kept, for its undo, but not shown or counted.
+CREATE TABLE IF NOT EXISTS emoji (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+    file TEXT NOT NULL, animated INTEGER NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS emoji_user ON emoji (user, deleted);
 "#
 
 /// What search marks a matched word with, before and after.
@@ -349,6 +360,9 @@ fn conversation_of(r: List<Value>) -> Json {
     // Another agent's thread with it, or a plugin panel's: who asks.
     let asked_by = text(r[10].copy())
     if asked_by.len() > 0 { o = o.s("asked_by", asked_by) }
+    // How full its session's context is, once its program has said.
+    let size = int(r[12].copy())
+    if size > 0 { o = o.j("context", Obj.new().i("used", int(r[11].copy())).i("size", size).done()) }
     return o.done()
 }
 
@@ -357,6 +371,11 @@ fn int(v: Value) -> i64 {
         Value.Int(n) => return n,
         _ => return 0,
     }
+}
+
+// A person's own emoji, from id, name, file, animated and at.
+fn emoji_row(r: List<Value>) -> Json {
+    return Obj.new().s("id", text(r[0].copy())).s("name", text(r[1].copy())).s("file", text(r[2].copy())).b("animated", int(r[3].copy()) != 0).i("at", int(r[4].copy())).done()
 }
 
 // A shared table's row, from id, data, by, at and updated.
@@ -1027,7 +1046,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, cx.used, cx.size FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -1036,7 +1055,7 @@ impl Store {
     // chat. A task's conversation is the task's, not the chat, and another
     // agent's thread with it (`asks`) is that agent's.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -1050,7 +1069,7 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, cx.used, cx.size FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -1980,6 +1999,42 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM agent_groups WHERE id = ? AND user = ?"), [t(id), t(user)])
     }
 
+    // --- The person's own emoji (PLAN.md, "Emoji") ---
+
+    // The person's emoji, oldest first, each `id`, `name`, `file`, `animated` and `at`,
+    // but those deleted.
+    pub fn emoji(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, name, file, animated, at FROM emoji WHERE user = ? AND deleted = 0 ORDER BY at, rowid"), [t(user)]) {
+            out.push(emoji_row(r))
+        }
+        return out
+    }
+
+    // One emoji by its id, whoever's it is, and whose: everyone on the instance sees
+    // the emoji in a chat they share. With `deleted`, one deleted too.
+    pub fn emoji_by_id(self, id: String, deleted: bool) -> (String, Json)? ! Error {
+        let r = try self.db.query_one(String("SELECT id, name, file, animated, at, user, deleted FROM emoji WHERE id = ?"), [t(id)]) else return none
+        if int(r[6].copy()) != 0 and not deleted { return none }
+        return some((text(r[5].copy()), emoji_row(r)))
+    }
+
+    pub fn add_emoji(self, user: String, name: String, file: String, animated: bool) -> Json ! Error {
+        let id = try self.new_id("e")
+        let at = now()
+        _ = try self.db.execute(String("INSERT INTO emoji (id, user, name, file, animated, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(name.copy()), t(file.copy()), Value.Int(if animated { 1 } else { 0 }), Value.Int(at)])
+        return Obj.new().s("id", id).s("name", name).s("file", file).b("animated", animated).i("at", at).done()
+    }
+
+    pub fn rename_emoji(self, user: String, id: String, name: String) ! Error {
+        _ = try self.db.execute(String("UPDATE emoji SET name = ? WHERE id = ? AND user = ?"), [t(name), t(id), t(user)])
+    }
+
+    // Deletes one, or with `gone` false brings one deleted back.
+    pub fn delete_emoji(self, user: String, id: String, gone: bool) ! Error {
+        _ = try self.db.execute(String("UPDATE emoji SET deleted = ? WHERE id = ? AND user = ?"), [Value.Int(if gone { 1 } else { 0 }), t(id), t(user)])
+    }
+
     // --- Rules on what's touched (PLAN.md, "Rules, records and limits") ---
 
     // The person's rules, oldest first, each with its `id` and `agent` ("" for
@@ -2315,7 +2370,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "events", "acp_sessions", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "emoji", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2406,6 +2461,17 @@ impl Store {
     // A turn in `session` ended now.
     pub fn used_acp_session(self, user: String, conversation: String, session: String) ! Error {
         _ = try self.db.execute(String("UPDATE acp_sessions SET at = ? WHERE user = ? AND conversation = ? AND session = ?"), [Value.Int(now()), t(user), t(conversation), t(session)])
+    }
+
+    // How full `conversation`'s session context is: its tokens and its window, as
+    // its program last said, or none before it has.
+    pub fn context(self, user: String, conversation: String) -> (i64, i64)? ! Error {
+        let r = try self.db.query_one(String("SELECT used, size FROM contexts WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return none
+        return some((int(r[0].copy()), int(r[1].copy())))
+    }
+
+    pub fn put_context(self, user: String, conversation: String, used: i64, size: i64) ! Error {
+        _ = try self.db.execute(String("INSERT INTO contexts (user, conversation, used, size) VALUES (?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET used = excluded.used, size = excluded.size"), [t(user), t(conversation), Value.Int(used), Value.Int(size)])
     }
 
     // The limits of `user`'s plan with `program`, as it last reported them, or none.
@@ -3394,6 +3460,23 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
     s.used_acp_session(a.id.copy(), String("c_1"), String("s_2"))!
     assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_2"))! > 5)
     assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_1"))! == 0)
+}
+
+@test
+fn a_chat_has_its_context_once_its_program_says() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let c = s.add_conversation(a.id.copy(), String("a_1"), String("Chat"))!
+    let id = field(c, "id")
+    assert(s.context(a.id.copy(), id.copy())! == none)
+    assert((s.conversation(a.id.copy(), id.copy())! ?? Json.Null).get(String("context")) == none)
+    s.put_context(a.id.copy(), id.copy(), 112000, 200000)!
+    s.put_context(a.id.copy(), id.copy(), 113000, 200000)!
+    assert(s.context(a.id.copy(), id.copy())! == some((i64(113000), i64(200000))))
+    let shown = (s.conversation(a.id.copy(), id.copy())! ?? Json.Null).get(String("context")) ?? Json.Null
+    assert(int_at(shown.copy(), "used") == some(113000i64) and int_at(shown, "size") == some(200000i64))
+    assert("{s.conversations(a.id.copy())!}".contains("113000"))
+    assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains("113000"))
 }
 
 @test

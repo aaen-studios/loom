@@ -66,6 +66,7 @@ import server.stage
 import server.tokenfile
 import server.update
 import shared.checkpoint
+import shared.emoji
 import shared.addcode
 import server.searcher
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
@@ -341,6 +342,7 @@ struct Proc {
     used: i64    // when it last said something, for stopping it once it has been idle a while
     compacts: bool    // whether it offers /compact, as Claude's adapter does, which compacts idle sessions itself
     turned: Map<String, i64>    // ACP session -> when its last turn ended
+    compactions: Map<String, String>    // a compaction its program reports, by its call -> the line in the chat that says so
 }
 
 impl Proc {
@@ -353,6 +355,19 @@ impl Proc {
         _ = self.profiled.remove(session.copy())
         _ = self.turned.remove(session.copy())
         _ = self.configs.remove(session)
+    }
+
+    // Whether `session` is being picked up again, while what session/load plays
+    // back of it comes: what it did before, not now.
+    fn picking_up(self: Proc, session: String) -> bool {
+        for (_, w) in self.pending {
+            match w {
+                Pending.Resume(_, s) => if s == session { return true },
+                Pending.Warm(_, s) => if s == session { return true },
+                _ => {},
+            }
+        }
+        return false
     }
 }
 
@@ -425,6 +440,7 @@ pub struct Instance {
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     setups: Map<String, Setup>    // tc_ id -> loom going onto one of the person's hosts
     mcp_adds: LinkedMap<String, McpAdd>    // tc_ id -> an MCP server an agent proposed, while its turn goes on
+    emojis: emoji.Table    // the built-in emoji, for an agent's `:name:` (PLAN.md, "Emoji")
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
     minute_ms: i64
@@ -661,6 +677,14 @@ enum Renew {
     Idle    // nothing was said in it for SESSION_IDLE_CLOSE_MS
 }
 
+// Whether a tool call's report is a compaction of its session's context, as
+// Claude's adapter reports one to a client without ACP's compaction updates: a
+// call named `compact`, with the tokens before and after in its rawOutput
+// (`preTokens`, `postTokens`). It shows as a line in the chat, not as a call.
+fn compaction(u: Json) -> bool {
+    return str_at(at(at(u, "_meta"), "claudeCode"), "toolName") == some(String("compact"))
+}
+
 // One window of a plan's limits, from Claude Code's rate-limit info: how much of
 // it is used, in percent (its `utilization` is 0 to 1), and when it resets, in Unix
 // ms (its `resetsAt` is in seconds). None without both.
@@ -754,6 +778,7 @@ const TASK_RESTARTED: str = "[loom: The instance restarted while you worked on t
 const TASK_RESUMED: str = "[loom: Your person paused this task, and has resumed it now. Carry on from where you stopped.]"
 const SECRETS_TOLD: str = "[loom: Never ask your person for a password or a code in the chat. When a page in your browser wants one, fill in one they keep with browser_fill_secret, or ask with browser_ask_secret: they type it on a card in your reply, it goes into the page without you seeing it, and they can keep it for next time.]"
 const ATTACH_TOLD: str = "[loom: To give your person a file you made, such as a picture, a PDF, a spreadsheet or a zip, put it in your reply with attach_files: a file in your folder or the shared one, or a screenshot you took with browser_screenshot or use_device, by the name its result gives. A file of those kinds that you made this turn and that your answer names, by its whole path, a file:// link or in `code`, is put there by itself.]"
+const EMOJI_TOLD: str = "In the chat, write an emoji as itself or by its name between colons, as :sob: or :thumbsup:, and it shows as the emoji."
 const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
 // How much of what a webhook was sent goes to the agent.
 const HOOK_MOST: usize = 20000
@@ -1251,6 +1276,12 @@ pub struct Mentioned {
     pub shown: String    // the words in the brackets
     pub target: String    // the agent's id, the file's path, or the skill's name
     pub agent: String    // for a file, the agent whose folder it's named from
+}
+
+// Whether one of the person's emoji in `have`, but the one with the id `but`, is
+// called `name` already.
+fn name_taken(have: List<Json>, name: String, but: String) -> bool {
+    return have.any(|e| str_at(e.copy(), "name") == some(name.copy()) and str_at(e.copy(), "id") != some(but.copy()))
 }
 
 // The mentions in `text`, in order, and the text as the agent reads it: an
@@ -1903,7 +1934,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3831,6 +3862,9 @@ impl Instance {
         }
         if req.path == "/files" or req.path.starts_with("/files/") {
             return some(try i.files_route(req))
+        }
+        if req.path.starts_with("/emoji/") and req.method == "GET" {
+            return some(try i.emoji_route(req))
         }
         if req.path.starts_with("/hooks/") {
             return some(try i.hook(req))
@@ -7496,6 +7530,93 @@ impl Instance {
         return shown
     }
 
+    // --- The person's own emoji (PLAN.md, "Emoji"; protocol.md, "Emoji") ---
+
+    // GET /emoji/<id>: an emoji's picture, for anyone signed in here, since everyone in
+    // a chat sees the emoji in it. One deleted isn't there.
+    fn emoji_route(i: Instance, req: Request) -> Response ! Error {
+        if try i.bearer(req) == none {
+            return http_error(401, "unauthorized", String("That token isn't signed in."))
+        }
+        let id = req.path[7..].copy()
+        let (_, e) = try i.store.emoji_by_id(id, false) else {
+            return http_error(404, "not_found", String("There's no such emoji."))
+        }
+        let sha = str_at(e, "file") ?? String()
+        if not is_sha(sha.copy()) { return http_error(404, "not_found", String("There's no such emoji.")) }
+        let data = try fs.read("{i.data}/files/{sha}")
+        let mime = files.sniff(data.copy()) ?? String("image/png")
+        return Response.new(200, mime, data).with_header(String("Cache-Control"), String("private, max-age=31536000, immutable"))
+    }
+
+    // The person's own emoji, as `shared.emoji` takes them.
+    fn custom_emoji(i: Instance, user: String) -> List<emoji.Custom> {
+        let list = match i.store.emoji(user) {
+            ok(l) => l,
+            err(_) => List<Json>(),
+        }
+        return list.map(|e| emoji.Custom { id: str_at(e.copy(), "id") ?? String(), name: str_at(e.copy(), "name") ?? String(), animated: bool_at(e.copy(), "animated") ?? false })
+    }
+
+    // Tells the person's devices their emoji as they are now.
+    fn emoji_changed(i: Instance, user: String, by: String) ! Error {
+        try i.event(user.copy(), "emoji.changed", Obj.new().j("emoji", Json.Array(try i.store.emoji(user))).s("by", by).done())
+    }
+
+    // emoji.list, emoji.add, emoji.rename, emoji.delete and emoji.restore.
+    fn emoji_cmd(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        let have = try i.store.emoji(user.copy())
+        if name == "emoji.list" {
+            return Answer.Value(Obj.new().j("emoji", Json.Array(have)).i("most", i64.wrap(u64(emoji.MOST))).done())
+        }
+        let id = str_at(args.copy(), "emoji") ?? String()
+        let named = (str_at(args.copy(), "name") ?? String()).trim().to_lower_root().trim_prefix(":").trim_suffix(":").copy()
+        let bad_name = "An emoji's name is 2 to 32 of a to z, 0 to 9 and _."
+        if name == "emoji.add" {
+            if not emoji.name_ok(named.copy()) { return Answer.Refused(String("bad_name"), String(bad_name)) }
+            if name_taken(have.copy(), named.copy(), String()) { return Answer.Refused(String("name_taken"), "There's an emoji called :{named}: already.") }
+            if have.len() >= emoji.MOST { return Answer.Refused(String("too_many"), "That's {emoji.MOST} emoji, as many as one person can have.") }
+            let sha = str_at(args, "file") ?? String()
+            if try i.store.file(user.copy(), sha.copy()) == none { return Answer.Refused(String("not_found"), "There's no file {sha}.") }
+            let png = match files.emoji_png(try fs.read("{i.data}/files/{sha}")) {
+                ok(p) => p,
+                err(e) => return Answer.Refused(String("bad_picture"), "That picture can't be an emoji: {e}."),
+            }
+            let small = bytes.hex(sha256(png.copy()))
+            _ = try i.keep_file(user.copy(), small.copy(), "{named}.png", String("image/png"), png)
+            let e = try i.store.add_emoji(user.copy(), named, small, false)
+            try i.emoji_changed(user, device)
+            return Answer.Value(Obj.new().j("emoji", e).done())
+        }
+        // The rest change one the person has, or had, by its id.
+        let (owner, old) = try i.store.emoji_by_id(id.copy(), name == "emoji.restore") else return Answer.Refused(String("not_found"), "There's no emoji {id}.")
+        if owner != user { return Answer.Refused(String("not_found"), "There's no emoji {id}.") }
+        let was = str_at(old.copy(), "name") ?? String()
+        if name == "emoji.rename" {
+            if not emoji.name_ok(named.copy()) { return Answer.Refused(String("bad_name"), String(bad_name)) }
+            if name_taken(have.copy(), named.copy(), id.copy()) { return Answer.Refused(String("name_taken"), "There's an emoji called :{named}: already.") }
+            if named != was {
+                try i.store.rename_emoji(user.copy(), id.copy(), named.copy())
+                try i.emoji_changed(user, device)
+            }
+            return Answer.Value(Obj.new().j("emoji", merge(old, Obj.new().s("name", named).done())).done())
+        }
+        if name == "emoji.delete" {
+            try i.store.delete_emoji(user.copy(), id, true)
+            try i.emoji_changed(user, device)
+            return Answer.Value(Obj.new().done())
+        }
+        if name == "emoji.restore" {
+            if have.any(|e| str_at(e.copy(), "id") == some(id.copy())) { return Answer.Value(Obj.new().j("emoji", old).done()) }
+            if name_taken(have.copy(), was.copy(), id.copy()) { return Answer.Refused(String("name_taken"), "There's an emoji called :{was}: already.") }
+            if have.len() >= emoji.MOST { return Answer.Refused(String("too_many"), "That's {emoji.MOST} emoji, as many as one person can have.") }
+            try i.store.delete_emoji(user.copy(), id, false)
+            try i.emoji_changed(user, device)
+            return Answer.Value(Obj.new().j("emoji", old).done())
+        }
+        return Answer.Refused(String("unknown_command"), "There's no command {name}.")
+    }
+
     // html_render (PLAN.md, "Pages in the chat"): the page goes in the chat as a
     // file block, after what the agent has said so far in its newest turn, and
     // the apps open it beside the chat, walled off.
@@ -8868,7 +8989,7 @@ impl Instance {
         }
         // And the sidebar's folders as they are, so a cache that never kept them, as one
         // from before them, has them all.
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).j("groups", Json.Array(try i.store.groups(user.copy()))).done()}")
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).j("groups", Json.Array(try i.store.groups(user.copy()))).j("emoji", Json.Array(try i.store.emoji(user.copy()))).done()}")
         i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0) })
         // A person who opens an app is likely to write soon (LOO-223).
         i.prestart(user.copy())
@@ -9058,14 +9179,16 @@ impl Instance {
             let answered = "[loom: This message is your person's answer to your form {str_at(form.copy(), "card") ?? String()}, by each field's label: {at(form, "answers")}]"
             note = if note.len() > 0 { "{note}\n{answered}" } else { answered }
         }
-        // What it replies to, its mentions read as names.
+        // What it replies to, its mentions and emoji read as names.
         if replying != Json.Null {
             let (quoted, _) = mentions_in(str_at(replying.copy(), "text") ?? String())
-            let answered = replies.told(replying, quoted)
+            let answered = replies.told(replying, emoji.as_names(quoted))
             note = if note.len() > 0 { "{note}\n{answered}" } else { answered }
         }
-        // What it mentions, as the agent reads it (PLAN.md, "Mentions").
-        let (said, mentioned) = mentions_in(text.copy())
+        // What it mentions, as the agent reads it (PLAN.md, "Mentions"), and the
+        // person's own emoji as `:name:` (PLAN.md, "Emoji").
+        let (with_tokens, mentioned) = mentions_in(text.copy())
+        let said = emoji.as_names(with_tokens)
         let told = try i.mentions_told(user.copy(), str_at(conversation.copy(), "agent") ?? String(), mentioned)
         if told.len() > 0 { note = if note.len() > 0 { "{note}\n{told}" } else { told } }
         try i.start_run(user, conversation, run_id, message_id, said, sent_files, from, note, "person")
@@ -9543,7 +9666,7 @@ impl Instance {
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), compactions: Map<String, String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -9600,6 +9723,7 @@ impl Instance {
         } else {
             return
         }
+        try i.went_fresh(user.copy(), conversation.copy(), renew)
         // A turn with no message of its own, as a routine's quiet run, goes on from the newest.
         let (before, _) = try i.store.messages(user.copy(), conversation.copy(), if answering.len() > 0 { some(answering) } else { none }, 1)
         var said = String()
@@ -9960,6 +10084,16 @@ impl Instance {
         if let _ = p.told.find(secrets_told.copy()) {} else {
             prompt.push(Obj.new().s("type", String("text")).s("text", String(SECRETS_TOLD)).done())
             p.told.insert(secrets_told, String("1"))
+        }
+        // How emoji are written, and the person's own (PLAN.md, "Emoji"), when the
+        // session hasn't been told them as they are now.
+        let own_emoji = i.custom_emoji(user.copy()).map(|c| ":{c.name}:")
+        let emoji_said = if own_emoji.is_empty() { String(EMOJI_TOLD) } else { "{EMOJI_TOLD} Your person's own emoji, written the same way: {own_emoji.join(", ")}." }
+        let emoji_told = "{session}#emoji"
+        let had_emoji = if let t = p.told.find(emoji_told.copy()) { t.copy() } else { String() }
+        if had_emoji != emoji_said {
+            prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: {emoji_said}]").done())
+            p.told.insert(emoji_told, emoji_said)
         }
         // The instructions every agent of the person's follows (PLAN.md,
         // "Agent defaults"), when the session hasn't had them as they are now.
@@ -10362,7 +10496,9 @@ impl Instance {
     // What a session says of itself, whether a run is going or not: how full
     // its context is, to start a fresh one before it overflows (PLAN.md, "One
     // endless chat"), which a compaction while idle changes with no run, and
-    // whether its program offers /compact (PLAN.md, "Idle sessions").
+    // whether its program offers /compact (PLAN.md, "Idle sessions"). How
+    // full it is goes to the person's apps too, and a compaction its program
+    // reports becomes a line in the chat.
     fn note_session(i: mut Instance, p: mut Proc, params: Json) {
         let session = str_at(params.copy(), "sessionId") ?? String()
         let u = at(params, "update")
@@ -10370,7 +10506,10 @@ impl Instance {
         if kind == "usage_update" {
             let used = int_at(u.copy(), "used") ?? 0
             let size = int_at(u.copy(), "size") ?? 0
-            if size > 0 and session.len() > 0 { i.context.insert(session, (used, size)) }
+            if size > 0 and session.len() > 0 {
+                i.context.insert(session.copy(), (used, size))
+                if let err(e) = i.keep_context(p, session, used, size) { eprintln("loom: keeping how full a session is: {e}") }
+            }
             // Claude's adapter puts its plan's limits on it, as Claude Code's rate-limit info.
             let info = at(at(u, "_meta"), "_claude/rateLimit")
             if info != Json.Null {
@@ -10382,6 +10521,97 @@ impl Instance {
                     if str_at(c, "name") == some(String("compact")) { p.compacts = true }
                 }
             }
+        } else if (kind == "tool_call" or kind == "tool_call_update") and compaction(u.copy()) and not p.picking_up(session.copy()) {
+            if let err(e) = i.compacted(mut p, session, u) { eprintln("loom: saying a session was compacted: {e}") }
+        }
+    }
+
+    // The conversation an ACP session of `p`'s is the session of.
+    fn session_chat(i: Instance, p: Proc, session: String) -> String? {
+        for (conversation, s) in p.sessions {
+            if s == session { return some(conversation.copy()) }
+        }
+        if let run = i.run_for_session(session) {
+            if let r = i.runs.find(run) { return some(r.conversation.copy()) }
+        }
+        return none
+    }
+
+    // How full a session's context is, kept with its chat, and told to the
+    // person's apps when what they show of it changes: its percent, or its window.
+    fn keep_context(i: Instance, p: Proc, session: String, used: i64, size: i64) ! Error {
+        let conversation = i.session_chat(p, session) else return
+        let (was, window): (i64, i64) = try i.store.context(p.user.copy(), conversation.copy()) ?? (i64(0), i64(0))
+        if window == size and was * 100 / window == used * 100 / size { return }
+        try i.store.put_context(p.user.copy(), conversation.copy(), used, size)
+        try i.tell_context(p.user.copy(), conversation, used, size)
+    }
+
+    fn tell_context(i: Instance, user: String, conversation: String, used: i64, size: i64) ! Error {
+        let context = Obj.new().i("used", used).i("size", size).done()
+        try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).j("context", context).done()).done())
+    }
+
+    // A chat goes on in a fresh session: its context starts again from nothing,
+    // and when the last one was nearly full, a line in the chat says so (PLAN.md,
+    // "One endless chat").
+    fn went_fresh(i: Instance, user: String, conversation: String, renew: Renew) ! Error {
+        let (_, size): (i64, i64) = try i.store.context(user.copy(), conversation.copy()) ?? (i64(0), i64(0))
+        if size > 0 {
+            try i.store.put_context(user.copy(), conversation.copy(), 0, size)
+            try i.tell_context(user.copy(), conversation.copy(), 0, size)
+        }
+        if let Renew.Full = renew { _ = try i.chat_line(user, conversation, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+    }
+
+    // A line across the chat from loom, not a message of anyone's: a `loom`
+    // message with one `mark` block. Its id.
+    fn chat_line(i: Instance, user: String, conversation: String, mark: Json) -> String ! Error {
+        let id = try i.store.new_id("msg")
+        let message = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", String("loom")).i("at", now()).j("blocks", Json.Array([mark.copy()])).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user, "message.created", Obj.new().s("conversation", conversation).j("message", message).done())
+        return id
+    }
+
+    // A compaction its program reported (`compaction`): once it's done, a line
+    // in its chat says so, with the tokens its context held before and after
+    // where the program says, filled in as a later report adds them. One that
+    // failed leaves no line.
+    fn compacted(i: Instance, p: mut Proc, session: String, u: Json) ! Error {
+        let call = str_at(u.copy(), "toolCallId") ?? String()
+        let status = str_at(u.copy(), "status") ?? String()
+        let facts = at(u, "rawOutput")
+        var before = int_at(facts.copy(), "preTokens") ?? 0
+        let after = int_at(facts, "postTokens") ?? 0
+        if status == "failed" {
+            _ = p.compactions.remove(call)
+            return
+        }
+        let line: String? = if let v = p.compactions.find(call.copy()) { some(v.copy()) } else { none }
+        if line == none and status != "completed" and before == 0 { return }
+        let conversation = i.session_chat(p, session.copy()) else return
+        if line == none and before == 0 {
+            let (used, _): (i64, i64) = i.context.get(session) ?? (i64(0), i64(0))
+            before = used
+        }
+        var mark = Obj.new().s("kind", String("mark")).s("mark", String("compacted"))
+        if before > 0 { mark = mark.i("before", before) }
+        if after > 0 { mark = mark.i("after", after) }
+        match line {
+            some(id) => {
+                if after == 0 { return }
+                var kept = try i.store.message(p.user.copy(), id) else return
+                kept = merge(kept, Obj.new().j("blocks", Json.Array([mark.done()])).done())
+                try i.store.put_message(p.user.copy(), kept.copy())
+                try i.event(p.user.copy(), "message.updated", Obj.new().s("conversation", conversation).j("message", kept).done())
+                _ = p.compactions.remove(call)
+            },
+            none => {
+                let id = try i.chat_line(p.user.copy(), conversation, mark.done())
+                // The tokens after can come in a later report.
+                if after == 0 { p.compactions.insert(call, id) }
+            },
         }
     }
 
@@ -10430,7 +10660,9 @@ impl Instance {
     }
 
     fn update_run(i: mut Instance, r: mut Run, u: Json) ! Error {
-        let kind = str_at(u, "sessionUpdate") ?? String()
+        let kind = str_at(u.copy(), "sessionUpdate") ?? String()
+        // A compaction is a line in the chat (note_session), not a step of the reply.
+        if (kind == "tool_call" or kind == "tool_call_update") and compaction(u.copy()) { return }
         if kind == "agent_message_chunk" or kind == "agent_thought_chunk" {
             let content = at(u, "content")
             if (str_at(content, "type") ?? String()) == "text" {
@@ -11460,6 +11692,9 @@ impl Instance {
         }
         var blocks = List<Json>()
         var said = String()
+        // The emoji it wrote by name, `:sob:` or one of its person's own, are kept as
+        // the emoji (PLAN.md, "Emoji").
+        let own_emoji = i.custom_emoji(r.user.copy())
         for b in r.blocks {
             // A subagent's calls and words keep the call they sit inside, and its
             // words aren't the reply's.
@@ -11473,7 +11708,8 @@ impl Instance {
             } else if b.kind == "card" {
                 blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", cards.ended(b.card.copy())).done())
             } else {
-                blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", b.text.copy()).maybe("parent", inside).done())
+                let shown = if b.kind == "text" { i.emojis.from_names(b.text.copy(), 0, own_emoji.copy()) } else { b.text.copy() }
+                blocks.push(Obj.new().s("kind", b.kind.copy()).s("text", shown).maybe("parent", inside).done())
                 if b.kind == "text" and b.parent.len() == 0 { said.push_str(b.text.copy()) }
             }
         }
@@ -12953,6 +13189,7 @@ impl Instance {
             try i.event(user, "group.deleted", Obj.new().s("group", id).s("by", device).done())
             return Answer.Value(empty)
         }
+        if name.starts_with("emoji.") { return try i.emoji_cmd(user, device, name, args) }
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()
             if try i.store.agent(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
