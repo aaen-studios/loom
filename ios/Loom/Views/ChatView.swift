@@ -240,6 +240,14 @@ struct ChatView: View {
                 threadOpen = nil
             }
         }
+        // Back from a thread, by Continue in your own chat or the back button, the chat is
+        // the agent's own again. Its onAppear doesn't come again when Continue pops the
+        // thread (LOO-341).
+        .onChange(of: threadOpen?.id) { _, now in
+            guard now == nil, !warming, roomId == nil, thread == nil else { return }
+            model.open(thread: nil)
+            session.flush()
+        }
         .sheet(isPresented: $roomSettings) {
             if let roomId { RoomSettingsSheet(roomId: roomId) }
         }
