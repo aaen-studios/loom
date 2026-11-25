@@ -4,10 +4,12 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// An agent's chat: its messages, the reply being written, the questions it's waiting
-/// on, and the composer.
+/// on, and the composer. Or another agent's thread with it, to read.
 struct ChatView: View {
     @Environment(Session.self) private var session
     let agentId: String
+    /// Another agent's thread with it, shown in place of its chat, with no composer.
+    var thread: Ask? = nil
     /// Drawn once, hidden, before any chat is opened, so the first one opened doesn't
     /// pay for building the screen the first time (AgentsView's `Warmup`). It selects
     /// nothing and fetches nothing.
@@ -16,12 +18,15 @@ struct ChatView: View {
     @State private var openThoughts: Set<String> = []
     /// A message's text open to select from.
     @State private var reading: Reading?
+    /// Another agent's thread with it, opened from the menu.
+    @State private var threadOpen: Ask?
 
     var body: some View {
         let model = session.model
         let agent = model.agent(agentId)
-        let messages = model.selected == agentId ? model.shown : []
-        let approvals = model.selected == agentId ? model.shownApprovals : []
+        let here = model.selected == agentId && model.thread == thread?.id
+        let messages = here ? model.shown : []
+        let approvals = here ? model.shownApprovals : []
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Tokens.Space.l + 2) {
@@ -84,14 +89,17 @@ struct ChatView: View {
             }
             .overlay {
                 // Only once its messages have come, not while it opens.
-                if messages.isEmpty && approvals.isEmpty && model.selected == agentId && model.messagesCame {
+                if messages.isEmpty && approvals.isEmpty && here && model.messagesCame {
                     Text("Nothing here yet")
                         .font(Fonts.body).foregroundStyle(P.ink3)
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                Composer(agentName: agent?.name ?? "the agent") {
-                    withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                // The composer writes to the agent's chat, so a thread is only read here.
+                if thread == nil {
+                    Composer(agentName: agent?.name ?? "the agent") {
+                        withAnimation { proxy.scrollTo("end", anchor: .bottom) }
+                    }
                 }
             }
         }
@@ -101,27 +109,54 @@ struct ChatView: View {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
                     HStack(spacing: 6) {
-                        if let agent {
-                            ThreadView(mood: model.mood(agent.id), color: P.thread(agent.color), snapped: model.finished[agent.id])
-                                .frame(width: 18, height: 10)
+                        // A thread is titled by the agent that asks, in its colour.
+                        if let thread {
+                            if let by = thread.by {
+                                ThreadView(mood: .idle, color: P.thread(by.color))
+                                    .frame(width: 18, height: 10)
+                            }
+                            Text(thread.label).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink)
+                        } else {
+                            if let agent {
+                                ThreadView(mood: model.mood(agent.id), color: P.thread(agent.color), snapped: model.finished[agent.id])
+                                    .frame(width: 18, height: 10)
+                            }
+                            Text(agent?.name ?? "").font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink)
                         }
-                        Text(agent?.name ?? "").font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink)
                     }
                     ConnLine(conn: model.conn)
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button {
-                        session.send(model.startFresh())
+            if thread == nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            session.send(model.startFresh())
+                        } label: {
+                            Label("Start a new chat", systemImage: "square.and.pencil")
+                        }
+                        // Other agents' threads with it, each to read on a screen of its own.
+                        let asks = model.asks(agentId)
+                        if !asks.isEmpty {
+                            Section {
+                                ForEach(asks) { k in
+                                    Button {
+                                        threadOpen = k
+                                    } label: {
+                                        Label(k.label, systemImage: "bubble.left.and.bubble.right")
+                                    }
+                                }
+                            }
+                        }
                     } label: {
-                        Label("Start a new chat", systemImage: "square.and.pencil")
+                        Image(systemName: "ellipsis")
                     }
-                } label: {
-                    Image(systemName: "ellipsis")
+                    .accessibilityLabel("More")
                 }
-                .accessibilityLabel("More")
             }
+        }
+        .navigationDestination(item: $threadOpen) { k in
+            ChatView(agentId: agentId, thread: k)
         }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
@@ -144,8 +179,19 @@ struct ChatView: View {
         .onAppear {
             guard !warming else { return }
             model.select(agentId)
+            // Back from a thread, the chat is the agent's own again.
+            model.open(thread: thread?.id)
             session.flush()
+            openFromLaunch()
         }
+    }
+
+    /// `-thread <conversation>` at launch, with `-open`, opens that agent's thread with
+    /// another, for screenshots of it (ios/README.md).
+    private func openFromLaunch() {
+        let args = ProcessInfo.processInfo.arguments
+        guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
+        threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
     }
 
     /// A link tapped in a message: a file it mentions or one sent with it opens here, and
