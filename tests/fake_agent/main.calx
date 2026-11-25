@@ -62,6 +62,11 @@ module tests.fake_agent.main
 //     /next STEP          plays STEP at the start of its next turn, before what that
 //                         turn's prompt says, for a prompt of only "[loom: ...]"
 //                         blocks, which has no steps of its own; several go in order
+//     /limits S SR W WR   reports its plan's limits as Claude's adapter does, on a
+//                         usage_update's _meta "_claude/rateLimit": the session S%
+//                         used, resetting at SR (Unix seconds), and the week W%, at WR
+//     /account NAME       says its login is a plan's, NAME, as Claude's adapter does
+//                         with _auth/status_update; "/account" alone, an API key's
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
 //                         open" or "direct closed"), and through the proxy
@@ -158,6 +163,8 @@ pub enum Step {
     Config
     Meta
     Usage(i64, i64)
+    Limits(String)
+    Account(String)
     Compacted(i64, i64)
     Next(String)    // a step for its next turn
 }
@@ -250,6 +257,10 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Usage(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
         } else if word == "/next" {
             steps.push(Step.Next(rest))
+        } else if word == "/limits" {
+            steps.push(Step.Limits(rest))
+        } else if word == "/account" {
+            steps.push(Step.Account(rest))
         } else if word == "/compacted" {
             let (used, size) = split_word(rest)
             steps.push(Step.Compacted(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
@@ -460,6 +471,59 @@ fn respond_error(id: Json, code: i64, message: String) {
     m.insert("jsonrpc", js(String("2.0")))
     m.insert("id", id.copy())
     m.insert("error", Json.Object(e))
+    emit(Json.Object(m))
+}
+
+// The plan's limits, "S SR W WR", on a usage_update as Claude's adapter puts them:
+// Claude Code's rate-limit info, with both windows in unifiedWindows.
+fn limits(session: String, words: String) {
+    var w = List<i64>()
+    for s in words.split(" ") {
+        w.push(i64.parse(s) ?? 0)
+    }
+    while w.len() < 4 {
+        w.push(0)
+    }
+    var five = LinkedMap<String, Json>()
+    five.insert("utilization", Json.Float(f64.nearest(w[0]) / 100.0))
+    five.insert("resetsAt", int(w[1]))
+    var seven = LinkedMap<String, Json>()
+    seven.insert("utilization", Json.Float(f64.nearest(w[2]) / 100.0))
+    seven.insert("resetsAt", int(w[3]))
+    var windows = LinkedMap<String, Json>()
+    windows.insert("five_hour", Json.Object(five))
+    windows.insert("seven_day", Json.Object(seven))
+    var info = LinkedMap<String, Json>()
+    info.insert("status", js(String("allowed")))
+    info.insert("rateLimitType", js(String("five_hour")))
+    info.insert("unifiedWindows", Json.Object(windows))
+    var meta = LinkedMap<String, Json>()
+    meta.insert("_claude/rateLimit", Json.Object(info))
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String("usage_update")))
+    u.insert("used", int(1000))
+    u.insert("size", int(200000))
+    u.insert("_meta", Json.Object(meta))
+    update(session, u)
+}
+
+// Which login it runs on, as Claude's adapter says with _auth/status_update: a
+// plan's, by its name, or with none, an API key's.
+fn account(name: String) {
+    var status = LinkedMap<String, Json>()
+    if name.len() > 0 {
+        status.insert("kind", js(String("account")))
+        status.insert("label", js(name))
+    } else {
+        status.insert("kind", js(String("api_key")))
+        status.insert("label", js(String("Anthropic API key")))
+    }
+    var p = LinkedMap<String, Json>()
+    p.insert("authStatus", Json.Object(status))
+    var m = LinkedMap<String, Json>()
+    m.insert("jsonrpc", js(String("2.0")))
+    m.insert("method", js(String("_auth/status_update")))
+    m.insert("params", Json.Object(p))
     emit(Json.Object(m))
 }
 
@@ -973,6 +1037,8 @@ impl Agent {
                 },
                 Step.Compacted(used, size) => compacted = some((used, size)),
                 Step.Next(s) => a.later.push(s.copy()),
+                Step.Limits(words) => limits(session.copy(), words),
+                Step.Account(name) => account(name),
                 Step.Config => {
                     let values = a.values(session.copy())
                     chunk(session.copy(), "agent_message_chunk", "model={value_of(values.copy(), "model")} effort={value_of(values, "effort")}")
