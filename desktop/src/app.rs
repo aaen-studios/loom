@@ -10339,6 +10339,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     inputs: None,
                     views: Rc::default(),
                     pruned: None,
+                    seen: None,
                 });
                 self.chat_view = Some(v.clone());
                 v
@@ -23875,7 +23876,7 @@ mod row_tests {
                 later: false,
                 room: 720,
             },
-            is_new: false,
+            is_new: None,
             column: 720.0,
             p: Palette::new(false),
             line: None,
@@ -24107,7 +24108,7 @@ struct ChatInputs {
     open: HashSet<String>,
     show: Show,
     newest: Option<String>,
-    new_line: Option<String>,
+    new_line: Option<(String, usize)>,
     column: f32,
     /// How wide the chat is (`Loom::chat_width`).
     width: f32,
@@ -24191,6 +24192,100 @@ struct ChatList {
     views: Rc<RefCell<HashMap<String, Entity<RowView>>>>,
     /// The rows `views` was last pruned to.
     pruned: Option<Rc<Vec<Row>>>,
+    /// The newest message when the chat was last at its bottom: the jump button counts
+    /// those after it.
+    seen: Option<String>,
+}
+
+impl ChatList {
+    /// How many messages came, not the person's, since the chat was last at its bottom,
+    /// with `up` whether it's scrolled up now.
+    fn came_since(&mut self, rows: &[Row], up: bool) -> usize {
+        let newest = rows.iter().rev().find_map(|r| match r {
+            Row::Message(m) => Some(m.id.as_str()),
+            Row::Approval(_) => None,
+        });
+        let at = self.seen.as_deref().and_then(|s| {
+            rows.iter()
+                .position(|r| matches!(r, Row::Message(m) if m.id == s))
+        });
+        // At the bottom, or in a chat that doesn't have the one it saw last (another chat).
+        if !up || at.is_none() {
+            self.seen = newest.map(str::to_string);
+            return 0;
+        }
+        rows[at.unwrap_or(0) + 1..]
+            .iter()
+            .filter(|r| matches!(r, Row::Message(m) if m.role != "person"))
+            .count()
+    }
+}
+
+/// The button that goes down to the chat's newest message, while it isn't at its bottom:
+/// round, with how many came meanwhile in the agent's colour at its corner.
+fn jump_button(p: Palette, tint: Hsla, came: usize, scroller: Entity<MessageScrollerState>) -> Div {
+    const SIZE: f32 = 34.0;
+    let black: Hsla = rgb(0x000000).into();
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(space::M))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id("jump-to-latest")
+                .role(Role::Button)
+                .aria_label("Jump to latest")
+                .relative()
+                .size(px(SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(p.line)
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .shadow(vec![BoxShadow {
+                    color: black.opacity(if p.dark { 0.5 } else { 0.14 }),
+                    offset: point(px(0.0), px(4.0)),
+                    blur_radius: px(14.0),
+                    spread_radius: px(-2.0),
+                    inset: false,
+                }])
+                .soft_hover(card_fill(p), p.raised_2, Some((p.ink_2, p.ink)))
+                .child(Icon::new(IconName::ArrowDown).small())
+                .when(came > 0, |d| {
+                    let n = if came > 99 {
+                        "99+".to_string()
+                    } else {
+                        came.to_string()
+                    };
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(-5.0))
+                            .left(px(SIZE - 13.0))
+                            .h(px(17.0))
+                            .min_w(px(17.0))
+                            .px(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(tint)
+                            .text_size(px(size::CAPTION - 1.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(motion::ink_on(tint, p.ink, p.bg))
+                            .child(n),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    scroller.update(cx, |s, cx| s.scroll_to_end(cx));
+                }),
+        )
 }
 
 impl Render for ChatList {
@@ -24218,14 +24313,27 @@ impl Render for ChatList {
             self.pruned = Some(i.rows.clone());
         }
         crate::perf::count("list");
-        chat_list(
-            i,
-            self.scroller.clone(),
-            self.this.clone(),
-            cx.entity_id(),
-            self.views.clone(),
-        )
-        .into_any_element()
+        let up = self.scroller.read(cx).is_scrolled_up();
+        let came = self.came_since(&i.rows, up);
+        let (p, tint) = (i.p, i.tint);
+        div()
+            .size_full()
+            .relative()
+            .child(
+                chat_list(
+                    i,
+                    self.scroller.clone(),
+                    self.this.clone(),
+                    cx.entity_id(),
+                    self.views.clone(),
+                )
+                // Its own, below, with how many came.
+                .jump_button(false),
+            )
+            .when(up, |d| {
+                d.child(jump_button(p, tint, came, self.scroller.clone()))
+            })
+            .into_any_element()
     }
 }
 
@@ -24248,8 +24356,8 @@ struct RowInputs {
     /// What's open in it, of the chat's open thoughts, folds and steps.
     open: HashSet<String>,
     show: Show,
-    /// The first reply that came while the chat was shut, with NEW over it.
-    is_new: bool,
+    /// The first reply that came while the chat was shut, with "3 new" over it: how many.
+    is_new: Option<usize>,
     column: f32,
     p: Palette,
     /// The time line over it, and its time on hover, and where that shows.
@@ -24563,7 +24671,12 @@ fn chat_list(
                 later: m.is_some_and(|m| m.answers_later(newest.as_deref() == Some(m.id.as_str()))),
                 ..show
             },
-            is_new: m.is_some_and(|m| new_line.as_deref() == Some(m.id.as_str())),
+            is_new: m.and_then(|m| {
+                new_line
+                    .as_ref()
+                    .filter(|(id, _)| *id == m.id)
+                    .map(|(_, n)| *n)
+            }),
             column,
             p,
             // Across the chat where it paused, or on a new day: when it went on.
@@ -24655,23 +24768,27 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     let (ix, here, tint, mood, show, is_new, column, p) =
         (*ix, *here, *tint, *mood, *show, *is_new, *column, *p);
     let row = i.row();
-    // Above the first reply that came while the chat was shut: a line, NEW
-    // in the agent's colour.
-    let divider = div()
-        .w_full()
-        .max_w(px(column))
-        .flex()
-        .items_center()
-        .gap(px(space::S))
-        .pt(px(space::S))
-        .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
-        .child(
-            div()
-                .text_size(px(size::CAPTION))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tint)
-                .child("NEW"),
-        );
+    // Above the first reply that came while the chat was shut: a quiet line across the
+    // column, with how many came in the middle.
+    let divider = is_new.map(|n| {
+        div()
+            .w_full()
+            .max_w(px(column))
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .pt(px(space::S))
+            .pb(px(space::XS))
+            .child(div().flex_1().h(px(1.0)).bg(p.line_strong))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(format!("{n} new")),
+            )
+            .child(div().flex_1().h(px(1.0)).bg(p.line_strong))
+    });
     let joined = here.joined;
     // Across the chat where it paused, or on a new day: when it went on.
     let time_line = i.line.clone().map(|line| {
@@ -24890,7 +25007,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         .px(px(space::XL))
         .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
         .when_some(on_picked, |d, f| d.on_mouse_up(MouseButton::Left, f))
-        .when(is_new, |d| d.child(divider))
+        .children(divider)
         .children(time_line)
         .child(
             div()
