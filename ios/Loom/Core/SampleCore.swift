@@ -18,6 +18,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var runs: [JSON] = []
     private var tools: [JSON] = []
     private var approvals: [JSON] = []
+    /// The agent list's folders.
+    private var groups: [JSON] = Sample.groups
     private var stopped = false
 
     init(inbox: Inbox, signedIn: Bool = true) {
@@ -177,6 +179,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 later(0.4) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "sign_in_failed", "message": "Sample servers can't be signed in to."]])
                 }
+            case "agent.group", "agent.hide", "group.create", "group.update", "group.delete":
+                folders(f)
             case "agent.files":
                 let query = f["args"]["query"].text.lowercased()
                 let found = Sample.folder.filter { query.isEmpty || $0["path"].text.lowercased().contains(query) }
@@ -202,6 +206,75 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         }
     }
 
+    /// The agent list's sections as the core gives them (core/sidebar.calx), for the
+    /// sample's agents, which are in the order they're listed.
+    private func sidebar() -> [JSON] {
+        let waiting = Set(approvals.compactMap { a in runs.first { $0["run"] == a["run"] }?["agent"].string })
+        var asking: [String] = [], pinned: [String] = [], loose: [String] = [], hidden: [String] = []
+        var inFolder: [String: [String]] = [:]
+        let known = Set(groups.map { $0["id"].text })
+        for a in agents {
+            let id = a["id"].text
+            if !a["pinned"].isNull && a["hidden"].isNull { pinned.append(id) }
+            else if waiting.contains(id) { asking.append(id) }
+            else if !a["hidden"].isNull { hidden.append(id) }
+            else if let g = a["group"].string, known.contains(g) { inFolder[g, default: []].append(id) }
+            else { loose.append(id) }
+        }
+        let part = { (kind: String, ids: [String]) -> JSON in ["kind": JSON(kind), "agents": JSON(ids)] }
+        var out = [part("waiting", asking), part("pinned", pinned), part("agents", loose)]
+        for g in groups {
+            out.append(["kind": "group", "id": g["id"], "name": g["name"], "collapsed": JSON(g["collapsed"].bool ?? false), "agents": JSON(inFolder[g["id"].text] ?? [])])
+        }
+        out.append(part("hidden", hidden))
+        return out
+    }
+
+    /// The folder commands, as the instance answers them.
+    private func folders(_ f: JSON) {
+        let args = f["args"]
+        func set(_ j: JSON, _ key: String, _ value: JSON) -> JSON {
+            guard case .object(var o) = j else { return j }
+            o[key] = value
+            return .object(o)
+        }
+        var value: JSON = [:]
+        switch f["name"].text {
+        case "agent.group", "agent.hide":
+            guard let i = agents.firstIndex(where: { $0["id"] == args["agent"] }) else { return }
+            var a = set(set(agents[i], "pinned", .null), "hidden", .null)
+            if f["name"].text == "agent.group" {
+                a = set(a, "group", args["group"].text.isEmpty ? .null : args["group"])
+            } else if args["hidden"].bool ?? true {
+                a = set(a, "hidden", JSON(Sample.now()))
+            }
+            agents[i] = a
+            event("agent.updated", ["agent": a])
+            value = ["agent": a]
+        case "group.create":
+            next += 1
+            let g: JSON = ["id": JSON("g_s\(next)"), "name": args["name"], "collapsed": false]
+            groups.append(g)
+            event("group.updated", ["group": g])
+            value = ["group": g]
+        case "group.update":
+            guard let i = groups.firstIndex(where: { $0["id"] == args["group"] }) else { return }
+            if !args["name"].isNull { groups[i] = set(groups[i], "name", args["name"]) }
+            if !args["collapsed"].isNull { groups[i] = set(groups[i], "collapsed", args["collapsed"]) }
+            event("group.updated", ["group": groups[i]])
+            value = ["group": groups[i]]
+        default:
+            let id = args["group"]
+            groups.removeAll { $0["id"] == id }
+            for i in agents.indices where agents[i]["group"] == id {
+                agents[i] = set(agents[i], "group", .null)
+                event("agent.updated", ["agent": agents[i]])
+            }
+            event("group.deleted", ["group": id])
+        }
+        tell(["t": "result", "id": f["id"], "ok": true, "value": value])
+    }
+
     private func data(_ f: JSON) -> JSON {
         let what = f["what"].text
         var items: [JSON] = []
@@ -212,6 +285,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         case "tools": items = tools
         case "approvals": items = approvals
         case "devices": items = Sample.devices
+        case "sidebar": items = sidebar()
         case "messages": items = messages[f["conversation"].text] ?? []
         default: break
         }
@@ -297,8 +371,13 @@ enum Sample {
          "instructions": "Keeps the notes: plans, meetings and the week's log."],
         ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask",
          "instructions": "Reads the mail in every inbox and says what needs me."],
-        ["id": "a_4", "name": "Gardener", "color": "pink", "shape": "star", "acp_agent": "gemini", "permission": "allow",
+        ["id": "a_4", "name": "Gardener", "color": "pink", "shape": "star", "acp_agent": "gemini", "permission": "allow", "group": "g_1",
          "instructions": "Looks after the balcony garden."],
+    ]
+
+    /// The agent list's folders, as `synced` gives them.
+    static let groups: [JSON] = [
+        ["id": "g_1", "name": "Home", "collapsed": false],
     ]
 
     /// The files the composer's @ picker finds, as `agent.files` gives them: in the

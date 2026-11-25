@@ -253,7 +253,7 @@ private struct SelectableText: UIViewRepresentable {
 /// and name in its colour over it.
 struct PersonMessage: View {
     @Environment(Session.self) private var session
-    @AppStorage(Prefs.vibrant) private var vibrant = true
+    @AppStorage(Prefs.vibrant) private var vibrant = false
     var message: Message
     var agent: Agent?
 
