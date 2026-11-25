@@ -80,6 +80,7 @@ enum Tokens {
         static let icon: CGFloat = 28
         static let iconSmall: CGFloat = 26
         static let iconComposer: CGFloat = 32
+        static let contextRing: CGFloat = 16
         static let iconLarge: CGFloat = 34
         static let lead: CGFloat = 30
         static let server: CGFloat = 46

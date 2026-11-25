@@ -71,6 +71,7 @@ chip = 28            # a chip, such as an agent to pick
 icon = 28            # an icon button, such as close or back
 icon-small = 26      # an icon button in a row, such as the queue's tools
 icon-composer = 32   # the composer's plus, mic and send
+context-ring = 16    # the ring by Send that fills with the agent's context
 icon-large = 34      # the settings gear, or a colour to pick
 lead = 30            # the icon or initial at a row's start
 server = 46          # the server's row atop the sidebar

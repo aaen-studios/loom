@@ -21,6 +21,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
+use crate::meter;
 use crate::model::{
     self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate, SignIn,
 };
@@ -10044,7 +10045,7 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         // The newest message, whose choices still answer.
         let newest = rows.iter().rev().find_map(|r| match r {
-            Row::Message(m) if !m.queued => Some(m.id.clone()),
+            Row::Message(m) if !m.queued && m.role != "loom" => Some(m.id.clone()),
             _ => None,
         });
         let tools = self.model.tools.clone();
@@ -10351,6 +10352,32 @@ ACTA_KEY=secret:ACTA_KEY",
                                             this.take_notice(cx);
                                         }
                                     })),
+                            )
+                        })
+                        // How full the agent's session context is, just before Send.
+                        .when_some(self.model.context(), |d, fill| {
+                            let ink = match fill.level() {
+                                model::Level::Bad => p.bad,
+                                model::Level::Warn => p.warn,
+                                model::Level::Quiet => p.ink_2,
+                            };
+                            d.child(
+                                div()
+                                    .id("context")
+                                    .role(Role::Meter)
+                                    .aria_label(fill.tip())
+                                    .size(px(control::ICON_COMPOSER))
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .tooltip(tip_text(fill.tip()))
+                                    .child(meter::ring(
+                                        control::CONTEXT_RING,
+                                        fill.fraction(),
+                                        ink,
+                                        p.line_strong,
+                                    )),
                             )
                         })
                         .child(
@@ -17297,7 +17324,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// still answer.
     fn newest_message(&self) -> Option<&Message> {
         self.rows.iter().rev().find_map(|r| match r {
-            Row::Message(m) if !m.queued => Some(m),
+            Row::Message(m) if !m.queued && m.role != "loom" => Some(m),
             _ => None,
         })
     }
@@ -25001,6 +25028,42 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .text_color(p.ink_3)
             .child(line)
     });
+    // A line from loom across the chat: where the context was compacted, or where a
+    // fresh session started.
+    if let Row::Message(m) = &row {
+        if m.role == "loom" {
+            let words = m.blocks.first().map(|b| b.text.clone()).unwrap_or_default();
+            let rule = || div().flex_1().h(px(1.0)).bg(p.line_strong);
+            return div()
+                .id(SharedString::from(format!("msg-{}", m.id)))
+                .role(Role::ListItem)
+                .aria_label(words.clone())
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .px(px(space::XL))
+                .children(time_line)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(column))
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .py(px(space::S))
+                        .child(rule())
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(words),
+                        )
+                        .child(rule()),
+                );
+        }
+    }
     // Its time, while the pointer is over it: just outside its left edge, or in a narrow
     // chat beside the person's bubble or in the row's corner (`WhenAt`).
     let when_at = i.when_at;
