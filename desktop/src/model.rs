@@ -1366,6 +1366,9 @@ pub struct Activity {
     pub status: String,
     /// Why it failed or was refused; a refusal's starts with its rule.
     pub why: String,
+    /// For a note or a fix that was kept, its proposal, and whether Undo can still undo it.
+    pub proposal: String,
+    pub undo: bool,
 }
 
 /// One revision of an agent, for the edit page.
@@ -1473,21 +1476,35 @@ pub struct Proposal {
     pub why: String,
     /// What the person did, a line a step, for a skill written from a recording.
     pub steps: Vec<String>,
+    /// For a fix to a skill that failed: the step it failed at and why, and its change.
+    pub failed_step: String,
+    pub failed_why: String,
+    pub lines: Vec<ChangeLine>,
 }
 
 impl Proposal {
     fn of(p: &Value) -> Proposal {
-        let skill = p.get("skill").cloned().unwrap_or(Value::Null);
+        let kind = s(p, "kind");
+        // A fix is a skill's name and body, with why it failed and what it changes.
+        let skill = p
+            .get(if kind == "fix" { "fix" } else { "skill" })
+            .cloned()
+            .unwrap_or(Value::Null);
         let note = p.get("note").cloned().unwrap_or(Value::Null);
         let steps = p
             .get("steps")
             .and_then(Value::as_array)
             .map(|ss| ss.iter().filter_map(step_line).collect())
             .unwrap_or_default();
+        let fixed = if kind == "fix" {
+            Learned::of(p)
+        } else {
+            Learned::default()
+        };
         Proposal {
             id: s(p, "id"),
             agent: s(p, "agent"),
-            kind: s(p, "kind"),
+            kind,
             name: s(&skill, "name"),
             description: s(&skill, "description"),
             body: s(&skill, "body"),
@@ -1496,16 +1513,34 @@ impl Proposal {
             shared: note.get("shared").and_then(Value::as_bool).unwrap_or(false),
             why: s(p, "why"),
             steps,
+            failed_step: fixed.failed_step,
+            failed_why: fixed.failed_why,
+            lines: fixed.lines,
         }
     }
 
     /// What it's called in the list: a skill's name, or the note.
     pub fn title(&self) -> String {
-        if self.kind == "skill" {
+        if self.kind == "skill" || self.kind == "fix" {
             self.name.clone()
         } else {
             self.text.clone()
         }
+    }
+
+    /// Why a fix's skill failed, in a line.
+    pub fn failed_line(&self) -> String {
+        failed_line(&self.failed_step, &self.failed_why)
+    }
+}
+
+/// Why a skill failed, in a line: the step, and what went wrong there.
+fn failed_line(step: &str, why: &str) -> String {
+    match (step.is_empty(), why.is_empty()) {
+        (false, false) => format!("Failed at \u{201c}{step}\u{201d}: {why}"),
+        (false, true) => format!("Failed at \u{201c}{step}\u{201d}"),
+        (true, false) => why.to_string(),
+        (true, true) => String::new(),
     }
 }
 
@@ -2303,6 +2338,149 @@ pub struct Message {
     pub status: String,
     /// For a person's message that replies to another, what it replies to.
     pub reply: Option<ReplyTo>,
+    /// For an agent's reply, the notes and fixes its agent kept or proposed from it,
+    /// oldest first (PLAN.md, "Sharing and learning").
+    pub learned: Vec<Learned>,
+}
+
+/// A note or a fix to a skill that an agent kept or proposed from a reply, as the reply
+/// has it under it (protocol.md, "Messages and streaming").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Learned {
+    pub id: String,
+    pub agent: String,
+    /// `note` or `fix`.
+    pub kind: String,
+    /// waiting, kept, dropped or undone.
+    pub status: String,
+    /// Who decided: a device, or `auto` for the permission mode.
+    pub by: String,
+    /// Put off on the card, to wait on the Proposals page.
+    pub later: bool,
+    pub why: String,
+    /// A note's words, and whether every agent reads it.
+    pub text: String,
+    pub shared: bool,
+    /// A fix's skill, as fixed, the step it failed at and why, and its change.
+    pub name: String,
+    pub body: String,
+    pub failed_step: String,
+    pub failed_why: String,
+    pub lines: Vec<ChangeLine>,
+}
+
+/// A line of a fix's change: `-` removed, `+` added, ` ` around them, `…` left out.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChangeLine {
+    pub op: String,
+    pub text: String,
+}
+
+/// What a reply shows under it of what its agent kept or proposed: a quiet line for the
+/// notes kept, one for each fix kept, a card for the notes waiting and one for each fix
+/// waiting, and a line for those put off (`Message::learned_view`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LearnedView {
+    /// The notes kept, or undone since, under one line that opens to list them.
+    pub notes: Vec<Learned>,
+    /// "Remembered 2 things", or "Forgot 2 things" once all are undone.
+    pub notes_line: String,
+    /// Each fix kept, or undone since, with its line: "Fixed the skill …".
+    pub fixes: Vec<(Learned, String)>,
+    /// The notes that wait for the person, on one card.
+    pub asks: Vec<Learned>,
+    /// Each fix that waits for the person, on a card of its own.
+    pub fix_asks: Vec<Learned>,
+    /// How many were put off, and wait on the Proposals page.
+    pub later: usize,
+}
+
+impl Learned {
+    fn of(v: &Value) -> Learned {
+        let note = v.get("note").cloned().unwrap_or(Value::Null);
+        let fix = v.get("fix").cloned().unwrap_or(Value::Null);
+        let failed = fix.get("failed").cloned().unwrap_or(Value::Null);
+        Learned {
+            id: s(v, "id"),
+            agent: s(v, "agent"),
+            kind: s(v, "kind"),
+            status: s(v, "status"),
+            by: s(v, "by"),
+            later: v.get("later").and_then(Value::as_bool).unwrap_or(false),
+            why: s(v, "why"),
+            text: s(&note, "text"),
+            shared: note.get("shared").and_then(Value::as_bool).unwrap_or(false),
+            name: s(&fix, "name"),
+            body: s(&fix, "body"),
+            failed_step: s(&failed, "step"),
+            failed_why: s(&failed, "why"),
+            lines: fix
+                .get("lines")
+                .and_then(Value::as_array)
+                .map(|ls| {
+                    ls.iter()
+                        .map(|l| ChangeLine {
+                            op: s(l, "op"),
+                            text: s(l, "text"),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Who a note is for, as its card says it: the agent, or every agent.
+    pub fn for_whom(&self, agent_name: &str) -> String {
+        if self.shared {
+            "For all agents".into()
+        } else {
+            format!("For {agent_name}")
+        }
+    }
+
+    /// Why a fix's skill failed, in a line: the step, and what went wrong there.
+    pub fn failed_line(&self) -> String {
+        failed_line(&self.failed_step, &self.failed_why)
+    }
+
+    /// The proposal it is, for the Proposals page to open and change.
+    pub fn proposal(&self) -> Proposal {
+        Proposal {
+            id: self.id.clone(),
+            agent: self.agent.clone(),
+            kind: self.kind.clone(),
+            name: self.name.clone(),
+            body: self.body.clone(),
+            text: self.text.clone(),
+            shared: self.shared,
+            why: self.why.clone(),
+            failed_step: self.failed_step.clone(),
+            failed_why: self.failed_why.clone(),
+            lines: self.lines.clone(),
+            ..Proposal::default()
+        }
+    }
+}
+
+fn learned_of(m: &Value) -> Vec<Learned> {
+    m.get("learned")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .map(Learned::of)
+                .filter(|l| !l.id.is_empty() && (l.kind == "note" || l.kind == "fix"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// "1 thing" or "2 things".
+fn things(n: usize) -> String {
+    if n == 1 {
+        "1 thing".into()
+    } else {
+        format!("{n} things")
+    }
 }
 
 /// What a person's message replies to (PLAN.md, "Replying to a message"), as the
@@ -2566,6 +2744,39 @@ impl Message {
         .unwrap_or(s.url.as_str())
         .to_string();
         (title, s.site.clone(), link.and_then(|l| l.icon.clone()))
+    }
+
+    /// What it shows under it of the notes and fixes its agent kept or proposed (PLAN.md,
+    /// "Sharing and learning"). One dropped shows nothing.
+    pub fn learned_view(&self) -> LearnedView {
+        let mut v = LearnedView::default();
+        for l in &self.learned {
+            let done = l.status == "kept" || l.status == "undone";
+            match (l.kind.as_str(), done, l.status == "waiting") {
+                ("note", true, _) => v.notes.push(l.clone()),
+                ("fix", true, _) => {
+                    let line = if l.status == "undone" {
+                        format!("Undid the fix to the skill {}", l.name)
+                    } else {
+                        format!("Fixed the skill {}", l.name)
+                    };
+                    v.fixes.push((l.clone(), line));
+                }
+                (_, _, true) if l.later => v.later += 1,
+                ("note", _, true) => v.asks.push(l.clone()),
+                ("fix", _, true) => v.fix_asks.push(l.clone()),
+                _ => {}
+            }
+        }
+        let kept = v.notes.iter().filter(|l| l.status == "kept").count();
+        v.notes_line = if kept > 0 {
+            format!("Remembered {}", things(kept))
+        } else if !v.notes.is_empty() {
+            format!("Forgot {}", things(v.notes.len()))
+        } else {
+            String::new()
+        };
+        v
     }
 
     /// The site icons and preview pictures its sources and links need.
@@ -5115,6 +5326,7 @@ impl Model {
             reply: ReplyTo::of(m),
             mentions: mentions_of(m),
             sources: sources_of(m),
+            learned: learned_of(m),
             links: links_of(m),
             status: s(m, "status"),
             routine: s(m, "routine"),
@@ -6692,6 +6904,8 @@ impl Model {
                             at: e.get("at").and_then(Value::as_i64).unwrap_or(0),
                             status: s(e, "status"),
                             why: s(e, "why"),
+                            proposal: s(e, "proposal"),
+                            undo: e.get("undo").and_then(Value::as_bool).unwrap_or(false),
                         })
                         .collect()
                 })
@@ -7029,7 +7243,9 @@ impl Model {
                         conversation: s(r, "conversation"),
                         agent: s(r, "agent"),
                         message: s(r, "message"),
-                        quiet: !s(r, "routine").is_empty(),
+                        // A routine's run, or an agent looking back over its chat.
+                        quiet: !s(r, "routine").is_empty()
+                            || r.get("quiet").and_then(Value::as_bool).unwrap_or(false),
                     })
                     .collect();
                 // A run new here may have started calls already: the calls asked for with
@@ -7152,6 +7368,7 @@ impl Model {
                     routine_name: String::new(),
                     mentions: Vec::new(),
                     sources: Vec::new(),
+                    learned: Vec::new(),
                     links: HashMap::new(),
                     status: String::new(),
                     pinned: false,
@@ -7205,6 +7422,7 @@ impl Model {
                 routine_name: String::new(),
                 mentions: Vec::new(),
                 sources: Vec::new(),
+                learned: Vec::new(),
                 links: HashMap::new(),
                 status: String::new(),
                 pinned: false,
@@ -8625,6 +8843,8 @@ impl Model {
         self.proposals.retain(|q| q.id != p.id);
         let changed = if p.kind == "skill" {
             json!({"skill": {"name": p.name.trim(), "description": p.description.trim(), "body": p.body}})
+        } else if p.kind == "fix" {
+            json!({"fix": {"body": p.body}})
         } else {
             json!({"note": {"text": p.text.trim()}})
         };
@@ -8637,6 +8857,43 @@ impl Model {
         let id = self.id("app.proposal_drop");
         self.proposals.retain(|q| q.id != proposal);
         json!({"t": "cmd", "id": id, "name": "proposal.drop", "args": {"id": proposal}})
+    }
+
+    /// Undoes a note or a fix that was kept: the note is forgotten, the skill put back.
+    pub fn undo_proposal(&mut self, proposal: &str) -> Value {
+        let id = self.id("app.proposal_undo");
+        for a in self.activity.iter_mut().filter(|a| a.proposal == proposal) {
+            a.undo = false;
+        }
+        json!({"t": "cmd", "id": id, "name": "proposal.undo", "args": {"id": proposal}})
+    }
+
+    /// The frames that answer the card of notes under reply `m`: Keep keeps the ticked
+    /// ones and drops the rest, and Not now puts them all off to the Proposals page.
+    /// `unticked` holds the ones the person unticked.
+    pub fn answer_learned(
+        &mut self,
+        m: &Message,
+        keep: bool,
+        unticked: &HashSet<String>,
+    ) -> Vec<Value> {
+        let asks = m.learned_view().asks;
+        if !keep {
+            let id = self.id("app.proposal_later");
+            let ids: Vec<&str> = asks.iter().map(|l| l.id.as_str()).collect();
+            return vec![
+                json!({"t": "cmd", "id": id, "name": "proposal.later", "args": {"ids": ids}}),
+            ];
+        }
+        let mut out = Vec::new();
+        for l in &asks {
+            if unticked.contains(&l.id) {
+                out.push(self.drop_proposal(&l.id));
+            } else {
+                out.push(self.keep_proposal(&l.proposal()));
+            }
+        }
+        out
     }
 
     /// Asks an agent to look over its past chats and propose skills and notes, as a task.
@@ -9944,6 +10201,7 @@ mod tests {
             routine_name: String::new(),
             mentions: Vec::new(),
             sources: Vec::new(),
+            learned: Vec::new(),
             links: HashMap::new(),
             status: String::new(),
             pinned: false,
@@ -10498,6 +10756,7 @@ mod tests {
             routine_name: String::new(),
             mentions: Vec::new(),
             sources: Vec::new(),
+            learned: Vec::new(),
             links: HashMap::new(),
             status: String::new(),
             pinned: false,
@@ -10538,6 +10797,7 @@ mod tests {
             routine_name: String::new(),
             mentions: Vec::new(),
             sources: Vec::new(),
+            learned: Vec::new(),
             links: HashMap::new(),
             pinned: false,
             reply: None,
@@ -11683,6 +11943,111 @@ mod tests {
         let dropped = m.drop_proposal("prop_1");
         assert_eq!(dropped["args"]["id"], "prop_1");
         assert!(m.proposals.is_empty());
+    }
+
+    /// A reply with what its agent kept or proposed under it (PLAN.md, "Sharing and
+    /// learning"), as the instance sends it.
+    fn learned_reply() -> Value {
+        json!({"id": "msg_9", "conversation": "c_1", "role": "agent", "agent": "a_1", "at": 2, "status": "done",
+        "blocks": [{"kind": "text", "text": "Done."}],
+        "learned": [
+            {"id": "prop_1", "agent": "a_1", "kind": "note", "status": "kept", "by": "auto", "why": "",
+             "note": {"text": "Ann buys wool socks.", "site": "", "shared": false}},
+            {"id": "prop_2", "agent": "a_1", "kind": "note", "status": "undone", "by": "d_1", "why": "",
+             "note": {"text": "Ann's sister is Bea.", "site": "", "shared": false}},
+            {"id": "prop_3", "agent": "a_1", "kind": "fix", "status": "kept", "by": "auto", "why": "The button moved.",
+             "fix": {"name": "post-release-notes", "body": "fixed", "failed": {"step": "Press Publish", "why": "There's no Publish button."},
+                     "lines": [{"op": "-", "text": "3. Press Publish."}, {"op": "+", "text": "3. Press Release."}]}},
+            {"id": "prop_4", "agent": "a_1", "kind": "note", "status": "waiting", "why": "",
+             "note": {"text": "Ann works at NTNU.", "site": "", "shared": false}},
+            {"id": "prop_5", "agent": "a_1", "kind": "note", "status": "waiting", "why": "",
+             "note": {"text": "Ann's team is Platform.", "site": "", "shared": true}},
+            {"id": "prop_6", "agent": "a_1", "kind": "fix", "status": "waiting", "why": "",
+             "fix": {"name": "order-socks", "body": "new", "failed": {"step": "Pay", "why": "No card."}, "lines": []}},
+            {"id": "prop_7", "agent": "a_1", "kind": "note", "status": "waiting", "later": true, "why": "",
+             "note": {"text": "Put off.", "site": "", "shared": false}},
+            {"id": "prop_8", "agent": "a_1", "kind": "note", "status": "dropped", "why": "",
+             "note": {"text": "Dropped.", "site": "", "shared": false}}
+        ]})
+    }
+
+    #[test]
+    fn a_reply_shows_what_was_kept_on_a_line_and_what_waits_on_a_card() {
+        let m = Model::new();
+        let msg = m.message_of(&learned_reply());
+        let v = msg.learned_view();
+        assert_eq!(v.notes_line, "Remembered 1 thing");
+        assert_eq!(v.notes.len(), 2);
+        assert_eq!(v.fixes.len(), 1);
+        assert_eq!(v.fixes[0].1, "Fixed the skill post-release-notes");
+        assert_eq!(
+            v.fixes[0].0.failed_line(),
+            "Failed at \u{201c}Press Publish\u{201d}: There's no Publish button."
+        );
+        assert_eq!(v.fixes[0].0.lines[1].op, "+");
+        let asks: Vec<&str> = v.asks.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(asks, ["prop_4", "prop_5"]);
+        assert_eq!(v.asks[0].for_whom("Juniper"), "For Juniper");
+        assert_eq!(v.asks[1].for_whom("Juniper"), "For all agents");
+        assert_eq!(v.fix_asks.len(), 1);
+        assert_eq!(v.later, 1);
+        // All of them undone, the line says so.
+        let mut all_undone = learned_reply();
+        all_undone["learned"][0]["status"] = json!("undone");
+        assert_eq!(
+            m.message_of(&all_undone).learned_view().notes_line,
+            "Forgot 2 things"
+        );
+    }
+
+    #[test]
+    fn the_card_keeps_the_ticked_drops_the_rest_or_puts_them_off() {
+        let mut m = Model::new();
+        let msg = m.message_of(&learned_reply());
+        let unticked: HashSet<String> = ["prop_5".to_string()].into_iter().collect();
+        let frames = m.answer_learned(&msg, true, &unticked);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0]["name"], "proposal.keep");
+        assert_eq!(frames[0]["args"]["id"], "prop_4");
+        assert_eq!(frames[0]["args"]["note"]["text"], "Ann works at NTNU.");
+        assert_eq!(frames[1]["name"], "proposal.drop");
+        assert_eq!(frames[1]["args"]["id"], "prop_5");
+        let later = m.answer_learned(&msg, false, &HashSet::new());
+        assert_eq!(later[0]["name"], "proposal.later");
+        assert_eq!(later[0]["args"]["ids"], json!(["prop_4", "prop_5"]));
+        // A fix is kept as the person changed it, and undone.
+        let mut fix = msg.learned_view().fix_asks[0].proposal();
+        fix.body = "changed".into();
+        let keep = m.keep_proposal(&fix);
+        assert_eq!(keep["args"]["fix"]["body"], "changed");
+        let undo = m.undo_proposal("prop_3");
+        assert_eq!(undo["name"], "proposal.undo");
+        assert_eq!(undo["args"]["id"], "prop_3");
+    }
+
+    #[test]
+    fn a_kept_note_in_the_activity_log_can_be_undone() {
+        let mut m = Model::new();
+        m.selected = Some("a_1".into());
+        let f = m.load_activity().unwrap();
+        m.result(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"activity": [
+            {"id": 2, "agent": "a_1", "kind": "memory", "text": "Remembered: Ann buys wool socks.", "by": "auto", "at": 1, "proposal": "prop_1", "undo": true},
+            {"id": 1, "agent": "a_1", "kind": "tool", "text": "Ran notify", "by": "", "at": 1}
+        ]}}));
+        assert!(m.activity[0].undo && m.activity[0].proposal == "prop_1");
+        assert!(!m.activity[1].undo);
+        _ = m.undo_proposal("prop_1");
+        assert!(!m.activity[0].undo);
+    }
+
+    #[test]
+    fn looking_back_over_a_chat_isnt_shown_working() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "runs", "items": [
+            {"run": "run_1", "conversation": "c_1", "agent": "a_1", "message": "msg_1", "quiet": true},
+            {"run": "run_2", "conversation": "c_2", "agent": "a_1", "message": "msg_2"}
+        ]}));
+        assert!(m.runs[0].quiet && !m.runs[1].quiet);
     }
 
     #[test]
