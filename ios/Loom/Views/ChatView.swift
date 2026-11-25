@@ -46,7 +46,7 @@ struct ChatView: View {
                     ForEach(messages) { m in
                         Group {
                             if m.isPerson {
-                                PersonMessage(message: m, agent: agent)
+                                PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
                             } else {
                                 Reply(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent, openThoughts: $openThoughts)
                             }
@@ -440,6 +440,8 @@ struct PersonMessage: View {
     @AppStorage(Prefs.vibrant) private var vibrant = false
     var message: Message
     var agent: Agent?
+    /// In a group chat, its colour, or grey with none: no one member's.
+    var tint: String? = nil
 
     var body: some View {
         let model = session.model
@@ -500,7 +502,7 @@ struct PersonMessage: View {
     /// The person's own bubble in the agent's colour; another agent's, a breath of the
     /// sender's, or grey for one that's gone.
     private func bubble(_ sender: Agent?) -> Color {
-        if message.from == nil { return P.personBubble(agent?.color ?? "", vibrant: vibrant) }
+        if message.from == nil { return P.personBubble(tint ?? agent?.color ?? "", vibrant: vibrant) }
         return sender.map { P.agentBubble($0.color) } ?? P.bubble
     }
 }
