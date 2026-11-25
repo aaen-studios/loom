@@ -696,6 +696,83 @@ pub struct Program {
     pub share: Option<Share>,
     /// To the owner, the people it's kept to, by id; none is everyone.
     pub members: Option<Vec<String>>,
+    /// The limits of the person's plan with it, where it reports them.
+    pub limits: Option<PlanLimits>,
+}
+
+/// The limits of the person's plan with an agent program, as it last reported them
+/// (PLAN.md, "Usage limits"): the plan's name, and the session's and the week's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PlanLimits {
+    pub plan: String,
+    pub session: Option<LimitWindow>,
+    pub week: Option<LimitWindow>,
+}
+
+/// One window of a plan's limits: how much of it is used, in percent, and when it
+/// resets (Unix ms).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LimitWindow {
+    pub used: i64,
+    pub resets: i64,
+}
+
+impl PlanLimits {
+    /// The `limits` the instance keeps, or none when they say nothing of the session or
+    /// the week, as for a login that isn't a plan's.
+    pub fn of(v: &Value) -> Option<PlanLimits> {
+        let window = |k: &str| {
+            let w = v.get(k)?;
+            Some(LimitWindow {
+                used: w.get("used")?.as_i64()?,
+                resets: w.get("resets").and_then(Value::as_i64).unwrap_or(0),
+            })
+        };
+        let limits = PlanLimits {
+            plan: s(v, "plan"),
+            session: window("session"),
+            week: window("week"),
+        };
+        (limits.session.is_some() || limits.week.is_some()).then_some(limits)
+    }
+}
+
+impl LimitWindow {
+    /// As it is at `now` (Unix ms): once it has reset, none of it is used, until the
+    /// program says more.
+    pub fn at(self, now: i64) -> LimitWindow {
+        if self.resets > 0 && now >= self.resets {
+            LimitWindow { used: 0, resets: 0 }
+        } else {
+            self
+        }
+    }
+
+    /// How much of the ring is filled, from 0 to 1.
+    pub fn fraction(self) -> f32 {
+        (self.used.clamp(0, 100) as f32) / 100.0
+    }
+
+    /// What its line says on the right: how much is used, and when it resets, as a time
+    /// within a day and a weekday after: "42% · 15:30", "78% · Mon".
+    pub fn words<Tz: chrono::TimeZone>(self, now: chrono::DateTime<Tz>) -> String
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let used = format!("{}%", self.used.max(0));
+        if self.resets <= 0 {
+            return used;
+        }
+        let Some(at) = now.timezone().timestamp_millis_opt(self.resets).single() else {
+            return used;
+        };
+        let when = if self.resets - now.timestamp_millis() < 24 * 60 * 60 * 1000 {
+            at.format("%H:%M").to_string()
+        } else {
+            at.format("%a").to_string()
+        };
+        format!("{used} · {when}")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -5538,6 +5615,8 @@ impl Model {
                 self.queue_stale = true;
                 self.tasks_stale = true;
                 self.updates_stale = true;
+                // The programs, for the limits of the person's plans in the sidebar.
+                self.programs_stale = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -5787,6 +5866,15 @@ impl Model {
             "account" => {
                 if let Some(has) = f.get("has_password").and_then(Value::as_bool) {
                     self.has_password = Some(has);
+                }
+            }
+            // A program reported the limits of the person's plan with it.
+            "limits" => {
+                let name = s(f, "program");
+                let limits = f.get("limits").and_then(PlanLimits::of);
+                match self.installed.iter_mut().find(|p| p.name == name) {
+                    Some(p) => p.limits = limits,
+                    None => self.programs_stale = true,
                 }
             }
             "agent" => {
@@ -7180,6 +7268,7 @@ impl Model {
                                 members: ids(sh.get("members")),
                             }),
                             members: ids(p.get("members")),
+                            limits: p.get("limits").and_then(PlanLimits::of),
                         })
                         .collect()
                 })
@@ -8385,6 +8474,20 @@ impl Model {
             frame["username"] = json!(offer.username);
         }
         frame
+    }
+
+    /// The sidebar's plan limits: one for each program that reports them and that the
+    /// person's agents run on, their own or as their backup, in the order installed.
+    pub fn plan_limits(&self) -> Vec<(String, PlanLimits)> {
+        self.installed
+            .iter()
+            .filter(|p| {
+                self.agents
+                    .iter()
+                    .any(|a| a.program == p.name || a.backup == p.name)
+            })
+            .filter_map(|p| Some((p.name.clone(), p.limits.clone()?)))
+            .collect()
     }
 
     pub fn programs(&mut self) -> Value {
@@ -11603,6 +11706,69 @@ mod tests {
 
     fn conversations(items: Value) -> Value {
         json!({"t": "core.data", "what": "conversations", "items": items})
+    }
+
+    #[test]
+    fn the_sidebar_has_the_limits_of_the_plans_the_agents_run_on() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Main", "acp_agent": "claude"},
+        ]}));
+        let limits = json!({"plan": "Claude Max", "session": {"used": 42, "resets": 1_795_620_600_000i64}, "week": {"used": 78, "resets": 1_795_900_000_000i64}});
+        m.take(
+            &json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [
+                {"name": "claude", "limits": limits},
+                {"name": "codex"},
+                {"name": "other", "limits": limits},
+            ]}}),
+        );
+        let shown = m.plan_limits();
+        assert_eq!(
+            shown.len(),
+            1,
+            "only the programs that report them and that agents use"
+        );
+        assert_eq!(shown[0].0, "claude");
+        assert_eq!(shown[0].1.plan, "Claude Max");
+        assert_eq!(
+            shown[0].1.session,
+            Some(LimitWindow {
+                used: 42,
+                resets: 1_795_620_600_000
+            })
+        );
+        // A later report changes them in place.
+        m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {"plan": "Claude Max", "session": {"used": 50, "resets": 1_795_620_600_000i64}}}));
+        let shown = m.plan_limits();
+        assert_eq!(shown[0].1.session.map(|w| w.used), Some(50));
+        assert_eq!(shown[0].1.week, None);
+        // A login that isn't a plan's has none to show.
+        m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {}}));
+        assert!(m.plan_limits().is_empty());
+    }
+
+    #[test]
+    fn a_limit_says_how_much_is_used_and_when_it_resets() {
+        use chrono::TimeZone;
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = utc.with_ymd_and_hms(2026, 11, 25, 10, 0, 0).unwrap();
+        let at = |h: i64| now.timestamp_millis() + h * 60 * 60 * 1000;
+        let soon = LimitWindow {
+            used: 42,
+            resets: at(5) + 30 * 60 * 1000,
+        };
+        assert_eq!(soon.words(now), "42% · 15:30");
+        // Past a day, its weekday: Monday 30 November.
+        let week = LimitWindow {
+            used: 78,
+            resets: at(5 * 24),
+        };
+        assert_eq!(week.words(now), "78% · Mon");
+        // Once it has reset, none of it is used.
+        assert_eq!(soon.at(at(6)), LimitWindow { used: 0, resets: 0 });
+        assert_eq!(soon.at(at(6)).words(now), "0%");
+        assert_eq!(soon.at(at(1)), soon);
+        assert_eq!(week.fraction(), 0.78);
     }
 
     #[test]

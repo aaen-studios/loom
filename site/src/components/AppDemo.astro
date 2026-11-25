@@ -118,6 +118,38 @@ const GITHUB =
 				))
 			}
 		</div>
+		<div class="limits" aria-hidden="true">
+			<span class="limits-plan">
+				{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
+				Claude Max
+			</span>
+			<span class="limit">
+				<svg class="ring" viewBox="0 0 14 14"
+					><circle cx="7" cy="7" r="6.1" pathLength="100"></circle><circle
+						class="fill"
+						cx="7"
+						cy="7"
+						r="6.1"
+						pathLength="100"
+						stroke-dasharray="42 100"></circle></svg
+				>
+				<span class="limit-name">Session</span>
+				<span class="limit-words">42% · 15:30</span>
+			</span>
+			<span class="limit warn">
+				<svg class="ring" viewBox="0 0 14 14"
+					><circle cx="7" cy="7" r="6.1" pathLength="100"></circle><circle
+						class="fill"
+						cx="7"
+						cy="7"
+						r="6.1"
+						pathLength="100"
+						stroke-dasharray="78 100"></circle></svg
+				>
+				<span class="limit-name">This week</span>
+				<span class="limit-words">78% · Mon</span>
+			</span>
+		</div>
 		<div class="side-foot" aria-hidden="true">
 			<span class="server">
 				<svg data-yarn="This computer" width="32" height="32"></svg>
@@ -660,6 +692,59 @@ const GITHUB =
 	.tile.on .tile-name {
 		color: var(--ink);
 	}
+	/* The plan's limits over the server, as Claude reports them: the session's and the
+	   week's, each with when it resets. */
+	.limits {
+		display: grid;
+		gap: 4px;
+		margin: 0 8px 4px;
+		padding: 8px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-button);
+		font-size: var(--size-caption);
+		flex: none;
+	}
+	.limits-plan {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+	}
+	.limits-plan .brain-icon {
+		width: var(--control-limit-ring);
+		height: var(--control-limit-ring);
+	}
+	.limit {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.limit .ring {
+		width: var(--control-limit-ring);
+		height: var(--control-limit-ring);
+		flex: none;
+		transform: rotate(-90deg);
+	}
+	.limit .ring circle {
+		fill: none;
+		stroke: var(--line-strong);
+		stroke-width: 1.75;
+	}
+	.limit .ring .fill {
+		stroke: var(--ink-2);
+	}
+	.limit.warn .ring .fill {
+		stroke: var(--warn);
+	}
+	.limit-name {
+		flex: 1;
+	}
+	.limit-words {
+		color: var(--ink-3);
+	}
 	.side-foot {
 		display: flex;
 		align-items: center;
@@ -764,6 +849,9 @@ const GITHUB =
 	.app.railed .tile svg {
 		width: 26px;
 		height: 18px;
+	}
+	.app.railed .limits {
+		display: none;
 	}
 	.app.railed .side-foot {
 		flex-direction: column-reverse;

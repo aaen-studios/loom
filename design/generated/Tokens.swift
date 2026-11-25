@@ -83,6 +83,7 @@ enum Tokens {
         static let iconLarge: CGFloat = 34
         static let lead: CGFloat = 30
         static let server: CGFloat = 46
+        static let limitRing: CGFloat = 14
         static let choice: CGFloat = 50
         static let row: CGFloat = 54
         static let rowTall: CGFloat = 68
