@@ -21,7 +21,9 @@
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs). "From Biscuit" under Juniper opens Biscuit's
-// thread with it in the chat's place, to read, with Continue in your own chat for a composer.
+// thread with it in the chat's place, to read, with Continue in your own chat for a composer. The
+// header's pin opens the chat's pins in a popover under it (app.rs, pins_pop), with Jump, Copy
+// and Unpin on each, as Ctrl+Shift+P does.
 //
 // It plays only while it's on screen, and with reduced motion it shows the finished chat instead.
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
@@ -245,6 +247,8 @@ export function play(app: HTMLElement) {
 			: 'You deleted a message';
 		row.classList.add('deleted');
 		row.append(mark);
+		// Deleting a message takes its pin.
+		if (pinned.delete(row)) drawPins();
 		for (const [quote, to] of quotes) {
 			if (to !== row) continue;
 			quote.classList.add('original-gone');
@@ -253,10 +257,16 @@ export function play(app: HTMLElement) {
 	};
 	/** The chat's first messages back as they were, as the scene starts again. */
 	const undelete = () => {
+		let repinned = false;
 		for (const row of msgs.querySelectorAll<HTMLElement>('.row.deleted')) {
 			row.classList.remove('deleted');
 			row.querySelector('.gone')?.remove();
+			if (row.dataset.pin) {
+				pinned.add(row);
+				repinned = true;
+			}
 		}
+		if (repinned) drawPins();
 	};
 	for (const b of msgs.querySelectorAll<HTMLButtonElement>('.more-btn')) {
 		b.addEventListener('click', (e) => {
@@ -291,6 +301,143 @@ export function play(app: HTMLElement) {
 	app.querySelector('[data-continue]')?.addEventListener('click', () => inThread(false));
 	app.querySelector('.agent.on')?.addEventListener('click', () => inThread(false));
 	const tpl =(id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
+
+	// The chat's pins (PLAN.md, "Pinned messages"): the header's pin opens them in a popover under
+	// it, the newest first, each drawn as the chat draws its message under who said it and when,
+	// cut at about four lines with Show more. Jump goes to the message and lights it, Copy copies
+	// it, and Unpin takes it off with Undo for a few seconds (app.rs, pins_pop, pin_row).
+	const pinsBtn = app.querySelector<HTMLButtonElement>('[data-pins]')!;
+	const pop = app.querySelector<HTMLElement>('[data-pins-pop]')!;
+	const pinList = pop.querySelector<HTMLElement>('[data-pins-list]')!;
+	const pinEmpty = pop.querySelector<HTMLElement>('.pp-empty')!;
+	const pinNote = pop.querySelector<HTMLElement>('[data-pins-note]')!;
+	const pinRows = [...msgs.querySelectorAll<HTMLElement>('.row[data-pin]')].sort((a, b) => Number(a.dataset.pin) - Number(b.dataset.pin));
+	const pinned = new Set(pinRows);
+	let unpinned: HTMLElement | null = null;
+	let noteTimer = 0;
+	let lit: HTMLElement | null = null;
+	/** One pin: the message's bubble, its words cut at about four lines (app.rs, pin_cut). */
+	const pinOf = (row: HTMLElement) => {
+		const pin = tpl('demo-pin');
+		const agent = row.classList.contains('reply');
+		const who = pin.querySelector('.pin-who')!;
+		who.querySelector('b')!.textContent = agent ? (row.querySelector('.who')?.textContent ?? 'Juniper') : 'You';
+		who.querySelector('time')!.textContent = row.dataset.when ?? '';
+		if (agent) {
+			const mark = row.querySelector('.reply-thread')!.cloneNode(true) as SVGElement;
+			mark.removeAttribute('class');
+			who.prepend(mark);
+			pin.style.setProperty('--from', 'var(--thread-sky)');
+		}
+		const bubble = (row.querySelector('.said:not(.on-the-way)') ?? row.querySelector('.bubble'))!.cloneNode(true) as HTMLElement;
+		const clip = document.createElement('div');
+		clip.style.overflow = 'hidden';
+		clip.append(...bubble.childNodes);
+		bubble.append(clip);
+		pin.querySelector('.pin-msg')!.append(bubble);
+		const more = pin.querySelector<HTMLButtonElement>('.pin-more')!;
+		const cut = (open: boolean) => {
+			clip.style.maxHeight = open ? '' : '6.2em';
+			const long = open || clip.scrollHeight > clip.clientHeight + 1;
+			clip.style.maskImage = long && !open ? 'linear-gradient(#000 45%, transparent)' : '';
+			more.hidden = !long;
+			more.textContent = open ? 'Show less' : 'Show more';
+		};
+		more.addEventListener('click', () => cut(!!clip.style.maxHeight));
+		pin.querySelector('[data-act="jump"]')!.addEventListener('click', () => {
+			showPins(false);
+			jump(row);
+		});
+		pin.querySelector('[data-act="copy"]')!.addEventListener('click', () => {
+			navigator.clipboard?.writeText(wordsOf(row)).catch(() => {});
+			note('Copied', 1600);
+		});
+		pin.querySelector('[data-act="unpin"]')!.addEventListener('click', () => {
+			pinned.delete(row);
+			unpinned = row;
+			drawPins();
+			note('Unpinned', 6000, true);
+		});
+		pin.addEventListener('mouseenter', () => light(null));
+		return { pin, cut };
+	};
+	/** The popover's list, with how many there are on it and on the header's pin. */
+	const drawPins = () => {
+		const shown = pinRows.filter((r) => pinned.has(r));
+		const drawn = shown.map(pinOf);
+		pinList.replaceChildren(...drawn.map((d) => d.pin));
+		pinList.hidden = shown.length === 0;
+		pinEmpty.hidden = shown.length > 0;
+		for (const c of app.querySelectorAll('[data-pins-count]')) c.textContent = shown.length ? String(shown.length) : '';
+		if (!pop.hidden) for (const d of drawn) d.cut(false);
+		return drawn;
+	};
+	const note = (words: string, ms: number, undo = false) => {
+		clearTimeout(noteTimer);
+		pinNote.textContent = words;
+		pinNote.classList.toggle('copied', !undo);
+		if (undo) {
+			const b = document.createElement('button');
+			b.type = 'button';
+			b.textContent = 'Undo';
+			b.addEventListener('click', () => {
+				if (unpinned) pinned.add(unpinned);
+				unpinned = null;
+				pinNote.hidden = true;
+				drawPins();
+			});
+			pinNote.append(b);
+		}
+		pinNote.hidden = false;
+		noteTimer = window.setTimeout(() => {
+			pinNote.hidden = true;
+			unpinned = null;
+		}, ms);
+	};
+	/** The arrow keys' ring, on a pin or none. */
+	const light = (pin: HTMLElement | null) => {
+		lit?.classList.remove('lit');
+		lit = pin;
+		lit?.classList.add('lit');
+		lit?.scrollIntoView({ block: 'nearest' });
+	};
+	const showPins = (open: boolean) => {
+		pop.hidden = !open;
+		pinsBtn.setAttribute('aria-expanded', String(open));
+		lit = null;
+		if (open) {
+			drawPins();
+			pinList.scrollTop = 0;
+			pop.classList.remove('scrolled');
+			pinList.focus({ preventScroll: true });
+		} else {
+			pinNote.hidden = true;
+			unpinned = null;
+		}
+	};
+	drawPins();
+	pinsBtn.addEventListener('click', () => showPins(pop.hidden === true));
+	pinList.addEventListener('scroll', () => pop.classList.toggle('scrolled', pinList.scrollTop > 0));
+	document.addEventListener('pointerdown', (e) => {
+		if (!pop.hidden && !pop.parentElement!.contains(e.target as Node)) showPins(false);
+	});
+	document.addEventListener('keydown', (e) => {
+		const key = e.key.toLowerCase();
+		if (key === 'p' && e.shiftKey && (e.ctrlKey || e.metaKey) && app.matches(':hover, :focus-within')) {
+			e.preventDefault();
+			showPins(pop.hidden === true);
+			return;
+		}
+		if (pop.hidden) return;
+		const pins = [...pinList.children] as HTMLElement[];
+		const at = lit ? pins.indexOf(lit) : -1;
+		if (e.key === 'Escape') showPins(false);
+		else if (e.key === 'ArrowDown' && pins.length) light(pins[Math.min(at + 1, pins.length - 1)]);
+		else if (e.key === 'ArrowUp' && pins.length) light(pins[at < 0 ? pins.length - 1 : Math.max(at - 1, 0)]);
+		else if (e.key === 'Enter' && lit) (lit.querySelector('[data-act="jump"]') as HTMLButtonElement).click();
+		else return;
+		e.preventDefault();
+	});
 	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.
 	const preview = (agent: string, text: string, mood: Mood) => {
 		const row = app.querySelector<HTMLElement>(`[data-agent="${agent}"]`);

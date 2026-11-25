@@ -192,7 +192,6 @@ enum Screen {
     Move,
     People,
     AddServer,
-    Pins,
     /// A group chat's settings, or the form that makes one.
     Room,
     Aside,
@@ -244,6 +243,34 @@ struct Picked {
     text: String,
     agent: bool,
 }
+
+/// The Pinned popover while it's open (PLAN.md, "Pinned messages").
+#[derive(Clone, Default)]
+struct PinsPop {
+    /// The conversation it opened on.
+    chat: Option<String>,
+    /// The pin the arrow keys are on, by message.
+    lit: Option<String>,
+    /// The pins opened with Show more, by message.
+    open: HashSet<String>,
+    /// The note at its foot, and when it came: Unpinned with Undo, or Copied.
+    note: Option<(PinNote, Instant)>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinNote {
+    Unpinned,
+    Copied,
+}
+
+/// How long Unpinned, with its Undo, stays at the popover's foot, and Copied.
+const UNPIN_SECS: u64 = 6;
+const COPIED_MILLIS: u64 = 1600;
+/// How wide the Pinned popover is, and how much of the window's height it takes at most.
+const PINS_W: f32 = 460.0;
+const PINS_TALL: f32 = 0.7;
+/// The room a pin is drawn for: its pictures smaller than the chat's, a picture 200 wide.
+const PIN_ROOM: i32 = 248;
 
 /// The composer's + menu while it's open (PLAN.md, "The composer's + menu").
 #[derive(Clone, Default)]
@@ -328,6 +355,15 @@ pub struct Loom {
     lit: Option<String>,
     /// The message a quote jumps to, once the chat has reached back to it.
     jumping: Option<String>,
+    /// The Pinned popover while it's open, when a click outside last closed it, how far
+    /// its list is scrolled, and the keys it takes while it's open (PLAN.md, "Pinned
+    /// messages").
+    pins: Option<PinsPop>,
+    pins_closed_at: Option<Instant>,
+    pins_scroll: ScrollHandle,
+    pins_keys: FocusHandle,
+    /// How tall the window was at its last draw, for the popover's most height.
+    window_h: f32,
     /// When the picture viewer opened, which it fades in from.
     viewer_at: Instant,
     /// The open picture's zoom and pan (`crate::zoom`), from its fit when another shows.
@@ -1487,6 +1523,11 @@ ACTA_KEY=secret:ACTA_KEY",
             picked: None,
             lit: None,
             jumping: None,
+            pins: None,
+            pins_closed_at: None,
+            pins_scroll: ScrollHandle::new(),
+            pins_keys: cx.focus_handle(),
+            window_h: 800.0,
             viewer_at: Instant::now(),
             zoom: None,
             viewer_sizes: HashMap::new(),
@@ -1685,6 +1726,8 @@ ACTA_KEY=secret:ACTA_KEY",
             self.model.viewing = None;
         } else if self.browser_big {
             self.browser_big = false;
+        } else if self.pins.is_some() {
+            self.close_pins(cx);
         } else if self.menu.is_some() || self.ctx.is_some() {
             self.menu = None;
             self.ctx = None;
@@ -2130,7 +2173,6 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent
             | Screen::Activity
             | Screen::Memory
-            | Screen::Pins
             | Screen::Room
             | Screen::Tables => self.show_side(screen, cx),
             _ => {
@@ -2150,13 +2192,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.screen = Screen::Chat;
         self.popup = None;
         self.side = Some(screen);
-        self.model.pins_open = screen == Screen::Pins;
         self.model.tables_open = screen == Screen::Tables;
-        if screen == Screen::Pins {
-            if let Some(f) = self.model.load_pins() {
-                self.send(f);
-            }
-        }
         cx.notify();
     }
 
@@ -2166,7 +2202,6 @@ ACTA_KEY=secret:ACTA_KEY",
             self.model.close_panel();
         }
         self.model.page = None;
-        self.model.pins_open = false;
         self.model.tables_open = false;
         self.side = None;
         self.model.editing = None;
@@ -3326,7 +3361,6 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent => (Ico::Pencil, format!("Edit {name}")),
             Screen::Activity => (Ico::Activity, format!("What {name} did")),
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
-            Screen::Pins => (Ico::Pin, "Pinned".to_string()),
             Screen::Room => (
                 Ico::Users,
                 match self.model.room_open() {
@@ -3360,7 +3394,6 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(cx),
             Screen::Memory => self.memory_page(cx),
-            Screen::Pins => self.pins_page(&name, cx),
             Screen::Room => self.room_panel(window, cx),
             Screen::Tables => self.tables_panel(cx),
             Screen::Aside => self.aside_page(&name),
@@ -7987,9 +8020,14 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.watch(id, cx);
                 }
             }));
-        // The chat's pins, while it has some, or they're open beside it.
-        let pinned = self.model.messages.iter().filter(|m| m.pinned).count();
-        let pins_open = self.side == Some(Screen::Pins);
+        // The chat's pins, while it has some, or they're open in the popover under it:
+        // how many the instance says, or of the messages here until it has.
+        let pinned = self
+            .model
+            .pins_count
+            .max(self.model.messages.iter().filter(|m| m.pinned).count());
+        let pins_open = self.pins.is_some();
+        let pop = self.pins_pop(cx);
         let pins = div()
             .id("pins-toggle")
             .role(Role::Button)
@@ -8014,15 +8052,30 @@ ACTA_KEY=secret:ACTA_KEY",
                 p.hover,
                 None,
             )
+            .tooltip(tip(if cfg!(target_os = "macos") {
+                "Pinned  ⌘⇧P"
+            } else {
+                "Pinned  Ctrl+Shift+P"
+            }))
             .child(Icon::new(Ico::Pin).small())
             .when(pinned > 0, |d| d.child(pinned.to_string()))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if this.side == Some(Screen::Pins) {
-                    this.close_side(cx);
-                } else {
-                    this.open(Screen::Pins, cx);
-                }
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_pins(window, cx);
             }));
+        // The popover hangs from the button's bottom right, over the chat.
+        let pins = div().relative().child(pins).when_some(pop, |d, pop| {
+            d.child(
+                div().absolute().top_full().right_0().child(
+                    deferred(
+                        anchored()
+                            .anchor(Anchor::TopRight)
+                            .snap_to_window_with_margin(px(space::S))
+                            .child(div().mt(px(space::S)).child(pop)),
+                    )
+                    .with_priority(1),
+                ),
+            )
+        });
         // A group chat: its mark and name, which open its settings, and its pins.
         if let Some(room) = self.model.room_open().cloned() {
             return bar.child(self.room_head(&room, cx)).child(
@@ -8326,6 +8379,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             0,
                             this.clone(),
                             &[],
+                            false,
                         ))
                         .child(x(
                             "unattach-pictures".into(),
@@ -10432,7 +10486,11 @@ ACTA_KEY=secret:ACTA_KEY",
         let mut opened = std::mem::take(&mut self.focus_composer);
         // A popup's or a page's fields live on hidden once it closes, keys and all, so
         // its closing hands the keys back too.
-        let over = (self.popup, self.menu.is_some(), self.side);
+        let over = (
+            self.popup,
+            self.menu.is_some() || self.pins.is_some(),
+            self.side,
+        );
         if over != self.focus_over {
             let closed = self.focus_over.0.is_some() && over.0.is_none()
                 || self.focus_over.1 && !over.1
@@ -10442,6 +10500,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         if self.popup.is_some()
             || self.menu.is_some()
+            || self.pins.is_some()
             || self.browser_big
             || self.model.selected.is_none()
             // Another agent's thread has no composer to type in.
@@ -10566,6 +10625,7 @@ ACTA_KEY=secret:ACTA_KEY",
             newest: false,
             later: false,
             room: self.chat_room(window),
+            pin: None,
         };
         // The newest message, whose choices still answer.
         let newest = rows.iter().rev().find_map(|r| match r {
@@ -16857,114 +16917,609 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
     }
 
-    /// The open chat's pinned messages, beside it: who, when and the start of each, to
-    /// jump to, or to take the pin off.
-    fn pins_page(&mut self, agent: &str, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let mut list = div().flex().flex_col().gap(px(space::S));
-        if self.model.pins.is_empty() {
-            list = list.child(
-                div()
-                    .pt(px(space::L))
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .child("Nothing pinned yet"),
-            );
+    /// Opens the Pinned popover under the header's pin, with the keys, or closes it
+    /// (PLAN.md, "Pinned messages").
+    fn toggle_pins(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pins.is_some() {
+            self.close_pins(cx);
+            return;
         }
-        for m in self.model.pins.clone() {
-            let who = if m.role == "person" {
-                "You".to_string()
-            } else {
-                agent.to_string()
-            };
-            let words: String = m
-                .blocks
-                .iter()
-                .filter(|b| b.kind == "text" && b.parent.is_none())
-                .map(|b| b.text.as_str())
-                .collect::<Vec<_>>()
-                .join(" ");
-            let words = if words.trim().is_empty() {
-                "A file".to_string()
-            } else {
-                let short: String = words.chars().take(240).collect();
-                if short.len() < words.len() {
-                    format!("{}…", short.trim_end())
-                } else {
-                    short
+        // The click outside that just closed it was on the pin, which leaves it closed.
+        if self
+            .pins_closed_at
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(300))
+        {
+            return;
+        }
+        let Some(chat) = self.model.conversation() else {
+            return;
+        };
+        if self.screen != Screen::Chat {
+            return;
+        }
+        self.menu = None;
+        self.ctx = None;
+        self.plus = None;
+        self.pins = Some(PinsPop {
+            chat: Some(chat),
+            ..PinsPop::default()
+        });
+        self.pins_scroll.set_offset(point(px(0.0), px(0.0)));
+        if let Some(f) = self.model.load_pins() {
+            self.send(f);
+        }
+        window.focus(&self.pins_keys, cx);
+        cx.notify();
+    }
+
+    fn close_pins(&mut self, cx: &mut Context<Self>) {
+        if self.pins.take().is_some() {
+            self.pins_closed_at = Some(Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// Jumps from a pin to its message in the chat, closing the popover: the chat reaches
+    /// back for it if it's older than what's loaded, and lights it for a moment.
+    fn jump_pin(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.pins = None;
+        self.jump_to(message, cx);
+    }
+
+    /// Shows `note` at the popover's foot, until its time is up.
+    fn pin_note(&mut self, note: PinNote, cx: &mut Context<Self>) {
+        let Some(pop) = self.pins.as_mut() else {
+            return;
+        };
+        let at = Instant::now();
+        pop.note = Some((note, at));
+        let wait = match note {
+            PinNote::Unpinned => Duration::from_secs(UNPIN_SECS),
+            PinNote::Copied => Duration::from_millis(COPIED_MILLIS),
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |this, cx| {
+                if let Some(pop) = this.pins.as_mut() {
+                    if pop.note.is_some_and(|(_, t)| t == at) {
+                        pop.note = None;
+                        if note == PinNote::Unpinned {
+                            this.model.unpinned = None;
+                        }
+                        cx.notify();
+                    }
                 }
-            };
-            let id = m.id.clone();
-            let unpin = m.id.clone();
-            list = list.child(
-                div()
-                    .id(SharedString::from(format!("pin-{}", m.id)))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::XS))
-                    .p(px(space::M))
-                    .rounded(px(radius::CARD))
-                    .border_1()
-                    .border_color(p.line)
-                    .cursor_pointer()
-                    .soft_hover(transparent_black(), p.hover, None)
-                    .on_click(cx.listener(move |this, _, _, cx| this.jump_to(&id, cx)))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(p.ink_2)
-                                    .child(who),
-                            )
-                            .child(format!("{} {}", day_of(m.at), time_of(m.at)))
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!("unpin-{}", m.id)))
-                                    .tooltip(tip("Unpin"))
-                                    .size(px(22.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(radius::ROW))
-                                    .soft_hover(
-                                        transparent_black(),
-                                        p.active,
-                                        Some((p.ink_3, p.ink)),
-                                    )
-                                    .child(Icon::new(Ico::PinOff).xsmall())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        let f = this.model.pin(&unpin, false);
-                                        this.send(f);
-                                    })),
-                            ),
-                    )
-                    // Its emoji as the chat draws them, with Twemoji and the person's own.
-                    .child(div().text_size(px(size::SMALL)).text_color(p.ink).child(
-                        KeptText::new(
-                            SharedString::from(format!("pin-words-{}", m.id)),
-                            crate::emoji::pictured(&model::literal_html(&words), size::SMALL),
-                            with_links,
-                        ),
-                    )),
-            );
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Takes the pin off `message` from the popover, with Undo at its foot.
+    fn unpin_from_pop(&mut self, message: &str, cx: &mut Context<Self>) {
+        if let Some(f) = self.model.unpin(message) {
+            self.send(f);
+            if let Some(pop) = self.pins.as_mut() {
+                if pop.lit.as_deref() == Some(message) {
+                    pop.lit = None;
+                }
+            }
+            self.pin_note(PinNote::Unpinned, cx);
         }
-        let page = div()
-            .id("pins")
-            .size_full()
-            .overflow_y_scroll()
+    }
+
+    fn undo_unpin(&mut self, cx: &mut Context<Self>) {
+        if let Some(f) = self.model.undo_unpin() {
+            self.send(f);
+        }
+        if let Some(pop) = self.pins.as_mut() {
+            pop.note = None;
+        }
+        cx.notify();
+    }
+
+    /// The arrow keys in the popover: the ring goes to the pin above or below, and the
+    /// list scrolls to it.
+    fn light_pin(&mut self, down: bool, cx: &mut Context<Self>) {
+        let ids: Vec<String> = self
+            .model
+            .pins
+            .iter()
+            .map(|p| p.message.id.clone())
+            .collect();
+        let Some(pop) = self.pins.as_mut() else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let at = pop
+            .lit
+            .as_ref()
+            .and_then(|id| ids.iter().position(|i| i == id));
+        let next = match (at, down) {
+            (None, true) => 0,
+            (None, false) => ids.len() - 1,
+            (Some(i), true) => (i + 1).min(ids.len() - 1),
+            (Some(i), false) => i.saturating_sub(1),
+        };
+        pop.lit = Some(ids[next].clone());
+        self.pins_scroll.scroll_to_item(next);
+        cx.notify();
+    }
+
+    /// The Pinned popover under the header's pin, over the chat (PLAN.md, "Pinned
+    /// messages"): the chat's pins, the newest first, each drawn as the chat draws it,
+    /// under who said it and when, its words cut at about four lines with Show more. On
+    /// hover or the arrow keys, Jump, Copy and Unpin; older pins come as it's scrolled.
+    fn pins_pop(&mut self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let pop = self.pins.clone()?;
+        // Another chat opened: the popover was this one's.
+        if pop.chat != self.model.conversation() {
+            self.pins = None;
+            return None;
+        }
+        let p = self.p;
+        let agent = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .cloned();
+        let (name, tint, agent_id) = agent
+            .as_ref()
+            .map(|a| {
+                (
+                    a.name.clone(),
+                    thread::color(&a.color, p.dark),
+                    a.id.clone(),
+                )
+            })
+            .unwrap_or_else(|| (String::new(), p.ink_3, String::new()));
+        // Older pins once the list is near its end.
+        let offset = self.pins_scroll.offset().y.as_f32();
+        let end = self.pins_scroll.max_offset().y.as_f32();
+        if -offset >= end - 160.0 {
+            if let Some(f) = self.model.load_more_pins() {
+                self.send(f);
+            }
+        }
+        let count = self.model.pins_count.max(self.model.pins.len());
+        let head = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(space::S))
             .px(px(space::L))
             .pt(px(space::M))
-            .pb(px(space::XXL))
-            .child(list);
-        div().flex_1().min_h_0().child(page)
+            .pb(px(10.0))
+            .border_b_1()
+            // A line under it once the list is scrolled under it.
+            .border_color(if offset < -0.5 {
+                p.line
+            } else {
+                transparent_black()
+            })
+            .child(
+                div()
+                    .text_size(px(size::BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Pinned"),
+            )
+            .when(count > 0, |d| {
+                d.child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(p.ink_3)
+                        .child(count.to_string()),
+                )
+            });
+        let show = Show {
+            tools: Tools::Hidden,
+            thoughts: Thoughts::Hidden,
+            text_scale: self.prefs.text_scale(),
+            bubbles: self.prefs.bubbles,
+            vibrant: self.prefs.vibrant(),
+            newest: false,
+            later: false,
+            room: PIN_ROOM,
+            pin: Some(true),
+        };
+        let now = chrono::Local::now();
+        let list_h = (self.window_h * PINS_TALL - 44.0).max(160.0);
+        let body = if self.model.pins.is_empty() {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(6.0))
+                .px(px(space::XL))
+                .pt(px(space::XL))
+                .pb(px(30.0))
+                .child(
+                    div()
+                        .size(px(36.0))
+                        .mb(px(space::XS))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .bg(p.raised_2)
+                        .text_color(p.ink_3)
+                        .child(Icon::new(Ico::Pin).small()),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::BODY))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink)
+                        .child("Nothing pinned yet"),
+                )
+                .child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child("Hover a message and pick Pin"),
+                )
+                .into_any_element()
+        } else {
+            let mut list = div()
+                .id("pins-list")
+                .flex()
+                .flex_col()
+                .gap(px(space::XS))
+                .px(px(space::S))
+                .pb(px(space::S))
+                .max_h(px(list_h))
+                .overflow_y_scroll()
+                .track_scroll(&self.pins_scroll)
+                // Drawn again as it scrolls: its head's line, and older pins near its end.
+                .on_scroll(cx.listener(|_, _, _, cx| cx.notify()));
+            for pin in self.model.pins.clone() {
+                list =
+                    list.child(self.pin_row(&pin, &pop, show, (&name, tint, &agent_id), now, cx));
+            }
+            if self.model.pins_loading() {
+                list = list.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(space::S))
+                        .pt(px(space::S))
+                        .pb(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(thread(
+                            "pins-loading",
+                            Mood::Thinking,
+                            tint,
+                            18.0,
+                            10.0,
+                            None,
+                        ))
+                        .child("Loading older pins"),
+                );
+            }
+            list.into_any_element()
+        };
+        // Unpinned with its Undo, or Copied, at the foot.
+        let note = pop.note.map(|(note, _)| {
+            let chip = div()
+                .id("pins-note")
+                .flex()
+                .items_center()
+                .gap(px(10.0))
+                .py(px(6.0))
+                .pl(px(space::M))
+                .pr(px(6.0))
+                .rounded(px(radius::BUTTON))
+                .bg(p.button)
+                .text_color(p.button_ink)
+                .text_size(px(size::SMALL))
+                .shadow_lg();
+            let chip = match note {
+                PinNote::Unpinned => chip.child("Unpinned").child(
+                    div()
+                        .id("pins-undo")
+                        .role(Role::Button)
+                        .aria_label("Undo")
+                        .h(px(24.0))
+                        .px(px(space::S))
+                        .flex()
+                        .items_center()
+                        .rounded(px(radius::ROW))
+                        .font_weight(FontWeight::MEDIUM)
+                        .bg(p.button_ink.opacity(0.14))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(p.button_ink.opacity(0.24)))
+                        .child("Undo")
+                        .on_click(cx.listener(|this, _, _, cx| this.undo_unpin(cx))),
+                ),
+                PinNote::Copied => chip
+                    .pr(px(space::M))
+                    .child(Icon::new(Ico::Check).xsmall())
+                    .child("Copied"),
+            };
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom(px(space::M))
+                .flex()
+                .justify_center()
+                .child(chip)
+        });
+        Some(
+            div()
+                .id("pins-pop")
+                .role(Role::Dialog)
+                .aria_label("Pinned")
+                .occlude()
+                .w(px(PINS_W))
+                .flex()
+                .flex_col()
+                .rounded(px(12.0))
+                .border_1()
+                .border_color(p.line_strong)
+                .bg(p.raised)
+                .shadow_lg()
+                .overflow_hidden()
+                .text_color(p.ink)
+                .track_focus(&self.pins_keys)
+                .on_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
+                    match e.keystroke.key.as_str() {
+                        "down" => this.light_pin(true, cx),
+                        "up" => this.light_pin(false, cx),
+                        "enter" => {
+                            let lit = this.pins.as_ref().and_then(|p| p.lit.clone());
+                            if let Some(id) = lit {
+                                this.jump_pin(&id, cx);
+                            }
+                        }
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                }))
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_pins(cx)))
+                .child(head)
+                .child(
+                    div()
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .min_h_0()
+                        .child(body)
+                        .children(note),
+                ),
+        )
+    }
+
+    /// One pin in the Pinned popover: who said it and when, a line in their colour down
+    /// its left, the message drawn by the chat's own code, Show more where its words are
+    /// cut, and its Jump, Copy and Unpin on hover or under the arrow keys' ring.
+    fn pin_row(
+        &self,
+        pin: &model::Pin,
+        pop: &PinsPop,
+        show: Show,
+        (name, tint, agent): (&str, Hsla, &str),
+        now: chrono::DateTime<chrono::Local>,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        let m = &pin.message;
+        let id = m.id.clone();
+        let lit = pop.lit.as_deref() == Some(id.as_str());
+        let opened = pop.open.contains(&id);
+        let show = Show {
+            pin: Some(!opened),
+            ..show
+        };
+        // Who: the person's own say only "You"; another agent's handing work over, that
+        // agent's thread and name in its colour; a reply, the chat's agent's.
+        let from = m.from_agent.as_ref().map(|from| {
+            let a = self.model.agents.iter().find(|a| &a.name == from);
+            (
+                from.clone(),
+                a.map_or(p.ink_3, |a| thread::color(&a.color, p.dark)),
+                a.map(|a| a.id.clone()).unwrap_or_default(),
+            )
+        });
+        let (who, color, mark) = match (&from, m.role == "person") {
+            (Some((from, c, a)), _) => (from.clone(), *c, Some(a.clone())),
+            (None, true) => ("You".to_string(), p.ink_3, None),
+            (None, false) => (name.to_string(), tint, Some(agent.to_string())),
+        };
+        let said_by = who.clone();
+        let who_line = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .min_h(px(18.0))
+            .text_size(px(size::SMALL))
+            .when_some(mark, |d, a| {
+                d.child(thread(
+                    format!("pin-{a}-{id}"),
+                    Mood::Idle,
+                    color,
+                    22.0,
+                    10.0,
+                    None,
+                ))
+            })
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(if from.is_some() {
+                        motion::mix(p.ink_3, color, 0.7)
+                    } else {
+                        p.ink
+                    })
+                    .child(who),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(pin_when(m.at, now)),
+            );
+        let this = cx.entity().downgrade();
+        let message = if m.role == "person" {
+            person(
+                p,
+                m,
+                tint,
+                show.vibrant,
+                &self.model.files,
+                show.text_scale,
+                show.room,
+                model::Joined::default(),
+                None,
+                &self.open_thoughts,
+                this.clone(),
+                show.pin,
+            )
+        } else {
+            reply(
+                p,
+                m,
+                name,
+                tint,
+                Mood::Idle,
+                false,
+                &self.open_thoughts,
+                &self.model.tools,
+                &self.model.files,
+                &self.card_secrets,
+                show,
+                this.clone(),
+            )
+        };
+        // Show more where the words run past their cut, and Show less once it's open.
+        let more = (opened || pin_tall(&id)).then(|| {
+            let id = id.clone();
+            div()
+                .id(SharedString::from(format!("pin-more-{id}")))
+                .role(Role::Button)
+                .mt(px(-2.0))
+                .ml(px(-space::XS))
+                .px(px(space::XS))
+                .py(px(1.0))
+                .rounded(px(radius::ROW))
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.active, Some((p.ink_3, p.ink)))
+                .child(if opened { "Show less" } else { "Show more" })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(pop) = this.pins.as_mut() {
+                        if !pop.open.remove(&id) {
+                            pop.open.insert(id.clone());
+                        }
+                    }
+                    cx.notify();
+                }))
+        });
+        let act = |key: &str, label: &'static str| {
+            div()
+                .id(SharedString::from(format!("pin-{key}-{id}")))
+                .role(Role::Button)
+                .aria_label(label)
+                .h(px(26.0))
+                .min_w(px(26.0))
+                .px(px(6.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(5.0))
+                .rounded(px(radius::ROW))
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.active, Some((p.ink_2, p.ink)))
+        };
+        let (jump, unpin) = (id.clone(), id.clone());
+        let text = model::copy_text(m, &self.model.tools);
+        let said = format!("{said_by}: {}", model::spoken(&text));
+        let acts = div()
+            .absolute()
+            .top(px(space::XS))
+            .right(px(6.0))
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .rounded(px(radius::BUTTON))
+            .border_1()
+            .border_color(p.line_strong)
+            .bg(p.raised)
+            .shadow_md()
+            .when(!lit, |d| {
+                d.opacity(0.0).group_hover("pin", |s| s.opacity(1.0))
+            })
+            .child(
+                act("jump", "Jump")
+                    .px(px(space::S))
+                    .child(Icon::new(Ico::CornerDownRight).xsmall())
+                    .child("Jump")
+                    .on_click(cx.listener(move |this, _, _, cx| this.jump_pin(&jump, cx))),
+            )
+            .when(!text.is_empty(), |d| {
+                d.child(
+                    act("copy", "Copy")
+                        .tooltip(tip("Copy"))
+                        .child(Icon::new(Ico::Copy).xsmall())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            this.pin_note(PinNote::Copied, cx);
+                        })),
+                )
+            })
+            .child(
+                act("unpin", "Unpin")
+                    .tooltip(tip("Unpin"))
+                    .child(Icon::new(Ico::PinOff).xsmall())
+                    .on_click(cx.listener(move |this, _, _, cx| this.unpin_from_pop(&unpin, cx))),
+            );
+        div()
+            .id(SharedString::from(format!("pin-{id}")))
+            .role(Role::ListItem)
+            .aria_label(said)
+            .group("pin")
+            .relative()
+            .flex()
+            .flex_col()
+            .gap(px(6.0))
+            .pt(px(space::S))
+            .pr(px(10.0))
+            .pb(px(10.0))
+            .pl(px(space::L))
+            .rounded(px(space::S))
+            .border_1()
+            .border_color(if lit {
+                p.line_strong
+            } else {
+                transparent_black()
+            })
+            .when(lit, |d| d.bg(p.hover))
+            .hover(move |s| s.bg(p.hover))
+            // A line in who said it's colour down its left.
+            .child(
+                div()
+                    .absolute()
+                    .left(px(6.0))
+                    .top(px(10.0))
+                    .bottom(px(10.0))
+                    .w(px(2.0))
+                    .rounded_full()
+                    .bg(color.opacity(0.75)),
+            )
+            .child(who_line)
+            .child(message)
+            .children(more)
+            .child(acts)
     }
 
     /// Side questions about the open chat, beside it: what was asked and the answers,
@@ -17051,6 +17606,8 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Scrolls the chat to a message and lights it for a moment. One further back than the
     /// chat has loaded is reached for, a page at a time, and jumped to once it's here.
     fn jump_to(&mut self, message: &str, cx: &mut Context<Self>) {
+        // From a pin, or a quote in one: the popover goes, for the chat to show it.
+        self.pins = None;
         let at = self
             .rows
             .iter()
@@ -17682,6 +18239,82 @@ fn quote_view(
         })
 }
 
+thread_local! {
+    /// Whether each pin's words in the Pinned popover run past their cut, by message, as
+    /// they were last laid out (`pin_cut`).
+    static PIN_TALL: RefCell<HashMap<String, bool>> = RefCell::new(HashMap::new());
+}
+
+/// How tall a pin's words are let be while they're cut, in their own text size: about
+/// four lines.
+const PIN_CUT_EM: f32 = 6.2;
+
+/// Whether the words of pin `message` run past their cut, in any of its bubbles, as they
+/// were last laid out.
+fn pin_tall(message: &str) -> bool {
+    let bubble = format!("{message}/");
+    PIN_TALL.with(|t| {
+        t.borrow()
+            .iter()
+            .any(|(k, tall)| *tall && (k == message || k.starts_with(&bubble)))
+    })
+}
+
+/// A message's words, as the chat has them, or in the Pinned popover (`pin`) cut at about
+/// four lines while `Some(true)`, fading into the bubble's `fill` where they're cut, and
+/// measured, so Show more shows only for words that run past it. `key` is the message's
+/// id, or `id/block` for one bubble of a reply.
+fn pin_cut(
+    words: impl IntoElement,
+    key: &str,
+    pin: Option<bool>,
+    text: f32,
+    fill: Hsla,
+) -> AnyElement {
+    let Some(cut) = pin else {
+        return words.into_any_element();
+    };
+    let most = (text * PIN_CUT_EM).round();
+    let id = key.to_string();
+    let tall = PIN_TALL.with(|t| t.borrow().get(key).copied().unwrap_or(false));
+    let measure = canvas(
+        move |bounds, window, _| {
+            let is = bounds.size.height.as_f32() > most + 1.0;
+            let was = PIN_TALL.with(|t| t.borrow_mut().insert(id.clone(), is));
+            if was != Some(is) {
+                window.request_animation_frame();
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full();
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .when(cut, |d| d.max_h(px(most)).overflow_hidden())
+        .child(div().relative().flex_none().child(words).child(measure))
+        .when(cut && tall, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px((most * 0.55).round()))
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(fill.opacity(0.0), 0.0),
+                        linear_color_stop(fill, 1.0),
+                    )),
+            )
+        })
+        .into_any_element()
+}
+
 /// A quote over the person's message, with its spine: a short line from the quote's
 /// middle that curves down at its right end onto the bubble, 20 px in from its edge.
 fn spined_quote(p: Palette, quote: Stateful<Div>) -> Div {
@@ -17931,6 +18564,7 @@ fn person(
     beside: Option<Div>,
     open: &HashSet<String>,
     this: WeakEntity<Loom>,
+    pin: Option<bool>,
 ) -> Div {
     let text: String = m
         .blocks
@@ -17939,20 +18573,28 @@ fn person(
         .map(|b| b.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
+    // In the Pinned popover it starts at the left, under who said it.
     let mut out = div()
         .w_full()
         .flex()
         .flex_col()
-        .items_end()
+        .map(|d| {
+            if pin.is_some() {
+                d.items_start()
+            } else {
+                d.items_end()
+            }
+        })
         .gap(px(space::XS));
     // Another agent wrote this one, handing work over: its thread and its name over it,
     // the name in its colour as a mention's is, and the bubble a breath of that colour.
+    // A pin says who over it already.
     let sender = m.from_agent.as_ref().map(|from| {
         let agents = MENTION_AGENTS.with(|a| a.borrow().clone());
         let a = agents.iter().find(|a| &a.name == from).cloned();
         (from.clone(), a)
     });
-    if let Some((from, a)) = &sender {
+    if let Some((from, a)) = sender.as_ref().filter(|_| pin.is_none()) {
         let hex = a.as_ref().map(|a| mention_color(p, &a.color));
         let glyph = a
             .as_ref()
@@ -17996,6 +18638,7 @@ fn person(
                     room,
                     this.clone(),
                     &[],
+                    pin.is_some(),
                 ));
                 stacked.extend(stack);
             }
@@ -18080,33 +18723,46 @@ fn person(
         None => person_bubble(p, tint, vibrant),
     };
     let ink = motion::ink_on(bg, p.ink, p.bg);
-    // Cut after ten lines, to open in place, and open while the find box is on it.
-    let fold = format!("more-{}", m.id);
-    let unfolded = open.contains(&fold) || find_is_on(&m.id);
-    let toggler = this.clone();
-    let said = cut_long(
-        fold.clone(),
-        KeptText::new(
-            SharedString::from(format!("m-{}-{room}", m.id)),
-            words,
-            move |v| with_links(v.selectable(true).on_link_click(on_link)),
+    let kept = KeptText::new(
+        SharedString::from(format!("m-{}-{room}", m.id)),
+        words,
+        move |v| with_links(v.selectable(true).on_link_click(on_link)),
+    )
+    .found_in(&m.id, 0);
+    // In a pin, cut at about four lines with Show more; in the chat, cut after ten
+    // lines, to open in place, and open while the find box is on it.
+    let said = if pin.is_some() {
+        pin_cut(kept, &m.id, pin, size::BODY * scale, bg)
+    } else {
+        let fold = format!("more-{}", m.id);
+        let unfolded = open.contains(&fold) || find_is_on(&m.id);
+        let toggler = this.clone();
+        cut_long(
+            fold.clone(),
+            kept.into_any_element(),
+            size::BODY * scale * line::BODY,
+            FOLD_LINES,
+            bg,
+            ink.opacity(0.6),
+            ink,
+            unfolded,
+            move |cx| {
+                let _ = toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+            },
         )
-        .found_in(&m.id, 0)
-        .into_any_element(),
-        size::BODY * scale * line::BODY,
-        FOLD_LINES,
-        bg,
-        ink.opacity(0.6),
-        ink,
-        unfolded,
-        move |cx| {
-            let _ = toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
-        },
-    );
+        .into_any_element()
+    };
     out.when(!text.trim().is_empty(), |d| {
         d.child(
             div()
-                .max_w(px(520.0))
+                // In a pin, as wide as the popover lets it be.
+                .map(|d| {
+                    if pin.is_some() {
+                        d.max_w_full()
+                    } else {
+                        d.max_w(px(520.0))
+                    }
+                })
                 .px(px(space::L))
                 .py(px(space::S + 2.0))
                 .rounded_tl(px(c.tl))
@@ -18331,7 +18987,9 @@ const FAN_SHADOW: f32 = 0.06;
 /// the first in front, filling its place, up to four more tilted behind it either side,
 /// and how many there are in its corner. Under the pointer the ones behind fan out.
 /// Clicking it opens the viewer at the first, to step through them: the pictures a reply
-/// names (`named`, drawn by their thumbnails) once the instance has kept them.
+/// names (`named`, drawn by their thumbnails) once the instance has kept them. A `still`
+/// fan, a pin's in the Pinned popover, stays at rest under the pointer.
+#[allow(clippy::too_many_arguments)]
 fn picture_stack(
     p: Palette,
     stack: &[model::FileRef],
@@ -18340,6 +18998,7 @@ fn picture_stack(
     room: i32,
     this: WeakEntity<Loom>,
     named: &[model::Mention],
+    still: bool,
 ) -> AnyElement {
     let behind = fan_cards(stack.len());
     // As far as the fan reaches either side, open, with its tilted corners.
@@ -18359,7 +19018,11 @@ fn picture_stack(
     let h = (w * STACK_H / STACK_W).round();
     let id = SharedString::from(format!("stack-{key}"));
     // Kept under the fan's hover key, so a change of hover builds its row again.
-    let open = motion::level(&id, motion::hovered(&id), FAN_SECS);
+    let open = if still {
+        0.0
+    } else {
+        motion::level(&id, motion::hovered(&id), FAN_SECS)
+    };
     let pad = (h * 0.09).round();
     let card = |f: &model::FileRef| {
         div()
@@ -18403,16 +19066,18 @@ fn picture_stack(
                     .border_color(p.line),
             )
     };
-    let mut out = motion::tracks_hover(
-        div()
-            .id(id.clone())
-            .relative()
-            .flex_none()
-            .w(px((w * (1.0 + left + right)).round()))
-            .h(px(h + 2.0 * pad))
-            .cursor_pointer(),
-        id,
-    );
+    let fan = div()
+        .id(id.clone())
+        .relative()
+        .flex_none()
+        .w(px((w * (1.0 + left + right)).round()))
+        .h(px(h + 2.0 * pad))
+        .cursor_pointer();
+    let mut out = if still {
+        fan
+    } else {
+        motion::tracks_hover(fan, id)
+    };
     for (i, c) in &behind {
         let Some(path) = files.get(&format!("{}.thumb", stack[*i].file)) else {
             continue;
@@ -18482,10 +19147,11 @@ fn named_pictures(
     key: String,
     room: i32,
     this: WeakEntity<Loom>,
+    still: bool,
 ) -> AnyElement {
     let stack: Vec<model::FileRef> = named.iter().filter_map(model::Mention::picture).collect();
     if stack.len() > 1 {
-        return picture_stack(p, &stack, files, key, room, this, named);
+        return picture_stack(p, &stack, files, key, room, this, named, still);
     }
     let opened = named.to_vec();
     let most_w = PICTURE_W
@@ -19016,6 +19682,9 @@ struct Show {
     /// How wide the chat's column is, to the pixel (`Loom::chat_room`), in the text's
     /// id, so text measures itself again when the column changes.
     room: i32,
+    /// Drawn as a pin in the Pinned popover rather than in the chat, and whether its words
+    /// are cut there at about four lines (PLAN.md, "Pinned messages").
+    pin: Option<bool>,
 }
 
 /// The widest a card in the chat grows: past that, its few lines would sit far apart
@@ -21642,6 +22311,7 @@ impl ReplyDraw<'_> {
                     self.show.room,
                     self.this.clone(),
                     &[],
+                    self.show.pin.is_some(),
                 )
             }
             Part::Fold {
@@ -21705,15 +22375,17 @@ impl ReplyDraw<'_> {
                     )),
                 };
             }
-            // Cut after ten lines, to open in place, and open while the find box is on it.
-            let fold = format!("more-{key}");
-            let open = self.open.contains(&fold) || find_is_on(&self.m.id);
-            let toggler = self.this.clone();
-            let words = div()
-                .text_size(px(size::REPLY * show.text_scale))
-                .line_height(relative(line::REPLY))
-                .text_color(p.ink)
-                .child(cut_long(
+            // A pin's are cut at about four lines in the Pinned popover, fading into its
+            // bubble, or into the popover where replies are plain text. In the chat, cut
+            // after ten lines, to open in place, and open while the find box is on it.
+            let cut = if show.pin.is_some() {
+                let fill = if show.bubbles { p.bubble } else { p.raised };
+                pin_cut(said_in, &key, show.pin, size::REPLY * show.text_scale, fill)
+            } else {
+                let fold = format!("more-{key}");
+                let open = self.open.contains(&fold) || find_is_on(&self.m.id);
+                let toggler = self.this.clone();
+                cut_long(
                     fold.clone(),
                     said_in.into_any_element(),
                     size::REPLY * show.text_scale * line::REPLY,
@@ -21726,7 +22398,14 @@ impl ReplyDraw<'_> {
                         let _ =
                             toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
                     },
-                ));
+                )
+                .into_any_element()
+            };
+            let words = div()
+                .text_size(px(size::REPLY * show.text_scale))
+                .line_height(relative(line::REPLY))
+                .text_color(p.ink)
+                .child(cut);
             let sources = (self.sources_at == Some(i)).then(|| self.sources_tab());
             group = group.child(if show.bubbles {
                 // A grey bubble, never the agent's colour, which is the person's: its
@@ -22346,6 +23025,7 @@ fn reply(
             format!("{}-named", m.id),
             show.room,
             this.clone(),
+            show.pin.is_some(),
         )));
     }
     let unshown: Vec<&model::Mention> = m
@@ -22392,6 +23072,10 @@ fn reply(
             );
         }
         body = body.child(chips);
+    }
+    // A pin has its agent's thread and name over it, in the Pinned popover.
+    if show.pin.is_some() {
+        return body.w_full();
     }
     // What its agent kept or proposed from it: a quiet line, or a card that asks.
     if let Some(under) =
@@ -22955,6 +23639,28 @@ fn time_of(ms: i64) -> String {
     match chrono::Local.timestamp_millis_opt(ms) {
         chrono::LocalResult::Single(t) => t.format("%H:%M").to_string(),
         _ => String::new(),
+    }
+}
+
+/// When a pinned message was sent, over it in the Pinned popover: "Today 12:57",
+/// "Yesterday 18:04", "16 Nov" this year, and "16 Nov 2025" before.
+fn pin_when(ms: i64, now: chrono::DateTime<chrono::Local>) -> String {
+    use chrono::{Datelike, TimeZone};
+    if ms <= 0 || ms == i64::MAX {
+        return String::new();
+    }
+    let chrono::LocalResult::Single(t) = chrono::Local.timestamp_millis_opt(ms) else {
+        return String::new();
+    };
+    let (day, today) = (t.date_naive(), now.date_naive());
+    if day == today {
+        t.format("Today %H:%M").to_string()
+    } else if today.pred_opt() == Some(day) {
+        t.format("Yesterday %H:%M").to_string()
+    } else if day.year() == today.year() {
+        t.format("%-d %b").to_string()
+    } else {
+        t.format("%-d %b %Y").to_string()
     }
 }
 
@@ -23588,6 +24294,15 @@ impl Render for Loom {
                 } else if held && k.modifiers.shift && k.key == "f" {
                     this.search_all(window, cx);
                     cx.stop_propagation();
+                } else if k.modifiers.secondary(cx)
+                    && k.modifiers.shift
+                    && !k.modifiers.alt
+                    && k.key.eq_ignore_ascii_case("p")
+                    && this.scene.0 == "app"
+                {
+                    // Ctrl+Shift+P (Cmd+Shift+P on a Mac): the chat's pins.
+                    this.toggle_pins(window, cx);
+                    cx.stop_propagation();
                 } else if chord && k.key == "u" && this.screen == Screen::Chat {
                     // Ctrl+U (Cmd on a Mac) attaches files, as the + menu says.
                     if this.plus.is_some() {
@@ -23649,6 +24364,7 @@ impl Render for Loom {
         self.swap_draft(window, cx);
         self.edit_composer(window, cx);
         self.sync_server_name(window, cx);
+        self.window_h = window.viewport_size().height.as_f32();
         let ww = window.viewport_size().width.as_f32();
         if self.bar.fit(ww, self.beside()) {
             cx.notify();
@@ -24724,6 +25440,7 @@ mod row_tests {
                 newest: false,
                 later: false,
                 room: 720,
+                pin: None,
             },
             is_new: None,
             column: 720.0,
@@ -25766,6 +26483,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             beside,
             open,
             this.clone(),
+            None,
         ),
         Row::Message(m) => reply(
             p,

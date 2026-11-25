@@ -330,6 +330,7 @@ gpui_kit::assets::icon_assets!(
         Play,
         Pin,
         PinOff,
+        CornerDownRight,
         Reply,
         TextQuote,
         MessageCircleQuestionMark,

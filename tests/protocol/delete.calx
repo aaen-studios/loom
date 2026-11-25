@@ -4,12 +4,12 @@ module tests.protocol.delete
 // mark where the message was, with its words gone from the chat and from
 // search, sent to every device as message.updated. A reply quoting it says the
 // original was deleted, and the agent is told once, with its next message,
-// that the message is gone.
+// that the message is gone. A pinned message deleted leaves Pinned.
 //
 //     calx tests/protocol/delete.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, bool_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session}
 import tests.kit.{Instance, check}
 
@@ -118,6 +118,16 @@ fn run(i: Instance) ! Error {
     try check(block_count(at(at(twice, "value"), "message")) == 0, "deleting it again changes nothing")
     let missing = try app.cmd("q_8", "message.delete", Obj.new().s("message", String("msg_nope")).done())
     try check(str_at(at(missing, "error"), "code") == some(String("not_found")), "a message that isn't there can't be deleted")
+
+    // --- A pinned message deleted leaves Pinned, and its mark can't be pinned ---
+    _ = try app.cmd("q_9", "message.pin", Obj.new().s("message", quoting_id.copy()).done())
+    let pinned = try app.cmd("q_10", "messages.pinned", Obj.new().s("conversation", chat.copy()).done())
+    try check(int_at(at(pinned, "value"), "count") == some(1), "a pinned message is in Pinned")
+    _ = try app.cmd("q_11", "message.delete", Obj.new().s("message", quoting_id.copy()).done())
+    let unpinned = try app.cmd("q_12", "messages.pinned", Obj.new().s("conversation", chat.copy()).done())
+    try check(int_at(at(unpinned, "value"), "count") == some(0), "deleting it takes its pin")
+    let again = try app.cmd("q_13", "message.pin", Obj.new().s("message", quoting_id).done())
+    try check(str_at(at(again, "error"), "code") == some(String("bad_request")), "and a deleted message can't be pinned")
     app.close()
 }
 

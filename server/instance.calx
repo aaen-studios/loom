@@ -13203,8 +13203,13 @@ impl Instance {
             let id = str_at(args.copy(), "message") ?? String()
             let m = try i.store.message(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no message {id}.")
             let conversation = str_at(m.copy(), "conversation") ?? String()
-            let pin = bool_at(args, "pinned") ?? true
-            let changed = if pin { merge(m, Obj.new().j("pinned", Obj.new().i("at", now()).s("by", device.copy()).done()).done()) } else { without(m, "pinned") }
+            let pin = bool_at(args.copy(), "pinned") ?? true
+            // A deleted message's mark isn't pinned: deleting took its pin.
+            if pin and at(m.copy(), "deleted") != Json.Null { return Answer.Refused(String("bad_request"), String("That message was deleted.")) }
+            // An undo puts a pin back with the time it had, so it goes back to its place.
+            let asked = int_at(args, "at") ?? now()
+            let when = if asked > 0 and asked <= now() { asked } else { now() }
+            let changed = if pin { merge(m, Obj.new().j("pinned", Obj.new().i("at", when).s("by", device.copy()).done()).done()) } else { without(m, "pinned") }
             try i.store.put_message(user.copy(), changed.copy())
             try i.event(user.copy(), "message.updated", Obj.new().s("conversation", conversation).j("message", changed.copy()).done())
             if device.starts_with("a_") { i.log(user, device.copy(), "agent", if pin { "Pinned a message" } else { "Unpinned a message" }, device) }
@@ -13229,7 +13234,11 @@ impl Instance {
         if name == "messages.pinned" {
             let id = str_at(args, "conversation") ?? String()
             if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
-            return Answer.Value(Obj.new().j("messages", Json.Array(try i.store.pinned(user, id))).done())
+            let limit = int_at(args.copy(), "limit") ?? 50
+            let n: i64 = if limit < 1 { 1 } else if limit > 100 { 100 } else { limit }
+            let count = try i.store.pinned_count(user.copy(), id.copy())
+            let (messages, more) = try i.store.pinned(user, id, str_at(args, "before"), usize.try_from(n) ?? 50)
+            return Answer.Value(Obj.new().j("messages", Json.Array(messages)).b("more", more).i("count", count).done())
         }
         if name.starts_with("queue.") { return try i.queue_cmd(user, name, args) }
         if name.starts_with("task.") { return try i.task_cmd(user, device, name, args) }
