@@ -304,6 +304,11 @@ const GITHUB =
 				</div>
 			</div>
 		</div>
+		<!-- In Biscuit's thread, read only: the way to the person's own chat with Juniper, in
+		     the composer's place (app.rs, continue_button). -->
+		<div class="continue-wrap">
+			<button type="button" class="continue" data-continue>Continue in your own chat</button>
+		</div>
 	</div>
 </div>
 
@@ -1364,6 +1369,40 @@ const GITHUB =
 		background: var(--active);
 		color: var(--ink);
 	}
+	/* The thread is read only: in the composer's place, the way to the person's own chat
+	   (app.rs, continue_button), as tall as the composer. */
+	.continue-wrap {
+		display: none;
+		padding: 4px 24px 16px;
+		flex: none;
+	}
+	.app.in-thread .composer-wrap {
+		display: none;
+	}
+	.app.in-thread .continue-wrap {
+		display: block;
+	}
+	.continue {
+		display: grid;
+		place-items: center;
+		width: 100%;
+		max-width: var(--space-column);
+		height: calc(var(--control-icon-composer) + 18px);
+		margin: 0 auto;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-composer);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink-2);
+		cursor: pointer;
+		transition:
+			background-color 0.12s,
+			color 0.12s;
+	}
+	.continue:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
 
 	/* A file or a pasted link in the words (app.rs, composer_token, linked_words): its icon
 	   and its name or page's title, underlined, with the hand and a light background under
@@ -2207,7 +2246,8 @@ const GITHUB =
 			border-radius: 12px;
 		}
 		.chat,
-		.composer-wrap {
+		.composer-wrap,
+		.continue-wrap {
 			padding-left: 14px;
 			padding-right: 14px;
 		}
