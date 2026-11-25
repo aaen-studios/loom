@@ -398,10 +398,12 @@ See [Messages and streaming](#messages-and-streaming).
 Catch-up is over. Everything after this is live.
 
 ```json
-{ "t": "synced", "seq": 1046, "runs": [ { "run": "run_77", "conversation": "c_9", "agent": "a_2", "message": "msg_311", "answering": "msg_310" } ] }
+{ "t": "synced", "seq": 1046, "runs": [ { "run": "run_77", "conversation": "c_9", "agent": "a_2", "message": "msg_311", "answering": "msg_310" } ], "groups": [ { "id": "g_1", "name": "Work", "collapsed": false, "at": 1700000000000 } ] }
 ```
 
 `runs` is every one of the person's runs still going, as `run.started` gave each (without `revision`), with `routine` for a routine's quiet run, which the apps don't show as working. The app's cache makes its runs exactly these, so a run whose `run.started` or `run.finished` it never kept (the event was pruned, came before a snapshot's, or the cache couldn't write it) shows as it is: an agent shows it's working for as long as its turn goes, and stops once it's over.
+
+`groups` is every one of the person's sidebar folders, in the order they were made, as `group.list` gives them ([PLAN.md](../PLAN.md#the-sidebar)). The cache makes its folders exactly these, so one that came while an older app was in use is there too. An instance from before folders leaves it out.
 
 ### `ack`
 
@@ -737,6 +739,8 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `rules.updated` | `rules` (all of the person's, as `rule.list` gives them), `by` (the device that changed them, or the one that said yes to an agent's) | A rule was added, changed or removed. Each agent works under the rules as they are from its next action ([Rules on what's touched](#rules-on-whats-touched)) |
 | `notify` | `agent`, `title`, `body`, and for a routine's, `conversation` | An agent sent its person a notification with its `notify` tool, or a routine's agent posted with `routine_post` while it notifies (its name as `title`, the start of the post as `body`), or its run failed, or loom itself told the owner of an update it made, with no `agent` ([Updating the instance](#updating-the-instance)). The apps show it, even while someone's looking |
 | `agent.deleted` | `agent` (the id) | Deleted |
+| `group.updated` | `group` (the whole folder: `id`, `name`, `collapsed`, `at`), `by` (the device that changed it) | A sidebar folder was made, renamed, or opened or shut ([PLAN.md](../PLAN.md#the-sidebar)) |
+| `group.deleted` | `group` (the id), `by` | Deleted. Its agents came out of it first, each with `agent.updated` |
 | `routine.updated` | `routine` (the whole routine, as `routine.list` gives it) | Made, changed, or run: `last` says how its newest run is going |
 | `routine.deleted` | `routine` (the id) | Deleted |
 | `proposal.created` | `proposal` (as `proposal.list` gives it) | An agent proposed a skill or a note, which waits for the person ([Teaching a task, and proposals](#teaching-a-task-and-proposals)) |
@@ -850,6 +854,12 @@ Version 1's commands:
 | `agent.rollback` | `agent`, `revision` | `agent`: a new revision with that one's name, ACP agent, instructions, folder, colour and shape. The permission mode stays as it is |
 | `agent.pin` | `agent`, `pinned`? (`false` takes the pin off) | `agent`, with `pinned`: when it was pinned. Pinned agents go at the top of the list, in that order. Not a revision; `agent.updated` tells every device |
 | `agent.order` | `agents` (the agents' ids, in the order the person dragged them into) | `agents`, and `moved`: how many changed place. Each keeps its place as `order`, and the apps list agents by it, pinned ones first; one with no `order` yet comes after, in the order it was made. Nothing else moves an agent in the list. Not a revision; `agent.updated` tells every device of each that moved. `not_found` for an agent that isn't there |
+| `agent.group` | `agent`, `group`? (a folder's id; `""` or left out takes it out of any) | `agent`, with `group` while it's in one. It shows in that folder, so it's no longer pinned or hidden. Not a revision; `agent.updated` tells every device. `not_found` for an agent or a folder that isn't there ([PLAN.md](../PLAN.md#the-sidebar)) |
+| `agent.hide` | `agent`, `hidden`? (`false` shows it again) | `agent`, with `hidden`: when it was hidden. A hidden agent is unpinned, keeps its folder, and is listed under Hidden; pinning it shows it again. Not a revision; `agent.updated` tells every device |
+| `group.list` | — | `groups`: the person's sidebar folders, in the order they were made, each `id`, `name`, `collapsed` and `at` |
+| `group.create` | `name` (1 to 80 characters, trimmed) | `group`, open. `group.updated` tells every device. `bad_request` for a blank or long name |
+| `group.update` | `group`, `name`?, `collapsed`? | `group`, as it is now, and `group.updated` to every device when it changed. Opening or shutting a folder is kept too, so every device shows it the same |
+| `group.delete` | `group` | —. Its agents stay, out of any folder, each with `agent.updated`, then `group.deleted` |
 | `agent.delete` | `agent` | —. A sandbox of its own, for an agent closed to the network, goes with it, and its egress |
 | `device.rename` | `device`, `name` | — |
 | `device.revoke` | `device` | — |
