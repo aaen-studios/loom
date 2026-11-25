@@ -56,6 +56,9 @@ module tests.fake_agent.main
 //     /session            says its session id: "session ID"
 //     /uptime             says how long ago the program started: "up MS ms"
 //     /usage USED SIZE    reports its context as USED tokens of a SIZE window (usage_update)
+//     /compacted USED SIZE
+//                         the same, but after the turn has ended, as Claude's adapter
+//                         reports a session it compacted while idle
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
 //                         open" or "direct closed"), and through the proxy
@@ -152,6 +155,7 @@ pub enum Step {
     Config
     Meta
     Usage(i64, i64)
+    Compacted(i64, i64)
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -240,6 +244,9 @@ pub fn script(text: String) -> List<Step> {
         } else if word == "/usage" {
             let (used, size) = split_word(rest)
             steps.push(Step.Usage(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
+        } else if word == "/compacted" {
+            let (used, size) = split_word(rest)
+            steps.push(Step.Compacted(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
         } else if word == "/env" {
             steps.push(Step.Env(rest))
         } else if word == "/net" {
@@ -800,6 +807,7 @@ impl Agent {
         var slow: u64 = 0
         var reason = String("end_turn")
         var tokens: i64 = 0
+        var compacted: (i64, i64)? = none
         for step in script(text) {
             match step {
                 Step.Say(s) => {
@@ -949,6 +957,7 @@ impl Agent {
                     u.insert("size", int(size))
                     update(session.copy(), u)
                 },
+                Step.Compacted(used, size) => compacted = some((used, size)),
                 Step.Config => {
                     let values = a.values(session.copy())
                     chunk(session.copy(), "agent_message_chunk", "model={value_of(values.copy(), "model")} effort={value_of(values, "effort")}")
@@ -1008,6 +1017,13 @@ impl Agent {
             r.insert("usage", Json.Object(usage))
         }
         respond(id, Json.Object(r))
+        if let (used, size) = compacted {
+            var u = LinkedMap<String, Json>()
+            u.insert("sessionUpdate", js(String("usage_update")))
+            u.insert("used", int(used))
+            u.insert("size", int(size))
+            update(session, u)
+        }
     }
 
     // Session `session`'s config values: its own, or the defaults (a session

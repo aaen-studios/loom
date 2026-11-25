@@ -45,6 +45,12 @@ fn run(i: Instance) ! Error {
     try check(not fresh.contains("/session\n/context"), "but not the message it's answering, twice")
     let after = try say(mut app, chat.copy(), "m_7", String("/session\n/context"))
     try check(after.starts_with(fresh[..first.len()].copy()) and not after.contains("earlier session"), "and the next message stays in it, without being told again")
+
+    // A session compacted once its turn has ended, as Claude's adapter compacts
+    // an idle one, has room again: what it says with no run going is kept.
+    _ = try say(mut app, chat.copy(), "m_8", String("/usage 900 1000\n/compacted 100 1000\nfull, then compacted"))
+    let compacted = try say(mut app, chat.copy(), "m_9", String("/session"))
+    try check(compacted.starts_with(fresh[..first.len()].copy()), "a session compacted after its turn keeps going")
     let listed = try app.cmd("q_3", "messages.list", Obj.new().s("conversation", chat).done())
     try check("{listed}".contains("The password hint is kiwi."), "the chat itself is one conversation, with everything in it")
     app.close()
