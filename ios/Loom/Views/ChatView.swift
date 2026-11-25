@@ -216,9 +216,10 @@ struct ChatView: View {
             // Back from a thread, the chat is the agent's own again.
             model.open(thread: thread?.id)
             session.flush()
+            // Once the thread has slid away: the field takes no cursor while it moves.
             if writeOnReturn {
                 writeOnReturn = false
-                write += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { write += 1 }
             }
             openFromLaunch()
         }
