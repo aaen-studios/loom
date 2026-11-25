@@ -14,6 +14,7 @@ import std.time.{Timestamp}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
 import shared.checkpoint
 import core.asks
+import core.sidebar
 import std.fs
 import std.thread.{Task, sleep}
 
@@ -31,12 +32,13 @@ CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER, parent TEXT, at INTEGER);
 CREATE INDEX IF NOT EXISTS calls_by_run ON calls (run);
 CREATE TABLE IF NOT EXISTS approvals (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox (
     cid TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL, at INTEGER NOT NULL);
 "#
 
 // Everything that came from the instance, which a reset or another login clears.
-const TABLES: [str; 7] = ["agents", "conversations", "messages", "devices", "runs", "calls", "approvals"]
+const TABLES: [str; 8] = ["agents", "conversations", "messages", "devices", "runs", "calls", "approvals", "groups"]
 
 // What each list the app reads is, in order.
 const AGENTS: str = "SELECT json FROM agents ORDER BY rowid"
@@ -97,6 +99,9 @@ const PRUNE_EVERY_MS: i64 = 86400000
 // Each agent's chat, newest first, for `conversation_for` at a send.
 const CHATS_BY_AGENT: str = "CREATE INDEX IF NOT EXISTS chats_by_agent ON conversations (agent, last DESC) WHERE chat = 1;"
 const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
+// The sidebar's folders, in the order the instance gave them, and the agents a question waits on.
+const GROUPS: str = "SELECT json FROM groups ORDER BY rowid"
+const WAITING: str = "SELECT DISTINCT json_extract(r.json, '$.agent') FROM approvals a JOIN runs r ON r.id = a.run"
 const OUTBOX: str = "SELECT json FROM outbox ORDER BY at, rowid"
 
 // A JSON array of `items`, each JSON already.
@@ -393,6 +398,11 @@ impl Cache {
             try self.put_agent(at(e, "agent"))
         } else if kind == "agent.deleted" {
             _ = try self.db.execute(String("DELETE FROM agents WHERE id = ?"), [t(str_at(e, "agent") ?? String())])
+        } else if kind == "group.updated" {
+            let g = at(e, "group")
+            _ = try self.db.execute(String("INSERT INTO groups (id, json) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(str_at(g.copy(), "id") ?? String()), t("{g}")])
+        } else if kind == "group.deleted" {
+            _ = try self.db.execute(String("DELETE FROM groups WHERE id = ?"), [t(str_at(e, "group") ?? String())])
         } else if kind == "device.added" {
             let d = at(e, "device")
             _ = try self.db.execute(String("INSERT OR REPLACE INTO devices (id, json) VALUES (?, ?)"), [t(str_at(d, "id") ?? String()), t("{d}")])
@@ -516,6 +526,40 @@ impl Cache {
         try self.step_done(began)
     }
 
+    /// Makes the sidebar's folders exactly `groups`, as `synced` gives them, in their
+    /// order. A synced from an instance from before folders has none, and changes nothing.
+    pub fn keep_groups(self, groups: Json) ! Error {
+        let Json.Array(all) = groups else return
+        let began = try self.step()
+        match self.put_groups(all) {
+            ok => {},
+            err(e) => {
+                self.undo(began)
+                fail e
+            },
+        }
+        try self.step_done(began)
+    }
+
+    fn put_groups(self, all: List<Json>) ! Error {
+        // Only when they differ, so the folders keep their rows, and the app reads the
+        // sidebar again only when they changed.
+        if try self.texts(GROUPS, List<Value>()) == all.map(|g| "{g}") { return }
+        _ = try self.db.execute(String("DELETE FROM groups"), List<Value>())
+        for g in all {
+            _ = try self.db.execute(String("INSERT INTO groups (id, json) VALUES (?, ?)"), [t(str_at(g.copy(), "id") ?? String()), t("{g}")])
+        }
+    }
+
+    /// How the sidebar groups the agents (`core/sidebar.calx`).
+    pub fn sidebar(self) -> Json ! Error {
+        var waiting = List<String>()
+        for id in try self.texts(WAITING, List<Value>()) {
+            if id.len() > 0 { waiting.push(id.copy()) }
+        }
+        return sidebar.arrange(try self.agents(), try self.all(GROUPS, List<Value>()), waiting)
+    }
+
     fn put_runs(self, going: List<Json>) ! Error {
         var ids = List<Json>()
         for r in going {
@@ -622,6 +666,7 @@ impl Cache {
             }
             return some(array(out))
         }
+        if what == "sidebar" { return some("{try self.sidebar()}") }
         let sql = if what == "agents" { AGENTS } else if what == "conversations" { CONVERSATIONS } else if what == "devices" { DEVICES } else if what == "runs" { RUNS } else if what == "tools" { TOOLS } else if what == "outbox" { OUTBOX } else { return none }
         return some(array(try self.texts(sql, List<Value>())))
     }
@@ -707,6 +752,48 @@ impl Cache {
 
 fn ev(seq: i64, kind: str, fields: Json) -> Json {
     return merge(Obj.new().s("t", String("event")).i("seq", seq).s("kind", String(kind)).done(), fields)
+}
+
+// The ids in the sidebar's section of `kind`.
+fn section_ids(c: Cache, kind: str) -> List<String> ! Error {
+    var out = List<String>()
+    if let Json.Array(ss) = try c.sidebar() {
+        for s in ss {
+            if str_at(s.copy(), "kind") != some(String(kind)) { continue }
+            if let Json.Array(listed) = at(s, "agents") {
+                for id in listed {
+                    if let Json.Str(x) = id { out.push(x.copy()) }
+                }
+            }
+        }
+    }
+    return out
+}
+
+@test
+fn the_sidebar_has_the_folders_and_who_waits() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    let folder = |id: str, name: str| Obj.new().s("id", String(id)).s("name", String(name)).b("collapsed", false).done()
+    assert(try c.apply(ev(1, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_1")).s("group", String("g_1")).done()).done())))
+    assert(try c.apply(ev(2, "agent.created", Obj.new().j("agent", Obj.new().s("id", String("a_2")).done()).done())))
+    assert(try c.apply(ev(3, "group.updated", Obj.new().j("group", folder("g_1", "Work")).done())))
+    assert(try section_ids(c, "group") == [String("a_1")])
+    // A question open for one of a_1's runs: it waits on the person.
+    assert(try c.apply(ev(4, "run.started", Obj.new().s("run", String("run_1")).s("conversation", String("c_1")).s("agent", String("a_1")).done())))
+    assert(try c.apply(ev(5, "approval.needed", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).done())))
+    assert(try section_ids(c, "waiting") == [String("a_1")] and section_ids(c, "group")!.len() == 0)
+    assert(try c.apply(ev(6, "approval.answered", Obj.new().s("call", String("tc_1")).done())))
+    assert(section_ids(c, "waiting")!.len() == 0)
+    assert(try c.apply(ev(7, "group.deleted", Obj.new().s("group", String("g_1")).done())))
+    assert(try section_ids(c, "agents") == [String("a_1"), String("a_2")])
+    // Synced brings the folders as they are; one from an older instance, none.
+    try c.keep_groups(Json.Array([folder("g_2", "Later"), folder("g_1", "Work")]))
+    try c.keep_groups(Json.Null)
+    let Json.Array(all) = try c.sidebar() else return
+    assert(str_at(all[3].copy(), "id") == some(String("g_2")) and str_at(all[4].copy(), "id") == some(String("g_1")))
+    assert(try section_ids(c, "group") == [String("a_1")])
+    let listed = try parse(try c.list_text(String("sidebar")) ?? String())
+    assert(listed == try c.sidebar())
 }
 
 @test

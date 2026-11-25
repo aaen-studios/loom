@@ -59,7 +59,7 @@ const FILL_PAGE: i64 = 100
 const RESTART_NS: u64 = 120000000000
 
 // What core.get reads from the cache.
-const GETS: [str; 8] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages"]
+const GETS: [str; 9] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages", "sidebar"]
 
 /// How long to wait after `failed` tries in a row: 0.5 s, doubling up to 30 s.
 pub fn wait_ms(failed: u32) -> u64 {
@@ -638,6 +638,8 @@ impl Conn {
                     return
                 },
             }
+            // The sidebar's folders, as the instance has them.
+            if let err(e) = self.cache.keep_groups(at(f.copy(), "groups")) { self.tell_error("cache", "{e}") }
             // Tool calls as old as the events the instance still keeps go, once a day.
             if let err(e) = self.cache.prune_calls(now() - CALLS_KEPT_MS) { self.tell_error("cache", "{e}") }
             // What catching up held from the app, on this connection and any before

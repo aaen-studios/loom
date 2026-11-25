@@ -68,9 +68,10 @@ pub struct Prefs {
     /// Whether an agent's replies show as grey bubbles, rather than plain text in the
     /// column.
     pub bubbles: bool,
-    /// Whether the person's bubbles are filled more strongly with the agent's colour,
-    /// rather than a breath of it.
-    pub vibrant: bool,
+    /// Whether the person's bubbles are filled with the agent's colour itself (Vibrant),
+    /// rather than a breath of it (Soft, the default), or `None` while they haven't
+    /// picked, so a choice is kept when the default changes. `vibrant()` says which shows.
+    pub vibrant: Option<bool>,
     /// Whether Enter makes a new line and Ctrl+Enter sends, rather than Enter sending.
     pub ctrl_enter: bool,
     /// Whether closing the window keeps loom running in the tray.
@@ -103,7 +104,7 @@ impl Default for Prefs {
             tools: Tools::Hidden,
             thoughts: Thoughts::Hidden,
             bubbles: true,
-            vibrant: true,
+            vibrant: None,
             ctrl_enter: false,
             tray: true,
             notify: true,
@@ -177,11 +178,14 @@ impl Prefs {
                 "bubbles" => true,
                 _ => d.bubbles,
             },
-            // 0.2.6 kept `vibrant_bubbles`, false in every file whose person didn't touch
-            // it, so Vibrant bubbles, the default since, is kept under a new name.
-            vibrant: match s("your_bubbles") {
-                "vibrant" => true,
-                "soft" => false,
+            // `bubble_colour` is kept only once the person picks. Before it, 0.2.7 to 0.2.9
+            // kept `your_bubbles` in every file, "vibrant" while that was the default, so
+            // only its "soft" was picked; and 0.2.6 kept `vibrant_bubbles`, false in every
+            // file whose person didn't touch it, so only its true was.
+            vibrant: match (s("bubble_colour"), s("your_bubbles")) {
+                ("vibrant", _) => Some(true),
+                ("soft", _) | (_, "soft") => Some(false),
+                (_, "") if b("vibrant_bubbles", false) => Some(true),
                 _ => d.vibrant,
             },
             ctrl_enter: b("ctrl_enter", d.ctrl_enter),
@@ -250,10 +254,12 @@ impl Prefs {
             "replies".into(),
             json!(if self.bubbles { "bubbles" } else { "plain" }),
         );
-        m.insert(
-            "your_bubbles".into(),
-            json!(if self.vibrant { "vibrant" } else { "soft" }),
-        );
+        if let Some(v) = self.vibrant {
+            m.insert(
+                "bubble_colour".into(),
+                json!(if v { "vibrant" } else { "soft" }),
+            );
+        }
         m.insert("ctrl_enter".into(), json!(self.ctrl_enter));
         m.insert("tray".into(), json!(self.tray));
         m.insert("notify".into(), json!(self.notify));
@@ -287,6 +293,11 @@ impl Prefs {
         } else {
             self.server_names.insert(key.to_string(), name.to_string());
         }
+    }
+
+    /// Whether the person's bubbles show Vibrant: only once they've picked it.
+    pub fn vibrant(&self) -> bool {
+        self.vibrant.unwrap_or(false)
     }
 
     /// Whether the window is dark, for a system that's `system_dark`.
@@ -442,16 +453,31 @@ mod tests {
     }
 
     #[test]
-    fn the_persons_bubbles_are_vibrant_until_they_turn_it_off() {
-        assert!(Prefs::default().vibrant);
+    fn the_persons_bubbles_are_soft_until_they_pick_vibrant() {
+        let fresh = Prefs::default();
+        assert!(!fresh.vibrant());
         assert!(
-            Prefs::from_json(&json!({ "vibrant_bubbles": false })).vibrant,
-            "the off every 0.2.6 file kept is left behind"
+            fresh.to_json().get("bubble_colour").is_none(),
+            "nothing is kept until the person picks"
         );
-        let picked = Prefs {
-            vibrant: false,
-            ..Prefs::default()
-        };
-        assert_eq!(Prefs::from_json(&picked.to_json()), picked);
+        let load = |v| Prefs::from_json(&v).vibrant;
+        // 0.2.7 to 0.2.9 kept "vibrant" in every file while it was the default.
+        assert_eq!(load(json!({ "your_bubbles": "vibrant" })), None);
+        assert_eq!(load(json!({ "your_bubbles": "soft" })), Some(false));
+        // 0.2.6 kept false in every file, and true only where the person turned it on.
+        assert_eq!(load(json!({ "vibrant_bubbles": false })), None);
+        assert_eq!(load(json!({ "vibrant_bubbles": true })), Some(true));
+        assert_eq!(
+            load(json!({ "bubble_colour": "vibrant", "your_bubbles": "soft" })),
+            Some(true)
+        );
+        for picked in [true, false] {
+            let p = Prefs {
+                vibrant: Some(picked),
+                ..Prefs::default()
+            };
+            assert_eq!(Prefs::from_json(&p.to_json()), p);
+            assert_eq!(p.vibrant(), picked);
+        }
     }
 }

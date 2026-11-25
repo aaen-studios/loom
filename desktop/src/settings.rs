@@ -350,8 +350,8 @@ impl Loom {
                 "pref-vibrant",
                 "Vibrant bubbles",
                 "",
-                self.prefs.vibrant,
-                |p, v| p.vibrant = v,
+                self.prefs.vibrant(),
+                |p, v| p.vibrant = Some(v),
                 cx,
             ),
             self.row(None, "Tool calls", Some(tools_sub.into()), Some(tools))

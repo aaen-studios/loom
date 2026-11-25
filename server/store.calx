@@ -164,6 +164,9 @@ CREATE TABLE IF NOT EXISTS profiles (
 CREATE TABLE IF NOT EXISTS defaults (
     user TEXT PRIMARY KEY REFERENCES users(id), json TEXT NOT NULL, revision INTEGER NOT NULL,
     by TEXT NOT NULL, at INTEGER NOT NULL);
+-- The folders the person put agents in, in the sidebar, in the order they were made.
+CREATE TABLE IF NOT EXISTS agent_groups (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rules (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     json TEXT NOT NULL, at INTEGER NOT NULL);
@@ -1909,6 +1912,33 @@ impl Store {
         return merge(kept, Obj.new().i("revision", revision).s("by", by).i("at", at).done())
     }
 
+    // --- The sidebar's folders (PLAN.md, "The sidebar") ---
+
+    // The person's folders, in the order they were made: each `id`, `name`,
+    // `collapsed` and `at`.
+    pub fn groups(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT json FROM agent_groups WHERE user = ? ORDER BY rowid"), [t(user)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    pub fn group(self, user: String, id: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM agent_groups WHERE id = ? AND user = ?"), [t(id), t(user)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    // Keeps a folder, new or changed, where it was in the order.
+    pub fn put_group(self, user: String, group: Json) ! Error {
+        let id = str_at(group.copy(), "id") ?? String()
+        _ = try self.db.execute(String("INSERT INTO agent_groups (id, user, json) VALUES (?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json WHERE agent_groups.user = excluded.user"), [t(id), t(user), t("{group}")])
+    }
+
+    pub fn delete_group(self, user: String, id: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM agent_groups WHERE id = ? AND user = ?"), [t(id), t(user)])
+    }
+
     // --- Rules on what's touched (PLAN.md, "Rules, records and limits") ---
 
     // The person's rules, oldest first, each with its `id` and `agent` ("" for
@@ -2244,7 +2274,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "events", "acp_sessions", "files", "profiles", "defaults", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "events", "acp_sessions", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
