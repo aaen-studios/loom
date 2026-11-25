@@ -1,0 +1,340 @@
+module scripts.emoji
+
+// The built-in emoji (PLAN.md, "Emoji"), fetched and vendored at the versions given:
+//
+// - design/twemoji/svg/: Twemoji's pictures, one SVG for each emoji, from the release
+//   of github.com/jdecked/twemoji given by --twemoji, with LICENSE-GRAPHICS, its
+//   CC-BY 4.0 licence. The apps and loom.rip draw built-in emoji with them.
+// - design/twemoji/sequences.txt: each emoji as it can be written, fully qualified or
+//   not, and the picture that draws it, for the apps to find emoji in a message.
+// - shared/emoji/emoji.tsv: each emoji for the picker and for shortcodes, in Unicode's
+//   order: its group, its names (gemoji's Discord-style aliases first, then CLDR's
+//   name), CLDR's keywords, its five skin tones and CLDR's name for it. From Unicode's
+//   emoji-test.txt (--emoji), CLDR's English annotations (--cldr) and GitHub's gemoji
+//   (--gemoji, a commit), with their licences beside it.
+//
+//     calx scripts/emoji.calx
+//     calx scripts/emoji.calx --twemoji 17.0.3 --emoji 17.0 --cldr 49 --gemoji <commit>
+//
+// Only emoji Twemoji has a picture for are kept. It says how many of each it kept.
+import std.env
+import std.fs
+import std.http.{fetch}
+import std.json
+import std.tar.{Tar}
+import std.unicode.{Form, normalize}
+import std.xml
+
+const TWEMOJI: str = "17.0.3"
+const EMOJI: str = "17.0"
+const CLDR: str = "49"
+const GEMOJI: str = "fadaeaf1f1a9be82b321316a6c5502e43138b2f6"
+
+const SVG: str = "design/twemoji/svg"
+
+fn get(url: String) -> List<u8> ! Error {
+    println("fetching {url}")
+    let r = try fetch(url.copy()).context("fetching {url}")
+    if r.status != 200 { fail Error.new("{url} gave {r.status}") }
+    return r.body
+}
+
+fn get_text(url: String) -> String ! Error {
+    let body = try get(url.copy())
+    return String.from_utf8(body) ?? String()
+}
+
+// The value after `--name` in the arguments, or `fallback`.
+fn arg(name: str, fallback: str) -> String {
+    let a = env.args()
+    for i in 0..a.len() {
+        if a[i] == "--{name}" and i + 1 < a.len() { return a[i + 1].copy() }
+    }
+    return String(fallback)
+}
+
+// The emoji's runes as hex, lowercase, joined by `-`: Twemoji's file name for it.
+fn hex(text: String) -> String {
+    var parts = List<String>()
+    for r in text.runes() {
+        parts.push("{u32(r):x}")
+    }
+    return parts.join("-")
+}
+
+// The picture Twemoji draws `text` with: its hex without U+FE0F, as Twemoji names
+// it, unless it joins with U+200D, when the name keeps them, or whichever of the two
+// it has.
+fn picture(text: String, have: Map<String, bool>) -> String? {
+    let full = hex(text.copy())
+    var bare = List<String>()
+    for p in full.split("-") {
+        if p != "fe0f" { bare.push(p.copy()) }
+    }
+    let stripped = bare.join("-")
+    let first = if text.contains("\u{200D}") { full.copy() } else { stripped.copy() }
+    if have.contains(first.copy()) { return some(first) }
+    if have.contains(full.copy()) { return some(full) }
+    if have.contains(stripped.copy()) { return some(stripped) }
+    return none
+}
+
+// How many runes `text` has.
+fn runes(text: String) -> usize {
+    var n: usize = 0
+    for _ in text.runes() { n += 1 }
+    return n
+}
+
+// `text` without U+FE0F, and without skin tones when `tones` is false.
+fn plain(text: String, tones: bool) -> String {
+    var out = String()
+    for r in text.runes() {
+        let n = u32(r)
+        if n == 0xFE0F { continue }
+        if not tones and n >= 0x1F3FB and n <= 0x1F3FF { continue }
+        out.push(r)
+    }
+    return out
+}
+
+// Which skin tone, 1 to 5, every modifier in `text` is, 0 for none, and 9 when they differ.
+fn tone_of(text: String) -> u32 {
+    var tone: u32 = 0
+    for r in text.runes() {
+        let n = u32(r)
+        if n >= 0x1F3FB and n <= 0x1F3FF {
+            let t = n - 0x1F3FB + 1
+            if tone == 0 { tone = t } else if tone != t { return 9 }
+        }
+    }
+    return tone
+}
+
+// A name as a shortcode: lowercase ASCII letters, digits and underscores, accents
+// taken off, `&` as `and`.
+fn snake(name: String) -> String {
+    let folded = normalize(name.to_lower_root().replace("&", " and "), Form.NFD)
+    var out = String()
+    var gap = false
+    for r in folded.runes() {
+        let keep = (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9')
+        if keep {
+            if gap and out.len() > 0 { out.push('_') }
+            gap = false
+            out.push(r)
+        } else if r == ' ' or r == '-' or r == '_' or r == ':' or r == ',' or r == '.' or r == '/' or r == '(' or r == ')' {
+            gap = true
+        } else if u32(r) < 0x80 {
+            // Other ASCII, such as quotes and #, goes.
+            continue
+        }
+        // A combining mark from NFD goes, and so does anything else outside ASCII.
+    }
+    return out
+}
+
+// The group in the picker, by Unicode's name for it.
+fn group_id(name: String) -> String {
+    return match name {
+        "Smileys & Emotion" => String("smileys"),
+        "People & Body" => String("people"),
+        "Animals & Nature" => String("nature"),
+        "Food & Drink" => String("food"),
+        "Travel & Places" => String("travel"),
+        "Activities" => String("activities"),
+        "Objects" => String("objects"),
+        "Symbols" => String("symbols"),
+        "Flags" => String("flags"),
+        _ => String(),
+    }
+}
+
+struct Line {
+    text: String,
+    status: String,
+    group: String,
+}
+
+// emoji-test.txt's emoji, in its order, each with how qualified it is and its group.
+fn test_lines(text: String) -> List<Line> {
+    var out = List<Line>()
+    var group = String()
+    for line in text.lines() {
+        if line.starts_with("# group: ") {
+            group = group_id(line.trim_prefix("# group: ").trim())
+            continue
+        }
+        if line.starts_with("#") or line.trim().len() == 0 { continue }
+        let (left, _) = line.split_once("#") ?? (line.copy(), String())
+        let (points, status) = left.split_once(";") ?? (left.copy(), String())
+        var t = String()
+        for p in points.split_whitespace() {
+            if let n = u32.parse_radix(p, 16) {
+                if let r = rune.try_from(n) { t.push(r) }
+            }
+        }
+        out.push(Line { text: t, status: status.trim(), group: group.copy() })
+    }
+    return out
+}
+
+struct Note {
+    keywords: String,
+    tts: String,
+}
+
+// CLDR's keywords and name for each emoji, by the emoji without U+FE0F.
+fn annotations(text: String, into: mut Map<String, Note>) ! Error {
+    let doc = try xml.parse(text).context("reading CLDR's annotations")
+    for a in doc.find_all(".//annotation") {
+        let cp = plain(a.get("cp") ?? String(), true)
+        let words = a.text.trim()
+        var note = into.remove(cp.copy()) ?? Note { keywords: String(), tts: String() }
+        if a.get("type") == some(String("tts")) {
+            note.tts = words
+        } else {
+            note.keywords = words.split("|").map(|w| w.trim()).join("|")
+        }
+        into.insert(cp, note)
+    }
+}
+
+fn main() ! Error {
+    let twemoji = arg("twemoji", TWEMOJI)
+    let emoji = arg("emoji", EMOJI)
+    let cldr = arg("cldr", CLDR)
+    let gemoji = arg("gemoji", GEMOJI)
+
+    // Twemoji's pictures.
+    let tar = match Tar.open(try get("https://github.com/jdecked/twemoji/archive/refs/tags/v{twemoji}.tar.gz")) {
+        ok(t) => t,
+        err(e) => fail Error.new("Twemoji's archive: {e}"),
+    }
+    let root = "twemoji-{twemoji}/"
+    var svgs = Map<String, List<u8>>()
+    var have = Map<String, bool>()
+    var graphics = List<u8>()
+    for i in 0..tar.len() {
+        let name = tar.name(i)
+        if name == "{root}LICENSE-GRAPHICS" { graphics = tar.read(i) }
+        let inside = name.trim_prefix("{root}assets/svg/")
+        if inside.len() < name.len() and inside.ends_with(".svg") {
+            let code = inside.trim_suffix(".svg")
+            have.insert(code.copy(), true)
+            svgs.insert(code, tar.read(i))
+        }
+    }
+    if svgs.len() < 1000 { fail Error.new("Twemoji {twemoji}'s archive has {svgs.len()} SVGs") }
+    if graphics.is_empty() { fail Error.new("Twemoji {twemoji}'s archive has no LICENSE-GRAPHICS") }
+
+    // Unicode's list, CLDR's names and gemoji's aliases.
+    let lines = test_lines(try get_text("https://www.unicode.org/Public/{emoji}.0/emoji/emoji-test.txt"))
+    var notes = Map<String, Note>()
+    try annotations(try get_text("https://raw.githubusercontent.com/unicode-org/cldr/release-{cldr}/common/annotations/en.xml"), mut notes)
+    try annotations(try get_text("https://raw.githubusercontent.com/unicode-org/cldr/release-{cldr}/common/annotationsDerived/en.xml"), mut notes)
+    let gem = try json.parse(try get_text("https://raw.githubusercontent.com/github/gemoji/{gemoji}/db/emoji.json")).context("reading gemoji")
+    var aliases = Map<String, List<String>>()
+    for i in 0..gem.len() {
+        let e = gem.at(i) ?? json.Json.Null
+        let text = plain((e.get(String("emoji")) ?? json.Json.Null).as_str() ?? String(), true)
+        var names = List<String>()
+        let given = e.get(String("aliases")) ?? json.Json.Null
+        for j in 0..given.len() {
+            if let s = (given.at(j) ?? json.Json.Null).as_str() { names.push(s) }
+        }
+        aliases.insert(text, names)
+    }
+
+    // The skin tones of each emoji that has them, by the emoji without them.
+    var tones = Map<String, List<String>>()
+    for l in lines.copy() {
+        if l.status != "fully-qualified" { continue }
+        let t = tone_of(l.text.copy())
+        if t == 0 or t == 9 { continue }
+        if picture(l.text.copy(), have.copy()) == none { continue }
+        let base = plain(l.text.copy(), false)
+        var five: List<String> = tones.remove(base.copy()) ?? [String(), String(), String(), String(), String()]
+        five[usize(t - 1)] = l.text.copy()
+        tones.insert(base, five)
+    }
+
+    // The rows, and every way each emoji can be written.
+    var rows = String()
+    rows.push_str("# Twemoji {twemoji}, Unicode emoji {emoji}, CLDR {cldr}, gemoji {gemoji}. Made by scripts/emoji.calx.\n")
+    var sequences = String()
+    sequences.push_str("# Twemoji {twemoji}, Unicode emoji {emoji}. Made by scripts/emoji.calx.\n")
+    var taken = Map<String, bool>()
+    var kept = 0
+    var written = 0
+    var missing = 0
+    for l in lines {
+        if l.group.len() == 0 { continue }
+        let file = picture(l.text.copy(), have.copy()) else {
+            if l.status == "fully-qualified" { missing += 1 }
+            continue
+        }
+        // A single rune that's text unless U+FE0F follows (©, ❤) is text alone.
+        let single = runes(plain(l.text.copy(), true)) == 1
+        if l.status == "unqualified" and single { continue }
+        sequences.push_str("{l.text}\t{file}\n")
+        written += 1
+        if l.status != "fully-qualified" or tone_of(l.text.copy()) != 0 { continue }
+        let key = plain(l.text.copy(), true)
+        var tts = String()
+        var keywords = String()
+        if let n = notes.find(key.copy()) {
+            tts = n.tts.copy()
+            keywords = n.keywords.copy()
+        }
+        var names = List<String>()
+        if let a = aliases.find(key.copy()) {
+            for n in a { names.push(n.copy()) }
+        }
+        names.push(snake(tts.copy()))
+        var named = List<String>()
+        for n in names {
+            if n.len() == 0 or taken.contains(n.copy()) { continue }
+            taken.insert(n.copy(), true)
+            named.push(n.copy())
+        }
+        if named.is_empty() { continue }
+        let five = if let t = tones.find(plain(l.text.copy(), false)) { t.join(" ") } else { String() }
+        rows.push_str("{l.text}\t{l.group}\t{named.join(" ")}\t{keywords}\t{five}\t{tts}\n")
+        kept += 1
+    }
+
+    // Written out, with the pictures no emoji names taken away.
+    try fs.make_dir_all(String(SVG))
+    for name in try fs.list(String(SVG)) {
+        if not name.ends_with(".svg") or not svgs.contains(name.trim_suffix(".svg")) {
+            try fs.remove_file("{SVG}/{name}")
+        }
+    }
+    for (code, bytes) in svgs {
+        let path = "{SVG}/{code}.svg"
+        let same = match fs.read(path.copy()) { ok(b) => b == bytes, err(_) => false }
+        if not same { try fs.write(path, bytes) }
+    }
+    try fs.write(String("design/twemoji/LICENSE-GRAPHICS"), graphics)
+    try fs.write_text(String("design/twemoji/sequences.txt"), sequences)
+    try fs.make_dir_all(String("shared/emoji"))
+    try fs.write_text(String("shared/emoji/emoji.tsv"), rows.copy())
+    try fs.write(String("shared/emoji/LICENSE-UNICODE"), try get("https://www.unicode.org/license.txt"))
+    try fs.write(String("shared/emoji/LICENSE-GEMOJI"), try get("https://raw.githubusercontent.com/github/gemoji/{gemoji}/LICENSE"))
+
+    // shared/emoji.calx embeds the table, and says how long it is.
+    let table_module = String("shared/emoji.calx")
+    let source = try fs.read_text(table_module.copy()) ?? String()
+    var out = List<String>()
+    for line in source.lines() {
+        if line.starts_with("const TABLE: [u8; ") {
+            out.push("const TABLE: [u8; {rows.len()}] = embed(\"emoji/emoji.tsv\")")
+        } else {
+            out.push(line.copy())
+        }
+    }
+    out.push(String())
+    try fs.write_text(table_module, out.join("\n"))
+    println("{svgs.len()} pictures, {written} ways to write an emoji, {kept} emoji in the picker, {missing} without a picture")
+}

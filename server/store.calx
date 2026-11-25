@@ -260,6 +260,12 @@ CREATE TABLE IF NOT EXISTS status_tokens (
 CREATE TABLE IF NOT EXISTS imported (
     user TEXT NOT NULL REFERENCES users(id), source TEXT NOT NULL, kind TEXT NOT NULL,
     id TEXT NOT NULL, loom TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, source, kind, id));
+-- Each person's own emoji (PLAN.md, "Emoji"): its picture is a file of theirs, 128 pixels
+-- square, and one deleted is kept, for its undo, but not shown or counted.
+CREATE TABLE IF NOT EXISTS emoji (
+    id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
+    file TEXT NOT NULL, animated INTEGER NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+CREATE INDEX IF NOT EXISTS emoji_user ON emoji (user, deleted);
 "#
 
 /// What search marks a matched word with, before and after.
@@ -369,6 +375,11 @@ fn int(v: Value) -> i64 {
         Value.Int(n) => return n,
         _ => return 0,
     }
+}
+
+// A person's own emoji, from id, name, file, animated and at.
+fn emoji_row(r: List<Value>) -> Json {
+    return Obj.new().s("id", text(r[0].copy())).s("name", text(r[1].copy())).s("file", text(r[2].copy())).b("animated", int(r[3].copy()) != 0).i("at", int(r[4].copy())).done()
 }
 
 // A shared table's row, from id, data, by, at and updated.
@@ -2053,6 +2064,42 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM agent_groups WHERE id = ? AND user = ?"), [t(id), t(user)])
     }
 
+    // --- The person's own emoji (PLAN.md, "Emoji") ---
+
+    // The person's emoji, oldest first, each `id`, `name`, `file`, `animated` and `at`,
+    // but those deleted.
+    pub fn emoji(self, user: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT id, name, file, animated, at FROM emoji WHERE user = ? AND deleted = 0 ORDER BY at, rowid"), [t(user)]) {
+            out.push(emoji_row(r))
+        }
+        return out
+    }
+
+    // One emoji by its id, whoever's it is, and whose: everyone on the instance sees
+    // the emoji in a chat they share. With `deleted`, one deleted too.
+    pub fn emoji_by_id(self, id: String, deleted: bool) -> (String, Json)? ! Error {
+        let r = try self.db.query_one(String("SELECT id, name, file, animated, at, user, deleted FROM emoji WHERE id = ?"), [t(id)]) else return none
+        if int(r[6].copy()) != 0 and not deleted { return none }
+        return some((text(r[5].copy()), emoji_row(r)))
+    }
+
+    pub fn add_emoji(self, user: String, name: String, file: String, animated: bool) -> Json ! Error {
+        let id = try self.new_id("e")
+        let at = now()
+        _ = try self.db.execute(String("INSERT INTO emoji (id, user, name, file, animated, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(id.copy()), t(user), t(name.copy()), t(file.copy()), Value.Int(if animated { 1 } else { 0 }), Value.Int(at)])
+        return Obj.new().s("id", id).s("name", name).s("file", file).b("animated", animated).i("at", at).done()
+    }
+
+    pub fn rename_emoji(self, user: String, id: String, name: String) ! Error {
+        _ = try self.db.execute(String("UPDATE emoji SET name = ? WHERE id = ? AND user = ?"), [t(name), t(id), t(user)])
+    }
+
+    // Deletes one, or with `gone` false brings one deleted back.
+    pub fn delete_emoji(self, user: String, id: String, gone: bool) ! Error {
+        _ = try self.db.execute(String("UPDATE emoji SET deleted = ? WHERE id = ? AND user = ?"), [Value.Int(if gone { 1 } else { 0 }), t(id), t(user)])
+    }
+
     // --- Rules on what's touched (PLAN.md, "Rules, records and limits") ---
 
     // The person's rules, oldest first, each with its `id` and `agent` ("" for
@@ -2388,7 +2435,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])

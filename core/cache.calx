@@ -95,6 +95,10 @@ COMMIT;
 // How long the cache keeps a tool call: as long as the instance keeps events (protocol.md,
 // "The event log"), after which a new device couldn't have it either. A day between looks.
 pub const CALLS_KEPT_MS: i64 = 2592000000
+
+/// How many of the emoji this device sent lately the picker shows first.
+const RECENT_EMOJI: usize = 24
+
 const PRUNE_EVERY_MS: i64 = 86400000
 // Each agent's chat, newest first, for `conversation_for` at a send.
 const CHATS_BY_AGENT: str = "CREATE INDEX IF NOT EXISTS chats_by_agent ON conversations (agent, last DESC) WHERE chat = 1;"
@@ -214,6 +218,50 @@ impl Cache {
 
     pub fn set_meta(self, key: str, value: String) ! Error {
         _ = try self.db.execute(String("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value"), [t(String(key)), t(value.copy())])
+    }
+
+    /// The person's own emoji (PLAN.md, "Emoji"), as `synced` and each `emoji.changed`
+    /// bring them whole: each `id`, `name`, `file`, `animated` and `at`.
+    pub fn keep_emoji(self, list: Json) ! Error {
+        let Json.Array(_) = list.copy() else return
+        try self.set_meta("emoji", "{list}")
+    }
+
+    pub fn emoji(self) -> List<Json> ! Error {
+        let kept = try self.meta("emoji") else return List<Json>()
+        let read = match parse(kept) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let Json.Array(all) = read else return List<Json>()
+        return all
+    }
+
+    /// The emoji this device sent lately, newest first, each as it was sent: the
+    /// character, or a token for one of the person's own.
+    pub fn recent_emoji(self) -> List<String> ! Error {
+        let kept = try self.meta("emoji_recent") else return List<String>()
+        let read = match parse(kept) {
+            ok(j) => j,
+            err(_) => Json.Null,
+        }
+        let Json.Array(all) = read else return List<String>()
+        var out = List<String>()
+        for e in all {
+            if let s = e.as_str() { out.push(s) }
+        }
+        return out
+    }
+
+    /// Notes that this device sent `emoji`: it goes first among those used lately,
+    /// which keep the newest `RECENT_EMOJI`.
+    pub fn used_emoji(self, emoji: String) ! Error {
+        if emoji.len() == 0 or emoji.len() > 64 { return }
+        var list: List<Json> = [Json.Str(emoji.copy())]
+        for e in try self.recent_emoji() {
+            if e != emoji and list.len() < RECENT_EMOJI { list.push(Json.Str(e.copy())) }
+        }
+        try self.set_meta("emoji_recent", "{Json.Array(list)}")
     }
 
     /// The seq of the newest event applied: the `after` for the next hello.
@@ -403,6 +451,8 @@ impl Cache {
             _ = try self.db.execute(String("INSERT INTO groups (id, json) VALUES (?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json"), [t(str_at(g.copy(), "id") ?? String()), t("{g}")])
         } else if kind == "group.deleted" {
             _ = try self.db.execute(String("DELETE FROM groups WHERE id = ?"), [t(str_at(e, "group") ?? String())])
+        } else if kind == "emoji.changed" {
+            try self.keep_emoji(at(e, "emoji"))
         } else if kind == "device.added" {
             let d = at(e, "device")
             _ = try self.db.execute(String("INSERT OR REPLACE INTO devices (id, json) VALUES (?, ?)"), [t(str_at(d, "id") ?? String()), t("{d}")])
@@ -667,6 +717,7 @@ impl Cache {
             return some(array(out))
         }
         if what == "sidebar" { return some("{try self.sidebar()}") }
+        if what == "emoji" { return some("{Json.Array(try self.emoji())}") }
         let sql = if what == "agents" { AGENTS } else if what == "conversations" { CONVERSATIONS } else if what == "devices" { DEVICES } else if what == "runs" { RUNS } else if what == "tools" { TOOLS } else if what == "outbox" { OUTBOX } else { return none }
         return some(array(try self.texts(sql, List<Value>())))
     }
