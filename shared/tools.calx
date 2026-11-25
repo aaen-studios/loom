@@ -28,6 +28,7 @@ fn tool(name: str, description: str, input: Json) -> Json {
 pub fn all() -> List<Json> {
     return [
         tool("message_agent", "Sends a message to another of your person's agents and waits for its reply, which comes back as the result. The two of you keep one conversation, so it remembers what you said before. Use it to hand work to an agent that's better at it: say what the task is, its bounds, and what a good answer looks like. An agent you ask can ask others, at most four deep, and never back to one already in the chain.", object(Obj.new().j("agent", text_arg("The agent's name or id, as list_agents gives them.")).j("text", text_arg("What to say.")).j("task", text_arg("What it's to do.")).j("bounds", text_arg("What it may and may not do, and when to stop.")).j("good_answer", text_arg("What a good answer looks like.")).j("files", Obj.new().s("type", String("array")).j("items", Obj.new().s("type", String("string")).done()).s("description", String("Files to hand over with it, up to 20 of 25 MiB each: paths in your own folder or the shared folder. The other agent gets them as your person's attachments.")).done()), ["agent"])),
+        tool("hand_off", "In a group chat, where your person talks with several of their agents and each message goes to one of you: gives the message you're answering to another member, who answers it in the same chat once your turn ends. Use it when the message is clearly theirs, then end your turn with one short line. A message is handed on three times at most, and never back to one that had it. Not for your own chat with your person: there, use message_agent.", object(Obj.new().j("agent", text_arg("The member's name, as you were told who's in the chat.")).j("why", text_arg("A few words on why, such as mail question.")), ["agent"])),
         tool("list_agents", "Lists your person's agents: each one's id, name, the ACP agent it runs on, and its instructions.", object(Obj.new(), List<str>())),
         tool("create_agent", "Makes a new agent for your person. It asks before every command and edit until your person changes that in the app.", object(Obj.new().j("name", text_arg("Its name.")).j("acp_agent", text_arg("The ACP agent it runs on, one of list_acp_agents.")).j("instructions", text_arg("Its instructions, in Markdown, as an AGENTS.md has them.")), ["name", "acp_agent", "instructions"])),
         tool("update_agent", "Changes another agent's name or instructions. Each change is kept as a revision your person can roll back.", object(Obj.new().j("agent", text_arg("The agent's name or id.")).j("name", text_arg("Its new name.")).j("instructions", text_arg("Its new instructions, whole.")), ["agent"])),
@@ -162,7 +163,7 @@ fn code_mode_keeps_the_app_tools_direct() {
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 62)
+    assert(tools.len() == 63)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }
