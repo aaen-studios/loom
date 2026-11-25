@@ -1,0 +1,105 @@
+module tests.protocol.groups
+
+// The sidebar's folders and hidden agents (PLAN.md, "The sidebar"): a folder is
+// made, renamed, collapsed and deleted for the person, every device hears it as
+// group.updated or group.deleted, and synced brings them all. agent.group puts
+// an agent in a folder or takes it out, agent.hide hides it or shows it again;
+// neither is a revision of it. Deleting a folder leaves its agents out of any.
+//
+//     calx tests/protocol/groups.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+// The newest event of `kind` among what the app has read.
+fn last(app: Session, kind: str) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { found = f.copy() }
+    }
+    return found
+}
+
+// The groups the newest synced frame brought.
+fn synced_groups(app: Session) -> List<Json> {
+    var found = List<Json>()
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("synced")) {
+            if let Json.Array(gs) = at(f.copy(), "groups") { found = gs.copy() }
+        }
+    }
+    return found
+}
+
+fn agent_of(answer: Json) -> Json {
+    return at(at(answer, "value"), "agent")
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    try check(synced_groups(app).len() == 0, "a new person has no folders")
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(agent_of(made), "id") ?? String()
+
+    // --- Folders ---
+    let created = try app.cmd("q_2", "group.create", Obj.new().s("name", String("  Work  ")).done())
+    let group = at(at(created, "value"), "group")
+    let gid = str_at(group.copy(), "id") ?? String()
+    let heard = at(last(app, "group.updated"), "group")
+    try check(gid.starts_with("g_") and str_at(group.copy(), "name") == some(String("Work")) and bool_at(group.copy(), "collapsed") == some(false) and str_at(heard, "id") == some(gid.copy()), "a folder is made with its name trimmed, open, and every device hears it")
+    let blank = try app.cmd("q_3", "group.create", Obj.new().s("name", String("   ")).done())
+    try check(str_at(at(blank, "error"), "code") == some(String("bad_request")), "a folder needs a name")
+    let renamed = try app.cmd("q_4", "group.update", Obj.new().s("group", gid.copy()).s("name", String("Projects")).b("collapsed", true).done())
+    let now = at(at(renamed, "value"), "group")
+    try check(str_at(now.copy(), "name") == some(String("Projects")) and bool_at(now, "collapsed") == some(true), "a folder is renamed and collapsed")
+
+    // --- An agent in a folder ---
+    _ = try app.cmd("q_5", "agent.pin", Obj.new().s("agent", agent.copy()).done())
+    let put = agent_of(try app.cmd("q_6", "agent.group", Obj.new().s("agent", agent.copy()).s("group", gid.copy()).done()))
+    let told = at(last(app, "agent.updated"), "agent")
+    try check(str_at(put.copy(), "group") == some(gid.copy()) and int_at(put.copy(), "pinned") == none and int_at(put.copy(), "revision") == some(1) and str_at(told, "group") == some(gid.copy()), "an agent put in a folder leaves its pin, tells every device, and isn't a revision")
+    let nowhere = try app.cmd("q_7", "agent.group", Obj.new().s("agent", agent.copy()).s("group", String("g_nothing")).done())
+    try check(str_at(at(nowhere, "error"), "code") == some(String("not_found")), "a folder that isn't there can't be put in")
+
+    // --- Hidden ---
+    _ = try app.cmd("q_8", "agent.pin", Obj.new().s("agent", agent.copy()).done())
+    let hidden = agent_of(try app.cmd("q_9", "agent.hide", Obj.new().s("agent", agent.copy()).done()))
+    try check(int_at(hidden.copy(), "hidden") != none and int_at(hidden.copy(), "pinned") == none and str_at(hidden, "group") == some(gid.copy()), "a hidden agent is unpinned and keeps its folder")
+    let shown = agent_of(try app.cmd("q_10", "agent.hide", Obj.new().s("agent", agent.copy()).b("hidden", false).done()))
+    try check(int_at(shown, "hidden") == none, "and it's shown again")
+    _ = try app.cmd("q_11", "agent.hide", Obj.new().s("agent", agent.copy()).done())
+    let pinned = agent_of(try app.cmd("q_12", "agent.pin", Obj.new().s("agent", agent.copy()).done()))
+    try check(int_at(pinned.copy(), "hidden") == none and int_at(pinned, "pinned") != none, "pinning a hidden agent shows it")
+
+    // --- Another device, then deleting the folder ---
+    let phone = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let there = synced_groups(phone)
+    try check(there.len() == 1 and str_at(there[0].copy(), "name") == some(String("Projects")), "synced brings every folder to a device")
+    phone.close()
+    _ = try app.cmd("q_13", "agent.group", Obj.new().s("agent", agent.copy()).s("group", gid.copy()).done())
+    _ = try app.cmd("q_14", "group.delete", Obj.new().s("group", gid.copy()).done())
+    let gone = last(app, "group.deleted")
+    let left = at(last(app, "agent.updated"), "agent")
+    let listed = try app.cmd("q_15", "group.list", Obj.new().done())
+    let none_left = if let Json.Array(gs) = at(at(listed, "value"), "groups") { gs.len() == 0 } else { false }
+    try check(str_at(gone, "group") == some(gid.copy()) and str_at(left, "group") == none and str_at(left, "id") == some(agent.copy()) and none_left, "deleting a folder leaves its agents out of any")
+    let out = agent_of(try app.cmd("q_16", "agent.group", Obj.new().s("agent", agent).done()))
+    try check(str_at(out, "group") == none, "an agent with no folder named stays out of them")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ngroups: all good")
+}

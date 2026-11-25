@@ -7,7 +7,8 @@ enum Prefs {
     static let replies = "loom.replies"
     static let bubbles = "bubbles"
     static let plain = "plain"
-    /// Whether the person's bubbles are the agent's colour itself (the default) or a breath
-    /// of it. `@AppStorage` keeps it only once the person sets it.
+    /// Whether the person's bubbles are the agent's colour itself or a breath of it (the
+    /// default). `@AppStorage` keeps it only once the person sets it, so a phone that never
+    /// did takes the default, and one whose person picked Vibrant keeps it.
     static let vibrant = "loom.vibrant_bubbles"
 }

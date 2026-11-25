@@ -9,7 +9,7 @@ import Observation
 
 /// The lists the app asks the core for.
 enum CoreList: String, CaseIterable, Sendable {
-    case agents, conversations, runs, tools, approvals, outbox, messages, devices
+    case agents, conversations, runs, tools, approvals, outbox, messages, devices, sidebar
 }
 
 struct Agent: Identifiable, Equatable, Sendable {
@@ -26,6 +26,9 @@ struct Agent: Identifiable, Equatable, Sendable {
     /// dragged it, if either.
     var pinned: Int?
     var order: Int?
+    /// The sidebar folder it's in, if any, and whether it's hidden there.
+    var group: String?
+    var hidden = false
     /// What the person told it, which the composer's @ picker shows the first line of.
     var instructions = ""
 
@@ -44,6 +47,31 @@ func listed(_ agents: [Agent]) -> [Agent] {
         let kb = (b.element.pinned == nil ? 1 : 0, b.element.order ?? Int.max, b.element.pinned ?? 0, b.offset)
         return ka < kb
     }.map(\.element)
+}
+
+/// A part of the agent list, as the core groups the agents (core/sidebar.calx), the way
+/// the desktop's sidebar shows them: who's waiting on the person, the pinned ones, the
+/// rest not in a folder, each folder, and the hidden ones.
+struct SideSection: Equatable, Sendable {
+    enum Part: Equatable, Sendable {
+        case waiting, pinned, agents, hidden
+        case folder(id: String, name: String, collapsed: Bool)
+    }
+    var part: Part
+    /// Its agents' ids, in order.
+    var agents: [String]
+
+    init?(_ j: JSON) {
+        switch j["kind"].text {
+        case "waiting": part = .waiting
+        case "pinned": part = .pinned
+        case "agents": part = .agents
+        case "hidden": part = .hidden
+        case "group": part = .folder(id: j["id"].text, name: j["name"].text, collapsed: j["collapsed"].bool ?? false)
+        default: return nil
+        }
+        agents = j["agents"].array.map(\.text)
+    }
 }
 
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
@@ -1202,6 +1230,10 @@ final class Model {
     var loginError: String?
     var loggingIn = false
     var agents: [Agent] = []
+    /// How the agent list groups them, as the core says.
+    var sidebar: [SideSection] = []
+    /// An agent to put in the folder asked for last, once it's made.
+    private var folderFor: String?
     var conversations: [Conversation] = []
     var runs: [Run] = []
     var tools: [Tool] = []
@@ -1281,7 +1313,7 @@ final class Model {
     private var nextId = 0
 
     init() {
-        dirty = [.agents, .conversations, .runs, .tools, .approvals, .outbox, .devices]
+        dirty = [.agents, .conversations, .runs, .tools, .approvals, .outbox, .devices, .sidebar]
     }
 
     private func id(_ prefix: String) -> String {
@@ -1536,6 +1568,8 @@ final class Model {
         switch family {
         case "agent":
             dirty.insert(.agents)
+        case "group":
+            dirty.insert(.sidebar)
         case "conversation":
             dirty.formUnion([.conversations, .messages])
         case "message":
@@ -1612,6 +1646,15 @@ final class Model {
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
         switch f["id"].text {
+        case let id where id.hasPrefix("app.folder_new"):
+            // A folder made for an agent: the agent goes in.
+            let agent = folderFor
+            folderFor = nil
+            if let error {
+                notice = error
+            } else if let agent, let group = f["value"]["group"]["id"].string {
+                pending.append(groupAgent(agent, group))
+            }
         case let id where id.hasPrefix("app.agent_files"):
             // The files the @ picker asked for, unless it has asked for others since.
             guard let asking = filesAsking, asking.id == id else { break }
@@ -1676,9 +1719,11 @@ final class Model {
         guard let what = CoreList(rawValue: f["what"].text) else { return }
         let items = f["items"].array
         switch what {
+        case .sidebar:
+            sidebar = items.compactMap(SideSection.init)
         case .agents:
             agents = listed(items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, instructions: $0["instructions"].text)
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text)
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -1819,8 +1864,11 @@ final class Model {
     func fetches() -> [JSON] {
         var out: [JSON] = pending
         pending = []
-        let lists = dirty
+        var lists = dirty
         dirty = []
+        // The sidebar groups the agents by what they are, and who's waiting by the
+        // questions open in their runs.
+        if !lists.isDisjoint(with: [.agents, .runs, .approvals]) { lists.insert(.sidebar) }
         if mcpStale {
             mcpStale = false
             out.append(["t": "cmd", "id": JSON(id("app.mcp_list")), "name": "mcp.list"])
@@ -2202,6 +2250,77 @@ final class Model {
     func signInEnded(_ server: String, error: String) {
         mcpSigning.remove(server)
         mcpSignInErrors[server] = error
+    }
+
+    // MARK: The agent list's folders (PLAN.md, "The sidebar")
+
+    /// The folders, each id and name, in order.
+    var folders: [(id: String, name: String)] {
+        sidebar.compactMap {
+            if case .folder(let id, let name, _) = $0.part { return (id, name) }
+            return nil
+        }
+    }
+
+    /// The agents in the list's order, without the hidden ones.
+    var shownAgents: [Agent] {
+        let ids = sidebar.filter { $0.part != .hidden }.flatMap(\.agents)
+        return ids.isEmpty ? agents : ids.compactMap { self.agent($0) }
+    }
+
+    /// Puts an agent in a folder, or with nil, out of them. It shows there at once.
+    func groupAgent(_ agent: String, _ group: String?) -> JSON {
+        for i in sidebar.indices { sidebar[i].agents.removeAll { $0 == agent } }
+        if let i = sidebar.firstIndex(where: {
+            switch $0.part {
+            case .folder(let id, _, _): return id == group
+            case .agents: return group == nil
+            default: return false
+            }
+        }) {
+            sidebar[i].agents.append(agent)
+        }
+        return ["t": "cmd", "id": JSON(id("app.group_agent")), "name": "agent.group", "args": ["agent": JSON(agent), "group": JSON(group ?? "")]]
+    }
+
+    /// Hides an agent, or shows it again.
+    func hideAgent(_ agent: String, _ hidden: Bool) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.hide_agent")), "name": "agent.hide", "args": ["agent": JSON(agent), "hidden": JSON(hidden)]]
+    }
+
+    /// Makes a folder, with `agent` in it once it's made. Nil for a blank name.
+    func newFolder(_ name: String, agent: String?) -> JSON? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        folderFor = agent
+        return ["t": "cmd", "id": JSON(id("app.folder_new")), "name": "group.create", "args": ["name": JSON(name)]]
+    }
+
+    /// Renames a folder. Nil for a blank name, which keeps the one it has.
+    func renameFolder(_ folder: String, _ name: String) -> JSON? {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        for i in sidebar.indices {
+            if case .folder(let id, _, let collapsed) = sidebar[i].part, id == folder {
+                sidebar[i].part = .folder(id: id, name: name, collapsed: collapsed)
+            }
+        }
+        return ["t": "cmd", "id": JSON(id("app.folder")), "name": "group.update", "args": ["group": JSON(folder), "name": JSON(name)]]
+    }
+
+    /// Opens or shuts a folder, at once here, and on the person's other devices.
+    func collapseFolder(_ folder: String, _ collapsed: Bool) -> JSON {
+        for i in sidebar.indices {
+            if case .folder(let id, let name, _) = sidebar[i].part, id == folder {
+                sidebar[i].part = .folder(id: id, name: name, collapsed: collapsed)
+            }
+        }
+        return ["t": "cmd", "id": JSON(id("app.folder")), "name": "group.update", "args": ["group": JSON(folder), "collapsed": JSON(collapsed)]]
+    }
+
+    /// Deletes a folder. Its agents stay, out of any folder.
+    func deleteFolder(_ folder: String) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.folder")), "name": "group.delete", "args": ["group": JSON(folder)]]
     }
 
     func startFresh() -> JSON? {
