@@ -98,6 +98,23 @@ export function play(app: HTMLElement) {
 		if (row?.classList.contains('tile')) row.title = text ? `${agent} · ${text}` : agent;
 		byAgent.get(agent)?.set(mood);
 	};
+	// An agent waiting on the person goes to the top of the sidebar, under Waiting on you, and
+	// back to its place once it's answered (core/sidebar.calx).
+	const waitingGroup = app.querySelector<HTMLElement>('[data-waiting]')!;
+	const places = new Map<string, Node | null>();
+	const waitingOn = (agent: string, on: boolean) => {
+		const row = app.querySelector<HTMLElement>(`.agent[data-agent="${agent}"]`);
+		if (!row) return;
+		if (on && !places.has(agent)) {
+			places.set(agent, row.nextSibling);
+			waitingGroup.append(row);
+		} else if (!on && places.has(agent)) {
+			const before = places.get(agent)!;
+			before?.parentNode?.insertBefore(row, before);
+			places.delete(agent);
+		}
+		waitingGroup.hidden = places.size === 0;
+	};
 
 	// The sidebar: collapsed by its control, and a rail anyway in a narrow window.
 	const bar = app.querySelector<HTMLButtonElement>('[data-bar]')!;
@@ -249,6 +266,7 @@ export function play(app: HTMLElement) {
 	}
 
 	async function scene(id: number) {
+		waitingOn('Juniper', false);
 		await wait(900, id);
 		await type(SEND, id);
 		await wait(350, id);
@@ -283,9 +301,11 @@ export function play(app: HTMLElement) {
 
 		mood('waiting', replyThread);
 		preview('Juniper', `Wants to ${ASK[0].toLowerCase()}${ASK.slice(1)}`, 'waiting');
+		waitingOn('Juniper', true);
 		const deploy = tool(steps, ASK);
 		say(`${ASK}…`);
 		const answer = await approve(id);
+		waitingOn('Juniper', false);
 
 		if (answer === 'allow') {
 			mood('tool', replyThread);
@@ -343,6 +363,7 @@ export function play(app: HTMLElement) {
 		threadsIn(reply);
 		mood('idle');
 		for (const a of byAgent.keys()) preview(a, '', 'idle');
+		waitingOn('Juniper', false);
 	}
 
 	const reduced = matchMedia('(prefers-reduced-motion: reduce)');

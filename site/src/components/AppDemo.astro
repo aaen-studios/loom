@@ -1,6 +1,6 @@
 ---
 // A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads in their shapes, the
-// pinned ones as tiles over the rest, an agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
+// pinned ones as tiles over the rest, a folder, and an agent waiting on the person at the top while it asks, an agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
 // colours and words are the app's (desktop/src/app.rs, design/tokens.toml); the script that plays
 // it is src/scripts/demo.ts. The approval's buttons answer it, a reply's steps open, and the
 // sidebar collapses to the rail, as the app's do.
@@ -12,10 +12,12 @@ const agents = [
 	{ name: 'Pip', color: 'lavender', pinned: true },
 	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true },
 	{ name: 'Moss', color: 'mint', shape: 'heart' },
-	{ name: 'Otto', color: 'coral', shape: 'snail' },
+	{ name: 'Otto', color: 'coral', shape: 'snail', folder: 'Home' },
 ];
 const pinned = agents.filter((a) => a.pinned);
-const rest = agents.filter((a) => !a.pinned);
+const rest = agents.filter((a) => !a.pinned && !a.folder);
+// A folder the person made, under its name (PLAN.md, "The sidebar").
+const home = agents.filter((a) => a.folder === 'Home');
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
 const [claude] = await brains(['claude-acp']);
 // An agent's thread where a message mentions it, or over a message it sent: its shape, still,
@@ -62,6 +64,9 @@ const GITHUB =
 			</span>
 		</div>
 		<div class="list" aria-hidden="true">
+			<div class="waiting" data-waiting hidden>
+				<div class="group-head">Waiting on you</div>
+			</div>
 			<div class="pins">
 				{
 					pinned.map((a) => (
@@ -75,6 +80,21 @@ const GITHUB =
 			{
 				rest.map((a) => (
 					<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
+						<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
+						<span class="agent-text">
+							<span class="agent-name">{a.name}</span>
+							<span class="agent-preview" />
+						</span>
+					</div>
+				))
+			}
+			<div class="group-head folder">
+				Home
+				<svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
+			</div>
+			{
+				home.map((a) => (
+					<div class="agent" data-agent={a.name}>
 						<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
 						<span class="agent-text">
 							<span class="agent-name">{a.name}</span>
@@ -418,6 +438,34 @@ const GITHUB =
 		text-overflow: ellipsis;
 	}
 	.agent-preview:empty {
+		display: none;
+	}
+	/* A group's head (app.rs, group_head): its name, small and quiet, with a chevron when it
+	   opens and shuts. Waiting on you is there only while an agent waits on the person. */
+	.group-head {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		margin-top: 8px;
+		padding: 4px 12px;
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: var(--ink-3);
+	}
+	.group-head .i {
+		width: 12px;
+		height: 12px;
+	}
+	.waiting {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		gap: 2px;
+		margin-bottom: 8px;
+	}
+	.waiting[hidden] {
+		display: none;
+	}
+	.app.railed .group-head {
 		display: none;
 	}
 	/* The pinned agents over the rest: tiles three across, each with its thread drawn large
