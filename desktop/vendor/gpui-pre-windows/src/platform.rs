@@ -305,6 +305,18 @@ impl WindowsPlatform {
             });
     }
 
+    // loom: what `set_cursor_style` did, shared with `set_pan_cursor`.
+    fn show_cursor(&self, hcursor: Option<HCURSOR>) {
+        if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
+            self.post_message(
+                WM_GPUI_CURSOR_STYLE_CHANGED,
+                WPARAM(self.inner.validation_number),
+                LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
+            );
+            self.inner.state.current_cursor.set(hcursor);
+        }
+    }
+
     fn generate_creation_info(&self) -> WindowCreationInfo {
         WindowCreationInfo {
             icon: self.icon,
@@ -1014,15 +1026,12 @@ impl Platform for WindowsPlatform {
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
-        let hcursor = load_cursor(style);
-        if self.inner.state.current_cursor.get().map(|c| c.0) != hcursor.map(|c| c.0) {
-            self.post_message(
-                WM_GPUI_CURSOR_STYLE_CHANGED,
-                WPARAM(self.inner.validation_number),
-                LPARAM(hcursor.map_or(0, |c| c.0 as isize)),
-            );
-            self.inner.state.current_cursor.set(hcursor);
-        }
+        self.show_cursor(load_cursor(style));
+    }
+
+    // loom: the system's pan cursors (`load_pan_cursor`).
+    fn set_pan_cursor(&self, pan: PanCursor) {
+        self.show_cursor(load_pan_cursor(pan));
     }
 
     fn hide_cursor_until_mouse_moves(&self) {
