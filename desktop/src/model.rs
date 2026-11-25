@@ -1187,13 +1187,12 @@ pub struct Routine {
     pub name: String,
     pub agent: String,
     pub prompt: String,
-    /// How its schedule runs: "every" (minutes apart), "daily" or "weekdays" (at a time of
-    /// day), or "" for a routine that only runs by webhook.
-    pub kind: String,
-    /// The schedule's value as the form shows it: "30", or "08:00".
-    pub at: String,
+    /// Its schedule, as the routine form edits it.
+    pub schedule: Schedule,
     /// When it runs, in words: "every 30 minutes".
     pub when: String,
+    /// When it runs the next three times (Unix ms), the first `next`; empty while it's off.
+    pub upcoming: Vec<i64>,
     pub notify: bool,
     pub on: bool,
     /// Whether a run missed while the instance was off happens once it starts again.
@@ -1288,26 +1287,143 @@ impl RunningFlow {
     }
 }
 
-/// Which of the schedules routine `r` has: "every", "daily", "weekdays", or "".
-fn schedule_kind(r: &Value) -> String {
-    for k in ["every", "daily", "weekdays"] {
-        if r.pointer(&format!("/schedule/{k}")).is_some() {
-            return k.into();
-        }
-    }
-    String::new()
+/// The days of the week as a schedule names them, Monday first: bit 0 is Monday.
+pub const DAY_KEYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+pub const EVERY_DAY: u8 = 0b111_1111;
+pub const WEEKDAYS: u8 = 0b001_1111;
+
+/// A routine's schedule as the routine form edits it (protocol.md, `routine.put`). The
+/// instance reads it and works out when it runs; this only carries the fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Schedule {
+    /// "hours" (every few hours or minutes), "days" (at times on chosen days), or "" for
+    /// none: a routine that only runs by webhook.
+    pub repeat: String,
+    /// The days it runs on, bit 0 Monday to bit 6 Sunday.
+    pub days: u8,
+    /// Its times of day, "HH:MM", for "days".
+    pub times: Vec<String>,
+    /// Minutes apart, for "hours".
+    pub every: i64,
+    /// The window of the day it runs in, "HH:MM", for "hours". Both empty for one every
+    /// N minutes from when it was made.
+    pub from: String,
+    pub to: String,
 }
 
-/// Its schedule's value, as the form shows it: "30" or "08:00".
-fn schedule_value(r: &Value) -> String {
-    match r.get("schedule") {
-        Some(Value::Object(m)) => m
-            .values()
-            .next()
-            .map(|v| v.as_str().map_or_else(|| v.to_string(), String::from))
-            .unwrap_or_default(),
-        _ => String::new(),
+impl Default for Schedule {
+    /// A new routine's: every 2 hours from 08:00 to 20:00, every day.
+    fn default() -> Schedule {
+        Schedule {
+            repeat: "hours".into(),
+            days: EVERY_DAY,
+            times: vec!["08:00".into()],
+            every: 120,
+            from: "08:00".into(),
+            to: "20:00".into(),
+        }
     }
+}
+
+impl Schedule {
+    /// A schedule as the instance gives it, in any of its forms.
+    pub fn of(v: &Value) -> Schedule {
+        let days = match v.get("days").and_then(Value::as_array) {
+            Some(names) => names
+                .iter()
+                .filter_map(|n| n.as_str())
+                .filter_map(|n| {
+                    DAY_KEYS
+                        .iter()
+                        .position(|k| n.to_lowercase().starts_with(k))
+                })
+                .fold(0u8, |m, k| m | (1 << k)),
+            None => EVERY_DAY,
+        };
+        let new = Schedule::default();
+        if let Some(every) = v.get("every").and_then(Value::as_i64) {
+            return Schedule {
+                repeat: "hours".into(),
+                days,
+                every,
+                from: s(v, "from"),
+                to: s(v, "to"),
+                ..new
+            };
+        }
+        let (times, days) = if let Some(t) = v.get("times").and_then(Value::as_array) {
+            let times = t.iter().filter_map(|x| x.as_str().map(String::from));
+            (times.collect(), days)
+        } else if let Some(t) = v.get("daily").and_then(Value::as_str) {
+            (vec![t.to_string()], EVERY_DAY)
+        } else if let Some(t) = v.get("weekdays").and_then(Value::as_str) {
+            (vec![t.to_string()], WEEKDAYS)
+        } else {
+            return Schedule {
+                repeat: String::new(),
+                ..new
+            };
+        };
+        Schedule {
+            repeat: "days".into(),
+            days,
+            times,
+            ..new
+        }
+    }
+
+    /// The schedule as `routine.put` takes it, or null for none.
+    pub fn to_json(&self) -> Value {
+        let days: Vec<&str> = (0..7)
+            .filter(|k| self.days & (1 << k) != 0)
+            .map(|k| DAY_KEYS[k])
+            .collect();
+        match self.repeat.as_str() {
+            "days" => {
+                let mut v = json!({"times": self.times});
+                if self.days != EVERY_DAY {
+                    v["days"] = json!(days);
+                }
+                v
+            }
+            "hours" => {
+                let mut v = json!({"every": self.every});
+                if !self.from.trim().is_empty() {
+                    v["from"] = json!(self.from.trim());
+                }
+                if !self.to.trim().is_empty() {
+                    v["to"] = json!(self.to.trim());
+                }
+                if self.days != EVERY_DAY {
+                    v["days"] = json!(days);
+                }
+                v
+            }
+            _ => Value::Null,
+        }
+    }
+
+    /// Whether it runs often, every few hours or minutes, which the week shows as thin
+    /// ticks rather than blocks.
+    pub fn frequent(&self) -> bool {
+        self.repeat == "hours"
+    }
+}
+
+/// A time of day as typed, "8:05", "08:05" or "0805", as a schedule has it: "08:05".
+pub fn clock_of(typed: &str) -> Option<String> {
+    let t = typed.trim();
+    let digits: String = t.chars().filter(|c| c.is_ascii_digit()).collect();
+    let ok = t.chars().all(|c| c.is_ascii_digit() || c == ':') && t.matches(':').count() <= 1;
+    let (h, m) = match (ok, digits.len()) {
+        (true, 1 | 2) if !t.contains(':') => (digits.parse::<u32>().ok()?, 0),
+        (true, 3 | 4) => {
+            let (h, m) = digits.split_at(digits.len() - 2);
+            (h.parse::<u32>().ok()?, m.parse::<u32>().ok()?)
+        }
+        _ => return None,
+    };
+    (h < 24 && m < 60).then(|| format!("{h:02}:{m:02}"))
 }
 
 impl Routine {
@@ -1318,9 +1434,13 @@ impl Routine {
             name: s(r, "name"),
             agent: s(r, "agent"),
             prompt: s(r, "prompt"),
-            kind: schedule_kind(r),
-            at: schedule_value(r),
+            schedule: Schedule::of(r.get("schedule").unwrap_or(&Value::Null)),
             when: s(r, "when"),
+            upcoming: r
+                .get("upcoming")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_i64).collect())
+                .unwrap_or_default(),
             notify: r.get("notify").and_then(Value::as_bool).unwrap_or(false),
             on: r.get("on").and_then(Value::as_bool).unwrap_or(true),
             catch_up: r.get("catch_up").and_then(Value::as_bool).unwrap_or(true),
@@ -1350,21 +1470,41 @@ impl Routine {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoutineRun {
     pub run: String,
+    /// When it was due, when its turn started (0 for one that never did, or was kept
+    /// before runs had it), and when it ended (0 while it goes on).
     pub at: i64,
+    pub started: i64,
+    pub ended: i64,
     /// waiting (for its chat), running, done, quiet, failed, limit, cancelled or skipped.
     pub status: String,
     pub error: String,
+    /// For one that failed or was skipped, what the person can do about it.
+    pub hint: String,
     pub said: String,
     pub posted: Vec<String>,
 }
 
+/// How a run ended, as the history colours it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunMark {
+    Posted,
+    Quiet,
+    Failed,
+    Skipped,
+    Going,
+}
+
 impl RoutineRun {
     fn of(v: &Value) -> RoutineRun {
+        let n = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
         RoutineRun {
             run: s(v, "run"),
-            at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+            at: n("at"),
+            started: n("started"),
+            ended: n("ended"),
             status: s(v, "status"),
             error: s(v, "error"),
+            hint: s(v, "hint"),
             said: s(v, "said"),
             posted: v
                 .get("posted")
@@ -1379,30 +1519,69 @@ impl RoutineRun {
         }
     }
 
-    /// How it ended, in a few words.
-    pub fn outcome(&self) -> String {
+    /// How it ended, for its mark and pill: a run that handed its answer on to its flow
+    /// counts as posted, and one stopped as quiet.
+    pub fn mark(&self) -> RunMark {
         match self.status.as_str() {
-            "running" => "Running".into(),
-            "waiting" => "Waiting for the chat".into(),
-            "skipped" if self.error.is_empty() => "Skipped".into(),
-            "skipped" => format!("Skipped: {}", self.error),
-            "quiet" => "Nothing new".into(),
-            "done" if !self.posted.is_empty() => "Posted".into(),
-            "done" => "Done".into(),
-            "cancelled" => "Stopped".into(),
-            _ if self.error.is_empty() => "Failed".into(),
-            _ => format!("Failed: {}", self.error),
+            "done" => RunMark::Posted,
+            "quiet" | "cancelled" => RunMark::Quiet,
+            "skipped" => RunMark::Skipped,
+            "running" | "waiting" => RunMark::Going,
+            _ => RunMark::Failed,
         }
     }
 
-    /// What it posted, or else what its agent answered, on one line.
-    pub fn words(&self) -> String {
-        let text = self
-            .posted
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.said.clone());
-        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    /// Its status in a word, for its pill.
+    pub fn pill(&self) -> &'static str {
+        match self.status.as_str() {
+            "done" if self.posted.is_empty() => "Done",
+            "done" => "Posted",
+            "quiet" => "Quiet",
+            "skipped" => "Skipped",
+            "running" => "Running",
+            "waiting" => "Waiting",
+            "cancelled" => "Stopped",
+            "limit" => "Limit",
+            _ => "Failed",
+        }
+    }
+
+    /// Its line in the history: the first line of what it posted, or why it failed or
+    /// was skipped, or else of what its agent answered.
+    pub fn line(&self) -> String {
+        let text = match self.mark() {
+            RunMark::Failed | RunMark::Skipped if !self.error.is_empty() => self.error.clone(),
+            _ => self
+                .posted
+                .first()
+                .cloned()
+                .unwrap_or_else(|| self.said.clone()),
+        };
+        text.lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("")
+            .to_string()
+    }
+
+    /// How long it took, from when its turn started (or was due) until it ended: "8 s",
+    /// "2 min 5 s", "1 h 3 min". Empty while it goes on, and for one that never ran.
+    pub fn took(&self) -> String {
+        let from = if self.started > 0 {
+            self.started
+        } else {
+            self.at
+        };
+        if self.ended <= 0 || from <= 0 || self.status == "skipped" {
+            return String::new();
+        }
+        let secs = (self.ended - from).max(0) / 1000;
+        match secs {
+            0..=59 => format!("{secs} s"),
+            60..=3599 if secs % 60 == 0 => format!("{} min", secs / 60),
+            60..=3599 => format!("{} min {} s", secs / 60, secs % 60),
+            _ => format!("{} h {} min", secs / 3600, secs % 3600 / 60),
+        }
     }
 }
 
@@ -1414,11 +1593,9 @@ pub struct RoutineForm {
     pub name: String,
     pub agent: String,
     pub prompt: String,
-    /// "every", "daily" or "weekdays", as on `Routine`.
-    pub kind: String,
-    /// Minutes apart, or a time of day as HH:MM. Empty for a routine that only runs by
-    /// webhook. The instance checks it.
-    pub at: String,
+    /// Its schedule as `routine.put` takes it (`Schedule::to_json`), or null for a
+    /// routine that only runs by webhook. The instance checks it.
+    pub schedule: Value,
     pub notify: bool,
     pub on: bool,
     pub catch_up: bool,
@@ -4422,6 +4599,17 @@ pub struct Model {
     /// The open routine's runs, newest first, and which routine they're for.
     pub routine_runs: Vec<RoutineRun>,
     routine_runs_for: Option<String>,
+    /// When the schedule in the routine form would run next (`routine.next`), the
+    /// schedule that was asked about, and the ask, so a late answer to an older one is
+    /// dropped.
+    pub schedule_next: Vec<i64>,
+    schedule_next_for: Value,
+    schedule_next_id: String,
+    /// When each routine runs in the week on the Routines page (`routine.calendar`): its
+    /// id and its times, for the span asked about, from and to in Unix ms.
+    pub routine_week: Vec<(String, Vec<i64>)>,
+    pub routine_week_span: (i64, i64),
+    routine_week_id: String,
     /// The routine flows running.
     pub flows: Vec<RunningFlow>,
     /// The person's tasks, newest first, a page at a time, and whether there are older ones.
@@ -4736,6 +4924,10 @@ impl Model {
             out.push(self.load_flows());
             if let Some(routine) = self.routine_runs_for.clone() {
                 out.extend(self.load_routine_runs(Some(&routine)));
+            }
+            let (from, to) = self.routine_week_span;
+            if to > from {
+                out.push(self.load_routine_week(from, to));
             }
         }
         if std::mem::take(&mut self.plugins_stale) {
@@ -6689,6 +6881,31 @@ impl Model {
                 .and_then(Value::as_array)
                 .map(|rs| rs.iter().map(RoutineRun::of).collect())
                 .unwrap_or_default();
+        } else if id.starts_with("app.schedule_next") {
+            // A schedule that isn't one yet, while it's typed, has no next runs.
+            if id == self.schedule_next_id {
+                self.schedule_next = f
+                    .pointer("/value/next")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_i64).collect())
+                    .unwrap_or_default();
+            }
+        } else if id.starts_with("app.calendar_routines") {
+            if id == self.routine_week_id {
+                self.routine_week = f
+                    .pointer("/value/routines")
+                    .and_then(Value::as_array)
+                    .map(|rs| {
+                        rs.iter()
+                            .map(|r| {
+                                let times = r.get("times").and_then(Value::as_array);
+                                let times = times.map(|a| a.iter().filter_map(Value::as_i64));
+                                (s(r, "id"), times.map(Iterator::collect).unwrap_or_default())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            }
         } else if id.starts_with("app.routine_") {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
@@ -8903,15 +9120,7 @@ impl Model {
     /// Saves a routine, new (`id` empty) or changed.
     pub fn save_routine(&mut self, f: &RoutineForm) -> Value {
         let cmd = self.id("app.routine_put");
-        let at = f.at.trim();
-        let schedule = if at.is_empty() {
-            Value::Null
-        } else if f.kind == "every" {
-            json!({"every": at.parse::<i64>().map_or(json!(at), |m| json!(m))})
-        } else {
-            json!({ f.kind.as_str(): at })
-        };
-        let mut args = json!({"name": f.name.trim(), "agent": f.agent, "prompt": f.prompt, "schedule": schedule, "notify": f.notify, "on": f.on, "catch_up": f.catch_up, "webhook": f.webhook});
+        let mut args = json!({"name": f.name.trim(), "agent": f.agent, "prompt": f.prompt, "schedule": f.schedule, "notify": f.notify, "on": f.on, "catch_up": f.catch_up, "webhook": f.webhook});
         if !f.post.is_empty() {
             args["post"] = json!(f.post);
         }
@@ -8948,7 +9157,38 @@ impl Model {
         self.routine_runs_for = id.map(String::from);
         let id = id?;
         let cmd = self.id("app.runs_of_routine");
-        Some(json!({"t": "cmd", "id": cmd, "name": "routine.runs", "args": {"id": id}}))
+        Some(
+            json!({"t": "cmd", "id": cmd, "name": "routine.runs", "args": {"id": id, "limit": 100}}),
+        )
+    }
+
+    /// Asks when `schedule` (as `routine.put` takes it) would run next, for the routine
+    /// form's "Next", unless that's what it last asked. Null forgets it.
+    pub fn ask_schedule_next(&mut self, schedule: &Value) -> Option<Value> {
+        if *schedule == self.schedule_next_for {
+            return None;
+        }
+        self.schedule_next_for = schedule.clone();
+        self.schedule_next.clear();
+        if schedule.is_null() {
+            self.schedule_next_id.clear();
+            return None;
+        }
+        let cmd = self.id("app.schedule_next");
+        self.schedule_next_id = cmd.clone();
+        Some(json!({"t": "cmd", "id": cmd, "name": "routine.next", "args": {"schedule": schedule}}))
+    }
+
+    /// Asks when each routine runs from `from` up to `to` (Unix ms), for the week on the
+    /// Routines page, and asks again whenever the routines change.
+    pub fn load_routine_week(&mut self, from: i64, to: i64) -> Value {
+        if self.routine_week_span != (from, to) {
+            self.routine_week.clear();
+        }
+        self.routine_week_span = (from, to);
+        let cmd = self.id("app.calendar_routines");
+        self.routine_week_id = cmd.clone();
+        json!({"t": "cmd", "id": cmd, "name": "routine.calendar", "args": {"from": from, "to": to}})
     }
 
     pub fn run_routine(&mut self, id: &str) -> Value {
@@ -11775,15 +12015,18 @@ mod tests {
     fn a_routines_runs_say_how_each_went() {
         let run = |v: Value| RoutineRun::of(&v);
         assert_eq!(
-            run(json!({"run": "run_1", "status": "waiting"})).outcome(),
-            "Waiting for the chat"
+            run(json!({"run": "run_1", "status": "waiting"})).pill(),
+            "Waiting"
+        );
+        let skipped = run(
+            json!({"run": "run_2", "status": "skipped", "error": "Its chat was busy for 10 minutes."}),
         );
         assert_eq!(
-            run(json!({"run": "run_2", "status": "skipped", "error": "Its chat was busy for 10 minutes."})).outcome(),
-            "Skipped: Its chat was busy for 10 minutes."
+            (skipped.pill(), skipped.line()),
+            ("Skipped", "Its chat was busy for 10 minutes.".into())
         );
         assert_eq!(
-            run(json!({"run": "run_3", "status": "done", "posted": ["26.4 is out."]})).outcome(),
+            run(json!({"run": "run_3", "status": "done", "posted": ["26.4 is out."]})).pill(),
             "Posted"
         );
     }
@@ -12759,6 +13002,124 @@ mod tests {
     }
 
     #[test]
+    fn a_routine_schedule_reads_and_saves_in_every_form() {
+        let days = Schedule::of(&json!({"times": ["08:00", "17:00"], "days": ["mon", "fri"]}));
+        assert_eq!(
+            (days.repeat.as_str(), days.days, days.times.len()),
+            ("days", 0b1_0001, 2)
+        );
+        assert_eq!(
+            days.to_json(),
+            json!({"times": ["08:00", "17:00"], "days": ["mon", "fri"]})
+        );
+        // As routines had them first: one time, every day or Monday to Friday.
+        let weekdays = Schedule::of(&json!({"weekdays": "09:30"}));
+        assert_eq!(
+            weekdays.to_json(),
+            json!({"times": ["09:30"], "days": ["mon", "tue", "wed", "thu", "fri"]})
+        );
+        assert_eq!(
+            Schedule::of(&json!({"daily": "07:00"})).to_json(),
+            json!({"times": ["07:00"]})
+        );
+        let window = json!({"every": 120, "from": "08:00", "to": "20:00", "days": ["sat", "sun"]});
+        assert_eq!(Schedule::of(&window).to_json(), window);
+        assert!(Schedule::of(&window).frequent());
+        // Every N minutes from when it was made stays so.
+        assert_eq!(
+            Schedule::of(&json!({"every": 30})).to_json(),
+            json!({"every": 30})
+        );
+        // None at all: it only runs by webhook.
+        assert_eq!(Schedule::of(&Value::Null).repeat, "");
+        assert_eq!(Schedule::of(&Value::Null).to_json(), Value::Null);
+        assert_eq!(clock_of("8"), Some("08:00".into()));
+        assert_eq!(clock_of("8:05"), Some("08:05".into()));
+        assert_eq!(clock_of(" 1730 "), Some("17:30".into()));
+        assert_eq!(clock_of("24:00"), None);
+        assert_eq!(clock_of("8:5"), None);
+        assert_eq!(clock_of("noon"), None);
+    }
+
+    #[test]
+    fn a_routine_run_says_how_it_went_and_how_long_it_took() {
+        let run = |v: Value| RoutineRun::of(&v);
+        let posted = run(
+            json!({"run": "r1", "at": 1000, "started": 2000, "ended": 127000, "status": "done", "said": "x", "posted": ["\n Rain at 3.\nTake a coat."]}),
+        );
+        assert_eq!(
+            (posted.mark(), posted.pill(), posted.line(), posted.took()),
+            (
+                RunMark::Posted,
+                "Posted",
+                "Rain at 3.".into(),
+                "2 min 5 s".into()
+            )
+        );
+        let failed = run(
+            json!({"run": "r2", "at": 1000, "ended": 9000, "status": "failed", "error": "The shop was down.", "hint": "Run it again.", "said": "Trying"}),
+        );
+        assert_eq!(
+            (
+                failed.mark(),
+                failed.line(),
+                failed.took(),
+                failed.hint.as_str()
+            ),
+            (
+                RunMark::Failed,
+                "The shop was down.".into(),
+                "8 s".into(),
+                "Run it again."
+            )
+        );
+        let skipped = run(
+            json!({"run": "r3", "at": 1000, "ended": 1000, "status": "skipped", "error": "It was missed while the instance was off."}),
+        );
+        assert_eq!(
+            (skipped.mark(), skipped.took()),
+            (RunMark::Skipped, String::new())
+        );
+        let going = run(json!({"run": "r4", "at": 1000, "status": "running"}));
+        assert_eq!(
+            (going.mark(), going.took()),
+            (RunMark::Going, String::new())
+        );
+    }
+
+    #[test]
+    fn the_routine_form_asks_when_it_runs_and_the_week_follows_the_routines() {
+        let mut m = Model::new();
+        let schedule = json!({"times": ["08:00"]});
+        let ask = m.ask_schedule_next(&schedule).expect("asks");
+        assert_eq!(ask["name"], "routine.next");
+        assert!(
+            m.ask_schedule_next(&schedule).is_none(),
+            "the same schedule isn't asked about twice"
+        );
+        let later = m
+            .ask_schedule_next(&json!({"times": ["09:00"]}))
+            .expect("a change asks again");
+        // The answer to the first ask comes late, and is dropped.
+        m.take(&json!({"t": "result", "id": ask["id"], "ok": true, "value": {"next": [1, 2, 3]}}));
+        assert!(m.schedule_next.is_empty());
+        m.take(
+            &json!({"t": "result", "id": later["id"], "ok": true, "value": {"next": [4, 5, 6]}}),
+        );
+        assert_eq!(m.schedule_next, vec![4, 5, 6]);
+        let week = m.load_routine_week(100, 200);
+        assert_eq!(week["args"], json!({"from": 100, "to": 200}));
+        m.take(&json!({"t": "result", "id": week["id"], "ok": true, "value": {"routines": [{"id": "rt_1", "times": [120, 150], "more": false}]}}));
+        assert_eq!(m.routine_week, vec![("rt_1".to_string(), vec![120, 150])]);
+        // A routine changed: the week is asked for again.
+        m.take(
+            &json!({"t": "event", "kind": "routine.updated", "seq": 1, "routine": {"id": "rt_1"}}),
+        );
+        let again = m.fetches();
+        assert!(again.iter().any(|f| f["name"] == "routine.calendar"));
+    }
+
+    #[test]
     fn a_routine_flow_is_saved_shown_while_it_runs_and_stopped() {
         let mut m = Model::new();
         let chain = vec![
@@ -12783,13 +13144,13 @@ mod tests {
             name: "Morning".into(),
             agent: "a_1".into(),
             prompt: "news".into(),
-            kind: "every".into(),
-            at: "30".into(),
+            schedule: json!({"every": 30}),
             flow: Some(chain),
             ..RoutineForm::default()
         };
         let f = m.save_routine(&form);
         assert_eq!(f["args"]["flow"][1]["after"], json!(["1"]));
+        assert_eq!(f["args"]["schedule"], json!({"every": 30}));
         let kept = RoutineForm { flow: None, ..form };
         assert!(
             m.save_routine(&kept)["args"].get("flow").is_none(),
