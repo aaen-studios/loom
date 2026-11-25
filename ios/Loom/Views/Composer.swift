@@ -446,7 +446,7 @@ struct PieceArt {
     }
 
     /// Draws `a` as its piece is shown, and gives whether it looks different now.
-    @discardableResult
+    @MainActor @discardableResult
     func draw(_ a: PieceAttachment, font: UIFont) -> Bool {
         let p = a.piece
         let ink = UIColor(P.ink)
