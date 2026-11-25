@@ -114,12 +114,14 @@ struct EmojiPicker: View {
                         if !query.isEmpty {
                             let found = emoji.found?.query == query ? emoji.found?.items ?? [] : []
                             Section {
-                                ForEach(found, id: \.self) { cell($0, paths: emoji.paths) }
+                                ForEach(found.indices.map { ("found/\($0)", found[$0]) }, id: \.0) { cell($0.1, paths: emoji.paths) }
                             }
                         } else {
                             ForEach(emoji.groups) { g in
                                 Section {
-                                    ForEach(g.emoji, id: \.self) { cell($0, paths: emoji.paths) }
+                                    // An emoji can be in Recently used and its own group too:
+                                    // each cell's id is its group and its place.
+                                    ForEach(g.emoji.indices.map { ("\(g.id)/\($0)", g.emoji[$0]) }, id: \.0) { cell($0.1, paths: emoji.paths) }
                                     if g.id == "custom" { addCell }
                                 } header: {
                                     Text(g.name)
