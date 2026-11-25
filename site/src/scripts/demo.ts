@@ -23,7 +23,8 @@
 // rail, as the app's does (desktop/src/rail.rs). "From Biscuit" under Juniper opens Biscuit's
 // thread with it in the chat's place, to read, with Continue in your own chat for a composer. The
 // header's pin opens the chat's pins in a popover under it (app.rs, pins_pop), with Jump, Copy
-// and Unpin on each, as Ctrl+Shift+P does.
+// and Unpin on each, as Ctrl+Shift+P does. A message's pin by its corner, or Pin in its ⋯
+// menu, pins it or takes it off. Delete in that menu leaves a quiet mark where it was.
 //
 // It plays only while it's on screen, and with reduced motion it shows the finished chat instead.
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
@@ -44,6 +45,10 @@ const ASK = 'Run ./deploy.sh production';
 const EFFECT = 'Runs a command';
 const SHIPPED = 'Shipped. 2.4.1 is live, and its health check answers.';
 const HELD = "Okay, I won't deploy. Main stays as it is.";
+
+/** Lucide's crossed-out pin, as the app's Unpin has it (Ico::PinOff). */
+const UNPIN_ICON =
+	'<path d="M12 17v5"></path><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89"></path><path d="m2 2 20 20"></path><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11"></path>';
 
 /** A pause that ends early, with an error, when the demo is stopped. */
 class Stopped extends Error {}
@@ -276,10 +281,17 @@ export function play(app: HTMLElement) {
 			const at = app.getBoundingClientRect();
 			menu.style.left = `${Math.min(e.clientX - at.left, at.width - 210)}px`;
 			menu.style.top = `${e.clientY - at.top + 6}px`;
+			// Pin, or Unpin with its crossed-out pin while it's pinned.
+			if (pinned.has(row)) {
+				const item = menu.querySelector('[data-act="pin"]')!;
+				item.querySelector('span')!.textContent = 'Unpin';
+				item.querySelector('svg')!.innerHTML = UNPIN_ICON;
+			}
 			for (const item of menu.querySelectorAll<HTMLButtonElement>('[data-act]')) {
 				item.addEventListener('click', () => {
 					if (item.dataset.act === 'reply') replyTo(row);
 					else if (item.dataset.act === 'copy') navigator.clipboard?.writeText(wordsOf(row)).catch(() => {});
+					else if (item.dataset.act === 'pin') pin(row, !pinned.has(row));
 					else remove(row);
 					unmenu();
 				});
@@ -361,8 +373,16 @@ export function play(app: HTMLElement) {
 		pin.addEventListener('mouseenter', () => light(null));
 		return { pin, cut };
 	};
-	/** The popover's list, with how many there are on it and on the header's pin. */
+	/** The popover's list, with how many there are on it and on the header's pin, and each
+	 * message's own pin by its corner, there while it's pinned. */
 	const drawPins = () => {
+		for (const r of pinRows) {
+			const on = pinned.has(r);
+			r.classList.toggle('pinned', on);
+			const b = r.querySelector<HTMLButtonElement>(':scope > .pin-btn');
+			b?.setAttribute('aria-label', on ? 'Unpin' : 'Pin');
+			if (b) b.title = on ? 'Unpin' : 'Pin';
+		}
 		const shown = pinRows.filter((r) => pinned.has(r));
 		const drawn = shown.map(pinOf);
 		pinList.replaceChildren(...drawn.map((d) => d.pin));
@@ -415,6 +435,16 @@ export function play(app: HTMLElement) {
 			unpinned = null;
 		}
 	};
+	/** Pins a message, or takes its pin off, from its corner or its menu. */
+	const pin = (row: HTMLElement, on: boolean) => {
+		if (on) pinned.add(row);
+		else pinned.delete(row);
+		drawPins();
+	};
+	for (const b of msgs.querySelectorAll<HTMLButtonElement>('.pin-btn')) {
+		const row = b.closest<HTMLElement>('.row')!;
+		b.addEventListener('click', () => pin(row, !pinned.has(row)));
+	}
 	drawPins();
 	pinsBtn.addEventListener('click', () => showPins(pop.hidden === true));
 	pinList.addEventListener('scroll', () => pop.classList.toggle('scrolled', pinList.scrollTop > 0));

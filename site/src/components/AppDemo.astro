@@ -281,10 +281,12 @@ const GITHUB =
 				<div class="time-line">Today 09:02</div>
 				<div class="row you" data-msg data-pin="2" data-when="Today 09:02">
 					<div class="bubble">What's on my plate today?</div>
+					<button type="button" class="pin-btn" aria-label="Unpin" title="Unpin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 				</div>
 				<div class="row reply" data-msg data-pin="1" data-when="Today 09:03">
+					<button type="button" class="pin-btn" aria-label="Unpin" title="Unpin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
@@ -442,12 +444,14 @@ const GITHUB =
 		<button type="button" role="menuitem" data-pick="ask"><svg class="i" viewBox="0 0 24 24"><path d="M2.992 16.342a2 2 0 0 1 .094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413-.998a2 2 0 0 1 1.099.092 10 10 0 1 0-4.777-4.719"></path><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01"></path></svg>Ask about this</button>
 	</div>
 </template>
-<!-- A message's menu, from the ⋯ by its corner (app.rs, ctx_menu): Delete in red, after a
-     line, goes at once and leaves a quiet mark where it was (deleted_mark). -->
+<!-- A message's menu, from the ⋯ by its corner (app.rs, ctx_menu): Reply, Copy, Pin or Unpin,
+     and Delete in red, after a line, which goes at once and leaves a quiet mark where it was
+     (deleted_mark). -->
 <template id="demo-more">
 	<div class="msg-menu" role="menu">
 		<button type="button" role="menuitem" data-act="reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg>Reply</button>
 		<button type="button" role="menuitem" data-act="copy"><svg class="i" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>Copy</button>
+		<button type="button" role="menuitem" data-act="pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg><span>Pin</span></button>
 		<div class="menu-line" role="separator"></div>
 		<button type="button" role="menuitem" data-act="delete" class="danger"><svg class="i" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Delete</button>
 	</div>
@@ -1678,16 +1682,50 @@ const GITHUB =
 		gap: 4px;
 	}
 
-	/* Replying (PLAN.md, "Replying to a message"). A message's Reply, by its corner on hover,
-	   just outside the column, as the app has it (app.rs, chat_row). */
+	/* Replying (PLAN.md, "Replying to a message"). By a message's corner, just outside the
+	   column, as the app has them (app.rs, chat_row): its pin, there while it's pinned and on
+	   hover to pin it, then Reply and the ⋯ under it, on hover. */
 	.msgs .row[data-msg] {
 		position: relative;
 		border-radius: var(--radius-bubble);
 		transition: background-color 0.3s;
 	}
-	.reply-btn {
+	.pin-btn {
 		position: absolute;
 		top: 4px;
+		right: -32px;
+		display: grid;
+		place-items: center;
+		width: 24px;
+		height: 24px;
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: transparent;
+		color: var(--ink-3);
+		cursor: pointer;
+		opacity: 0;
+		transition: opacity 0.12s, background-color 0.12s, color 0.12s;
+	}
+	.pin-btn .i {
+		width: 14px;
+		height: 14px;
+	}
+	.row.pinned > .pin-btn {
+		opacity: 1;
+		color: var(--ink-2);
+	}
+	.row:hover > .pin-btn,
+	.pin-btn:focus-visible {
+		opacity: 1;
+	}
+	.pin-btn:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	.reply-btn {
+		position: absolute;
+		top: 32px;
 		right: -32px;
 		display: grid;
 		place-items: center;
@@ -1710,7 +1748,7 @@ const GITHUB =
 	/* Under Reply, the ⋯ that opens the message's menu. */
 	.more-btn {
 		position: absolute;
-		top: 32px;
+		top: 60px;
 		right: -32px;
 		display: grid;
 		place-items: center;
@@ -1738,6 +1776,7 @@ const GITHUB =
 		color: var(--ink);
 	}
 	@media (max-width: 640px) {
+		.pin-btn,
 		.reply-btn,
 		.more-btn {
 			display: none;
