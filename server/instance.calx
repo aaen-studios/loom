@@ -8532,7 +8532,9 @@ impl Instance {
                 b += 1
             }
         }
-        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).done()}")
+        // And the sidebar's folders as they are, so a cache that never kept them, as one
+        // from before them, has them all.
+        _ = i.server.send_text(s, "{Obj.new().s("t", String("synced")).i("seq", last).j("runs", Json.Array(going)).j("groups", Json.Array(try i.store.groups(user.copy()))).done()}")
         i.sessions.insert(s.id(), Session { socket: s, user: user.copy(), device: device.id, live: true, key: String(), tools: Json.Null, hosts: Json.Null, version: version, shown: (0, 0) })
         // A person who opens an app is likely to write soon (LOO-223).
         i.prestart(user.copy())
@@ -12264,7 +12266,8 @@ impl Instance {
                 }
             }
             if pin { o = o.i("pinned", int_at(old, "pinned") ?? now()) }
-            let agent = o.done()
+            // A pinned agent is always in sight: pinning a hidden one shows it again.
+            let agent = if pin { without(o.done(), "hidden") } else { o.done() }
             try i.store.put_agent_json(user.copy(), agent.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device).done())
             return Answer.Value(Obj.new().j("agent", agent).done())
@@ -12289,6 +12292,73 @@ impl Instance {
                 placed.push(agent)
             }
             return Answer.Value(Obj.new().j("agents", Json.Array(ids)).i("moved", i64.wrap(placed.len())).done())
+        }
+        if name == "agent.group" or name == "agent.hide" {
+            // Which of the sidebar's folders an agent is in, or whether it's hidden
+            // (PLAN.md, "The sidebar"). Like a pin, where an agent sits isn't a change
+            // to it: no revision. Putting one in a folder, or out of them, shows it
+            // where it's put, so it's no longer pinned or hidden; hiding one unpins it.
+            let id = str_at(args.copy(), "agent") ?? String()
+            let old = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            var agent = without(without(old.copy(), "pinned"), "hidden")
+            if name == "agent.group" {
+                let group = str_at(args, "group") ?? String()
+                agent = without(agent, "group")
+                if group.len() > 0 {
+                    if try i.store.group(user.copy(), group.copy()) == none { return Answer.Refused(String("not_found"), "There's no folder {group}.") }
+                    agent = merge(agent, Obj.new().s("group", group).done())
+                }
+            } else if bool_at(args, "hidden") ?? true {
+                agent = merge(agent, Obj.new().i("hidden", int_at(old.copy(), "hidden") ?? now()).done())
+            } else if let pinned = int_at(old.copy(), "pinned") {
+                // Shown again: a pin it kept stays.
+                agent = merge(agent, Obj.new().i("pinned", pinned).done())
+            }
+            if agent == old { return Answer.Value(Obj.new().j("agent", agent).done()) }
+            try i.store.put_agent_json(user.copy(), agent.copy())
+            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device).done())
+            return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "group.list" {
+            return Answer.Value(Obj.new().j("groups", Json.Array(try i.store.groups(user))).done())
+        }
+        if name == "group.create" or name == "group.update" {
+            // A folder in the sidebar, kept for the person, so every device of theirs
+            // shows the same ones.
+            let named = str_at(args.copy(), "name")
+            if let n = named.copy() {
+                if n.trim().len() == 0 or n.trim().len() > 80 { return Answer.Refused(String("bad_request"), String("A folder's name is 1 to 80 characters.")) }
+            }
+            var group = Json.Null
+            if name == "group.create" {
+                let n = named else return Answer.Refused(String("bad_request"), String("A folder needs a name."))
+                group = Obj.new().s("id", try i.store.new_id("g")).s("name", n.trim().copy()).b("collapsed", false).i("at", now()).done()
+            } else {
+                let id = str_at(args.copy(), "group") ?? String()
+                let old = try i.store.group(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no folder {id}.")
+                var changes = Obj.new()
+                if let n = named { changes = changes.s("name", n.trim().copy()) }
+                if let c = bool_at(args, "collapsed") { changes = changes.b("collapsed", c) }
+                group = merge(old.copy(), changes.done())
+                if group == old { return Answer.Value(Obj.new().j("group", group).done()) }
+            }
+            try i.store.put_group(user.copy(), group.copy())
+            try i.event(user, "group.updated", Obj.new().j("group", group.copy()).s("by", device).done())
+            return Answer.Value(Obj.new().j("group", group).done())
+        }
+        if name == "group.delete" {
+            // Its agents stay, out of any folder.
+            let id = str_at(args, "group") ?? String()
+            if try i.store.group(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no folder {id}.") }
+            for a in try i.store.agents(user.copy()) {
+                if str_at(a.copy(), "group") != some(id.copy()) { continue }
+                let agent = without(a, "group")
+                try i.store.put_agent_json(user.copy(), agent.copy())
+                try i.event(user.copy(), "agent.updated", Obj.new().j("agent", agent).s("by", device.copy()).done())
+            }
+            try i.store.delete_group(user.copy(), id.copy())
+            try i.event(user, "group.deleted", Obj.new().s("group", id).s("by", device).done())
+            return Answer.Value(empty)
         }
         if name == "agent.delete" {
             let id = str_at(args, "agent") ?? String()

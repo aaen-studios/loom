@@ -333,7 +333,10 @@ gpui_kit::assets::icon_assets!(
         ArrowRightLeft,
         Lightbulb,
         ArrowUpRight,
-        Lock
+        Lock,
+        FolderInput,
+        FolderOutput,
+        FolderPlus
     ]
 );
 

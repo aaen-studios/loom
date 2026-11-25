@@ -201,6 +201,8 @@ enum Ctx {
     Server(String),
     /// The sidebar's list of agents, under its last.
     Agents,
+    /// A folder in the sidebar, by its id.
+    Folder(String),
 }
 
 /// The composer's + menu, open at its first list or at one it leads to.
@@ -335,6 +337,13 @@ pub struct Loom {
     server_name_in: Entity<InputState>,
     /// The server whose name the field has in it, by `server_key`.
     server_name_for: Option<String>,
+    /// The name of the sidebar folder being renamed, and which one it is.
+    folder_in: Entity<InputState>,
+    renaming_folder: Option<String>,
+    /// Whether the sidebar's hidden agents are shown.
+    hidden_open: bool,
+    /// Whether the agent menu shows the folders to move the agent to.
+    menu_folders: bool,
     listing_hosts: bool,
     /// One of the person's own hosts to add, by what ssh is given, on the Hosts page.
     ssh_host_in: Entity<InputState>,
@@ -765,6 +774,19 @@ impl Loom {
                         this.prefs.save(&data_dir());
                         cx.notify();
                     }
+                }
+            },
+        )
+        .detach();
+        // A sidebar folder's name: Enter, or leaving the field, keeps it.
+        let folder_in = input(window, cx, "Folder name", false);
+        cx.subscribe_in(
+            &folder_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+                    let typed = state.read(cx).value().to_string();
+                    this.finish_renaming(&typed, cx);
                 }
             },
         )
@@ -1269,6 +1291,10 @@ ACTA_KEY=secret:ACTA_KEY",
             host_in,
             server_name_in,
             server_name_for: None,
+            folder_in,
+            renaming_folder: None,
+            hidden_open: false,
+            menu_folders: false,
             listing_hosts: false,
             ssh_host_in,
             skill_name_in,
@@ -2597,15 +2623,71 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// What dropping a dragged agent on the agent `onto` does: puts it in that one's
-    /// place, and tells the instance the new order.
+    /// place, and tells the instance the new order. Dropped on one in a folder, it goes
+    /// in that folder; on one out of them, out of its own.
     fn drop_agent(&self, onto: &str, cx: &mut Context<Self>) -> DropAgent {
         let onto = onto.to_string();
         Box::new(cx.listener(move |this, d: &AgentDrag, _, cx| {
+            let into = match this.model.part_of(&onto) {
+                Some(model::SidePart::Folder { id, .. }) => Some(Some(id)),
+                Some(model::SidePart::Agents) => Some(None),
+                _ => None,
+            };
             if let Some(f) = this.model.move_agent(&d.id, &onto) {
                 this.send(f);
             }
+            if let Some(group) = into {
+                let from = this.model.part_of(&d.id);
+                let already = match (&from, &group) {
+                    (Some(model::SidePart::Folder { id, .. }), Some(g)) => id == g,
+                    (Some(model::SidePart::Agents), None) => true,
+                    _ => false,
+                };
+                if !already {
+                    let f = this.model.group_agent(&d.id, group.as_deref());
+                    this.send(f);
+                }
+            }
             cx.notify();
         }))
+    }
+
+    /// Puts a sidebar folder's name in a field in its place, chosen, to type over.
+    fn start_renaming(&mut self, folder: String, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self
+            .model
+            .folders()
+            .into_iter()
+            .find(|(id, _)| *id == folder)
+            .map(|(_, name)| name)
+            .unwrap_or_else(|| NEW_FOLDER.to_string());
+        self.renaming_folder = Some(folder);
+        self.folder_in.update(cx, |s, cx| {
+            s.set_value(name, window, cx);
+            s.focus(window, cx);
+            s.select_all(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// The folder being renamed keeps what was typed, unless it's blank.
+    fn finish_renaming(&mut self, typed: &str, cx: &mut Context<Self>) {
+        let Some(folder) = self.renaming_folder.take() else {
+            return;
+        };
+        if let Some(f) = self.model.rename_folder(&folder, typed) {
+            self.send(f);
+        }
+        cx.notify();
+    }
+
+    /// Makes a sidebar folder, with `agent` in it, to be named in place once it's made.
+    fn new_folder(&mut self, agent: Option<&str>, cx: &mut Context<Self>) {
+        let f = self.model.new_folder(NEW_FOLDER, agent);
+        self.send(f);
+        self.ctx = None;
+        self.menu = None;
+        cx.notify();
     }
 
     /// A right-click on an agent in the sidebar: its chat, with its menu open at the
@@ -2614,6 +2696,7 @@ ACTA_KEY=secret:ACTA_KEY",
         self.select(agent, cx);
         self.ctx = None;
         self.menu = Some(Menu::Agent);
+        self.menu_folders = false;
         self.menu_at = Some(at);
         cx.notify();
     }
@@ -5690,147 +5773,325 @@ ACTA_KEY=secret:ACTA_KEY",
             })
     }
 
-    /// The whole sidebar: the knot and the wordmark, the + and the collapse, search when
-    /// it's shown, the pinned agents as tiles, the rest of them each on one line, and at
-    /// the foot the server, the update icon and the gear.
-    fn whole_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
+    /// An agent's row in the sidebar: its thread, its name, and what it's on after it.
+    /// A click opens its chat, a right-click its menu, and it drags into a new place, or
+    /// into a folder.
+    fn agent_row(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
-        let searching = !self.model.query.trim().is_empty();
-        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
-        // The pinned agents, as tiles over the rest.
-        let mut tiles = Vec::new();
-        let agents = self.model.agents.clone();
-        for a in agents.iter() {
-            if a.pinned.is_some() {
-                tiles.push(self.pinned_tile(a, cx));
-                // Its tile has no room under it for other agents' threads with it: they
-                // head the list while it's open.
-                if self.model.selected.as_deref() == Some(a.id.as_str())
-                    && self.screen == Screen::Chat
-                {
-                    let open = self.model.ask_open().map(|k| k.conversation);
-                    for k in self.model.asks(&a.id) {
-                        let here = open.as_deref() == Some(k.conversation.as_str());
-                        list = list.child(self.ask_row(&a.id, &k, here, cx));
-                    }
-                }
-                continue;
-            }
-            let selected = self.model.selected.as_deref() == Some(a.id.as_str())
-                && self.screen == Screen::Chat;
-            let mood = self.model.mood(&a.id);
-            let preview = self.model.preview(a);
-            // A reply that came while its chat wasn't open: the row is bold until it is.
-            let unread = self.model.unread.contains(&a.id);
-            // Other agents' threads with it: listed under it while it's open, and while
-            // one has a reply not seen, a dot in the asker's colour on its row.
-            let asks = self.model.asks(&a.id);
-            let ask_open = self
-                .model
-                .ask_open()
-                .filter(|_| selected)
-                .map(|k| k.conversation);
-            let dot = asks
-                .iter()
-                .find(|k| k.unread)
-                .filter(|_| !selected)
-                .map(|k| self.ask_tint(k));
-            let id = a.id.clone();
-            list = list.child(
+        let selected =
+            self.model.selected.as_deref() == Some(a.id.as_str()) && self.screen == Screen::Chat;
+        let mood = self.model.mood(&a.id);
+        let preview = self.model.preview(a);
+        // A reply that came while its chat wasn't open: the row is bold until it is.
+        let unread = self.model.unread.contains(&a.id);
+        // While one of other agents' threads with it has a reply not seen, a dot in the
+        // asker's colour on its row; and while one of them is open, the row isn't lit.
+        let ask_open = self
+            .model
+            .ask_open()
+            .filter(|_| selected)
+            .map(|k| k.conversation);
+        let dot = self
+            .model
+            .asks(&a.id)
+            .iter()
+            .find(|k| k.unread)
+            .filter(|_| !selected)
+            .map(|k| self.ask_tint(k));
+        let id = a.id.clone();
+        div()
+            .id(SharedString::from(format!("agent-{}", a.id)))
+            .role(Role::Button)
+            .aria_label(a.name.clone())
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .when(selected && ask_open.is_none(), |d| d.bg(p.active))
+            .when(!selected || ask_open.is_some(), move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let id = id.clone();
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.agent_menu_at(id.clone(), e.position, cx);
+                })
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+            .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
+            .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
+            .on_drop(self.drop_agent(&a.id, cx))
+            .child(thread::strand(
+                format!("side-{}", a.id),
+                mood,
+                thread::color(&a.color, p.dark),
+                a.outline(),
+                26.0,
+                10.0,
+                self.model.finished_at(&a.id),
+            ))
+            // One line whatever the agent is doing: what it's on sits quietly after
+            // its name, so starting or stopping work never moves a row.
+            .child(
                 div()
-                    .id(SharedString::from(format!("agent-{}", a.id)))
-                    .role(Role::Button)
-                    .aria_label(a.name.clone())
+                    .flex_1()
                     .flex()
                     .items_center()
-                    .gap(px(space::M))
-                    .px(px(space::M))
-                    .py(px(space::S))
-                    .rounded(px(radius::ROW))
-                    .cursor_pointer()
-                    .when(selected && ask_open.is_none(), |d| d.bg(p.active))
-                    .when(!selected || ask_open.is_some(), move |d| {
-                        d.soft_hover(transparent_black(), p.hover, None)
-                    })
-                    .on_mouse_down(MouseButton::Right, {
-                        let id = id.clone();
-                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.agent_menu_at(id.clone(), e.position, cx);
-                        })
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                    .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-                    .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
-                    .on_drop(self.drop_agent(&a.id, cx))
-                    .child(thread::strand(
-                        format!("side-{}", a.id),
-                        mood,
-                        thread::color(&a.color, p.dark),
-                        a.outline(),
-                        26.0,
-                        10.0,
-                        self.model.finished_at(&a.id),
-                    ))
-                    // One line whatever the agent is doing: what it's on sits quietly after
-                    // its name, so starting or stopping work never moves a row.
+                    .gap(px(space::S))
+                    .min_w_0()
                     .child(
                         div()
                             .flex_1()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
                             .min_w_0()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(size::BODY))
-                                    .font_weight(if unread {
-                                        FontWeight::SEMIBOLD
-                                    } else {
-                                        FontWeight::MEDIUM
-                                    })
-                                    .text_color(p.ink)
-                                    .truncate()
-                                    .child(a.name.clone()),
-                            )
-                            .when(!preview.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .min_w_0()
-                                        .max_w(relative(0.55))
-                                        .text_size(px(size::CAPTION))
-                                        .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
-                                        .text_color(if mood == Mood::Failed {
-                                            p.bad
-                                        } else if unread {
-                                            p.ink
-                                        } else {
-                                            p.ink_3
-                                        })
-                                        .truncate()
-                                        .child(preview),
-                                )
+                            .text_size(px(size::BODY))
+                            .font_weight(if unread {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::MEDIUM
                             })
-                            .when_some(dot, |d, tint| {
-                                d.child(div().size(px(6.0)).flex_none().rounded_full().bg(tint))
-                            }),
-                    ),
-            );
-            if selected {
-                for k in &asks {
-                    let open = ask_open.as_deref() == Some(k.conversation.as_str());
-                    list = list.child(self.ask_row(&a.id, k, open, cx));
+                            .text_color(p.ink)
+                            .truncate()
+                            .child(a.name.clone()),
+                    )
+                    .when(!preview.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .min_w_0()
+                                .max_w(relative(0.55))
+                                .text_size(px(size::CAPTION))
+                                .when(unread, |d| d.font_weight(FontWeight::MEDIUM))
+                                .text_color(if mood == Mood::Failed {
+                                    p.bad
+                                } else if unread {
+                                    p.ink
+                                } else {
+                                    p.ink_3
+                                })
+                                .truncate()
+                                .child(preview),
+                        )
+                    })
+                    .when_some(dot, |d, tint| {
+                        d.child(div().size(px(6.0)).flex_none().rounded_full().bg(tint))
+                    }),
+            )
+    }
+
+    /// Other agents' threads with the agent `a`, each a labelled row under it, while its
+    /// chat is open (its tile has no room under it: they head the list then).
+    fn ask_rows(&self, a: &model::Agent, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        if self.model.selected.as_deref() != Some(a.id.as_str()) || self.screen != Screen::Chat {
+            return Vec::new();
+        }
+        let open = self.model.ask_open().map(|k| k.conversation);
+        self.model
+            .asks(&a.id)
+            .iter()
+            .map(|k| {
+                let here = open.as_deref() == Some(k.conversation.as_str());
+                self.ask_row(&a.id, k, here, cx)
+            })
+            .collect()
+    }
+
+    /// A group's head in the sidebar: its name, small and quiet, with a chevron when it
+    /// opens and shuts.
+    fn group_head(&self, id: SharedString, title: String, open: Option<bool>) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .mt(px(space::S))
+            .px(px(space::M))
+            .py(px(space::XS))
+            .rounded(px(radius::ROW))
+            .text_size(px(size::CAPTION))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink_3)
+            .when(open.is_some(), |d| {
+                d.cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+            })
+            .child(div().min_w_0().truncate().child(title))
+            .when_some(open, |d, open| {
+                d.child(
+                    Icon::new(if open {
+                        Ico::ChevronDown
+                    } else {
+                        Ico::ChevronRight
+                    })
+                    .xsmall(),
+                )
+            })
+    }
+
+    /// A folder's head: a click opens or shuts it, a right-click has Rename and Delete,
+    /// and an agent dropped on it goes in. While it's being renamed, its name is a field.
+    fn folder_head(
+        &self,
+        folder: &str,
+        name: &str,
+        collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let p = self.p;
+        if self.renaming_folder.as_deref() == Some(folder) {
+            return div()
+                .mt(px(space::S))
+                .px(px(space::S))
+                .text_size(px(size::SMALL))
+                .child(Input::new(&self.folder_in).small())
+                .into_any_element();
+        }
+        let id = folder.to_string();
+        let menu_id = folder.to_string();
+        let drop_id = folder.to_string();
+        self.group_head(
+            SharedString::from(format!("folder-{folder}")),
+            name.to_string(),
+            Some(!collapsed),
+        )
+        .role(Role::Button)
+        .aria_label(name.to_string())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            let f = this.model.collapse_folder(&id, !collapsed);
+            this.send(f);
+            cx.notify();
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                this.open_ctx(e.position, Ctx::Folder(menu_id.clone()), cx);
+            }),
+        )
+        .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover).text_color(p.ink))
+        .on_drop(cx.listener(move |this, d: &AgentDrag, _, cx| {
+            let f = this.model.group_agent(&d.id, Some(&drop_id));
+            this.send(f);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The sidebar's agents, as the core groups them (`core/sidebar.calx`): who's waiting
+    /// on the person, the pinned ones as tiles, the rest each on one line, each folder
+    /// under its name, and the hidden ones last, shut until opened.
+    fn agent_list(&mut self, cx: &mut Context<Self>) -> Div {
+        let agents = self.model.agents.clone();
+        let sections = self.model.sidebar.clone();
+        let by_id: HashMap<&str, &model::Agent> =
+            agents.iter().map(|a| (a.id.as_str(), a)).collect();
+        // An agent the sidebar doesn't have yet, just made, goes with the rest.
+        let listed: HashSet<&str> = sections
+            .iter()
+            .flat_map(|s| s.agents.iter().map(String::as_str))
+            .collect();
+        let extra: Vec<&model::Agent> = agents
+            .iter()
+            .filter(|a| !listed.contains(a.id.as_str()))
+            .collect();
+        let mut tiles = Vec::new();
+        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        let mut top = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        let mut waiting = false;
+        for sec in sections.iter() {
+            let members: Vec<&model::Agent> = sec
+                .agents
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()).copied())
+                .collect();
+            match &sec.part {
+                model::SidePart::Waiting => {
+                    if members.is_empty() {
+                        continue;
+                    }
+                    waiting = true;
+                    top = top.child(self.group_head(
+                        "group-waiting".into(),
+                        "Waiting on you".into(),
+                        None,
+                    ));
+                    for a in members {
+                        top = top.child(self.agent_row(a, cx));
+                        top = top.children(self.ask_rows(a, cx));
+                    }
+                }
+                model::SidePart::Pinned => {
+                    for a in members {
+                        tiles.push(self.pinned_tile(a, cx));
+                        // Its tile has no room under it for other agents' threads with it:
+                        // they head the list while it's open.
+                        list = list.children(self.ask_rows(a, cx));
+                    }
+                }
+                model::SidePart::Agents => {
+                    for a in members.into_iter().chain(extra.iter().copied()) {
+                        list = list.child(self.agent_row(a, cx));
+                        list = list.children(self.ask_rows(a, cx));
+                    }
+                }
+                model::SidePart::Folder {
+                    id,
+                    name,
+                    collapsed,
+                } => {
+                    list = list.child(self.folder_head(id, name, *collapsed, cx));
+                    if !collapsed {
+                        for a in members {
+                            list = list.child(self.agent_row(a, cx));
+                            list = list.children(self.ask_rows(a, cx));
+                        }
+                    }
+                }
+                model::SidePart::Hidden => {
+                    if members.is_empty() {
+                        continue;
+                    }
+                    let open = self.hidden_open;
+                    list = list.child(
+                        self.group_head("group-hidden".into(), "Hidden".into(), Some(open))
+                            .role(Role::Button)
+                            .aria_label("Hidden")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.hidden_open = !open;
+                                cx.notify();
+                            })),
+                    );
+                    if open {
+                        for a in members {
+                            list = list.child(self.agent_row(a, cx));
+                            list = list.children(self.ask_rows(a, cx));
+                        }
+                    }
                 }
             }
         }
-        if !tiles.is_empty() {
-            list = div()
-                .flex()
-                .flex_col()
-                .gap(px(space::S))
-                .child(
+        // Before the core has grouped them: as they're listed.
+        if sections.is_empty() {
+            for a in agents.iter() {
+                if a.pinned.is_some() {
+                    tiles.push(self.pinned_tile(a, cx));
+                    list = list.children(self.ask_rows(a, cx));
+                } else {
+                    list = list.child(self.agent_row(a, cx));
+                    list = list.children(self.ask_rows(a, cx));
+                }
+            }
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .when(waiting, |d| d.child(top))
+            .when(!tiles.is_empty(), |d| {
+                d.child(
                     div()
                         .flex()
                         .flex_wrap()
@@ -5839,8 +6100,21 @@ ACTA_KEY=secret:ACTA_KEY",
                         .px(px(space::S))
                         .children(tiles),
                 )
-                .child(list);
-        }
+            })
+            .child(list)
+    }
+
+    /// The whole sidebar: the knot and the wordmark, the + and the collapse, search when
+    /// it's shown, the agents as the core groups them (`agent_list`), and at the foot the
+    /// server, the update icon and the gear.
+    fn whole_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let searching = !self.model.query.trim().is_empty();
+        let list = if searching {
+            div()
+        } else {
+            self.agent_list(cx)
+        };
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
         let search_shown = self.prefs.search || self.search_peek || searching;
@@ -6041,6 +6315,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 .selected
                 .clone()
                 .filter(|_| self.screen == Screen::Chat),
+            sections: model.sidebar.clone(),
+            renaming: self.renaming_folder.clone(),
+            hidden_open: self.hidden_open,
             ask_open: model.ask_open().map(|k| k.conversation),
             query: model.query.clone(),
             hits: model
@@ -6178,9 +6455,38 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
     }
 
+    /// The agents the rail shows: the sidebar's, in its order, without the hidden ones,
+    /// and one just made that it doesn't have yet. Before the core has grouped them, as
+    /// they're listed.
+    fn rail_agents(&self) -> Vec<model::Agent> {
+        if self.model.sidebar.is_empty() {
+            return self.model.agents.to_vec();
+        }
+        let listed: HashSet<&str> = self
+            .model
+            .sidebar
+            .iter()
+            .flat_map(|s| s.agents.iter().map(String::as_str))
+            .collect();
+        let mut out: Vec<model::Agent> = self
+            .model
+            .shown_agents()
+            .iter()
+            .filter_map(|id| self.model.agent(id).cloned())
+            .collect();
+        out.extend(
+            self.model
+                .agents
+                .iter()
+                .filter(|a| !listed.contains(a.id.as_str()))
+                .cloned(),
+        );
+        out
+    }
+
     /// The sidebar collapsed: the control that opens it (beside a Mac's traffic lights,
-    /// in the title bar), each agent as its thread, the pinned ones first and a short
-    /// line under them, with a dot while a reply waits and its name out to its right
+    /// in the title bar), each agent as its thread, in the sidebar's order without the
+    /// hidden ones, a short line under the pinned ones, with a dot while a reply waits and its name out to its right
     /// under the pointer, and at the foot the update icon over the gear over the server's
     /// yarn.
     fn rail(&mut self, cx: &mut Context<Self>) -> Div {
@@ -6191,7 +6497,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .gap(px(2.0))
             .py(px(space::XS));
-        let agents = self.model.agents.clone();
+        // In the sidebar's order, without the hidden ones.
+        let agents = self.rail_agents();
         for (n, a) in agents.iter().enumerate() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
                 && self.screen == Screen::Chat;
@@ -6755,6 +7062,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu_at = None;
+                    this.menu_folders = false;
                     this.menu = if this.menu == Some(Menu::Agent) {
                         None
                     } else {
@@ -7193,6 +7501,62 @@ ACTA_KEY=secret:ACTA_KEY",
         } else if let Some(url) = id.strip_prefix(model::LINK) {
             cx.open_url(url);
         }
+    }
+
+    /// The agent menu's Move to folder: each folder, the one it's in checked, out of
+    /// them when it's in one, and a new folder with it in.
+    fn folder_menu(&self, panel: Div, group: Option<String>, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let mut panel = panel;
+        for (n, (id, name)) in self.model.folders().into_iter().enumerate() {
+            let here = group.as_deref() == Some(id.as_str());
+            panel = panel.child(
+                self.menu_item(
+                    SharedString::from(format!("to-folder-{n}")),
+                    Ico::Folder,
+                    &name,
+                    false,
+                )
+                .when(here, |d| {
+                    d.child(Icon::new(Ico::Check).small().text_color(p.ink_2))
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(agent) = this.model.selected.clone() {
+                        if !here {
+                            let f = this.model.group_agent(&agent, Some(&id));
+                            this.send(f);
+                        }
+                    }
+                    this.menu = None;
+                    cx.notify();
+                })),
+            );
+        }
+        if group.is_some() {
+            panel = panel.child(
+                self.menu_item(
+                    "out-of-folder",
+                    Ico::FolderOutput,
+                    "Remove from folder",
+                    false,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(agent) = this.model.selected.clone() {
+                        let f = this.model.group_agent(&agent, None);
+                        this.send(f);
+                    }
+                    this.menu = None;
+                    cx.notify();
+                })),
+            );
+        }
+        panel.child(
+            self.menu_item("to-new-folder", Ico::FolderPlus, NEW_FOLDER, false)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let agent = this.model.selected.clone();
+                    this.new_folder(agent.as_deref(), cx);
+                })),
+        )
     }
 
     /// The @ picker's choices for what's typed after the @ (PLAN.md, "Mentions").
@@ -7800,14 +8164,38 @@ ACTA_KEY=secret:ACTA_KEY",
                     );
             }
             Ctx::Agents => {
-                panel = panel.child(
-                    self.menu_item("ctx-new-agent", Ico::Plus, "New agent", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.ctx = None;
-                            this.open(Screen::NewAgent, cx);
-                            cx.notify();
-                        })),
-                );
+                panel = panel
+                    .child(
+                        self.menu_item("ctx-new-agent", Ico::Plus, "New agent", false)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.ctx = None;
+                                this.open(Screen::NewAgent, cx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        self.menu_item("ctx-new-folder", Ico::FolderPlus, "New folder", false)
+                            .on_click(cx.listener(|this, _, _, cx| this.new_folder(None, cx))),
+                    );
+            }
+            Ctx::Folder(folder) => {
+                let rename = folder.clone();
+                panel = panel
+                    .child(
+                        self.menu_item("ctx-rename-folder", Ico::Pencil, "Rename", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ctx = None;
+                                this.start_renaming(rename.clone(), window, cx);
+                            })),
+                    )
+                    .child(
+                        self.menu_item("ctx-delete-folder", Ico::Trash, "Delete folder", true)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let f = this.model.delete_folder(&folder);
+                                this.send(f);
+                                close(this, cx);
+                            })),
+                    );
             }
         }
         Some(
@@ -7992,6 +8380,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.menu != Some(Menu::Agent) {
             self.armed = None;
             self.menu_at = None;
+            self.menu_folders = false;
         }
         let menu = self.menu?;
         let under_header = self.menu_at.is_none();
@@ -8021,6 +8410,20 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .and_then(|id| self.model.agent(id))
             .is_some_and(|a| a.pinned.is_some());
+        let (group, hidden) = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| (a.group.clone(), a.hidden))
+            .unwrap_or_default();
+        if menu == Menu::Agent && self.menu_folders {
+            return Some(self.folder_menu(
+                panel.when(under_header, |d| d.left(px(space::S))),
+                group,
+                cx,
+            ));
+        }
         Some(match menu {
             Menu::Agent => panel
                 .when(under_header, |d| d.left(px(space::S)))
@@ -8033,6 +8436,29 @@ ACTA_KEY=secret:ACTA_KEY",
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if let Some(f) = this.model.pin_agent(!pinned) {
+                            this.send(f);
+                        }
+                        this.menu = None;
+                        cx.notify();
+                    })),
+                )
+                .child(
+                    self.menu_item("move-agent", Ico::FolderInput, "Move to folder", false)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.menu_folders = true;
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    self.menu_item(
+                        "hide-agent",
+                        if hidden { Ico::Eye } else { Ico::EyeOff },
+                        if hidden { "Show" } else { "Hide" },
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(agent) = this.model.selected.clone() {
+                            let f = this.model.hide_agent(&agent, !hidden);
                             this.send(f);
                         }
                         this.menu = None;
@@ -8310,7 +8736,7 @@ ACTA_KEY=secret:ACTA_KEY",
             thoughts: self.prefs.thoughts,
             text_scale: self.prefs.text_scale(),
             bubbles: self.prefs.bubbles,
-            vibrant: self.prefs.vibrant,
+            vibrant: self.prefs.vibrant(),
             newest: false,
             room: self.chat_room(window),
         };
@@ -15172,11 +15598,10 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 }
 
-/// The person's bubble in an agent's chat. With Vibrant bubbles, the default, it's the
-/// agent's colour itself, as saturated as it is, made light in the light theme and deep in
-/// the dark, so the words read on it whichever colour it is (`motion::ink_on` makes sure).
-/// Without, it's the bubble grey with a breath of the agent's colour, a little more in the
-/// dark.
+/// The person's bubble in an agent's chat. By default it's the bubble grey with a breath
+/// of the agent's colour, a little more in the dark. With Vibrant bubbles it's the agent's
+/// colour itself, as saturated as it is, made light in the light theme and deep in the
+/// dark, so the words read on it whichever colour it is (`motion::ink_on` makes sure).
 fn person_bubble(p: Palette, tint: Hsla, vibrant: bool) -> Hsla {
     if vibrant {
         return Hsla {
@@ -19831,6 +20256,10 @@ impl Render for Loom {
             self.server_in
                 .update(cx, |s, cx| s.set_value(address, window, cx));
         }
+        // A folder just made, named here.
+        if let Some(folder) = self.model.made_folder.take() {
+            self.start_renaming(folder, window, cx);
+        }
         let signed_out = self.model.conn == Some(Conn::SignedOut);
         // The opening weave plays once the app knows it's signed in. Signed out, the
         // welcome comes in on its own instead.
@@ -20767,6 +21196,9 @@ const BAR_COLLAPSE: &str = "Collapse sidebar  Ctrl+B";
 const BAR_OPEN: &str = "Open sidebar  ⌘B";
 #[cfg(not(target_os = "macos"))]
 const BAR_OPEN: &str = "Open sidebar  Ctrl+B";
+
+/// What a new sidebar folder is called until the person names it.
+const NEW_FOLDER: &str = "New folder";
 /// The small browser window's width.
 const MINI_W: f32 = 280.0;
 
@@ -21261,6 +21693,11 @@ struct SidebarKey {
     lights: bool,
     p: Palette,
     agents: Vec<SidebarAgent>,
+    /// How the core groups them, the folder being renamed, and whether the hidden
+    /// ones show.
+    sections: Rc<Vec<model::Section>>,
+    renaming: Option<String>,
+    hidden_open: bool,
     /// The agent whose chat is on screen.
     selected: Option<String>,
     /// Another agent's thread with it, when that's on screen in its chat's place.
