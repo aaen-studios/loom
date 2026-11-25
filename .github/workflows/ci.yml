@@ -126,10 +126,37 @@ jobs:
           cd /tmp
           sudo -u loom env -i HOME=/var/lib/loom PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin XDG_RUNTIME_DIR="/run/user/$uid" podman run --rm --network pasta docker.io/library/alpine:3.20 true
 
+      # The service updates its own copy, which root never runs; the command line in
+      # /usr/local/bin says when the service runs a newer loom than itself.
+      - name: The command line and the service's own copy
+        run: |
+          sudo cmp /usr/local/bin/loom /var/lib/loom/bin/loom
+          test ! -L /usr/local/bin/loom
+          test "$(stat -c %U /usr/local/bin/loom)" = root
+          test "$(sudo stat -c %U /var/lib/loom/bin/loom)" = loom
+          # As if the service had updated itself to a newer release.
+          perl -pi -e 's/^const VERSION: str = ".*"/const VERSION: str = "9.9.9-ci"/' server/main.calx
+          mkdir -p newer
+          calx build server/main.calx -o newer/loom
+          git checkout -- server/main.calx
+          sudo install -o loom -g loom -m 755 newer/loom /var/lib/loom/bin/loom.next
+          sudo mv /var/lib/loom/bin/loom.next /var/lib/loom/bin/loom
+          sudo systemctl restart loom
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8790/api/version 2>/dev/null | grep -q '"version":"9.9.9-ci"'; then break; fi
+            sleep 1
+          done
+          sudo loom version 2> said.txt
+          cat said.txt
+          grep -q 'the service runs loom 9.9.9-ci' said.txt
+          grep -q 'sudo loom update' said.txt
+
       - name: Install again
         run: |
           sudo env LOOM_RELEASES="file://$PWD/release" sh server/install.sh
           systemctl is-active loom
+          # And the two are the same program again.
+          sudo cmp /usr/local/bin/loom /var/lib/loom/bin/loom
 
   # The Docker image, built as the Dockerfile says, and answering with its setup code.
   docker:

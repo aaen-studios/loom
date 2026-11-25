@@ -436,6 +436,13 @@ fn main() ! Error {
         try serve(a)
         return
     }
+    // On a server loom install set up, the service updates its own copy of loom, and
+    // this one, the command line's, stays as it was until root updates it.
+    if cmd != "install" and cmd != "update" {
+        if let v = service_version() {
+            if newer(v.copy(), String(VERSION)) { eprintln("loom: the service runs loom {v}, and this command is {VERSION}: sudo loom update brings it up to date") }
+        }
+    }
     match run(a.copy()) {
         ok(s) => if a.json { println("{s.value}") } else if s.text.len() > 0 { println(s.text) },
         err(e) => {
@@ -928,16 +935,46 @@ fn json_text(text: String) -> Json {
     }
 }
 
+// The version the service runs, when this is the command line of a server loom install
+// set up and the service answers; none otherwise. It asks the service rather than
+// running its program, which the loom user can write.
+fn service_version() -> String? {
+    if not setup.is_command_line() { return none }
+    let port = setup.service_port() else return none
+    var r = client.ask_version("http://127.0.0.1:{port}", 2000)
+    let (answer, _) = client.version_of(mut r)
+    return str_at(answer, "version")
+}
+
+// Whether the files at `a` and `b` hold the same bytes.
+fn same_file(a: String, b: String) -> bool {
+    let x = match fs.read(a) {
+        ok(d) => d,
+        err(_) => return false,
+    }
+    return match fs.read(b) {
+        ok(y) => x == y,
+        err(_) => false,
+    }
+}
+
 // `loom update`: the newest release, if its manifest is signed with the release key and
 // it's newer, takes this program's place once its SHA-256 is the manifest's
 // (server/update.calx, which the instance's instance.update uses too). The old
-// program stays beside it, as .old, until the next update. A running instance
-// runs the new one once it's restarted; the app's Update restarts it too.
+// program stays beside it, as .old, until the next update. Run as root on a server loom
+// install set up, the service's own copy gets the same program, and one that's behind the
+// command line, newest already, gets it too. A running instance runs the new one once
+// it's restarted; the app's Update restarts it too.
 fn update_self(check_only: bool) -> Said ! Error {
     let manifest = try update.manifest(update.Source.official())
     let version = update.version_of(manifest.copy())
     let answer = Obj.new().s("version", String(VERSION)).s("newest", version.copy())
+    let command_line = setup.is_command_line() and env.is_elevated()
     if not newer(version.copy(), String(VERSION)) {
+        if command_line and not check_only and not same_file(String(setup.BIN), String(setup.SERVICE_BIN)) {
+            try setup.give_service(String(setup.BIN))
+            return said("loom {VERSION} is the newest, and the service's own copy is too now; restart the service to run it: sudo systemctl restart loom", answer.b("updated", false).b("service", true).done())
+        }
         return said("loom {VERSION} is the newest", answer.b("updated", false).done())
     }
     if check_only {
@@ -948,5 +985,9 @@ fn update_self(check_only: bool) -> Said ! Error {
     let data = try update.download(manifest)
     _ = try update.stage(exe.copy(), data)
     try update.swap(exe)
+    if command_line {
+        try setup.give_service(String(setup.BIN))
+        return said("updated loom {VERSION} to {version}, and the service's own copy; restart the service to run it: sudo systemctl restart loom", answer.b("updated", true).b("service", true).done())
+    }
     return said("updated loom {VERSION} to {version}; restart the instance to run it", answer.b("updated", true).done())
 }
