@@ -7,7 +7,7 @@ module server.files
 // written beside the file as <sha256>.thumb.
 import std.bytes
 import std.fs
-import std.image.{Color, Image, Kind, decode_ico, encode_ico}
+import std.image.{Color, Filter, Image, Kind, decode_ico, encode_ico}
 import std.net.{Waker as LoopWaker}
 import std.thread.{Task}
 
@@ -351,6 +351,67 @@ pub fn page_picture(data: List<u8>) -> List<u8> ! Error {
     return small.to(Kind.Rgb).encode_jpeg(82)
 }
 
+/// The side a person's own emoji is kept at, in pixels (PLAN.md, "Emoji").
+pub const EMOJI: usize = 128
+/// The most bytes a picture given for an emoji may have.
+pub const EMOJI_BYTES: usize = 262144
+
+/// What kind of picture an emoji is given as: `png`, `jpeg`, `gif`, `webp` or `apng`
+/// (a PNG with an `acTL` chunk before its pictures, which moves), or empty.
+pub fn emoji_kind(data: List<u8>) -> String {
+    let n = data.len()
+    let mime = sniff(data[..if n < 12 { n } else { 12 }]) ?? String()
+    if mime == "image/png" {
+        // The chunks after the signature, up to the first IDAT.
+        var i: usize = 8
+        while i + 8 <= n {
+            let len = usize(bytes.u32_be(data.copy(), i))
+            let kind = String.from_utf8(data[i + 4..i + 8]) ?? String()
+            if kind == "acTL" { return String("apng") }
+            if kind == "IDAT" { break }
+            i += 12 + len
+        }
+        return String("png")
+    }
+    return match mime {
+        "image/jpeg" => String("jpeg"),
+        "image/gif" => String("gif"),
+        "image/webp" => String("webp"),
+        _ => String(),
+    }
+}
+
+/// A person's own emoji, from the picture they gave (PLAN.md, "Emoji"): a still PNG
+/// or JPEG of at most 256 KB and 1024 pixels a side, made as big as fits in
+/// `EMOJI` by `EMOJI` pixels without changing its shape, in the middle of a clear
+/// square that size, as a PNG. GIF, WebP and moving PNGs wait for std.image to
+/// read them (CLX-448, CLX-362, CLX-455).
+pub fn emoji_png(data: List<u8>) -> List<u8> ! Error {
+    if data.len() > EMOJI_BYTES { fail "it's {data.len() / 1024} KB, and an emoji is at most {EMOJI_BYTES / 1024} KB" }
+    let kind = emoji_kind(data.copy())
+    if kind == "gif" or kind == "webp" or kind == "apng" { fail "loom can't read a {kind} yet: give a PNG or a JPEG" }
+    if kind != "png" and kind != "jpeg" { fail "it isn't a PNG or a JPEG" }
+    let (w, h) = header_size(data.copy()) else { fail "it isn't a picture loom can read" }
+    if w == 0 or h == 0 or w > ICON_MOST or h > ICON_MOST { fail "it's {w} by {h} pixels, and an emoji is at most {ICON_MOST} a side" }
+    let im = match Image.decode(data) {
+        ok(i) => i,
+        err(why) => fail "it isn't a picture loom can read: {why}",
+    }
+    let fit = if im.width() > EMOJI or im.height() > EMOJI { im.thumbnail(EMOJI, EMOJI) } else { im.copy() }
+    // A small picture is made bigger, to fill the square as a big one does.
+    let longest = if fit.width() > fit.height() { fit.width() } else { fit.height() }
+    let sized = if longest < EMOJI {
+        let w2 = fit.width() * EMOJI / longest
+        let h2 = fit.height() * EMOJI / longest
+        fit.resize(if w2 > 0 { w2 } else { 1 }, if h2 > 0 { h2 } else { 1 }, Filter.Lanczos)
+    } else {
+        fit
+    }
+    var square = Image.new(EMOJI, EMOJI, Kind.Rgba, Color.rgba(0u8, 0u8, 0u8, 0u8))
+    square.paste(sized.to(Kind.Rgba), i64.wrap(u64((EMOJI - sized.width()) / 2)), i64.wrap(u64((EMOJI - sized.height()) / 2)))
+    return square.encode_png()
+}
+
 /// Whether loom makes thumbnails of this type.
 pub fn thumbable(mime: String) -> bool {
     return mime == "image/png" or mime == "image/jpeg"
@@ -443,6 +504,42 @@ fn a_thumbnail_is_a_small_jpeg_or_png() {
     assert(kind == "image/jpeg" and small.width() == THUMB and small.height() == 256)
     let (clear, clear_kind) = thumb_of(Image.new(40, 30, Kind.Rgba, Color.rgba(0, 0, 0, 100)).encode_png())!
     assert(clear_kind == "image/png" and Image.decode(clear)!.width() == 40)
+}
+
+@test
+fn an_emoji_is_a_clear_square_of_128() {
+    // A wide one fills the width, in the middle; a small one is made bigger.
+    let wide = Image.decode(emoji_png(Image.new(300, 150, Kind.Rgb, Color.rgb(200, 10, 10)).encode_png())!)!
+    assert(wide.width() == EMOJI and wide.height() == EMOJI)
+    assert(wide.get(0, 0).a == 0 and wide.get(64, 64).r == 200 and wide.get(64, 64).a == 255)
+    let small = Image.decode(emoji_png(Image.new(32, 32, Kind.Rgba, Color.rgba(0, 0, 255, 255)).encode_png())!)!
+    assert(small.width() == EMOJI and small.get(1, 1).b == 255)
+    let photo = Image.decode(emoji_png(Image.new(64, 48, Kind.Rgb, Color.rgb(9, 9, 9)).encode_jpeg(80))!)!
+    assert(photo.width() == EMOJI)
+}
+
+@test
+fn an_emoji_picture_is_held_to_its_limits() {
+    let refuse = |data: List<u8>| match emoji_png(data) {
+        ok(_) => false,
+        err(_) => true,
+    }
+    // Over 256 KB, though it's a PNG.
+    var big = Image.new(16, 16, Kind.Rgb, Color.rgb(1, 2, 3)).encode_png()
+    for _ in 0..EMOJI_BYTES { big.push(0u8) }
+    assert(refuse(big))
+    // Too many pixels, not a picture, and a GIF, which waits for std.image.
+    assert(refuse(Image.new(1100, 10, Kind.Gray, Color.gray(0)).encode_png()))
+    assert(refuse("not a picture".to_bytes()))
+    let gif: List<u8> = [0x47u8, 0x49, 0x46, 0x38, 0x39, 0x61, 7, 0, 5, 0, 0, 0, 0]
+    assert(emoji_kind(gif.copy()) == "gif" and refuse(gif))
+    // A PNG with acTL before its IDAT moves.
+    let still = Image.new(4, 4, Kind.Rgb, Color.rgb(1, 2, 3)).encode_png()
+    assert(emoji_kind(still.copy()) == "png")
+    var moving: List<u8> = still[..33]
+    moving.extend([0u8, 0, 0, 8, 0x61, 0x63, 0x54, 0x4c, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0])
+    moving.extend(still[33..])
+    assert(emoji_kind(moving.copy()) == "apng" and refuse(moving))
 }
 
 fn refused(data: List<u8>) -> bool {
