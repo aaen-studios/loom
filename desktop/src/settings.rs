@@ -93,7 +93,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Mcp => "mcp servers tools connectors",
         Screen::Secrets => "secrets keys passwords sites bank sealed",
         Screen::Plugins => "plugins panels",
-        Screen::Routines => "routines schedule every day cron webhook",
+        Screen::Routines => "routines schedule every day hours times weekdays cron webhook history runs calendar week",
         Screen::Tasks => "tasks jobs long work",
         Screen::Import => "import openbot grok bring over",
         _ => "",
