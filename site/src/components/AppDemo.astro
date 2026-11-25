@@ -326,6 +326,18 @@ const GITHUB =
 							><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg
 						></span
 					>
+					<!-- How full Juniper's session context is, just before Send (app.rs, meter::ring). -->
+					<span class="context" data-context title="Context 41%, 82k of 200k. A fresh session starts at 80%.">
+						<svg viewBox="0 0 16 16"
+							><circle class="track" cx="8" cy="8" r="7" pathLength="100"></circle><circle
+								class="fill"
+								cx="8"
+								cy="8"
+								r="7"
+								pathLength="100"
+								style="--fill: 41"></circle></svg
+						>
+					</span>
 					<span class="send">
 						<svg class="i up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"></path></svg>
 						<svg class="i stop" viewBox="0 0 24 24"><rect width="14" height="14" x="5" y="5" rx="2"></rect></svg>
@@ -2178,6 +2190,36 @@ const GITHUB =
 		50% {
 			opacity: 0;
 		}
+	}
+	/* The context's ring: the line all round, filled clockwise from the top as the
+	   session fills, orange from 75% and red from 90%. */
+	.context {
+		display: grid;
+		place-items: center;
+		width: var(--control-icon-composer);
+		height: var(--control-icon-composer);
+		flex: none;
+	}
+	.context svg {
+		width: var(--control-context-ring);
+		height: var(--control-context-ring);
+		transform: rotate(-90deg);
+		fill: none;
+		stroke-width: 2;
+	}
+	.context .track {
+		stroke: var(--line-strong);
+	}
+	.context .fill {
+		stroke: var(--ink-2);
+		stroke-dasharray: var(--fill) 100;
+		transition: stroke-dasharray 0.6s ease;
+	}
+	.context.warn .fill {
+		stroke: var(--warn);
+	}
+	.context.bad .fill {
+		stroke: var(--bad);
 	}
 	.send {
 		display: grid;

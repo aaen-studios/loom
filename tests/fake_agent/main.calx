@@ -58,7 +58,14 @@ module tests.fake_agent.main
 //     /usage USED SIZE    reports its context as USED tokens of a SIZE window (usage_update)
 //     /compacted USED SIZE
 //                         the same, but after the turn has ended, as Claude's adapter
-//                         reports a session it compacted while idle
+//                         reports a session it compacted while idle: the compaction,
+//                         from the turn's last /usage to USED, then the usage
+//     /compact BEFORE AFTER SIZE
+//                         compacts its context from BEFORE tokens to AFTER of a SIZE
+//                         window during the turn, reported as Claude's adapter reports
+//                         one to a client without ACP's compaction updates: a call
+//                         named compact, done, then its tokens in rawOutput, then
+//                         the usage
 //     /limits S SR W WR   reports its plan's limits as Claude's adapter does, on a
 //                         usage_update's _meta "_claude/rateLimit": the session S%
 //                         used, resetting at SR (Unix seconds), and the week W%, at WR
@@ -169,6 +176,7 @@ pub enum Step {
     Limits(String)
     Account(String)
     Compacted(i64, i64)
+    Compact(i64, i64, i64)
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -264,6 +272,10 @@ pub fn script(text: String) -> List<Step> {
         } else if word == "/compacted" {
             let (used, size) = split_word(rest)
             steps.push(Step.Compacted(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
+        } else if word == "/compact" {
+            let (before, more) = split_word(rest)
+            let (after, size) = split_word(more)
+            steps.push(Step.Compact(i64.parse(before) ?? 0, i64.parse(after) ?? 0, i64.parse(size) ?? 0))
         } else if word == "/env" {
             steps.push(Step.Env(rest))
         } else if word == "/net" {
@@ -550,6 +562,40 @@ fn inside(u: own LinkedMap<String, Json>, parent: String) -> LinkedMap<String, J
     var out = u
     out.insert("_meta", Json.Object(meta))
     return out
+}
+
+// A compaction of the context from `before` tokens to `after` of a `size` window,
+// as Claude's adapter reports it to a client without ACP's compaction updates.
+fn compaction(session: String, id: String, before: i64, after: i64, size: i64) {
+    var claude = LinkedMap<String, Json>()
+    claude.insert("toolName", js(String("compact")))
+    var meta = LinkedMap<String, Json>()
+    meta.insert("claudeCode", Json.Object(claude))
+    var started = tool_call_of(id.copy(), String("think"), String("Compact conversation"))
+    started.insert("status", js(String("in_progress")))
+    started.insert("_meta", Json.Object(meta.copy()))
+    update(session.copy(), started)
+    var done = LinkedMap<String, Json>()
+    done.insert("sessionUpdate", js(String("tool_call_update")))
+    done.insert("toolCallId", js(id.copy()))
+    done.insert("status", js(String("completed")))
+    done.insert("_meta", Json.Object(meta.copy()))
+    update(session.copy(), done)
+    var facts = LinkedMap<String, Json>()
+    facts.insert("trigger", js(String("automatic")))
+    facts.insert("preTokens", int(before))
+    facts.insert("postTokens", int(after))
+    var told = LinkedMap<String, Json>()
+    told.insert("sessionUpdate", js(String("tool_call_update")))
+    told.insert("toolCallId", js(id))
+    told.insert("rawOutput", Json.Object(facts))
+    told.insert("_meta", Json.Object(meta))
+    update(session.copy(), told)
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String("usage_update")))
+    u.insert("used", int(after))
+    u.insert("size", int(size))
+    update(session, u)
 }
 
 fn tool_update(session: String, id: String, status: str, output: String) {
@@ -880,6 +926,7 @@ impl Agent {
         var compacted: (i64, i64)? = none
         // Asked to pick for a group chat, it answers as a router would.
         if context.contains("[loom: route]") { text = route_pick(context.copy()) }
+        var last_used: i64 = 0
         for step in script(text) {
             match step {
                 Step.Say(s) => {
@@ -1028,8 +1075,13 @@ impl Agent {
                     u.insert("used", int(used))
                     u.insert("size", int(size))
                     update(session.copy(), u)
+                    last_used = used
                 },
                 Step.Compacted(used, size) => compacted = some((used, size)),
+                Step.Compact(before, after, size) => {
+                    a.next_id += 1
+                    compaction(session.copy(), "compact_{a.next_id}", before, after, size)
+                },
                 Step.Limits(words) => limits(session.copy(), words),
                 Step.Account(name) => account(name),
                 Step.Config => {
@@ -1092,11 +1144,8 @@ impl Agent {
         }
         respond(id, Json.Object(r))
         if let (used, size) = compacted {
-            var u = LinkedMap<String, Json>()
-            u.insert("sessionUpdate", js(String("usage_update")))
-            u.insert("used", int(used))
-            u.insert("size", int(size))
-            update(session, u)
+            a.next_id += 1
+            compaction(session, "compact_{a.next_id}", last_used, used, size)
         }
     }
 

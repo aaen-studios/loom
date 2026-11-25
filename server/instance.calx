@@ -372,6 +372,7 @@ struct Proc {
     compacts: bool    // whether it offers /compact, as Claude's adapter does, which compacts idle sessions itself
     turned: Map<String, i64>    // ACP session -> when its last turn ended
     routes: List<String>    // the router's picks waiting for it to start, by their runs
+    compactions: Map<String, String>    // a compaction its program reports, by its call -> the line in the chat that says so
 }
 
 impl Proc {
@@ -384,6 +385,19 @@ impl Proc {
         _ = self.profiled.remove(session.copy())
         _ = self.turned.remove(session.copy())
         _ = self.configs.remove(session)
+    }
+
+    // Whether `session` is being picked up again, while what session/load plays
+    // back of it comes: what it did before, not now.
+    fn picking_up(self: Proc, session: String) -> bool {
+        for (_, w) in self.pending {
+            match w {
+                Pending.Resume(_, s) => if s == session { return true },
+                Pending.Warm(_, s) => if s == session { return true },
+                _ => {},
+            }
+        }
+        return false
     }
 }
 
@@ -693,6 +707,14 @@ enum Renew {
     Full    // its context was nearly full
     Tools    // its agent's tools changed, and a session keeps its tools
     Idle    // nothing was said in it for SESSION_IDLE_CLOSE_MS
+}
+
+// Whether a tool call's report is a compaction of its session's context, as
+// Claude's adapter reports one to a client without ACP's compaction updates: a
+// call named `compact`, with the tokens before and after in its rawOutput
+// (`preTokens`, `postTokens`). It shows as a line in the chat, not as a call.
+fn compaction(u: Json) -> bool {
+    return str_at(at(at(u, "_meta"), "claudeCode"), "toolName") == some(String("compact"))
 }
 
 // One window of a plan's limits, from Claude Code's rate-limit info: how much of
@@ -10048,7 +10070,7 @@ impl Instance {
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>(), compactions: Map<String, String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -10105,6 +10127,7 @@ impl Instance {
         } else {
             return
         }
+        try i.went_fresh(user.copy(), conversation.copy(), renew)
         // A turn with no message of its own, as a routine's quiet run, goes on from the newest.
         let (before, _) = try i.store.messages(user.copy(), conversation.copy(), if answering.len() > 0 { some(answering) } else { none }, 1)
         var said = String()
@@ -10915,7 +10938,9 @@ impl Instance {
     // What a session says of itself, whether a run is going or not: how full
     // its context is, to start a fresh one before it overflows (PLAN.md, "One
     // endless chat"), which a compaction while idle changes with no run, and
-    // whether its program offers /compact (PLAN.md, "Idle sessions").
+    // whether its program offers /compact (PLAN.md, "Idle sessions"). How
+    // full it is goes to the person's apps too, and a compaction its program
+    // reports becomes a line in the chat.
     fn note_session(i: mut Instance, p: mut Proc, params: Json) {
         let session = str_at(params.copy(), "sessionId") ?? String()
         let u = at(params, "update")
@@ -10923,7 +10948,10 @@ impl Instance {
         if kind == "usage_update" {
             let used = int_at(u.copy(), "used") ?? 0
             let size = int_at(u.copy(), "size") ?? 0
-            if size > 0 and session.len() > 0 { i.context.insert(session, (used, size)) }
+            if size > 0 and session.len() > 0 {
+                i.context.insert(session.copy(), (used, size))
+                if let err(e) = i.keep_context(p, session, used, size) { eprintln("loom: keeping how full a session is: {e}") }
+            }
             // Claude's adapter puts its plan's limits on it, as Claude Code's rate-limit info.
             let info = at(at(u, "_meta"), "_claude/rateLimit")
             if info != Json.Null {
@@ -10935,6 +10963,97 @@ impl Instance {
                     if str_at(c, "name") == some(String("compact")) { p.compacts = true }
                 }
             }
+        } else if (kind == "tool_call" or kind == "tool_call_update") and compaction(u.copy()) and not p.picking_up(session.copy()) {
+            if let err(e) = i.compacted(mut p, session, u) { eprintln("loom: saying a session was compacted: {e}") }
+        }
+    }
+
+    // The conversation an ACP session of `p`'s is the session of.
+    fn session_chat(i: Instance, p: Proc, session: String) -> String? {
+        for (conversation, s) in p.sessions {
+            if s == session { return some(conversation.copy()) }
+        }
+        if let run = i.run_for_session(session) {
+            if let r = i.runs.find(run) { return some(r.conversation.copy()) }
+        }
+        return none
+    }
+
+    // How full a session's context is, kept with its chat, and told to the
+    // person's apps when what they show of it changes: its percent, or its window.
+    fn keep_context(i: Instance, p: Proc, session: String, used: i64, size: i64) ! Error {
+        let conversation = i.session_chat(p, session) else return
+        let (was, window): (i64, i64) = try i.store.context(p.user.copy(), conversation.copy()) ?? (i64(0), i64(0))
+        if window == size and was * 100 / window == used * 100 / size { return }
+        try i.store.put_context(p.user.copy(), conversation.copy(), used, size)
+        try i.tell_context(p.user.copy(), conversation, used, size)
+    }
+
+    fn tell_context(i: Instance, user: String, conversation: String, used: i64, size: i64) ! Error {
+        let context = Obj.new().i("used", used).i("size", size).done()
+        try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).j("context", context).done()).done())
+    }
+
+    // A chat goes on in a fresh session: its context starts again from nothing,
+    // and when the last one was nearly full, a line in the chat says so (PLAN.md,
+    // "One endless chat").
+    fn went_fresh(i: Instance, user: String, conversation: String, renew: Renew) ! Error {
+        let (_, size): (i64, i64) = try i.store.context(user.copy(), conversation.copy()) ?? (i64(0), i64(0))
+        if size > 0 {
+            try i.store.put_context(user.copy(), conversation.copy(), 0, size)
+            try i.tell_context(user.copy(), conversation.copy(), 0, size)
+        }
+        if let Renew.Full = renew { _ = try i.chat_line(user, conversation, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+    }
+
+    // A line across the chat from loom, not a message of anyone's: a `loom`
+    // message with one `mark` block. Its id.
+    fn chat_line(i: Instance, user: String, conversation: String, mark: Json) -> String ! Error {
+        let id = try i.store.new_id("msg")
+        let message = Obj.new().s("id", id.copy()).s("conversation", conversation.copy()).s("role", String("loom")).i("at", now()).j("blocks", Json.Array([mark.copy()])).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user, "message.created", Obj.new().s("conversation", conversation).j("message", message).done())
+        return id
+    }
+
+    // A compaction its program reported (`compaction`): once it's done, a line
+    // in its chat says so, with the tokens its context held before and after
+    // where the program says, filled in as a later report adds them. One that
+    // failed leaves no line.
+    fn compacted(i: Instance, p: mut Proc, session: String, u: Json) ! Error {
+        let call = str_at(u.copy(), "toolCallId") ?? String()
+        let status = str_at(u.copy(), "status") ?? String()
+        let facts = at(u, "rawOutput")
+        var before = int_at(facts.copy(), "preTokens") ?? 0
+        let after = int_at(facts, "postTokens") ?? 0
+        if status == "failed" {
+            _ = p.compactions.remove(call)
+            return
+        }
+        let line: String? = if let v = p.compactions.find(call.copy()) { some(v.copy()) } else { none }
+        if line == none and status != "completed" and before == 0 { return }
+        let conversation = i.session_chat(p, session.copy()) else return
+        if line == none and before == 0 {
+            let (used, _): (i64, i64) = i.context.get(session) ?? (i64(0), i64(0))
+            before = used
+        }
+        var mark = Obj.new().s("kind", String("mark")).s("mark", String("compacted"))
+        if before > 0 { mark = mark.i("before", before) }
+        if after > 0 { mark = mark.i("after", after) }
+        match line {
+            some(id) => {
+                if after == 0 { return }
+                var kept = try i.store.message(p.user.copy(), id) else return
+                kept = merge(kept, Obj.new().j("blocks", Json.Array([mark.done()])).done())
+                try i.store.put_message(p.user.copy(), kept.copy())
+                try i.event(p.user.copy(), "message.updated", Obj.new().s("conversation", conversation).j("message", kept).done())
+                _ = p.compactions.remove(call)
+            },
+            none => {
+                let id = try i.chat_line(p.user.copy(), conversation, mark.done())
+                // The tokens after can come in a later report.
+                if after == 0 { p.compactions.insert(call, id) }
+            },
         }
     }
 
@@ -10983,7 +11102,9 @@ impl Instance {
     }
 
     fn update_run(i: mut Instance, r: mut Run, u: Json) ! Error {
-        let kind = str_at(u, "sessionUpdate") ?? String()
+        let kind = str_at(u.copy(), "sessionUpdate") ?? String()
+        // A compaction is a line in the chat (note_session), not a step of the reply.
+        if (kind == "tool_call" or kind == "tool_call_update") and compaction(u.copy()) { return }
         if kind == "agent_message_chunk" or kind == "agent_thought_chunk" {
             let content = at(u, "content")
             if (str_at(content, "type") ?? String()) == "text" {
