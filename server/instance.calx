@@ -1608,6 +1608,11 @@ impl Instance {
                 _ = try store.append(user.copy(), "routine.updated", Obj.new().j("routine", after).done())
             }
         }
+        // Agents' threads with agents kept before they were marked as theirs: from now
+        // on they're never the agent's chat, and the devices hear so, as a change.
+        for (user, conversation, by) in try store.mark_old_asks() {
+            _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("asked_by", by).done()).done())
+        }
         var server = try Server.listen(config.port, config.host.copy())
         server.log = false
         server.max_message = protocol.MAX_FRAME
@@ -5020,9 +5025,12 @@ impl Instance {
             conversation = try i.store.conversation(g.user.copy(), id) ?? Json.Null
         }
         if conversation == Json.Null {
-            conversation = try i.store.add_conversation(g.user.copy(), to_id.copy(), "From {from_name}")
+            // The asking agent's thread with it, never its chat with the person.
+            let made = str_at(try i.store.add_conversation(g.user.copy(), to_id.copy(), "From {from_name}"), "id") ?? String()
+            try i.store.mark_ask(g.user.copy(), made.copy(), g.agent.copy())
+            try i.store.set_meta(kept, made.copy())
+            conversation = try i.store.conversation(g.user.copy(), made) ?? Json.Null
             try i.event(g.user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-            try i.store.set_meta(kept, str_at(conversation.copy(), "id") ?? String())
         }
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         for (_, r) in i.runs {
@@ -6136,9 +6144,12 @@ impl Instance {
             conversation = try i.store.conversation(user.copy(), c) ?? Json.Null
         }
         if conversation == Json.Null {
-            conversation = try i.store.add_conversation(user.copy(), to_id.copy(), "From {plugin_name}")
+            // The panel's thread with it, never its chat with the person.
+            let made = str_at(try i.store.add_conversation(user.copy(), to_id.copy(), "From {plugin_name}"), "id") ?? String()
+            try i.store.mark_ask(user.copy(), made.copy(), "plugin:{id}")
+            try i.store.set_meta(kept, made.copy())
+            conversation = try i.store.conversation(user.copy(), made) ?? Json.Null
             try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-            try i.store.set_meta(kept, str_at(conversation.copy(), "id") ?? String())
         }
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         var answering = false
