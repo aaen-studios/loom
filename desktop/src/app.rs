@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
+use gpui_kit::base::TextSelection;
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState,
     MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
@@ -195,14 +196,24 @@ enum Menu {
 /// (`menu_at`) instead.
 #[derive(Clone, PartialEq, Eq)]
 enum Ctx {
-    /// A message in the chat, by its id.
-    Message(String),
+    /// A message in the chat, by its id, and what's selected in it.
+    Message(String, Option<String>),
     /// A server in the sidebar's foot, by its folder.
     Server(String),
     /// The sidebar's list of agents, under its last.
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
+}
+
+/// Words selected in a message, and where the selection ended: a small bar there has
+/// Copy, Quote and, in an agent's reply, Ask about this (LOO-200).
+#[derive(Clone)]
+struct Picked {
+    at: Point<Pixels>,
+    message: String,
+    text: String,
+    agent: bool,
 }
 
 /// The composer's + menu while it's open (PLAN.md, "The composer's + menu").
@@ -281,6 +292,13 @@ pub struct Loom {
     menu_at: Option<Point<Pixels>>,
     /// A menu a right-click opened, where and on what.
     ctx: Option<(Point<Pixels>, Ctx)>,
+    /// What was selected in a message, with what can be done with it, by where the
+    /// selection ended (LOO-200).
+    picked: Option<Picked>,
+    /// The message a quote jumped to, lit for a moment.
+    lit: Option<String>,
+    /// The message a quote jumps to, once the chat has reached back to it.
+    jumping: Option<String>,
     /// When the picture viewer opened, which it fades in from.
     viewer_at: Instant,
     /// The open picture's zoom and pan (`crate::zoom`), from its fit when another shows.
@@ -1356,6 +1374,9 @@ ACTA_KEY=secret:ACTA_KEY",
             menu: None,
             menu_at: None,
             ctx: None,
+            picked: None,
+            lit: None,
+            jumping: None,
             viewer_at: Instant::now(),
             zoom: None,
             viewer_sizes: HashMap::new(),
@@ -2757,6 +2778,7 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.rows.len() > 1 {
             crate::perf::once("chat shown");
         }
+        self.jump_on(cx);
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
@@ -2959,6 +2981,8 @@ ACTA_KEY=secret:ACTA_KEY",
     fn select(&mut self, agent: String, cx: &mut Context<Self>) {
         self.screen = Screen::Chat;
         self.popup = None;
+        self.jumping = None;
+        self.picked = None;
         // An agent's own page beside the chat is the old agent's: it closes.
         if self.side.is_some() && self.side != Some(Screen::Plugins) {
             self.side = None;
@@ -9087,11 +9111,42 @@ ACTA_KEY=secret:ACTA_KEY",
             .shadow_lg()
             .on_mouse_down_out(cx.listener(move |this, _, _, cx| close(this, cx)));
         match on {
-            Ctx::Message(id) => {
+            Ctx::Message(id, picked) => {
                 let m = self.rows.iter().find_map(|r| match r {
                     Row::Message(m) if m.id == id => Some(m.clone()),
                     _ => None,
                 })?;
+                // Words selected in it: what's done with them, first (LOO-200).
+                if let Some(words) = picked.filter(|w| model::selected_in(&m, w)) {
+                    for (n, (act, icon, title)) in
+                        pick_acts(m.role == "agent").into_iter().enumerate()
+                    {
+                        let (message, words) = (m.id.clone(), words.clone());
+                        panel = panel.child(
+                            self.menu_item(
+                                SharedString::from(format!("ctx-picked-{n}")),
+                                icon,
+                                title,
+                                false,
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    close(this, cx);
+                                    this.act_on_picked(act, &message, &words, window, cx);
+                                },
+                            )),
+                        );
+                    }
+                    panel = panel.child(div().my(px(space::XS)).h(px(1.0)).bg(p.line));
+                }
+                let reply_id = m.id.clone();
+                panel = panel.child(
+                    self.menu_item("ctx-reply", Ico::Reply, "Reply", false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            close(this, cx);
+                            this.start_reply(&reply_id, None, false, window, cx);
+                        })),
+                );
                 let text = model::copy_text(&m, &self.model.tools);
                 if !text.is_empty() {
                     panel = panel.child(
@@ -10043,6 +10098,7 @@ ACTA_KEY=secret:ACTA_KEY",
             pad,
             hold,
             hold_keys,
+            lit: self.lit.clone(),
         };
         // The list is a view of its own, built with the window, and each finished message
         // in it another, drawn from its cache until what it shows changes (`RowView`): a
@@ -10094,6 +10150,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
         }
         let attached = self.attached_row(window, cx);
+        let reply_bar = self.reply_bar(cx);
         let plus_open = self.plus.is_some();
         let plus_menu = self.plus.clone().map(|menu| self.plus_menu(&menu, cx));
         let picks = self.mention_picks();
@@ -10124,6 +10181,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         anchored().anchor(Anchor::BottomLeft).child(menu),
                     )))
                 })
+                .when_some(reply_bar, |d, bar| d.child(bar))
                 .when_some(attached, |d, row| d.child(row))
                 .child(
                     div()
@@ -10220,13 +10278,18 @@ ACTA_KEY=secret:ACTA_KEY",
                                     this.mention_key(MentionKey::Take, window, cx)
                                 }))
                                 .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
-                                    this.mention_key(MentionKey::Up, window, cx)
+                                    this.mention_key(MentionKey::Up, window, cx);
+                                    this.composer_up(window, cx)
                                 }))
                                 .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
                                     this.mention_key(MentionKey::Down, window, cx)
                                 }))
                                 .capture_action(cx.listener(|this, _: &Escape, window, cx| {
-                                    this.mention_key(MentionKey::Shut, window, cx)
+                                    let open = this.mention.is_some();
+                                    this.mention_key(MentionKey::Shut, window, cx);
+                                    if !open {
+                                        this.composer_escape(cx)
+                                    }
                                 }))
                                 .child(self.composer_textarea(cx)),
                         )
@@ -16887,7 +16950,8 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
-    /// Scrolls the chat to a message, when it's among those loaded.
+    /// Scrolls the chat to a message and lights it for a moment. One further back than the
+    /// chat has loaded is reached for, a page at a time, and jumped to once it's here.
     fn jump_to(&mut self, message: &str, cx: &mut Context<Self>) {
         let at = self
             .rows
@@ -16895,16 +16959,293 @@ ACTA_KEY=secret:ACTA_KEY",
             .position(|r| matches!(r, Row::Message(m) if m.id == message));
         match at {
             Some(ix) => {
+                self.jumping = None;
                 self.scroller.update(cx, |s, cx| {
                     s.scroll_to_item(ix, cx);
                 });
+                self.lit = Some(message.to_string());
+                let lit = message.to_string();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(1400))
+                        .await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.lit.as_deref() == Some(lit.as_str()) {
+                            this.lit = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
             }
-            None => self
-                .model
-                .notices
-                .push("That one is further back than the chat has loaded.".into()),
+            None if self.model.load_further_back() => {
+                self.jumping = Some(message.to_string());
+                self.fetch();
+            }
+            None => {
+                self.jumping = None;
+                self.model
+                    .notices
+                    .push("That message isn't in this chat any more.".into());
+            }
         }
         cx.notify();
+    }
+
+    /// After the chat's rows changed: the message a quote jumps to, once it's here, or
+    /// the chat reaches further back for it.
+    fn jump_on(&mut self, cx: &mut Context<Self>) {
+        let Some(message) = self.jumping.clone() else {
+            return;
+        };
+        // Found, or the page asked for came without it: further back again, or not at all.
+        let here = self
+            .rows
+            .iter()
+            .any(|r| matches!(r, Row::Message(m) if m.id == message));
+        if here || !self.model.reaching_back() {
+            self.jump_to(&message, cx);
+        }
+    }
+
+    /// Starts a reply to the chat's message `message`, to the part `quote` when one was
+    /// selected, with the composer ready to type in (PLAN.md, "Replying to a message").
+    fn start_reply(
+        &mut self,
+        message: &str,
+        quote: Option<&str>,
+        ask: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.model.reply_to(message, quote, ask) {
+            self.picked = None;
+            TextSelection::clear(window, cx);
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Does what was picked for words selected in a message: copies them, or starts a
+    /// reply quoting them, or asking about them.
+    fn act_on_picked(
+        &mut self,
+        act: PickAct,
+        message: &str,
+        words: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picked = None;
+        match act {
+            PickAct::Copy => {
+                cx.write_to_clipboard(ClipboardItem::new_string(words.to_string()));
+                self.notice = Some(("Copied.".into(), Instant::now(), true));
+                cx.notify();
+            }
+            PickAct::Quote => self.start_reply(message, Some(words), false, window, cx),
+            PickAct::Ask => self.start_reply(message, Some(words), true, window, cx),
+        }
+    }
+
+    /// Words were selected in a message, ending at `at`: the small bar there says what can
+    /// be done with them. Words that aren't the message's, as a selection that ran on past
+    /// it, have no bar.
+    fn picked_in(
+        &mut self,
+        message: &str,
+        words: String,
+        at: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let words = words.trim().to_string();
+        let found = self.rows.iter().find_map(|r| match r {
+            Row::Message(m) if m.id == message && !m.live && !m.queued => Some(m),
+            _ => None,
+        });
+        self.picked = found
+            .filter(|m| !words.is_empty() && model::selected_in(m, &words))
+            .map(|m| Picked {
+                at,
+                message: message.to_string(),
+                text: words,
+                agent: m.role == "agent",
+            });
+        cx.notify();
+    }
+
+    /// The bar over words selected in a message: Copy, Quote, and Ask about this in an
+    /// agent's reply (LOO-200).
+    fn picked_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.p;
+        let picked = self.picked.clone()?;
+        let mut bar = div()
+            .occlude()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .p(px(2.0))
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.picked = None;
+                cx.notify();
+            }));
+        for (n, (act, icon, title)) in pick_acts(picked.agent).into_iter().enumerate() {
+            let (message, words) = (picked.message.clone(), picked.text.clone());
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("picked-{n}")))
+                    .role(Role::Button)
+                    .aria_label(title)
+                    .flex()
+                    .items_center()
+                    .gap(px(space::XS))
+                    .px(px(space::S))
+                    .py(px(space::XS))
+                    .rounded(px(radius::ROW))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink)
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child(Icon::new(icon).xsmall().text_color(p.ink_2))
+                    .child(title)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.act_on_picked(act, &message, &words, window, cx);
+                    })),
+            );
+        }
+        Some(
+            deferred(
+                anchored()
+                    .position(point(picked.at.x, picked.at.y + px(space::S)))
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(bar),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    /// Over the composer's words while a reply is written: whom it replies to and the
+    /// first line of what, along a thin line in the colour of who said it, and its ×.
+    fn reply_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.p;
+        let r = self.model.replying()?.clone();
+        let (who, color) = self.quoted_by(&r);
+        let head = if r.ask {
+            format!("Asking {who} about")
+        } else if r.role == "person" && !r.from.starts_with("a_") {
+            "Replying to yourself".to_string()
+        } else {
+            format!("Replying to {who}")
+        };
+        let line = r.line();
+        let shown = if line.is_empty() {
+            r.files.first().map(|f| f.name.clone()).unwrap_or_default()
+        } else {
+            line
+        };
+        Some(
+            div()
+                .id("reply-bar")
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .pl(px(space::S))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(2.0))
+                        .h(px(28.0))
+                        .rounded_full()
+                        .bg(color),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(color)
+                                .child(head),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink_2)
+                                .truncate()
+                                .child(shown),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("reply-cancel")
+                        .role(Role::Button)
+                        .aria_label("Cancel reply")
+                        .flex_none()
+                        .size(px(22.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(radius::ROW))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                        .tooltip(tip("Cancel reply"))
+                        .child(Icon::new(IconName::Close).xsmall())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.cancel_reply();
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Who said what a quote quotes, as the chat names them, and their colour: the agent,
+    /// another agent that sent it, or the person, in this agent's colour.
+    fn quoted_by(&self, r: &model::ReplyTo) -> (String, Hsla) {
+        let here = self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|a| self.model.agent(a));
+        let tint = here.map_or(self.p.ink_2, |a| thread::color(&a.color, self.p.dark));
+        quoted_by(self.p, r, &self.model.agents, tint)
+    }
+
+    /// ↑ in an empty composer, with no picker open: a reply to the chat's newest message.
+    fn composer_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let empty = self.composer.read(cx).value().trim().is_empty();
+        if self.mention.is_some() || !empty || self.model.replying().is_some() {
+            return;
+        }
+        if self.model.reply_to_last() {
+            self.composer.update(cx, |c, cx| c.focus(window, cx));
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    /// Esc in the composer, with no picker open: the reply being written goes as a
+    /// message of its own.
+    fn composer_escape(&mut self, cx: &mut Context<Self>) {
+        if self.mention.is_some() {
+            return;
+        }
+        if self.model.replying().is_some() && self.model.cancel_reply() {
+            cx.stop_propagation();
+            cx.notify();
+        }
     }
 
     /// The newest message in the chat, not counting one waiting to be sent: its choices
@@ -17066,6 +17407,136 @@ ACTA_KEY=secret:ACTA_KEY",
 /// of the agent's colour, a little more in the dark. With Vibrant bubbles it's the agent's
 /// colour itself, as saturated as it is, made light in the light theme and deep in the
 /// dark, so the words read on it whichever colour it is (`motion::ink_on` makes sure).
+/// What can be done with words selected in a message (LOO-200).
+#[derive(Clone, Copy)]
+enum PickAct {
+    Copy,
+    Quote,
+    Ask,
+}
+
+/// Copy and Quote, and Ask about this in an agent's reply.
+fn pick_acts(agent: bool) -> Vec<(PickAct, Ico, &'static str)> {
+    let mut out = vec![
+        (PickAct::Copy, Ico::Copy, "Copy"),
+        (PickAct::Quote, Ico::TextQuote, "Quote"),
+    ];
+    if agent {
+        out.push((
+            PickAct::Ask,
+            Ico::MessageCircleQuestionMark,
+            "Ask about this",
+        ));
+    }
+    out
+}
+
+/// Who said what a quote quotes, as the chat names them, and their colour: the agent,
+/// another agent that sent it, or the person, "You", in `tint`, the chat's agent's.
+fn quoted_by(
+    p: Palette,
+    r: &model::ReplyTo,
+    agents: &[model::Agent],
+    tint: Hsla,
+) -> (String, Hsla) {
+    let agent = if r.role == "agent" {
+        Some(r.agent.as_str())
+    } else {
+        Some(r.from.as_str()).filter(|f| f.starts_with("a_"))
+    };
+    match agent {
+        Some(id) => match agents.iter().find(|a| a.id == id) {
+            Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
+            None => ("An agent".into(), p.ink_2),
+        },
+        None => ("You".into(), tint),
+    }
+}
+
+/// The quote over a message that replies to another: who said it, in their colour, and
+/// a line or two of what, with its files' pills, along a thin line of that colour. A
+/// click goes to the original (PLAN.md, "Replying to a message").
+fn quote_view(
+    p: Palette,
+    r: &model::ReplyTo,
+    tint: Hsla,
+    files: &HashMap<String, String>,
+    key: String,
+    this: WeakEntity<Loom>,
+) -> Stateful<Div> {
+    let agents = MENTION_AGENTS.with(|a| a.borrow().clone());
+    let (who, color) = quoted_by(p, r, &agents, tint);
+    let words = model::spoken(&r.text);
+    let mut pills = div().flex().flex_wrap().gap(px(space::XS));
+    for f in &r.files {
+        let thumb = files
+            .get(&format!("{}.thumb", f.file))
+            .filter(|_| f.image());
+        pills = pills.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_2)
+                .child(match thumb {
+                    Some(path) => img(std::path::PathBuf::from(path))
+                        .when_some(chat_images(), |i, c| i.image_cache(&c))
+                        .size(px(16.0))
+                        .rounded(px(3.0))
+                        .object_fit(ObjectFit::Cover)
+                        .into_any_element(),
+                    None => Icon::new(if f.image() { Ico::Image } else { Ico::FileText })
+                        .xsmall()
+                        .text_color(p.ink_3)
+                        .into_any_element(),
+                })
+                .child(model::middle_cut(&f.name, model::PILL_NAME)),
+        );
+    }
+    let to = r.message.clone();
+    div()
+        .id(SharedString::from(format!("quote-{key}")))
+        .role(Role::Button)
+        .aria_label(format!("Replying to {who}: {}", r.line()))
+        .max_w(px(420.0))
+        .flex()
+        .gap(px(space::S))
+        .px(px(space::S))
+        .py(px(2.0))
+        .rounded(px(radius::ROW))
+        .cursor_pointer()
+        .soft_hover(transparent_black(), p.hover, None)
+        .child(div().flex_none().w(px(2.0)).rounded_full().bg(color))
+        .child(
+            div()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(1.0))
+                .child(
+                    div()
+                        .text_size(px(size::CAPTION))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(color)
+                        .child(who),
+                )
+                .when(!words.trim().is_empty(), |d| {
+                    d.child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink_2)
+                            .line_clamp(2)
+                            .child(words.trim().to_string()),
+                    )
+                })
+                .when(!r.files.is_empty(), |d| d.child(pills)),
+        )
+        .on_click(move |_, _, cx| {
+            let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
+        })
+}
+
 fn person_bubble(p: Palette, tint: Hsla, vibrant: bool) -> Hsla {
     if vibrant {
         return Hsla {
@@ -17128,6 +17599,10 @@ fn person(
                 })
                 .child(from.clone()),
         );
+    }
+    // What it replies to, over everything else.
+    if let Some(r) = &m.reply {
+        out = out.child(quote_view(p, r, tint, files, m.id.clone(), this.clone()));
     }
     // Its files over its words, two or more pictures as one stack.
     let mut stacked: Vec<model::FileRef> = Vec::new();
@@ -22586,6 +23061,7 @@ impl Render for Loom {
         });
         let menu_scrim = self.menu_scrim(cx);
         let ctx_menu = self.ctx_menu(cx);
+        let picked_bar = self.picked_bar(cx);
         let popup = self.popup_view(window, cx);
         let ask = self.ask_view(cx);
         let browser_full = self.browser_full(window, cx);
@@ -22625,6 +23101,7 @@ impl Render for Loom {
             .when_some(toast, |d, t| d.child(t))
             .when_some(menu_scrim, |d, s| d.child(s))
             .when_some(ctx_menu, |d, m| d.child(m))
+            .when_some(picked_bar, |d, b| d.child(b))
             .when_some(whole, |d, c| d.child(c))
             .when_some(splash, |d, s| d.child(s))
             .when_some(self.auto.at(), |d, at| d.child(auto_marker(p, at)))
@@ -23560,6 +24037,7 @@ mod row_tests {
             routine: String::new(),
             routine_name: String::new(),
             pinned: false,
+            reply: None,
             mentions: Vec::new(),
             sources: Vec::new(),
             links: HashMap::new(),
@@ -23627,6 +24105,7 @@ mod row_tests {
             when_at: super::WhenAt::Outside,
             hold: (None, None),
             hold_keys: Rc::default(),
+            lit: false,
         }
     }
 
@@ -23857,6 +24336,8 @@ struct ChatInputs {
     hold: HoldShown,
     /// The focus each risky question's Allow takes (`Loom::hold_keys`).
     hold_keys: Rc<HashMap<String, FocusHandle>>,
+    /// The message a quote jumped to, lit for a moment.
+    lit: Option<String>,
 }
 
 /// Allow held on a risky question now, and how far along; and the question a plain click
@@ -23996,6 +24477,8 @@ struct RowInputs {
     when_at: WhenAt,
     hold: HoldShown,
     hold_keys: Rc<HashMap<String, FocusHandle>>,
+    /// Lit for a moment, once a quote jumped to it.
+    lit: bool,
 }
 
 impl RowInputs {
@@ -24025,6 +24508,7 @@ impl RowInputs {
             && self.when_at == o.when_at
             && self.hold == o.hold
             && self.hold_keys == o.hold_keys
+            && self.lit == o.lit
     }
 }
 
@@ -24218,6 +24702,7 @@ fn chat_list(
         pad,
         hold,
         hold_keys,
+        lit,
     } = i;
     let now = chrono::Local::now();
     let (content, gutter) = row_room(width, column);
@@ -24315,6 +24800,7 @@ fn chat_list(
             } else {
                 Rc::default()
             },
+            lit: m.is_some_and(|m| lit.as_deref() == Some(m.id.as_str())),
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -24538,15 +25024,31 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 }),
         );
     }
-    // A right-click on a kept message: Copy, Pin and Branch from here.
+    // A right-click on a kept message: Reply, Copy, Pin and Branch from here, and what
+    // can be done with words selected in it.
     let on_right = branch_at.clone().map(|id| {
         let this = this.clone();
-        move |e: &MouseDownEvent, _: &mut Window, cx: &mut App| {
+        move |e: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+            let words = TextSelection::selected_text(window, cx);
+            let words = Some(words.trim().to_string()).filter(|w| !w.is_empty());
             let _ = this.update(cx, |loom, cx| {
-                loom.open_ctx(e.position, Ctx::Message(id.clone()), cx)
+                loom.picked = None;
+                loom.open_ctx(e.position, Ctx::Message(id.clone(), words), cx)
             });
         }
     });
+    // Words selected in it, once the button's up: the bar over them (LOO-200).
+    let on_picked = branch_at.clone().map(|id| {
+        let this = this.clone();
+        move |e: &MouseUpEvent, window: &mut Window, cx: &mut App| {
+            let words = TextSelection::selected_text(window, cx);
+            let _ = this.update(cx, |loom, cx| loom.picked_in(&id, words, e.position, cx));
+        }
+    });
+    // Beside it, on hover, a way to reply to it.
+    let reply_at = branch_at.clone();
+    let to_reply = this.clone();
+    let lit = i.lit;
     // To a screen reader, a message is an item in the chat, named by who said
     // what.
     let (row_id, said) = match row {
@@ -24570,6 +25072,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         .items_center()
         .px(px(space::XL))
         .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
+        .when_some(on_picked, |d, f| d.on_mouse_up(MouseButton::Left, f))
         .when(is_new, |d| d.child(divider))
         .children(time_line)
         .child(
@@ -24587,10 +25090,41 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 .pb(px(if joined.below { space::XS } else { space::S }))
                 .relative()
                 .group("row")
+                // Lit for a moment, once a quote jumped to it.
+                .rounded(px(radius::BUBBLE))
+                .when(lit, |d| d.bg(tint.opacity(if p.dark { 0.16 } else { 0.1 })))
                 .child(inner)
                 .child(links)
                 // Over the message, where it's in the corner.
                 .children(when)
+                .when_some(reply_at, |d, id| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("reply-row-{id}")))
+                            .role(Role::Button)
+                            .aria_label("Reply")
+                            .absolute()
+                            .top(px(space::XS + 28.0))
+                            .right(px(HOVER_REACH - 30.0))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .cursor_pointer()
+                            .text_color(p.ink_3)
+                            .opacity(0.0)
+                            .group_hover("row", |s| s.opacity(1.0))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                            .tooltip(tip("Reply"))
+                            .child(Icon::new(Ico::Reply).xsmall())
+                            .on_click(move |_, window, cx| {
+                                let _ = to_reply.update(cx, |loom, cx| {
+                                    loom.start_reply(&id, None, false, window, cx)
+                                });
+                            }),
+                    )
+                })
                 .when_some(branch_at, |d, id| {
                     d.child(
                         div()
@@ -24598,7 +25132,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                             .role(Role::Button)
                             .aria_label("Branch from here")
                             .absolute()
-                            .top(px(space::XS + 28.0))
+                            .top(px(space::XS + 56.0))
                             .right(px(HOVER_REACH - 30.0))
                             .size(px(24.0))
                             .flex()

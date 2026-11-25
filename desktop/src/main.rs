@@ -328,6 +328,8 @@ gpui_kit::assets::icon_assets!(
         Play,
         Pin,
         PinOff,
+        Reply,
+        TextQuote,
         MessageCircleQuestionMark,
         GitBranch,
         AppWindow,

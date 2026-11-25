@@ -2266,6 +2266,11 @@ pub fn size_of(bytes: u64) -> String {
     }
 }
 
+/// How many of a chat's newest messages it shows, and how many more it reaches back for
+/// a message a quote jumps to, a page at a time (the core gives 2,000 at most).
+const MESSAGES_PAGE: usize = 200;
+const MESSAGES_FURTHEST: usize = 1800;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -2295,6 +2300,102 @@ pub struct Message {
     /// when the message doesn't say: a person's, one still being written, or one kept
     /// before messages said.
     pub status: String,
+    /// For a person's message that replies to another, what it replies to.
+    pub reply: Option<ReplyTo>,
+}
+
+/// What a person's message replies to (PLAN.md, "Replying to a message"), as the
+/// instance keeps it with the message: the message, who said it, and what's quoted.
+/// While a reply is written, the same, as the composer's bar shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReplyTo {
+    pub message: String,
+    /// `agent` or `person`.
+    pub role: String,
+    /// The agent that said it, for an agent's.
+    pub agent: String,
+    /// The device or the agent that sent it, for a person's.
+    pub from: String,
+    /// The part selected, or the message's words.
+    pub text: String,
+    /// Only a part of it, selected.
+    pub part: bool,
+    /// Asking about that part.
+    pub ask: bool,
+    /// Its files, for the whole message.
+    pub files: Vec<FileRef>,
+}
+
+impl ReplyTo {
+    /// The `reply` of a message, or of a message waiting to go.
+    pub fn of(m: &Value) -> Option<ReplyTo> {
+        let r = m.get("reply")?;
+        let message = s(r, "message");
+        if message.is_empty() {
+            return None;
+        }
+        Some(ReplyTo {
+            message,
+            role: s(r, "role"),
+            agent: s(r, "agent"),
+            from: s(r, "from"),
+            text: s(r, "text"),
+            part: r.get("part").and_then(Value::as_bool).unwrap_or(false),
+            ask: r.get("ask").and_then(Value::as_bool).unwrap_or(false),
+            files: r
+                .get("files")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().map(FileRef::of).collect())
+                .unwrap_or_default(),
+        })
+    }
+
+    /// Starts a reply to `m`, in `agent`'s chat: to a part of it, `quote`, when one was
+    /// selected, asking about it with `ask`. Its words are a reply's answer, its last
+    /// words as `parts` has them, or a person's whole message, as the instance keeps them.
+    pub fn to(m: &Message, agent: &str, quote: Option<&str>, ask: bool) -> ReplyTo {
+        let quote = quote.map(str::trim).filter(|q| !q.is_empty());
+        let words: Vec<&str> = m
+            .blocks
+            .iter()
+            .filter(|b| b.kind == "text" && b.parent.is_none() && !b.text.trim().is_empty())
+            .map(|b| b.text.trim())
+            .collect();
+        let text = match quote {
+            Some(q) => q.to_string(),
+            None if m.role == "agent" => words.last().copied().unwrap_or_default().to_string(),
+            None => words.join("\n"),
+        };
+        ReplyTo {
+            message: m.id.clone(),
+            role: m.role.clone(),
+            agent: if m.role == "agent" {
+                agent.to_string()
+            } else {
+                String::new()
+            },
+            from: String::new(),
+            text,
+            part: quote.is_some(),
+            ask: ask && quote.is_some(),
+            files: if quote.is_some() {
+                Vec::new()
+            } else {
+                m.blocks.iter().filter_map(|b| b.file.clone()).collect()
+            },
+        }
+    }
+
+    /// What a quote shows of its words: its first line with something in it, links and
+    /// mentions as their words.
+    pub fn line(&self) -> String {
+        spoken(&self.text)
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    }
 }
 
 /// How a form card in a reply stands, as its card draws it.
@@ -3121,6 +3222,24 @@ pub fn copy_text(m: &Message, tools: &Tools) -> String {
         .map(|&i| m.blocks[i].text.trim())
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+/// Whether `selected`, words selected in the chat, are all in `m`, as it shows them: a
+/// selection that ran on past it into the next message isn't one of its own.
+pub fn selected_in(m: &Message, selected: &str) -> bool {
+    let squash = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let picked = squash(selected);
+    if picked.is_empty() {
+        return false;
+    }
+    let shown = m
+        .blocks
+        .iter()
+        .filter(|b| b.kind == "text" && b.parent.is_none())
+        .map(|b| spoken(&b.text))
+        .collect::<Vec<_>>()
+        .join(" ");
+    squash(&shown).contains(&picked)
 }
 
 /// Markdown as a screen reader should say it: its words, without the marks around
@@ -4054,6 +4173,13 @@ pub struct Model {
     /// The selected agent's messages, oldest first, with the queued ones last.
     pub messages: Vec<Message>,
     pub more_messages: bool,
+    /// How many of the chat's newest messages it asks for beyond the first page, to
+    /// reach one far back that a quote jumps to.
+    messages_more: usize,
+    /// Asked for more of them, which haven't come yet.
+    reaching: bool,
+    /// The message the next message replies to, while it's written.
+    replying: Option<ReplyTo>,
     pub selected: Option<String>,
     /// Agents with a reply that came while their chat wasn't open, until it is: their
     /// row in the sidebar is bold.
@@ -4349,11 +4475,14 @@ struct Queued {
     text: String,
     /// Its files: what the app knows of each from sending it, or only which file.
     files: Vec<FileRef>,
+    /// What it replies to, as the core worked it out.
+    reply: Option<ReplyTo>,
 }
 
 impl Queued {
     fn of(q: &Value) -> Queued {
         Queued {
+            reply: ReplyTo::of(q),
             cid: s(q, "cid"),
             agent: q.get("agent").and_then(Value::as_str).map(str::to_string),
             conversation: q
@@ -4539,7 +4668,7 @@ impl Model {
                 };
                 // Named by its conversation, so a page that comes after the chat changed
                 // isn't shown in it.
-                out.push(json!({"t": "core.get", "id": format!("app.messages:{conversation}"), "what": "messages", "conversation": conversation, "limit": 200}));
+                out.push(json!({"t": "core.get", "id": format!("app.messages:{conversation}"), "what": "messages", "conversation": conversation, "limit": MESSAGES_PAGE + self.messages_more}));
             } else if l == List::Tools {
                 // Only the calls the shown chat's blocks name, and the runs going on: a
                 // heavy user has tens of thousands of calls, and this comes at each one.
@@ -4863,6 +4992,8 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
+            self.messages_more = 0;
+            self.replying = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
@@ -4930,6 +5061,7 @@ impl Model {
             live: false,
             queued: false,
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
+            reply: ReplyTo::of(m),
             mentions: mentions_of(m),
             sources: sources_of(m),
             links: links_of(m),
@@ -6915,6 +7047,7 @@ impl Model {
                 }
                 self.messages_for = current;
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
+                self.reaching = false;
                 let messages: Vec<Message> = items
                     .iter()
                     .filter(|m| !routine_prompt(m))
@@ -6965,6 +7098,7 @@ impl Model {
                     links: HashMap::new(),
                     status: String::new(),
                     pinned: false,
+                    reply: q.reply.clone(),
                 });
             }
         }
@@ -7017,6 +7151,7 @@ impl Model {
                 links: HashMap::new(),
                 status: String::new(),
                 pinned: false,
+                reply: None,
             });
         }
         // A sign-in card says Signed in once the person has, and only waits quietly once
@@ -7353,7 +7488,78 @@ impl Model {
         if !files.is_empty() {
             frame["files"] = json!(files);
         }
+        if let Some(r) = self.replying() {
+            let mut reply = json!({"message": r.message});
+            if r.part {
+                reply["quote"] = json!(r.text);
+            }
+            if r.ask {
+                reply["ask"] = json!(true);
+            }
+            frame["reply"] = reply;
+        }
+        self.replying = None;
         Some(frame)
+    }
+
+    // --- Replying to a message (PLAN.md, "Replying to a message") ---
+
+    /// Starts a reply to the chat's message `message`: to a part of it, `quote`, when
+    /// one was selected, asking about it with `ask`. False for one that can't be
+    /// replied to, still written or waiting to go.
+    pub fn reply_to(&mut self, message: &str, quote: Option<&str>, ask: bool) -> bool {
+        let agent = self.selected.clone().unwrap_or_default();
+        let Some(m) = self
+            .messages
+            .iter()
+            .find(|m| m.id == message && !m.live && !m.queued)
+        else {
+            return false;
+        };
+        self.replying = Some(ReplyTo::to(m, &agent, quote, ask));
+        true
+    }
+
+    /// Starts a reply to the chat's newest message, as ↑ in an empty composer does.
+    pub fn reply_to_last(&mut self) -> bool {
+        let Some(id) = self
+            .shown()
+            .iter()
+            .rev()
+            .find(|m| !m.live && !m.queued)
+            .map(|m| m.id.clone())
+        else {
+            return false;
+        };
+        self.reply_to(&id, None, false)
+    }
+
+    /// What the message being written replies to, while it's in the chat on screen.
+    pub fn replying(&self) -> Option<&ReplyTo> {
+        let r = self.replying.as_ref()?;
+        self.messages.iter().any(|m| m.id == r.message).then_some(r)
+    }
+
+    /// Stops replying: the message goes as one of its own. Gives whether it was a reply.
+    pub fn cancel_reply(&mut self) -> bool {
+        self.replying.take().is_some()
+    }
+
+    /// Asks for more of the chat's older messages, to reach one a quote jumps to. False
+    /// when the chat has no more.
+    pub fn load_further_back(&mut self) -> bool {
+        if !self.more_messages || self.messages_more >= MESSAGES_FURTHEST {
+            return false;
+        }
+        self.messages_more += MESSAGES_PAGE;
+        self.reaching = true;
+        self.dirty.insert(List::Messages);
+        true
+    }
+
+    /// Whether older messages asked for with `load_further_back` are still to come.
+    pub fn reaching_back(&self) -> bool {
+        self.reaching
     }
 
     /// An answer the person picked on an agent's choices card, sent as their next
@@ -9550,6 +9756,83 @@ mod tests {
         m
     }
 
+    // LOO-198 and LOO-200: a reply to a message, the whole of it or a part selected,
+    // goes with the next message, and the message keeps what it replies to.
+    #[test]
+    fn a_reply_goes_with_the_next_message_and_the_message_keeps_it() {
+        let mut m = in_chat();
+        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "items": [
+            {"id": "msg_1", "role": "agent", "at": 1, "blocks": [
+                {"kind": "text", "text": "Let me look."},
+                {"kind": "tool", "call": "tc_1"},
+                {"kind": "text", "text": "The build passed at **14:02**."}
+            ]},
+            {"id": "msg_2", "role": "person", "from": "d_1", "at": 2,
+             "blocks": [{"kind": "text", "text": "Which build?"}],
+             "reply": {"message": "msg_1", "role": "agent", "agent": "a_1", "text": "14:02", "part": true}}
+        ]}));
+        let kept = m.messages[1]
+            .reply
+            .clone()
+            .expect("it keeps what it replies to");
+        assert_eq!(
+            (kept.message.as_str(), kept.text.as_str(), kept.part),
+            ("msg_1", "14:02", true)
+        );
+        // The whole reply: its answer, its last words.
+        assert!(m.reply_to("msg_1", None, false));
+        let r = m.replying().unwrap();
+        assert_eq!(
+            (r.agent.as_str(), r.line()),
+            ("a_1", "The build passed at 14:02.".to_string())
+        );
+        let f = m.send("Thanks").unwrap();
+        assert_eq!(f["reply"], json!({"message": "msg_1"}));
+        assert!(m.replying().is_none());
+        // A part selected, asked about.
+        assert!(model_selected(&m, "msg_1", "build passed"));
+        assert!(!model_selected(&m, "msg_1", "passed at 14:02. Which"));
+        assert!(m.reply_to("msg_1", Some(" passed at "), true));
+        let f = m.send("Why?").unwrap();
+        assert_eq!(
+            f["reply"],
+            json!({"message": "msg_1", "quote": "passed at", "ask": true})
+        );
+        // ↑ replies to the newest; Esc takes it away; another chat has none.
+        assert!(m.reply_to_last());
+        assert_eq!(m.replying().unwrap().message, "msg_2");
+        assert!(m.cancel_reply());
+        assert!(m.send("On its own").unwrap().get("reply").is_none());
+        assert!(m.reply_to("msg_1", None, false));
+        m.select(Some("a_2".into()));
+        assert!(m.replying().is_none());
+        // One still being written can't be replied to.
+        assert!(!m.reply_to("msg_9", None, false));
+    }
+
+    fn model_selected(m: &Model, id: &str, words: &str) -> bool {
+        m.messages
+            .iter()
+            .find(|x| x.id == id)
+            .is_some_and(|x| selected_in(x, words))
+    }
+
+    #[test]
+    fn a_quote_far_back_reaches_for_older_messages_a_page_at_a_time() {
+        let mut m = in_chat();
+        _ = m.fetches();
+        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": true, "items": []}));
+        assert!(m.load_further_back());
+        assert!(m.reaching_back());
+        let asked = m.fetches();
+        assert!(asked
+            .iter()
+            .any(|f| f["what"] == "messages" && f["limit"] == 400));
+        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": false, "items": []}));
+        assert!(!m.reaching_back());
+        assert!(!m.load_further_back());
+    }
+
     #[test]
     fn questions_answer_once_the_reply_is_finished() {
         let mut m = in_chat();
@@ -9568,6 +9851,7 @@ mod tests {
             links: HashMap::new(),
             status: String::new(),
             pinned: false,
+            reply: None,
         };
         // While it's written, its choices don't answer and their keys don't pick.
         assert!(!reply(true).takes_answers(true));
@@ -10121,6 +10405,7 @@ mod tests {
             links: HashMap::new(),
             status: String::new(),
             pinned: false,
+            reply: None,
         };
         assert!(reply(Vec::new()).is_empty_reply());
         assert!(reply(vec![Block::text("text", "  \n".into())]).is_empty_reply());
@@ -10159,6 +10444,7 @@ mod tests {
             sources: Vec::new(),
             links: HashMap::new(),
             pinned: false,
+            reply: None,
             status: status.into(),
         }
     }

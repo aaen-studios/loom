@@ -1,0 +1,151 @@
+module shared.reply
+
+// Replies (PLAN.md, "Replying to a message"): a person's message can answer
+// one message in its chat, the whole of it or a part they selected. The
+// message keeps what it answers as `reply`, so every device draws its quote
+// without having the original, and the agent is told what was answered.
+import std.json.{Json}
+import shared.obj.{Obj, at, bool_at, str_at, without}
+
+// The most of a quote kept and told, in bytes.
+pub const QUOTE_MOST: usize = 2000
+// The most files a quote names.
+const FILES_MOST: usize = 4
+
+// `text`, trimmed, cut at `most` bytes with "…". Its lines stay.
+fn cut(text: String, most: usize) -> String {
+    var out = String()
+    for r in text.trim().runes() {
+        if out.len() >= most {
+            out.push_str("…")
+            break
+        }
+        out.push(r)
+    }
+    return out
+}
+
+// What a message says, as its quote shows it: an agent's reply is its answer,
+// its last words (PLAN.md, "One answer at the end"), and a person's message
+// all its words. A subagent's words are never the reply's.
+pub fn words_of(m: Json) -> String {
+    let agent = str_at(m.copy(), "role") == some(String("agent"))
+    var texts = List<String>()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") != some(String("text")) or str_at(b.copy(), "parent") != none { continue }
+            let t = str_at(b, "text") ?? String()
+            if t.trim().len() > 0 { texts.push(t.trim().copy()) }
+        }
+    }
+    if texts.len() == 0 { return String() }
+    if agent { return texts[texts.len() - 1].copy() }
+    return texts.join("\n")
+}
+
+// The `reply` a person's message keeps: `given`, the send's `reply`
+// (`message`, and `quote` for a part selected, `ask` for asking about it),
+// with what the instance knows of `original`, the message it answers: who
+// said it (`role`, and `agent` or `from`), what's quoted (`text`, the part
+// or the message's words, and `part` when it's a part) and, for the whole
+// message, its files.
+pub fn kept(given: Json, original: Json) -> Json {
+    let quote = cut(str_at(given.copy(), "quote") ?? String(), QUOTE_MOST)
+    let part = quote.len() > 0
+    let role = str_at(original.copy(), "role") ?? String("person")
+    var out = Obj.new().s("message", str_at(original.copy(), "id") ?? String()).s("role", role.copy())
+    if role == "agent" {
+        out = out.maybe("agent", str_at(original.copy(), "agent"))
+    } else {
+        out = out.maybe("from", str_at(original.copy(), "from"))
+    }
+    out = out.s("text", if part { quote } else { cut(words_of(original.copy()), QUOTE_MOST) })
+    if part { out = out.b("part", true) }
+    if part and (bool_at(given, "ask") ?? false) { out = out.b("ask", true) }
+    if not part {
+        var files = List<Json>()
+        if let Json.Array(blocks) = at(original, "blocks") {
+            for b in blocks {
+                if files.len() >= FILES_MOST { break }
+                if str_at(b.copy(), "kind") == some(String("file")) and str_at(b.copy(), "parent") == none { files.push(without(b, "kind")) }
+            }
+        }
+        if files.len() > 0 { out = out.j("files", Json.Array(files)) }
+    }
+    return out.done()
+}
+
+// What the agent is told with the message, of what it replies to: `reply`
+// as kept, and `said`, its quote's words as the agent reads them (mentions
+// as names).
+pub fn told(reply: Json, said: String) -> String {
+    let id = str_at(reply.copy(), "message") ?? String()
+    let whose = if str_at(reply.copy(), "role") == some(String("agent")) {
+        "your message {id}"
+    } else if (str_at(reply.copy(), "from") ?? String()).starts_with("a_") {
+        "the message {id}, which another agent sent"
+    } else {
+        "their own message {id}"
+    }
+    var names = List<String>()
+    if let Json.Array(files) = at(reply.copy(), "files") {
+        for f in files {
+            if let n = str_at(f, "name") { names.push(n) }
+        }
+    }
+    let with_files = if names.len() > 0 { " (with {names.join(", ")})" } else { String() }
+    let head = if bool_at(reply.copy(), "ask") ?? false {
+        "Your person asks about this part of {whose}"
+    } else if bool_at(reply, "part") ?? false {
+        "This message replies to this part of {whose}"
+    } else {
+        "This message replies to {whose}{with_files}"
+    }
+    let quoted = if said.trim().len() > 0 { said.trim().split("\n").map(|l| "> {l}").join("\n") } else { String("> (no words)") }
+    return "[loom: {head}:\n{quoted}]"
+}
+
+@test
+fn a_reply_quotes_its_answer_and_a_part_only_that() {
+    let original = Obj.new().s("id", String("msg_3")).s("role", String("agent")).s("agent", String("a_2")).s("run", String("run_1")).j("blocks", Json.Array([
+        Obj.new().s("kind", String("text")).s("text", String("Let me look.")).done(),
+        Obj.new().s("kind", String("tool")).s("call", String("tc_1")).done(),
+        Obj.new().s("kind", String("text")).s("text", String("From the subagent.")).s("parent", String("tc_1")).done(),
+        Obj.new().s("kind", String("text")).s("text", String("  The build passed at 14:02.\nAll green.  ")).done(),
+        Obj.new().s("kind", String("file")).s("file", String("ab12")).s("name", String("log.txt")).s("mime", String("text/plain")).i("size", 40).done(),
+    ])).done()
+    let whole = kept(Obj.new().s("message", String("msg_3")).done(), original.copy())
+    assert("{whole}" == #"{"message":"msg_3","role":"agent","agent":"a_2","text":"The build passed at 14:02.\nAll green.","files":[{"file":"ab12","name":"log.txt","mime":"text/plain","size":40}]}"#)
+    assert(told(whole, String("The build passed at 14:02.\nAll green.")) == "[loom: This message replies to your message msg_3 (with log.txt):\n> The build passed at 14:02.\n> All green.]")
+    // A part selected: only it, and no files.
+    let part = kept(Obj.new().s("message", String("msg_3")).s("quote", String(" 14:02 ")).done(), original.copy())
+    assert("{part}" == #"{"message":"msg_3","role":"agent","agent":"a_2","text":"14:02","part":true}"#)
+    assert(told(part, String("14:02")) == "[loom: This message replies to this part of your message msg_3:\n> 14:02]")
+    // Asking about a part.
+    let ask = kept(Obj.new().s("message", String("msg_3")).s("quote", String("All green")).b("ask", true).done(), original)
+    assert(told(ask, String("All green")) == "[loom: Your person asks about this part of your message msg_3:\n> All green]")
+}
+
+@test
+fn a_reply_to_the_persons_own_message_says_so() {
+    let mine = Obj.new().s("id", String("msg_1")).s("role", String("person")).s("from", String("dev_1")).j("blocks", Json.Array([
+        Obj.new().s("kind", String("text")).s("text", String("First line")).done(),
+        Obj.new().s("kind", String("text")).s("text", String("Second")).done(),
+    ])).done()
+    let r = kept(Obj.new().s("message", String("msg_1")).done(), mine)
+    assert(str_at(r.copy(), "from") == some(String("dev_1")) and str_at(r.copy(), "text") == some(String("First line\nSecond")))
+    assert(told(r, String("First line\nSecond")) == "[loom: This message replies to their own message msg_1:\n> First line\n> Second]")
+    let sent = Obj.new().s("id", String("msg_2")).s("role", String("person")).s("from", String("a_9")).j("blocks", Json.Array([Obj.new().s("kind", String("text")).s("text", String("Hi")).done()])).done()
+    assert(told(kept(Obj.new().done(), sent), String("Hi")).starts_with("[loom: This message replies to the message msg_2, which another agent sent:"))
+}
+
+@test
+fn a_long_quote_is_cut() {
+    var long = String()
+    for _ in 0..3000 {
+        long.push('a')
+    }
+    let r = kept(Obj.new().s("quote", long).done(), Obj.new().s("id", String("msg_1")).s("role", String("agent")).done())
+    let text = str_at(r, "text") ?? String()
+    assert(text.len() == QUOTE_MOST + "…".len() and text.ends_with("…"))
+}

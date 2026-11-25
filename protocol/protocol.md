@@ -306,6 +306,8 @@ A message from the person into a conversation.
 - `files`: the `file`s of files uploaded first with [`POST /files`](#post-filesnamename). Each becomes a `file` block after the text. A send needs `text`, `files` or both.
 - `form`: the person's answers to a `form` card (below): `{message, card, answers}`, the reply the card is in, the card's `id`, and the answers, by each field's label. The instance checks them against the card (`server/cards.calx`): a text answer is cut at 1,000 bytes, a choice is one of its options, a toggle `true` or `false`, a number a number or text that reads as one; a required field left empty, or a form already answered, is refused with `bad_form`, saying why, and the core takes the send out of its outbox. The message's `text` is then the instance's, one line a field, `Label: answer` (a toggle `Yes` or `No`, an optional field left empty left out), and it keeps `form` with the answers as they were checked. The card keeps them as `answers`, and the reply comes again in `message.updated`. The agent reads the text, with a note after it: `[loom: This message is your person's answer to your form card_1, by each field's label: {"Name":"Ada","Size":"Large"}]`.
 
+- `reply`: the message it replies to ([PLAN.md](../PLAN.md#replying-to-a-message)), `{message, quote?, ask?}`: a message's `id` in the same conversation; `quote`, the words the person selected in it, for a reply to that part alone; and `ask: true` with a `quote`, for asking about it. Other fields are ignored: the core fills in the rest from its cache, as the instance will keep it, so the message waiting in the outbox shows its quote. One whose message isn't there or is in another chat is refused with `bad_reply`, and the core takes the send out of its outbox. The message keeps it as its own `reply`, below, and the agent reads it with the message, quoted line by line after `> `, in a note: `[loom: This message replies to your message msg_311 (with log.txt):`, `to this part of your message msg_311`, `to their own message msg_9`, or `Your person asks about this part of your message msg_311`.
+
 Answered by [`ack`](#ack), or [`error`](#error) with `ref` set to the `cid`.
 
 ### `approve`
@@ -692,6 +694,12 @@ A reply whose words end in a Sources list (a line such as `Sources:`, `**Sources
 
 A message that links to pages, in its words or its `sources`, has `links` for those the instance has looked up: by each address, `{title, site, icon?, image?}`, `title` the page's own, or its address cleaned up when it has none ([PLAN.md](../PLAN.md#links-and-sources)), `icon` the site's icon, a PNG kept as the person's file, to fetch with `file.get`, and `image` the page's preview picture (its `og:image`, a JPEG or a PNG at most 480 pixels a side, kept the same way), only for a page looked up with `link.preview`. Only https pages of public hosts are looked up, twelve a message at most. One looked up after the message was kept comes with `message.updated`.
 
+A person's message that replies to another has `reply`, what it replies to as it was when sent ([`send`](#send)): `message`, its id; `role`, and `agent` for an agent's or `from` for a person's; `text`, the words quoted, the part selected or the message's words (an agent's reply its last text block that isn't a subagent's, a person's message all its text), up to 2,000 bytes; `part: true` when it's a part, and `ask: true` for asking about it; and for a whole message its `files`, up to four, as its `file` blocks have them without `kind`. The apps draw it over the message's bubble, and a click on it goes to the original.
+
+```json
+"reply": { "message": "msg_311", "role": "agent", "agent": "a_2", "text": "14:02", "part": true }
+```
+
 In a person's message, a bare address is a link they pasted as a piece, which the apps show by its page's title and its site's icon, and `<https://…>` one they wrote or pasted as plain text, which they show as the address itself, untitled ([PLAN.md](../PLAN.md#links-in-the-composer)). An attached file is its name in brackets, `[image.png]`, where it was attached.
 
 ```json
@@ -983,6 +991,7 @@ What it asks for is its `asks`: `tools` when it has a tool server, `agents`, and
 | `sign_in_failed` | `mcp.sign_in` or `mcp.signed_in`: the sign-in couldn't be started or finished. The message says why |
 | `unknown_file` | A `send` names a file this person hasn't uploaded |
 | `bad_form` | A `send`'s `form` doesn't fit its card: a required field left empty, an answer that isn't one of its options or a number, a card that isn't a form or isn't in that reply, or a form answered already. The message says which |
+| `bad_reply` | A `send`'s `reply` names a message that isn't there, or is in another conversation |
 | `storage_full` | A file would take the person over the space the owner gives each person |
 | `moving` | The instance is moving: nothing changes until it's at the new place |
 | `moved` | `instance.move` on an instance that has moved already |

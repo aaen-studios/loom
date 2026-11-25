@@ -323,7 +323,13 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             for file in f["files"].array {
                 blocks.append(["kind": "file", "file": file, "name": "photo.jpg", "mime": "image/jpeg", "size": 1_200_000])
             }
-            event("message.created", ["conversation": JSON(conversation), "message": ["id": JSON(mine), "conversation": JSON(conversation), "role": "person", "from": "d_4", "at": JSON(Sample.now()), "blocks": .array(blocks)]])
+            var message: [String: JSON] = ["id": JSON(mine), "conversation": JSON(conversation), "role": "person", "from": "d_4", "at": JSON(Sample.now()), "blocks": .array(blocks)]
+            // A reply keeps what it replies to, as the instance would: here, always the agent's.
+            if !f["reply"].isNull {
+                let quote = f["reply"]["quote"].text
+                message["reply"] = ["message": f["reply"]["message"], "role": "agent", "agent": JSON(agent), "text": JSON(quote.isEmpty ? "Here they are, from the 12 PRs merged since v0.2." : quote), "part": JSON(!quote.isEmpty)]
+            }
+            event("message.created", ["conversation": JSON(conversation), "message": .object(message)])
             event("run.started", ["run": JSON(run), "conversation": JSON(conversation), "agent": JSON(agent), "revision": 1, "message": JSON(theirs), "answering": JSON(mine)])
         }
         var pos = 0
@@ -450,7 +456,8 @@ enum Sample {
                 ["kind": "text", "text": "Here they are, from the **12 PRs** merged since `v0.2`:\n\n## loom 0.3\n\n- Routines run on webhooks, signed as GitHub signs.\n- Agents get your MCP servers, with secrets sealed.\n- Screenshots and the clipboard as device tools.\n\nI kept them short. Want the full list too?"],
              ]],
             ["id": "msg_3", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187100000,
-             "blocks": [["kind": "text", "text": "That's good. Did the build on main pass?"]]],
+             "blocks": [["kind": "text", "text": "That's good. Did the build on main pass?"]],
+             "reply": ["message": "msg_2", "role": "agent", "agent": "a_1", "text": "I kept them short. Want the full list too?", "part": true]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,

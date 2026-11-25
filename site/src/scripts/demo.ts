@@ -1,4 +1,8 @@
-// Plays the live copy of the app (src/components/AppDemo.astro) in a loop: a message is typed,
+// Plays the live copy of the app (src/components/AppDemo.astro) in a loop: the earlier answer's
+// Reply, by its corner on hover, puts it over the composer's words, and the message that goes
+// has its quote over its bubble, which goes back to the answer and lights it (desktop/src/app.rs,
+// reply_bar, quote_view, jump_to); a message's Reply, or words selected in one with the bar
+// that comes over them (Copy, Quote, Ask about this), does the same by hand. A message is typed,
 // with a link pasted and a file attached among its words, each a piece in them, the file with its
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
 // asks before it deploys and waits for the yes, then finishes. While the turn runs, one quiet
@@ -100,6 +104,77 @@ export function play(app: HTMLElement) {
 	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
+
+	// Replying (PLAN.md, "Replying to a message"): a message's Reply, or words selected in it,
+	// put a bar over the composer's words; the message goes with a quote over its bubble, which
+	// goes back to the original and lights it (app.rs, reply_bar, quote_view, jump_to).
+	const replyBar = app.querySelector<HTMLElement>('[data-reply-bar]')!;
+	type Replying = { row: HTMLElement; who: string; words: string; ask: boolean };
+	let replying: Replying | null = null;
+	/** A message's words, on one line: an agent's answer, or what the person wrote. */
+	const wordsOf = (row: HTMLElement) =>
+		(row.querySelector('.said:not(.on-the-way)') ?? row.querySelector('.bubble'))?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+	const replyTo = (row: HTMLElement, part?: string, ask = false) => {
+		const agent = row.classList.contains('reply');
+		const who = agent ? (row.querySelector('.who')?.textContent ?? 'Juniper') : 'You';
+		replying = { row, who, words: part ?? wordsOf(row), ask: ask && !!part };
+		replyBar.querySelector('.rb-head')!.textContent = replying.ask ? `Asking ${who} about` : agent ? `Replying to ${who}` : 'Replying to yourself';
+		replyBar.querySelector('.rb-words')!.textContent = replying.words;
+		replyBar.hidden = false;
+	};
+	const unreply = () => {
+		replying = null;
+		replyBar.hidden = true;
+	};
+	app.querySelector('[data-reply-x]')!.addEventListener('click', unreply);
+	for (const b of msgs.querySelectorAll<HTMLButtonElement>('.reply-btn')) {
+		b.addEventListener('click', () => replyTo(b.closest<HTMLElement>('.row')!));
+	}
+	/** Goes to the original a quote names: the chat moves to show it, lit, then back. */
+	const jump = (row: HTMLElement) => {
+		const chat = app.querySelector<HTMLElement>('.chat')!;
+		const by = chat.getBoundingClientRect().top + 24 - row.getBoundingClientRect().top;
+		msgs.classList.add('jumping');
+		if (by > 0) msgs.style.transform = `translateY(${by}px)`;
+		row.classList.add('lit');
+		setTimeout(() => {
+			row.classList.remove('lit');
+			msgs.style.transform = '';
+			setTimeout(() => msgs.classList.remove('jumping'), 400);
+		}, 1800);
+	};
+	// Words selected in a message have a small bar where the selection ended.
+	let picked: HTMLElement | null = null;
+	const unpick = () => {
+		picked?.remove();
+		picked = null;
+	};
+	msgs.addEventListener('mouseup', (e) => {
+		setTimeout(() => {
+			unpick();
+			const sel = getSelection();
+			const words = sel?.toString().replace(/\s+/g, ' ').trim() ?? '';
+			const row = (sel?.anchorNode?.parentElement)?.closest<HTMLElement>('.row[data-msg]');
+			if (!words || !row || !row.contains(sel!.focusNode)) return;
+			picked = tpl('demo-picked');
+			if (!row.classList.contains('reply')) picked.querySelector('[data-pick="ask"]')!.remove();
+			const at = app.getBoundingClientRect();
+			picked.style.left = `${Math.min(e.clientX - at.left, at.width - 280)}px`;
+			picked.style.top = `${e.clientY - at.top + 10}px`;
+			for (const b of picked.querySelectorAll<HTMLButtonElement>('[data-pick]')) {
+				b.addEventListener('click', () => {
+					if (b.dataset.pick === 'copy') navigator.clipboard?.writeText(words).catch(() => {});
+					else replyTo(row, words, b.dataset.pick === 'ask');
+					sel?.removeAllRanges();
+					unpick();
+				});
+			}
+			app.append(picked);
+		});
+	});
+	document.addEventListener('pointerdown', (e) => {
+		if (picked && !picked.contains(e.target as Node)) unpick();
+	});
 	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place;
 	// the strip's arrow, or Juniper's own row, goes back to the person's chat (app.rs,
 	// open_thread, branch_strip). The chat goes on meanwhile.
@@ -231,11 +306,12 @@ export function play(app: HTMLElement) {
 		typed.replaceChildren();
 		attached.replaceChildren();
 		attached.hidden = true;
+		unreply();
 	}
 
-	/** The person's message in the chat, as the composer showed it: its file over its words,
-	 * and the pieces in them (app.rs, person). */
-	function sent(fresh: boolean) {
+	/** The person's message in the chat, as the composer showed it: what it replies to and its
+	 * file over its words, and the pieces in them (app.rs, person). */
+	function sent(fresh: boolean, to: Replying | null) {
 		const you = tpl('demo-you');
 		you.classList.toggle('fresh', fresh);
 		const bubble = you.querySelector<HTMLElement>('.bubble')!;
@@ -248,6 +324,14 @@ export function play(app: HTMLElement) {
 			}
 		}
 		bubble.before(...overs.children);
+		// What it replies to, over everything else.
+		if (to) {
+			const quote = tpl('demo-quote');
+			quote.querySelector('.q-who')!.textContent = to.who;
+			quote.querySelector('.q-words')!.textContent = to.words;
+			quote.addEventListener('click', () => jump(to.row));
+			you.prepend(quote);
+		}
 		return you;
 	}
 
@@ -339,10 +423,18 @@ export function play(app: HTMLElement) {
 		waitingOn('Juniper', false);
 		cleared();
 		await wait(900, id);
+		// It replies to the earlier answer, from its Reply on hover.
+		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
+		earlier.classList.add('hovered');
+		await wait(700, id);
+		earlier.classList.remove('hovered');
+		replyTo(earlier);
+		await wait(500, id);
 		await compose(id);
 		await wait(500, id);
+		const to = replying;
 		cleared();
-		msgs.append(sent(true));
+		msgs.append(sent(true, to));
 		await wait(250, id);
 
 		const reply = tpl('demo-reply');
@@ -418,7 +510,8 @@ export function play(app: HTMLElement) {
 		run++;
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
 		cleared();
-		const you = sent(false);
+		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
+		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), ask: false });
 		const reply = tpl('demo-reply');
 		reply.classList.remove('fresh');
 		const { steps, say } = foldOf(reply);
