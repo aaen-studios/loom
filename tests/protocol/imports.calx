@@ -189,7 +189,7 @@ fn run(inst: Instance) ! Error {
     println("      {str_at(r.copy(), "text") ?? String()}")
     try check(int_at(came.copy(), "agents") == some(2) and int_at(came.copy(), "messages") == some(3) and int_at(came.copy(), "memories") == some(1) and int_at(came.copy(), "routines") == some(2) and int_at(came.copy(), "skills") == some(1) and int_at(came.copy(), "mcp") == some(2) and int_at(came.copy(), "tables") == some(1) and int_at(came.copy(), "rows") == some(2) and int_at(came.copy(), "files") == some(1) and int_at(came.copy(), "pins") == some(1), "import.run brings each kind over from OpenBot, and says how many")
     let left = "{at(r.copy(), "not")}"
-    try check(left.contains("Weekly review") and left.contains("weekly on Friday") and left.contains("file") and left.contains("template") == false and left.contains("only its SKILL.md") and left.contains("environment and headers"), "and says plainly what changed or couldn't come")
+    try check(not left.contains("Weekly review") and left.contains("file") and left.contains("template") == false and left.contains("only its SKILL.md") and left.contains("environment and headers"), "and says plainly what changed or couldn't come")
 
     let main_one = agent_named(app, "Main")
     let main_id = str_at(main_one.copy(), "id") ?? String()
@@ -215,7 +215,7 @@ fn run(inst: Instance) ! Error {
     let notes = "{value(try app.cmd("q_5", "memory.list", Obj.new().s("agent", main_id.copy()).done()))}"
     try check(notes.contains("Elliot likes short answers") and notes.contains("import:openbot"), "memories come, each its agent's")
     let rs = "{value(try app.cmd("q_6", "routine.list", Obj.new().done()))}"
-    try check(rs.contains(#""daily":"07:30""#) and rs.contains(#""daily":"16:00""#) and rs.contains("Europe/Oslo") and rs.contains(#""post":"thread""#), "routines come on loom's schedules, in their time zone")
+    try check(rs.contains(#""daily":"07:30""#) and rs.contains(#""times":["16:00"],"days":["fri"]"#) and rs.contains("on Fri at 16:00") and rs.contains("Europe/Oslo") and rs.contains(#""post":"thread""#), "routines come on loom's schedules, in their time zone")
     try check(rs.contains("With nothing new, call routine_quiet.") and not rs.contains("openbot.routine"), "naming loom's routine tools where they named OpenBot's")
     let skill = value(try app.cmd("q_7", "skill.get", Obj.new().s("name", String("weekly-report")).done()))
     try check((str_at(at(skill, "skill"), "body") ?? String()).contains("Gather the week"), "a skill comes from its bundle")

@@ -75,3 +75,17 @@ Under **Updates**:
 - **Update on its own**: a new version goes in by itself, while loom is in the tray and no agent is working. Otherwise the sidebar offers it, to restart into.
 
 Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), © Twitter, Jason Sofonia and Justine De Caires, under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+## Routines
+
+A routine sends an agent a prompt on a schedule, or when something posts to its webhook. The page shows the week over your routines: days across, hours down, each routine a small block in its agent's colour at its times, and one that runs every few hours as thin ticks. Today stands out, and the arrows go to other weeks. Click a block, or a routine, to open it.
+
+On a routine's page, **Repeat** sets when it runs:
+
+- **Every few hours**: "Every 2 hours, from 08:00 to 20:00", on the days you pick. A routine an agent set every 30 minutes shows minutes here.
+- **On days**: the days, M T W T F S S, and its times, one or more. **+ Time** adds one; × takes one off. "Weekdays" or "Every day" shows beside the days when that's what's picked.
+- **Webhook**: only when something posts to its webhook. Its address and secret show under **Options** once it's saved. A routine on a schedule can have one too, with **Webhook too**.
+
+Times are in your time zone, summer time included. Under them, **Next** says when it runs the next three times.
+
+Its **History** has a strip of its last 30 runs, each coloured by how it ended: green posted, grey quiet, red failed, orange skipped. Under it is every run: when, how it ended, the first line of what it posted or why it failed or was skipped, and how long it took. Click a run, or its mark, to see what the agent posted and answered, or why it failed and what to do about it.

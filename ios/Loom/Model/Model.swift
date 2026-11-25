@@ -1480,6 +1480,9 @@ final class Model {
     private(set) var reaching = false
     /// The message the next message replies to, while it's written.
     var replying: ReplyTo?
+    /// Continue in your own chat was tapped in a thread: the agent's composer takes the
+    /// cursor once it's on screen.
+    var writeNow = false
     /// The message a quote was tapped to go to, until the chat is there.
     var jumpTo: String?
     var selected: String?
