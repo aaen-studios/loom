@@ -38,7 +38,9 @@ pub fn all() -> List<Json> {
         tool("read_skill", "Reads a skill: how your person wants that kind of task done. Follow it.", object(Obj.new().j("name", text_arg("The skill's name, as list_skills gives it.")), ["name"])),
         tool("save_skill", "Saves a skill, new or changed, for every one of your person's agents: how to do a kind of task, learned while doing it. Give it whole. Written from a task your person recorded in your browser, it's proposed instead, and kept once they say yes.", object(Obj.new().j("name", text_arg("Lowercase letters, digits and hyphens, such as release-notes.")).j("description", text_arg("When it's for, in one sentence, so an agent knows to read it.")).j("body", text_arg("The skill, in Markdown.")).j("recording", text_arg("The recording it's written from, such as rec_3, when your person taught you the task in your browser.")), ["name", "description", "body"])),
         tool("propose_skill", "Proposes a skill to your person, which they keep or drop in their app: a way of doing a kind of task, from your past chats, that they'd want done the same way again. It isn't saved until they keep it, and they may change it first.", object(Obj.new().j("name", text_arg("Lowercase letters, digits and hyphens, such as release-notes.")).j("description", text_arg("When it's for, in one sentence, so an agent knows to read it.")).j("body", text_arg("The skill, in Markdown.")).j("why", text_arg("Where it came from, in a sentence, such as which chat.")), ["name", "description", "body"])),
-        tool("propose_note", "Proposes a note to your person, which they keep or drop in their app: a lasting fact about them or their work, from your past chats. Tie it to a site, and you're shown it whenever your browser is there. It isn't a note until they keep it.", object(Obj.new().j("text", text_arg("The note, one fact.")).j("site", text_arg("A site it's about, such as github.com, to be shown it there.")).j("shared", Obj.new().s("type", String("boolean")).s("description", String("Whether every agent of your person's may read it.")).done()).j("why", text_arg("Where it came from, in a sentence.")), ["text"])),
+        hinted(tool("propose_note", "Proposes a note: a lasting fact about your person or their work, from your chats. Your permission mode decides: one that doesn't ask about everyday changes keeps it at once, with a line under your reply they can undo, and otherwise your person keeps or drops it on a card there. A shared one always waits for them. Tie it to a site, and you're shown it whenever your browser is there. The result says which happened.", object(Obj.new().j("text", text_arg("The note, one fact.")).j("site", text_arg("A site it's about, such as github.com, to be shown it there.")).j("shared", Obj.new().s("type", String("boolean")).s("description", String("Whether every agent of your person's may read it.")).done()).j("why", text_arg("Where it came from, in a sentence.")), ["text"])), false),
+        hinted(tool("skill_failed", "Says a skill you followed failed at a step, such as a page that moved or a command that's changed, so it's fixed. Say it as soon as you know, then carry on as you can. Write the fix with fix_skill, now or when you're asked after the chat.", object(Obj.new().j("name", text_arg("The skill's name.")).j("step", text_arg("The step that failed, in a few words, as the skill says it.")).j("why", text_arg("What went wrong there, in a sentence.")), ["name", "step", "why"])), false),
+        hinted(tool("fix_skill", "Fixes a skill you said failed with skill_failed: give the whole skill as it should be, its other steps as they were. Your permission mode decides: one that doesn't ask about everyday changes puts the fix in at once, with a line under your reply your person can undo, and otherwise they keep or drop it on a card there, which shows what changed.", object(Obj.new().j("name", text_arg("The skill's name.")).j("body", text_arg("The whole skill, fixed, in Markdown.")).j("description", text_arg("When it's for, if that changes too.")).j("why", text_arg("What the fix changes, in a sentence.")), ["name", "body"])), false),
         tool("list_devices", "Lists your person's devices that are connected and offer tools: each one's id, name, kind (windows, macos, iphone) and its tools, each off, ask (your person says yes on that device each time) or allow. A device offers them while its app runs. Your person's own servers are listed too, as kind host, each with the device that reaches it with ssh (through): use those, never ssh of your own, to run commands on them. When the server you run on needs something done as root, as giving the loom user access to a folder, and it is one of their hosts, run it there with sudo through use_device, which asks them, rather than telling them what to type.", object(Obj.new(), List<str>())),
         tool("use_device", "Uses a tool on one of your person's devices, such as their PC: run_command runs args.command in their shell (PowerShell on Windows, zsh on a Mac); read_file and list_files take args.path; open opens args.target, a file or a link; screenshot gives you a picture of the main screen; read_clipboard gives what's copied there; write_clipboard copies args.text. On a host (one of your person's servers), only run_command, which runs args.command there over ssh, from the device that reaches it. Each does only what your person turned on for it on that device, and one that asks waits for their yes there. The result is the output. Not for looking at web pages: use your own browser (browser_open) for that, never their device's, unless they ask to see a page there.", object(Obj.new().j("device", text_arg("The device's or host's name or id, as list_devices gives them.")).j("tool", text_arg("run_command, read_file, list_files, open, screenshot, read_clipboard or write_clipboard.")).j("args", Obj.new().s("type", String("object")).s("description", String("The tool's arguments: command, path, target or text, or none.")).done()), ["device", "tool"])),
         tool("delete_agent", "Deletes one of your person's agents, with its conversations. Your person is asked first, and the result says what they answered.", object(Obj.new().j("agent", text_arg("The agent's name or id.")), ["agent"])),
@@ -112,12 +114,19 @@ pub fn code_tools() -> List<Json> {
 // Code Mode's tools by name, which agent programs are told to allow.
 pub const CODE_TOOLS: str = "search_tools run_code"
 
+// What an agent keeps from a chat (PLAN.md, "Memory"): loom keeps each, or asks
+// its person on a card, as the agent's permission mode says, so the agent
+// program shouldn't ask before them either, and an agent looking back over its
+// chat in a turn its person doesn't see never asks them to run a script. Agent
+// programs are told to allow them, and their annotations say so.
+pub const LEARNING_TOOLS: str = "propose_note skill_failed fix_skill"
+
 // Loom's tools an agent in Code Mode gets directly too, beside search_tools
 // and run_code (PLAN.md, "Code Mode"): the ones that reach the person's app and
-// devices, which setting loom up for them needs at once, and search_messages,
-// which a fresh session is told finds the rest of the chat. Scripts call them
-// as well.
-pub const DIRECT_TOOLS: str = "add_server install_server add_mcp_server list_devices use_device show_card search_messages"
+// devices, which setting loom up for them needs at once, search_messages,
+// which a fresh session is told finds the rest of the chat, and what it keeps
+// from a chat. Scripts call them as well.
+pub const DIRECT_TOOLS: str = "add_server install_server add_mcp_server list_devices use_device show_card search_messages propose_note skill_failed fix_skill"
 
 // What `loom mcp` lists in Code Mode: search_tools, run_code and the direct
 // ones, the same for every session, so an agent's tools never change while it
@@ -156,13 +165,13 @@ fn code_mode_keeps_the_app_tools_direct() {
     for t in code_mode_tools() {
         names.push(str_at(t, "name") ?? String())
     }
-    assert(names.join(" ") == "search_tools run_code search_messages list_devices use_device show_card add_server install_server add_mcp_server")
+    assert(names.join(" ") == "search_tools run_code search_messages propose_note skill_failed fix_skill list_devices use_device show_card add_server install_server add_mcp_server")
 }
 
 @test
 fn every_tool_has_a_schema() {
     let tools = all()
-    assert(tools.len() == 62)
+    assert(tools.len() == 64)
     for t in tools {
         assert("{t}".contains("\"inputSchema\":\{\"type\":\"object\""))
     }

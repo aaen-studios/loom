@@ -1,0 +1,216 @@
+module server.learn
+
+// What an agent learns from a chat (PLAN.md, "Memory" and "Sharing and
+// learning"): once a chat pauses, the agent looks back over it in a quiet
+// turn, and keeps or proposes notes, and fixes to skills it said failed. A
+// note or a fix follows the agent's permission mode: one that doesn't ask
+// about everyday changes keeps it on its own, and otherwise it waits for the
+// person, on a card under the reply it came from. The instance runs the turn
+// and keeps what came of it; this is what the agent is told, and what a
+// reply shows of it.
+import std.diff
+import std.json.{Json}
+import server.acp
+import shared.obj.{Obj, at, bool_at, str_at}
+
+// How long after a chat's last turn it has paused, in minutes: inside the five
+// minutes a prompt cache lasts, so looking back reads the chat from the cache.
+pub const PAUSE_MINUTES: i64 = 4
+// The most lines a fix's change shows, removed, added and around them.
+pub const LINES_MOST: usize = 400
+// The lines around each change in a fix, for where it is.
+const AROUND: usize = 2
+const STEP_MOST: usize = 200
+const WHY_MOST: usize = 500
+
+// Whether an agent in permission mode `mode` keeps a note or puts in a fix
+// itself: its mode doesn't ask about everyday changes (edits).
+pub fn keeps_itself(mode: String) -> bool {
+    return acp.allows(mode, String("edit"))
+}
+
+// What the agent is told in its quiet turn once its chat has paused, with the
+// failures of skills it said that no fix was proposed for.
+pub fn look_back(failures: List<Json>) -> String {
+    var fixes = String()
+    if failures.len() > 0 {
+        var said = List<String>()
+        for f in failures {
+            said.push("{str_at(f.copy(), "skill") ?? String()}, at \"{str_at(f.copy(), "step") ?? String()}\" ({str_at(f, "why") ?? String()})")
+        }
+        fixes = " You said {if said.len() == 1 { "a skill" } else { "skills" }} failed: {said.join("; ")}. Fix {if said.len() == 1 { "it" } else { "each" }} with fix_skill: read it with read_skill, and give it whole, with what went wrong put right and the rest as it was."
+    }
+    return "[loom: Your chat with your person has paused. Look back over it, from where you last did this or from its start, for what's worth keeping, and keep each with propose_note: a lasting fact about them or their work that you'd want in a later chat, one fact a note, with shared for one every agent of theirs should know, and site for one about a site. Not what recall has already, what only mattered today, or a secret.{fixes} Nothing at all is a fine answer. Your person doesn't see this turn or what you say in it, only what you keep, so don't answer them, and say nothing more than a word.]"
+}
+
+// What a failure an agent says of a skill keeps: its step and why, cut short.
+pub fn failure(step: String, why: String) -> (String, String) {
+    return (cut(step.trim().copy(), STEP_MOST), cut(why.trim().copy(), WHY_MOST))
+}
+
+// The change a fix makes, from the skill as it was to the fix, a line each:
+// {"op": "-", "text"} for one removed, "+" for one added, " " for one around a
+// change, and "…" for lines left out between. LINES_MOST at most, and a last
+// "…" when there's more.
+pub fn change(was: String, now: String) -> Json {
+    let a = lines_of(was)
+    let b = lines_of(now)
+    var out = List<Json>()
+    let edits = diff.edits(a.copy(), b.copy())
+    for k in 0usize..edits.len() {
+        let e = edits[k]
+        match e.kind {
+            diff.EditKind.Keep => {
+                let n = e.a_end - e.a_start
+                let first = k == 0
+                let last = k + 1 == edits.len()
+                if first and last { continue }
+                if n <= AROUND * 2 and not first and not last {
+                    for j in e.a_start..e.a_end { out.push(line(" ", a[j].copy())) }
+                    continue
+                }
+                // After the change before it, then before the next.
+                if not first {
+                    for j in e.a_start..e.a_start + min(AROUND, n) { out.push(line(" ", a[j].copy())) }
+                }
+                if n > (if first or last { AROUND } else { AROUND * 2 }) { out.push(line("…", String())) }
+                if not last {
+                    let from = e.a_end - min(AROUND, n)
+                    for j in from..e.a_end { out.push(line(" ", a[j].copy())) }
+                }
+            },
+            diff.EditKind.Delete => {
+                for j in e.a_start..e.a_end { out.push(line("-", a[j].copy())) }
+            },
+            diff.EditKind.Insert => {
+                for j in e.b_start..e.b_end { out.push(line("+", b[j].copy())) }
+            },
+            diff.EditKind.Replace => {
+                for j in e.a_start..e.a_end { out.push(line("-", a[j].copy())) }
+                for j in e.b_start..e.b_end { out.push(line("+", b[j].copy())) }
+            },
+        }
+    }
+    if out.len() > LINES_MOST {
+        var cut_off = List<Json>()
+        for j in 0usize..LINES_MOST { cut_off.push(out[j].copy()) }
+        cut_off.push(line("…", String()))
+        return Json.Array(cut_off)
+    }
+    return Json.Array(out)
+}
+
+// What a reply shows of proposal `p` under it (protocol.md, "Teaching a task,
+// and proposals"): the proposal as proposal.list gives it, with a fix's
+// skill as fixed, to change it from there, but not as it was, nor a skill's
+// body or a recording's steps, which the Proposals page reads.
+pub fn shown(p: Json) -> Json {
+    var o = Obj.new().s("id", str_at(p.copy(), "id") ?? String()).s("agent", str_at(p.copy(), "agent") ?? String()).s("kind", str_at(p.copy(), "kind") ?? String()).s("status", str_at(p.copy(), "status") ?? String()).s("why", str_at(p.copy(), "why") ?? String())
+    if let by = str_at(p.copy(), "by") { o = o.s("by", by) }
+    if bool_at(p.copy(), "later") == some(true) { o = o.b("later", true) }
+    let kind = str_at(p.copy(), "kind") ?? String()
+    if kind == "fix" {
+        let f = at(p, "fix")
+        o = o.j("fix", Obj.new().s("name", str_at(f.copy(), "name") ?? String()).s("body", str_at(f.copy(), "body") ?? String()).j("failed", at(f.copy(), "failed")).j("lines", at(f, "lines")).done())
+    } else if kind == "note" {
+        let n = at(p, "note")
+        o = o.j("note", Obj.new().s("text", str_at(n.copy(), "text") ?? String()).s("site", str_at(n.copy(), "site") ?? String()).b("shared", bool_at(n, "shared") ?? false).done())
+    } else {
+        let s = at(p, "skill")
+        o = o.j("skill", Obj.new().s("name", str_at(s.copy(), "name") ?? String()).s("description", str_at(s, "description") ?? String()).done())
+    }
+    return o.done()
+}
+
+// The activity log's line for a note or a fix that was kept: on its own, by the
+// permission mode, or by the person.
+pub fn kept_line(kind: String, data: Json, itself: bool) -> String {
+    if kind == "fix" {
+        let name = str_at(data, "name") ?? String()
+        return if itself { "Fixed the skill {name}" } else { "Kept the fix to the skill {name}" }
+    }
+    let text = cut(str_at(data, "text") ?? String(), 100)
+    return if itself { "Remembered: {text}" } else { "Kept the proposed note: {text}" }
+}
+
+// The activity log's line for a note or a fix that was undone.
+pub fn undone_line(kind: String, data: Json) -> String {
+    if kind == "fix" { return "Undid the fix to the skill {str_at(data, "name") ?? String()}" }
+    return "Forgot what was remembered: {cut(str_at(data, "text") ?? String(), 100)}"
+}
+
+fn line(op: str, text: String) -> Json {
+    return Obj.new().s("op", String(op)).s("text", text).done()
+}
+
+fn lines_of(text: String) -> List<String> {
+    var out = List<String>()
+    if text.len() == 0 { return out }
+    for l in text.replace("\r\n", "\n").split("\n") { out.push(l.copy()) }
+    // A last line break isn't a line.
+    if out.len() > 0 and out[out.len() - 1].len() == 0 { _ = out.pop() }
+    return out
+}
+
+fn min(a: usize, b: usize) -> usize {
+    return if a < b { a } else { b }
+}
+
+// `text` on one line, cut at `most` bytes with "…" after.
+fn cut(text: String, most: usize) -> String {
+    var out = String()
+    for r in text.runes() {
+        if out.len() >= most {
+            out.push_str("…")
+            break
+        }
+        out.push(if r == '\n' { ' ' } else { r })
+    }
+    return out
+}
+
+fn ops(made: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(list) = made {
+        for l in list { out.push("{str_at(l.copy(), "op") ?? String()}{str_at(l, "text") ?? String()}") }
+    }
+    return out.join("|")
+}
+
+@test
+fn a_mode_that_doesnt_ask_about_edits_keeps_what_it_learns() {
+    assert(keeps_itself(String("allow")) and keeps_itself(String("read,edit")))
+    assert(not keeps_itself(String("ask")) and not keeps_itself(String("auto")) and not keeps_itself(String("read,search")))
+}
+
+@test
+fn a_fix_shows_what_it_removes_and_adds_around_it() {
+    let was = "# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Publish.\n4. Share the link.\n5. Close the tab.\n6. Say it's out.\n"
+    let now = "# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release, at the top.\n4. Share the link.\n5. Close the tab.\n6. Say it's out.\n"
+    assert(ops(change(String(was), String(now))) == "…| 1. Open the drafts.| 2. Paste the notes.|-3. Press Publish.|+3. Press Release, at the top.| 4. Share the link.| 5. Close the tab.|…")
+    // Two changes close together share their lines around.
+    assert(ops(change(String("a\nb\nc\nd"), String("A\nb\nc\nD"))) == "-a|+A| b| c|-d|+D")
+    assert(ops(change(String("a\nb"), String("a\nb\nc"))) == " a| b|+c")
+    assert(ops(change(String("same"), String("same"))) == "")
+    var long = String()
+    for k in 0usize..500 { long.push_str("line {k}\n") }
+    let Json.Array(cut_off) = change(String(), long) else return
+    assert(cut_off.len() == LINES_MOST + 1 and "{cut_off[LINES_MOST]}".contains("…"))
+}
+
+@test
+fn looking_back_asks_for_notes_and_fixes() {
+    let plain = look_back(List<Json>())
+    assert(plain.starts_with("[loom: Your chat with your person has paused.") and plain.contains("propose_note") and not plain.contains("fix_skill"))
+    let failed = look_back([Obj.new().s("skill", String("post-release-notes")).s("step", String("Press Publish")).s("why", String("There's no Publish button.")).done()])
+    assert(failed.contains("You said a skill failed: post-release-notes, at \"Press Publish\" (There's no Publish button.). Fix it with fix_skill"))
+}
+
+@test
+fn a_reply_shows_a_fix_as_fixed_but_not_as_it_was() {
+    let p = Obj.new().s("id", String("prop_1")).s("agent", String("a_1")).s("kind", String("fix")).s("status", String("kept")).s("by", String("auto")).s("why", String("The button moved.")).j("fix", Obj.new().s("name", String("post-release-notes")).s("body", String("whole")).s("was", String("old")).j("failed", Obj.new().s("step", String("Press Publish")).done()).j("lines", Json.Array(List<Json>())).done()).done()
+    let s = "{shown(p)}"
+    assert(s.contains("\"by\":\"auto\"") and s.contains("\"name\":\"post-release-notes\"") and s.contains("\"failed\":") and s.contains("\"body\":\"whole\"") and not s.contains("old"))
+    assert(kept_line(String("note"), Obj.new().s("text", String("Ann likes wool.")).done(), true) == "Remembered: Ann likes wool.")
+    assert(undone_line(String("fix"), Obj.new().s("name", String("post-release-notes")).done()) == "Undid the fix to the skill post-release-notes")
+}

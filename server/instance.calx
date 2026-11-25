@@ -42,6 +42,7 @@ import shared.files.{is_sha, safe_name}
 import shared.hosts.{good_domain, good_target, import_command, install_command, install_plan}
 import server.hashing
 import server.importer
+import server.learn
 import server.hashing.{Done, Job}
 import server.installer
 import server.icons
@@ -433,6 +434,8 @@ pub struct Instance {
     routines_waiting: List<WaitingRoutine>    // routine runs waiting for their chat, oldest first
     routine_marks: Map<String, (String, String)>    // a routine run -> how its agent said it went: quiet or failed, and why
     quiet_turns: Map<String, QuietTurn>    // a run the person doesn't see, a routine's or a step of its flow -> what it's for
+    looking_back: Map<String, String>    // the quiet turn an agent looks back over its chat in, once it paused -> the reply it goes under
+    paused: LinkedMap<String, Paused>    // "user/conversation" -> when the chat will have paused, after the person's last turn there
     run_chains: Map<String, List<String>>    // a run message_agent started -> the agents that asked on the way, oldest first
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
     script_calls: Map<String, Request>    // a script's ask, by its run, answered when the run ends
@@ -601,6 +604,16 @@ struct QuietTurn {
     posted: List<String>    // what its agent posted, oldest first
     step: String    // for a step of the routine's flow, its name, and the routine's run it goes on from; "" for the routine's own run
     of: String
+}
+
+// A chat the person wrote in, which pauses `at` unless something more is
+// said, when its agent looks back over it (PLAN.md, "Memory").
+struct Paused {
+    user: String
+    conversation: String
+    agent: String
+    message: String    // the reply that ended the person's last turn, which what the agent keeps goes under
+    at: i64
 }
 
 struct Install {
@@ -1859,7 +1872,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3481,16 +3494,142 @@ impl Instance {
         return try parse(text)
     }
 
-    // Keeps an agent's proposal of a skill or a note, which waits for the
-    // person to keep or drop it, and tells their devices.
+    // --- What an agent learns from a chat (PLAN.md, "Memory" and "Sharing and learning") ---
+
+    // Keeps an agent's proposal of a skill, a note or a fix to a skill that
+    // failed, under the reply of the turn that made it, and tells the person's
+    // devices. A note or a fix is kept at once when the agent's permission mode
+    // doesn't ask about everyday changes, unless the note is for every agent;
+    // anything else waits for the person. Gives the proposal as it is now.
     fn propose(i: Instance, g: Grant, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
-        let waiting = try i.store.proposals(g.user.copy(), String("waiting"), PROPOSALS_WAITING_MOST + 1)
-        if waiting.len() >= PROPOSALS_WAITING_MOST { fail "Your person has {PROPOSALS_WAITING_MOST} proposals waiting already. Wait until they've gone through them." }
-        let p = try i.store.add_proposal(g.user.copy(), g.agent.copy(), kind, data.copy(), cut_short(why, 500), recording)
-        let what = if kind == "skill" { "the skill {str_at(data, "name") ?? String()}" } else { "a note: {cut_short(str_at(data, "text") ?? String(), 100)}" }
-        i.log(g.user.copy(), g.agent.copy(), "memory", "Proposed {what}", g.agent.copy())
-        try i.event(g.user, "proposal.created", Obj.new().j("proposal", p.copy()).done())
+        let message = i.reply_of_run(g.copy())
+        let for_every = kind == "note" and (bool_at(data.copy(), "shared") ?? false)
+        let itself = kind != "skill" and not for_every and try i.keeps_itself(g.user.copy(), g.agent.copy())
+        if not itself {
+            let waiting = try i.store.proposals(g.user.copy(), String("waiting"), PROPOSALS_WAITING_MOST + 1)
+            if waiting.len() >= PROPOSALS_WAITING_MOST { fail "Your person has {PROPOSALS_WAITING_MOST} proposals waiting already. Wait until they've gone through them." }
+        }
+        let made = try i.store.add_proposal(g.user.copy(), g.agent.copy(), kind, data.copy(), cut_short(why, 500), recording, message.copy())
+        let id = str_at(made.copy(), "id") ?? String()
+        var kept_itself = false
+        if itself {
+            let why_not = if kind == "fix" { try i.keep_fix(g.user.copy(), g.agent.copy(), id.copy(), data.copy(), String("auto")) } else { try i.keep_note(g.user.copy(), g.agent.copy(), id.copy(), data.copy(), String("auto")) }
+            kept_itself = why_not.len() == 0
+        }
+        if not kept_itself {
+            let what = if kind == "skill" { "the skill {str_at(data.copy(), "name") ?? String()}" } else if kind == "fix" { "a fix to the skill {str_at(data.copy(), "name") ?? String()}" } else { "a note: {cut_short(str_at(data, "text") ?? String(), 100)}" }
+            i.log(g.user.copy(), g.agent.copy(), "memory", "Proposed {what}", g.agent.copy())
+        }
+        let p = try i.store.proposal(g.user.copy(), id) ?? made
+        try i.event(g.user.copy(), "proposal.created", Obj.new().j("proposal", p.copy()).done())
+        if message.len() > 0 { try i.relearn(g.user, message) }
         return p
+    }
+
+    // Whether `agent`'s permission mode keeps what it learns on its own.
+    fn keeps_itself(i: Instance, user: String, agent: String) -> bool ! Error {
+        let a = try i.store.agent(user.copy(), agent) else return false
+        return learn.keeps_itself(defaults.mode_of(a, try i.store.defaults(user)))
+    }
+
+    // The reply a proposal from the calling run goes under: the run's own, or
+    // for an agent looking back over its paused chat, the one it looks back
+    // from. None for a routine's quiet run, whose reply isn't kept.
+    fn reply_of_run(i: Instance, g: Grant) -> String {
+        let run = i.calling_run(g)
+        if let message = i.looking_back.find(run.copy()) { return message.copy() }
+        if i.quiet_turns.contains(run.copy()) { return String() }
+        let r = i.runs.find(run) else return String()
+        return r.message.copy()
+    }
+
+    // Keeps the note of proposal `id`, as `by` said ("auto" for the agent's
+    // permission mode): as `agent`'s, or every agent's with `shared`, tied to its
+    // site. Why it couldn't be, or "".
+    fn keep_note(i: Instance, user: String, agent: String, id: String, data: Json, by: String) -> String ! Error {
+        let what = (str_at(data.copy(), "text") ?? String()).trim().copy()
+        if what.len() == 0 { return String("The note is empty.") }
+        let shared = bool_at(data.copy(), "shared") ?? false
+        let site = site_of(str_at(data.copy(), "site") ?? String())
+        let memory = try i.store.remember_on(user.copy(), if shared { String() } else { agent.copy() }, what.copy(), agent.copy(), site.copy())
+        let kept = merge(data, Obj.new().s("text", what).s("site", site).b("shared", shared).i("memory", memory).done())
+        if not try i.store.decide_proposal(user.copy(), id.copy(), "kept", kept.copy(), by.copy()) { return String("That proposal was decided already.") }
+        i.log_kept(user, agent, learn.kept_line(String("note"), kept, by == "auto"), by, id)
+        return String()
+    }
+
+    // Puts in the fix of proposal `id` to a skill, as `by` said, keeping the
+    // skill as it was to undo it. Why it couldn't be, or "".
+    fn keep_fix(i: Instance, user: String, agent: String, id: String, data: Json, by: String) -> String ! Error {
+        let name = str_at(data.copy(), "name") ?? String()
+        let body = str_at(data.copy(), "body") ?? String()
+        if body.trim().len() == 0 { return String("The fixed skill is empty.") }
+        let skill = try i.store.skill(user.copy(), name.copy()) else return "There's no skill {name} any more."
+        let was = str_at(skill.copy(), "body") ?? String()
+        let was_description = str_at(skill, "description") ?? String()
+        let given = (str_at(data.copy(), "description") ?? String()).trim().copy()
+        let description = if given.len() > 0 { given } else { was_description.copy() }
+        let kept = merge(data, Obj.new().s("description", description.copy()).s("was", was.copy()).s("was_description", was_description).j("lines", learn.change(was, body.copy())).done())
+        if not try i.store.decide_proposal(user.copy(), id.copy(), "kept", kept.copy(), by.copy()) { return String("That proposal was decided already.") }
+        try i.store.put_skill(user.copy(), name, description, body)
+        i.sync_skills(user.copy())
+        i.log_kept(user, agent, learn.kept_line(String("fix"), kept, by == "auto"), by, id)
+        return String()
+    }
+
+    // What the reply `message` has under it: the notes and fixes its agent kept
+    // or proposed from it, as learn.shown gives them.
+    fn learned_under(i: Instance, user: String, message: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for p in try i.store.proposals_under(user, message) {
+            if str_at(p.copy(), "kind") != some(String("skill")) { out.push(learn.shown(p)) }
+        }
+        return out
+    }
+
+    // The reply `message`, once it's kept, with what's under it as it is now,
+    // which every device is told. A reply still being written gets it when it's kept.
+    fn relearn(i: Instance, user: String, message: String) ! Error {
+        let m = try i.store.message(user.copy(), message.copy()) else return
+        let learned = try i.learned_under(user.copy(), message)
+        let changed = if learned.len() > 0 { merge(m, Obj.new().j("learned", Json.Array(learned)).done()) } else { without(m, "learned") }
+        try i.store.put_message(user.copy(), changed.copy())
+        try i.event(user, "message.updated", Obj.new().s("conversation", str_at(changed.copy(), "conversation") ?? String()).j("message", changed).done())
+    }
+
+    // The person's turn in `conversation` ended with the reply `message`: the
+    // chat pauses unless something more is said, if it's one of its agent's
+    // chats with the person, not a task's, a thread or side questions.
+    fn pause_after(i: mut Instance, user: String, conversation: String, agent: String, message: String) ! Error {
+        let c = try i.store.conversation(user.copy(), conversation.copy()) else return
+        if bool_at(c.copy(), "side") == some(true) or str_at(c.copy(), "task") != none or str_at(c.copy(), "routine") != none or str_at(c, "asked_by") != none { return }
+        if try i.store.task_in(user.copy(), conversation.copy()) != none { return }
+        i.paused.insert("{user}/{conversation}", Paused { user: user.copy(), conversation: conversation.copy(), agent: agent.copy(), message: message.copy(), at: now() + learn.PAUSE_MINUTES * i.minute_ms })
+    }
+
+    // The chats that have paused by `t`, nothing more said in them: each one's
+    // agent looks back over it in a quiet turn. One that's busy waits.
+    fn paused_now(i: mut Instance, t: i64) {
+        if i.paused.len() == 0 { return }
+        var due = List<String>()
+        for (k, p) in i.paused {
+            if p.at <= t and not i.chat_busy(p.user.copy(), p.conversation.copy()) { due.push(k.copy()) }
+        }
+        for k in due {
+            let p = i.paused.remove(k) else continue
+            if let err(e) = i.look_back(p) { eprintln("loom: looking back over a chat: {e}") }
+        }
+    }
+
+    // `p`'s agent looks back over its paused chat, in a turn of the chat its
+    // person doesn't see (PLAN.md, "Memory"), told the skills it said failed.
+    fn look_back(i: mut Instance, p: Paused) ! Error {
+        let conversation = try i.store.conversation(p.user.copy(), p.conversation.copy()) else return
+        if try i.store.agent(p.user.copy(), p.agent.copy()) == none { return }
+        let run_id = try i.store.new_id("run")
+        i.looking_back.insert(run_id.copy(), p.message.copy())
+        let failures = try i.store.skill_failures(p.user.copy(), p.agent.copy(), p.conversation.copy())
+        try i.start_run(p.user, conversation, run_id, String(), String(), List<Json>(), String(), learn.look_back(failures), "person")
     }
 
     // The recording the calling run writes up, if it's a task started from one.
@@ -3683,6 +3822,12 @@ impl Instance {
     fn log(i: Instance, user: String, agent: String, kind: str, what: String, by: String) {
         let shown = hidden_text(what, i.secret_values(user.copy()))
         if let err(e) = i.store.log(user, agent, kind, shown, by) { eprintln("loom: the activity log: {e}") }
+    }
+
+    // The same, for a note or a fix that was kept, which the entry can undo.
+    fn log_kept(i: Instance, user: String, agent: String, what: String, by: String, proposal: String) {
+        let shown = hidden_text(what, i.secret_values(user.copy()))
+        if let err(e) = i.store.log_kept(user, agent, shown, by, proposal) { eprintln("loom: the activity log: {e}") }
     }
 
     // `user`'s secrets, (name, value), for the activity log to hide: opened
@@ -4879,8 +5024,36 @@ impl Instance {
             if what.len() == 0 { return some(tool_error(String("text is empty."))) }
             let site = site_of(str_at(args.copy(), "site") ?? String())
             let note = Obj.new().s("text", what).s("site", site).b("shared", bool_at(args.copy(), "shared") ?? false).done()
-            _ = try i.propose(g.copy(), "note", note, (str_at(args, "why") ?? String()).trim().copy(), String())
+            let p = try i.propose(g.copy(), "note", note, (str_at(args, "why") ?? String()).trim().copy(), String())
+            if str_at(p.copy(), "status") == some(String("kept")) { return some(tool_text(String("Kept: it's a note of yours now, and your person can undo it from the line under your reply."))) }
+            if str_at(p, "message") != none { return some(tool_text(String("Proposed. Your person keeps or drops it on a card under your reply; it isn't a note until they keep it."))) }
             return some(tool_text(String("Proposed. Your person keeps or drops it in their app; it isn't a note until they keep it.")))
+        }
+        // A skill that failed at a step, which its agent fixes (PLAN.md, "Memory").
+        if name == "skill_failed" {
+            let skill_name = (str_at(args.copy(), "name") ?? String()).trim().copy()
+            if try i.store.skill(g.user.copy(), skill_name.copy()) == none { return some(tool_error("There's no skill {skill_name}. list_skills gives their names.")) }
+            let (step, why) = learn.failure(str_at(args.copy(), "step") ?? String(), str_at(args, "why") ?? String())
+            if step.len() == 0 or why.len() == 0 { return some(tool_error(String("Say the step that failed, and why."))) }
+            let run = i.calling_run(g.copy())
+            let conversation = if let r = i.runs.find(run) { r.conversation.copy() } else { g.conversation.copy() }
+            try i.store.skill_failed(g.user.copy(), g.agent.copy(), skill_name.copy(), step.copy(), why, conversation)
+            i.log(g.user, g.agent.copy(), "memory", "Said the skill {skill_name} failed at: {step}", g.agent)
+            return some(tool_text("Noted. Fix {skill_name} with fix_skill now, or when you're asked once the chat pauses."))
+        }
+        if name == "fix_skill" {
+            let skill_name = (str_at(args.copy(), "name") ?? String()).trim().copy()
+            let skill = try i.store.skill(g.user.copy(), skill_name.copy()) else return some(tool_error("There's no skill {skill_name}. list_skills gives their names."))
+            let failed = try i.store.skill_failure(g.user.copy(), g.agent.copy(), skill_name.copy()) else return some(tool_error("You haven't said {skill_name} failed. When a step of it goes wrong, say so with skill_failed, then fix it."))
+            let body = str_at(args.copy(), "body") ?? String()
+            if body.trim().len() == 0 { return some(tool_error(String("The skill's body is empty: give it whole, fixed."))) }
+            let was = str_at(skill, "body") ?? String()
+            if body == was { return some(tool_error(String("That's the skill as it is: change what went wrong."))) }
+            let fix = Obj.new().s("name", skill_name.copy()).s("body", body.copy()).s("description", (str_at(args.copy(), "description") ?? String()).trim().copy()).j("failed", Obj.new().s("step", str_at(failed.copy(), "step") ?? String()).s("why", str_at(failed, "why") ?? String()).done()).j("lines", learn.change(was, body)).done()
+            let p = try i.propose(g.copy(), "fix", fix, (str_at(args, "why") ?? String()).trim().copy(), String())
+            try i.store.skill_fixed(g.user.copy(), g.agent.copy(), skill_name.copy())
+            if str_at(p.copy(), "status") == some(String("kept")) { return some(tool_text("Fixed: {skill_name} is as you gave it now, and your person can undo it from the line under your reply.")) }
+            return some(tool_text("Proposed the fix. Your person keeps or drops it{if str_at(p, "message") != none { " on a card under your reply, which shows what it changes" } else { " in their app" }}; {skill_name} stays as it was until they keep it."))
         }
         if name == "save_skill" {
             let a = Obj.new().s("name", str_at(args.copy(), "name") ?? String()).s("description", str_at(args.copy(), "description") ?? String()).s("body", str_at(args, "body") ?? String()).done()
@@ -6871,6 +7044,8 @@ impl Instance {
         // Routines run at the new place once the instance has moved there.
         if i.moving.len() > 0 or i.moved != Json.Null { return }
         if let err(e) = i.pending_import() { eprintln("loom: a staged import: {e}") }
+        // Chats that have paused: their agents look back over them.
+        i.paused_now(t)
         let due = match i.store.due_routines(t) {
             ok(d) => d,
             err(e) => {
@@ -8809,7 +8984,9 @@ impl Instance {
             if r.user != user { continue }
             // A routine's quiet run says whose it is here too, as its run.started does.
             let quiet_for = if let q = i.quiet_turns.find(r.id.copy()) { some(q.routine.copy()) } else { none }
-            going.push(Obj.new().s("run", r.id.copy()).s("conversation", r.conversation.copy()).s("agent", r.agent.copy()).s("message", r.message.copy()).s("answering", r.answering.copy()).maybe("routine", quiet_for).done())
+            var one = Obj.new().s("run", r.id.copy()).s("conversation", r.conversation.copy()).s("agent", r.agent.copy()).s("message", r.message.copy()).s("answering", r.answering.copy()).maybe("routine", quiet_for)
+            if i.looking_back.contains(r.id.copy()) { one = one.b("quiet", true) }
+            going.push(one.done())
             var b: i64 = 0
             for block in r.blocks {
                 if block.kind == "text" or block.kind == "thought" {
@@ -8918,15 +9095,18 @@ impl Instance {
         // goes first and the running turn stops for it, as queue.steer does.
         if let running = i.answering(user.copy(), conversation_id.copy()) {
             let agent = try i.store.agent(user.copy(), str_at(conversation.copy(), "agent") ?? String()) ?? Json.Null
-            let steer = defaults.busy_of(agent, try i.store.defaults(user.copy())) == "steer"
+            // An agent looking back over its paused chat stops for the person's
+            // message, which goes at once, with nothing said of what it stopped.
+            let looking = i.looking_back.contains(running.copy())
+            let steer = looking or defaults.busy_of(agent, try i.store.defaults(user.copy())) == "steer"
             var queued = Obj.new().s("id", message_id.copy()).s("text", text).j("files", Json.Array(sent_files)).s("from", device.copy()).i("at", now())
             if form != Json.Null { queued = queued.j("form", form.copy()) }
             if replying != Json.Null { queued = queued.j("reply", replying.copy()) }
             let item = queued.done()
-            try i.store.put_queued(user.copy(), conversation_id.copy(), if steer { merge(item, Obj.new().b("steered", true).done()) } else { item }, steer)
+            try i.store.put_queued(user.copy(), conversation_id.copy(), if steer and not looking { merge(item, Obj.new().b("steered", true).done()) } else { item }, steer)
             try i.store.remember_sent(device, cid.copy(), message_id.copy(), String())
             var ack = Obj.new().s("t", String("ack")).s("cid", cid.copy()).s("message", message_id).b("queued", true)
-            if steer { ack = ack.b("steered", true) }
+            if steer and not looking { ack = ack.b("steered", true) }
             _ = i.server.send_text(s, "{ack.done()}")
             try i.queue_changed(user, conversation_id)
             if steer { try i.stop_run(running) }
@@ -9274,11 +9454,17 @@ impl Instance {
             notice = brains.moved_line(moved_from, program.copy(), "hand")
             try i.store.summary_handed(conversation_id.copy())
         }
-        // A routine's quiet run says whose it is, so the apps don't draw it in the chat.
+        // A routine's quiet run says whose it is, so the apps don't draw it in the chat,
+        // and an agent's looking back over its chat says it's quiet.
         let quiet_for = if let q = i.quiet_turns.find(run_id.copy()) { some(q.routine.copy()) } else { none }
+        let looks_back = i.looking_back.contains(run_id.copy())
+        // Something more is said in the chat, so it hasn't paused yet.
+        _ = i.paused.remove("{user}/{conversation_id}")
         // Where its events begin, so its calls are found when it ends.
         let since = try i.store.last_seq(user.copy())
-        try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).maybe("routine", quiet_for).done())
+        var started = Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).maybe("routine", quiet_for)
+        if looks_back { started = started.b("quiet", true) }
+        try i.event(user.copy(), "run.started", started.done())
         i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since, started: now() })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
@@ -11318,6 +11504,7 @@ impl Instance {
         // A server its agent proposed: its card says how it stands in the kept reply.
         if let err(e) = i.close_mcp_adds(run_id.copy()) { eprintln("loom: ending run {run_id}: {e}") }
         let r = i.runs.remove(run_id.copy()) else return
+        let looked_back = i.looking_back.contains(run_id.copy())
         match i.wind_up(r, status.copy(), error.copy()) {
             ok(ends) => if not ends { return },
             err(e) => {
@@ -11336,6 +11523,11 @@ impl Instance {
         var finished = Obj.new().s("run", r.id.copy()).s("status", status.copy()).maybe("error", error)
         if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
         try i.event(r.user.copy(), "run.finished", finished.done())
+        // A turn of the person's that ended well: its chat pauses unless
+        // something more is said, and then its agent looks back over it.
+        if r.starter == "person" and status == "done" and not looked_back {
+            if let err(e) = i.pause_after(r.user.copy(), r.conversation.copy(), r.agent.copy(), r.message.copy()) { eprintln("loom: ending run {run_id}: {e}") }
+        }
         // A flow's step that waited for this agent to be free in its chat goes now.
         var flows_waiting = List<String>()
         for (id, f) in i.running_flows {
@@ -11345,8 +11537,10 @@ impl Instance {
             if not i.flows_due.contains(id.copy()) { i.flows_due.push(id.copy()) }
         }
         // What waited for this turn goes next, from the loop: the agent's
-        // program may be in the middle of being handled here.
-        i.turns_ended.push((r.user.copy(), r.conversation.copy(), status.copy()))
+        // program may be in the middle of being handled here. Looking back over
+        // a chat isn't the person's turn, so what they sent goes on after it
+        // however it ended.
+        i.turns_ended.push((r.user.copy(), r.conversation.copy(), if looked_back { String("done") } else { status.copy() }))
         // And the agent's browser closes, once nothing else uses it.
         i.check_browser("{r.user}/{r.agent}")
     }
@@ -11412,6 +11606,9 @@ impl Instance {
             keep = status == "failed" or status == "limit" or (status == "done" and mark == "failed")
             if q.step.len() > 0 { try i.step_ran(r.user.copy(), q, r.agent.copy(), status.copy(), error.copy(), said.copy()) }
         }
+        // Looking back over a paused chat leaves nothing in it but what the agent
+        // kept or proposed, which went under the reply it looked back from.
+        if let _ = i.looking_back.remove(r.id.copy()) { keep = false }
         if keep {
             // How the turn ended goes with it, so an app reads a stopped one as it was.
             // The Sources list at the end of its words comes out of them, and goes
@@ -11437,6 +11634,9 @@ impl Instance {
             }
             var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks.copy()))
             if sources.len() > 0 { o = o.j("sources", Json.Array(sources)) }
+            // The notes and fixes it kept or proposed this turn, under it.
+            let learned = try i.learned_under(r.user.copy(), r.message.copy())
+            if learned.len() > 0 { o = o.j("learned", Json.Array(learned)) }
             // Files it names that are there, for the app to show where they're named,
             // a picture as a picture once its thumbnail is made.
             let (mentions, pictures) = i.with_thumbs(i.mentions(r.user.copy(), r.agent.copy(), said.copy()), blocks)
@@ -11912,7 +12112,7 @@ impl Instance {
         if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Proposals are your person's to keep or drop, in the app.")) }
         if name == "proposal.list" {
             let status = str_at(args, "status") ?? String("waiting")
-            if status != "waiting" and status != "kept" and status != "dropped" and status != "all" { return Answer.Refused(String("bad_request"), String("status is waiting, kept, dropped or all.")) }
+            if status != "waiting" and status != "kept" and status != "dropped" and status != "undone" and status != "all" { return Answer.Refused(String("bad_request"), String("status is waiting, kept, dropped, undone or all.")) }
             let list = try i.store.proposals(user, if status == "all" { String() } else { status }, 200)
             return Answer.Value(Obj.new().j("proposals", Json.Array(list)).done())
         }
@@ -11929,36 +12129,78 @@ impl Instance {
             let task = try i.start_task(user, agent, String("Propose skills and notes from past chats"), prompt, from, device)
             return Answer.Value(Obj.new().j("task", task).done())
         }
-        if name != "proposal.keep" and name != "proposal.drop" { return Answer.Refused(String("unknown_command"), "There's no command {name}.") }
+        // Put off on the card under a reply: each waits on the Proposals page.
+        if name == "proposal.later" {
+            let Json.Array(ids) = at(args, "ids") else return Answer.Refused(String("bad_request"), String("ids is a list of proposals' ids."))
+            var under = List<String>()
+            var later = List<Json>()
+            for given in ids {
+                let id = given.as_str() ?? String()
+                if not try i.store.later_proposal(user.copy(), id.copy()) { continue }
+                let p = try i.store.proposal(user.copy(), id) ?? Json.Null
+                if let m = str_at(p.copy(), "message") {
+                    if not under.contains(m.copy()) { under.push(m) }
+                }
+                try i.event(user.copy(), "proposal.updated", Obj.new().j("proposal", p.copy()).done())
+                later.push(p)
+            }
+            for m in under { try i.relearn(user.copy(), m) }
+            return Answer.Value(Obj.new().j("proposals", Json.Array(later)).done())
+        }
+        if name != "proposal.keep" and name != "proposal.drop" and name != "proposal.undo" { return Answer.Refused(String("unknown_command"), "There's no command {name}.") }
         let id = str_at(args.copy(), "id") ?? String()
         let p = try i.store.proposal(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no proposal {id}.")
-        if str_at(p.copy(), "status") != some(String("waiting")) { return Answer.Refused(String("not_now"), "That proposal was {str_at(p, "status") ?? String()} already.") }
         let kind = str_at(p.copy(), "kind") ?? String()
         let agent = str_at(p.copy(), "agent") ?? String()
-        // What the person kept: what was proposed, with what they changed.
-        let part: str = if kind == "skill" { "skill" } else { "note" }
-        let data = merge(at(p.copy(), part), at(args, part))
-        if name == "proposal.drop" {
-            _ = try i.store.decide_proposal(user.copy(), id.copy(), "dropped", at(p, part), device.copy())
-            i.log(user.copy(), agent, "memory", "Dropped a proposal", device)
-        } else if kind == "skill" {
-            let skill_name = str_at(data.copy(), "name") ?? String()
-            let put = try i.command(user.copy(), device.copy(), String("skill.put"), data.copy())
-            if let Answer.Refused(code, message) = put { return Answer.Refused(code, message) }
-            _ = try i.store.decide_proposal(user.copy(), id.copy(), "kept", data, device.copy())
-            i.log(user.copy(), agent, "memory", "Kept the proposed skill {skill_name}", device)
+        let part: str = if kind == "skill" { "skill" } else if kind == "fix" { "fix" } else { "note" }
+        if name == "proposal.undo" {
+            if let why = try i.undo(user.copy(), device.copy(), p.copy()) { return why }
         } else {
-            let what = (str_at(data.copy(), "text") ?? String()).trim().copy()
-            if what.len() == 0 { return Answer.Refused(String("bad_request"), String("The note is empty.")) }
-            let shared = bool_at(data.copy(), "shared") ?? false
-            let site = site_of(str_at(data.copy(), "site") ?? String())
-            _ = try i.store.remember_on(user.copy(), if shared { String() } else { agent.copy() }, what.copy(), agent.copy(), site)
-            _ = try i.store.decide_proposal(user.copy(), id.copy(), "kept", data, device.copy())
-            i.log(user.copy(), agent, "memory", "Kept the proposed note: {cut_short(what, 100)}", device)
+            if str_at(p.copy(), "status") != some(String("waiting")) { return Answer.Refused(String("not_now"), "That proposal was {str_at(p, "status") ?? String()} already.") }
+            // What the person kept: what was proposed, with what they changed.
+            let data = merge(at(p.copy(), part), at(args, part))
+            if name == "proposal.drop" {
+                _ = try i.store.decide_proposal(user.copy(), id.copy(), "dropped", at(p.copy(), part), device.copy())
+                i.log(user.copy(), agent, "memory", "Dropped a proposal", device)
+            } else if kind == "skill" {
+                let skill_name = str_at(data.copy(), "name") ?? String()
+                let put = try i.command(user.copy(), device.copy(), String("skill.put"), data.copy())
+                if let Answer.Refused(code, message) = put { return Answer.Refused(code, message) }
+                _ = try i.store.decide_proposal(user.copy(), id.copy(), "kept", data, device.copy())
+                i.log(user.copy(), agent, "memory", "Kept the proposed skill {skill_name}", device)
+            } else {
+                let why = if kind == "fix" { try i.keep_fix(user.copy(), agent, id.copy(), data, device) } else { try i.keep_note(user.copy(), agent, id.copy(), data, device) }
+                if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
+            }
         }
         let decided = try i.store.proposal(user.copy(), id) ?? Json.Null
-        try i.event(user, "proposal.updated", Obj.new().j("proposal", decided.copy()).done())
+        try i.event(user.copy(), "proposal.updated", Obj.new().j("proposal", decided.copy()).done())
+        if let m = str_at(decided.copy(), "message") { try i.relearn(user, m) }
         return Answer.Value(Obj.new().j("proposal", decided).done())
+    }
+
+    // Undoes the note or fix of proposal `p` that was kept: the note is
+    // forgotten, and the skill put back as it was before the fix, unless it has
+    // changed since. A refusal, or none once it's undone.
+    fn undo(i: Instance, user: String, device: String, p: Json) -> Answer? ! Error {
+        let id = str_at(p.copy(), "id") ?? String()
+        let kind = str_at(p.copy(), "kind") ?? String()
+        if kind != "note" and kind != "fix" { return some(Answer.Refused(String("bad_request"), String("Only a kept note or fix can be undone."))) }
+        if str_at(p.copy(), "status") != some(String("kept")) { return some(Answer.Refused(String("not_now"), "That proposal was {str_at(p, "status") ?? String()}, not kept.")) }
+        let data = at(p.copy(), if kind == "fix" { "fix" } else { "note" })
+        if kind == "fix" {
+            let name = str_at(data.copy(), "name") ?? String()
+            if let skill = try i.store.skill(user.copy(), name.copy()) {
+                if str_at(skill, "body") != str_at(data.copy(), "body") { return some(Answer.Refused(String("changed"), "The skill {name} has changed since the fix. Change it on the Skills page.")) }
+                try i.store.put_skill(user.copy(), name, str_at(data.copy(), "was_description") ?? String(), str_at(data.copy(), "was") ?? String())
+                i.sync_skills(user.copy())
+            }
+        } else if let memory = int_at(data.copy(), "memory") {
+            _ = try i.store.forget(user.copy(), memory, none)
+        }
+        if not try i.store.undo_proposal(user.copy(), id, device.copy()) { return some(Answer.Refused(String("not_now"), String("That was undone already."))) }
+        i.log(user, str_at(p, "agent") ?? String(), "memory", learn.undone_line(kind, data), device)
+        return none
     }
 
     // A command's value, or its error's code and message.

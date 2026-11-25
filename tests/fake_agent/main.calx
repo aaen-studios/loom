@@ -59,6 +59,9 @@ module tests.fake_agent.main
 //     /compacted USED SIZE
 //                         the same, but after the turn has ended, as Claude's adapter
 //                         reports a session it compacted while idle
+//     /next STEP          plays STEP at the start of its next turn, before what that
+//                         turn's prompt says, for a prompt of only "[loom: ...]"
+//                         blocks, which has no steps of its own; several go in order
 //     /env NAME           says NAME=VALUE, its environment variable NAME
 //     /net HOST:PORT      says whether HOST:PORT can be reached straight ("direct
 //                         open" or "direct closed"), and through the proxy
@@ -156,6 +159,7 @@ pub enum Step {
     Meta
     Usage(i64, i64)
     Compacted(i64, i64)
+    Next(String)    // a step for its next turn
 }
 
 // The steps a prompt spells out. Blank lines are skipped.
@@ -244,6 +248,8 @@ pub fn script(text: String) -> List<Step> {
         } else if word == "/usage" {
             let (used, size) = split_word(rest)
             steps.push(Step.Usage(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
+        } else if word == "/next" {
+            steps.push(Step.Next(rest))
         } else if word == "/compacted" {
             let (used, size) = split_word(rest)
             steps.push(Step.Compacted(i64.parse(used) ?? 0, i64.parse(size) ?? 0))
@@ -389,6 +395,8 @@ struct Agent {
     kept: Map<String, Child>
     kept_id: i64
     born: Instant    // when it started, for /uptime
+    // Steps /next left for its next turn, oldest first.
+    later: List<String>
 }
 
 // The config options a session offers (ACP's session config options): a model
@@ -808,6 +816,12 @@ impl Agent {
         var reason = String("end_turn")
         var tokens: i64 = 0
         var compacted: (i64, i64)? = none
+        // What /next left for this turn goes first.
+        if a.later.len() > 0 {
+            let first = a.later.join("\n")
+            a.later = List<String>()
+            text = if text.len() > 0 { "{first}\n{text}" } else { first }
+        }
         for step in script(text) {
             match step {
                 Step.Say(s) => {
@@ -958,6 +972,7 @@ impl Agent {
                     update(session.copy(), u)
                 },
                 Step.Compacted(used, size) => compacted = some((used, size)),
+                Step.Next(s) => a.later.push(s.copy()),
                 Step.Config => {
                     let values = a.values(session.copy())
                     chunk(session.copy(), "agent_message_chunk", "model={value_of(values.copy(), "model")} effort={value_of(values, "effort")}")
@@ -1125,7 +1140,7 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     let given = env.args()
     let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() } }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)
