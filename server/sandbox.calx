@@ -31,13 +31,49 @@ import std.env
 import std.fs
 import std.process.{Command}
 import std.tar
+import std.thread.{Task}
 import std.time.{Timestamp}
 import server.egress
 
 // The image a sandbox runs, unless `loom serve --sandbox-image` names another:
 // loom's own, which has Node for the agents that start with npx, git, and `loom`
-// for `loom mcp` and `loom egress`.
+// for `loom mcp` and `loom egress`. A release runs its own version's (`image_for`).
 pub const IMAGE: str = "ghcr.io/aaen-studios/loom"
+
+// The image of loom `version`'s sandboxes: the one a release of it pushed, tagged
+// with its version, so their `loom mcp` and `loom egress` are the instance's own.
+// A build from source, whose version no image has, takes the newest.
+pub fn image_for(version: String) -> String {
+    if version.len() == 0 or version.contains("-dev") or version.starts_with("0.0.0") { return String(IMAGE) }
+    return "{IMAGE}:{version}"
+}
+
+@test
+fn a_release_runs_its_own_versions_image() {
+    assert(image_for(String("0.2.11")) == "ghcr.io/aaen-studios/loom:0.2.11")
+    assert(image_for(String("0.3.0-beta.1")) == "ghcr.io/aaen-studios/loom:0.3.0-beta.1")
+    assert(image_for(String("0.2.0-dev")) == IMAGE and image_for(String("0.0.0-docker")) == IMAGE)
+}
+
+// The sandboxes made from another image than `id`, from what `container inspect`
+// said of each: its name and its image's id. Docker's names start with a slash.
+pub fn stale(said: String, id: String) -> List<String> {
+    var out = List<String>()
+    for line in said.lines() {
+        let (box, image) = line.trim().split_once(" ") ?? (String(), String())
+        if box.len() == 0 { continue }
+        if image.trim() != id { out.push(box.trim_prefix("/").copy()) }
+    }
+    return out
+}
+
+@test
+fn a_sandbox_from_another_image_is_stale() {
+    let said = String("loom-u_2 abc\n/loom-u_3 def\nloom-u_3-a_1 abc\n")
+    assert(stale(said.copy(), String("abc")).join(" ") == "loom-u_3")
+    assert(stale(said, String("new")).join(" ") == "loom-u_2 loom-u_3 loom-u_3-a_1")
+    assert(stale(String(), String("abc")).len() == 0)
+}
 
 // What each sandbox may use, at most.
 const MEMORY: str = "2g"
@@ -210,6 +246,28 @@ fn du_says_kilobytes() {
     assert(kilobytes(String("du: cannot read")) == none)
 }
 
+struct Puller {
+    boxes: Sandboxes
+    done: Sender<String>
+}
+
+impl Task for Puller {
+    fn run(own self) {
+        var p = self
+        let said = match p.boxes.pull() {
+            ok => String(),
+            err(e) => "{e}",
+        }
+        p.done.send(said)
+    }
+}
+
+// Fetches the sandboxes' image on a thread of its own, and sends `done` "" once it's
+// here, or why it isn't.
+pub fn pull_on_thread(boxes: own Sandboxes, done: own Sender<String>) {
+    _ = unsafe { Thread.spawn(Puller { boxes: boxes, done: done }) }
+}
+
 // The name of `user`'s own sandbox.
 pub fn name(user: String) -> String {
     return "loom-{user}"
@@ -320,10 +378,53 @@ impl Sandboxes {
     // or it's deleted. The person's folder stays.
     pub fn drop_place(self, place: Place) {
         if not place.closed() { return }
-        let stop: List<String> = if self.runtime == "docker" { [String("rm"), String("-f"), place.name()] } else { [String("rm"), String("-f"), String("-t"), String("0"), place.name()] }
+        self.drop_box(place.name())
+    }
+
+    // Stops and removes the sandbox `box`. The folders it sees stay.
+    pub fn drop_box(self, box: own String) {
+        let stop: List<String> = if self.runtime == "docker" { [String("rm"), String("-f"), box.copy()] } else { [String("rm"), String("-f"), String("-t"), String("0"), box] }
         match Command.new(self.runtime.copy()).args(stop).output() {
             ok(_) => {},
             err(e) => eprintln("loom: removing a sandbox: {e}"),
+        }
+    }
+
+    // The id of the image sandboxes are made from, or none while the runtime doesn't
+    // have it here.
+    pub fn image_id(self) -> String? {
+        let out = match Command.new(self.runtime.copy()).args([String("image"), String("inspect"), String("--format"), String(#"{{.Id}}"#), self.image.copy()]).output() {
+            ok(o) => o,
+            err(_) => return none,
+        }
+        let id = out.text().trim().copy()
+        if not out.status.success() or id.len() == 0 { return none }
+        return some(id)
+    }
+
+    // Fetches the image sandboxes are made from: slow, so on a thread of its own.
+    pub fn pull(self) ! Error {
+        try self.run([String("pull"), String("-q"), self.image.copy()])
+    }
+
+    // The sandboxes made from another image than `id`, the image's they're made from
+    // now: from an image an older loom ran, whose `loom` is the older one's.
+    pub fn stale_boxes(self, id: String) -> List<String> {
+        let listed = match Command.new(self.runtime.copy()).args([String("ps"), String("-a"), String("--filter"), String("label=loom.user"), String("--format"), String(#"{{.Names}}"#)]).output() {
+            ok(o) => o.text(),
+            err(_) => return List<String>(),
+        }
+        var names = List<String>()
+        for line in listed.lines() {
+            let n = line.trim().copy()
+            if n.len() > 0 { names.push(n) }
+        }
+        if names.len() == 0 { return names }
+        var args: List<String> = [String("container"), String("inspect"), String("--format"), String(#"{{.Name}} {{.Image}}"#)]
+        args.extend(names)
+        return match Command.new(self.runtime.copy()).args(args).output() {
+            ok(o) => stale(o.text(), id),
+            err(_) => List<String>(),
         }
     }
 

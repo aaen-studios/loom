@@ -28,7 +28,7 @@ Point at a message, yours or an agent's, and choose **Reply** by its corner, or 
 
 Select words in a message for a small bar with **Copy**, **Quote** and, in an agent's reply, **Ask about this**. These are in the right-click menu too. Quote and Ask about this quote only the words you selected. On the iPhone, long-press a message and choose **Select text**; the selection has Quote and Ask about this.
 
-What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it over the bubble. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
+What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it on one line over the bubble: who said it and the start of what. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
 
 ## Cards in replies
 
