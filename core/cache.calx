@@ -102,6 +102,8 @@ const APPROVALS: str = "SELECT json FROM approvals ORDER BY rowid"
 // The sidebar's folders, in the order the instance gave them, and the agents a question waits on.
 const GROUPS: str = "SELECT json FROM groups ORDER BY rowid"
 const WAITING: str = "SELECT DISTINCT json_extract(r.json, '$.agent') FROM approvals a JOIN runs r ON r.id = a.run"
+// The group chats, in the order they were made (PLAN.md, "Group chats").
+const ROOMS: str = "SELECT json FROM conversations WHERE json_extract(json, '$.room') IS NOT NULL ORDER BY rowid"
 const OUTBOX: str = "SELECT json FROM outbox ORDER BY at, rowid"
 
 // A JSON array of `items`, each JSON already.
@@ -140,7 +142,7 @@ fn maybe(s: own String?) -> Value {
 // Whether a conversation is its agent's chat, rather than a task's, a side
 // question's, a branch's, a routine's or another agent's (`asked_by`): 1 or 0.
 fn chat_of(c: Json) -> i64 {
-    for key in ["task", "side", "branch_of", "routine", "asked_by"] {
+    for key in ["task", "side", "branch_of", "routine", "asked_by", "room"] {
         if at(c, key) != Json.Null { return 0 }
     }
     return 1
@@ -557,7 +559,7 @@ impl Cache {
         for id in try self.texts(WAITING, List<Value>()) {
             if id.len() > 0 { waiting.push(id.copy()) }
         }
-        return sidebar.arrange(try self.agents(), try self.all(GROUPS, List<Value>()), waiting)
+        return sidebar.arrange_with(try self.all(ROOMS, List<Value>()), try self.agents(), try self.all(GROUPS, List<Value>()), waiting)
     }
 
     fn put_runs(self, going: List<Json>) ! Error {
@@ -795,7 +797,8 @@ fn the_sidebar_has_the_folders_and_who_waits() ! Error {
     try c.keep_groups(Json.Array([folder("g_2", "Later"), folder("g_1", "Work")]))
     try c.keep_groups(Json.Null)
     let Json.Array(all) = try c.sidebar() else return
-    assert(str_at(all[3].copy(), "id") == some(String("g_2")) and str_at(all[4].copy(), "id") == some(String("g_1")))
+    // After the group chats' section and waiting, pinned and agents.
+    assert(str_at(all[4].copy(), "id") == some(String("g_2")) and str_at(all[5].copy(), "id") == some(String("g_1")))
     assert(try section_ids(c, "group") == [String("a_1")])
     let listed = try parse(try c.list_text(String("sidebar")) ?? String())
     assert(listed == try c.sidebar())
