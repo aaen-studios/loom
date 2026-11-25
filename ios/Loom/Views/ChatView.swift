@@ -63,7 +63,7 @@ struct ChatView: View {
                             }
                             if !m.live && !text.isEmpty {
                                 Button {
-                                    UIPasteboard.general.string = text
+                                    UIPasteboard.general.string = Emoji.asNames(text)
                                 } label: {
                                     Label("Copy", systemImage: "doc.on.doc")
                                 }

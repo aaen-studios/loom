@@ -14,7 +14,7 @@ use gpui_kit::component::input::{
     MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::text::{TextView, TextViewState};
+use gpui_kit::component::text::{RangeHighlight, RenderedText, TextView, TextViewState};
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -129,6 +129,9 @@ pub struct Palette {
     pub ok: Hsla,
     pub bad: Hsla,
     pub warn: Hsla,
+    /// A match found in the chat, and the one it's on (Ctrl+F).
+    pub find: Hsla,
+    pub find_current: Hsla,
 }
 
 impl Palette {
@@ -155,6 +158,8 @@ impl Palette {
             ok: c(d::OK, l::OK),
             bad: c(d::BAD, l::BAD),
             warn: c(d::WARN, l::WARN),
+            find: c(d::FIND, l::FIND),
+            find_current: c(d::FIND_CURRENT, l::FIND_CURRENT),
         }
     }
 }
@@ -536,6 +541,13 @@ pub struct Loom {
     share_month: bool,
     instructions_in: Entity<TextareaState>,
     search_in: Entity<InputState>,
+    /// The find box over the chat (Ctrl+F), and the typing it waits out.
+    find_in: Entity<InputState>,
+    find_gen: u64,
+    /// The match the chat last went to, so it goes to the next one once.
+    find_shown: Option<model::Found>,
+    /// The jump under way is a find's, which doesn't light the message.
+    jump_quiet: bool,
     /// Search over the settings, at the top of the popup's pages.
     settings_in: Entity<InputState>,
     open_thoughts: HashSet<String>,
@@ -1164,6 +1176,36 @@ ACTA_KEY=secret:ACTA_KEY",
             },
         )
         .detach();
+        // Finding in the open chat: asked once typing pauses, as the search is.
+        let find_in = input(window, cx, "Find in chat", false);
+        cx.subscribe_in(
+            &find_in,
+            window,
+            |this: &mut Loom, state, event: &InputEvent, _, cx| {
+                if let InputEvent::Change = event {
+                    let query = state.read(cx).value().to_string();
+                    this.find_gen += 1;
+                    let gen = this.find_gen;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(150))
+                            .await;
+                        let _ = this.update(cx, |loom, cx| {
+                            if loom.find_gen != gen || loom.model.find.is_none() {
+                                return;
+                            }
+                            loom.find_shown = None;
+                            if let Some(frame) = loom.model.find(&query) {
+                                loom.send(frame);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                }
+            },
+        )
+        .detach();
 
         // The core's events come on its thread; this task brings them to the window.
         // It also looks at the tray, and notices the system waking: a tick that comes
@@ -1584,6 +1626,10 @@ ACTA_KEY=secret:ACTA_KEY",
             share_month: false,
             instructions_in,
             search_in,
+            find_in,
+            find_gen: 0,
+            find_shown: None,
+            jump_quiet: false,
             settings_in,
             open_thoughts: HashSet::new(),
             sources_shut: None,
@@ -1607,6 +1653,8 @@ ACTA_KEY=secret:ACTA_KEY",
         } else if self.menu.is_some() || self.ctx.is_some() {
             self.menu = None;
             self.ctx = None;
+        } else if self.popup.is_none() && self.model.find.is_some() {
+            self.close_find(window, cx);
         } else if self.popup.is_none() && (self.search_peek || !self.model.query.is_empty()) {
             self.end_search(window, cx);
         } else if self.popup.is_some() {
@@ -1669,9 +1717,9 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// Ctrl+F: the search box, opening the sidebar if it's a rail and showing the box
-    /// if the prefs hide it.
-    fn find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Ctrl+Shift+F: the search box over every chat, opening the sidebar if it's a rail
+    /// and showing the box if the prefs hide it.
+    fn search_all(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let w = window.viewport_size().width.as_f32();
         if self.railed(w) {
             self.bar.open(w, self.beside());
@@ -1684,7 +1732,154 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// Clears the search, and hides the box again if only Ctrl+F showed it.
+    /// Ctrl+F: the find box over the open chat, finding what it found last time again
+    /// (PLAN.md, "Finding in a chat").
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.conversation().is_none() || self.screen != Screen::Chat {
+            return;
+        }
+        if self.model.find.is_none() {
+            let query = self.find_in.read(cx).value().to_string();
+            self.find_shown = None;
+            match self.model.find(&query) {
+                Some(frame) => self.send(frame),
+                None => self.model.find = Some(model::Find::default()),
+            }
+        }
+        self.find_in.update(cx, |s, cx| s.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Shuts the find box, and its marks go.
+    fn close_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.model.find = None;
+        self.find_shown = None;
+        self.focus_composer = true;
+        self.keep_composer_focused(window, cx);
+        cx.notify();
+    }
+
+    /// Steps through the find's matches: back to older ones (-1) or on to newer (1).
+    fn find_step(&mut self, by: i32, cx: &mut Context<Self>) {
+        self.model.find_step(by);
+        cx.notify();
+    }
+
+    /// The find box, over the chat at its top right: the field with its icon, where it is
+    /// ("3 of 7"), the arrows up to older matches and down to newer, and ×. Enter steps
+    /// back, Shift+Enter on, and Esc closes it.
+    fn find_box(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let p = self.p;
+        let f = self.model.find.as_ref()?;
+        let typed = !f.query.trim().is_empty();
+        let count = if !typed {
+            String::new()
+        } else if f.matches.is_empty() {
+            if f.asking {
+                String::new()
+            } else {
+                "No matches".into()
+            }
+        } else {
+            format!("{} of {}", f.at + 1, f.matches.len())
+        };
+        let some = f.matches.len() > 1;
+        let arrow = |id: &'static str, icon: IconName, label: &'static str, by: i32| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .size(px(control::ICON_SMALL))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::BUTTON))
+                .text_color(if some { p.ink_2 } else { p.ink_3 })
+                .when(some, |d| {
+                    d.cursor_pointer().soft_hover(
+                        transparent_black(),
+                        p.hover,
+                        Some((p.ink_2, p.ink)),
+                    )
+                })
+                .tooltip(tip(label))
+                .child(Icon::new(icon).small())
+                .on_click(cx.listener(move |this, _, _, cx| this.find_step(by, cx)))
+        };
+        Some(
+            div()
+                .absolute()
+                .top(px(space::S))
+                .right(px(space::L))
+                .w(px(330.0))
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .pl(px(space::M))
+                .pr(px(space::XS))
+                .py(px(space::XS))
+                .bg(card_fill(p))
+                .border_1()
+                .border_color(p.line)
+                .rounded(px(radius::CARD))
+                .shadow(card_shadow(p))
+                .text_size(px(size::SMALL))
+                .child(Icon::new(IconName::Search).small().text_color(p.ink_3))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .capture_action(cx.listener(|this, e: &Enter, _, cx| {
+                            cx.stop_propagation();
+                            this.find_step(if e.shift { 1 } else { -1 }, cx);
+                        }))
+                        .capture_action(cx.listener(|this, _: &MoveUp, _, cx| {
+                            cx.stop_propagation();
+                            this.find_step(-1, cx);
+                        }))
+                        .capture_action(cx.listener(|this, _: &MoveDown, _, cx| {
+                            cx.stop_propagation();
+                            this.find_step(1, cx);
+                        }))
+                        .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                            cx.stop_propagation();
+                            this.close_find(window, cx);
+                        }))
+                        .child(Input::new(&self.find_in).appearance(false).small()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .px(px(space::XS))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(count),
+                )
+                .child(arrow("find-older", IconName::ChevronUp, "Older match", -1))
+                .child(arrow("find-newer", IconName::ChevronDown, "Newer match", 1))
+                .child(
+                    div()
+                        .id("find-close")
+                        .role(Role::Button)
+                        .aria_label("Close")
+                        .size(px(control::ICON_SMALL))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(radius::BUTTON))
+                        .text_color(p.ink_3)
+                        .cursor_pointer()
+                        .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                        .tooltip(tip("Close"))
+                        .child(Icon::new(IconName::Close).small())
+                        .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
+                ),
+        )
+    }
+
+    /// Clears the search, and hides the box again if only Ctrl+Shift+F showed it.
     fn end_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search_in
             .update(cx, |s, cx| s.set_value("", window, cx));
@@ -10254,6 +10449,32 @@ ACTA_KEY=secret:ACTA_KEY",
         let files = self.model.files.clone();
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
+        // The match the find is on, once it changes: the chat goes to it, reaching back
+        // for older messages when it's further back than the chat has loaded.
+        let found = self.model.found().cloned();
+        if found != self.find_shown {
+            self.find_shown = found.clone();
+            if let Some(f) = found {
+                self.jump_quiet = true;
+                self.jump_to(&f.message, cx);
+            }
+        }
+        let find = self
+            .model
+            .find
+            .as_ref()
+            .filter(|f| !f.matches.is_empty())
+            .map(|f| {
+                Rc::new(FindMarks {
+                    query: f.query.clone(),
+                    messages: f.matches.iter().map(|m| m.message.clone()).collect(),
+                    at: self.model.found().cloned(),
+                    soft: p.find,
+                    solid: p.find_current,
+                })
+            });
+        FIND.with(|f| *f.borrow_mut() = find.clone());
+        let find_box = self.find_box(cx);
         let column = self.prefs.column();
         // Allow held on a risky question: allowed once it's held long enough, and drawn
         // filling at every frame meanwhile.
@@ -10324,6 +10545,7 @@ ACTA_KEY=secret:ACTA_KEY",
             hold,
             hold_keys,
             lit: self.lit.clone(),
+            find,
         };
         // The list is a view of its own, built with the window, and each finished message
         // in it another, drawn from its cache until what it shows changes (`RowView`): a
@@ -10738,6 +10960,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             })
                             .into_any_element()
                     })
+                    .when_some(find_box, |d, b| d.child(b))
                     .when_some(mini, |d, m| d.child(m)),
             )
             .when_some(ask, |d, a| d.child(a))
@@ -16696,6 +16919,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.scroller.update(cx, |s, cx| {
                     s.scroll_to_item(ix, cx);
                 });
+                // A find's match is marked in it already.
+                if std::mem::take(&mut self.jump_quiet) {
+                    cx.notify();
+                    return;
+                }
                 self.lit = Some(message.to_string());
                 let lit = message.to_string();
                 cx.spawn(async move |this, cx| {
@@ -16717,6 +16945,7 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             None => {
                 self.jumping = None;
+                self.jump_quiet = false;
                 self.model
                     .notices
                     .push("That message isn't in this chat any more.".into());
@@ -17512,11 +17741,14 @@ fn person(
                 .text_size(px(size::BODY * scale))
                 .text_color(ink)
                 .when(m.queued, |d| d.opacity(0.6))
-                .child(KeptText::new(
-                    SharedString::from(format!("m-{}-{room}", m.id)),
-                    words,
-                    move |v| with_links(v.selectable(true).on_link_click(on_link)),
-                ))
+                .child(
+                    KeptText::new(
+                        SharedString::from(format!("m-{}-{room}", m.id)),
+                        words,
+                        move |v| with_links(v.selectable(true).on_link_click(on_link)),
+                    )
+                    .found_in(&m.id, 0),
+                )
                 // Its time on hover, just left of it.
                 .when_some(beside, |d, t| d.relative().child(t)),
         )
@@ -20775,12 +21007,42 @@ fn chat_images() -> Option<Entity<KeptImages>> {
     IMAGES.with(|c| c.borrow().as_ref().map(|(chat, _)| chat.clone()))
 }
 
+/// What a kept text last marked: what was looked for, the match it's on, and the text
+/// it marked.
+type Marked = (String, Option<usize>, RenderedText);
+
+/// What the find box found, for the chat's texts to mark (Ctrl+F): what was looked for,
+/// the messages it's in, and the match it's on, with the soft colour every match has and
+/// the solid one of that match.
+#[derive(Clone, PartialEq)]
+struct FindMarks {
+    query: String,
+    messages: HashSet<String>,
+    at: Option<model::Found>,
+    soft: Hsla,
+    solid: Hsla,
+}
+
+thread_local! {
+    /// What the chat on screen marks, set as it's drawn.
+    static FIND: RefCell<Option<Rc<FindMarks>>> = const { RefCell::new(None) };
+    /// What each kept text last marked, by its key: what was looked for, the match it's
+    /// on, and the text it marked.
+    static MARKED: RefCell<HashMap<SharedString, Marked>> =
+        RefCell::new(HashMap::new());
+    /// The kept texts whose words, as they're parsed, are marked again.
+    static WATCHED: RefCell<HashSet<SharedString>> = RefCell::new(HashSet::new());
+}
+
 /// A message's text, drawn from the state kept for `key`.
 #[derive(IntoElement)]
 struct KeptText {
     key: SharedString,
     text: SharedString,
     style: Box<dyn FnOnce(TextView) -> TextView>,
+    /// The message and the piece of its words it is, for the find box's marks
+    /// (`model::find_pieces`).
+    found_in: Option<(String, usize)>,
 }
 
 impl KeptText {
@@ -20793,7 +21055,69 @@ impl KeptText {
             key,
             text: text.into(),
             style: Box::new(style),
+            found_in: None,
         }
+    }
+
+    /// Marked by the find box, as `piece` of `message`'s words.
+    fn found_in(mut self, message: &str, piece: usize) -> Self {
+        self.found_in = Some((message.to_string(), piece));
+        self
+    }
+
+    /// Marks what the find box found in it, soft, and the match it's on solid, brought
+    /// into view; or takes the marks away once there's nothing to mark. Only when that
+    /// changes, as marking draws it again.
+    fn mark(
+        key: &SharedString,
+        found_in: &Option<(String, usize)>,
+        state: &Entity<TextViewState>,
+        cx: &mut App,
+    ) {
+        let want = found_in.as_ref().and_then(|(message, piece)| {
+            FIND.with(|f| {
+                let f = f.borrow().clone()?;
+                if !f.messages.contains(message) {
+                    return None;
+                }
+                let at =
+                    f.at.as_ref()
+                        .filter(|a| &a.message == message && a.piece == *piece)
+                        .map(|a| a.nth);
+                Some((f, at))
+            })
+        });
+        let text = state.read(cx).rendered_text();
+        let had = MARKED.with(|m| m.borrow().get(key).cloned());
+        let Some((f, at)) = want else {
+            if had.is_some() {
+                MARKED.with(|m| m.borrow_mut().remove(key));
+                state.update(cx, |s, cx| s.clear_range_highlights(cx));
+            }
+            return;
+        };
+        if had.is_some_and(|(q, a, t)| q == f.query && a == at && t == text) {
+            return;
+        }
+        let ranges = model::find_ranges(text.as_str(), &f.query);
+        let marks: Vec<RangeHighlight> = ranges
+            .iter()
+            .enumerate()
+            .map(|(k, r)| {
+                RangeHighlight::new(r.clone(), if Some(k) == at { f.solid } else { f.soft })
+            })
+            .collect();
+        let reveal = at.and_then(|k| ranges.get(k).cloned());
+        state.update(cx, |s, cx| {
+            let _ = s.set_range_highlights(marks, cx);
+            if let Some(r) = reveal {
+                let _ = s.reveal_range(r, cx);
+            }
+        });
+        MARKED.with(|m| {
+            m.borrow_mut()
+                .insert(key.clone(), (f.query.clone(), at, text))
+        });
     }
 }
 
@@ -20816,6 +21140,9 @@ impl RenderOnce for KeptText {
             None => {
                 let text = self.text.clone();
                 let state = cx.new(|cx| TextViewState::markdown(&text, cx));
+                // A new state for the key: what was marked and watched was the old one's.
+                WATCHED.with(|w| w.borrow_mut().remove(&self.key));
+                MARKED.with(|m| m.borrow_mut().remove(&self.key));
                 TEXTS.with(|t| {
                     let mut t = t.borrow_mut();
                     let now = t.1;
@@ -20833,6 +21160,15 @@ impl RenderOnce for KeptText {
                 state
             }
         };
+        KeptText::mark(&self.key, &self.found_in, &state, cx);
+        // Its words parsed after it's drawn are marked as they land: once for each text.
+        if self.found_in.is_some() && WATCHED.with(|w| w.borrow_mut().insert(self.key.clone())) {
+            let (key, found_in) = (self.key.clone(), self.found_in.clone());
+            cx.observe(&state, move |state, cx| {
+                KeptText::mark(&key, &found_in, &state, cx)
+            })
+            .detach();
+        }
         (self.style)(TextView::new(&state))
     }
 }
@@ -20913,38 +21249,42 @@ impl ReplyDraw<'_> {
                 .text_size(px(size::REPLY * show.text_scale))
                 .line_height(relative(line::REPLY))
                 .text_color(p.ink)
-                .child(KeptText::new(
-                    SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    crate::emoji::pictured(
-                        &linked_words(p, &said, self.m),
-                        size::REPLY * show.text_scale,
-                    ),
-                    move |v| {
-                        let opener = opener.clone();
-                        with_links(v.selectable(true).on_link_click(
-                            move |url: &SharedString,
-                                  _: &ClickEvent,
-                                  _: &mut Window,
-                                  cx: &mut App| {
-                                if url.starts_with("loom:file/") {
-                                    let _ = opener.update(cx, |loom, _| {
-                                        if let Some(frame) = loom.model.open_file_mention(url) {
-                                            loom.send(frame);
-                                        }
-                                    });
-                                } else if let Some(agent) = url.strip_prefix("loom:agent/") {
-                                    // An agent it mentions opens its chat (LOO-301).
-                                    let agent = agent.to_string();
-                                    let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
-                                } else if url.starts_with(crate::emoji::OWN_LINK) {
-                                    emoji_ui::own_clicked(&opener, url, cx);
-                                } else if !url.starts_with("loom:") {
-                                    cx.open_url(url);
-                                }
-                            },
-                        ))
-                    },
-                ));
+                .child(
+                    KeptText::new(
+                        SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
+                        crate::emoji::pictured(
+                            &linked_words(p, &said, self.m),
+                            size::REPLY * show.text_scale,
+                        ),
+                        move |v| {
+                            let opener = opener.clone();
+                            with_links(v.selectable(true).on_link_click(
+                                move |url: &SharedString,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut App| {
+                                    if url.starts_with("loom:file/") {
+                                        let _ = opener.update(cx, |loom, _| {
+                                            if let Some(frame) = loom.model.open_file_mention(url) {
+                                                loom.send(frame);
+                                            }
+                                        });
+                                    } else if let Some(agent) = url.strip_prefix("loom:agent/") {
+                                        // An agent it mentions opens its chat (LOO-301).
+                                        let agent = agent.to_string();
+                                        let _ =
+                                            opener.update(cx, |loom, cx| loom.select(agent, cx));
+                                    } else if url.starts_with(crate::emoji::OWN_LINK) {
+                                        emoji_ui::own_clicked(&opener, url, cx);
+                                    } else if !url.starts_with("loom:") {
+                                        cx.open_url(url);
+                                    }
+                                },
+                            ))
+                        },
+                    )
+                    .found_in(&self.m.id, i),
+                );
             let sources = (self.sources_at == Some(i)).then(|| self.sources_tab());
             group = group.child(if show.bubbles {
                 // A grey bubble, never the agent's colour, which is the person's: its
@@ -22781,18 +23121,20 @@ impl Render for Loom {
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
                 let k = &e.keystroke;
-                // Ctrl+B and Ctrl+F (Cmd on a Mac), only where the sidebar is.
-                let chord = k.modifiers.secondary(cx)
-                    && !k.modifiers.alt
-                    && !k.modifiers.shift
-                    && this.scene.0 == "app";
+                // Ctrl+B, Ctrl+F and Ctrl+Shift+F (Cmd on a Mac), only where the
+                // sidebar is.
+                let held = k.modifiers.secondary(cx) && !k.modifiers.alt && this.scene.0 == "app";
+                let chord = held && !k.modifiers.shift;
                 if k.key == "escape" {
                     this.escape(window, cx);
                 } else if chord && k.key == "b" {
                     this.toggle_bar(window, cx);
                     cx.stop_propagation();
                 } else if chord && k.key == "f" {
-                    this.find(window, cx);
+                    this.open_find(window, cx);
+                    cx.stop_propagation();
+                } else if held && k.modifiers.shift && k.key == "f" {
+                    this.search_all(window, cx);
                     cx.stop_propagation();
                 } else if chord && k.key == "u" && this.screen == Screen::Chat {
                     // Ctrl+U (Cmd on a Mac) attaches files, as the + menu says.
@@ -23938,6 +24280,7 @@ mod row_tests {
             hold: (None, None),
             hold_keys: Rc::default(),
             lit: false,
+            found: None,
         }
     }
 
@@ -24173,6 +24516,8 @@ struct ChatInputs {
     hold_keys: Rc<HashMap<String, FocusHandle>>,
     /// The message a quote jumped to, lit for a moment.
     lit: Option<String>,
+    /// What the find box found, to mark (Ctrl+F).
+    find: Option<Rc<FindMarks>>,
 }
 
 /// Allow held on a risky question now, and how far along; and the question a plain click
@@ -24421,6 +24766,9 @@ struct RowInputs {
     hold_keys: Rc<HashMap<String, FocusHandle>>,
     /// Lit for a moment, once a quote jumped to it.
     lit: bool,
+    /// What's found in it, while the find box has matches: what was looked for, and
+    /// the match it'"'"'s on when that'"'"'s in it, by its piece and which.
+    found: Option<(String, Option<(usize, usize)>)>,
 }
 
 impl RowInputs {
@@ -24451,6 +24799,7 @@ impl RowInputs {
             && self.hold == o.hold
             && self.hold_keys == o.hold_keys
             && self.lit == o.lit
+            && self.found == o.found
     }
 }
 
@@ -24645,6 +24994,7 @@ fn chat_list(
         hold,
         hold_keys,
         lit,
+        find,
     } = i;
     let now = chrono::Local::now();
     let (content, gutter) = row_room(width, column);
@@ -24748,6 +25098,14 @@ fn chat_list(
                 Rc::default()
             },
             lit: m.is_some_and(|m| lit.as_deref() == Some(m.id.as_str())),
+            found: m.and_then(|m| {
+                let f = find.as_ref().filter(|f| f.messages.contains(&m.id))?;
+                let at =
+                    f.at.as_ref()
+                        .filter(|a| a.message == m.id)
+                        .map(|a| (a.piece, a.nth));
+                Some((f.query.clone(), at))
+            }),
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
