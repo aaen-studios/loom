@@ -181,7 +181,9 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 92 and access(String("routine.runs")) == Access.Runs)
+    assert(catalog().len() == 93 and access(String("routine.runs")) == Access.Runs)
+    assert(access(String("device.list")) == Access.Runs)
+    if let Access.Never(_) = access(String("link.answer")) {} else { panic("an agent could answer a device's ask to join") }
     assert(access(String("token.make_to_file")) == Access.Asks(String("other")))
     assert(access(String("mcp.test")) == Access.Runs)
     assert(access(String("rule.list")) == Access.Runs and access(String("rule.check")) == Access.Runs)
