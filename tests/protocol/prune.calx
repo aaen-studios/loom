@@ -14,12 +14,30 @@ import shared.obj.{Obj, at, str_at}
 import shared.client.{Session}
 import tests.kit.{Instance, check}
 
-fn count(db: Database, sql: str) -> i64 ! Error {
-    let row = try db.query_one(String(sql), List<Value>()) else return 0
+fn count(db: Database, sql: String) -> i64 ! Error {
+    let row = try db.query_one(sql, List<Value>()) else return 0
     return match row[0].copy() {
         Value.Int(n) => n,
         _ => 0,
     }
+}
+
+/// Whether every query comes to its count within ten seconds, looking every 50 ms. The
+/// instance writes a turn's rows a moment after the event that says it's done, and
+/// prunes every 200 ms, so on a busy machine either can come later than the test looks.
+fn reach(db: Database, wants: List<(String, i64)>) -> bool ! Error {
+    for _ in 0..200 {
+        var all = true
+        for (sql, want) in wants {
+            if try count(db, sql.copy()) != want {
+                all = false
+                break
+            }
+        }
+        if all { return true }
+        unsafe { sleep(50000000) }
+    }
+    return false
 }
 
 fn run(i: Instance) ! Error {
@@ -37,16 +55,15 @@ fn run(i: Instance) ! Error {
     _ = try app.until("event", "run.started")
 
     let db = try Database.open("{i.data}/loom.db")
-    try check(try count(db, "SELECT count(*) FROM runs") == 3 and try count(db, "SELECT count(*) FROM sent") == 3 and try count(db, "SELECT count(*) FROM usage") == 2, "each turn keeps its run, its message's client id and its usage")
+    try check(try reach(db, [(String("SELECT count(*) FROM runs"), 3), (String("SELECT count(*) FROM sent"), 3), (String("SELECT count(*) FROM usage"), 2)]), "each turn keeps its run, its message's client id and its usage")
     // A year ago, all of them; the first turn's alone, two days ago, is too new to go.
     _ = try db.execute(String("UPDATE runs SET at = at - 31536000000"), List<Value>())
     _ = try db.execute(String("UPDATE sent SET at = at - 31536000000 WHERE cid != 'm_1'"), List<Value>())
     _ = try db.execute(String("UPDATE sent SET at = at - 172800000 WHERE cid = 'm_1'"), List<Value>())
     _ = try db.execute(String("UPDATE usage SET at = at - 31536000000"), List<Value>())
-    unsafe { sleep(800000000) }
-    try check(try count(db, "SELECT count(*) FROM runs") == 1 and try count(db, "SELECT count(*) FROM runs WHERE status = 'running'") == 1, "old runs go, but not one still going")
-    try check(try count(db, "SELECT count(*) FROM sent") == 1 and try count(db, "SELECT count(*) FROM sent WHERE cid = 'm_1'") == 1, "old sent messages' ids go, but not a newer one")
-    try check(try count(db, "SELECT count(*) FROM usage") == 0, "old usage goes")
+    try check(try reach(db, [(String("SELECT count(*) FROM runs"), 1), (String("SELECT count(*) FROM runs WHERE status = 'running'"), 1)]), "old runs go, but not one still going")
+    try check(try reach(db, [(String("SELECT count(*) FROM sent"), 1), (String("SELECT count(*) FROM sent WHERE cid = 'm_1'"), 1)]), "old sent messages' ids go, but not a newer one")
+    try check(try reach(db, [(String("SELECT count(*) FROM usage"), 0)]), "old usage goes")
     try db.close()
     // A resend of the newer one is still known, and nothing else changed.
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("hello\n/tokens 10")).done())
