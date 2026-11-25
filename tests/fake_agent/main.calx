@@ -50,6 +50,9 @@ module tests.fake_agent.main
 //                         exists, "missing NAME" for one that doesn't
 //     /image              sends back a small PNG
 //     /link PATH          sends back a link to the file at PATH (resource_link)
+//     /write PATH TEXT    writes TEXT, with each \n in it a line break, to the file
+//                         at PATH, making its folder, as an agent makes a file
+//     /picture PATH W H   writes a W by H PNG to the file at PATH, the same way
 //     /session            says its session id: "session ID"
 //     /uptime             says how long ago the program started: "up MS ms"
 //     /usage USED SIZE    reports its context as USED tokens of a SIZE window (usage_update)
@@ -136,6 +139,8 @@ pub enum Step {
     Files
     Image
     Link(String)
+    Write(String, String)    // the path, and what goes in it
+    Picture(String, u32, u32)
     Session
     Uptime
     Context
@@ -243,6 +248,13 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Image)
         } else if word == "/link" {
             steps.push(Step.Link(rest))
+        } else if word == "/write" {
+            let (path, words) = split_word(rest)
+            steps.push(Step.Write(path, words.replace(String("\\n"), String("\n"))))
+        } else if word == "/picture" {
+            let (path, size) = split_word(rest)
+            let (w, h) = split_word(size)
+            steps.push(Step.Picture(path, u32.parse(w) ?? 8, u32.parse(h) ?? 8))
         } else {
             steps.push(Step.Say(line.copy()))
         }
@@ -959,6 +971,19 @@ impl Agent {
                     u.insert("sessionUpdate", js(String("agent_message_chunk")))
                     u.insert("content", Json.Object(content))
                     update(session.copy(), u)
+                },
+                Step.Write(path, words) => {
+                    if let cut = path.replace("\\", "/").find_last("/") {
+                        if let err(e) = fs.make_dir_all(path[..cut].copy()) { eprintln("fake agent: making {path}'s folder: {e}") }
+                    }
+                    if let err(e) = fs.write_text(path.copy(), words.copy()) { eprintln("fake agent: writing {path}: {e}") }
+                },
+                Step.Picture(path, w, h) => {
+                    if let cut = path.replace("\\", "/").find_last("/") {
+                        if let err(e) = fs.make_dir_all(path[..cut].copy()) { eprintln("fake agent: making {path}'s folder: {e}") }
+                    }
+                    let png = Image.new(usize(w), usize(h), Kind.Rgb, Color.rgb(200, 90, 40)).encode_png()
+                    if let err(e) = fs.write(path.copy(), png) { eprintln("fake agent: writing {path}: {e}") }
                 },
                 Step.Image => {
                     var content = LinkedMap<String, Json>()

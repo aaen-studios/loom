@@ -118,7 +118,7 @@ struct MarkdownView: View {
     /// - an agent it mentions as its thread and its name in its colour, a little
     ///   weathered, with no @, or `@Name` for one that's gone;
     /// - a file it mentions, or one sent with it, with its icon before its name, or a
-    ///   tiny copy of a picture sent with it once it's fetched.
+    ///   tiny copy of a picture sent with it or a reply names once it's fetched.
     static func text(_ s: String, links: Inline) -> Text {
         let a = inline(s)
         guard !links.icons.isEmpty || s.contains("](loom") else { return Text(a) }
@@ -157,7 +157,12 @@ struct MarkdownView: View {
                 out = Text("\(out)\(Text(linked).fontWeight(.medium))")
                 continue
             case .file(_, let path) where first:
-                out = Text("\(out)\(fileIcon(path))\u{00A0}")
+                // A picture a reply names shows a tiny copy of itself once it's fetched.
+                if let thumb = links.icons[address], let icon = siteIcon(thumb) {
+                    out = Text("\(out)\(Text(Image(uiImage: icon)).baselineOffset(-2))\u{00A0}")
+                } else {
+                    out = Text("\(out)\(fileIcon(path))\u{00A0}")
+                }
             case .attached where first:
                 if let path = links.icons[address], let icon = siteIcon(path) {
                     out = Text("\(out)\(Text(Image(uiImage: icon)).baselineOffset(-2))\u{00A0}")

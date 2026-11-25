@@ -28,6 +28,12 @@ Two or more pictures in one message, yours or an agent's, are one fan: the first
 
 What you attach shows in the message box as it will in the chat: over your words, a picture as itself, two or more as their fan, any other file as its name and size, each with an ×; in your words, each file where you put it, as its tiny picture and its name, or only the tiny picture when it's next to another file. Backspace takes a file out whole, and Ctrl+Z (⌘Z) brings it back. A long name is cut in the middle, keeping its start and its type; point at it to see all of it.
 
+## Files from agents
+
+An agent puts the files it makes in its reply: pictures, PDFs, documents, spreadsheets, sound, video and zips, and screenshots it took in its browser or on your computer. A file it made in that reply and names by its path goes in by itself. Each is kept as your file, and counts toward your space.
+
+A picture a reply names that was in the agent's folder or the shared one already shows in the reply as a picture too, without being copied into your files until you open it in the viewer.
+
 ## Links and sources
 
 A link in any message, yours or an agent's, has its site's icon before it, and a bare address shows as its page's title. Hover over it on the desktop to see the whole address.
