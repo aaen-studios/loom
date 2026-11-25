@@ -16,7 +16,7 @@ use gpui::{
 };
 
 use super::state::ParagraphRows;
-use crate::text::text_view::{LinkClickHandlerFn, handle_link_click};
+use crate::text::text_view::{LinkClickHandlerFn, LinkTooltipFn, handle_link_click};
 
 use super::{
     inline::{Inline, InlineHighlight, InlineState, code_insets, text_runs, text_size_ranges},
@@ -338,6 +338,7 @@ impl InlineFlow {
         _title: &str,
         size: Size<Pixels>,
         link_click_handler: Option<Arc<LinkClickHandlerFn>>,
+        link_tooltip: Option<Arc<LinkTooltipFn>>,
     ) -> AnyElement {
         img(source.clone())
             .id(ix)
@@ -348,7 +349,13 @@ impl InlineFlow {
             .when_some(link.clone(), |this, link| {
                 let aux_link = link.clone();
                 let aux_link_click_handler = link_click_handler.clone();
-                this.cursor_pointer()
+                // loom: a linked image shows its link's tooltip, as a linked word does, such
+                // as the card over an emoji the chat draws as a picture.
+                let tip_url = link.url.clone();
+                this.when_some(link_tooltip, move |this, builder| {
+                    this.tooltip(move |window, cx| builder(&tip_url, window, cx))
+                })
+                .cursor_pointer()
                     .on_click(move |event, window, cx| {
                         crate::TextSelection::end(window, cx);
                         cx.stop_propagation();
@@ -779,6 +786,9 @@ impl Element for InlineFlow {
                     let (origin, fragment_size) = (*origin, *fragment_size);
                     let overlays =
                         report_box(*item_ix, Bounds::new(bounds.origin + origin, fragment_size));
+                    let link_tooltip = crate::GlobalState::global(cx)
+                        .text_view_state()
+                        .and_then(|view| view.read(cx).link_tooltip.clone());
                     let mut element = Self::image_element(
                         elements.len(),
                         source,
@@ -786,6 +796,7 @@ impl Element for InlineFlow {
                         title.as_str(),
                         fragment_size,
                         self.link_click_handler.clone(),
+                        link_tooltip,
                     );
                     element.prepaint_as_root(
                         bounds.origin + origin,

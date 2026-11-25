@@ -8,6 +8,7 @@
 mod app;
 mod autoscroll;
 mod core;
+mod emoji;
 #[cfg(target_os = "macos")]
 mod mac;
 mod meter;
@@ -361,7 +362,16 @@ gpui_kit::assets::icon_assets!(
         FileClock,
         FolderInput,
         FolderOutput,
-        FolderPlus
+        FolderPlus,
+        // The emoji picker's smiley, its tabs and Settings → Emoji's Add.
+        FaceSlightlySmiling,
+        Sticker,
+        Leaf,
+        Apple,
+        Plane,
+        Volleyball,
+        Flag,
+        ImagePlus
     ]
 );
 

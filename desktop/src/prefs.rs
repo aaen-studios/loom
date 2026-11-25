@@ -88,6 +88,13 @@ pub struct Prefs {
     pub auto_update: bool,
     /// Whether the sidebar shows the search box over the agents.
     pub search: bool,
+    /// Settings → Emoji: whether the composer shows the emoji button, whether moving
+    /// emoji play only under the pointer, the skin tone (0 for none, 1 to 5 light to
+    /// dark), and whether `:)` becomes 🙂.
+    pub emoji_button: bool,
+    pub emoji_hover: bool,
+    pub skin_tone: u32,
+    pub emoticons: bool,
     pub width: Width,
     /// The names the person gave servers on this device, by address (empty for the
     /// instance in the app).
@@ -113,6 +120,10 @@ impl Default for Prefs {
             awake: false,
             auto_update: false,
             search: false,
+            emoji_button: true,
+            emoji_hover: false,
+            skin_tone: 0,
+            emoticons: false,
             width: Width::Normal,
             server_names: BTreeMap::new(),
         }
@@ -196,6 +207,14 @@ impl Prefs {
             awake: b("awake", d.awake),
             auto_update: b("auto_update", d.auto_update),
             search: b("search", d.search),
+            emoji_button: b("emoji_button", d.emoji_button),
+            emoji_hover: b("emoji_hover", d.emoji_hover),
+            skin_tone: v
+                .get("skin_tone")
+                .and_then(Value::as_u64)
+                .filter(|t| *t <= 5)
+                .map_or(d.skin_tone, |t| t as u32),
+            emoticons: b("emoticons", d.emoticons),
             width: match s("width") {
                 "comfortable" => Width::Comfortable,
                 "full" => Width::Full,
@@ -268,6 +287,10 @@ impl Prefs {
         m.insert("awake".into(), json!(self.awake));
         m.insert("auto_update".into(), json!(self.auto_update));
         m.insert("search".into(), json!(self.search));
+        m.insert("emoji_button".into(), json!(self.emoji_button));
+        m.insert("emoji_hover".into(), json!(self.emoji_hover));
+        m.insert("skin_tone".into(), json!(self.skin_tone));
+        m.insert("emoticons".into(), json!(self.emoticons));
         m.insert(
             "width".into(),
             json!(match self.width {
@@ -411,6 +434,26 @@ mod tests {
         };
         assert_eq!(Prefs::from_json(&p.to_json()), p);
         assert_eq!(Prefs::default().width, Width::Normal);
+    }
+
+    #[test]
+    fn emoji_settings_are_kept_and_start_as_planned() {
+        let d = Prefs::default();
+        // The button shows, moving emoji play, no skin tone, and :) stays text.
+        assert!(d.emoji_button && !d.emoji_hover && d.skin_tone == 0 && !d.emoticons);
+        let p = Prefs {
+            emoji_button: false,
+            emoji_hover: true,
+            skin_tone: 3,
+            emoticons: true,
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&p.to_json()), p);
+        // A tone past the six hands is none.
+        assert_eq!(
+            Prefs::from_json(&serde_json::json!({"skin_tone": 9})).skin_tone,
+            0
+        );
     }
 
     #[test]

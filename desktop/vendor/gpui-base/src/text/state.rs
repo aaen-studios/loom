@@ -2327,6 +2327,19 @@ mod tests {
         });
     }
 
+    // loom: an emoji drawn as a picture copies as itself.
+    #[gpui::test]
+    fn an_emoji_picture_copies_as_its_alt_text(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let markdown = "so [<img src=\"loom-emoji:1f62d@36\" alt=\"😭\" width=\"18\" height=\"18\" />](loom:emoji/1f62d) ok <img src=\"/icons/a\" width=\"14\" height=\"14\" /> end";
+        let state = cx.update(|cx| cx.new(|cx| TextViewState::markdown(markdown, cx)));
+        cx.run_until_parked();
+        state.update(cx, |state, cx| state.select_all(cx));
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_text().trim(), "so 😭 ok  end");
+        });
+    }
+
     #[gpui::test]
     fn select_all_in_source_format_returns_source(cx: &mut TestAppContext) {
         cx.update(crate::init);
