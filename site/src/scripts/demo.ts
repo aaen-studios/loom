@@ -19,7 +19,7 @@
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs). "From Biscuit" under Juniper opens Biscuit's
-// thread with it in the chat's place.
+// thread with it in the chat's place, to read, with Continue in your own chat for a composer.
 //
 // It plays only while it's on screen, and with reduced motion it shows the finished chat instead.
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
@@ -256,12 +256,14 @@ export function play(app: HTMLElement) {
 		const on = e.target as Element;
 		if (menu && !menu.contains(on) && !on.closest?.('.more-btn')) unmenu();
 	});
-	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place;
-	// the strip's arrow, or Juniper's own row, goes back to the person's chat (app.rs,
-	// open_thread, branch_strip). The chat goes on meanwhile.
+	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place,
+	// read only; the strip's arrow, Continue in your own chat in the composer's place, or
+	// Juniper's own row, goes back to the person's chat (app.rs, open_thread, branch_strip,
+	// continue_button). The chat goes on meanwhile.
 	const inThread = (on: boolean) => app.classList.toggle('in-thread', on);
 	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));
 	app.querySelector('[data-back]')?.addEventListener('click', () => inThread(false));
+	app.querySelector('[data-continue]')?.addEventListener('click', () => inThread(false));
 	app.querySelector('.agent.on')?.addEventListener('click', () => inThread(false));
 	const tpl =(id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.

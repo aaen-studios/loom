@@ -10,6 +10,8 @@ struct ChatView: View {
     let agentId: String
     /// Another agent's thread with it, shown in place of its chat, with no composer.
     var thread: Ask? = nil
+    /// In a thread: back to the agent's own chat, ready to write.
+    var continueChat: (() -> Void)? = nil
     /// Drawn once, hidden, before any chat is opened, so the first one opened doesn't
     /// pay for building the screen the first time (AgentsView's `Warmup`). It selects
     /// nothing and fetches nothing.
@@ -125,11 +127,14 @@ struct ChatView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                // The composer writes to the agent's chat, so a thread is only read here.
+                // The composer writes to the agent's chat, so a thread is only read here,
+                // with the way back to that chat in the composer's place.
                 if thread == nil {
                     Composer(agentName: agent?.name ?? "the agent") {
                         withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                     }
+                } else {
+                    ContinueButton { continueChat?() }
                 }
             }
         }
@@ -186,7 +191,10 @@ struct ChatView: View {
             }
         }
         .navigationDestination(item: $threadOpen) { k in
-            ChatView(agentId: agentId, thread: k)
+            ChatView(agentId: agentId, thread: k) {
+                session.model.writeNow = true
+                threadOpen = nil
+            }
         }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
@@ -223,6 +231,10 @@ struct ChatView: View {
     /// another, for screenshots of it (ios/README.md).
     private func openFromLaunch() {
         let args = ProcessInfo.processInfo.arguments
+        // `-continue` in that thread does what its Continue in your own chat does.
+        if thread != nil, args.contains("-continue") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { continueChat?() }
+        }
         // `-reply <message>` starts a reply to that message, once the chat's messages have
         // come, for screenshots of the composer's bar.
         if thread == nil, let i = args.firstIndex(of: "-reply"), i + 1 < args.count {
@@ -576,6 +588,29 @@ struct PersonMessage: View {
     private func bubble(_ sender: Agent?) -> Color {
         if message.from == nil { return P.personBubble(agent?.color ?? "", vibrant: vibrant) }
         return sender.map { P.agentBubble($0.color) } ?? P.bubble
+    }
+}
+
+/// In another agent's thread, where the composer would be: back to the person's own chat
+/// with the agent, with the cursor in its composer.
+private struct ContinueButton: View {
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Continue in your own chat")
+                .font(Fonts.ui(Tokens.PhoneSize.body, .medium))
+                .foregroundStyle(P.ink2)
+                // As tall as the composer, which it stands in for.
+                .frame(maxWidth: .infinity, minHeight: Tokens.Control.iconComposer + 2 * (Tokens.Space.xs + 2) + 2)
+                .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.composer, style: .continuous).strokeBorder(P.line, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: Tokens.Radius.composer, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Tokens.Space.m)
+        .padding(.top, Tokens.Space.xs)
+        .padding(.bottom, Tokens.Space.s)
+        .background(P.bg)
     }
 }
 
