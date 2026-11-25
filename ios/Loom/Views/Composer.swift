@@ -19,12 +19,22 @@ struct Composer: View {
     /// Whether the + sheet is up, and whether it opened with its search, from a /.
     @State private var plusOpen = false
     @State private var plusSearch = false
+    /// The emoji picker is up (PLAN.md, "Emoji").
+    @State private var emojiOpen = false
+    @AppStorage(Prefs.emojiButton) private var emojiButton = true
+    @AppStorage(Prefs.emoticons) private var emoticons = false
+    @AppStorage(Prefs.skinTone) private var skinTone = 0
 
     var body: some View {
         let model = session.model
         let mention = mentionQuery(box.typed)
         let picks = mention.map { model.picks($0.query) } ?? []
         VStack(spacing: Tokens.Space.xs) {
+            if let row = model.emoji.row, picks.isEmpty {
+                EmojiRowView(items: row.items, paths: model.emoji.paths) { takeEmoji($0) }
+                    .padding(.horizontal, Tokens.Space.m)
+                    .padding(.top, Tokens.Space.xs)
+            }
             if let mention, !picks.isEmpty {
                 MentionPicker(picks: picks) { pick in
                     guard let agent = model.selected else { return }
@@ -51,6 +61,10 @@ struct Composer: View {
             }
             // Follows the @ being typed, and asks for the files that match it.
             if let q = mentionQuery(now) { session.send(model.findFiles(q.query)) }
+            trackEmoji()
+        }
+        .onChange(of: model.emoji.replace) { _, now in
+            if let now { replaceEmoji(now) }
         }
         .onChange(of: box.attached) { _, ids in model.syncAttachments(ids) }
         // Starting a reply puts the cursor in the composer.
@@ -107,6 +121,9 @@ struct Composer: View {
         Task {
             for path in values("-attach") { await attach(path: path, name: (path as NSString).lastPathComponent) }
             for url in values("-paste") { box.view?.pasteLink(url) }
+            // What's typed, as the keyboard types it, and the emoji picker.
+            for text in values("-type") { box.view?.insertText(text) }
+            if args.contains("-emoji") { openEmoji() }
         }
     }
     #endif
@@ -150,6 +167,22 @@ struct Composer: View {
                     // As far from the plus as the plus is from the edge.
                     .padding(.leading, Tokens.Space.xs - Tokens.Space.s)
 
+                if emojiButton {
+                    Button {
+                        openEmoji()
+                    } label: {
+                        Image(systemName: "face.smiling")
+                            .font(.system(size: 18))
+                            .foregroundStyle(P.ink2)
+                            .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
+                            .contentShape(Circle())
+                    }
+                    .accessibilityLabel("Emoji")
+                    .contextMenu {
+                        Button("Hide emoji button", systemImage: "eye.slash") { emojiButton = false }
+                    }
+                }
+
                 Button {
                     if busy && idle {
                         session.send(model.cancel())
@@ -192,6 +225,12 @@ struct Composer: View {
         .sheet(isPresented: $plusOpen) {
             PlusSheet(take: take, searchFirst: plusSearch)
         }
+        .sheet(isPresented: $emojiOpen) {
+            EmojiPicker { item in
+                pickEmoji(item)
+                emojiOpen = false
+            }
+        }
         // `-plus` at launch opens the sheet, for screenshots (ios/README.md).
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("-plus") { plusOpen = true }
@@ -227,7 +266,62 @@ struct Composer: View {
             let mention = skillMention(name)
             box.put(Piece(id: mention.link, text: mention.words))
             box.view?.becomeFirstResponder()
+        case .emoji:
+            // Once the + sheet has gone.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { openEmoji() }
         }
+    }
+
+    // MARK: Emoji
+
+    /// Opens the emoji picker, with its groups in the person's skin tone.
+    private func openEmoji() {
+        let model = session.model
+        model.emoji.tone = skinTone
+        session.send(model.emoji.picker())
+        emojiOpen = true
+    }
+
+    /// An emoji picked in the picker goes where the person was writing.
+    private func pickEmoji(_ item: EmojiItem) {
+        box.put(emojiPiece(item.emoji), space: false)
+        session.send(session.model.emoji.used(item.emoji))
+    }
+
+    /// Follows what's typed for emoji (PLAN.md, "Emoji"): an emoji from the keyboard
+    /// becomes its piece, drawn with Twemoji, and the words up to the cursor go to the
+    /// core, which answers with the suggestion row or a replacement.
+    private func trackEmoji() {
+        let model = session.model
+        model.emoji.tone = skinTone
+        // Its edit comes back here, once the field says it changed.
+        if box.view?.pieceEmoji() == true { return }
+        guard let before = box.beforeCaret() else { return }
+        if before.contains(":") || (emoticons && before.hasSuffix(" ")) {
+            session.send(model.emoji.typed(before, emoticons: emoticons))
+        } else {
+            model.emoji.untyped()
+        }
+    }
+
+    /// Takes an emoji from the suggestion row, in place of the name being typed.
+    private func takeEmoji(_ item: EmojiItem) {
+        let model = session.model
+        guard let row = model.emoji.row, let before = box.beforeCaret(), before.hasSuffix(row.suffix) else { return }
+        box.put(emojiPiece(item.emoji), replacingFrom: before.count - row.suffix.count)
+        model.emoji.untyped()
+        session.send(model.emoji.used(item.emoji))
+    }
+
+    /// Makes the replacement the core said: `:sob:` closed with its colon, or `:) ` when
+    /// emoticons turn into emoji.
+    private func replaceEmoji(_ r: EmojiReplace) {
+        let model = session.model
+        model.emoji.replace = nil
+        guard let before = box.beforeCaret(), before.hasSuffix(r.suffix) else { return }
+        let with = r.with.trimmingCharacters(in: .whitespaces)
+        box.put(emojiPiece(with), replacingFrom: before.count - r.suffix.count, space: r.with.hasSuffix(" "))
+        session.send(model.emoji.used(with))
     }
 
     private var canSend: Bool {
@@ -371,7 +465,7 @@ final class ComposerBox {
 
     /// Puts a piece in at the caret, or in place of what's typed from character `from`
     /// to the caret (an @ and what follows it), with a space after it.
-    func put(_ piece: Piece, replacingFrom from: Int? = nil) {
+    func put(_ piece: Piece, replacingFrom from: Int? = nil, space: Bool = true) {
         guard let v = view else {
             waiting.append(piece)
             return
@@ -384,8 +478,15 @@ final class ComposerBox {
             range = NSRange(location: at, length: max(0, v.selectedRange.location - at))
         }
         let made = NSMutableAttributedString(attributedString: v.piece(piece))
-        made.append(NSAttributedString(string: " ", attributes: v.typingAttributes))
+        if space { made.append(NSAttributedString(string: " ", attributes: v.typingAttributes)) }
         v.edit(range, made)
+    }
+
+    /// The field's words up to the caret, each piece as U+FFFC.
+    func beforeCaret() -> String? {
+        guard let v = view else { return nil }
+        let s = v.textStorage.string as NSString
+        return s.substring(to: min(v.selectedRange.location, s.length))
     }
 
     /// Takes out the piece of the attached file `id`, and the space after it, as an edit
@@ -448,6 +549,30 @@ final class PieceTextView: UITextView {
                   self.textStorage.attributedSubstring(from: range).string == url else { return }
             self.edit(range, self.piece(linkPiece(url)))
         }
+    }
+
+    /// The first emoji typed as a character, from the keyboard's emoji or a paste, made
+    /// its piece, so it's drawn with Twemoji as the message will show it (PLAN.md,
+    /// "Emoji"). Gives whether there was one; the field's change brings the next.
+    func pieceEmoji() -> Bool {
+        guard markedTextRange == nil else { return false }
+        let text = textStorage.string
+        var found: (NSRange, String)?
+        text.enumerateSubstrings(in: text.startIndex..., options: .byComposedCharacterSequences) { sub, range, _, stop in
+            guard let sub, let c = sub.first, Emoji.name(c) != nil else { return }
+            let r = NSRange(range, in: text)
+            if self.textStorage.attribute(.attachment, at: r.location, effectiveRange: nil) == nil {
+                found = (r, sub)
+                stop = true
+            }
+        }
+        guard let (range, emoji) = found else { return false }
+        let caret = selectedRange.location
+        edit(range, piece(emojiPiece(emoji)))
+        // The caret stays where it was among the words.
+        let at = range.location < caret ? caret - range.length + 1 : caret
+        selectedRange = NSRange(location: min(at, textStorage.length), length: 0)
+        return true
     }
 
     /// How wide a piece may be: the field's line, once it has one.
@@ -543,10 +668,13 @@ struct PieceArt {
     var files: [String: (name: String, path: String, picture: Bool)] = [:]
     var previews: [String: (title: String, icon: String?)] = [:]
     var together: Set<String> = []
+    /// Where the person's own emoji pictures are, by id.
+    var emojiPaths: [String: String] = [:]
 
     init() {}
 
     @MainActor init(model: Model) {
+        emojiPaths = model.emoji.paths
         for a in model.agents { agents[a.id] = (a.color, a.outline) }
         for a in model.attachments + model.dropped {
             files[PieceKind.attach + a.id] = (a.name, model.picturePath(a), isPicture(a.name))
@@ -566,6 +694,7 @@ struct PieceArt {
     @MainActor @discardableResult
     func draw(_ a: PieceAttachment, font: UIFont, most: CGFloat = .greatestFiniteMagnitude) -> Bool {
         let p = a.piece
+        if p.id.hasPrefix(PieceKind.emoji) { return drawEmoji(a, font: font) }
         let ink = UIColor(P.ink)
         var icon: UIImage?
         var words = ""
@@ -647,6 +776,27 @@ struct PieceArt {
         }
         a.image = image
         a.bounds = CGRect(x: 0, y: font.descender, width: width, height: height)
+        return true
+    }
+
+    /// An emoji as the message will show it: Twemoji's picture, or the person's own,
+    /// a little bigger than the words, or its `:name:` until its picture is here.
+    @MainActor
+    private func drawEmoji(_ a: PieceAttachment, font: UIFont) -> Bool {
+        let side = (font.pointSize * Emoji.inText).rounded()
+        let image = Emoji.picture(of: a.piece.text, side: side, paths: emojiPaths)
+        let key = "\(a.piece.id)|\(image != nil)|\(side)"
+        if a.drawn == key { return false }
+        a.drawn = key
+        if let image {
+            a.image = image
+            a.bounds = CGRect(x: 0, y: (font.capHeight - side) / 2, width: side, height: side)
+        } else {
+            let text = NSAttributedString(string: Emoji.asNames(a.piece.text), attributes: [.font: font, .foregroundColor: UIColor(P.ink)])
+            let size = CGSize(width: ceil(text.size().width), height: ceil(font.lineHeight))
+            a.image = UIGraphicsImageRenderer(size: size).image { _ in text.draw(at: .zero) }
+            a.bounds = CGRect(x: 0, y: font.descender, width: size.width, height: size.height)
+        }
         return true
     }
 }
