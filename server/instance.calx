@@ -266,6 +266,16 @@ struct Run {
     tried: List<String>    // the programs that couldn't answer it, before its backup took over
     starter: String    // who started the turn, as rules name it: person, agent, routine, webhook, script or plugin
     since: i64    // the person's last event before run.started: its calls' events come after
+    started: i64    // when it started, so the files its answer names that it made since are attached
+}
+
+// A screenshot an agent took, with browser_screenshot or a device's screenshot, kept
+// for a while for attach_files (PLAN.md, "Files and images").
+struct Shot {
+    name: String    // what the agent's told it's called, such as browser-screenshot-3.jpg
+    mime: String
+    data: List<u8>
+    at: i64
 }
 
 // The tool.finished that ends a call its turn ended without anything finishing:
@@ -364,6 +374,11 @@ pub struct Instance {
     open_secrets: Map<String, List<(String, String)>>    // each person's secrets, (name, value), for the activity log to hide
     failures: LinkedMap<String, List<i64>>
     thumbs: Sender<Thumb>
+    picture_to: Sender<files.Picture>    // the thread that makes thumbnails of the pictures replies name
+    picture_done: Receiver<files.Pictured>
+    picture_thumbs: Map<String, String>    // each picture a reply named (its path, size and time) -> its thumbnail, the person's file
+    shots: Map<String, List<Shot>>    // user/agent -> the screenshots it took last, for attach_files
+    next_shot: i64
     events: EventLife
     next_prune: i64
     next_proc_sweep: i64    // when idle agent programs are next looked for
@@ -626,6 +641,7 @@ const PROPOSALS_WAITING_MOST: usize = 50
 const TASK_RESTARTED: str = "[loom: The instance restarted while you worked on this task. Carry on from where you were.]"
 const TASK_RESUMED: str = "[loom: Your person paused this task, and has resumed it now. Carry on from where you stopped.]"
 const SECRETS_TOLD: str = "[loom: Never ask your person for a password or a code in the chat. When a page in your browser wants one, fill in one they keep with browser_fill_secret, or ask with browser_ask_secret: they type it on a card in your reply, it goes into the page without you seeing it, and they can keep it for next time.]"
+const ATTACH_TOLD: str = "[loom: To give your person a file you made, such as a picture, a PDF, a spreadsheet or a zip, put it in your reply with attach_files: a file in your folder or the shared one, or a screenshot you took with browser_screenshot or use_device, by the name its result gives. A file of those kinds that you made this turn and that your answer names, by its whole path, a file:// link or in `code`, is put there by itself.]"
 const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
 // How much of what a webhook was sent goes to the agent.
 const HOOK_MOST: usize = 20000
@@ -1216,6 +1232,120 @@ fn a_reply_names_paths_in_code() {
     assert(named_paths(String("no code here")).len() == 0)
 }
 
+// --- Files an agent puts in its reply (PLAN.md, "Files and images") ---
+
+// What an agent is told of a screenshot it took, kept as `name` for attach_files.
+fn shot_told(name: String) -> String {
+    return "[loom: This picture is kept for a while as {name}: attach_files with that name puts it in your reply.]"
+}
+
+// How many files attach_files takes at once, and how big each may be: as big as a
+// file the person sends.
+const ATTACH_MOST: usize = 20
+const ATTACH_BYTES_MOST: u64 = 67108864
+
+// How many files a turn's answer has attached by itself, of those it names, and how
+// big each may be.
+const ANSWER_FILES_MOST: usize = 10
+const ANSWER_FILE_BYTES_MOST: u64 = 26214400
+
+// How far before its turn started a file may say it was changed and still count as
+// made during it: Linux stamps files from a clock that can trail by a tick or two.
+const ANSWER_FILE_CLOCK_MS: i64 = 50
+
+// How many screenshots an agent took are kept for attach_files, the newest.
+const SHOTS_KEPT: usize = 10
+
+// Whether a file of this name is one an agent makes for its person, which its answer
+// naming it attaches: a picture, a PDF, an Office document, a table, text, sound or
+// video, or a zip.
+fn output_type(name: String) -> bool {
+    let lower = name.to_lower_root()
+    let dot = lower.find_last(".") else return false
+    let ext = lower[dot + 1..].copy()
+    return " png jpg jpeg gif webp svg bmp tif tiff heic pdf doc docx xls xlsx ppt pptx odt ods odp rtf csv tsv txt md mp3 wav m4a aac ogg flac mp4 mov m4v webm mkv avi zip ".contains(" {ext} ")
+}
+
+@test
+fn an_agents_output_is_known_by_its_type() {
+    assert(output_type(String("chart.PNG")) and output_type(String("out/report.pdf")) and output_type(String("a.tar.zip")))
+    assert(not output_type(String("main.rs")) and not output_type(String("Makefile")) and not output_type(String("notes.")))
+}
+
+// Where a path ends in text: at a space or what closes the words around it, without
+// the stop after it.
+fn path_end(s: String) -> usize {
+    let b = s.to_bytes()
+    let stops: List<u8> = [32u8, 9, 10, 13, 41, 93, 62, 34, 39, 96, 42, 124]
+    var end: usize = 0
+    while end < b.len() and not stops.contains(b[end]) { end += 1 }
+    let trailing: List<u8> = [46u8, 44, 59, 58, 33, 63]
+    while end > 0 and trailing.contains(b[end - 1]) { end -= 1 }
+    return end
+}
+
+// The files an answer names, for its files to be attached: each path in `code`,
+// each absolute path (`/home/me/out/chart.png`, `C:\out\chart.png`) and each
+// `file://` link, whose last part has a type. Each once, in order.
+fn answer_paths(text: String) -> List<String> {
+    var out = List<String>()
+    // In code: a path with spaces in it too, when it's a file of an agent's output.
+    let parts = text.split("`")
+    var n: usize = 1
+    while n < parts.len() {
+        let span = parts[n].trim().copy()
+        n += 2
+        if span.len() == 0 or span.len() > 260 or span.contains("\n") or span.contains("://") { continue }
+        if span.contains(" ") and not output_type(span.copy()) { continue }
+        let last = if let cut = span.replace("\\", "/").find_last("/") { span[cut + 1..].copy() } else { span.copy() }
+        let dot = last.find_last(".") else continue
+        if dot + 1 >= last.len() or out.contains(span.copy()) { continue }
+        out.push(span)
+    }
+    // A file:// link, its path as it is on the computer.
+    var rest = text.copy()
+    while let k = rest.find("file://") {
+        let after = rest[k + 7..].copy()
+        let end = path_end(after.copy())
+        var p = url_unescape(after[..end].copy())
+        // file:///C:/out/a.png is C:/out/a.png.
+        if p.len() > 3 and p.starts_with("/") and p[2..].starts_with(":") { p = p[1..].copy() }
+        if p.len() > 0 and not out.contains(p.copy()) { out.push(p) }
+        rest = after[end..].copy()
+    }
+    // An absolute path where words could start: after a space, a bracket, a quote or code's mark.
+    let b = text.to_bytes()
+    var k: usize = 0
+    while k < b.len() {
+        let before = if k == 0 { 32u8 } else { b[k - 1] }
+        let starts = before == 32 or before == 9 or before == 10 or before == 40 or before == 91 or before == 60 or before == 34 or before == 39 or before == 96
+        let unix = b[k] == 47 and k + 1 < b.len() and b[k + 1] != 47 and b[k + 1] != 32
+        let drive = k + 2 < b.len() and ((b[k] >= 65 and b[k] <= 90) or (b[k] >= 97 and b[k] <= 122)) and b[k + 1] == 58 and (b[k + 2] == 92 or b[k + 2] == 47)
+        if starts and (unix or drive) {
+            let tail = String.from_utf8(b[k..]) ?? String()
+            let end = path_end(tail.copy())
+            let p = tail[..end].copy()
+            let last = if let cut = p.replace("\\", "/").find_last("/") { p[cut + 1..].copy() } else { p.copy() }
+            if let dot = last.find_last(".") {
+                if dot > 0 and dot + 1 < last.len() and not out.contains(p.copy()) { out.push(p.copy()) }
+            }
+            k += if end > 0 { end } else { 1 }
+            continue
+        }
+        k += 1
+    }
+    return out
+}
+
+@test
+fn an_answer_names_its_files_by_path_link_or_code() {
+    let found = answer_paths(String("Made `out/chart.png` and `my report.pdf`, not `ls -la`. Also /home/me/out/data.csv, [this](file:///C:/work/a%20b.zip) and C:\\work\\notes.md. See https://x.io/y.png or /usr/bin."))
+    assert(found.len() == 5)
+    assert(found[0] == "out/chart.png" and found[1] == "my report.pdf")
+    assert(found[2] == "C:/work/a b.zip")
+    assert(found[3] == "/home/me/out/data.csv" and found[4] == "C:\\work\\notes.md")
+}
+
 // A path as two paths to the same place compare: with forward slashes, and on
 // Windows, whose paths ignore case, in lower case.
 fn path_key(path: String) -> String {
@@ -1626,7 +1756,8 @@ impl Instance {
         let search_to = searcher.start("{config.data}/loom.db", search_done.sender(), waker)
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        let (picture_to, picture_done) = files.start_pictures(waker)
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2315,6 +2446,12 @@ impl Instance {
                     err(e) => eprintln("loom: looking a page up: {e}"),
                 }
             }
+            while let d = i.picture_done.next() {
+                match i.pictured(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: a picture's thumbnail: {e}"),
+                }
+            }
             while let d = i.mcp_test_done.next() {
                 match i.mcp_tested(d) {
                     ok => {},
@@ -2378,7 +2515,9 @@ impl Instance {
                         }
                         // A page on a site with notes tied to it: the agent is shown them, once a visit;
                         // and what it should know of secrets there.
-                        let noted = i.with_site_notes(key.copy(), site.copy() ?? String(), given)
+                        // A picture of the page is kept, for attach_files.
+                        let shot = i.with_shot(key.copy(), given)
+                        let noted = i.with_site_notes(key.copy(), site.copy() ?? String(), shot)
                         let result = if let host = site { i.with_secret_hints(key, host, field, noted) } else { noted }
                         // A secret for a site it hasn't gone to waits for the person's yes.
                         let needs = str_at(result.copy(), "needs")
@@ -4651,6 +4790,9 @@ impl Instance {
         if name == "show_card" {
             return some(try i.show_card(g, args))
         }
+        if name == "attach_files" {
+            return some(try i.attach_files(g, args))
+        }
         // Shared tables: each tool is a table command, as the agent; dropping asks first.
         if name == "drop_table" {
             let table = str_at(args.copy(), "table") ?? String()
@@ -5148,23 +5290,55 @@ impl Instance {
     }
 
     // The files a reply names that are in its agent's folder or the shared
-    // one: each `path` as the reply wrote it, its `name` and its `size`.
-    fn mentions(i: Instance, user: String, agent: String, said: String) -> List<Json> {
-        var out = List<Json>()
+    // one: each `path` as the reply wrote it, its `name`, `size` and `mime`; with
+    // where it is, and that with its size and time, which a picture's thumbnail is
+    // kept by.
+    fn mentions(i: Instance, user: String, agent: String, said: String) -> List<(Json, String, String)> {
+        var out = List<(Json, String, String)>()
         let named = named_paths(said)
         if named.len() == 0 { return out }
         let shared = i.shared_of(user.copy(), agent.copy())
         let mine = i.folder_of(user.copy(), agent)
         for p in named {
             let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else continue
-            let size = match fs.metadata(path.copy()) {
-                ok(m) => i64.wrap(m.size),
+            let meta = match fs.metadata(path.copy()) {
+                ok(m) => m,
                 err(_) => continue,
             }
+            let size = i64.wrap(meta.size)
             let name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
-            out.push(Obj.new().s("path", p).s("name", name).i("size", size).done())
+            let key = "{path_key(path.copy())}\n{size}\n{meta.modified.unix_ms}"
+            out.push((Obj.new().s("path", p).s("name", name.copy()).i("size", size).s("mime", content_type(name)).done(), path, key))
         }
         return out
+    }
+
+    // A reply's `mentions`, from what `mentions` found: a picture's with its
+    // thumbnail, when one was made of it as it is now, and the pictures still to have
+    // one, each (its path as the reply named it, where it is, its key). A picture the
+    // reply has as a file already, by its name and size, has none: it shows there.
+    fn with_thumbs(i: Instance, found: List<(Json, String, String)>, blocks: List<Json>) -> (List<Json>, List<(String, String, String)>) {
+        var out = List<Json>()
+        var todo = List<(String, String, String)>()
+        for (m, path, key) in found {
+            let mime = str_at(m.copy(), "mime") ?? String()
+            let size = int_at(m.copy(), "size") ?? 0
+            var shown = false
+            for b in blocks {
+                if str_at(b.copy(), "kind") == some(String("file")) and str_at(b.copy(), "name") == str_at(m.copy(), "name") and int_at(b.copy(), "size") == some(size) { shown = true }
+            }
+            if not files.thumbable(mime) or shown or u64.wrap(size) > ANSWER_FILE_BYTES_MOST {
+                out.push(m.copy())
+                continue
+            }
+            if let thumb = i.picture_thumbs.find(key.copy()) {
+                out.push(merge(m.copy(), Obj.new().s("thumb", thumb.copy()).done()))
+            } else {
+                out.push(m.copy())
+                todo.push((str_at(m, "path") ?? String(), path.copy(), key.copy()))
+            }
+        }
+        return (out, todo)
     }
 
     // The run a tool call came from: the one in the conversation its session
@@ -7509,6 +7683,232 @@ impl Instance {
         return Obj.new().s("kind", String("file")).s("file", sha).s("name", name).s("mime", mime).i("size", size).done()
     }
 
+    // --- Files an agent puts in its reply (PLAN.md, "Files and images") ---
+
+    // A screenshot `key`'s agent (user/agent) just took, kept under a name of its own
+    // for attach_files, the newest SHOTS_KEPT. Gives the name.
+    fn keep_shot(i: mut Instance, key: String, kind: str, mime: String, data: List<u8>) -> String {
+        i.next_shot += 1
+        let ext = if mime == "image/png" { "png" } else { "jpg" }
+        let name = "{kind}-screenshot-{i.next_shot}.{ext}"
+        var list = i.shots.remove(key.copy()) ?? List<Shot>()
+        list.push(Shot { name: name.copy(), mime: mime.copy(), data: data.copy(), at: now() })
+        while list.len() > SHOTS_KEPT { _ = list.remove(0) }
+        i.shots.insert(key.copy(), list)
+        return name
+    }
+
+    // The screenshot `user`'s `agent` took that's called `name`, while it's kept.
+    fn shot(i: Instance, user: String, agent: String, name: String) -> Shot? {
+        if let list = i.shots.find("{user}/{agent}") {
+            for s in list {
+                if s.name == name.trim() { return some(s.copy()) }
+            }
+        }
+        return none
+    }
+
+    // A browser's result with a picture in it, as a screenshot's: the picture is kept
+    // for attach_files, and the agent told what it's called.
+    fn with_shot(i: mut Instance, key: String, result: Json) -> Json {
+        var content = List<Json>()
+        if let Json.Array(list) = at(result.copy(), "content") { content = list }
+        var picture = List<u8>()
+        var mime = String()
+        for c in content {
+            if str_at(c.copy(), "type") == some(String("image")) {
+                if let d = bytes.from_base64(str_at(c.copy(), "data") ?? String()) {
+                    picture = d
+                    mime = str_at(c.copy(), "mimeType") ?? String("image/jpeg")
+                }
+            }
+        }
+        if picture.len() == 0 { return result.copy() }
+        let name = i.keep_shot(key, "browser", mime, picture)
+        var more = content.copy()
+        more.push(Obj.new().s("type", String("text")).s("text", shot_told(name)).done())
+        return merge(result, Obj.new().j("content", Json.Array(more)).done())
+    }
+
+    // The shas of the files in run `run_id`'s reply so far.
+    fn reply_files(i: Instance, run_id: String) -> List<String> {
+        var out = List<String>()
+        if let r = i.runs.find(run_id) {
+            for b in r.blocks {
+                if b.kind == "file" { out.push(str_at(b.file.copy(), "file") ?? String()) }
+            }
+        }
+        return out
+    }
+
+    // The space `user` has left for files, or none when there's no limit.
+    fn space_left(i: Instance, user: String) -> i64? ! Error {
+        let max = i64.parse(try i.store.meta("file_limit") ?? String()) ?? 0
+        if max <= 0 { return none }
+        return some(max - try i.store.file_usage(user))
+    }
+
+    // attach_files: files from the agent's folder or the shared one, or screenshots
+    // it took, go in its reply after what it has said so far, kept as the person's.
+    fn attach_files(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
+        let run_id = i.calling_run(g.copy())
+        if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's no reply to put them in.")) }
+        if i.quiet_turns.contains(run_id.copy()) { return tool_error(String("You're answering for a routine, which your person doesn't see, so there's no reply to put them in. Say where they are with routine_post.")) }
+        var given = List<String>()
+        if let Json.Array(list) = at(args.copy(), "paths") {
+            for p in list {
+                if let Json.Str(s) = p {
+                    if s.trim().len() > 0 { given.push(s.trim().copy()) }
+                }
+            }
+        }
+        if given.len() == 0 { return tool_error(String("paths is a list of files: paths in your folder or the shared folder, or the name of a screenshot you took, such as browser-screenshot-3.jpg.")) }
+        if given.len() > ATTACH_MOST { return tool_error("That's {given.len()} files, and attach_files takes {ATTACH_MOST} at once.") }
+        let mine = i.folder_of(g.user.copy(), g.agent.copy())
+        let shared = i.shared_of(g.user.copy(), g.agent.copy())
+        var left = try i.space_left(g.user.copy())
+        var had = i.reply_files(run_id.copy())
+        var attached = List<String>()
+        var problems = List<String>()
+        for p in given {
+            var name = String()
+            var mime = String()
+            var data = List<u8>()
+            if let s = i.shot(g.user.copy(), g.agent.copy(), p.copy()) {
+                name = s.name.copy()
+                mime = s.mime.copy()
+                data = s.data.copy()
+            } else {
+                let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else {
+                    problems.push("{p} isn't a file in your folder or the shared folder")
+                    continue
+                }
+                let size = match fs.metadata(path.copy()) {
+                    ok(m) => m.size,
+                    err(_) => 0,
+                }
+                if size > ATTACH_BYTES_MOST {
+                    problems.push("{p} is {size / 1000000} MB, and a file in the chat is {ATTACH_BYTES_MOST / 1048576} MB at most")
+                    continue
+                }
+                data = try fs.read(path.copy())
+                name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
+                mime = files.sniff(data.copy()) ?? content_type(name.copy())
+            }
+            let sha = bytes.hex(sha256(data.copy()))
+            if had.contains(sha.copy()) {
+                attached.push(name)
+                continue
+            }
+            let size = i64.wrap(u64(data.len()))
+            if let room = left {
+                if size > room {
+                    problems.push("{p} would take your person past the space they have for files")
+                    continue
+                }
+                left = some(room - size)
+            }
+            let file = try i.agent_file(g.user.copy(), name.copy(), mime, data)
+            if let r = mut i.runs.find(run_id.copy()) {
+                var b = new_block("file")
+                b.file = file
+                r.blocks.push(b)
+            }
+            had.push(sha)
+            attached.push(name)
+        }
+        if attached.len() == 0 { return tool_error("Nothing was attached: {problems.join("; ")}.") }
+        i.log(g.user.copy(), g.agent.copy(), "file", "Attached {attached.join(", ")}", g.agent.copy())
+        let said = "Attached {attached.join(", ")} to your reply, after what you've said so far."
+        if problems.len() > 0 { return tool_text("{said} Not attached: {problems.join("; ")}.") }
+        return tool_text(said)
+    }
+
+    // The files a turn's answer names that its agent made or changed during it, of
+    // the kinds an agent makes for its person (output_type), and the screenshots it
+    // took during it, kept as the person's and given as file blocks to put in the
+    // reply: ANSWER_FILES_MOST at most, each ANSWER_FILE_BYTES_MOST at most, none
+    // that `blocks` has already, and none past the person's space.
+    fn answer_files(i: mut Instance, r: Run, blocks: List<Json>, said: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        let named = answer_paths(said)
+        if named.len() == 0 { return out }
+        var had = List<String>()
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("file")) { had.push(str_at(b, "file") ?? String()) }
+        }
+        let mine = i.folder_of(r.user.copy(), r.agent.copy())
+        let shared = i.shared_of(r.user.copy(), r.agent.copy())
+        var left = try i.space_left(r.user.copy())
+        var seen = List<String>()
+        for p in named {
+            if out.len() >= ANSWER_FILES_MOST { break }
+            let last = if let cut = p.replace("\\", "/").find_last("/") { p[cut + 1..].copy() } else { p.copy() }
+            if not output_type(last.copy()) { continue }
+            var name = String()
+            var mime = String()
+            var data = List<u8>()
+            if let s = i.shot(r.user.copy(), r.agent.copy(), last.copy()) {
+                if s.at < r.started { continue }
+                name = s.name.copy()
+                mime = s.mime.copy()
+                data = s.data.copy()
+            } else {
+                let path = handoff_path(p.copy(), mine.copy(), shared.copy()) else continue
+                if seen.contains(path_key(path.copy())) { continue }
+                seen.push(path_key(path.copy()))
+                let meta = match fs.metadata(path.copy()) {
+                    ok(m) => m,
+                    err(_) => continue,
+                }
+                if meta.size > ANSWER_FILE_BYTES_MOST or meta.modified.unix_ms + ANSWER_FILE_CLOCK_MS < r.started { continue }
+                data = match fs.read(path.copy()) {
+                    ok(d) => d,
+                    err(_) => continue,
+                }
+                name = if let cut = path.replace("\\", "/").find_last("/") { path[cut + 1..].copy() } else { path.copy() }
+                mime = files.sniff(data.copy()) ?? content_type(name.copy())
+            }
+            let sha = bytes.hex(sha256(data.copy()))
+            if had.contains(sha.copy()) { continue }
+            let size = i64.wrap(u64(data.len()))
+            if let room = left {
+                if size > room { continue }
+                left = some(room - size)
+            }
+            had.push(sha)
+            out.push(try i.agent_file(r.user.copy(), name, mime, data))
+        }
+        return out
+    }
+
+    // A picture a reply names has its thumbnail: kept as the person's file, and given
+    // to the reply's mention of it, which every device is told of.
+    fn pictured(i: mut Instance, d: files.Pictured) ! Error {
+        if d.thumb.len() == 0 {
+            eprintln("loom: the thumbnail of {d.path}: {d.error}")
+            return
+        }
+        let size = i64.wrap(u64(d.thumb.len()))
+        if let room = try i.space_left(d.user.copy()) {
+            if size > room { return }
+        }
+        let sha = bytes.hex(sha256(d.thumb.copy()))
+        let name = if let cut = d.path.replace("\\", "/").find_last("/") { d.path[cut + 1..].copy() } else { d.path.copy() }
+        try i.keep_file(d.user.copy(), sha.copy(), name, d.mime.copy(), d.thumb.copy())
+        i.picture_thumbs.insert(d.key.copy(), sha.copy())
+        let message = try i.store.message(d.user.copy(), d.message.copy()) else return
+        var list = List<Json>()
+        if let Json.Array(had) = at(message.copy(), "mentions") {
+            for m in had {
+                if str_at(m.copy(), "path") == some(d.named.copy()) { list.push(merge(m.copy(), Obj.new().s("thumb", sha.copy()).done())) } else { list.push(m.copy()) }
+            }
+        }
+        let changed = merge(message, Obj.new().j("mentions", Json.Array(list)).done())
+        try i.store.put_message(d.user.copy(), changed.copy())
+        try i.event(d.user, "message.updated", Obj.new().s("conversation", str_at(changed.copy(), "conversation") ?? String()).j("message", changed).done())
+    }
+
     // Where the agent finds a file sent to it: a copy in its folder, under the name it was
     // sent with, so its tools see the right extension.
     fn agent_copy(i: Instance, place: sandbox.Place?, folder: String, f: Json) -> String ! Error {
@@ -8545,7 +8945,7 @@ impl Instance {
         // Where its events begin, so its calls are found when it ends.
         let since = try i.store.last_seq(user.copy())
         try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).maybe("routine", quiet_for).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since, started: now() })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
@@ -9140,6 +9540,13 @@ impl Instance {
         if let _ = p.told.find(shared_told.copy()) {} else {
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: Your person's agents share the folder {i.shared_of(user.copy(), agent.copy())}. Put files there for another agent, and look there for what they leave. To hand one over with a message, give message_agent its path in files.]").done())
             p.told.insert(shared_told, String("1"))
+        }
+        // That it can put files in its reply, and that the files its answer names are
+        // put there (PLAN.md, "Files and images"), once a session.
+        let attach_told = "{session}#attach"
+        if let _ = p.told.find(attach_told.copy()) {} else {
+            prompt.push(Obj.new().s("type", String("text")).s("text", String(ATTACH_TOLD)).done())
+            p.told.insert(attach_told, String("1"))
         }
         // That a password or a code is never asked for in the chat (PLAN.md, "The
         // agent's browser"), once a session.
@@ -10057,7 +10464,11 @@ impl Instance {
     fn device_result(i: mut Instance, user: String, device: String, f: Json) ! Error {
         let call = str_at(f.copy(), "call") ?? String()
         var mine = false
-        if let dc = i.device_calls.find(call.copy()) { mine = dc.user == user and dc.device == device }
+        var agent = String()
+        if let dc = i.device_calls.find(call.copy()) {
+            mine = dc.user == user and dc.device == device
+            agent = dc.agent.copy()
+        }
         if not mine { return }
         let worked = bool_at(f.copy(), "ok") ?? false
         // A screenshot comes as a picture: the agent sees it, and the chat keeps it as a file.
@@ -10067,8 +10478,10 @@ impl Instance {
             if worked and (mime == "image/jpeg" or mime == "image/png") {
                 if let data = bytes.from_base64(image.copy()) {
                     let name = if mime == "image/png" { "screenshot.png" } else { "screenshot.jpg" }
-                    let file = try i.agent_file(user.copy(), String(name), mime.copy(), data)
-                    picture = Obj.new().s("data", image).s("mime", mime).j("file", file).done()
+                    let file = try i.agent_file(user.copy(), String(name), mime.copy(), data.copy())
+                    // And kept for attach_files.
+                    let shot = i.keep_shot("{user}/{agent}", "device", mime.copy(), data)
+                    picture = Obj.new().s("data", image).s("mime", mime).j("file", file).s("shot", shot).done()
                 }
             }
         }
@@ -10085,7 +10498,8 @@ impl Instance {
         var shown = List<Json>()
         if picture != Json.Null {
             let image = Obj.new().s("type", String("image")).s("data", str_at(picture.copy(), "data") ?? String()).s("mimeType", str_at(picture.copy(), "mime") ?? String()).done()
-            result = Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", output.copy()).done()])).done()
+            let told = shot_told(str_at(picture.copy(), "shot") ?? String())
+            result = Obj.new().j("content", Json.Array([image, Obj.new().s("type", String("text")).s("text", output.copy()).done(), Obj.new().s("type", String("text")).s("text", told).done()])).done()
             shown.push(at(picture, "file"))
         }
         i.answer_call(call.copy(), result)
@@ -10597,10 +11011,6 @@ impl Instance {
                 if b.kind == "text" and b.parent.len() == 0 { said.push_str(b.text.copy()) }
             }
         }
-        // Its questions go after all of it, whenever the agent made them.
-        for b in r.ending {
-            blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", b.card.copy()).done())
-        }
         // A routine's quiet run, or a step of its flow, leaves nothing in the chat
         // but what its agent posted with routine_post (PLAN.md, "Routines"), unless
         // it failed: the person sees that, as its agent said it or as its turn ended.
@@ -10628,15 +11038,24 @@ impl Instance {
                     sources = found
                 }
             }
-            var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks))
+            // Files its answer names that it made this turn go in the reply, as
+            // attach_files would put them there (PLAN.md, "Files and images").
+            for f in try i.answer_files(r.copy(), blocks.copy(), said.copy()) { blocks.push(f.copy()) }
+            // Its questions go after all of it, whenever the agent made them.
+            for b in r.ending {
+                blocks.push(Obj.new().s("kind", b.kind.copy()).j("card", b.card.copy()).done())
+            }
+            var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks.copy()))
             if sources.len() > 0 { o = o.j("sources", Json.Array(sources)) }
-            // Files it names that are there, for the app to show as chips.
-            let mentions = i.mentions(r.user.copy(), r.agent.copy(), said.copy())
+            // Files it names that are there, for the app to show where they're named,
+            // a picture as a picture once its thumbnail is made.
+            let (mentions, pictures) = i.with_thumbs(i.mentions(r.user.copy(), r.agent.copy(), said.copy()), blocks)
             if mentions.len() > 0 { o = o.j("mentions", Json.Array(mentions)) }
             // And each page it links to, by its title and its site's icon.
             let message = try i.with_links(r.user.copy(), o.done())
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
+            for (named, path, key) in pictures { i.picture_to.send(files.Picture { user: r.user.copy(), message: r.message.copy(), named: named.copy(), path: path.copy(), key: key.copy() }) }
         }
         // A run an update stopped to restart keeps its reply so far, and the restart
         // does the rest, as for any run a restart cuts short: the run is failed, saying

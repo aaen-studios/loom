@@ -25,6 +25,12 @@ Anything bigger, such as a report or a chart, comes as a page in the chat instea
 
 Two or more pictures in one message, yours or an agent's, are one fan: the first in front, and up to four more tilted behind it, which spread out when you point at them. Its corner says how many there are, or past five, how many more ("+2"). Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
 
+## Files from agents
+
+An agent puts the files it makes in its reply: pictures, PDFs, documents, spreadsheets, sound, video and zips, and screenshots it took in its browser or on your computer. A file it made in that reply and names by its path goes in by itself. Each is kept as your file, and counts toward your space.
+
+A picture a reply names that was in the agent's folder or the shared one already shows in the reply as a picture too, without being copied into your files until you open it in the viewer.
+
 ## Links and sources
 
 A link in any message, yours or an agent's, has its site's icon before it, and a bare address shows as its page's title. Hover over it on the desktop to see the whole address.
