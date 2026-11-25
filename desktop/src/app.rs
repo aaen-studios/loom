@@ -1346,6 +1346,8 @@ ACTA_KEY=secret:ACTA_KEY",
         }
 
         let scroller = cx.new(|cx| MessageScrollerState::new(0, cx));
+        cx.observe(&scroller, |this: &mut Loom, _, cx| this.near_top(cx))
+            .detach();
         // "System" follows the system as it changes.
         cx.observe_window_appearance(window, |this: &mut Loom, window, cx| {
             this.apply_theme(window, cx);
@@ -2779,6 +2781,26 @@ ACTA_KEY=secret:ACTA_KEY",
             crate::perf::once("chat shown");
         }
         self.jump_on(cx);
+        self.near_top(cx);
+    }
+
+    /// Scrolled near the top of what the chat has loaded: it asks for the page of older
+    /// messages before it, which come in above the place being read (`rebuild_rows`).
+    fn near_top(&mut self, cx: &mut Context<Self>) {
+        // Rows held while the scrollbar is dragged would keep it at the top, asking
+        // page after page.
+        if self.rows.is_empty()
+            || self.rows_wait
+            || !self.model.more_messages
+            || self.model.reaching_back()
+        {
+            return;
+        }
+        let top = self.scroller.read(cx).logical_scroll_top().item_ix;
+        if top < OLDER_WITHIN && self.model.load_further_back() {
+            self.fetch();
+            cx.notify();
+        }
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
@@ -10418,6 +10440,29 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }),
                             )
                             .child(list)
+                            .when(self.model.reaching_back(), |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .top(px(space::XS))
+                                        .left_0()
+                                        .right_0()
+                                        .flex()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .px(px(space::M))
+                                                .py(px(space::XS))
+                                                .rounded_full()
+                                                .border_1()
+                                                .border_color(p.line)
+                                                .bg(p.bg)
+                                                .text_size(px(size::CAPTION))
+                                                .text_color(p.ink_3)
+                                                .child("Loading older messages…"),
+                                        ),
+                                )
+                            })
                             .into_any_element()
                     })
                     .when_some(mini, |d, m| d.child(m)),
@@ -18163,6 +18208,9 @@ fn tilted_card(path: String, dx: f32, deg: f32, scale: f32) -> impl IntoElement 
 
 /// How a tilted card's picture is named for `CardLoader`: this, then the picture's path.
 const TILTED: &str = "loom-tilted:";
+
+/// How near the top of what's loaded, in rows, the chat asks for older messages.
+const OLDER_WITHIN: usize = 8;
 
 /// The place a picture attached in the composer takes, at most.
 const COMPOSER_PICTURE_W: f32 = 200.0;
