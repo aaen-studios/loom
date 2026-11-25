@@ -7705,6 +7705,22 @@ ACTA_KEY=secret:ACTA_KEY",
                 let _ = window.drop_image(t.small);
             }
         }
+        // A picture sent before and picked to go again has no file here of its own: it's
+        // drawn from its thumbnail once that has come (`Model::file_fetches`).
+        let again: Vec<(String, String)> = self
+            .model
+            .attachments
+            .iter()
+            .filter(|a| a.path.is_empty() && a.image() && !self.previews.contains_key(&a.id))
+            .filter_map(|a| {
+                let f = a.file.as_ref()?;
+                let thumb = self.model.files.get(&format!("{}.thumb", f.file))?;
+                Some((a.id.clone(), thumb.clone()))
+            })
+            .collect();
+        for (id, path) in again {
+            self.make_preview(id, path, cx);
+        }
         let links: Vec<String> = self
             .composer
             .read(cx)
@@ -7776,15 +7792,18 @@ ACTA_KEY=secret:ACTA_KEY",
                                 this.view(f, cx);
                             }
                         }))
+                        // The picture has the tile's corners itself: they don't clip it.
                         .child(match self.previews.get(&a.id) {
                             Some(Some(t)) => img(ImageSource::Render(t.small.clone()))
                                 .size_full()
+                                .rounded(px(radius::BUBBLE))
                                 .object_fit(ObjectFit::Cover)
                                 .into_any_element(),
                             Some(None) => div().into_any_element(),
                             None => img(std::path::PathBuf::from(&a.path))
                                 .image_cache(&kept_images(cx).0)
                                 .size_full()
+                                .rounded(px(radius::BUBBLE))
                                 .object_fit(ObjectFit::Cover)
                                 .into_any_element(),
                         })
@@ -8422,6 +8441,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         let (id, name) = model::attach_token(a);
                         self.composer_edits.push(ComposerEdit::Put(id, name));
                     }
+                    // A picture's thumbnail, for the composer to draw it from.
+                    self.fetch();
                 }
                 self.shut_plus(window, cx);
             }
@@ -8499,7 +8520,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else {
                     Ico::FileText
                 },
-                f.file.name.clone(),
+                // Cut in the middle, as a file's name is everywhere else.
+                model::middle_cut(&f.file.name, model::PILL_NAME),
                 grey(line_of(f.at, chrono::Local::now())),
             ),
             PlusRow::Skill(k) => (
@@ -21544,6 +21566,9 @@ fn approval(
     place.child(card.draw(p, scale))
 }
 
+/// How wide the held Allow is: room for "Keep holding" and "Hold to allow".
+const HOLD_WIDE: f32 = 108.0;
+
 /// Allow on a risky question (PLAN.md, "Permissions"): pressed and held, it fills from
 /// the left, and once it's full the question is allowed. Let go sooner, it says to hold.
 fn hold_button(
@@ -21567,10 +21592,14 @@ fn hold_button(
         .relative()
         .overflow_hidden()
         .px(px(space::M + 2.0))
+        // As wide as its longest words from the start, so its fill grows across one width
+        // and Deny doesn't move under the pointer as the words change.
+        .min_w(px(HOLD_WIDE))
         .h(px(control::BUTTON_SMALL))
         .flex()
         .flex_none()
         .items_center()
+        .justify_center()
         .rounded(px(radius::BUTTON))
         .text_size(px(size::SMALL))
         .font_weight(FontWeight::MEDIUM)

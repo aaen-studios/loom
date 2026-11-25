@@ -7483,7 +7483,14 @@ impl Model {
             .messages
             .iter()
             .flat_map(|m| m.mentions.iter().filter_map(|x| x.thumb.clone()));
-        for sha in named {
+        // And those of pictures sent before and picked to go again, which the composer
+        // has no file of its own to draw.
+        let again = self
+            .attachments
+            .iter()
+            .filter(|a| a.path.is_empty() && a.image())
+            .filter_map(|a| a.file.as_ref().map(|f| f.file.clone()));
+        for sha in named.chain(again) {
             if !wanted.contains(&sha) {
                 wanted.push(sha);
             }
@@ -9758,6 +9765,32 @@ mod tests {
         );
         assert_eq!(m.answering.get("tc_1"), Some(&(true, false)));
         assert!(m.release_allow(t1 + HOLD * 2).is_none() && !m.holding(t1 + HOLD * 2));
+    }
+
+    #[test]
+    fn a_picture_sent_before_and_picked_again_has_its_thumbnail_fetched() {
+        let mut m = Model::new();
+        let picture = FileRef {
+            file: "ab12".into(),
+            name: "monday.png".into(),
+            mime: "image/png".into(),
+            size: 10,
+            width: 0,
+            height: 0,
+        };
+        let notes = FileRef {
+            file: "cd34".into(),
+            name: "notes.md".into(),
+            mime: "text/markdown".into(),
+            ..picture.clone()
+        };
+        assert!(m.attach_sent(&picture) && m.attach_sent(&notes));
+        let asked = m.file_fetches();
+        let files: Vec<&str> = asked.iter().filter_map(|f| f["file"].as_str()).collect();
+        // The picture's, for the composer to draw it from; not the notes'.
+        assert_eq!(files, vec!["ab12"]);
+        assert!(asked.iter().all(|f| f["thumb"] == true));
+        assert!(m.file_fetches().is_empty());
     }
 
     #[test]

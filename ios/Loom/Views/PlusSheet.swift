@@ -130,7 +130,7 @@ struct PlusSheet: View {
         case .open(.recent): "Recent files"
         case .open(.skills): "Skills"
         case .open(.routines): "Routines"
-        case .file(let f): f.file.name
+        case .file(let f): middleCut(f.file.name)
         case .skill(let k): k.name
         case .routine(let r): r.name
         }
