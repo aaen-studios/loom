@@ -28,6 +28,8 @@ pub const SAID_BYTES_MOST: usize = 24000
 pub const HANDOFFS_MOST: usize = 3
 // How long the router has to pick, in milliseconds.
 pub const PICK_MS: i64 = 8000
+// How long its program and session have to start before it's asked, in milliseconds.
+pub const START_MS: i64 = 60000
 // Picks one router session takes before the next starts a fresh one.
 pub const PICKS_PER_SESSION: i64 = 20
 // The model the router is set to until the person picks another.

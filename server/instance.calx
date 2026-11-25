@@ -58,6 +58,7 @@ import server.tables
 import server.flows
 import server.defaults
 import server.rules
+import server.rooms
 import shared.reply as replies
 import server.brains
 import server.egress
@@ -269,6 +270,32 @@ struct Run {
     starter: String    // who started the turn, as rules name it: person, agent, routine, webhook, script or plugin
     since: i64    // the person's last event before run.started: its calls' events come after
     started: i64    // when it started, so the files its answer names that it made since are attached
+    routed: Json    // in a group chat, how its agent was picked (PLAN.md, "Group chats"), or null
+    seat: String    // what its ACP sessions are kept under: its conversation, or in a group chat CONVERSATION/AGENT
+    handed: List<String>    // in a group chat, the agents that had its message before, handed on with hand_off
+}
+
+// A person's message in a group chat, waiting for the router's pick.
+struct Pick {
+    run: String    // the run it starts once its agent is picked, which the send's ack named
+    user: String
+    conversation: String
+    message: String    // the person's message
+    text: String    // its words, as the agent reads them
+    files: List<Json>
+    from: String
+    note: String
+    starter: String
+    members: List<String>
+    fallback: String    // who it goes to when the router names no one
+    told: List<rooms.Member>
+    prompt: String    // the router's prompt
+    program: String
+    proc: String    // the router's process, in `procs`
+    model: String
+    session: String    // the router's session, once it's asked
+    said: String    // what the router has said so far
+    at: i64
 }
 
 // A screenshot an agent took, with browser_screenshot or a device's screenshot, kept
@@ -312,6 +339,9 @@ enum Pending {
     Prompt(String)
     Config(String, String, String, String)    // the run, its session, and the option and value being set
     Warm(String, String)    // a conversation's session readied before its message, and the one picked up, or "" for a new one
+    RouteSession(String)    // a router session started for a pick, by its run
+    RouteConfig(String, String)    // the router session set to its model, for a pick: its run and the session
+    Route(String)    // the router asked for a pick, by its run
 }
 
 struct Proc {
@@ -341,6 +371,7 @@ struct Proc {
     used: i64    // when it last said something, for stopping it once it has been idle a while
     compacts: bool    // whether it offers /compact, as Claude's adapter does, which compacts idle sessions itself
     turned: Map<String, i64>    // ACP session -> when its last turn ended
+    routes: List<String>    // the router's picks waiting for it to start, by their runs
 }
 
 impl Proc {
@@ -502,6 +533,9 @@ pub struct Instance {
     restart: bool    // the loop stopped to start again as the new program
     told_update: Json    // an update the instance made by itself, to tell its owner of once, or null
     told_update_at: i64    // when to tell them, if none of their devices has come by then
+    picks: LinkedMap<String, Pick>    // messages in group chats waiting for the router, by the run each starts
+    route_counts: Map<String, i64>    // a router session -> the picks it has made
+    handoffs: Map<String, (String, String)>    // a run whose agent called hand_off -> the member it goes to next, and why
 }
 
 // An agent's browser (server/browser.calx), on its thread.
@@ -1784,6 +1818,28 @@ fn proc_key(agent: String, program: String) -> String {
     return "{agent}~{program}"
 }
 
+// What the router's session is kept under, in its process's sessions.
+const ROUTE_SEAT: str = "route"
+
+// A reply's `routed`, with the person's message it answers.
+fn with_answers(routed: Json, message: String) -> Json {
+    return merge(routed, Obj.new().s("answers", message).done())
+}
+
+// The group chats' router, as an agent: its own folder and process, and its sandbox for a member.
+fn router_agent(user: String) -> Json {
+    return Obj.new().s("id", "router-{user}").done()
+}
+
+// A refusal from why it's refused: "code:words", or words that are `bad_request`.
+fn refusal(why: String) -> Answer {
+    if let cut = why.find(":") {
+        let code = why[..cut].copy()
+        if code == "not_found" or code == "not_allowed" { return Answer.Refused(code, why[cut + 1..].copy()) }
+    }
+    return Answer.Refused(String("bad_request"), why.copy())
+}
+
 fn error_frame(code: str, message: String, ref_id: String?) -> String {
     return "{Obj.new().s("t", String("error")).s("code", String(code)).s("message", message).maybe("ref", ref_id).done()}"
 }
@@ -1859,7 +1915,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2588,6 +2644,8 @@ impl Instance {
             // While an update stops what runs, nothing new starts: the restart picks it all up.
             let holding = i.holding()
             if now() >= i.next_due and not holding { i.due() }
+            // A group chat's message the router hasn't picked for in time goes to its fallback.
+            if i.picks.len() > 0 { i.picks_overdue() }
             var held = false
             while let line = i.lines.next() {
                 if not held {
@@ -4899,6 +4957,9 @@ impl Instance {
         if name == "message_agent" {
             return try i.message_agent(req, g, args)
         }
+        if name == "hand_off" {
+            return some(try i.hand_off(g, args))
+        }
         if name == "add_server" {
             let address = (str_at(args.copy(), "address") ?? String()).trim().trim_suffix("/").copy()
             if not address.starts_with("https://") and not address.starts_with("http://") { return some(tool_error(String("address is the server's http:// or https:// address, such as https://loom.example.com."))) }
@@ -5780,6 +5841,7 @@ impl Instance {
         let from = str_at(m.copy(), "conversation") ?? String()
         let chat = try i.store.conversation(user.copy(), from.copy()) else return Answer.Refused(String("not_found"), String("That message's conversation was deleted."))
         if bool_at(chat.copy(), "side") == some(true) { return Answer.Refused(String("bad_request"), String("Side questions don't branch.")) }
+        if at(chat.copy(), "room") != Json.Null { return Answer.Refused(String("bad_request"), String("A group chat doesn't branch.")) }
         var said = String()
         if let Json.Array(blocks) = at(m, "blocks") {
             for b in blocks {
@@ -6434,6 +6496,10 @@ impl Instance {
         }
         if bool_at(chat.copy(), "side") == some(true) {
             i.answer_cmd(w, Answer.Refused(String("bad_request"), String("Ask about a chat, not about the side questions.")))
+            return
+        }
+        if at(chat.copy(), "room") != Json.Null {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("Ask on the side about an agent's own chat.")))
             return
         }
         if question.len() == 0 or question.len() > SIDE_QUESTION_MOST {
@@ -8768,6 +8834,8 @@ impl Instance {
         }
         if let tz = str_at(at(f.copy(), "device"), "tz") { try i.store.update_device_tz(device.id.copy(), tz) }
         let user = device.user.copy()
+        // Everyone, and the group chats' members as the agents are now, before catching up.
+        try i.keep_rooms(user.copy())
         let after = int_at(f, "after") ?? 0
         let last = try i.store.last_seq(user.copy())
         let first = try i.store.first_seq(user.copy())
@@ -8809,7 +8877,9 @@ impl Instance {
             if r.user != user { continue }
             // A routine's quiet run says whose it is here too, as its run.started does.
             let quiet_for = if let q = i.quiet_turns.find(r.id.copy()) { some(q.routine.copy()) } else { none }
-            going.push(Obj.new().s("run", r.id.copy()).s("conversation", r.conversation.copy()).s("agent", r.agent.copy()).s("message", r.message.copy()).s("answering", r.answering.copy()).maybe("routine", quiet_for).done())
+            var one = Obj.new().s("run", r.id.copy()).s("conversation", r.conversation.copy()).s("agent", r.agent.copy()).s("message", r.message.copy()).s("answering", r.answering.copy())
+            if r.routed != Json.Null { one = one.j("routed", r.routed.copy()) }
+            going.push(one.maybe("routine", quiet_for).done())
             var b: i64 = 0
             for block in r.blocks {
                 if block.kind == "text" or block.kind == "thought" {
@@ -8985,6 +9055,10 @@ impl Instance {
         for (id, r) in i.runs {
             if r.user == user and r.conversation == conversation { return some(id.copy()) }
         }
+        // A group chat's message waiting for the router's pick is its turn too.
+        for (id, k) in i.picks {
+            if k.user == user and k.conversation == conversation { return some(id.copy()) }
+        }
         return none
     }
 
@@ -9021,6 +9095,11 @@ impl Instance {
         }
         // What it mentions, as the agent reads it (PLAN.md, "Mentions").
         let (said, mentioned) = mentions_in(text.copy())
+        // In a group chat, one member answers, picked for it (PLAN.md, "Group chats").
+        if at(conversation.copy(), "room") != Json.Null {
+            try i.route(user, conversation, run_id, message_id, said, sent_files, from, note, String("person"), text)
+            return
+        }
         let told = try i.mentions_told(user.copy(), str_at(conversation.copy(), "agent") ?? String(), mentioned)
         if told.len() > 0 { note = if note.len() > 0 { "{note}\n{told}" } else { told } }
         try i.start_run(user, conversation, run_id, message_id, said, sent_files, from, note, "person")
@@ -9052,6 +9131,405 @@ impl Instance {
         }
         if parts.len() == 0 { return String() }
         return "[loom: In this message, {parts.join("; ")}.]"
+    }
+
+    // --- Group chats (PLAN.md, "Group chats") ---
+
+    // The ids of `user`'s agents, in the order they were made.
+    fn agent_ids(i: Instance, user: String) -> List<String> ! Error {
+        var out = List<String>()
+        for a in try i.store.agents(user) { out.push(str_at(a, "id") ?? String()) }
+        return out
+    }
+
+    // The agents `ids`, as the router and the members are told of them.
+    fn members_told(i: Instance, user: String, ids: List<String>) -> List<rooms.Member> ! Error {
+        var out = List<rooms.Member>()
+        for id in ids {
+            let a = try i.store.agent(user.copy(), id.copy()) else continue
+            var mcp = List<String>()
+            for n in rooms.ids_in(at(a.copy(), "mcp")) { mcp.push(n.copy()) }
+            out.push(rooms.Member { id: id.copy(), name: str_at(a.copy(), "name") ?? String("Agent"), for_line: rooms.for_of(a), skills: List<String>(), mcp: mcp })
+        }
+        return out
+    }
+
+    // `user`'s agents' (id, name)s.
+    fn names_of_agents(i: Instance, user: String) -> List<(String, String)> ! Error {
+        var out = List<(String, String)>()
+        for a in try i.store.agents(user) { out.push((str_at(a.copy(), "id") ?? String(), str_at(a, "name") ?? String())) }
+        return out
+    }
+
+    // Keeps `user`'s group chats' members as their agents are now: Everyone,
+    // made once they have two agents, has every one of them, and the others
+    // lose the ones that were deleted. Each change is a conversation.created
+    // or conversation.updated.
+    fn keep_rooms(i: Instance, user: String) ! Error {
+        let all = try i.agent_ids(user.copy())
+        if try i.store.everyone_room(user.copy()) == none and all.len() >= 2 {
+            let made = try i.store.add_conversation(user.copy(), String(), String(rooms.EVERYONE))
+            let id = str_at(made, "id") ?? String()
+            let room = Obj.new().s("name", String(rooms.EVERYONE)).b("everyone", true).j("members", rooms.ids_json(all.copy())).s("color", String()).s("default", String()).j("corrections", Json.Array(List<Json>())).done()
+            try i.store.put_room(user.copy(), id.copy(), room)
+            let c = try i.store.conversation(user.copy(), id) else return
+            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
+        }
+        for (id, room) in try i.store.rooms(user.copy()) {
+            let members = rooms.members_of(room.copy(), all.copy())
+            if rooms.ids_in(at(room.copy(), "members")) == members { continue }
+            var changed = merge(room, Obj.new().j("members", rooms.ids_json(members.copy())).done())
+            if not members.contains(str_at(changed.copy(), "default") ?? String()) { changed = merge(changed, Obj.new().s("default", String()).done()) }
+            try i.room_changed(user.copy(), id, changed)
+        }
+    }
+
+    // Keeps a group chat's room as `room`, and tells every device.
+    fn room_changed(i: Instance, user: String, id: String, room: Json) ! Error {
+        try i.store.put_room(user.copy(), id.copy(), room.copy())
+        try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id).j("room", room).done()).done())
+    }
+
+    // What the member `agent` is told as it answers in a group chat: where it
+    // is, who's there, and what was said since it last answered there.
+    fn room_note(i: Instance, user: String, conversation: Json, agent: String, answering: String) -> String ! Error {
+        let id = str_at(conversation.copy(), "id") ?? String()
+        let room = at(conversation, "room")
+        let names = try i.names_of_agents(user.copy())
+        var others = List<String>()
+        for m in rooms.ids_in(at(room.copy(), "members")) {
+            if m == agent { continue }
+            for (k, n) in names.copy() {
+                if k == m { others.push(n.copy()) }
+            }
+        }
+        let (newest, _) = try i.store.messages(user, id, none, 100)
+        let said = rooms.said_since(newest, agent, answering, names)
+        let name = str_at(room, "name") ?? String("the group chat")
+        return "[loom: You're answering in the group chat \"{name}\", where your person talks with several of their agents at once: {if others.len() > 0 { others.join(", ") } else { String("no one else") }}, and you. Each message there goes to one of you, and this one is yours. What was said there since you last answered, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing since.)") }}\n\nIf this message is clearly for another of them, call hand_off with its name and why, then end your turn with one short line.]"
+    }
+
+    // A person's message in a group chat goes to one member (PLAN.md, "Group
+    // chats"): the only one; the first one it mentions; or the router's pick,
+    // asked for here and answered later, with the chat's fallback when it
+    // can't pick. `said` is its words as the agent reads them, `text` as sent.
+    fn route(i: mut Instance, user: String, conversation: Json, run_id: String, message_id: String, said: String, sent_files: List<Json>, from: String, note: String, starter: String, text: String) ! Error {
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
+        let room = at(conversation.copy(), "room")
+        let members = rooms.members_of(room.copy(), try i.agent_ids(user.copy()))
+        let told = try i.members_told(user.copy(), members.copy())
+        if members.len() <= 1 {
+            let only = if members.len() == 1 { members[0].copy() } else { String() }
+            try i.start_run_as(user, conversation, run_id, message_id.copy(), said, sent_files, from, note, starter, only, with_answers(rooms.routed("default", String(), String(), String()), message_id), List<String>())
+            return
+        }
+        if let id = rooms.mentioned(text, told.copy()) {
+            try i.start_run_as(user, conversation, run_id, message_id.copy(), said, sent_files, from, note, starter, id, with_answers(rooms.routed("mention", String(), String(), String()), message_id), List<String>())
+            return
+        }
+        let last = try i.store.last_answered(user.copy(), conversation_id.copy())
+        let fallback = rooms.fallback(str_at(room.copy(), "default") ?? String(), last.copy(), members.copy())
+        let d = try i.store.defaults(user.copy())
+        var programs = List<(String, String)>()
+        for a in try i.store.acp_agents() {
+            if try i.may_use(user.copy(), a.name.copy()) { programs.push((a.name.copy(), a.source.copy())) }
+        }
+        let program = rooms.router_program(str_at(d.copy(), "router_brain") ?? String(), str_at(d.copy(), "brain") ?? String(), programs)
+        let model = str_at(d, "router_model") ?? String(rooms.ROUTER_MODEL)
+        if program.len() == 0 or try i.store.acp_agent(program.copy()) == none {
+            try i.start_run_as(user, conversation, run_id, message_id.copy(), said, sent_files, from, note, starter, fallback, with_answers(rooms.routed("default", String(), String(), String()), message_id), List<String>())
+            return
+        }
+        // What the router reads: the chat's newest messages before this one, by who said them.
+        let names = try i.names_of_agents(user.copy())
+        let (before, _) = try i.store.messages(user.copy(), conversation_id.copy(), some(message_id.copy()), rooms.RECENT_MOST)
+        var recent = List<(String, String)>()
+        for m in before {
+            let words = rooms.words_of(m.copy())
+            if words.len() == 0 { continue }
+            recent.push((rooms.who_said(m, String(), names.copy()), words))
+        }
+        var examples = List<(String, String)>()
+        if let Json.Array(cs) = at(room.copy(), "corrections") {
+            for c in cs {
+                let to = str_at(c.copy(), "to") ?? String()
+                for (k, n) in names.copy() {
+                    if k == to { examples.push((str_at(c.copy(), "text") ?? String(), n.copy())) }
+                }
+            }
+        }
+        var last_name = String()
+        for (k, n) in names {
+            if k == last { last_name = n.copy() }
+        }
+        let prompt = rooms.route_prompt(str_at(room, "name") ?? String(), told.copy(), last_name, recent, examples, said.copy())
+        let key = proc_key("router-{user}", program.copy())
+        i.picks.insert(run_id.copy(), Pick { run: run_id.copy(), user: user.copy(), conversation: conversation_id, message: message_id.copy(), text: said.copy(), files: sent_files.copy(), from: from.copy(), note: note.copy(), starter: starter.copy(), members: members, fallback: fallback, told: told, prompt: prompt, program: program.copy(), proc: key.copy(), model: model, session: String(), said: String(), at: now() })
+        try i.ask_router(user, run_id)
+    }
+
+    // Asks the router for pick `run`, starting its program first if it isn't running.
+    fn ask_router(i: mut Instance, user: String, run: String) ! Error {
+        var key = String()
+        var program = String()
+        if let k = i.picks.find(run.copy()) {
+            key = k.proc.copy()
+            program = k.program.copy()
+        } else {
+            return
+        }
+        if not i.procs.contains(key.copy()) {
+            match i.start_proc(user.copy(), router_agent(user.copy()), program) {
+                ok => {},
+                err(e) => {
+                    eprintln("loom: the group chats' router didn't start: {e}")
+                    try i.picked(run, none)
+                    return
+                },
+            }
+        }
+        var p = i.procs.remove(key.copy()) else return
+        p.routes.push(run.copy())
+        if p.ready { i.route_next(mut p) }
+        i.procs.insert(key, p)
+    }
+
+    // Whether the router `key` is picking for a message now.
+    fn routing(i: Instance, key: String) -> bool {
+        for (_, k) in i.picks {
+            if k.proc == key and k.session.len() > 0 { return true }
+        }
+        return false
+    }
+
+    // The next pick waiting for the router `p`, once it's free.
+    fn route_next(i: mut Instance, p: mut Proc) {
+        if i.routing(p.key.copy()) { return }
+        while p.routes.len() > 0 {
+            let run = p.routes.remove(0)
+            if not i.picks.contains(run.copy()) { continue }
+            i.route_go(mut p, run)
+            return
+        }
+    }
+
+    // Asks for pick `run` in the router's session, or in a fresh one once a
+    // session has made PICKS_PER_SESSION, so its context stays small.
+    fn route_go(i: mut Instance, p: mut Proc, run: String) {
+        if let k = mut i.picks.find(run.copy()) { k.session = String("…") }
+        var known = String()
+        if let s = p.sessions.find(String(ROUTE_SEAT)) { known = s.copy() }
+        if known.len() > 0 and (i.route_counts.get(known.copy()) ?? 0) < rooms.PICKS_PER_SESSION {
+            i.route_prompt(mut p, run, known)
+            return
+        }
+        if known.len() > 0 {
+            _ = p.sessions.remove(String(ROUTE_SEAT))
+            p.forget(known.copy())
+            _ = i.route_counts.remove(known)
+        }
+        let folder = match fs.absolute(i.agent_folder(p.user.copy(), router_agent(p.user.copy()))) {
+            ok(path) => path,
+            err(_) => String("."),
+        }
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.RouteSession(run.copy()))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).j("_meta", acp.session_meta()).done())))
+    }
+
+    // A fresh router session is set to the router's model, where its program offers it.
+    fn route_configure(i: mut Instance, p: mut Proc, run: String, sid: String) {
+        let model = if let k = i.picks.find(run.copy()) { k.model.copy() } else { String(rooms.ROUTER_MODEL) }
+        let config = if let c = p.configs.find(sid.copy()) { c.copy() } else { Json.Null }
+        let todo = acp.config_todo(config, Obj.new().s("model", model).done())
+        if todo.len() == 0 {
+            i.route_prompt(mut p, run, sid)
+            return
+        }
+        let (option, value) = todo[0].copy()
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.RouteConfig(run.copy(), sid.copy()))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/set_config_option", Obj.new().s("sessionId", sid).s("configId", option).s("value", value).done())))
+    }
+
+    fn route_prompt(i: mut Instance, p: mut Proc, run: String, sid: String) {
+        var prompt = String()
+        if let k = mut i.picks.find(run.copy()) {
+            k.session = sid.copy()
+            prompt = k.prompt.copy()
+            k.at = now()
+        } else {
+            // Its message went another way meanwhile: the next one goes.
+            i.route_next(mut p)
+            return
+        }
+        i.route_counts.insert(sid.copy(), (i.route_counts.get(sid.copy()) ?? 0) + 1)
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.Route(run.copy()))
+        p.to.send(Out.Prompt(p.next_id, sid.copy(), [Obj.new().s("type", String("text")).s("text", prompt).done()], List<acp.Image>()))
+    }
+
+    // What the router says while it picks, kept to read its pick from. Gives
+    // whether the update was the router's.
+    fn route_update(i: mut Instance, params: Json) -> bool {
+        let session = str_at(params.copy(), "sessionId") ?? String()
+        if session.len() == 0 { return false }
+        var run = String()
+        for (id, k) in i.picks {
+            if k.session == session { run = id.copy() }
+        }
+        if run.len() == 0 {
+            // A router session with no pick going: what it says late is dropped.
+            return i.route_counts.contains(session)
+        }
+        let u = at(params, "update")
+        if str_at(u.copy(), "sessionUpdate") == some(String("agent_message_chunk")) {
+            let piece = str_at(at(u, "content"), "text") ?? String()
+            if let k = mut i.picks.find(run) { k.said.push_str(piece) }
+        }
+        return true
+    }
+
+    // Pick `run` is made: `chosen`, the member and why, or none, for the
+    // chat's fallback. Its run starts with that member.
+    fn picked(i: mut Instance, run: String, chosen: (String, String)?) ! Error {
+        let k = i.picks.remove(run.copy()) else return
+        let (agent, routed) = match chosen {
+            some((id, why)) => (id.copy(), rooms.routed("router", why.copy(), String(), String())),
+            none => (k.fallback.copy(), rooms.routed("default", String(), String(), String())),
+        }
+        let conversation = try i.store.conversation(k.user.copy(), k.conversation.copy()) else return
+        try i.start_run_as(k.user, conversation, run, k.message.copy(), k.text, k.files, k.from, k.note, k.starter, agent, with_answers(routed, k.message), List<String>())
+    }
+
+    // Picks the router hasn't made in time go to their chats' fallbacks, and
+    // the router's session that was asked starts fresh next time.
+    fn picks_overdue(i: mut Instance) {
+        var late = List<(String, String, String)>()
+        for (id, k) in i.picks {
+            // PICK_MS once it's asked; its program and session first get START_MS.
+            let asked = k.session.len() > 0 and k.session != "…"
+            if now() - k.at > (if asked { rooms.PICK_MS } else { rooms.START_MS }) { late.push((id.copy(), k.proc.copy(), k.session.copy())) }
+        }
+        for (run, key, session) in late {
+            if let p = mut i.procs.find(key.copy()) {
+                if session.len() > 0 and session != "…" {
+                    p.to.send(Out.Send(acp.notify("session/cancel", Obj.new().s("sessionId", session.copy()).done())))
+                    _ = p.sessions.remove(String(ROUTE_SEAT))
+                    p.forget(session.copy())
+                }
+                if let k = p.routes.position(|r| r == run) { _ = p.routes.remove(k) }
+            }
+            if let err(e) = i.picked(run, none) { eprintln("loom: a group chat's message: {e}") }
+            var p = i.procs.remove(key.copy()) else continue
+            if p.ready { i.route_next(mut p) }
+            i.procs.insert(key.copy(), p)
+        }
+    }
+
+    // hand_off (PLAN.md, "Group chats"): the agent answering in a group chat
+    // gives the message to another member, who answers it once this turn ends.
+    fn hand_off(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
+        let run_id = i.calling_run(g.copy())
+        let (conversation_id, handed) = if let r = i.runs.find(run_id.copy()) { (r.conversation.copy(), r.handed.copy()) } else { return tool_error(String("hand_off works only while you answer in a group chat.")) }
+        let conversation = try i.store.conversation(g.user.copy(), conversation_id) ?? Json.Null
+        let room = at(conversation, "room")
+        if room == Json.Null { return tool_error(String("hand_off works only in a group chat. To bring another agent in here, use message_agent.")) }
+        let key = str_at(args.copy(), "agent") ?? String()
+        let members = rooms.members_of(room, try i.agent_ids(g.user.copy()))
+        let told = try i.members_told(g.user.copy(), members.copy())
+        let to = rooms.member_named(told, key.copy()) else return tool_error("{key} isn't in this group chat. Its members are the ones you were told of.")
+        if to == g.agent { return tool_error(String("That's you.")) }
+        if handed.contains(to.copy()) { return tool_error(String("That agent had this message already. Answer it yourself.")) }
+        if handed.len() >= rooms.HANDOFFS_MOST { return tool_error("This message has been handed on {rooms.HANDOFFS_MOST} times already. Answer it yourself.") }
+        let why = rooms.cut(str_at(args, "why") ?? String(), 60)
+        i.handoffs.insert(run_id, (to.copy(), why))
+        let name = if let a = try i.store.agent(g.user.copy(), to) { str_at(a, "name") ?? key.copy() } else { key.copy() }
+        i.log(g.user.copy(), g.agent.copy(), "message", "Handed a message on to {name}", g.agent.copy())
+        return tool_text("{name} answers it once your turn ends. End your turn now, with one short line at most.")
+    }
+
+    // A run whose agent handed its message on: the next member answers it.
+    fn handed_on(i: mut Instance, r: Run, to: String, why: String) ! Error {
+        let conversation = try i.store.conversation(r.user.copy(), r.conversation.copy()) else return
+        let name = if let a = try i.store.agent(r.user.copy(), r.agent.copy()) { str_at(a, "name") ?? String("an agent") } else { String("an agent") }
+        var handed = r.handed.copy()
+        handed.push(r.agent.copy())
+        let run_id = try i.store.new_id("run")
+        try i.start_run_as(r.user.copy(), conversation, run_id, r.answering.copy(), r.prompt.copy(), r.files.copy(), r.from.copy(), "[loom: {name} handed this message on to you: it's yours to answer.]", r.starter.copy(), to, with_answers(rooms.routed("handoff", why, r.agent.copy(), name), r.answering.copy()), handed)
+    }
+
+    // room.create, room.update, room.resend and room.forget.
+    fn room_cmd(i: Instance, user: String, _device: String, name: String, args: Json) -> Answer ! Error {
+        let all = try i.agent_ids(user.copy())
+        if name == "room.create" {
+            let (room, why) = rooms.room_made(args, all, color_ok)
+            if why.len() > 0 { return refusal(why) }
+            let made = try i.store.add_conversation(user.copy(), String(), str_at(room.copy(), "name") ?? String())
+            let id = str_at(made, "id") ?? String()
+            try i.store.put_room(user.copy(), id.copy(), room)
+            let c = try i.store.conversation(user.copy(), id) else return Answer.Refused(String("not_found"), String("The group chat wasn't kept."))
+            try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
+            return Answer.Value(Obj.new().j("conversation", c).done())
+        }
+        let id = str_at(args.copy(), "conversation") ?? String()
+        let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
+        let room = at(c.copy(), "room")
+        if room == Json.Null and name != "room.resend" { return Answer.Refused(String("bad_request"), String("That's an agent's own chat, not a group chat.")) }
+        if name == "room.update" {
+            let (changed, why) = rooms.room_changed(room, args, all, color_ok)
+            if why.len() > 0 { return refusal(why) }
+            if let title = str_at(changed.copy(), "name") { try i.store.rename_conversation(user.copy(), id.copy(), title) }
+            try i.room_changed(user.copy(), id.copy(), changed)
+            return Answer.Value(Obj.new().j("conversation", try i.store.conversation(user, id) ?? c).done())
+        }
+        if name == "room.forget" {
+            let (left, found) = rooms.forgotten(at(room.copy(), "corrections"), str_at(args, "correction") ?? String())
+            if not found { return Answer.Refused(String("not_found"), String("That correction isn't kept any more.")) }
+            try i.room_changed(user.copy(), id.copy(), merge(room, Obj.new().j("corrections", left).done()))
+            return Answer.Value(Obj.new().j("conversation", try i.store.conversation(user, id) ?? c).done())
+        }
+        return Answer.Refused(String("unknown_command"), "There's no command {name}.")
+    }
+
+    // room.resend: the person's message a reply in a group chat answered goes
+    // to another member, and the router's pick is kept as a correction.
+    fn resend(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        let reply_id = str_at(args.copy(), "message") ?? String()
+        let reply = try i.store.message(user.copy(), reply_id.copy()) else return Answer.Refused(String("not_found"), "There's no message {reply_id}.")
+        let id = str_at(reply.copy(), "conversation") ?? String()
+        let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), String("That message's chat was deleted."))
+        let room = at(c.copy(), "room")
+        if room == Json.Null or str_at(reply.copy(), "role") != some(String("agent")) { return Answer.Refused(String("bad_request"), String("Only an agent's reply in a group chat is sent to another agent.")) }
+        let members = rooms.members_of(room.copy(), try i.agent_ids(user.copy()))
+        let to = str_at(args, "agent") ?? String()
+        let picked_one = str_at(reply.copy(), "agent") ?? String()
+        if not members.contains(to.copy()) or to == picked_one { return Answer.Refused(String("bad_request"), String("Pick another member of the chat.")) }
+        if i.answering(user.copy(), id.copy()) != none { return Answer.Refused(String("busy"), String("An agent is answering in the chat. Try once it's done, or stop it.")) }
+        // The person's message the reply answered.
+        var asked = str_at(at(reply.copy(), "routed"), "answers") ?? String()
+        if asked.len() == 0 {
+            let (before, _) = try i.store.messages(user.copy(), id.copy(), some(reply_id.copy()), 20)
+            for m in before {
+                if str_at(m.copy(), "role") == some(String("person")) { asked = str_at(m, "id") ?? String() }
+            }
+        }
+        let message = try i.store.message(user.copy(), asked.copy()) else return Answer.Refused(String("not_found"), String("The message it answered isn't there any more."))
+        let words = rooms.words_of(message.copy())
+        let (said, _) = mentions_in(words.copy())
+        var sent_files = List<Json>()
+        if let Json.Array(blocks) = at(message.copy(), "blocks") {
+            for b in blocks {
+                if str_at(b.copy(), "kind") == some(String("file")) { sent_files.push(without(b, "kind")) }
+            }
+        }
+        // Kept for the router, as an example of where such a message goes.
+        let kept = Obj.new().s("id", try i.store.new_id("k")).s("text", rooms.cut(words, rooms.CORRECTION_TEXT_MOST)).s("to", to.copy()).s("from", picked_one).i("at", now()).done()
+        try i.room_changed(user.copy(), id.copy(), merge(room.copy(), Obj.new().j("corrections", rooms.corrected(at(room, "corrections"), kept)).done()))
+        let run_id = try i.store.new_id("run")
+        let from = try i.writing_from(user.copy(), str_at(message, "from") ?? device.copy())
+        try i.start_run_as(user, c, run_id.copy(), asked.copy(), said, sent_files, from, String("[loom: Your person sent this message to you, after another agent answered it: it's yours to answer.]"), String("person"), to, with_answers(rooms.routed("person", String(), String(), String()), asked), List<String>())
+        return Answer.Value(Obj.new().s("run", run_id).done())
     }
 
     // --- Tasks (PLAN.md, "Work that waits its turn") ---
@@ -9244,8 +9722,23 @@ impl Instance {
     // --- Runs ---
 
     fn start_run(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, given_note: String, starter: str) ! Error {
+        let agent_id = str_at(conversation.copy(), "agent") ?? String()
+        try i.start_run_as(user, conversation, run_id, answering, text, sent_files, from, given_note, String(starter), agent_id, Json.Null, List<String>())
+    }
+
+    // A run of `agent_id`'s in `conversation`: its own chat's agent, or in a
+    // group chat the member picked for it, with `routed`, how, and `handed`,
+    // the members that had its message before (PLAN.md, "Group chats").
+    fn start_run_as(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, first_note: String, starter: String, agent_id: String, routed: Json, handed: List<String>) ! Error {
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
-        let agent_id = str_at(conversation, "agent") ?? String()
+        let in_room = at(conversation.copy(), "room") != Json.Null
+        let seat = if in_room { "{conversation_id}/{agent_id}" } else { conversation_id.copy() }
+        // In a group chat: what was said there since it last answered, by who said it.
+        var given_note = first_note.copy()
+        if in_room {
+            let told = try i.room_note(user.copy(), conversation.copy(), agent_id.copy(), answering.copy())
+            given_note = if given_note.len() > 0 { "{told}\n\n{given_note}" } else { told }
+        }
         let reply = try i.store.new_id("msg")
         try i.store.add_run(user.copy(), run_id.copy(), conversation_id.copy())
         // A branch's first turn: the agent is handed the chat it goes on from.
@@ -9278,8 +9771,10 @@ impl Instance {
         let quiet_for = if let q = i.quiet_turns.find(run_id.copy()) { some(q.routine.copy()) } else { none }
         // Where its events begin, so its calls are found when it ends.
         let since = try i.store.last_seq(user.copy())
-        try i.event(user.copy(), "run.started", Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy()).maybe("routine", quiet_for).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: String(starter), since: since, started: now() })
+        var started = Obj.new().s("run", run_id.copy()).s("conversation", conversation_id.copy()).s("agent", agent_id.copy()).i("revision", revision).s("message", reply.copy()).s("answering", answering.copy())
+        if routed != Json.Null { started = started.j("routed", routed.copy()) }
+        try i.event(user.copy(), "run.started", started.maybe("routine", quiet_for).done())
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: starter.copy(), since: since, started: now(), routed: routed.copy(), seat: seat, handed: handed.copy() })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
@@ -9397,8 +9892,15 @@ impl Instance {
         }
         i.notice(run_id.copy(), line.copy())
         // The chat stays on the backup, until the person moves it back.
-        try i.store.set_conversation_program(user.copy(), conversation.copy(), backup.copy(), String())
-        try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("program", backup).done()).done())
+        // A group chat isn't moved: each member answers there on its own program.
+        let in_room = match try i.store.conversation(user.copy(), conversation.copy()) {
+            some(c) => at(c, "room") != Json.Null,
+            none => false,
+        }
+        if not in_room {
+            try i.store.set_conversation_program(user.copy(), conversation.copy(), backup.copy(), String())
+            try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("program", backup).done()).done())
+        }
         i.log(user.copy(), agent_id.copy(), "session", line, agent_id)
         try i.give(user, agent, run_id)
         return true
@@ -9487,18 +9989,21 @@ impl Instance {
             }
         }
         // Without the skills, if they can't be read: the folders loom made for them stay.
+        // The group chats' router reads only what it's given, so it has none.
         var skill_names: List<String>? = none
-        match i.skill_files(user.copy(), folder.copy()) {
-            ok((written, names)) => {
-                writes.extend(written)
-                skill_names = some(names)
-            },
-            err(e) => eprintln("loom: skills: {e}"),
+        if not id.starts_with("router-") {
+            match i.skill_files(user.copy(), folder.copy()) {
+                ok((written, names)) => {
+                    writes.extend(written)
+                    skill_names = some(names)
+                },
+                err(e) => eprintln("loom: skills: {e}"),
+            }
         }
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -9583,10 +10088,12 @@ impl Instance {
     // has none yet in this agent program, then the prompt.
     fn proceed(i: mut Instance, p: mut Proc, run_id: String) {
         var conversation = String()
+        var real = String()    // the conversation itself, where `conversation` is what its sessions are kept under
         var user = String()
         var agent = String()
         if let r = i.runs.find(run_id.copy()) {
-            conversation = r.conversation.copy()
+            conversation = r.seat.copy()
+            real = r.conversation.copy()
             user = r.user.copy()
             agent = r.agent.copy()
         } else {
@@ -9674,7 +10181,7 @@ impl Instance {
                 }
                 let method = if p.resume { "session/resume" } else { "session/load" }
                 p.pending.insert(id, Pending.Resume(run_id.copy(), session.copy()))
-                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), conversation.copy(), p.mcp_http, p.boxed)).j("_meta", acp.session_meta()).done())))
+                p.to.send(Out.Send(acp.request(id, method, Obj.new().s("sessionId", session).s("cwd", folder).j("mcpServers", i.mcp_servers(user.copy(), agent.copy(), real.copy(), p.mcp_http, p.boxed)).j("_meta", acp.session_meta()).done())))
                 return
             }
         }
@@ -10018,7 +10525,8 @@ impl Instance {
             some(name) => {
                 if name == "session/update" {
                     i.note_session(mut p, at(m.copy(), "params"))
-                    try i.update(at(m, "params"))
+                    // The router's words are its pick, never a reply.
+                    if not i.route_update(at(m.copy(), "params")) { try i.update(at(m, "params")) }
                 } else if name == "session/request_permission" {
                     let rpc = id ?? Json.Null
                     match i.permission(mut p, rpc.copy(), at(m, "params")) {
@@ -10064,6 +10572,10 @@ impl Instance {
                         if try i.fail_over(run.copy(), "start") { continue }
                         try i.finish(run, String("failed"), some("The agent program didn't start: {str_at(e.copy(), "message") ?? String()}"))
                     }
+                    // The router's picks go to their chats' fallbacks.
+                    let routes = p.routes.copy()
+                    p.routes = List<String>()
+                    for run in routes { try i.picked(run, none) }
                     return
                 }
                 p.ready = true
@@ -10086,6 +10598,7 @@ impl Instance {
                 for run in waiting {
                     i.proceed(mut p, run)
                 }
+                i.route_next(mut p)
             },
             Pending.Warm(conversation, picked) => {
                 if let k = p.warming.position(|c| c == conversation) { _ = p.warming.remove(k) }
@@ -10151,13 +10664,53 @@ impl Instance {
                 let took = if let c = p.configs.find(sid.copy()) { acp.current(c.copy(), option) == some(value) } else { false }
                 if took { i.configure(mut p, run, sid) } else { i.prompt(mut p, run, sid) }
             },
+            Pending.RouteSession(run) => {
+                if let e = error {
+                    eprintln("loom: the group chats' router couldn't start a session: {str_at(e, "message") ?? String()}")
+                    try i.picked(run, none)
+                    i.route_next(mut p)
+                    return
+                }
+                let sid = str_at(result.copy(), "sessionId") ?? String()
+                p.sessions.insert(String(ROUTE_SEAT), sid.copy())
+                i.route_counts.insert(sid.copy(), 0)
+                let config = at(result, "configOptions")
+                if let Json.Array(_) = config { p.configs.insert(sid.copy(), config.copy()) }
+                i.route_configure(mut p, run, sid)
+            },
+            Pending.RouteConfig(run, sid) => {
+                match error {
+                    some(e) => eprintln("loom: the group chats' router stays on its program's model: {str_at(e, "message") ?? String()}"),
+                    none => {
+                        let config = at(result, "configOptions")
+                        if let Json.Array(_) = config { p.configs.insert(sid.copy(), config.copy()) }
+                    },
+                }
+                i.route_prompt(mut p, run, sid)
+            },
+            Pending.Route(run) => {
+                var chosen: (String, String)? = none
+                if error == none {
+                    // Its tokens count toward the person's, as a turn's do.
+                    let usage = at(result.copy(), "usage")
+                    if usage != Json.Null {
+                        let input = int_at(usage.copy(), "inputTokens") ?? 0
+                        let output = int_at(usage.copy(), "outputTokens") ?? 0
+                        let total = int_at(usage, "totalTokens") ?? (input + output)
+                        if let err(e) = i.store.add_usage(p.user.copy(), p.program.copy(), "route:{run}", input, output, total, p.shared) { eprintln("loom: usage: {e}") }
+                    }
+                    if let k = i.picks.find(run.copy()) { chosen = rooms.parse_pick(k.said.copy(), k.told.copy()) }
+                }
+                try i.picked(run, chosen)
+                i.route_next(mut p)
+            },
             Pending.Prompt(run) => {
                 // When the session's last turn ended, for compacting it and
                 // closing it once idle (PLAN.md, "Idle sessions").
                 if let r = i.runs.find(run.copy()) {
                     if r.session.len() > 0 {
                         p.turned.insert(r.session.copy(), now())
-                        if let err(e) = i.store.used_acp_session(r.user.copy(), r.conversation.copy(), r.session.copy()) { eprintln("loom: keeping when a session was used: {e}") }
+                        if let err(e) = i.store.used_acp_session(r.user.copy(), r.seat.copy(), r.session.copy()) { eprintln("loom: keeping when a session was used: {e}") }
                     }
                 }
                 if let e = error {
@@ -10181,7 +10734,7 @@ impl Instance {
         var agent = String()
         if let rr = mut i.runs.find(run.copy()) {
             rr.session = sid.copy()
-            conversation = rr.conversation.copy()
+            conversation = rr.seat.copy()
             user = rr.user.copy()
             agent = rr.agent.copy()
         } else {
@@ -11276,6 +11829,8 @@ impl Instance {
     // Stops a run: its questions are answered no, and its agent is told to
     // stop, which ends the run as cancelled.
     fn stop_run(i: mut Instance, run_id: String) ! Error {
+        // A group chat's message still waiting for the router's pick goes no further.
+        if let _ = i.picks.remove(run_id.copy()) { return }
         var session = String()
         var key = String()
         if let r = i.runs.find(run_id.copy()) {
@@ -11336,6 +11891,12 @@ impl Instance {
         var finished = Obj.new().s("run", r.id.copy()).s("status", status.copy()).maybe("error", error)
         if r.usage != Json.Null { finished = finished.j("usage", r.usage.copy()) }
         try i.event(r.user.copy(), "run.finished", finished.done())
+        // A message its agent handed on in a group chat goes to the next member now.
+        if let (to, why) = i.handoffs.remove(r.id.copy()) {
+            if status == "done" {
+                if let err(e) = i.handed_on(r, to, why) { eprintln("loom: handing a message on: {e}") }
+            }
+        }
         // A flow's step that waited for this agent to be free in its chat goes now.
         var flows_waiting = List<String>()
         for (id, f) in i.running_flows {
@@ -11437,6 +11998,8 @@ impl Instance {
             }
             var o = Obj.new().s("id", r.message.copy()).s("conversation", r.conversation.copy()).s("role", String("agent")).s("agent", r.agent.copy()).s("run", r.id.copy()).i("at", now()).s("status", status.copy()).j("blocks", Json.Array(blocks.copy()))
             if sources.len() > 0 { o = o.j("sources", Json.Array(sources)) }
+            // In a group chat, how its agent was picked, for the line over it.
+            if r.routed != Json.Null { o = o.j("routed", r.routed.copy()) }
             // Files it names that are there, for the app to show where they're named,
             // a picture as a picture once its thumbnail is made.
             let (mentions, pictures) = i.with_thumbs(i.mentions(r.user.copy(), r.agent.copy(), said.copy()), blocks)
@@ -11980,6 +12543,8 @@ impl Instance {
             try i.event(user, "server.offered", offered.done())
             return Answer.Value(empty)
         }
+        if name == "room.resend" { return try i.resend(user, device, args) }
+        if name.starts_with("room.") { return try i.room_cmd(user, device, name, args) }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
         if name.starts_with("table.") { return try i.table_command(user, device, name, args) }
         if name.starts_with("import.") { return try i.import_cmd(user, device, name, args) }
@@ -12063,6 +12628,7 @@ impl Instance {
             let program = str_at(args, "program") ?? String()
             if try i.store.acp_agent(program.copy()) == none { return Answer.Refused(String("not_found"), "There's no ACP agent {program}.") }
             if not try i.may_use(user.copy(), program.copy()) { return Answer.Refused(String("not_allowed"), not_given(program)) }
+            if at(c.copy(), "room") != Json.Null { return Answer.Refused(String("bad_request"), String("Each agent in a group chat answers on its own program.")) }
             let agent_id = str_at(c.copy(), "agent") ?? String()
             let agent = try i.store.agent(user.copy(), agent_id.copy()) else return Answer.Refused(String("not_found"), String("The conversation's agent was deleted."))
             let now_on = str_at(c.copy(), "program") ?? (str_at(agent, "acp_agent") ?? String())
@@ -12075,11 +12641,21 @@ impl Instance {
         }
         if name == "conversation.rename" or name == "conversation.delete" {
             let id = str_at(args.copy(), "conversation") ?? String()
-            if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
+            let had = try i.store.conversation(user.copy(), id.copy()) ?? Json.Null
+            if had == Json.Null { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
+            let room = at(had, "room")
+            if name == "conversation.delete" and (bool_at(room.copy(), "everyone") ?? false) { return Answer.Refused(String("not_allowed"), String("Everyone is always there. Rename it if you like.")) }
             if name == "conversation.rename" {
                 let title = str_at(args, "title") ?? String()
                 try i.store.rename_conversation(user.copy(), id.copy(), title.copy())
-                try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id).s("title", title).done()).done())
+                // A group chat's name is its title.
+                var shown = Obj.new().s("id", id.copy()).s("title", title.copy())
+                if room != Json.Null and title.trim().len() > 0 {
+                    let renamed = merge(room.copy(), Obj.new().s("name", title.trim().copy()).done())
+                    try i.store.put_room(user.copy(), id.copy(), renamed.copy())
+                    shown = shown.j("room", renamed)
+                }
+                try i.event(user, "conversation.updated", Obj.new().j("conversation", shown.done()).done())
             } else {
                 try i.store.delete_conversation(user.copy(), id.copy())
                 var keys = List<String>()
@@ -12091,6 +12667,17 @@ impl Instance {
                         if let s = p.sessions.remove(id.copy()) {
                             p.forget(s.copy())
                             _ = i.context.remove(s)
+                        }
+                        // A group chat's seats.
+                        var seats = List<String>()
+                        for (seat, _) in p.sessions {
+                            if seat.starts_with("{id}/") { seats.push(seat.copy()) }
+                        }
+                        for seat in seats {
+                            if let s = p.sessions.remove(seat) {
+                                p.forget(s.copy())
+                                _ = i.context.remove(s)
+                            }
                         }
                     }
                 }
@@ -12149,7 +12736,9 @@ impl Instance {
             // Each new agent takes the next of the eight thread colours, unless it names one.
             let count = (try i.store.agents(user.copy())).len()
             let color = str_at(args.copy(), "color") ?? String(COLORS[count % COLORS.len()])
-            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).j("network", network).i("revision", 1).i("at", now()).done()
+            // What it's for, which the group chats' router reads: given, or from its instructions.
+            let for_line = rooms.cut(str_at(args.copy(), "for") ?? rooms.for_line(str_at(args.copy(), "instructions") ?? String()), rooms.FOR_MOST)
+            var agent = Obj.new().s("id", id).s("name", str_at(args.copy(), "name") ?? String("Agent")).s("color", color).s("for", for_line).s("acp_agent", program).s("instructions", str_at(args.copy(), "instructions") ?? String()).maybe("folder", str_at(args.copy(), "folder")).j("mcp", names_of(at(args.copy(), "mcp"))).maybe("permission", permission).maybe("busy", busy).maybe("backup", backup).b("code_mode", bool_at(args.copy(), "code_mode") ?? true).b("isolated", isolated).j("network", network).i("revision", 1).i("at", now()).done()
             if network == Json.Null { agent = without(agent, "network") }
             agent = with_shape(agent, new_shape, drawing)
             // What its program offers, as the person's other agents on it learned it.
@@ -12158,11 +12747,27 @@ impl Instance {
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
+            try i.keep_rooms(user.copy())
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
         if name == "agent.update" {
             let id = str_at(args.copy(), "agent") ?? String()
             let old = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            // What it's for alone isn't a revision: the router reads it, the agent doesn't.
+            if let line = str_at(args.copy(), "for") {
+                let kept = merge(old.copy(), Obj.new().s("for", rooms.cut(line, rooms.FOR_MOST)).done())
+                var only = true
+                if let Json.Object(m) = args.copy() {
+                    for (k, _) in m {
+                        if k != "agent" and k != "for" { only = false }
+                    }
+                }
+                if only {
+                    try i.store.put_agent_json(user.copy(), kept.copy())
+                    try i.event(user, "agent.updated", Obj.new().j("agent", kept.copy()).s("by", device.copy()).done())
+                    return Answer.Value(Obj.new().j("agent", kept).done())
+                }
+            }
             var o = Obj.new()
             if let Json.Object(m) = old.copy() {
                 for (k, v) in m {
@@ -12172,7 +12777,7 @@ impl Instance {
             if let c = str_at(args.copy(), "color") {
                 if c.len() > 0 and not color_ok(c.copy()) { return Answer.Refused(String("bad_request"), "color is a thread colour, such as periwinkle or teal, or one of its own as #rrggbb, not {c}.") }
             }
-            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "color"]
+            let keys: List<str> = ["name", "acp_agent", "instructions", "folder", "color", "for"]
             for key in keys {
                 if let v = str_at(args.copy(), key) { o.m.insert(String(key), Json.Str(v)) }
             }
@@ -12476,6 +13081,10 @@ impl Instance {
             let backup = str_at(next.copy(), "backup") ?? String()
             if backup.len() > 0 and some(backup.copy()) != str_at(old.copy(), "backup") {
                 if let why = try i.backup_refused(user.copy(), backup) { return why }
+            }
+            let router = str_at(next.copy(), "router_brain") ?? String()
+            if router.len() > 0 and some(router.copy()) != str_at(old.copy(), "router_brain") {
+                if let why = try i.backup_refused(user.copy(), router) { return why }
             }
             let kept = try i.store.put_defaults(user.copy(), next, device.copy())
             i.log(user.copy(), String(), "agent", "Changed the agent defaults: revision {int_at(kept.copy(), "revision") ?? 0}", device.copy())
@@ -12849,6 +13458,7 @@ impl Instance {
             i.drop_browsers(user.copy(), some(id.copy()))
             i.log(user.copy(), id.copy(), "agent", String("Deleted"), device.copy())
             try i.event(user, "agent.deleted", Obj.new().s("agent", id).done())
+            try i.keep_rooms(user.copy())
             return Answer.Value(empty)
         }
         if name == "device.rename" or name == "device.revoke" {

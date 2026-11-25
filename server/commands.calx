@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 93] = [
+const COMMANDS: [Command; 95] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -34,6 +34,8 @@ const COMMANDS: [Command; 93] = [
     Command { name: "messages.list", args: "conversation, before? (a message id), limit? (up to 100)", does: "A conversation's messages, newest last." },
     Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), limit?", does: "Finds words in every chat, and in file names." },
     Command { name: "message.pin", args: "message, pinned? (false unpins it)", does: "Pins a message in its conversation, for every device to see." },
+    Command { name: "room.create", args: "name, members (two or more agent ids), color?, default? (a member)", does: "Makes a group chat: a chat with several of your person's agents, where each message goes to the one a router picks." },
+    Command { name: "room.update", args: "conversation, name?, members?, color?, default?", does: "Changes a group chat's name, members, colour or default agent." },
     Command { name: "messages.pinned", args: "conversation", does: "The pinned messages in a conversation, the newest pin first." },
     Command { name: "agent.create", args: "name, acp_agent? (left out: the default brain), backup? (the program that takes over when its own runs out; left out: the default's), instructions, mcp? (names of MCP servers), color?, shape? (its shape in the sidebar: loop, coil, bow, heart, star, knot, snail or yarn; left out: the plain thread), isolated? (true runs it in a sandbox), network? (hosts it may reach, [] for none; null for everything)", does: "Makes an agent. It starts out asking first, and an isolated agent's are isolated, with no more network than its own." },
     Command { name: "agent.update", args: #"agent, and what changes: name, instructions, mcp, color, shape (loop, coil, bow, heart, star, knot, snail, yarn, drawn for its drawing, or "" for the plain thread), folder, permission (ask, auto or allow), busy (queue or steer), backup (a program, or none), config ({option: value}), code_mode (false for plain tools), isolated (true runs it in a sandbox), network (hosts it may reach, [] for none, null for everything); null follows the default"#, does: "Changes an agent. A looser permission mode, or where it runs, asks the person." },
@@ -133,8 +135,9 @@ pub fn access(name: String) -> Access {
     if name.starts_with("push.") or name.starts_with("plugin.data.") or name == "plugin.cmd" { return Access.Never(String("That's for an app or a plugin's panel, not an agent.")) }
     if name.starts_with("browser.") { return Access.Never(String("Use your browser_ tools.")) }
     if name == "queue.steer" { return Access.Never(String("Steering is your person's: it stops the turn that's running.")) }
+    if name == "room.resend" or name == "room.forget" { return Access.Never(String("Where a message in a group chat goes is your person's to correct, in the app. To give one to another member, use hand_off.")) }
     if name.starts_with("scripts.") { return Access.Never(String("Scripts are your person's own: they turn them on in the app.")) }
-    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry", "device.list"]
+    let runs = ["conversation.create", "conversation.rename", "conversation.branch", "conversation.move", "messages.list", "messages.search", "messages.pinned", "message.pin", "room.create", "room.update", "agent.create", "agent.update", "agent.revisions", "agent.rollback", "activity.list", "memory.list", "memory.put", "table.list", "table.create", "table.write", "table.rows", "table.delete_rows", "profile.get", "profile.put", "defaults.get", "rule.list", "rule.check", "routine.list", "routine.put", "routine.run", "routine.runs", "routine.stop", "flow.list", "task.list", "task.start", "task.pause", "task.resume", "task.cancel", "task.retry", "queue.list", "queue.edit", "queue.order", "queue.drop", "skill.list", "skill.get", "skill.put", "plugin.list", "plugin.get", "plugin.put", "plugin.revisions", "mcp.list", "mcp.test", "secret.list", "acp.list", "acp.registry", "device.list"]
     if name.starts_with("proposal.") { return Access.Never(String("Proposals are your person's to keep or drop, in the app. Use propose_skill or propose_note to make one.")) }
     for r in runs {
         if name == r { return Access.Runs }

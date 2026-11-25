@@ -808,6 +808,8 @@ impl Agent {
         var reason = String("end_turn")
         var tokens: i64 = 0
         var compacted: (i64, i64)? = none
+        // Asked to pick for a group chat, it answers as a router would.
+        if context.contains("[loom: route]") { text = route_pick(context.copy()) }
         for step in script(text) {
             match step {
                 Step.Say(s) => {
@@ -1113,6 +1115,75 @@ impl Agent {
         // Notifications it doesn't know, such as a session/cancel with no turn
         // running, and stray responses, are dropped.
     }
+}
+
+// The words of `s` of four letters or more, lowercase.
+fn long_words(s: String) -> List<String> {
+    var out = List<String>()
+    var word = String()
+    for r in "{s.to_lower_root()} ".runes() {
+        if (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') {
+            word.push(r)
+            continue
+        }
+        if word.len() >= 4 and not out.contains(word.copy()) { out.push(word.copy()) }
+        word = String()
+    }
+    return out
+}
+
+fn shares(a: String, b: String) -> bool {
+    let theirs = long_words(b)
+    for w in long_words(a) {
+        if theirs.contains(w) { return true }
+    }
+    return false
+}
+
+fn text_of(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+// What it answers when loom asks it, as the group chats' router, to pick
+// (a "[loom: route]" block with the chat as JSON): "ROUTE:NAME" in the
+// message picks NAME, member or not; else a correction kept for words like
+// the message's; else a member whose "for" shares a word with it; else the
+// one that answered last, else the first member. As JSON, one line.
+fn route_pick(context: String) -> String {
+    let start = context.find("[loom: route]") ?? 0
+    let rest = context[start..].copy()
+    let open = rest.find("\n\n\{") ?? 0
+    let given = match parse(rest[open + 2..].copy()) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+    let message = text_of(given.copy(), "message")
+    var pick = String()
+    if let at = message.find("ROUTE:") {
+        let after = message[at + 6..].copy()
+        let end = after.find(" ") ?? after.len()
+        pick = after[..end].trim().copy()
+    }
+    if pick.len() == 0 {
+        if let Json.Array(examples) = given.get(String("examples")) ?? Json.Null {
+            for e in examples {
+                if pick.len() == 0 and shares(message.copy(), text_of(e.copy(), "text")) { pick = text_of(e, "to") }
+            }
+        }
+    }
+    var first = String()
+    if let Json.Array(members) = given.get(String("members")) ?? Json.Null {
+        for m in members {
+            if first.len() == 0 { first = text_of(m.copy(), "name") }
+            if pick.len() == 0 and shares(message.copy(), text_of(m.copy(), "for")) { pick = text_of(m, "name") }
+        }
+    }
+    if pick.len() == 0 { pick = text_of(given.copy(), "last") }
+    if pick.len() == 0 { pick = first }
+    var o = LinkedMap<String, Json>()
+    o.insert("agent", js(pick))
+    o.insert("why", js(String("fake pick")))
+    return "/say {Json.Object(o)}"
 }
 
 fn method(m: Json) -> String {

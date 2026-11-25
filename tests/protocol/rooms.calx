@@ -1,0 +1,129 @@
+module tests.protocol.rooms
+
+// Group chats (PLAN.md, "Group chats"): Everyone comes once the person has two
+// agents, a group chat is made with some of them, and each message in one goes
+// to one member: the router's pick, among the members only, falling back to the
+// chat's default; the one an @mention names, with no router call; and the one
+// the person re-sends it to, which is kept as a correction the router follows
+// next time. A member hands a message on with hand_off, and the next answers
+// it. A chat with one agent never routes, and a pin in a group chat isn't in a
+// member's own chat. The fake agent plays the router (tests/fake_agent).
+//
+//     calx tests/protocol/rooms.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+fn agent(app: mut Session, id: str, name: str, instructions: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String(instructions)).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+// The run.started and the reply of the next turn in `conversation`.
+fn next_turn(app: mut Session, conversation: String) -> (Json, Json) ! Error {
+    var started = Json.Null
+    loop {
+        let e = try app.until("event", "")
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if kind == "run.started" and str_at(e.copy(), "conversation") == some(conversation.copy()) { started = e.copy() }
+        if kind == "message.created" {
+            let m = at(e, "message")
+            if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return (started, m) }
+        }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> (Json, Json) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try next_turn(mut app, conversation)
+}
+
+fn by(m: Json) -> String {
+    return str_at(at(m, "routed"), "by") ?? String()
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_0", "defaults.put", Obj.new().s("router_brain", String("fake")).done())
+    let ledger = try agent(mut app, "q_1", "Ledger", "Keeps money and bills.")
+    let hermes = try agent(mut app, "q_2", "Hermes", "Reads and writes mail.")
+    let casper = try agent(mut app, "q_3", "Casper", "Writes code.")
+
+    // --- Everyone ---
+    let listed = try app.cmd("q_4", "agent.update", Obj.new().s("agent", ledger.copy()).s("for", String("Keeps money and bills.")).done())
+    try check(str_at(at(at(listed, "value"), "agent"), "for") == some(String("Keeps money and bills.")), "an agent's what-I'm-for is filled from its instructions, and kept")
+    var everyone = String()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) and bool_at(at(at(f.copy(), "conversation"), "room"), "everyone") == some(true) { everyone = str_at(at(f, "conversation"), "id") ?? String() }
+    }
+    try check(everyone.len() > 0, "Everyone comes once the person has two agents")
+
+    // --- A group chat routes among its members only ---
+    let room = try app.cmd("q_5", "room.create", Obj.new().s("name", String("Money")).j("members", Json.Array([Json.Str(ledger.copy()), Json.Str(hermes.copy())])).s("default", hermes.copy()).done())
+    let money = str_at(at(at(room.copy(), "value"), "conversation"), "id") ?? String()
+    try check(str_at(at(at(at(room, "value"), "conversation"), "room"), "name") == some(String("Money")), "a group chat is made with its name and members")
+    let (_, picked) = try say(mut app, money.copy(), "m_1", String("ROUTE:Ledger the bill please"))
+    try check(str_at(picked.copy(), "agent") == some(ledger.copy()) and by(picked.copy()) == "router" and str_at(at(picked, "routed"), "said") == some(String("fake pick")), "the router's pick answers, with why")
+    let (_, outside) = try say(mut app, money.copy(), "m_2", String("ROUTE:Casper fix the code"))
+    try check(str_at(outside.copy(), "agent") == some(hermes.copy()) and by(outside) == "default", "a pick that isn't a member goes to the chat's default instead")
+
+    // --- @ wins ---
+    let (started, mentioned) = try say(mut app, money.copy(), "m_3", "[@Hermes](loom:agent/{hermes}) any new mail?")
+    try check(str_at(mentioned.copy(), "agent") == some(hermes.copy()) and by(mentioned) == "mention" and str_at(at(started, "routed"), "by") == some(String("mention")), "an @mention goes to that member, with no router call")
+    let (_, typed) = try say(mut app, money.copy(), "m_4", String("@ledger and the budget?"))
+    try check(str_at(typed.copy(), "agent") == some(ledger.copy()) and by(typed) == "mention", "a name typed after @ is a mention too")
+
+    // --- A correction changes the next similar pick ---
+    let (_, first) = try say(mut app, everyone.copy(), "m_5", String("what did the vps cost in october"))
+    try check(str_at(first.copy(), "agent") == some(ledger.copy()), "with nothing to go on, the router picks the first member")
+    let resent = try app.cmd("q_6", "room.resend", Obj.new().s("message", str_at(first, "id") ?? String()).s("agent", casper.copy()).done())
+    try check(str_at(at(resent, "value"), "run") != none, "a reply is sent to another member")
+    let (_, again) = try next_turn(mut app, everyone.copy())
+    try check(str_at(again.copy(), "agent") == some(casper.copy()) and by(again) == "person", "that member answers the same message")
+    var corrections: usize = 0
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) and str_at(at(f.copy(), "conversation"), "id") == some(everyone.copy()) {
+            if let Json.Array(cs) = at(at(at(f, "conversation"), "room"), "corrections") { corrections = cs.len() }
+        }
+    }
+    try check(corrections == 1, "the correction is kept with the chat")
+    let (_, next) = try say(mut app, everyone.copy(), "m_6", String("what did the vps cost in november"))
+    try check(str_at(next.copy(), "agent") == some(casper.copy()) and by(next) == "router", "and the router follows it for a message like it")
+
+    // --- A handoff moves the answer ---
+    let handoff = "ROUTE:Ledger please\n/mcp hand_off {Obj.new().s("agent", String("Hermes")).s("why", String("mail question")).done()}"
+    let (_, handing) = try say(mut app, money.copy(), "m_7", handoff)
+    try check(str_at(handing.copy(), "agent") == some(ledger.copy()) and reply_text(handing).contains("hand_off: Hermes answers it"), "a member hands the message on")
+    let (_, handed) = try next_turn(mut app, money.copy())
+    try check(str_at(handed.copy(), "agent") == some(hermes.copy()) and by(handed.copy()) == "handoff" and str_at(at(handed.copy(), "routed"), "from") == some(ledger.copy()) and str_at(at(handed, "routed"), "said") == some(String("handed off by Ledger")), "and the next member answers it, handed off by the first")
+
+    // --- One agent's chat never routes, and pins stay in their chat ---
+    let single = str_at(at(try app.cmd("q_8", "conversation.create", Obj.new().s("agent", casper.copy()).done()), "value"), "conversation") ?? String()
+    let (alone_started, alone) = try say(mut app, single.copy(), "m_8", String("ROUTE:Ledger hello"))
+    try check(str_at(alone.copy(), "agent") == some(casper.copy()) and at(alone, "routed") == Json.Null and at(alone_started, "routed") == Json.Null, "an agent's own chat never routes")
+    _ = try app.cmd("q_9", "message.pin", Obj.new().s("message", str_at(again, "id") ?? String()).done())
+    let in_room = "{try app.cmd("q_10", "messages.pinned", Obj.new().s("conversation", everyone.copy()).done())}"
+    let in_own = "{try app.cmd("q_11", "messages.pinned", Obj.new().s("conversation", single).done())}"
+    try check(in_room.contains("\"pinned\"") and not in_own.contains("\"pinned\""), "a pin in a group chat isn't in the member's own chat")
+
+    // --- Everyone stays ---
+    let gone = try app.cmd("q_12", "conversation.delete", Obj.new().s("conversation", everyone).done())
+    try check(str_at(at(gone, "error"), "code") == some(String("not_allowed")), "Everyone can't be deleted")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nrooms: all good")
+}
