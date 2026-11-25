@@ -13,7 +13,7 @@ An agent can put cards in its reply, drawn in the chat's own look:
 - **Progress**: a bar with a label.
 - **Facts**: up to 12 labels, each with its value.
 
-Choices and forms always come at the end of the reply, once the agent has finished it, so you read the whole reply before you answer. A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
+Choices and forms come at the end of the reply, once the agent has finished it, so you read the whole reply before you answer. An agent can put a form where it is in the reply instead, which says "Opens once the reply is done" until the reply is finished. A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
 
 When one of the agent's MCP servers needs you to sign in, loom puts its own card in the reply, "Sign in to acta", with **Sign in** ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). The agent is told to wait for you rather than try to sign in itself. **Sign in** works from the iPhone app too.
 
