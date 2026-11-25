@@ -41,6 +41,9 @@ mod rules;
 #[path = "learned.rs"]
 mod learned;
 
+#[path = "emoji_ui.rs"]
+mod emoji_ui;
+use emoji_ui::RowKey;
 #[path = "routines.rs"]
 mod routines;
 
@@ -189,6 +192,7 @@ enum Screen {
     Appearance,
     ChatPrefs,
     AppPrefs,
+    Emoji,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -211,6 +215,8 @@ enum Ctx {
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
+    /// The composer's smiley.
+    EmojiButton,
 }
 
 /// Words selected in a message, and where the selection ended: a small bar there has
@@ -375,6 +381,13 @@ pub struct Loom {
     mention: Option<(usize, String)>,
     /// Which of the @ picker's choices is lit.
     mention_lit: usize,
+    /// The suggestion row and the picker (PLAN.md, "Emoji"), the picker's search, and
+    /// the name of one of the person's own being renamed in Settings → Emoji.
+    emoji_ui: emoji_ui::EmojiUi,
+    emoji_search: Entity<InputState>,
+    emoji_rename: Entity<InputState>,
+    /// One of the person's own emoji a right-click on a message was on, for Copy name.
+    ctx_emoji: Option<String>,
     /// What's written and attached but not sent in each chat the person left, by
     /// `draft_key`, and the chat the composer holds now.
     drafts: HashMap<String, (InputContent, Vec<String>)>,
@@ -764,6 +777,8 @@ impl Loom {
             .unwrap_or_else(|| Core::start(&core_config("", None)));
         let (device_tx, device_rx) = std::sync::mpsc::channel();
 
+        // Twemoji's pictures are drawn with GPUI's own SVG renderer (src/emoji.rs).
+        crate::emoji::set_renderer(cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -791,6 +806,7 @@ impl Loom {
                     // the @ picker follows what's typed after an @.
                     InputEvent::Change => {
                         this.track_mention(cx);
+                        this.track_emoji(window, cx);
                         // A file whose piece was taken out goes with it, and comes back
                         // with an undo.
                         this.sync_attachments(cx);
@@ -812,6 +828,19 @@ impl Loom {
                     .masked(masked)
             })
         };
+        // The emoji picker's search: the core finds what's typed.
+        let emoji_search = input(window, cx, "Find an emoji", false);
+        cx.subscribe_in(
+            &emoji_search,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.find_emoji(cx);
+                }
+            },
+        )
+        .detach();
+        let emoji_rename = input(window, cx, "name", false);
         // The + menu's search: what's typed finds rows in every group.
         let plus_search = input(window, cx, "Find a file, skill or routine…", false);
         cx.subscribe_in(
@@ -1420,6 +1449,10 @@ ACTA_KEY=secret:ACTA_KEY",
             composer_edits: Vec::new(),
             mention: None,
             mention_lit: 0,
+            emoji_ui: emoji_ui::EmojiUi::default(),
+            emoji_search,
+            emoji_rename,
+            ctx_emoji: None,
             drafts: HashMap::new(),
             draft_for: String::new(),
             server_in,
@@ -3538,6 +3571,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Appearance => self.appearance_page(cx),
             Screen::ChatPrefs => self.chat_prefs_page(cx),
             Screen::AppPrefs => self.app_prefs_page(cx),
+            Screen::Emoji => self.emoji_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -8559,6 +8593,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.shut_plus(window, cx);
                 self.paste_files(cx);
             }
+            PlusRow::Emoji => {
+                self.shut_plus(window, cx);
+                self.open_emoji_picker(window, cx);
+            }
             PlusRow::Open(s) => {
                 if let Some(menu) = self.plus.as_mut() {
                     menu.sub = Some(s);
@@ -8644,6 +8682,7 @@ ACTA_KEY=secret:ACTA_KEY",
         match row {
             PlusRow::Attach => (Ico::Paperclip, "Attach files".into(), None),
             PlusRow::PasteImage => (Ico::ClipboardPaste, "Paste image".into(), None),
+            PlusRow::Emoji => (Ico::FaceSlightlySmiling, "Emoji".into(), None),
             PlusRow::Open(PlusSub::Recent) => (Ico::FileClock, "Recent files".into(), None),
             PlusRow::Open(PlusSub::Skills) => (Ico::BookOpen, "Skills".into(), None),
             PlusRow::Open(PlusSub::Routines) => (Ico::Clock, "Routines".into(), None),
@@ -9232,6 +9271,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn open_ctx(&mut self, at: Point<Pixels>, on: Ctx, cx: &mut Context<Self>) {
         self.menu = None;
         self.plus = None;
+        // The emoji under the pointer, its card showing, as the menu opens.
+        self.ctx_emoji = crate::emoji::hovered()
+            .and_then(|l| l.strip_prefix(crate::emoji::OWN_LINK).map(String::from));
         self.ctx = Some((at, on));
         cx.notify();
     }
@@ -9286,6 +9328,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     panel = panel.child(div().my(px(space::XS)).h(px(1.0)).bg(p.line));
                 }
+                // One of the person's own the right-click was on: its name.
+                let own = self
+                    .ctx_emoji
+                    .as_deref()
+                    .and_then(crate::emoji::own_one)
+                    .map(|(name, _, _)| name);
+                if let Some(name) = own {
+                    panel = panel
+                        .child(
+                            self.menu_item("ctx-emoji-name", Ico::Copy, "Copy name", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                                        ":{name}:"
+                                    )));
+                                    this.notice = Some(("Copied.".into(), Instant::now(), true));
+                                    close(this, cx);
+                                })),
+                        )
+                        .child(div().my(px(space::XS)).h(px(1.0)).bg(p.line));
+                }
                 let reply_id = m.id.clone();
                 panel = panel.child(
                     self.menu_item("ctx-reply", Ico::Reply, "Reply", false)
@@ -9294,7 +9356,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.start_reply(&reply_id, None, false, window, cx);
                         })),
                 );
-                let text = model::copy_text(&m, &self.model.tools);
+                // The person's own emoji copy as their names.
+                let text = crate::emoji::as_names(&model::copy_text(&m, &self.model.tools));
                 if !text.is_empty() {
                     panel = panel.child(
                         self.menu_item("ctx-copy", Ico::Copy, "Copy", false)
@@ -9378,6 +9441,16 @@ ACTA_KEY=secret:ACTA_KEY",
                                 close(this, cx);
                             })),
                     );
+            }
+            Ctx::EmojiButton => {
+                panel = panel.child(
+                    self.menu_item("ctx-hide-emoji", Ico::EyeOff, "Hide emoji button", false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            close(this, cx);
+                            this.emoji_ui.picker = None;
+                            this.set_prefs(|p| p.emoji_button = false, window, cx);
+                        })),
+                );
             }
             Ctx::Agents => {
                 panel = panel
@@ -10269,6 +10342,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     inputs: None,
                     views: Rc::default(),
                     pruned: None,
+                    seen: None,
                 });
                 self.chat_view = Some(v.clone());
                 v
@@ -10307,6 +10381,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let plus_menu = self.plus.clone().map(|menu| self.plus_menu(&menu, cx));
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
+        let emoji_row = self.emoji_row().map(|row| self.emoji_row_view(&row, cx));
+        let emoji_picker = self.emoji_picker_view(cx);
+        let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
+            .then(|| self.emoji_button(cx));
         let mut composer = Some(
             div()
                 .w_full()
@@ -10327,10 +10405,21 @@ ACTA_KEY=secret:ACTA_KEY",
                         anchored().anchor(Anchor::BottomLeft).child(menu),
                     )))
                 })
-                // And the @ picker, the same.
+                // And the @ picker, the same, and the emoji row.
                 .when_some(mention_menu, |d, menu| {
                     d.child(div().absolute().top_0().left_0().child(deferred(
                         anchored().anchor(Anchor::BottomLeft).child(menu),
+                    )))
+                })
+                .when_some(emoji_row, |d, row| {
+                    d.child(div().absolute().top_0().left_0().child(deferred(
+                        anchored().anchor(Anchor::BottomLeft).child(row),
+                    )))
+                })
+                // The emoji picker opens above it from its right edge, by the smiley.
+                .when_some(emoji_picker, |d, picker| {
+                    d.child(div().absolute().top_0().right_0().child(deferred(
+                        anchored().anchor(Anchor::BottomRight).child(picker),
                     )))
                 })
                 .when_some(reply_bar, |d, bar| d.child(bar))
@@ -10417,26 +10506,44 @@ ACTA_KEY=secret:ACTA_KEY",
                                         this.composer
                                             .update(cx, |c, cx| c.replace(text, window, cx));
                                         this.track_mention(cx);
+                                        this.track_emoji(window, cx);
                                         cx.notify();
                                     }
                                 }))
-                                // The @ picker's keys, before the textarea's own.
+                                // The @ picker's keys and the emoji row's, before the
+                                // textarea's own.
                                 .capture_action(cx.listener(|this, e: &Enter, window, cx| {
-                                    if !e.shift {
+                                    if !e.shift && !this.emoji_row_key(RowKey::Take, window, cx) {
                                         this.mention_key(MentionKey::Take, window, cx)
                                     }
                                 }))
                                 .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                                    this.mention_key(MentionKey::Take, window, cx)
+                                    if !this.emoji_row_key(RowKey::Take, window, cx) {
+                                        this.mention_key(MentionKey::Take, window, cx)
+                                    }
+                                }))
+                                .capture_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+                                    this.emoji_row_key(RowKey::Back, window, cx);
+                                }))
+                                .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                                    this.emoji_row_key(RowKey::On, window, cx);
                                 }))
                                 .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                                    if this.emoji_row_key(RowKey::Back, window, cx) {
+                                        return;
+                                    }
                                     this.mention_key(MentionKey::Up, window, cx);
                                     this.composer_up(window, cx)
                                 }))
                                 .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
-                                    this.mention_key(MentionKey::Down, window, cx)
+                                    if !this.emoji_row_key(RowKey::On, window, cx) {
+                                        this.mention_key(MentionKey::Down, window, cx)
+                                    }
                                 }))
                                 .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                                    if this.emoji_row_key(RowKey::Shut, window, cx) {
+                                        return;
+                                    }
                                     let open = this.mention.is_some();
                                     this.mention_key(MentionKey::Shut, window, cx);
                                     if !open {
@@ -10445,6 +10552,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }))
                                 .child(self.composer_textarea(cx)),
                         )
+                        .when_some(emoji_button, |d, b| d.child(b))
                         // Dictation: the system's own voice typing, into the composer.
                         .when(cfg!(any(windows, target_os = "macos")), |d| {
                             let (name, didnt) = if cfg!(target_os = "macos") {
@@ -16473,12 +16581,14 @@ ACTA_KEY=secret:ACTA_KEY",
                                     })),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink)
-                            .child(words),
-                    ),
+                    // Its emoji as the chat draws them, with Twemoji and the person's own.
+                    .child(div().text_size(px(size::SMALL)).text_color(p.ink).child(
+                        KeptText::new(
+                            SharedString::from(format!("pin-words-{}", m.id)),
+                            crate::emoji::pictured(&model::literal_html(&words), size::SMALL),
+                            with_links,
+                        ),
+                    )),
             );
         }
         let page = div()
@@ -16806,7 +16916,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_size(px(size::SMALL))
                                 .text_color(p.ink_2)
                                 .truncate()
-                                .child(shown),
+                                .child(emoji_ui::inline_words(
+                                    &shown,
+                                    (size::SMALL * crate::emoji::IN_TEXT).round(),
+                                )),
                         ),
                 )
                 .child(
@@ -17171,7 +17284,16 @@ fn quote_view(
         )
         .children(lead)
         .when(!shown.is_empty(), |d| {
-            d.child(div().min_w_0().truncate().text_color(p.ink_2).child(shown))
+            d.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(p.ink_2)
+                    .child(emoji_ui::inline_words(
+                        &shown,
+                        (size::SMALL * crate::emoji::IN_TEXT).round(),
+                    )),
+            )
         })
         .on_click(move |_, _, cx| {
             let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
@@ -17324,10 +17446,13 @@ fn person(
             }
         }
     });
-    let words = linked_words(
-        p,
-        &model::link_files(&model::literal_html(&text), &attached),
-        m,
+    let words = crate::emoji::pictured(
+        &linked_words(
+            p,
+            &model::link_files(&model::literal_html(&text), &attached),
+            m,
+        ),
+        size::BODY * scale,
     );
     let opener = this.clone();
     let on_link = move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| match url
@@ -17358,6 +17483,8 @@ fn person(
             let agent = url["loom:agent/".len()..].to_string();
             let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
         }
+        // A right-click on one of the person's own emoji: Copy name in its menu.
+        None if url.starts_with(crate::emoji::OWN_LINK) => emoji_ui::own_clicked(&opener, url, cx),
         None if url.starts_with("loom:") => {}
         None => cx.open_url(url),
     };
@@ -20266,6 +20393,9 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
             .size(px(14.0))
             .flex_none()
     };
+    if id.starts_with(emoji_ui::PIECE) {
+        return emoji_ui::composer_piece(words);
+    }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {
             return div()
@@ -20504,11 +20634,23 @@ fn mention_file_icon(name: &str, color: &str) -> Option<String> {
 /// Draws the site icons `linked_words` put in, and a link's full address when the pointer
 /// is on it.
 fn with_links(v: TextView) -> TextView {
-    v.image_source(|uri| match uri.strip_prefix(SITE_ICON) {
-        Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
-        None => uri.clone().into(),
+    v.image_source(|uri| {
+        // An emoji: a built-in one drawn at its size, one of the person's own its picture.
+        if let Some(drawn) = crate::emoji::from_source(uri) {
+            return ImageSource::Render(drawn);
+        }
+        match uri
+            .strip_prefix(SITE_ICON)
+            .or_else(|| uri.strip_prefix(crate::emoji::OWN_SOURCE))
+        {
+            Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
+            None => uri.clone().into(),
+        }
     })
     .link_tooltip(|url, window, cx| {
+        if url.starts_with(crate::emoji::LINK) {
+            return emoji_ui::EmojiCard::view(url, window, cx);
+        }
         // A file's whole name, which its link shows cut in the middle.
         let file = model::mention_path(url).or_else(|| {
             let sha = url.strip_prefix("loom-file:")?;
@@ -20773,7 +20915,10 @@ impl ReplyDraw<'_> {
                 .text_color(p.ink)
                 .child(KeptText::new(
                     SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    linked_words(p, &said, self.m),
+                    crate::emoji::pictured(
+                        &linked_words(p, &said, self.m),
+                        size::REPLY * show.text_scale,
+                    ),
                     move |v| {
                         let opener = opener.clone();
                         with_links(v.selectable(true).on_link_click(
@@ -20791,6 +20936,8 @@ impl ReplyDraw<'_> {
                                     // An agent it mentions opens its chat (LOO-301).
                                     let agent = agent.to_string();
                                     let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
+                                } else if url.starts_with(crate::emoji::OWN_LINK) {
+                                    emoji_ui::own_clicked(&opener, url, cx);
                                 } else if !url.starts_with("loom:") {
                                     cx.open_url(url);
                                 }
@@ -22434,6 +22581,10 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
         self.frames += 1;
+        // The emoji the core said of what was typed, and what the chat draws them from.
+        crate::emoji::set_play(!self.prefs.emoji_hover, cx.reduce_motion());
+        self.take_emoji(window, cx);
+        self.sync_emoji_cards();
         // Set again as the chat's list is drawn, if it is.
         self.list_at.set(None);
         let p = self.p;
@@ -23778,7 +23929,7 @@ mod row_tests {
                 later: false,
                 room: 720,
             },
-            is_new: false,
+            is_new: None,
             column: 720.0,
             p: Palette::new(false),
             line: None,
@@ -24010,7 +24161,7 @@ struct ChatInputs {
     open: HashSet<String>,
     show: Show,
     newest: Option<String>,
-    new_line: Option<String>,
+    new_line: Option<(String, usize)>,
     column: f32,
     /// How wide the chat is (`Loom::chat_width`).
     width: f32,
@@ -24094,6 +24245,100 @@ struct ChatList {
     views: Rc<RefCell<HashMap<String, Entity<RowView>>>>,
     /// The rows `views` was last pruned to.
     pruned: Option<Rc<Vec<Row>>>,
+    /// The newest message when the chat was last at its bottom: the jump button counts
+    /// those after it.
+    seen: Option<String>,
+}
+
+impl ChatList {
+    /// How many messages came, not the person's, since the chat was last at its bottom,
+    /// with `up` whether it's scrolled up now.
+    fn came_since(&mut self, rows: &[Row], up: bool) -> usize {
+        let newest = rows.iter().rev().find_map(|r| match r {
+            Row::Message(m) => Some(m.id.as_str()),
+            Row::Approval(_) => None,
+        });
+        let at = self.seen.as_deref().and_then(|s| {
+            rows.iter()
+                .position(|r| matches!(r, Row::Message(m) if m.id == s))
+        });
+        // At the bottom, or in a chat that doesn't have the one it saw last (another chat).
+        if !up || at.is_none() {
+            self.seen = newest.map(str::to_string);
+            return 0;
+        }
+        rows[at.unwrap_or(0) + 1..]
+            .iter()
+            .filter(|r| matches!(r, Row::Message(m) if m.role != "person"))
+            .count()
+    }
+}
+
+/// The button that goes down to the chat's newest message, while it isn't at its bottom:
+/// round, with how many came meanwhile in the agent's colour at its corner.
+fn jump_button(p: Palette, tint: Hsla, came: usize, scroller: Entity<MessageScrollerState>) -> Div {
+    const SIZE: f32 = 34.0;
+    let black: Hsla = rgb(0x000000).into();
+    div()
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom(px(space::M))
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .id("jump-to-latest")
+                .role(Role::Button)
+                .aria_label("Jump to latest")
+                .relative()
+                .size(px(SIZE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(p.line)
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .shadow(vec![BoxShadow {
+                    color: black.opacity(if p.dark { 0.5 } else { 0.14 }),
+                    offset: point(px(0.0), px(4.0)),
+                    blur_radius: px(14.0),
+                    spread_radius: px(-2.0),
+                    inset: false,
+                }])
+                .soft_hover(card_fill(p), p.raised_2, Some((p.ink_2, p.ink)))
+                .child(Icon::new(IconName::ArrowDown).small())
+                .when(came > 0, |d| {
+                    let n = if came > 99 {
+                        "99+".to_string()
+                    } else {
+                        came.to_string()
+                    };
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(-5.0))
+                            .left(px(SIZE - 13.0))
+                            .h(px(17.0))
+                            .min_w(px(17.0))
+                            .px(px(4.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(tint)
+                            .text_size(px(size::CAPTION - 1.0))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(motion::ink_on(tint, p.ink, p.bg))
+                            .child(n),
+                    )
+                })
+                .on_click(move |_, _, cx| {
+                    scroller.update(cx, |s, cx| s.scroll_to_end(cx));
+                }),
+        )
 }
 
 impl Render for ChatList {
@@ -24121,14 +24366,27 @@ impl Render for ChatList {
             self.pruned = Some(i.rows.clone());
         }
         crate::perf::count("list");
-        chat_list(
-            i,
-            self.scroller.clone(),
-            self.this.clone(),
-            cx.entity_id(),
-            self.views.clone(),
-        )
-        .into_any_element()
+        let up = self.scroller.read(cx).is_scrolled_up();
+        let came = self.came_since(&i.rows, up);
+        let (p, tint) = (i.p, i.tint);
+        div()
+            .size_full()
+            .relative()
+            .child(
+                chat_list(
+                    i,
+                    self.scroller.clone(),
+                    self.this.clone(),
+                    cx.entity_id(),
+                    self.views.clone(),
+                )
+                // Its own, below, with how many came.
+                .jump_button(false),
+            )
+            .when(up, |d| {
+                d.child(jump_button(p, tint, came, self.scroller.clone()))
+            })
+            .into_any_element()
     }
 }
 
@@ -24151,8 +24409,8 @@ struct RowInputs {
     /// What's open in it, of the chat's open thoughts, folds and steps.
     open: HashSet<String>,
     show: Show,
-    /// The first reply that came while the chat was shut, with NEW over it.
-    is_new: bool,
+    /// The first reply that came while the chat was shut, with "3 new" over it: how many.
+    is_new: Option<usize>,
     column: f32,
     p: Palette,
     /// The time line over it, and its time on hover, and where that shows.
@@ -24466,7 +24724,12 @@ fn chat_list(
                 later: m.is_some_and(|m| m.answers_later(newest.as_deref() == Some(m.id.as_str()))),
                 ..show
             },
-            is_new: m.is_some_and(|m| new_line.as_deref() == Some(m.id.as_str())),
+            is_new: m.and_then(|m| {
+                new_line
+                    .as_ref()
+                    .filter(|(id, _)| *id == m.id)
+                    .map(|(_, n)| *n)
+            }),
             column,
             p,
             // Across the chat where it paused, or on a new day: when it went on.
@@ -24558,23 +24821,27 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     let (ix, here, tint, mood, show, is_new, column, p) =
         (*ix, *here, *tint, *mood, *show, *is_new, *column, *p);
     let row = i.row();
-    // Above the first reply that came while the chat was shut: a line, NEW
-    // in the agent's colour.
-    let divider = div()
-        .w_full()
-        .max_w(px(column))
-        .flex()
-        .items_center()
-        .gap(px(space::S))
-        .pt(px(space::S))
-        .child(div().flex_1().h(px(1.0)).bg(tint.opacity(0.5)))
-        .child(
-            div()
-                .text_size(px(size::CAPTION))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(tint)
-                .child("NEW"),
-        );
+    // Above the first reply that came while the chat was shut: a quiet line across the
+    // column, with how many came in the middle.
+    let divider = is_new.map(|n| {
+        div()
+            .w_full()
+            .max_w(px(column))
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .pt(px(space::S))
+            .pb(px(space::XS))
+            .child(div().flex_1().h(px(1.0)).bg(p.line_strong))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(format!("{n} new")),
+            )
+            .child(div().flex_1().h(px(1.0)).bg(p.line_strong))
+    });
     let joined = here.joined;
     // Across the chat where it paused, or on a new day: when it went on.
     let time_line = i.line.clone().map(|line| {
@@ -24778,7 +25045,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             } else {
                 name.as_str()
             };
-            let words = model::spoken(&model::copy_text(m, tools));
+            let words = model::spoken(&crate::emoji::as_names(&model::copy_text(m, tools)));
             (format!("msg-{}", m.id), Some(format!("{who}: {words}")))
         }
         Row::Approval(_) => (format!("row-{ix}"), None),
@@ -24793,7 +25060,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         .px(px(space::XL))
         .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
         .when_some(on_picked, |d, f| d.on_mouse_up(MouseButton::Left, f))
-        .when(is_new, |d| d.child(divider))
+        .children(divider)
         .children(time_line)
         .child(
             div()

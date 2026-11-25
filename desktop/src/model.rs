@@ -920,6 +920,8 @@ pub enum PlusSub {
 pub enum PlusRow {
     Attach,
     PasteImage,
+    /// Opens the emoji picker.
+    Emoji,
     /// Opens a list beside the menu.
     Open(PlusSub),
     File(RecentFile),
@@ -986,6 +988,7 @@ impl Model {
                 add.push(PlusRow::PasteImage);
             }
             add.push(PlusRow::Open(PlusSub::Recent));
+            add.push(PlusRow::Emoji);
             return vec![
                 add,
                 vec![
@@ -997,6 +1000,7 @@ impl Model {
         let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
             .into_iter()
             .chain(paste.then_some((PlusRow::PasteImage, "Paste image")))
+            .chain([(PlusRow::Emoji, "Emoji")])
             .filter(|(_, title)| title.to_lowercase().contains(&q))
             .map(|(r, _)| r)
             .collect();
@@ -2899,7 +2903,7 @@ impl ReplyTo {
     /// What a quote shows of its words: its first line with something in it, links and
     /// mentions as their words.
     pub fn line(&self) -> String {
-        spoken(&self.text)
+        spoken(&crate::emoji::as_names(&self.text))
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
@@ -3283,6 +3287,9 @@ pub fn link_token(url: &str) -> (String, String) {
 pub const ATTACH: &str = "loom-attach:";
 /// How the id of a link preview's token starts, then its address.
 pub const LINK: &str = "loom-link:";
+/// How the id of an emoji's token starts, then the emoji: the character, or the person's
+/// own token (PLAN.md, "Emoji").
+pub const EMOJI: &str = "loom:emoji/";
 
 /// The address a whole paste is, when it's one http or https address and nothing
 /// else: what a paste turns into a preview.
@@ -3533,6 +3540,9 @@ pub fn with_mention_links(
         out.push_str(&plain_links(&text[at..range.start]));
         if link.starts_with(ATTACH) {
             out.push_str(&file_mark(words));
+        } else if link.starts_with(EMOJI) {
+            // An emoji goes as itself: the character, or the person's own token.
+            out.push_str(words);
         } else if let Some(url) = link.strip_prefix(LINK) {
             out.push_str(url);
         } else {
@@ -3826,7 +3836,7 @@ pub const QUOTE_MOST: usize = 240;
 /// `QUOTE_MOST` characters with "…".
 pub fn one_line(md: &str) -> String {
     let mut out = String::new();
-    for line in spoken(md).lines() {
+    for line in spoken(&crate::emoji::as_names(md)).lines() {
         let line = line.trim();
         // A rule, or a table's divider, says nothing.
         if line
@@ -4679,6 +4689,8 @@ pub struct LinkAsk {
 
 #[derive(Default)]
 pub struct Model {
+    /// The person's own emoji, the suggestion row and the picker (src/emoji.rs).
+    pub emoji: crate::emoji::Emojis,
     /// The files the composer's @ picker last found: for which agent and query, and
     /// the files (`agent.files`).
     pub found_files: (String, String, Vec<FoundFile>),
@@ -4778,13 +4790,15 @@ pub struct Model {
     /// Agents with a reply that came while their chat wasn't open, until it is: their
     /// row in the sidebar is bold.
     pub unread: HashSet<String>,
-    /// Each unread agent's first reply that came while its chat was shut.
-    first_unread: HashMap<String, String>,
+    /// Each unread agent's first reply that came while its chat was shut, and how many
+    /// came.
+    first_unread: HashMap<String, (String, usize)>,
     /// Other agents' threads with an agent with a reply that came while they weren't
     /// open, until they are: the sidebar marks them, and the agent's row.
     pub asks_unread: HashSet<String>,
-    /// The message the open chat's NEW line is above, while that chat stays open.
-    pub new_line: Option<String>,
+    /// The message the open chat's "3 new" line is above, and how many came, while that
+    /// chat stays open.
+    pub new_line: Option<(String, usize)>,
     /// Replies being written, by message id: their blocks so far.
     live: HashMap<String, Vec<Block>>,
     last_delta: HashMap<String, Instant>,
@@ -5300,6 +5314,7 @@ impl Model {
                 );
             }
         }
+        out.extend(self.emoji.fetches());
         out
     }
 
@@ -5595,7 +5610,7 @@ impl Model {
     pub fn select(&mut self, agent: Option<String>) {
         if let Some(a) = &agent {
             self.unread.remove(a);
-            // The NEW line goes above the first reply that came while the chat was
+            // The "3 new" line goes above the first reply that came while the chat was
             // shut, and stays while it's open.
             if let Some(first) = self.first_unread.remove(a) {
                 self.new_line = Some(first);
@@ -5739,6 +5754,10 @@ impl Model {
     /// Takes a frame from the core. Gives whether the screen should redraw.
     pub fn take(&mut self, f: &Value) -> bool {
         let t = s(f, "t");
+        // The emoji frames are the emoji module's alone; `synced` is everyone's.
+        if self.emoji.take(f) {
+            return true;
+        }
         match t.as_str() {
             "core.conn" => {
                 if let Some(server) = f.get("server").and_then(Value::as_str) {
@@ -6121,7 +6140,7 @@ impl Model {
                     if asked {
                         self.asks_unread.insert(conversation.clone());
                     } else if !agent.is_empty() {
-                        self.first_unread.entry(agent.clone()).or_insert(id);
+                        self.first_unread.entry(agent.clone()).or_insert((id, 0)).1 += 1;
                         self.unread.insert(agent);
                     }
                 }
@@ -12889,10 +12908,10 @@ mod tests {
         m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_2", "message": {"id": "msg_3", "conversation": "c_2", "role": "agent", "agent": "a_2"}}));
         m.select(Some("a_2".into()));
         assert!(m.unread.is_empty());
-        // The NEW line is above the first of them, while the chat stays open.
-        assert_eq!(m.new_line.as_deref(), Some("msg_1"));
+        // The "2 new" line is above the first of them, while the chat stays open.
+        assert_eq!(m.new_line, Some(("msg_1".into(), 2)));
         m.select(Some("a_2".into()));
-        assert_eq!(m.new_line.as_deref(), Some("msg_1"));
+        assert_eq!(m.new_line, Some(("msg_1".into(), 2)));
         m.select(Some("a_1".into()));
         assert_eq!(m.new_line, None);
     }
@@ -13255,7 +13274,11 @@ mod tests {
         assert_eq!(
             m.plus_groups("", false),
             vec![
-                vec![PlusRow::Attach, PlusRow::Open(PlusSub::Recent)],
+                vec![
+                    PlusRow::Attach,
+                    PlusRow::Open(PlusSub::Recent),
+                    PlusRow::Emoji
+                ],
                 vec![
                     PlusRow::Open(PlusSub::Skills),
                     PlusRow::Open(PlusSub::Routines)
