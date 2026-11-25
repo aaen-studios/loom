@@ -4317,13 +4317,15 @@ pub struct Model {
     /// Agents with a reply that came while their chat wasn't open, until it is: their
     /// row in the sidebar is bold.
     pub unread: HashSet<String>,
-    /// Each unread agent's first reply that came while its chat was shut.
-    first_unread: HashMap<String, String>,
+    /// Each unread agent's first reply that came while its chat was shut, and how many
+    /// came.
+    first_unread: HashMap<String, (String, usize)>,
     /// Other agents' threads with an agent with a reply that came while they weren't
     /// open, until they are: the sidebar marks them, and the agent's row.
     pub asks_unread: HashSet<String>,
-    /// The message the open chat's NEW line is above, while that chat stays open.
-    pub new_line: Option<String>,
+    /// The message the open chat's "3 new" line is above, and how many came, while that
+    /// chat stays open.
+    pub new_line: Option<(String, usize)>,
     /// Finding in the open chat, while the find box is open (Ctrl+F).
     pub find: Option<Find>,
     /// Replies being written, by message id: their blocks so far.
@@ -5113,7 +5115,7 @@ impl Model {
     pub fn select(&mut self, agent: Option<String>) {
         if let Some(a) = &agent {
             self.unread.remove(a);
-            // The NEW line goes above the first reply that came while the chat was
+            // The "3 new" line goes above the first reply that came while the chat was
             // shut, and stays while it's open.
             if let Some(first) = self.first_unread.remove(a) {
                 self.new_line = Some(first);
@@ -5627,7 +5629,7 @@ impl Model {
                     if asked {
                         self.asks_unread.insert(conversation.clone());
                     } else if !agent.is_empty() {
-                        self.first_unread.entry(agent.clone()).or_insert(id);
+                        self.first_unread.entry(agent.clone()).or_insert((id, 0)).1 += 1;
                         self.unread.insert(agent);
                     }
                 }
@@ -12173,10 +12175,10 @@ mod tests {
         m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_2", "message": {"id": "msg_3", "conversation": "c_2", "role": "agent", "agent": "a_2"}}));
         m.select(Some("a_2".into()));
         assert!(m.unread.is_empty());
-        // The NEW line is above the first of them, while the chat stays open.
-        assert_eq!(m.new_line.as_deref(), Some("msg_1"));
+        // The "2 new" line is above the first of them, while the chat stays open.
+        assert_eq!(m.new_line, Some(("msg_1".into(), 2)));
         m.select(Some("a_2".into()));
-        assert_eq!(m.new_line.as_deref(), Some("msg_1"));
+        assert_eq!(m.new_line, Some(("msg_1".into(), 2)));
         m.select(Some("a_1".into()));
         assert_eq!(m.new_line, None);
     }
