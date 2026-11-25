@@ -34,7 +34,7 @@ Choose **+** at the top of the sidebar. An agent has a name, the program it runs
 
 **Edit agent**, in the agent's menu, opens its settings beside the chat, in groups:
 
-- **Brain**: its name, model and effort, permission mode, what a message while it answers does, its backup program, its colour, and its instructions. **Save** keeps the name and instructions; the rest changes as you pick it.
+- **Brain**: its name, model and effort, permission mode, what a message while it answers does, its backup program, its colour, its instructions, and **What it's for**, one line that group chats read to pick it ([In the chat](chat.md#group-chats)), filled from its instructions to start with. **Save** keeps the name, instructions and what it's for; the rest changes as you pick it.
 - **Knows**: its memories, skills, tables and files, each counted, its MCP servers, and Code Mode ([In the chat](chat.md#how-an-agent-uses-its-tools)).
 - **Does**: its routines, and the tokens it used today and this month.
 - **Runs**: whether it's isolated, and its network ([Permissions](permissions.md#isolated-agents)).
@@ -48,6 +48,7 @@ The **Defaults** page, under Agents in Settings, sets what every agent of yours 
 - **Permission**: Asks first, Asks when it's risky, or Doesn't ask, for agents without a mode of their own. It's Asks first until you change it.
 - **A message while it answers**: waits its turn, or steers at once.
 - **Model and effort** for each program, for agents that don't pick their own. A program's models show here once an agent on it has started.
+- **Group chats**: the program that picks who answers in a group chat, Claude unless you pick another, and its model, Claude Haiku 5.5 to begin with ([In the chat](chat.md#group-chats)).
 - **Instructions**: what every agent follows, told to each beside About you, under their own heading. Choose **Save** to keep them.
 
 The defaults are live: change one and every agent that follows it changes too. On an agent's edit page, each choice that follows the default says **Default:** and what that is. Pick it again to set the agent back to following.

@@ -1,6 +1,6 @@
 ---
 // A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads
-// in their shapes, the pinned ones as tiles over the rest, a folder, and an agent waiting on the
+// in their shapes under the group chats, the pinned ones as tiles over the rest, a folder, and an agent waiting on the
 // person at the top while it asks; an agent's chat with a message written with a link and a file
 // in it, and a reply that thinks, uses a tool, writes and asks before it deploys; and another
 // agent's thread with it, opened from its row. Its sizes, colours and words are the app's
@@ -40,6 +40,21 @@ function mentionThread(shape: keyof typeof shapes): string {
 	return pts.map(([x, y], i) => `${i ? 'L' : 'M'}${(7 + x * scale).toFixed(2)} ${(7 + y * scale).toFixed(2)}`).join(' ');
 }
 const BISCUIT = mentionThread('star');
+// The group chats atop the sidebar (PLAN.md, "Group chats"), each with its members' threads
+// woven together, four at most, as desktop/src/room_view.rs draws them with thread::weave.
+const rooms = [
+	{ name: 'Everyone', colors: ['apricot', 'lavender', 'sky', 'mint'] },
+	{ name: 'Shop', colors: ['sky', 'apricot'] },
+];
+function wave(k: number, n: number): string {
+	const phase = (k * Math.PI * 2) / n;
+	const pts: string[] = [];
+	for (let i = 0; i <= 24; i++) {
+		const u = i / 24;
+		pts.push(`${i ? 'L' : 'M'}${(1 + u * 24).toFixed(2)} ${(7 - Math.sin(u * Math.PI * 2 + phase) * 5).toFixed(2)}`);
+	}
+	return pts.join(' ');
+}
 const JUNIPER = mentionThread('yarn');
 
 // GitHub's mark, as its site icon on the reply's link and sources.
@@ -71,6 +86,25 @@ const GITHUB =
 			</span>
 		</div>
 		<div class="list" aria-hidden="true">
+			<div class="group-head rooms-head">
+				Group chats
+				<svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg>
+			</div>
+			{
+				rooms.map((r) => (
+					<div class="agent room">
+						<svg class="weave" width="26" height="14" viewBox="0 0 26 14">
+							{r.colors.map((c, k) => (
+								<path d={wave(k, r.colors.length)} style={`stroke: var(--thread-${c})`} />
+							))}
+						</svg>
+						<span class="agent-text">
+							<span class="agent-name">{r.name}</span>
+						</span>
+					</div>
+				))
+			}
+			<div class="group-head">Agents</div>
 			<div class="waiting" data-waiting hidden>
 				<div class="group-head">Waiting on you</div>
 			</div>
@@ -651,6 +685,18 @@ const GITHUB =
 		display: none;
 	}
 	.app.railed .group-head {
+		display: none;
+	}
+	/* A group chat's row: its members' threads woven, and its name. The rail shows only agents. */
+	.rooms-head {
+		justify-content: space-between;
+	}
+	.weave path {
+		fill: none;
+		stroke-width: 1.6;
+		stroke-linecap: round;
+	}
+	.app.railed .room {
 		display: none;
 	}
 	/* Another agent's thread with the open one, under its row (app.rs, ask_row): the

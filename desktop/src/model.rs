@@ -9,6 +9,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+mod rooms;
+pub use rooms::{Room, Routed};
+
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum List {
@@ -166,6 +169,8 @@ pub struct Agent {
     /// doesn't start: "" when it follows the person's default, "none" for none.
     pub backup: String,
     pub instructions: String,
+    /// What it's for, in one line: what a group chat's router reads to pick it.
+    pub for_line: String,
     /// The names of the person's MCP servers it has.
     pub mcp: Vec<String>,
     /// What its program offers to pick: its model, reasoning effort and the like.
@@ -341,6 +346,9 @@ pub struct Defaults {
     pub instructions: String,
     /// "queue" or "steer".
     pub busy: String,
+    /// The program group chats' router runs on, "" for the one loom picks, and its model.
+    pub router_brain: String,
+    pub router_model: String,
     pub revision: i64,
 }
 
@@ -371,6 +379,8 @@ impl Defaults {
             permission: or(s(d, "permission"), "ask"),
             instructions: s(d, "instructions"),
             busy: or(s(d, "busy"), "queue"),
+            router_brain: s(d, "router_brain"),
+            router_model: or(s(d, "router_model"), "haiku"),
             revision: d.get("revision").and_then(Value::as_i64).unwrap_or(0),
         }
     }
@@ -2759,6 +2769,8 @@ pub struct Message {
     pub status: String,
     /// For a person's message that replies to another, what it replies to.
     pub reply: Option<ReplyTo>,
+    /// For a reply in a group chat, its agent and how it came to it.
+    pub routed: Option<Routed>,
     /// For an agent's reply, the notes and fixes its agent kept or proposed from it,
     /// oldest first (PLAN.md, "Sharing and learning").
     pub learned: Vec<Learned>,
@@ -5231,6 +5243,19 @@ pub struct Model {
     pub open_task: Option<String>,
     /// The branch the chat shows, by conversation, instead of the agent's chat.
     pub open_branch: Option<String>,
+    /// The group chats, as the conversations list has them (PLAN.md, "Group chats").
+    pub rooms: Vec<Room>,
+    /// Their order in the sidebar, as the core gives it.
+    room_order: Vec<String>,
+    /// The group chat the chat shows, by conversation, instead of the agent's chat.
+    pub open_room: Option<String>,
+    /// The room.create the app sent last, to show the group chat once it's made.
+    making_room: Option<String>,
+    /// Why the last group chat couldn't be made.
+    pub room_error: Option<String>,
+    /// How each reply still being written in a group chat came to its agent, by its
+    /// message.
+    routed_live: HashMap<String, Routed>,
     /// The person's plugins, by id.
     pub plugins: Vec<Plugin>,
     plugins_stale: bool,
@@ -5576,9 +5601,14 @@ impl Model {
         }
         // The sidebar groups the agents by what they are, and who's waiting by the
         // questions open in their runs.
-        if [List::Agents, List::Runs, List::Approvals]
-            .iter()
-            .any(|l| self.dirty.contains(l))
+        if [
+            List::Agents,
+            List::Runs,
+            List::Approvals,
+            List::Conversations,
+        ]
+        .iter()
+        .any(|l| self.dirty.contains(l))
         {
             self.dirty.insert(List::Sidebar);
         }
@@ -5625,6 +5655,10 @@ impl Model {
     /// agent's chat, its newest that isn't a task's, a branch, a routine's thread or
     /// another agent's thread with it, however new that is.
     pub fn conversation(&self) -> Option<String> {
+        // A group chat by its id, as a branch is.
+        if let Some(room) = &self.open_room {
+            return Some(room.clone());
+        }
         if let Some(task) = self.task_open() {
             return Some(task.conversation.clone());
         }
@@ -5863,7 +5897,10 @@ impl Model {
         let mut agents: Vec<(bool, &Agent)> = self
             .agents
             .iter()
-            .filter(|a| Some(&a.id) != self.selected.as_ref())
+            .filter(|a| match self.room_open() {
+                Some(r) => r.members.contains(&a.id),
+                None => Some(&a.id) != self.selected.as_ref(),
+            })
             .filter_map(|a| {
                 let name = a.name.to_lowercase();
                 name.contains(&q).then(|| (!name.starts_with(&q), a))
@@ -5918,7 +5955,8 @@ impl Model {
         } else {
             self.new_line = None;
         }
-        if self.selected != agent {
+        // Picking an agent leaves a group chat, even for one of its members.
+        if self.selected != agent || self.open_room.take().is_some() {
             self.selected = agent;
             self.find = None;
             self.open_task = None;
@@ -6000,6 +6038,7 @@ impl Model {
             learned: learned_of(m),
             links: links_of(m),
             status: s(m, "status"),
+            routed: Routed::of(m),
             routine: s(m, "routine"),
             routine_name: s(m, "routine_name"),
             deleted: m.get("deleted").is_some_and(|d| !d.is_null()),
@@ -6808,6 +6847,17 @@ impl Model {
 
     fn result(&mut self, f: &Value) {
         let id = s(f, "id");
+        // A group chat made here: the chat shows it.
+        if id.starts_with("app.room_create") {
+            if let Some(v) = f.get("value") {
+                self.room_made(&id, v);
+            }
+            if let Some(e) = f.pointer("/error/message").and_then(Value::as_str) {
+                self.making_room = None;
+                self.room_error = Some(e.to_string());
+            }
+            return;
+        }
         // A folder made: the agent it was made for goes in, and the app has it named.
         if id.starts_with("app.folder_new") {
             if let Some(g) = f.pointer("/value/group/id").and_then(Value::as_str) {
@@ -7861,6 +7911,18 @@ impl Model {
                     .map(|ss| ss.iter().filter_map(Section::of).collect())
                     .unwrap_or_default();
                 self.sidebar = Rc::new(sections);
+                // Its group chats, first, as the core orders them.
+                self.room_order = items
+                    .iter()
+                    .filter(|sec| sec.get("kind").and_then(Value::as_str) == Some("rooms"))
+                    .flat_map(|sec| {
+                        sec.get("rooms")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default()
+                    })
+                    .map(|r| s(&r, "id"))
+                    .collect();
             }
             // Offline, from the cache, until device.list says when each was last on.
             List::Devices => {
@@ -7890,6 +7952,7 @@ impl Model {
                         defaulted: self.defaults.picks(&s(a, "acp_agent")),
                         default_mode: self.defaults.permission.clone(),
                         instructions: s(a, "instructions"),
+                        for_line: s(a, "for"),
                         mcp: a
                             .get("mcp")
                             .and_then(Value::as_array)
@@ -7978,6 +8041,7 @@ impl Model {
                         title: s(c, "title"),
                     })
                     .collect();
+                self.take_rooms(&items);
                 if self.conversation() != before {
                     self.dirty.insert(List::Messages);
                 }
@@ -7994,6 +8058,10 @@ impl Model {
                         quiet: !s(r, "routine").is_empty()
                             || r.get("quiet").and_then(Value::as_bool).unwrap_or(false),
                     })
+                    .collect();
+                self.routed_live = items
+                    .iter()
+                    .filter_map(|r| Some((s(r, "message"), Routed::of(r)?)))
                     .collect();
                 // A run new here may have started calls already: the calls asked for with
                 // the runs before it, in the same burst as its run.started, left them out,
@@ -8111,6 +8179,7 @@ impl Model {
                     live: false,
                     queued: true,
                     from_agent: None,
+                    routed: None,
                     routine: String::new(),
                     routine_name: String::new(),
                     deleted: false,
@@ -8166,6 +8235,7 @@ impl Model {
                 live: true,
                 queued: false,
                 from_agent: None,
+                routed: self.routed_live.get(&r.message).cloned(),
                 routine: String::new(),
                 routine_name: String::new(),
                 deleted: false,
@@ -8608,8 +8678,13 @@ impl Model {
     fn send_frame(&self, agent: String, text: &str) -> Value {
         let mut frame = json!({"t": "send", "agent": agent, "text": text});
         // Into the task's or the branch's conversation when the chat shows one; the core finds
-        // the agent's chat otherwise.
-        if let Some(task) = self.task_open() {
+        // the agent's chat otherwise. Into a group chat, the instance picks who answers.
+        if let Some(room) = &self.open_room {
+            frame["conversation"] = json!(room);
+            if let Some(o) = frame.as_object_mut() {
+                o.remove("agent");
+            }
+        } else if let Some(task) = self.task_open() {
             frame["conversation"] = json!(task.conversation);
         } else if let Some(branch) = &self.open_branch {
             frame["conversation"] = json!(branch);
@@ -11131,6 +11206,7 @@ mod tests {
             live,
             queued: false,
             from_agent: None,
+            routed: None,
             routine: String::new(),
             routine_name: String::new(),
             deleted: false,
@@ -11696,6 +11772,7 @@ mod tests {
             live: false,
             queued: false,
             from_agent: None,
+            routed: None,
             routine: String::new(),
             routine_name: String::new(),
             deleted: false,
@@ -11738,6 +11815,7 @@ mod tests {
             live,
             queued: false,
             from_agent: None,
+            routed: None,
             routine: String::new(),
             routine_name: String::new(),
             deleted: false,
@@ -12166,6 +12244,7 @@ mod tests {
         let person = |text: &str, from: Option<&str>| Message {
             role: "person".into(),
             from_agent: from.map(str::to_string),
+            routed: None,
             routine: String::new(),
             routine_name: String::new(),
             deleted: false,
