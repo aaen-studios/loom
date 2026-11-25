@@ -120,6 +120,8 @@ enum Tokens {
         static let ok: UInt32 = 0x6ccf9a
         static let bad: UInt32 = 0xff7a6b
         static let warn: UInt32 = 0xf2a77a
+        static let find: UInt32 = 0x3b3417
+        static let findCurrent: UInt32 = 0x94781a
     }
 
     enum ColorLight {
@@ -140,6 +142,8 @@ enum Tokens {
         static let ok: UInt32 = 0x1f8a55
         static let bad: UInt32 = 0xd4442f
         static let warn: UInt32 = 0xc2621f
+        static let find: UInt32 = 0xfbefb4
+        static let findCurrent: UInt32 = 0xf2cc3d
     }
 
     enum ThreadColorDark {

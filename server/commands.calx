@@ -32,7 +32,7 @@ const COMMANDS: [Command; 94] = [
     Command { name: "conversation.move", args: "conversation, program", does: "Moves a chat to another agent program, which starts with loom's summary of it." },
     Command { name: "conversation.delete", args: "conversation", does: "Deletes a conversation and its messages." },
     Command { name: "messages.list", args: "conversation, before? (a message id), limit? (up to 100)", does: "A conversation's messages, newest last." },
-    Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), limit?", does: "Finds words in every chat, and in file names." },
+    Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), conversation?, limit?", does: "Finds words in every chat, and in file names, or in one chat, oldest first." },
     Command { name: "message.pin", args: "message, pinned? (false unpins it)", does: "Pins a message in its conversation, for every device to see." },
     Command { name: "messages.pinned", args: "conversation", does: "The pinned messages in a conversation, the newest pin first." },
     Command { name: "message.delete", args: "message", does: "Deletes a message from its chat, leaving a mark where it was, for every device; its agent is told it's gone." },
