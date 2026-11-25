@@ -988,6 +988,14 @@ impl Store {
         return Obj.new().i("memories", memories).i("skills", skills).i("tables", tables).i("routines", routines).i("tokens_today", today).i("tokens_month", this_month).done()
     }
 
+    // What a group chat used since `since`: the tokens of its members' turns
+    // there, and of the router's picks for its messages, kept as "route:RUN".
+    pub fn room_usage(self, user: String, conversation: String, since: i64) -> (i64, i64) ! Error {
+        let said = try self.count("SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = ? AND r.conversation = ? AND u.at >= ?", [t(user.copy()), t(conversation.copy()), Value.Int(since)])
+        let picked = try self.count("SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = substr(u.run, 7) WHERE u.user = ? AND u.run LIKE 'route:%' AND r.conversation = ? AND u.at >= ?", [t(user), t(conversation), Value.Int(since)])
+        return (said, picked)
+    }
+
     // The one number a query gives.
     fn count(self, sql: str, args: List<Value>) -> i64 ! Error {
         let row = try self.db.query_one(String(sql), args)
@@ -3909,4 +3917,21 @@ fn first_words(words: String, most: usize) -> String {
         cut.push(r)
     }
     return cut
+}
+
+@test
+fn a_group_chat_s_usage_has_its_turns_and_the_router_s_picks() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    s.add_run(a.id.copy(), String("run_1"), String("c_room"))!
+    s.add_run(a.id.copy(), String("run_2"), String("c_room"))!
+    s.add_run(a.id.copy(), String("run_3"), String("c_own"))!
+    s.add_usage(a.id.copy(), String("fake"), String("run_1"), 50, 50, 100, false)!
+    s.add_usage(a.id.copy(), String("fake"), String("run_2"), 20, 20, 40, false)!
+    s.add_usage(a.id.copy(), String("fake"), String("run_3"), 500, 500, 1000, false)!
+    s.add_usage(a.id.copy(), String("fake"), String("route:run_1"), 6, 1, 7, false)!
+    s.add_usage(a.id.copy(), String("fake"), String("route:run_2"), 4, 1, 5, false)!
+    assert(s.room_usage(a.id.copy(), String("c_room"), 0)! == (140, 12))
+    assert(s.room_usage(a.id.copy(), String("c_own"), 0)! == (1000, 0))
+    assert(s.room_usage(a.id.copy(), String("c_room"), now() + 60000)! == (0, 0))
 }

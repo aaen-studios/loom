@@ -12,7 +12,7 @@ module tests.protocol.rooms
 //     calx tests/protocol/rooms.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, bool_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check}
 
@@ -38,6 +38,11 @@ fn next_turn(app: mut Session, conversation: String) -> (Json, Json) ! Error {
 fn say(app: mut Session, conversation: String, cid: str, text: String) -> (Json, Json) ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
     return try next_turn(mut app, conversation)
+}
+
+// A number in a command's value, or 0.
+fn num(value: Json, key: str) -> i64 {
+    return int_at(value, key) ?? 0
 }
 
 fn by(m: Json) -> String {
@@ -98,6 +103,28 @@ fn run(i: Instance) ! Error {
     try check(str_at(handing.copy(), "agent") == some(ledger.copy()) and reply_text(handing).contains("hand_off: Hermes answers it"), "a member hands the message on")
     let (_, handed) = try next_turn(mut app, money.copy())
     try check(str_at(handed.copy(), "agent") == some(hermes.copy()) and by(handed.copy()) == "handoff" and str_at(at(handed.copy(), "routed"), "from") == some(ledger.copy()) and str_at(at(handed, "routed"), "said") == some(String("handed off by Ledger")), "and the next member answers it, handed off by the first")
+
+    // --- A member's fresh session goes on from its part, by who said each ---
+    let (_, full) = try say(mut app, money.copy(), "m_9", String("ROUTE:Hermes nearly full\n/usage 90 100"))
+    try check(str_at(full, "agent") == some(hermes.copy()), "a member fills its session")
+    let (_, fresh) = try say(mut app, money.copy(), "m_10", String("ROUTE:Hermes and now?\n/context"))
+    let told = reply_text(fresh.copy())
+    try check(str_at(fresh, "agent") == some(hermes.copy()) and told.contains("Your part in this group chat goes on from an earlier session of yours, which grew too long"), "its next message goes to a fresh session of its own there")
+    try check(told.contains("Ledger: @ledger and the budget?") and told.contains("You: ROUTE:Hermes nearly full") and not told.contains("You: @ledger"), "where another member's replies are by its name, and its own are its")
+    var marked = false
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(at(f.copy(), "message"), "role") == some(String("loom")) and str_at(at(f, "message"), "conversation") == some(money.copy()) { marked = true }
+    }
+    try check(not marked, "and the group chat has no line for one member's fresh session")
+
+    // --- Its usage has the router's ---
+    _ = try say(mut app, money.copy(), "m_11", String("ROUTE:Ledger count this\n/tokens 100"))
+    let used = at(try app.cmd("q_7", "room.summary", Obj.new().s("conversation", money.copy()).done()), "value")
+    try check(num(used.copy(), "tokens_today") >= 100 and num(used.copy(), "tokens_month") >= num(used.copy(), "tokens_today"), "a group chat's usage counts its members' turns there")
+    try check(num(used.copy(), "router_today") >= 12 * 5 and num(used.copy(), "router_month") >= num(used.copy(), "router_today"), "and the router's picks for it, apart")
+    let ledger_own = str_at(at(try app.cmd("q_13", "conversation.create", Obj.new().s("agent", ledger.copy()).done()), "value"), "conversation") ?? String()
+    let in_own_chat = try app.cmd("q_14", "room.summary", Obj.new().s("conversation", ledger_own).done())
+    try check(str_at(at(in_own_chat, "error"), "code") == some(String("bad_request")), "an agent's own chat has no group chat's usage")
 
     // --- One agent's chat never routes, and pins stay in their chat ---
     let single = str_at(at(try app.cmd("q_8", "conversation.create", Obj.new().s("agent", casper.copy()).done()), "value"), "conversation") ?? String()

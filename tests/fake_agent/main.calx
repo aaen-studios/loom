@@ -101,7 +101,8 @@ module tests.fake_agent.main
 // the member a "ROUTE:NAME" in the message names, else the one a correction
 // that shares a word of four letters or more went to, else one whose `for`
 // shares one, else the one that answered last, else the first, and says
-// {"agent": NAME, "why": "fake pick"}.
+// {"agent": NAME, "why": "fake pick"}, or with "WHY:UPTIME" in the message,
+// "why": "up MS ms", how long ago the program started; and reports 12 tokens.
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
@@ -939,7 +940,7 @@ impl Agent {
             text = if text.len() > 0 { "{first}\n{text}" } else { first }
         }
         // Asked to pick for a group chat, it answers as a router would.
-        if context.contains("[loom: route]") { text = route_pick(context.copy()) }
+        if context.contains("[loom: route]") { text = route_pick(context.copy(), "up {unsafe { Instant.now() }.nanos_since(a.born) / 1000000} ms") }
         var last_used: i64 = 0
         for step in script(text) {
             match step {
@@ -1284,8 +1285,10 @@ fn text_of(j: Json, key: str) -> String {
 // (a "[loom: route]" block with the chat as JSON): "ROUTE:NAME" in the
 // message picks NAME, member or not; else a correction kept for words like
 // the message's; else a member whose "for" shares a word with it; else the
-// one that answered last, else the first member. As JSON, one line.
-fn route_pick(context: String) -> String {
+// one that answered last, else the first member. As JSON, one line, why
+// "fake pick", or with "WHY:UPTIME" in the message, `up` ("up MS ms", how long
+// ago the program started). Each pick reports 12 tokens.
+fn route_pick(context: String, up: String) -> String {
     let start = context.find("[loom: route]") ?? 0
     let rest = context[start..].copy()
     let open = rest.find("\n\n\{") ?? 0
@@ -1318,8 +1321,8 @@ fn route_pick(context: String) -> String {
     if pick.len() == 0 { pick = first }
     var o = LinkedMap<String, Json>()
     o.insert("agent", js(pick))
-    o.insert("why", js(String("fake pick")))
-    return "/say {Json.Object(o)}"
+    o.insert("why", js(if message.contains("WHY:UPTIME") { up.copy() } else { String("fake pick") }))
+    return "/say {Json.Object(o)}\n/tokens 12"
 }
 
 fn method(m: Json) -> String {
