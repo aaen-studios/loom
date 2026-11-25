@@ -1,0 +1,565 @@
+module server.rooms
+
+// Group chats (PLAN.md, "Group chats"): chats where several of the person's
+// agents take part, and a router picks which one answers each message. What's
+// here only reads and makes JSON and text: a room as it's kept, its members,
+// the pick a mention makes, the router's prompt and how its answer is read,
+// the fallback when it names no one, the corrections kept for a chat, and what
+// the agent that answers is told of what was said. The instance does the rest,
+// with the store and the agent programs.
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, bool_at, str_at}
+
+// The most corrections a chat keeps, the newest.
+pub const CORRECTIONS_MOST: usize = 20
+// The most of a message a correction keeps, in bytes.
+pub const CORRECTION_TEXT_MOST: usize = 300
+// How long a "what I'm for" line may be, in characters.
+pub const FOR_MOST: usize = 200
+// How long a group chat's name may be, in characters.
+pub const NAME_MOST: usize = 80
+// The chat's newest messages the router reads, and how much of each.
+pub const RECENT_MOST: usize = 8
+const RECENT_TEXT_MOST: usize = 400
+// What the agent that answers is given of what was said since it last did.
+pub const SAID_MESSAGES_MOST: usize = 40
+pub const SAID_BYTES_MOST: usize = 24000
+// How many times a message is handed on, at most.
+pub const HANDOFFS_MOST: usize = 3
+// How long the router has to pick, in milliseconds.
+pub const PICK_MS: i64 = 8000
+// Picks one router session takes before the next starts a fresh one.
+pub const PICKS_PER_SESSION: i64 = 20
+// The model the router is set to until the person picks another.
+pub const ROUTER_MODEL: str = "haiku"
+// Everyone's name, until the person renames it.
+pub const EVERYONE: str = "Everyone"
+
+// `text`, trimmed and on one line, cut at `most` bytes with "…".
+pub fn cut(text: String, most: usize) -> String {
+    var out = String()
+    for r in text.trim().runes() {
+        if out.len() >= most {
+            out.push_str("…")
+            break
+        }
+        out.push(if r == '\n' or r == '\r' or r == '\t' { ' ' } else { r })
+    }
+    return out
+}
+
+// An agent's "what I'm for", from its instructions as it starts: their first
+// line that isn't a heading, a rule or a fence, without a list's mark or
+// Markdown's emphasis, FOR_MOST characters at most.
+pub fn for_line(instructions: String) -> String {
+    for raw in instructions.split("\n") {
+        var line = raw.trim().copy()
+        if line.len() == 0 or line.starts_with("#") or line.starts_with("```") or line.starts_with("---") or line.starts_with("<") { continue }
+        for mark in ["- ", "* ", "> ", "+ "] {
+            if line.starts_with(mark) { line = line[2..].trim().copy() }
+        }
+        line = line.replace(String("**"), String()).replace(String("__"), String())
+        if line.len() == 0 { continue }
+        var out = String()
+        var n: usize = 0
+        for r in line.runes() {
+            if n >= FOR_MOST { break }
+            out.push(r)
+            n += 1
+        }
+        return out.trim().copy()
+    }
+    return String()
+}
+
+// An agent's "what I'm for": its own, or else the start of its instructions.
+pub fn for_of(agent: Json) -> String {
+    let its = (str_at(agent.copy(), "for") ?? String()).trim().copy()
+    if its.len() > 0 { return its }
+    return for_line(str_at(agent, "instructions") ?? String())
+}
+
+// The ids in a JSON array of strings, each once, in order.
+pub fn ids_in(j: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(list) = j {
+        for v in list {
+            if let id = v.as_str() {
+                if id.len() > 0 and not out.contains(id.copy()) { out.push(id) }
+            }
+        }
+    }
+    return out
+}
+
+pub fn ids_json(ids: List<String>) -> Json {
+    var out = List<Json>()
+    for id in ids { out.push(Json.Str(id.copy())) }
+    return Json.Array(out)
+}
+
+// A room's members as they are now: Everyone's are all the person's agents
+// (`all`, their ids); another's, those it names that are still there.
+pub fn members_of(room: Json, all: List<String>) -> List<String> {
+    if bool_at(room.copy(), "everyone") ?? false { return all.copy() }
+    var out = List<String>()
+    for id in ids_in(at(room, "members")) {
+        if all.contains(id.copy()) { out.push(id.copy()) }
+    }
+    return out
+}
+
+// A member, as the router and the agents are told of it.
+pub struct Member {
+    pub id: String
+    pub name: String
+    pub for_line: String
+    pub skills: List<String>
+    pub mcp: List<String>
+}
+
+// The member called `name`, in any case, or with that id.
+pub fn member_named(members: List<Member>, name: String) -> String? {
+    let wanted = name.trim().trim_prefix("@").trim().to_lower_root()
+    if wanted.len() == 0 { return none }
+    for m in members {
+        if m.id == name.trim() or m.name.trim().to_lower_root() == wanted { return some(m.id.copy()) }
+    }
+    return none
+}
+
+fn word_char(b: u8) -> bool {
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or b == 95 or b >= 128
+}
+
+// The first member the message mentions: as a link the composer made,
+// `[@Hermes](loom:agent/a_5)`, or `@Hermes` typed, its name ending where a
+// word does. Mentions of agents that aren't members don't count.
+pub fn mentioned(text: String, members: List<Member>) -> String? {
+    var best: (usize, String)? = none
+    // Links first: they name the agent by its id.
+    var rest = text.copy()
+    var offset: usize = 0
+    loop {
+        let open = rest.find("](loom:agent/") else break
+        let close = rest[open..].find(")") else break
+        let id = rest[open + 13..open + close].copy()
+        for m in members.copy() {
+            if m.id == id {
+                if best == none { best = some((offset + open, id.copy())) }
+            }
+        }
+        offset += open + close + 1
+        rest = rest[open + close + 1..].copy()
+    }
+    // Then names typed after @.
+    let lower = text.to_lower_root()
+    let bytes = lower.to_bytes()
+    for m in members {
+        let name = m.name.trim().to_lower_root()
+        if name.len() == 0 { continue }
+        let wanted = "@{name}"
+        var from: usize = 0
+        while from < lower.len() {
+            let found = lower[from..].find(wanted.copy()) else break
+            let start = from + found
+            let end = start + wanted.len()
+            let before_ok = start == 0 or not word_char(bytes[start - 1])
+            let after_ok = end >= bytes.len() or not word_char(bytes[end])
+            // In a link the composer made, it's counted as the link.
+            let in_link = end < bytes.len() and bytes[end] == 93
+            if before_ok and after_ok and not in_link {
+                let take = match best.copy() {
+                    some((at_byte, _)) => start < at_byte,
+                    none => true,
+                }
+                if take { best = some((start, m.id.copy())) }
+                break
+            }
+            from = end
+        }
+    }
+    if let (_, id) = best { return some(id) }
+    return none
+}
+
+// Who a message goes to when the router names no one: the chat's default
+// agent, the one that answered last, or its first member.
+pub fn fallback(default: String, last: String, members: List<String>) -> String {
+    if default.len() > 0 and members.contains(default.copy()) { return default.copy() }
+    if last.len() > 0 and members.contains(last.copy()) { return last.copy() }
+    if members.len() > 0 { return members[0].copy() }
+    return String()
+}
+
+fn names_json(list: List<String>) -> Json {
+    var out = List<Json>()
+    for n in list { out.push(Json.Str(n.copy())) }
+    return Json.Array(out)
+}
+
+// The router's prompt: what it's for and its rules, then as JSON the members,
+// who answered last, the chat's newest messages, the corrections kept for
+// it, and the message. `recent` is (who, text) oldest first, `examples`
+// (text, the member's name it should go to).
+pub fn route_prompt(room_name: String, members: List<Member>, last: String, recent: List<(String, String)>, examples: List<(String, String)>, message: String) -> String {
+    var ms = List<Json>()
+    for m in members {
+        ms.push(Obj.new().s("name", m.name.copy()).s("for", m.for_line.copy()).j("skills", names_json(m.skills.copy())).j("mcp", names_json(m.mcp.copy())).done())
+    }
+    var rs = List<Json>()
+    for (who, said) in recent {
+        rs.push(Obj.new().s("who", who.copy()).s("text", cut(said.copy(), RECENT_TEXT_MOST)).done())
+    }
+    var es = List<Json>()
+    for (said, to) in examples {
+        es.push(Obj.new().s("text", said.copy()).s("to", to.copy()).done())
+    }
+    let given = Obj.new().s("chat", room_name).j("members", Json.Array(ms)).s("last", last).j("recent", Json.Array(rs)).j("examples", Json.Array(es)).s("message", cut(message, 2000)).done()
+    return "[loom: route] You pick which agent answers a message in a group chat, where a person talks with several of their agents. Pick exactly one of the members, always: never ask the person, and never answer the message yourself. Keep a follow-up with the agent that answered last (\"last\") until the subject clearly changes. The examples are messages the person sent to another agent than the one picked: follow them for messages like them. If you're unsure, pick your best guess. This pick stands alone: earlier ones in this conversation don't count. Answer with only JSON, \{\"agent\": \"NAME\", \"why\": \"a few words\"\}, the why at most five words, such as \"money question\".\n\n{given}"
+}
+
+// The router's pick in what it answered: the first JSON object in its words
+// that names a member, and its why (cut to a few words), or none.
+pub fn parse_pick(said: String, members: List<Member>) -> (String, String)? {
+    var rest = said.copy()
+    loop {
+        let open = rest.find("\{") else return none
+        let close = rest[open..].find("\}") else return none
+        let piece = rest[open..open + close + 1].copy()
+        if let ok(j) = parse(piece) {
+            if let name = str_at(j.copy(), "agent") {
+                if let id = member_named(members.copy(), name) {
+                    return some((id, cut(str_at(j, "why") ?? String(), 60)))
+                }
+            }
+        }
+        rest = rest[open + 1..].copy()
+    }
+}
+
+// The corrections a chat keeps, with `made` added at the end, and only the
+// newest CORRECTIONS_MOST. One for the same words as an older one takes its place.
+pub fn corrected(kept: Json, made: Json) -> Json {
+    var out = List<Json>()
+    let words = str_at(made.copy(), "text") ?? String()
+    if let Json.Array(list) = kept {
+        for c in list {
+            if str_at(c.copy(), "text") == some(words.copy()) { continue }
+            out.push(c.copy())
+        }
+    }
+    out.push(made.copy())
+    while out.len() > CORRECTIONS_MOST { _ = out.remove(0) }
+    return Json.Array(out)
+}
+
+// The corrections without the one with `id`, and whether it was there.
+pub fn forgotten(kept: Json, id: String) -> (Json, bool) {
+    var out = List<Json>()
+    var found = false
+    if let Json.Array(list) = kept {
+        for c in list {
+            if str_at(c.copy(), "id") == some(id.copy()) {
+                found = true
+                continue
+            }
+            out.push(c.copy())
+        }
+    }
+    return (Json.Array(out), found)
+}
+
+// What a message's words are, as the chat reads them: its text blocks that
+// aren't a subagent's.
+pub fn words_of(m: Json) -> String {
+    var said = String()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("text")) and str_at(b.copy(), "parent") == none {
+                if said.len() > 0 { said.push_str("\n") }
+                said.push_str(str_at(b, "text") ?? String())
+            }
+        }
+    }
+    return said.trim().copy()
+}
+
+// Who said a message, as an agent in the chat is told: "Your person", "You",
+// or the other member's name. `names` is (id, name).
+pub fn who_said(m: Json, me: String, names: List<(String, String)>) -> String {
+    if str_at(m.copy(), "role") != some(String("agent")) { return String("Your person") }
+    let id = str_at(m, "agent") ?? String()
+    if id == me { return String("You") }
+    for (k, n) in names {
+        if k == id { return n.copy() }
+    }
+    return String("Another agent")
+}
+
+// What was said in the chat since `me` last answered there, from its
+// messages oldest first, each "WHO: WORDS", within SAID_MESSAGES_MOST and
+// SAID_BYTES_MOST, the oldest left out first. `upto`, the message being
+// answered, and what came after it, aren't in it: its prompt has it.
+pub fn said_since(messages: List<Json>, me: String, upto: String, names: List<(String, String)>) -> String {
+    var since = List<Json>()
+    for m in messages {
+        if upto.len() > 0 and str_at(m.copy(), "id") == some(upto.copy()) { break }
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "agent") == some(me.copy()) {
+            since = List<Json>()
+            continue
+        }
+        since.push(m.copy())
+    }
+    var lines = List<String>()
+    for m in since {
+        let words = words_of(m.copy())
+        if words.len() == 0 { continue }
+        lines.push("{who_said(m, me.copy(), names.copy())}: {cut_lines(words, 1500)}")
+    }
+    while lines.len() > SAID_MESSAGES_MOST { _ = lines.remove(0) }
+    var text = lines.join("\n\n")
+    while text.len() > SAID_BYTES_MOST and lines.len() > 1 {
+        _ = lines.remove(0)
+        text = lines.join("\n\n")
+    }
+    return text
+}
+
+// `text`, trimmed, cut at `most` bytes with "…", keeping its lines.
+fn cut_lines(text: String, most: usize) -> String {
+    var out = String()
+    for r in text.trim().runes() {
+        if out.len() >= most {
+            out.push_str("…")
+            break
+        }
+        out.push(r)
+    }
+    return out
+}
+
+// The line over a reply, after the agent's name: why it answers.
+pub fn said_of(by: str, why: String, from_name: String) -> String {
+    if by == "mention" { return String("you asked") }
+    if by == "person" { return String("you picked") }
+    if by == "handoff" { return "handed off by {from_name}" }
+    if by == "default" { return if why.len() > 0 { why.copy() } else { String("best guess") } }
+    return why.copy()
+}
+
+// A reply's `routed`: how its agent was picked, why, the words its line says,
+// and for a handoff the agent that handed it on.
+pub fn routed(by: str, why: String, from: String, from_name: String) -> Json {
+    var o = Obj.new().s("by", String(by)).s("why", why.copy()).s("said", said_of(by, why, from_name))
+    if from.len() > 0 { o = o.s("from", from) }
+    return o.done()
+}
+
+// A room as `room.create` takes it, checked: the name, members (two or more,
+// of `all`), colour and default. Gives the room, or why it can't be.
+pub fn room_made(args: Json, all: List<String>, color_ok: fn(String) -> bool) -> (Json, String) {
+    let name = (str_at(args.copy(), "name") ?? String()).trim().copy()
+    if name.len() == 0 { return (Json.Null, String("A group chat needs a name.")) }
+    if chars(name) > NAME_MOST { return (Json.Null, "A group chat's name is {NAME_MOST} characters at most.") }
+    let members = ids_in(at(args.copy(), "members"))
+    for id in members.copy() {
+        if not all.contains(id.copy()) { return (Json.Null, "not_found:There's no agent {id}.") }
+    }
+    if members.len() < 2 { return (Json.Null, String("A group chat has two members or more.")) }
+    let color = (str_at(args.copy(), "color") ?? String()).trim().copy()
+    if color.len() > 0 and not color_ok(color.copy()) { return (Json.Null, "{color} isn't one of the thread colours, or #rrggbb.") }
+    let default = str_at(args, "default") ?? String()
+    if default.len() > 0 and not members.contains(default.copy()) { return (Json.Null, String("The default agent is one of the members.")) }
+    return (Obj.new().s("name", name).j("members", ids_json(members)).s("color", color).s("default", default).j("corrections", Json.Array(List<Json>())).done(), String())
+}
+
+// `room` with what room.update's `args` change, checked as `made` checks a new
+// one. Everyone's members don't change.
+pub fn room_changed(room: Json, args: Json, all: List<String>, color_ok: fn(String) -> bool) -> (Json, String) {
+    let everyone = bool_at(room.copy(), "everyone") ?? false
+    var o = Obj.new()
+    if let Json.Object(m) = room.copy() { o.m = m }
+    if let name = str_at(args.copy(), "name") {
+        let n = name.trim().copy()
+        if n.len() == 0 { return (Json.Null, String("A group chat needs a name.")) }
+        if chars(n) > NAME_MOST { return (Json.Null, "A group chat's name is {NAME_MOST} characters at most.") }
+        o.m.insert(String("name"), Json.Str(n))
+    }
+    var members = ids_in(at(room.copy(), "members"))
+    if at(args.copy(), "members") != Json.Null {
+        if everyone { return (Json.Null, String("not_allowed:Everyone has all your agents in it.")) }
+        members = ids_in(at(args.copy(), "members"))
+        for id in members.copy() {
+            if not all.contains(id.copy()) { return (Json.Null, "not_found:There's no agent {id}.") }
+        }
+        if members.len() < 2 { return (Json.Null, String("A group chat has two members or more.")) }
+        o.m.insert(String("members"), ids_json(members.copy()))
+    }
+    if let color = str_at(args.copy(), "color") {
+        let c = color.trim().copy()
+        if c.len() > 0 and not color_ok(c.copy()) { return (Json.Null, "{c} isn't one of the thread colours, or #rrggbb.") }
+        o.m.insert(String("color"), Json.Str(c))
+    }
+    if let default = str_at(args, "default") {
+        let in_it = if everyone { all.contains(default.copy()) } else { members.contains(default.copy()) }
+        if default.len() > 0 and not in_it { return (Json.Null, String("The default agent is one of the members.")) }
+        o.m.insert(String("default"), Json.Str(default))
+    }
+    // A default that has left the chat is passed over (`fallback`).
+    return (o.done(), String())
+}
+
+fn is_claude(name: String, source: String) -> bool {
+    return name.to_lower_root().contains("claude") or source.to_lower_root().contains("claude")
+}
+
+// The program the router runs on: the person's own pick, or their default
+// brain when it's Claude's, or else the first program that is, or else their
+// default brain. `programs` is each installed program's (name, registry id).
+pub fn router_program(picked: String, brain: String, programs: List<(String, String)>) -> String {
+    if picked.len() > 0 { return picked.copy() }
+    for (name, source) in programs.copy() {
+        if name == brain and is_claude(name.copy(), source.copy()) { return name.copy() }
+    }
+    for (name, source) in programs.copy() {
+        if is_claude(name.copy(), source.copy()) { return name.copy() }
+    }
+    if brain.len() > 0 { return brain.copy() }
+    if programs.len() > 0 { return programs[0].0.copy() }
+    return String()
+}
+
+fn member(id: str, name: str, does: str) -> Member {
+    return Member { id: String(id), name: String(name), for_line: String(does), skills: List<String>(), mcp: List<String>() }
+}
+
+fn agents() -> List<Member> {
+    return [member("a_1", "Ledger", "money, bills and the budget"), member("a_5", "Hermes", "mail and messages"), member("a_7", "Casper", "code")]
+}
+
+@test
+fn what_an_agent_is_for_comes_from_its_instructions() {
+    assert(for_line(String("# Ledger\n\n- **Keeps** the budget and the bills.\nMore")) == "Keeps the budget and the bills.")
+    assert(for_line(String("```\ncode\n```")) == "code")
+    assert(for_line(String("")) == "")
+    var long = String()
+    for _ in 0..300 { long.push_str("é") }
+    assert(chars(for_line(long)) == FOR_MOST)
+    assert(for_of(Obj.new().s("for", String(" mail ")).s("instructions", String("Other")).done()) == "mail")
+    assert(for_of(Obj.new().s("instructions", String("Other")).done()) == "Other")
+}
+
+@test
+fn a_mention_of_a_member_picks_it() {
+    assert(mentioned(String("@hermes can you look?"), agents()) == some(String("a_5")))
+    assert(mentioned(String("ask [@Casper](loom:agent/a_7) and @Ledger"), agents()) == some(String("a_7")))
+    assert(mentioned(String("@Ledger then [@Casper](loom:agent/a_7)"), agents()) == some(String("a_1")))
+    assert(mentioned(String("mail me@hermes.no"), agents()) == none)
+    assert(mentioned(String("@Hermesian"), agents()) == none)
+    // An agent that isn't a member doesn't count.
+    assert(mentioned(String("[@Nova](loom:agent/a_9) hi"), agents()) == none)
+    assert(mentioned(String("no one"), agents()) == none)
+}
+
+@test
+fn the_fallback_is_the_default_then_the_last_then_the_first() {
+    let members: List<String> = [String("a_1"), String("a_5")]
+    assert(fallback(String("a_5"), String("a_1"), members.copy()) == "a_5")
+    assert(fallback(String("a_9"), String("a_1"), members.copy()) == "a_1")
+    assert(fallback(String(), String("a_9"), members.copy()) == "a_1")
+    assert(fallback(String(), String(), List<String>()) == "")
+}
+
+@test
+fn the_router_s_pick_is_read_from_its_words_and_must_be_a_member() {
+    assert(parse_pick(String(#"Sure: {"agent": "hermes", "why": "mail question"}"#), agents()) == some((String("a_5"), String("mail question"))))
+    assert(parse_pick(String(#"{"agent": "Nova"} then {"agent": "Ledger", "why": "money"}"#), agents()) == some((String("a_1"), String("money"))))
+    assert(parse_pick(String("I can't tell."), agents()) == none)
+    assert(parse_pick(String(#"{not json}"#), agents()) == none)
+}
+
+@test
+fn the_prompt_has_the_members_the_examples_and_the_message() {
+    let p = route_prompt(String("Money"), agents(), String("Ledger"), [(String("Your person"), String("hi"))], [(String("what did the vps cost"), String("Casper"))], String("and in October?"))
+    assert(p.starts_with("[loom: route]"))
+    let json = p[(p.find("\n\n\{") ?? 0) + 2..].copy()
+    let j = parse(json)!
+    assert(str_at(j.copy(), "last") == some(String("Ledger")) and str_at(j.copy(), "message") == some(String("and in October?")))
+    assert("{at(j.copy(), "examples")}".contains("\"to\":\"Casper\""))
+    assert("{at(j, "members")}".contains("\"for\":\"mail and messages\""))
+}
+
+@test
+fn corrections_keep_the_newest_and_one_for_the_same_words() {
+    var kept = Json.Array(List<Json>())
+    for k in 0..25 {
+        kept = corrected(kept, Obj.new().s("id", "k_{k}").s("text", "words {k}").s("to", String("a_1")).done())
+    }
+    let Json.Array(list) = kept.copy() else return
+    assert(list.len() == CORRECTIONS_MOST and str_at(list[0].copy(), "id") == some(String("k_5")))
+    let again = corrected(kept, Obj.new().s("id", String("k_99")).s("text", String("words 10")).s("to", String("a_5")).done())
+    let Json.Array(list2) = again.copy() else return
+    assert(list2.len() == CORRECTIONS_MOST and str_at(list2[list2.len() - 1].copy(), "id") == some(String("k_99")))
+    let (less, found) = forgotten(again, String("k_99"))
+    let Json.Array(list3) = less else return
+    assert(found and list3.len() == CORRECTIONS_MOST - 1)
+}
+
+// A message `id` with `words`: the person's, or with `agent` that agent's reply.
+fn msg(id: str, agent: str, words: str) -> Json {
+    let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", String(words)).done()])
+    let o = Obj.new().s("id", String(id)).s("role", String(if agent.len() > 0 { "agent" } else { "person" }))
+    if agent.len() > 0 { return o.s("agent", String(agent)).j("blocks", blocks).done() }
+    return o.j("blocks", blocks).done()
+}
+
+@test
+fn what_was_said_since_it_last_answered_is_marked_by_who_said_it() {
+    let names: List<(String, String)> = [(String("a_1"), String("Ledger")), (String("a_5"), String("Hermes"))]
+    let msgs: List<Json> = [msg("m1", "", "old"), msg("m2", "a_5", "mine"), msg("m3", "", "the bill?"), msg("m4", "a_1", "paid"), msg("m5", "", "now mail")]
+    assert(said_since(msgs.copy(), String("a_5"), String("m5"), names.copy()) == "Your person: the bill?\n\nLedger: paid")
+    assert(said_since(msgs, String("a_7"), String(), names) == "Your person: old\n\nHermes: mine\n\nYour person: the bill?\n\nLedger: paid\n\nYour person: now mail")
+}
+
+@test
+fn a_reply_s_line_says_why_its_agent_answers() {
+    assert(str_at(routed("router", String("money question"), String(), String()), "said") == some(String("money question")))
+    assert(str_at(routed("handoff", String("mail"), String("a_1"), String("Ledger")), "said") == some(String("handed off by Ledger")))
+    assert(str_at(routed("mention", String(), String(), String()), "said") == some(String("you asked")))
+    assert(str_at(routed("default", String(), String(), String()), "said") == some(String("best guess")))
+}
+
+@test
+fn the_router_runs_on_claude_unless_the_person_picks() {
+    let programs: List<(String, String)> = [(String("codex"), String("codex-acp")), (String("claude"), String("claude-acp"))]
+    assert(router_program(String("codex"), String("claude"), programs.copy()) == "codex")
+    assert(router_program(String(), String("codex"), programs.copy()) == "claude")
+    assert(router_program(String(), String("codex"), [(String("codex"), String())]) == "codex")
+    assert(router_program(String(), String(), List<(String, String)>()) == "")
+}
+
+fn yes(_c: String) -> bool { return true }
+
+@test
+fn a_room_is_checked_as_it_s_made_and_changed() {
+    let all: List<String> = [String("a_1"), String("a_5"), String("a_7")]
+    let (r, why) = room_made(Obj.new().s("name", String(" Money ")).j("members", ids_json([String("a_1"), String("a_5")])).s("default", String("a_5")).done(), all.copy(), yes)
+    assert(why.len() == 0 and str_at(r.copy(), "name") == some(String("Money")))
+    let (_, one) = room_made(Obj.new().s("name", String("X")).j("members", ids_json([String("a_1")])).done(), all.copy(), yes)
+    assert(one.len() > 0)
+    let (_, gone) = room_made(Obj.new().s("name", String("X")).j("members", ids_json([String("a_1"), String("a_9")])).done(), all.copy(), yes)
+    assert(gone.starts_with("not_found:"))
+    let (c, w) = room_changed(r, Obj.new().s("name", String("Bills")).j("members", ids_json([String("a_1"), String("a_7")])).done(), all.copy(), yes)
+    assert(w.len() == 0 and str_at(c.copy(), "name") == some(String("Bills")))
+    let everyone = Obj.new().b("everyone", true).s("name", String(EVERYONE)).done()
+    let (_, no) = room_changed(everyone, Obj.new().j("members", ids_json([String("a_1"), String("a_5")])).done(), all, yes)
+    assert(no.starts_with("not_allowed:"))
+}
+
+// How many characters `s` has.
+pub fn chars(s: String) -> usize {
+    var n: usize = 0
+    for _ in s.runes() { n += 1 }
+    return n
+}
