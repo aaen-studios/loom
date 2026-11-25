@@ -1,0 +1,119 @@
+module tests.protocol.attach
+
+// Files an agent puts in its reply, and pictures a reply names (PLAN.md, "Files and
+// images" and "Mentions"): attach_files puts files from the agent's folder in its
+// reply as file blocks, kept as the person's; a file the answer names that the agent
+// made that turn, by its whole path, a file:// link or in `code`, goes in by itself,
+// once; and a picture a reply names that's there from before comes with a thumbnail,
+// kept as the person's file, without the picture itself.
+//
+//     calx tests/protocol/attach.calx
+import std.fs
+import std.image.{Color, Image, Kind}
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check, fetch}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// The names of the message's file blocks, in order.
+fn files_in(m: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(blocks) = at(m, "blocks") {
+        for b in blocks {
+            if str_at(b.copy(), "kind") == some(String("file")) { out.push(str_at(b, "name") ?? String()) }
+        }
+    }
+    return out
+}
+
+// The message's mention of the file at `path`, or null.
+fn mention(m: Json, path: str) -> Json {
+    if let Json.Array(list) = at(m, "mentions") {
+        for x in list {
+            if str_at(x.copy(), "path") == some(String(path)) { return x.copy() }
+        }
+    }
+    return Json.Null
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Maker")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    let mine = (try fs.absolute("{i.data}/agents/{agent}")).replace("\\", "/")
+    try fs.make_dir_all(mine.copy())
+    // What's there from before the turns.
+    try fs.write_text("{mine}/notes.md", String("# Notes"))
+    try fs.write("{mine}/old.png", Image.new(1024, 512, Kind.Rgb, Color.rgb(30, 160, 90)).encode_png())
+    // Older than the turns by more than the clock's slack (ANSWER_FILE_CLOCK_MS).
+    unsafe { sleep(300000000) }
+
+    // --- What its answer names ---
+    let made_now = try say(mut app, chat.copy(), "m_1", "/write {mine}/out/report.md # Report\n/picture {mine}/out/chart.png 40 30\n/write {mine}/out/main.rs fn main() \{\}\nMade `out/report.md`, {mine}/out/chart.png and `out/main.rs`, from `notes.md`.")
+    let names = files_in(made_now.copy())
+    try check(names.len() == 2 and names[0] == "report.md" and names[1] == "chart.png", "the files of an agent's kinds that its answer names and it made this turn go in its reply")
+    try check(not names.contains(String("notes.md")) and not names.contains(String("main.rs")), "and not one from before, or code")
+    let linked = try say(mut app, chat.copy(), "m_2", "/write {mine}/out/data.csv a,b\nIt's at [data.csv](file://{mine}/out/data.csv).")
+    try check(files_in(linked) == [String("data.csv")], "a file:// link names one too")
+
+    // --- attach_files ---
+    let attached = try say(mut app, chat.copy(), "m_3", String(#"/mcp attach_files {"paths":["old.png","notes.md","gone.pdf"]}"#))
+    let said = reply_text(attached.copy())
+    try check(said.starts_with("attach_files: Attached old.png, notes.md to your reply") and said.contains("Not attached: gone.pdf isn't a file in your folder or the shared folder"), "attach_files puts files from the agent's folder in its reply, and says which it couldn't")
+    try check(files_in(attached.copy()) == [String("old.png"), String("notes.md")], "as file blocks")
+    let outside = try say(mut app, chat.copy(), "m_4", String(#"/mcp attach_files {"paths":["../../loom.db"]}"#))
+    try check(reply_text(outside.copy()).starts_with("attach_files failed: Nothing was attached") and files_in(outside).len() == 0, "and refuses a file outside its folders")
+    let once = try say(mut app, chat.copy(), "m_5", "/picture {mine}/new.png 12 12\n/mcp attach_files \{\"paths\":[\"new.png\"]\}\nHere it is: `new.png`.")
+    try check(files_in(once.copy()) == [String("new.png")], "a file attach_files put in the reply isn't put in again for being named")
+    try check(at(mention(once, "new.png"), "thumb") == Json.Null, "nor shown again as a picture where it's named")
+
+    // --- A picture named from before ---
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_6")).s("conversation", chat.copy()).s("text", String("Look at `old.png`.")).done())
+    let named = try reply_in(mut app, chat.copy())
+    try check(files_in(named.copy()).len() == 0 and str_at(mention(named.copy(), "old.png"), "mime") == some(String("image/png")), "a picture a reply names from before isn't put in it, and its mention says it's a picture")
+    let id = str_at(named, "id") ?? String()
+    var thumb = String()
+    while thumb.len() == 0 {
+        let updated = try app.until("event", "message.updated")
+        let m = at(updated, "message")
+        if str_at(m.copy(), "id") == some(id.copy()) { thumb = str_at(mention(m, "old.png"), "thumb") ?? String() }
+    }
+    let (status, mime, body) = try fetch(i.base.copy(), i.token.copy(), "/files/{thumb}")
+    let small = Image.decode(body.copy())!
+    try check(status == 200 and mime == "image/jpeg" and small.width() == 512 and small.height() == 256, "its thumbnail comes after, kept as the person's file, and the picture itself isn't")
+    let again = try say(mut app, chat.copy(), "m_7", String("Still `old.png`."))
+    try check(str_at(mention(again, "old.png"), "thumb") == some(thumb.copy()), "named again, it has the thumbnail at once")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nattach: all good")
+}
