@@ -107,6 +107,18 @@ export function play(app: HTMLElement) {
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
 
+	// How full Juniper's session context is, by Send, in thousands of tokens of its 200k: it
+	// fills a little with each turn (app.rs, meter::ring; model.rs, ContextFill).
+	const ring = app.querySelector<HTMLElement>('[data-context]')!;
+	function context(used: number) {
+		const size = 200;
+		const percent = Math.floor((used * 100) / size);
+		ring.querySelector<SVGElement>('.fill')!.style.setProperty('--fill', String(percent));
+		ring.classList.toggle('warn', percent >= 75 && percent < 90);
+		ring.classList.toggle('bad', percent >= 90);
+		ring.title = `Context ${percent}%, ${used}k of ${size}k. A fresh session starts at 80%.`;
+	}
+
 	// Replying (PLAN.md, "Replying to a message"): a message's Reply, or words selected in it,
 	// put a bar over the composer's words; the message goes with a quote over its bubble, which
 	// goes back to the original and lights it (app.rs, reply_bar, quote_view, jump_to).
@@ -569,6 +581,7 @@ export function play(app: HTMLElement) {
 	async function scene(id: number) {
 		waitingOn('Juniper', false);
 		cleared();
+		context(82);
 		await wait(900, id);
 		// It replies to the earlier answer, from its Reply on hover.
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
@@ -631,6 +644,7 @@ export function play(app: HTMLElement) {
 			await stream(say, HELD, id);
 			finish(reply, say, steps, HELD);
 		}
+		context(92);
 		await wait(200, id);
 		mood('idle', replyThread);
 		preview('Juniper', '', 'idle');
@@ -666,6 +680,7 @@ export function play(app: HTMLElement) {
 		words(steps, ANSWER);
 		tool(steps, ASK)('done');
 		finish(reply, say, steps, SHIPPED);
+		context(92);
 		msgs.append(you, reply);
 		threadsIn(reply);
 		mood('idle');

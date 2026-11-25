@@ -2116,7 +2116,8 @@ final class Model {
         case .messages:
             moreMessages = f["more"].bool ?? false
             messagesCame = true
-            messages = items.filter { !routinePrompt($0) }.map(messageOf)
+            // Loom's own lines across the chat (a compaction, a fresh session) are the desktop's.
+            messages = items.filter { !routinePrompt($0) && $0["role"].text != "loom" }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.

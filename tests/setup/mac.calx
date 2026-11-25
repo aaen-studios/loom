@@ -10,7 +10,8 @@ module tests.setup.mac
 // the test's folder and updates put in on their own (prefs.json, auto_update). Then:
 //
 // 1. a release whose loom can't start: the new loom puts itself in place, starts, ends
-//    with an error, and the old loom goes back and starts again;
+//    with an error, and the old loom goes back and starts again, and with the broken
+//    release still the newest, it isn't put in again on its own;
 // 2. a release that starts: it stays, running, and the old bundle is cleared away.
 //
 // Each release's loom is the same program with its version changed, signed again; the
@@ -134,6 +135,13 @@ fn dmg(app: String, out: String) ! Error {
     try Command.new(calx()).args([String("scripts/mac.calx"), String("dmg"), app.copy(), out.copy()]).stdout(Stdio.Null).run()
 }
 
+/// Starts the loom at `app` in the menu bar, as at login, with its data in `data` and its
+/// releases from `base`, signed with `public`. What it says goes in app.log, which a
+/// failure prints.
+fn open_in_menu_bar(root: String, app: String, data: String, base: String, public: String) ! Error {
+    try Command.new(String("open")).args([String("-n"), String("--stderr"), "{root}/app.log", String("--env"), "LOOM_DATA={data}", String("--env"), "LOOM_UPDATE={base}/manifest.json", String("--env"), "LOOM_UPDATE_KEY={public}", app.copy(), String("--args"), String("--background")]).run()
+}
+
 /// Ends every loom from the bundle at `app`.
 fn stop(app: String) {
     match Command.new(String("pkill")).args([String("-f"), "{app}/Contents/MacOS/loom"]).output() {
@@ -198,9 +206,8 @@ fn run(root: String, given: String) ! Error {
     while base.ends_with("/") { base = base[..base.len() - 1].copy() }
     try release(served.copy(), BROKEN, "{root}/broken.dmg", key, base.copy())
 
-    // The old loom, in the menu bar, as at login. What it says goes in app.log, which a
-    // failure prints.
-    try Command.new(String("open")).args([String("-n"), String("--stderr"), "{root}/app.log", String("--env"), "LOOM_DATA={data}", String("--env"), "LOOM_UPDATE={base}/manifest.json", String("--env"), "LOOM_UPDATE_KEY={public}", app.copy(), String("--args"), String("--background")]).run()
+    // The old loom, in the menu bar, as at login.
+    try open_in_menu_bar(root.copy(), app.copy(), data.copy(), base.copy(), public.copy())
     let said = wait_for_log(data.copy(), String("so the old loom goes back"))
     try check(said, "a new loom that ends with an error is put back")
     // The old loom starts again from its place.
@@ -214,11 +221,40 @@ fn run(root: String, given: String) ! Error {
     }
     try check(back, "the old loom is in its place again, running")
 
+    // The old loom, with updates still going in on their own, finds the broken release
+    // the newest still, and leaves it: the update icon offers it, saying why.
+    let kept = match fs.read_text("{data}/update/failed.json") {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+    try check(kept.contains(#""version":"0.0.2-dev""#), "the release that didn't start is kept")
+    var skipped = false
+    for _ in 0..STEP_MS / 500 {
+        let app_said = match fs.read_text("{root}/app.log") {
+            ok(some(t)) => t,
+            _ => String(),
+        }
+        if app_said.contains("loom {BROKEN} didn't start the last time it went in") {
+            skipped = true
+            break
+        }
+        wait_ms(500)
+    }
+    try check(skipped, "the old loom finds it again, and says it isn't put in on its own")
+    // Long enough for a second try to have put itself in place and failed.
+    wait_ms(20000)
+    try check(log_of(data.copy()).split("so the old loom goes back").len() == 2, "it isn't tried again")
+    try check(running(app.copy()) and version_of(app.copy()) == OLD, "and the old loom runs on")
+
     // A release that starts: the old loom, started again, finds it and puts it in.
     let key2 = Ed25519Key.from_seed(bytes.from_hex(String(SEED)) ?? List<u8>()) else {
         fail "the test seed isn't a seed"
     }
     try release(served.copy(), NEW, "{root}/new.dmg", key2, base.copy())
+    // It looks every ten minutes, so it's started again, as at the next login, and
+    // looks ten seconds after.
+    stop(app.copy())
+    try open_in_menu_bar(root.copy(), app.copy(), data.copy(), base.copy(), public.copy())
     let started = wait_for_log(data.copy(), "loom {NEW} started")
     try check(started, "the new loom puts itself in place and starts")
     try check(version_of(app.copy()) == NEW, "the app in its place is loom 0.0.3-dev")
