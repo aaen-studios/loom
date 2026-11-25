@@ -138,6 +138,11 @@ fn run(i: Instance) ! Error {
 
     let shot = try say(mut app, conversation.copy(), "m_6", String("/mcp browser_screenshot"))
     try see(shot.starts_with("browser_screenshot: [image image/jpeg] Page: "), "browser_screenshot gives a picture", shot.copy())
+    // Kept for a while under a name, which attach_files puts in the reply.
+    let shot_said = if let k = shot.find("kept for a while as ") { shot[k + 20..].copy() } else { String() }
+    let shot_name = shot_said[..shot_said.find(":") ?? 0].copy()
+    let put = try say(mut app, conversation.copy(), "m_6b", "/mcp attach_files \{\"paths\":[\"{shot_name}\"]\}")
+    try see(shot_name.starts_with("browser-screenshot-") and put.starts_with("attach_files: Attached {shot_name} to your reply"), "and keeps it for attach_files to put in the reply", put.copy())
 
     // --- html_preview ---
     let card = String(#"<!doctype html><title>Card</title><h1>Hello</h1><script>console.log("drawn", 2); console.error("oops"); missing();</script>"#)
