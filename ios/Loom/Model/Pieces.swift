@@ -8,6 +8,9 @@ import Foundation
 enum PieceKind {
     static let attach = "loom-attach:"
     static let link = "loom-link:"
+    /// An emoji, built-in or one of the person's own, which goes as itself: the
+    /// character, or its token (PLAN.md, "Emoji").
+    static let emoji = "loom:emoji/"
 }
 
 /// A piece in the composer: an agent or a file mentioned (its `loom:` link), a file
@@ -17,6 +20,11 @@ enum PieceKind {
 struct Piece: Equatable, Sendable {
     var id: String
     var text: String
+}
+
+/// An emoji as a piece: what's sent, the character or the token.
+func emojiPiece(_ emoji: String) -> Piece {
+    Piece(id: PieceKind.emoji + emoji, text: emoji)
 }
 
 /// An attached file as a piece.
@@ -40,7 +48,9 @@ func composerText(_ parts: [Either]) -> String {
         case .words(let w):
             out += plainLinks(w)
         case .piece(let p):
-            if p.id.hasPrefix(PieceKind.attach) {
+            if p.id.hasPrefix(PieceKind.emoji) {
+                out += p.text
+            } else if p.id.hasPrefix(PieceKind.attach) {
                 out += "[\(p.text)]"
             } else if p.id.hasPrefix(PieceKind.link) {
                 out += String(p.id.dropFirst(PieceKind.link.count))

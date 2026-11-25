@@ -81,6 +81,11 @@ struct SettingsView: View {
                     Toggle(isOn: $vibrant) {
                         Text("Vibrant bubbles").font(Fonts.body).foregroundStyle(P.ink)
                     }
+                    NavigationLink {
+                        EmojiSettingsView()
+                    } label: {
+                        Text("Emoji").font(Fonts.body).foregroundStyle(P.ink)
+                    }
                 }
                 Section {
                     HStack {
@@ -109,6 +114,9 @@ struct SettingsView: View {
                 } footer: {
                     Text("The lock screen needs push on your instance")
                         .font(Fonts.caption)
+                }
+                Section("Credits") {
+                    EmojiCredits()
                 }
                 Section {
                     Button(role: .destructive) {

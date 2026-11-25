@@ -20,6 +20,10 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var approvals: [JSON] = []
     /// The agent list's folders.
     private var groups: [JSON] = Sample.groups
+    /// The person's own emoji, the ones deleted, and Recently used.
+    private var own: [JSON] = Sample.own
+    private var gone: [JSON] = []
+    private var recent: [String] = ["🎉", "👍", "😭"]
     private var stopped = false
 
     init(inbox: Inbox, signedIn: Bool = true) {
@@ -203,6 +207,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 }
             case "routine.run":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
+            case "emoji.add", "emoji.rename", "emoji.delete", "emoji.restore":
+                ownEmoji(f)
             case "agent.file":
                 let path = f["args"]["path"].text
                 let name = (path as NSString).lastPathComponent
@@ -210,6 +216,15 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["file": ["file": JSON(picture ? "sample-leaf" : "sample-\(name)"), "name": JSON(name), "mime": JSON(picture ? "image/png" : "text/markdown"), "size": 2_400]]])
             default:
                 break
+            }
+        case "emoji.typed", "emoji.find", "emoji.picker":
+            tell(emoji(f))
+        case "emoji.used":
+            recent.removeAll { $0 == f["emoji"].text }
+            recent.insert(f["emoji"].text, at: 0)
+        case "emoji.file":
+            if let path = Sample.picture("sample-leaf") {
+                tell(["t": "core.file", "id": f["id"], "path": JSON(path)])
             }
         case "file.get":
             if let path = Sample.picture(f["file"].text) {
@@ -220,6 +235,97 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         default:
             break
         }
+    }
+
+    /// What the core says to the composer's emoji (core/README.md), from the sample's few:
+    /// the suggestion row or a replacement for what's typed, the picker's search, and its
+    /// groups.
+    private func emoji(_ f: JSON) -> JSON {
+        let tone = f["tone"].int ?? 0
+        func item(_ e: Sample.EmojiEntry) -> JSON {
+            let shown = e.tones && tone > 0 ? e.emoji + String(UnicodeScalar(0x1F3FA + tone)!) : e.emoji
+            return ["emoji": JSON(shown), "names": JSON(e.names), "tones": JSON(e.tones)]
+        }
+        func custom(_ c: JSON) -> JSON {
+            let token = "<\(c["animated"].bool == true ? "a" : ""):\(c["name"].text):\(c["id"].text)>"
+            return ["emoji": JSON(token), "custom": c["id"], "names": JSON([c["name"].text]), "animated": c["animated"]]
+        }
+        switch f["t"].text {
+        case "emoji.picker":
+            var out: [JSON] = [
+                ["id": "recent", "name": "Recently used", "emoji": .array(recent.compactMap { r in Sample.emoji.first { $0.emoji == r }.map(item) })],
+                ["id": "custom", "name": "Your emoji", "emoji": .array(own.map(custom))],
+            ]
+            for (id, name) in Sample.emojiGroups {
+                out.append(["id": JSON(id), "name": JSON(name), "emoji": .array(Sample.emoji.filter { $0.group == id }.map(item))])
+            }
+            return ["t": "core.emoji", "id": f["id"], "groups": .array(out)]
+        case "emoji.find":
+            let q = f["query"].text.lowercased()
+            let items = own.filter { $0["name"].text.contains(q) }.map(custom) + Sample.emoji.filter { $0.names.contains { $0.contains(q) } }.map(item)
+            return ["t": "core.emoji", "id": f["id"], "query": JSON(q), "items": .array(items)]
+        default:
+            let text = f["text"].text
+            if f["emoticons"].bool == true && text.hasSuffix(":) ") {
+                return ["t": "core.emoji", "id": f["id"], "replace": ["suffix": ":) ", "with": "🙂 "]]
+            }
+            guard let colon = text.lastIndex(of: ":") else { return ["t": "core.emoji", "id": f["id"]] }
+            let typed = String(text[text.index(after: colon)...])
+            // `:sob:`, closed with its colon.
+            if typed.isEmpty, let open = text[..<colon].lastIndex(of: ":") {
+                let name = String(text[text.index(after: open)..<colon])
+                if let c = own.first(where: { $0["name"].text == name }) {
+                    return ["t": "core.emoji", "id": f["id"], "replace": ["suffix": JSON(":\(name):"), "with": custom(c)["emoji"]]]
+                }
+                if let e = Sample.emoji.first(where: { $0.names.contains(name) }) {
+                    return ["t": "core.emoji", "id": f["id"], "replace": ["suffix": JSON(":\(name):"), "with": item(e)["emoji"]]]
+                }
+            }
+            guard typed.count >= 2, typed.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "_" }) else { return ["t": "core.emoji", "id": f["id"]] }
+            let mine = own.filter { $0["name"].text.hasPrefix(typed) }.map { c -> JSON in
+                guard case .object(var o) = custom(c) else { return c }
+                o["name"] = c["name"]
+                return .object(o)
+            }
+            let builtIn = Sample.emoji.compactMap { e -> JSON? in
+                guard let n = e.names.first(where: { $0.hasPrefix(typed) }), case .object(var o) = item(e) else { return nil }
+                o["name"] = JSON(n)
+                return .object(o)
+            }
+            return ["t": "core.emoji", "id": f["id"], "suffix": JSON(":\(typed)"), "query": JSON(typed), "items": .array(Array((mine + builtIn).prefix(8)))]
+        }
+    }
+
+    /// The emoji commands, as the instance answers them.
+    private func ownEmoji(_ f: JSON) {
+        let args = f["args"]
+        func set(_ j: JSON, _ key: String, _ value: JSON) -> JSON {
+            guard case .object(var o) = j else { return j }
+            o[key] = value
+            return .object(o)
+        }
+        var value: JSON = [:]
+        switch f["name"].text {
+        case "emoji.add":
+            next += 1
+            let e: JSON = ["id": JSON("e_s\(next)"), "name": args["name"], "file": args["file"], "animated": false, "at": JSON(Sample.now())]
+            own.append(e)
+            value = ["emoji": e]
+        case "emoji.rename":
+            guard let i = own.firstIndex(where: { $0["id"] == args["emoji"] }) else { return }
+            own[i] = set(own[i], "name", args["name"])
+            value = ["emoji": own[i]]
+        case "emoji.delete":
+            gone += own.filter { $0["id"] == args["emoji"] }
+            own.removeAll { $0["id"] == args["emoji"] }
+        default:
+            guard let e = gone.first(where: { $0["id"] == args["emoji"] }) else { return }
+            gone.removeAll { $0["id"] == args["emoji"] }
+            own.append(e)
+            value = ["emoji": e]
+        }
+        tell(["t": "result", "id": f["id"], "ok": true, "value": value])
+        event("emoji.changed", ["emoji": .array(own), "by": "d_4"])
     }
 
     /// The agent list's sections as the core gives them (core/sidebar.calx), for the
@@ -303,6 +409,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         case "devices": items = Sample.devices
         case "sidebar": items = sidebar()
         case "messages": items = messages[f["conversation"].text] ?? []
+        case "emoji": items = own
         default: break
         }
         return ["t": "core.data", "id": f["id"], "what": JSON(what), "items": .array(items), "more": false]
@@ -374,6 +481,56 @@ final class SampleCore: CoreLink, @unchecked Sendable {
 /// The sample data: three agents, their chats, and one waiting on a question.
 enum Sample {
     static func now() -> Int { Int(Date.now.timeIntervalSince1970 * 1000) }
+
+    /// A few of Unicode's emoji, by group, with their names, as shared/emoji.calx has
+    /// them.
+    struct EmojiEntry: Sendable {
+        var emoji: String
+        var names: [String]
+        var group: String
+        var tones = false
+    }
+
+    static let emojiGroups: [(String, String)] = [
+        ("smileys", "Smileys & Emotion"), ("people", "People & Body"), ("nature", "Animals & Nature"),
+        ("food", "Food & Drink"), ("travel", "Travel & Places"), ("activities", "Activities"),
+        ("objects", "Objects"), ("symbols", "Symbols"), ("flags", "Flags"),
+    ]
+
+    static let emoji: [EmojiEntry] = [
+        EmojiEntry(emoji: "😀", names: ["grinning", "grinning_face"], group: "smileys"),
+        EmojiEntry(emoji: "😄", names: ["smile", "grinning_face_with_smiling_eyes"], group: "smileys"),
+        EmojiEntry(emoji: "😂", names: ["joy", "face_with_tears_of_joy"], group: "smileys"),
+        EmojiEntry(emoji: "🙂", names: ["slight_smile", "slightly_smiling_face"], group: "smileys"),
+        EmojiEntry(emoji: "😉", names: ["wink", "winking_face"], group: "smileys"),
+        EmojiEntry(emoji: "😍", names: ["heart_eyes", "smiling_face_with_heart_eyes"], group: "smileys"),
+        EmojiEntry(emoji: "🤔", names: ["thinking", "thinking_face"], group: "smileys"),
+        EmojiEntry(emoji: "😭", names: ["sob", "loudly_crying_face"], group: "smileys"),
+        EmojiEntry(emoji: "😅", names: ["sweat_smile", "grinning_face_with_sweat"], group: "smileys"),
+        EmojiEntry(emoji: "💀", names: ["skull"], group: "smileys"),
+        EmojiEntry(emoji: "👍", names: ["thumbsup", "+1", "thumbs_up"], group: "people", tones: true),
+        EmojiEntry(emoji: "👋", names: ["wave", "waving_hand"], group: "people", tones: true),
+        EmojiEntry(emoji: "🙏", names: ["pray", "folded_hands"], group: "people", tones: true),
+        EmojiEntry(emoji: "👏", names: ["clap", "clapping_hands"], group: "people", tones: true),
+        EmojiEntry(emoji: "💪", names: ["muscle", "flexed_biceps"], group: "people", tones: true),
+        EmojiEntry(emoji: "🐶", names: ["dog", "dog_face"], group: "nature"),
+        EmojiEntry(emoji: "🌱", names: ["seedling"], group: "nature"),
+        EmojiEntry(emoji: "🍅", names: ["tomato"], group: "food"),
+        EmojiEntry(emoji: "☕", names: ["coffee", "hot_beverage"], group: "food"),
+        EmojiEntry(emoji: "🚀", names: ["rocket"], group: "travel"),
+        EmojiEntry(emoji: "🎉", names: ["tada", "party_popper"], group: "activities"),
+        EmojiEntry(emoji: "⚽", names: ["soccer", "soccer_ball"], group: "activities"),
+        EmojiEntry(emoji: "💡", names: ["bulb", "light_bulb"], group: "objects"),
+        EmojiEntry(emoji: "🔥", names: ["fire"], group: "travel"),
+        EmojiEntry(emoji: "❤️", names: ["heart", "red_heart"], group: "symbols"),
+        EmojiEntry(emoji: "✅", names: ["white_check_mark", "check_mark_button"], group: "symbols"),
+        EmojiEntry(emoji: "🇳🇴", names: ["flag_no", "flag_norway"], group: "flags"),
+    ]
+
+    /// The person's own: one, its picture a sample's.
+    static let own: [JSON] = [
+        ["id": "e_1", "name": "knot", "file": "sample-leaf", "animated": false, "at": 1795100000000],
+    ]
 
     static let streamed = ["Let me ", "check ", "the last ", "run on ", "main."]
     static let finished = """
@@ -465,6 +622,11 @@ enum Sample {
             ["id": "msg_11", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_10", "at": 1795100030000,
              "blocks": [["kind": "text", "text": "In Swift:\n\n```swift\nfunc size(_ bytes: Int) -> String {\n    switch bytes {\n    case ..<1000: return \"\\(bytes) B\"\n    case ..<1_000_000: return \"\\(bytes / 1000) KB\"\n    default: return String(format: \"%.1f MB\", Double(bytes) / 1e6)\n    }\n}\n```\n\nIt counts in thousands, as Finder does."]],
              "sources": [["url": "https://support.apple.com/en-us/102119", "title": "How iOS and macOS report storage capacity", "site": "support.apple.com"]]],
+            // Emoji, drawn with Twemoji (PLAN.md, "Emoji"): two alone show big.
+            ["id": "msg_12", "conversation": "c_2", "role": "person", "from": "d_4", "at": 1795100060000,
+             "blocks": [["kind": "text", "text": "🎉🎉"]]],
+            ["id": "msg_13", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_11", "at": 1795100070000,
+             "blocks": [["kind": "text", "text": "Glad it helps 😄 <:knot:e_1> In code it stays as written: `:sob:`."]]],
         ],
         "c_3": [
             // A routine's prompt kept from before routines ran quietly: not shown.

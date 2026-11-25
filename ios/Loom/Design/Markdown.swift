@@ -16,14 +16,28 @@ struct MarkdownView: View {
     /// What its links and mentions show: the small pictures before links, and the agents
     /// it mentions.
     var links = Inline()
+    /// How big an emoji among its words is drawn, in points.
+    var emojiSide = Emoji.side(Tokens.PhoneSize.reply)
 
     var body: some View {
+        // A message of only one to three emoji shows them big (PLAN.md, "Emoji").
+        if !live, Emoji.jumbo(text) {
+            MarkdownView.text(text.trimmingCharacters(in: .whitespacesAndNewlines), links: links, side: Emoji.jumboSide)
+                .font(font)
+                .foregroundStyle(ink)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            blocks
+        }
+    }
+
+    private var blocks: some View {
         let parts = live && !keepBreaks ? MarkdownView.growing(text) : MarkdownView.parse(text, keepBreaks: keepBreaks)
-        VStack(alignment: .leading, spacing: 10) {
+        return VStack(alignment: .leading, spacing: 10) {
             // Each part is its own view, compared before it's drawn again: as a reply is
             // written, only its last part changes.
             ForEach(parts.indices, id: \.self) { i in
-                PartView(part: parts[i], font: font, ink: ink, links: links).equatable()
+                PartView(part: parts[i], font: font, ink: ink, links: links, side: emojiSide).equatable()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -118,17 +132,22 @@ struct MarkdownView: View {
     /// - an agent it mentions as its thread and its name in its colour, a little
     ///   weathered, with no @, or `@Name` for one that's gone;
     /// - a file it mentions, or one sent with it, with its icon before its name, or a
-    ///   tiny copy of a picture sent with it or a reply names once it's fetched.
-    static func text(_ s: String, links: Inline) -> Text {
+    ///   tiny copy of a picture sent with it or a reply names once it's fetched;
+    /// - each emoji outside code drawn with Twemoji, `side` points square, and the
+    ///   person's own as their pictures once fetched (PLAN.md, "Emoji").
+    static func text(_ s: String, links: Inline, side: CGFloat = Emoji.side(Tokens.PhoneSize.reply)) -> Text {
+        let emoji = Emoji.mayHave(s)
+        let s = emoji ? Emoji.linkTokens(s) : s
         let a = inline(s)
-        guard !links.icons.isEmpty || s.contains("](loom") else { return Text(a) }
+        guard emoji || !links.icons.isEmpty || s.contains("](loom") else { return Text(a) }
         var out = Text("")
         var last: URL?
         for run in a.runs {
             let piece = AttributedString(a[run.range])
+            let code = run.inlinePresentationIntent?.contains(.code) == true
             guard let url = run.link else {
                 last = nil
-                out = Text("\(out)\(Text(piece))")
+                out = Text("\(out)\(emoji && !code ? Emoji.text(piece, side: side) : Text(piece))")
                 continue
             }
             // A link's words can be more than one run, as when part of them is bold: what
@@ -136,6 +155,17 @@ struct MarkdownView: View {
             let first = url != last
             last = url
             let address = url.absoluteString
+            // One of the person's own: its picture, or its name until that's here.
+            if address.hasPrefix(Emoji.link) {
+                guard first else { continue }
+                let name = String(piece.characters)
+                if let path = links.emoji[String(address.dropFirst(Emoji.link.count))], let image = Emoji.picture(path: path, side: side) {
+                    out = Text("\(out)\(Emoji.inline(image, side: side, label: name))")
+                } else {
+                    out = Text("\(out)\(Text(verbatim: name))")
+                }
+                continue
+            }
             // An icon and its name are joined by a no-break space, so a line never ends
             // between them.
             switch LinkTo(address) {
@@ -180,7 +210,7 @@ struct MarkdownView: View {
             default:
                 break
             }
-            out = Text("\(out)\(Text(piece))")
+            out = Text("\(out)\(emoji && !code ? Emoji.text(piece, side: side) : Text(piece))")
         }
         return out
     }
@@ -228,24 +258,25 @@ private struct PartView: View, Equatable {
     var font: Font
     var ink: Color
     var links: Inline
+    var side: CGFloat
 
     var body: some View {
         switch part {
         case .paragraph(let s):
-            MarkdownView.text(s, links: links).font(font).foregroundStyle(ink).lineSpacing(4)
+            MarkdownView.text(s, links: links, side: side).font(font).foregroundStyle(ink).lineSpacing(4)
         case .heading(let level, let s):
-            MarkdownView.text(s, links: links)
+            MarkdownView.text(s, links: links, side: side)
                 .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
                 .foregroundStyle(P.ink)
                 .padding(.top, 4)
         case .item(let indent, let mark, let s):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
-                MarkdownView.text(s, links: links).font(font).foregroundStyle(ink).lineSpacing(4)
+                MarkdownView.text(s, links: links, side: side).font(font).foregroundStyle(ink).lineSpacing(4)
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .quote(let s):
-            MarkdownView.text(s, links: links)
+            MarkdownView.text(s, links: links, side: side)
                 .font(font).foregroundStyle(P.ink2).lineSpacing(4)
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 2) }
@@ -369,7 +400,8 @@ extension MarkdownView {
 }
 
 extension MarkdownView {
-    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false, links: Inline = Inline()) {
+    init(_ text: String, keepBreaks: Bool = false, font: Font = Fonts.reply, ink: Color = P.ink, live: Bool = false, links: Inline = Inline(), emojiSide: CGFloat = Emoji.side(Tokens.PhoneSize.reply)) {
+        self.emojiSide = emojiSide
         self.text = text
         self.keepBreaks = keepBreaks
         self.font = font
