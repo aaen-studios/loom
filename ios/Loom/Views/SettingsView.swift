@@ -14,6 +14,8 @@ struct SettingsView: View {
     @State private var confirmSignOut = false
     /// Add a device, open at launch with `-addDevice`, for its screenshot.
     @State private var addingDevice = ProcessInfo.processInfo.arguments.contains("-addDevice")
+    /// Settings → Emoji, open at launch with `-emojiSettings`, for its screenshot.
+    @State private var emojiSettings = ProcessInfo.processInfo.arguments.contains("-emojiSettings")
 
     var body: some View {
         let model = session.model
@@ -81,6 +83,11 @@ struct SettingsView: View {
                     Toggle(isOn: $vibrant) {
                         Text("Vibrant bubbles").font(Fonts.body).foregroundStyle(P.ink)
                     }
+                    NavigationLink {
+                        EmojiSettingsView()
+                    } label: {
+                        Text("Emoji").font(Fonts.body).foregroundStyle(P.ink)
+                    }
                 }
                 Section {
                     HStack {
@@ -109,6 +116,9 @@ struct SettingsView: View {
                 } footer: {
                     Text("The lock screen needs push on your instance")
                         .font(Fonts.caption)
+                }
+                Section("Credits") {
+                    EmojiCredits()
                 }
                 Section {
                     Button(role: .destructive) {
@@ -139,6 +149,7 @@ struct SettingsView: View {
                 Text("Your agents and chats stay on the instance")
             }
             .navigationDestination(isPresented: $addingDevice) { AddDeviceView() }
+            .navigationDestination(isPresented: $emojiSettings) { EmojiSettingsView() }
         }
         .task { notifications = await Notifications.status() }
         .onAppear {

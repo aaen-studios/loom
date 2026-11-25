@@ -127,6 +127,7 @@ struct PlusSheet: View {
     private func title(_ row: PlusRow) -> String {
         switch row {
         case .attach: "Files"
+        case .emoji: "Emoji"
         case .open(.recent): "Recent files"
         case .open(.skills): "Skills"
         case .open(.routines): "Routines"
@@ -139,6 +140,7 @@ struct PlusSheet: View {
     private func icon(_ row: PlusRow) -> String {
         switch row {
         case .attach: "folder"
+        case .emoji: "face.smiling"
         case .open(.recent): "clock.arrow.circlepath"
         case .open(.skills), .skill: "book"
         case .open(.routines), .routine: "clock"
@@ -206,6 +208,7 @@ struct PlusSheet: View {
     private func pick(_ row: PlusRow) {
         switch row {
         case .attach: take(.files)
+        case .emoji: take(.emoji)
         case .open(let which):
             searching = false
             open = which
@@ -219,6 +222,7 @@ struct PlusSheet: View {
 /// What the + sheet asks the composer to do.
 enum PlusTake {
     case photos
+    case emoji
     case photo(PHAsset)
     case files
     case sent(FileRef)
