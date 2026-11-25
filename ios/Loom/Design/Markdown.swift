@@ -25,7 +25,7 @@ struct MarkdownView: View {
             MarkdownView.text(text.trimmingCharacters(in: .whitespacesAndNewlines), links: links, side: Emoji.jumboSide)
                 .font(font)
                 .foregroundStyle(ink)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize()
         } else {
             blocks
         }
