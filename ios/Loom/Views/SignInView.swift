@@ -1,17 +1,20 @@
 import SwiftUI
 import VisionKit
 
-/// Signing in: the instance's address, a username and a password (the core's `login`),
-/// or scanning the code the desktop app shows under Add a phone (`link`).
+/// Signing in: scanning or pasting the code another device shows under Add a device
+/// (`link`), then a yes on that device; or the instance's address, a username and a
+/// password (the core's `login`), for the first device or when every one is lost.
 struct SignInView: View {
     @Environment(Session.self) private var session
     @AppStorage("loom.server") private var server = ""
     @AppStorage("loom.username") private var username = ""
     @State private var password = ""
+    @State private var pasted = ""
     @State private var scanning = false
+    @State private var withPassword = false
     @FocusState private var field: Field?
 
-    private enum Field { case server, username, password }
+    private enum Field { case code, server, username, password }
 
     var body: some View {
         let model = session.model
@@ -24,25 +27,83 @@ struct SignInView: View {
                 }
                 .padding(.top, 56)
 
-                Button {
-                    scanning = true
-                } label: {
-                    Label("Scan a code", systemImage: "qrcode.viewfinder")
+                if let check = model.adding {
+                    Waiting(check: check) { session.send(session.model.cancelLink()) }
+                } else if withPassword {
+                    passwordForm(model)
+                } else {
+                    codeForm(model)
                 }
-                .buttonStyle(.loomWide)
-                .disabled(model.loggingIn)
+            }
+            .padding(.horizontal, Tokens.PhoneSpace.gutter + 4)
+            .padding(.bottom, Tokens.Space.xxl)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background(P.bg)
+        .sheet(isPresented: $scanning) {
+            ScanSheet { text in
+                scanning = false
+                session.send(session.model.link(qr: text, device: Session.device))
+            }
+        }
+    }
 
-                Text("On your computer, open loom and choose Add a phone.")
-                    .font(Fonts.caption)
-                    .foregroundStyle(P.ink3)
-                    .padding(.top, -Tokens.Space.m)
+    /// Scan the QR code, or paste the code, that a device signed in shows.
+    @ViewBuilder private func codeForm(_ model: Model) -> some View {
+        Button {
+            scanning = true
+        } label: {
+            Label("Scan a code", systemImage: "qrcode.viewfinder")
+        }
+        .buttonStyle(.loomWide)
+        .disabled(model.loggingIn)
 
-                HStack(spacing: Tokens.Space.m) {
-                    Rectangle().fill(P.line).frame(height: 1)
-                    Text("or").font(Fonts.caption).foregroundStyle(P.ink3)
-                    Rectangle().fill(P.line).frame(height: 1)
-                }
+        HStack(spacing: Tokens.Space.m) {
+            Rectangle().fill(P.line).frame(height: 1)
+            Text("or").font(Fonts.caption).foregroundStyle(P.ink3)
+            Rectangle().fill(P.line).frame(height: 1)
+        }
 
+        Field_(label: "Code") {
+            TextField("K7QF-M2XD@loom.example.com", text: $pasted)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .focused($field, equals: .code)
+                .submitLabel(.go)
+                .onSubmit(useCode)
+        }
+
+        if let error = model.loginError {
+            Text(error).font(Fonts.small).foregroundStyle(P.bad)
+        }
+
+        Button(action: useCode) {
+            if model.loggingIn {
+                ProgressView().tint(P.buttonInk)
+            } else {
+                Text("Add")
+            }
+        }
+        .buttonStyle(LoomButtonStyle(primary: false, wide: true))
+        .disabled(model.loggingIn || pasted.trimmingCharacters(in: .whitespaces).isEmpty)
+
+        Button("Sign in with a password") {
+            model.loginError = nil
+            withPassword = true
+        }
+        .font(Fonts.small)
+        .foregroundStyle(P.ink3)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func useCode() {
+        let text = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !session.model.loggingIn, !text.isEmpty else { return }
+        field = nil
+        session.send(session.model.link(qr: text, device: Session.device))
+    }
+
+    @ViewBuilder private func passwordForm(_ model: Model) -> some View {
                 VStack(spacing: Tokens.Space.m) {
                     Field_(label: "Instance") {
                         TextField("https://loom.example.com", text: $server)
@@ -83,18 +144,14 @@ struct SignInView: View {
                 }
                 .buttonStyle(LoomButtonStyle(primary: false, wide: true))
                 .disabled(model.loggingIn || username.isEmpty || password.isEmpty)
-            }
-            .padding(.horizontal, Tokens.PhoneSpace.gutter + 4)
-            .padding(.bottom, Tokens.Space.xxl)
-        }
-        .scrollDismissesKeyboard(.interactively)
-        .background(P.bg)
-        .sheet(isPresented: $scanning) {
-            ScanSheet { text in
-                scanning = false
-                session.send(session.model.link(qr: text, device: Session.device))
-            }
-        }
+
+                Button("Use a code instead") {
+                    model.loginError = nil
+                    withPassword = false
+                }
+                .font(Fonts.small)
+                .foregroundStyle(P.ink3)
+                .frame(maxWidth: .infinity)
     }
 
     private func signIn() {
@@ -102,6 +159,30 @@ struct SignInView: View {
         field = nil
         session.send(session.model.login(server: server, username: username, password: password, device: Session.device))
         password = ""
+    }
+}
+
+/// Waiting for a yes on the device that showed the code: the check both show, large.
+struct Waiting: View {
+    var check: String
+    var cancel: () -> Void
+
+    var body: some View {
+        VStack(spacing: Tokens.Space.l) {
+            Text(check.map(String.init).joined(separator: "\u{2009}"))
+                .font(.system(size: 44, weight: .semibold, design: .monospaced))
+                .foregroundStyle(P.ink)
+            Text("Say yes on your other device if it shows the same")
+                .font(Fonts.small)
+                .foregroundStyle(P.ink2)
+                .multilineTextAlignment(.center)
+            ProgressView().tint(P.ink3)
+            Button("Cancel", action: cancel)
+                .font(Fonts.small)
+                .foregroundStyle(P.ink3)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, Tokens.Space.xl)
     }
 }
 
@@ -142,7 +223,7 @@ struct ScanSheet: View {
                         Text("No camera here: paste the code's text")
                             .font(Fonts.body)
                             .foregroundStyle(P.ink2)
-                        TextField("loom://link?…", text: $pasted, axis: .vertical)
+                        TextField("loom://add?…", text: $pasted, axis: .vertical)
                             .font(Fonts.code)
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
@@ -150,7 +231,7 @@ struct ScanSheet: View {
                             .background(P.raised, in: RoundedRectangle(cornerRadius: Tokens.Radius.input))
                         Button("Join") { found(pasted.trimmingCharacters(in: .whitespacesAndNewlines)) }
                             .buttonStyle(.loomWide)
-                            .disabled(!pasted.hasPrefix("loom://link"))
+                            .disabled(!(pasted.hasPrefix("loom://add") || pasted.hasPrefix("loom://link")))
                         Spacer()
                     }
                     .padding(Tokens.PhoneSpace.gutter)
@@ -203,7 +284,7 @@ private struct Scanner: UIViewControllerRepresentable {
 
         func dataScanner(_ scanner: DataScannerViewController, didAdd items: [RecognizedItem], allItems: [RecognizedItem]) {
             for item in items {
-                guard !done, case .barcode(let code) = item, let text = code.payloadStringValue, text.hasPrefix("loom://link") else { continue }
+                guard !done, case .barcode(let code) = item, let text = code.payloadStringValue, text.hasPrefix("loom://add") || text.hasPrefix("loom://link") else { continue }
                 done = true
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 found(text)

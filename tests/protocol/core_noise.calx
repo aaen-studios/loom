@@ -85,7 +85,6 @@ fn run(inst: Instance, core: mut Core, service: String) ! Error {
     let port = int_at(on.copy(), "port") ?? 0
     let noise_key = bytes.from_base64(str_at(on, "key") ?? String()) ?? List<u8>()
     let v = at(try app.cmd("q_2", "link.create", Obj.new().done()), "value")
-    app.close()
     // Port 1 answers nothing, so the relay goes on to the next address.
     let place = relay.write(relay.Place { key: noise_key.copy(), addresses: [String("127.0.0.1:1"), "127.0.0.1:{port}"] })
     let qr = link.qr(link.Link { server: place.copy(), code: str_at(v.copy(), "code") ?? String(), instance: str_at(v.copy(), "instance") ?? String(), key: str_at(v, "key") ?? String() })
@@ -97,6 +96,10 @@ fn run(inst: Instance, core: mut Core, service: String) ! Error {
     try check(str_at(at(refused, "error"), "code") == some(String("unreachable")), "a place with another Noise key is unreachable")
 
     core.send(Obj.new().s("t", String("link")).s("id", String("l_1")).s("qr", qr).j("device", phone()).done())
+    let waits = try core.until("core.login", 30000)
+    try check(bool_at(waits, "waiting") == some(true), "the core uses the QR code's code over Noise, and waits for a yes")
+    _ = try app.answer_link("q_yes", true)
+    app.close()
     let joined = try core.until("core.login", 30000)
     try check(bool_at(joined.copy(), "ok") == some(true), "the core joins over Noise with the QR code's code, past an address that answers nothing")
     if bool_at(joined.copy(), "kept") == some(true) {

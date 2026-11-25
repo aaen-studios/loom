@@ -162,8 +162,18 @@ final class Session {
     }
 
     /// A `loom:` address the system opened the app with: the end of a sign-in, when one
-    /// is going.
+    /// is going, or a code that adds this phone (`loom://add?…`, as a QR code the camera
+    /// read), at the step where the person says yes on the device that showed it.
     func opened(_ url: URL) {
+        let text = url.absoluteString
+        if text.hasPrefix("loom://add?") || text.hasPrefix("loom://link?") {
+            if model.conn == .signedOut {
+                send(model.link(qr: text, device: Session.device))
+            } else {
+                model.notice = "This phone is signed in already. Sign out in Settings to add it to another account."
+            }
+            return
+        }
         signInPage.took(url)
     }
 

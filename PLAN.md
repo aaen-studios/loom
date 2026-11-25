@@ -188,11 +188,15 @@ How it's built ([protocol.md, "Sandboxes"](protocol/protocol.md#sandboxes)): `lo
 
 A device joins an instance in one of three ways:
 
-- **Log in.** Type the instance's address, then a username and password. For instances on a server.
-- **Scan a QR code** from a desktop app that's already connected, as WhatsApp links a computer. This works with any instance, and it's the only way into one that runs in a desktop app. The new device gets its own device token for the same account.
+- **A code from a device that's signed in**, the way in for every device after the first. **Add a device**, in the settings of any device signed in (desktop or phone), shows a QR code and a short code. A phone scans the QR code; a Mac or a PC pastes the code, or opens the `loom://add?…` link it's in. The code says where the instance is, so the new device's first screen asks for nothing else. The new device shows four digits, and the device that showed the code asks `Add "Elliot's MacBook"?` with the same four: the person taps Add, and the new device gets its own device token for the same account. A code that leaked does nothing without that yes. This works with any instance, and it's the only way into one that runs in a desktop app.
+- **Log in.** Type the instance's address, then a username and password. For an instance on a server, for the first device, or when every device is lost.
 - **An invite link**, for someone who doesn't have an account yet, on an instance on a server.
 
-The QR code holds the instance's id and public key, the addresses to reach it, and a one-time code that expires after a few minutes. The core makes what goes in it, and the desktop app draws it. The phone scans it with Apple's own camera code reader (AVFoundation or VisionKit).
+The code works once, for ten minutes, and the yes has five more. The QR code holds the instance's id and public key, the address to reach it at, and the code; the code to paste holds the code and the address. The core makes both, and the apps draw the QR code. The phone scans it with Apple's own camera code reader (VisionKit). The exact steps are in [protocol.md, "Adding a device"](protocol/protocol.md#adding-a-device).
+
+**The devices signed in** are listed in the same place, each with its name, its kind, and whether it's connected or when it last was, and **Remove** signs one out for good. An account a link code made ([Several servers in one app](#several-servers-in-one-app)) has no password, and **Set a password** is there until it has one, for signing in where no device can show a code.
+
+**A server only on a tailnet**, at a `….ts.net` name or a 100.x address, that a device isn't on: the app says "This server is only reachable on Tailscale, and this device isn't on it" rather than that the connection failed.
 
 **Each instance has a key pair**, made when it's created, and that key is its identity. The apps check it on every connection, on top of TLS. That's what lets an instance move to a new address without the apps trusting a stranger.
 

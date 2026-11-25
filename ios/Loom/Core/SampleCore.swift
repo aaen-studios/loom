@@ -11,6 +11,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var seq = 100
     private var next = 0
     private var signedIn: Bool
+    private var linkWaiting = false
     private var agents: [JSON]
     private var conversations: [JSON]
     private var messages: [String: [JSON]]
@@ -51,7 +52,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private func connect() {
         tell(["t": "core.conn", "state": "connecting"])
         tell(["t": "core.conn", "state": "live"])
-        tell(["t": "welcome", "version": 1, "user": "u_1", "device": "d_4", "seq": JSON(seq), "reset": false])
+        tell(["t": "welcome", "version": 1, "user": "u_1", "device": "d_4", "seq": JSON(seq), "reset": false, "has_password": false])
         tell(["t": "synced", "seq": JSON(seq)])
     }
 
@@ -98,8 +99,19 @@ final class SampleCore: CoreLink, @unchecked Sendable {
 
     private func take(_ f: JSON) {
         switch f["t"].text {
+        case "link.cancel":
+            linkWaiting = false
         case "login", "link":
-            later(0.6) { [self] in
+            // A code waits for a yes on the device that showed it, as an instance's does,
+            // which the sample gives after a few seconds.
+            if f["t"].text == "link" {
+                linkWaiting = true
+                later(0.4) { [self] in
+                    tell(["t": "core.login", "id": f["id"], "waiting": true, "check": "4821", "expires": JSON(Sample.now() + 300_000)])
+                }
+            }
+            later(f["t"].text == "link" ? 4 : 0.6) { [self] in
+                if f["t"].text == "link" && !linkWaiting { return }
                 if f["t"].text == "login" && f["password"].text.isEmpty {
                     tell(["t": "core.login", "id": f["id"], "error": ["code": "bad_password", "message": "That username and password don't match."]])
                     return
@@ -143,6 +155,24 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             // sign-in, which sample servers can't do. The files the composer's @ picker
             // finds, and a file a message mentions, kept as the person's.
             switch f["name"].text {
+            case "link.create":
+                // A code to add a device, and a Mac asking to be added with it soon after.
+                let code = "K7QF-M2XD"
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["code": JSON(code), "expires": JSON(Sample.now() + 600_000), "qr": JSON("loom://add?a=https%3A%2F%2Floom.example.com&c=\(code)&i=i_1&k=sample"), "text": JSON("\(code)@loom.example.com")]])
+                later(3) { [self] in
+                    event("link.asked", ["ask": ["id": "la_1", "name": "Elliot's MacBook", "kind": "macos", "check": "4821", "expires": JSON(Sample.now() + 300_000)]])
+                }
+            case "link.answer":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
+                event("link.answered", ["ask": f["args"]["ask"], "allow": f["args"]["allow"], "by": "d_4"])
+            case "device.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["devices": [
+                    ["id": "d_1", "name": "Desk PC", "kind": "windows", "at": 1, "seen": JSON(Sample.now() - 3_600_000), "online": false],
+                    ["id": "d_2", "name": "Elliot's MacBook", "kind": "macos", "at": 2, "seen": JSON(Sample.now()), "online": true],
+                    ["id": "d_4", "name": "iPhone", "kind": "ios", "at": 3, "seen": JSON(Sample.now()), "online": true],
+                ]]])
+            case "device.revoke", "password.set":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
             case "mcp.list":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["servers": [["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed"]]]])
             case "mcp.sign_in", "mcp.signed_in":

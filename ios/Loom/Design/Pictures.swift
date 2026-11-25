@@ -1,6 +1,20 @@
+import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
 import UniformTypeIdentifiers
+
+/// A QR code of what the core made for it, drawn by Core Image, dark on white, a pixel a
+/// module, for the view to scale up without smoothing.
+enum QRPicture {
+    static func of(_ text: String) -> UIImage? {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(text.utf8)
+        filter.correctionLevel = "M"
+        guard let image = filter.outputImage,
+              let cg = CIContext().createCGImage(image, from: image.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+}
 
 /// Pictures read, decoded and made smaller off the main thread, and kept once they are,
 /// so a row that's built again doesn't decode its picture again.

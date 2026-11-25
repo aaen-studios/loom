@@ -65,6 +65,7 @@ import server.stage
 import server.tokenfile
 import server.update
 import shared.checkpoint
+import shared.addcode
 import server.searcher
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
@@ -373,6 +374,7 @@ pub struct Instance {
     ready_now: String    // the sandbox an agent's program is starting in, readied already
     open_secrets: Map<String, List<(String, String)>>    // each person's secrets, (name, value), for the activity log to hide
     failures: LinkedMap<String, List<i64>>
+    link_asks: LinkedMap<String, LinkAsk>    // devices that used a code to be added, waiting for a yes, by id
     thumbs: Sender<Thumb>
     picture_to: Sender<files.Picture>    // the thread that makes thumbnails of the pictures replies name
     picture_done: Receiver<files.Pictured>
@@ -645,8 +647,12 @@ const ATTACH_TOLD: str = "[loom: To give your person a file you made, such as a 
 const TASK_RETRIED: str = "[loom: Your person asked you to try this task again. What happened the last time is above.]"
 // How much of what a webhook was sent goes to the agent.
 const HOOK_MOST: usize = 20000
-// How long a code to add a device by QR code works: five minutes.
-const LINK_MS: i64 = 300000
+// How long a code to add a device works: ten minutes.
+const LINK_MS: i64 = 600000
+// How long a device that used one waits for the person's yes, in minutes (a test's are shorter).
+const LINK_ASK_MINUTES: i64 = 5
+// The longest name a device asking to be added goes by, in runes.
+const DEVICE_NAME_MOST: usize = 64
 // How long a link code an agent hands the app works (protocol.md, "Link codes"):
 // fifteen minutes, for an install to finish and the person to say yes.
 pub const LINK_CODE_MS: i64 = 900000
@@ -694,6 +700,20 @@ struct Grant {
     user: String
     agent: String
     conversation: String    // the session's, so a tool call finds its run
+}
+
+// A device that used a code another device showed (protocol.md, "Adding a device"),
+// waiting for the person's yes on one of theirs.
+struct LinkAsk {
+    id: String
+    secret: String    // the SHA-256 of what the new device asks again with, hex
+    user: String
+    body: Json        // what it posted, with its device
+    name: String
+    kind: String
+    check: String     // the four digits both devices show
+    expires: i64
+    state: String     // waiting, allowed or refused
 }
 
 // A setup or a login waiting on the hashing thread.
@@ -1766,7 +1786,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3650,6 +3670,7 @@ impl Instance {
         if req.path.starts_with("/api/reset/") { return try i.reset(req, body) }
         if req.path == "/api/login" { return try i.login(req, body) }
         if req.path == "/api/link" { return some(try i.link(req, body)) }
+        if req.path == "/api/link/wait" { return some(try i.link_wait(req, body)) }
         if req.path == "/api/link/new" { return some(try i.new_owner_code(req, body)) }
         if req.path == "/api/logout" { return try i.logout(req) }
         return some(http_error(404, "not_found", String("There's nothing here.")))
@@ -8222,7 +8243,7 @@ impl Instance {
         let address = client_address(req.client.copy())
         if let wait = i.limited(address.copy(), String()) { return rate_limited(wait) }
         let code = str_at(body.copy(), "code") ?? String()
-        let hash = bytes.hex(sha256(code.to_bytes()))
+        let hash = bytes.hex(sha256(addcode.normal(code.copy()).to_bytes()))
         // A link code that makes the owner, on an instance no one has set up yet.
         if let expires = try i.store.owner_code(hash.copy()) {
             return try i.link_owner(body, expires)
@@ -8232,8 +8253,99 @@ impl Instance {
             return http_error(403, "bad_code", String("That code isn't one this instance made, or it's been used."))
         }
         let (user, expires) = taken
-        if expires <= now() { return http_error(403, "expired", String("That code has expired. Ask for a new one.")) }
-        return json_response(200, try i.new_device(user, body))
+        if expires <= now() { return http_error(403, "expired", String("That code has expired. Make a new one under Add a device.")) }
+        // A link code an agent or the server's command line handed on was said yes to
+        // already. A code a device showed waits for a yes on one of the person's devices,
+        // so the code alone isn't enough.
+        if not addcode.is_device_code(code) { return json_response(200, try i.new_device(user, body)) }
+        return try i.ask_link(user, body)
+    }
+
+    // A device used a code another showed: the person's devices are asked, with the
+    // check both show, and the new device asks again with `waiting` until they answer.
+    fn ask_link(i: mut Instance, user: String, body: Json) -> Response ! Error {
+        i.drop_old_asks()
+        let d = at(body.copy(), "device")
+        var name = String()
+        for (n, r) in (str_at(d.copy(), "name") ?? String()).trim().runes().enumerate() {
+            if n >= DEVICE_NAME_MOST { break }
+            if r >= ' ' { name.push(r) }
+        }
+        if name.len() == 0 { name = String("A device") }
+        let kind = str_at(d, "kind") ?? String("cli")
+        let secret = bytes.hex(random_bytes(16))
+        let id = "la_{bytes.hex(random_bytes(6))}"
+        let check = addcode.new_check()
+        let expires = now() + LINK_ASK_MINUTES * i.minute_ms
+        i.link_asks.insert(id.copy(), LinkAsk { id: id.copy(), secret: bytes.hex(sha256(secret.to_bytes())), user: user.copy(), body: body.copy(), name: name.copy(), kind: kind.copy(), check: check.copy(), expires: expires, state: String("waiting") })
+        try i.event(user, "link.asked", Obj.new().j("ask", Obj.new().s("id", id).s("name", name).s("kind", kind).s("check", check.copy()).i("expires", expires).done()).done())
+        // An app from before this reads `error`, and says to update it.
+        let older = Obj.new().s("code", String("update_app")).s("message", String("Update loom on this device first: adding it takes a yes on one of your devices now.")).done()
+        return json_response(202, Obj.new().s("waiting", secret).s("check", check).i("expires", expires).j("error", older).done())
+    }
+
+    // Asks that have expired go, unanswered.
+    fn drop_old_asks(i: mut Instance) {
+        var old = List<String>()
+        for (id, a) in i.link_asks {
+            if a.expires <= now() { old.push(id.copy()) }
+        }
+        for id in old {
+            _ = i.link_asks.remove(id)
+        }
+    }
+
+    // POST /api/link/wait: a device waiting to be added asks again with `waiting`,
+    // and hears at once: still waiting, its token, or that it was turned down.
+    fn link_wait(i: mut Instance, req: Request, body: Json) -> Response ! Error {
+        let address = client_address(req.client.copy())
+        if let wait = i.limited(address.copy(), String()) { return rate_limited(wait) }
+        let secret = bytes.hex(sha256((str_at(body, "waiting") ?? String()).to_bytes()))
+        var found = String()
+        for (id, a) in i.link_asks {
+            if compare_digest(a.secret.to_bytes(), secret.to_bytes()) { found = id.copy() }
+        }
+        if found.len() == 0 {
+            i.failed(address, String())
+            return http_error(403, "bad_code", String("That isn't a device waiting to be added here, or it was answered already."))
+        }
+        var expires: i64 = 0
+        var state = String()
+        var check = String()
+        if let a = i.link_asks.find(found.copy()) {
+            expires = a.expires
+            state = a.state.copy()
+            check = a.check.copy()
+        }
+        if expires <= now() {
+            _ = i.link_asks.remove(found)
+            return http_error(410, "expired", String("No one said yes in time. Make a new code under Add a device."))
+        }
+        if state == "waiting" {
+            return json_response(202, Obj.new().b("waiting", true).s("check", check).i("expires", expires).done())
+        }
+        let taken = i.link_asks.remove(found) else return http_error(403, "bad_code", String("That isn't a device waiting to be added here."))
+        if taken.state == "refused" {
+            return http_error(403, "refused", String("That was turned down on your other device."))
+        }
+        return json_response(200, try i.new_device(taken.user, taken.body))
+    }
+
+    // link.answer: the person's yes or no, on one of their devices, to a device asking
+    // to be added. Every device of theirs hears it, so each stops asking.
+    fn answer_link(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person says yes to a new device, on one of theirs.")) }
+        let id = str_at(args.copy(), "ask") ?? String()
+        let allow = bool_at(args, "allow") ?? false
+        {
+            let a = mut i.link_asks.find(id.copy()) else return Answer.Refused(String("not_found"), String("No device is asking to be added with that."))
+            if a.user != user { return Answer.Refused(String("not_found"), String("No device is asking to be added with that.")) }
+            if a.expires <= now() { return Answer.Refused(String("expired"), String("It waited too long. Make a new code under Add a device.")) }
+            if a.state != "waiting" { return Answer.Refused(String("answered"), String("That was answered already.")) }
+            a.state = String(if allow { "allowed" } else { "refused" })
+        }
+        try i.event(user, "link.answered", Obj.new().s("ask", id).b("allow", allow).s("by", device).done())
+        return Answer.Value(Obj.new().done())
     }
 
     // The owner, from a link code, with the username the app gives and no password
@@ -8489,7 +8601,8 @@ impl Instance {
         if since < first - 1 { since = first - 1 }
         if since < 0 { since = 0 }
         // The instance's own version, and to an owner or admin, an update under way.
-        var welcome = Obj.new().s("t", String("welcome")).i("version", i64(version)).s("loom", i.version.copy()).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).maybe("relay", try i.relay_key())
+        try i.store.touch_device(device.id.copy(), now())
+        var welcome = Obj.new().s("t", String("welcome")).i("version", i64(version)).s("loom", i.version.copy()).s("user", user.copy()).s("device", device.id.copy()).i("seq", last).b("reset", reset).s("key", try i.public_key()).maybe("relay", try i.relay_key()).b("has_password", try i.store.has_password(user.copy()))
         if i.updating.state.len() > 0 and i.updating.state != "latest" and try i.may_update(user.copy()) { welcome = welcome.j("update", i.update_json()) }
         _ = i.server.send_text(s, "{welcome.done()}")
         if reset { _ = i.server.send_text(s, "{try i.snapshot(user.copy(), since)}") }
@@ -10524,6 +10637,7 @@ impl Instance {
 
     // A device's last connection closed: what was sent to it has no answer coming.
     fn device_gone(i: mut Instance, user: String, device: String) ! Error {
+        if device.len() > 0 { try i.store.touch_device(device.copy(), now()) }
         for (_, s) in i.sessions {
             if s.live and s.user == user and s.device == device { return }
         }
@@ -11948,9 +12062,9 @@ impl Instance {
                 try i.people_logged("link", "Made a link code to sign in as {theirs_name}", user)
                 return Answer.Value(Obj.new().s("code", code).i("expires", expires).done())
             }
-            let code = bytes.hex(random_bytes(16))
+            let code = addcode.new_code()
             let expires = now() + LINK_MS
-            try i.store.add_link_code(bytes.hex(sha256(code.to_bytes())), user, device, expires, now())
+            try i.store.add_link_code(bytes.hex(sha256(addcode.normal(code.copy()).to_bytes())), user, device, expires, now())
             var value = Obj.new().s("code", code).i("expires", expires).s("instance", try i.store.meta("instance") ?? String()).s("key", try i.public_key())
             // A phone reaches an instance in the desktop app over Noise.
             if i.bridge != none { value = value.j("noise", try i.phones()) }
@@ -11966,8 +12080,25 @@ impl Instance {
             // Hashed here, once: an account sets its first password only once.
             try i.store.set_password(user.copy(), password)
             let name_here = try i.store.username(user.copy()) ?? String()
-            try i.people_logged("password", "{name_here} set their password", user)
+            try i.people_logged("password", "{name_here} set their password", user.copy())
+            // Each of their devices stops offering to set one.
+            try i.event(user, "account.updated", Obj.new().b("has_password", true).done())
             return Answer.Value(empty)
+        }
+        if name == "link.answer" {
+            return try i.answer_link(user, device, args)
+        }
+        if name == "device.list" {
+            var list = List<Json>()
+            for d in try i.store.devices(user.copy()) {
+                let id = str_at(d.copy(), "id") ?? String()
+                var online = false
+                for (_, s) in i.sessions {
+                    if s.live and s.user == user and s.device == id { online = true }
+                }
+                list.push(merge(d, Obj.new().b("online", online).done()))
+            }
+            return Answer.Value(Obj.new().j("devices", Json.Array(list)).done())
         }
         if name.starts_with("invite.") or name.starts_with("user.") or name == "account.delete" or name == "password.reset" or name == "people.log" {
             return try i.people_cmd(user, device, name, args)

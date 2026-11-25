@@ -112,6 +112,42 @@ pub fn reopened() {
     crate::wake::wake();
 }
 
+/// The file a `loom://` link that opened loom waits in, for the loom that has the data
+/// folder `data` to take (protocol.md, "Adding a device").
+fn link_file(data: &Path) -> std::path::PathBuf {
+    data.join("open-link")
+}
+
+/// The `loom://` link loom was started with, if it was: a link that adds this device.
+pub fn link_in_args() -> Option<String> {
+    std::env::args()
+        .skip(1)
+        .find(|a| a.starts_with("loom://add?") || a.starts_with("loom://link?"))
+}
+
+/// Keeps `link` for the loom running, or this one once it runs, to take.
+pub fn keep_link(data: &Path, link: &str) {
+    let _ = std::fs::create_dir_all(data);
+    let _ = std::fs::write(link_file(data), link);
+}
+
+/// The link waiting to be taken, once.
+pub fn take_link(data: &Path) -> Option<String> {
+    let file = link_file(data);
+    let text = std::fs::read_to_string(&file).ok()?;
+    let _ = std::fs::remove_file(&file);
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+/// A link came while loom runs, as macOS hands one to the app: it's kept, and the
+/// window comes back to take it.
+#[cfg(target_os = "macos")]
+pub fn opened_link(data: &Path, link: &str) {
+    keep_link(data, link);
+    reopened();
+}
+
 /// Lets go of the folder, as loom quits.
 pub fn let_go() {
     if let Some(o) = OWNER.lock().ok().and_then(|mut o| o.take()) {
