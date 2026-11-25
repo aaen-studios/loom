@@ -224,7 +224,7 @@ Agents live in the database, and are made and edited in the app.
 ### Agent defaults
 
 - **Live, and an agent can override.** The person's **Defaults** page, under Agents in the settings, sets what every agent of theirs follows until its own settings change that field, so changing a default changes every agent that hasn't. They're kept on the instance per person, so the phone has them too.
-- **What they cover:** the brain (agent program) a new agent runs on; the backup program that takes a turn over when an agent's own runs out of usage or doesn't start ([A backup brain](#a-backup-brain)); the model and reasoning effort for each brain's agents, used where the program offers that value; the permission mode, `ask` until the person changes it; instructions every agent follows, told beside the person's profile under their own heading; and whether a message to a busy agent queues or steers ([Work that waits its turn](#work-that-waits-its-turn)).
+- **What they cover:** the brain (agent program) a new agent runs on; the backup program that takes a turn over when an agent's own runs out of usage or doesn't start ([A backup brain](#a-backup-brain)); the model and reasoning effort for each brain's agents, used where the program offers that value; the permission mode, `ask` until the person changes it; instructions every agent follows, told beside the person's profile under their own heading; and whether a message to a busy agent queues or steers ([Work that waits its turn](#work-that-waits-its-turn)); and the program and model the group chats' router runs on ([Group chats](#group-chats)).
 - **Back to the default.** Each field on an agent's edit page that follows the default says so, and the person sets one back to it there. Agents made before the defaults keep the permission mode they were made with until the person sets it to follow, so nothing loosens on its own; one an agent makes, or an import brings, starts on `ask` of its own.
 - **Rules for every agent** sit beside the defaults, on the Rules page, since they're followed by every agent too, but they're kept apart, so a rule never loosens with a default ([Rules, records and limits](#rules-records-and-limits)).
 - **Agents read them, the person changes them.** An agent reads the defaults at once, and changing them asks its person first, as a looser permission mode does, since the default mode is every following agent's.
@@ -351,6 +351,7 @@ Each agent program runs as its own process. The instance reads each one on a thr
 | Tool | What it does |
 |---|---|
 | `message_agent` | Talks to another of your agents |
+| `hand_off` | In a group chat, gives the message to another member to answer ([Group chats](#group-chats)) |
 | `remember`, `recall`, `forget`, `update_profile` | Memory (below) |
 | `schedule`, `list_routines` | Make or change a routine, and list them ([Routines](#routines)) |
 | `routine_post`, `routine_quiet`, `routine_failed`, `pause_routine` | While answering for a routine, whose turn the person doesn't see: post what's worth telling them into the chat, end the run with nothing to say, say it failed and why, or pause the routine ([Routines](#routines)) |
@@ -675,12 +676,51 @@ Ask an agent about its chat without adding to it: "what did we decide about the 
 
 A message worth keeping at hand is pinned in its chat, as in Discord: by the person, from the pin in its corner, or by an agent, with `run_command`. The pin is kept on the message, with when and who, so every device sees it. The chat's header shows how many there are, and opens them beside the chat, the newest pin first, each to jump to or take off.
 
+Pins belong to the chat they were made in, not to an agent: a message is in one conversation, and its pin goes with it. An agent's own chat shows only its pins, and a [group chat](#group-chats) or Everyone only its own, so a reply an agent wrote in a group chat and pinned there isn't in that agent's own chat. Each pin says who wrote the message, an agent by its name or the person.
+
 An agent is pinned too, from its menu: pinned agents sit at the top of the sidebar as tiles, three across, each a rounded square with the agent's thread drawn large in its shape and its name under it, as OpenBot's pinned agents are. A tile shows what the agent's row would: its thread moves as the agent works, a dot in its corner is a reply not seen yet, and what it's on shows under the pointer. On the rail the pinned agents come first, with a short line under them. Otherwise agents stay where they are: nothing the person does with one moves it, and they drag them into the order they want, among the tiles, in the list or on the rail (`agent.order`). The pin and the order are kept on the instance, so every device has them, and neither is a revision of the agent. Every other agent is one line in the sidebar, its thread and its name, with what it's on (thinking, its tool, what it wants to do) quietly after the name while it works, so starting or stopping never moves a row.
+
+## Group chats
+
+Chats where several of the person's agents take part, and a router picks which one answers each message.
+
+- **Everyone** is one chat with all of the person's agents in it, made by the instance once they have two. The person just writes, and the router picks the agent.
+- **A group chat** is one the person makes with some of their agents: a name, its members (two or more) and a colour if they like. It works as Everyone does, among its members only.
+- **A chat with one agent never routes.** An agent's own chat always talks to that agent, and is the same as before group chats. That agent can still bring another in itself with `message_agent`, which goes in its "From NAME" thread.
+- **A room, not an agent.** A group chat is a conversation with no agent of its own (`agent` is empty) and a `room`: its name, members, colour and default agent, kept in `rooms` beside the conversation. Everyone is the room marked `everyone`, whose members are all of the person's agents as they are now, so a new agent is in it from its first day and a deleted one is gone. The word "group" stays the sidebar's folders'.
+
+### The router
+
+- **One pick a message.** For each of the person's messages in a group chat, a small fast model reads the message, the chat's last few messages with who said them, the agent that answered last, and each member's name and "what I'm for", skills and MCP servers, and the corrections kept for the chat, and names exactly one member and a few words of why. It never asks the person and never answers itself.
+- **It sticks to the topic.** It's told to keep a follow-up with the agent that answered last until the subject clearly changes.
+- **@ wins.** A message that mentions a member, picked with @ or typed, goes to the first one mentioned, with no router call.
+- **A best guess, always.** A pick that isn't a member, or no pick within 8 seconds, or a router that can't run, falls back to the chat's default agent, then the one that answered last, then its first member, so a message is always answered.
+- **On an agent program, as everything is.** Loom makes no model calls of its own ([Agents run on ACP](#agents-run-on-acp)), so the router is a session on one of the person's agent programs, on their own login, set to a small model: by default Claude's adapter (the person's default brain when it's Claude's, or else the first program that is) with `model` `haiku`, Claude Haiku 5.5. The person changes both on the Defaults page (`router_brain`, `router_model`), so it runs on whatever they have. The session has no tools and no MCP servers, and its folder is its own, so it reads only what it's given. One session takes up to 20 picks, each told to stand alone, then the next pick starts a fresh one, so its context stays small and its prompt cache warm. A member's router runs in their sandbox, as their agents do.
+- **Fast and cheap.** One short prompt and one short answer, about a second on a warm session. Its tokens count toward the person's usage as any turn's do, and show with the chat's.
+- **It shows its choice.** The reply has `routed`: how it was picked (`router`, `mention`, `handoff`, `person`, or `default` for a fallback) and why, which the apps draw as one small line over the answer, "→ Ledger · money question", with the agent's thread in its shape and colour. A mention says "→ Hermes · you asked", a handoff "→ Hermes · handed off by Ledger".
+- **Corrections.** A click on the line opens the chat's other members; picking one sends the same message to that agent (`room.resend`), which answers after the first reply, with "→ Hermes · you picked". The instance keeps it as an example for that chat, the message's words (300 bytes at most) and the agent it should have gone to: the newest 20, which the router sees with every pick there. They're listed under the chat's settings, each to delete.
+
+### Answering
+
+- **As itself.** The picked agent answers with its own memory, tools, permissions, program and instructions, and the chat shows its name, shape and colour on the reply.
+- **A seat in the room.** Each member keeps its own ACP session for the group chat, apart from its own chat's, so neither sees the other's: its sessions there are kept under the seat `CONVERSATION/AGENT`, where its own chat's are under the conversation alone.
+- **What was said.** With each turn the agent is given what was said in the group chat since it last answered there (the newest 40 messages, 24,000 bytes at most), each marked with who said it ("Your person:", "Ledger:"), and once a session, who's in the chat and how to hand off. A fresh session gets the newest of the chat the same way.
+- **Handing off.** An agent that finds a message is another member's calls `hand_off` with that member and why. Its turn ends as it would, and the same message goes to that agent at once, answering in the same chat after it, with `routed` `handoff` and `from` the agent that handed it on. A message is handed on three times at most, and never back to one that had it. Outside a group chat, `hand_off` says to use `message_agent`.
+
+### In the apps
+
+- **The sidebar** has Everyone and the group chats over the agents, each a row with its name and its colour's dot, and New group chat in the space under the agents' menu. A group chat's right-click has Settings, Rename and Delete.
+- **Making one**: its name, its members picked from the person's agents, and its colour.
+- **A group chat's settings**, in the panel beside the chat: its name, colour and members, its default agent, and the corrections kept, each with its ×. Everyone's members are everyone's, so it has no members row.
+- **An agent's "what I'm for"** is one line on its settings, under its name, filled from its instructions to start with (their first line that isn't a heading, 200 characters at most), which the person changes. The router reads it.
+- **The router's program and model** are on the Defaults page, under Group chats.
+- **Pins** in a group chat show only there ([Pinned messages](#pinned-messages)).
 
 ## The sidebar
 
 The sidebar groups the agents, in this order, and the phone's agent list the same:
 
+- **Group chats**: Everyone first, once the person has two agents, then the group chats in the order they were made ([Group chats](#group-chats)).
 - **Waiting on you**, only while an agent waits on a question or a permission: each agent with one open, hidden or in a folder too, but a pinned one, whose tile stays where it is. It goes back where it was once it's answered.
 - **The pinned agents**, as tiles ([Pinned messages](#pinned-messages)).
 - **The rest that aren't in a folder**, each on its line.
@@ -723,7 +763,7 @@ To try another way from some point without losing the chat, branch it there: by 
 
 ## Storage
 
-One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `mcp_servers`, `mcp_auth` (each MCP sign-in, sealed), `conversations`, `acp_sessions`, `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5, and the site each is tied to), `recordings` (the steps of a task the person recorded), `proposals` (what agents propose, until the person keeps or drops it), `routines`, `routine_runs` (each routine's newest runs), `push_tokens`, `secrets`, `usage`, `imported` (what came from another app, by its ids), `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
+One SQLite database on the server, with these tables: `users`, `invites`, `link_codes`, `devices` (with each device's public key), `device_grants`, `sandboxes`, `plugins`, `plugin_revisions`, `acp_agents`, `acp_settings`, `agents`, `agent_revisions`, `skills`, `mcp_servers`, `mcp_auth` (each MCP sign-in, sealed), `conversations`, `rooms` (each group chat's name, members, colour, default agent and corrections), `acp_sessions` (by conversation, or by seat in a group chat), `messages` (content blocks as JSON, with FTS5), `files`, `runs`, `tool_calls`, `approvals`, `activity`, `reports`, `events`, `memories` (with FTS5, and the site each is tied to), `recordings` (the steps of a task the person recorded), `proposals` (what agents propose, until the person keeps or drops it), `routines`, `routine_runs` (each routine's newest runs), `push_tokens`, `secrets`, `usage`, `imported` (what came from another app, by its ids), `schema_version`. Files themselves sit in the data folder, named by their SHA-256.
 
 What only grows is pruned. Events go after 30 days, keeping each person's newest 10,000 ([Sync](#sync-an-event-log-with-a-cursor)). Finished `runs`, the client ids of sent messages (`sent`) and the tokens turns used (`usage`) go with the events' age, but never before 35 days, since a month's budget counts usage, and a run still going never; the instance looks once an hour, 10,000 rows of each at most. The app's cache keeps a tool call as long as the events are kept, 30 days, and one of a run still going for as long as it goes.
 
@@ -805,7 +845,7 @@ Also done: std.http reports a server that doesn't speak HTTP/1.1 or HTTP/2 as a 
 
 Already there: WebSockets both ways, FTS5 in std.sqlite's build (SQLite 3.54.1), `calx test` for the tests, std.image for thumbnails. For ACP, std.process can start an agent, write to it, and read its output a line at a time with a timeout (`read_line`), which is enough with a thread per agent.
 
-Not needed: a TLS server in Calx, since Caddy or Cloudflare handles TLS in front of the server. And since agents run on ACP, loom makes no model calls and needs no MCP client, so std.http needs neither streaming bodies nor more methods than GET and POST.
+Not needed: a TLS server in Calx, since Caddy or Cloudflare handles TLS in front of the server. And since agents run on ACP, loom makes no model calls (the group chats' router is a session on an agent program too) and needs no MCP client, so std.http needs neither streaming bodies nor more methods than GET and POST.
 
 ## Phases
 
