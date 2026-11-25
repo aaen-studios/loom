@@ -82,6 +82,12 @@ module tests.fake_agent.main
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Diagnostics go to standard error.
 //
+// A prompt with a `[loom: route]` block plays a group chat's router: it picks
+// the member a "ROUTE:NAME" in the message names, else the one a correction
+// that shares a word of four letters or more went to, else one whose `for`
+// shares one, else the one that answered last, else the first, and says
+// {"agent": NAME, "why": "fake pick"}.
+//
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
 // session/load and refuses every one. Without, it offers neither. With
