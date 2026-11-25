@@ -575,6 +575,12 @@ pub trait Platform: 'static {
 
     fn set_cursor_style(&self, style: CursorStyle);
 
+    /// loom: shows `pan` as the cursor, as [`Self::set_cursor_style`] shows a style. A
+    /// platform without pan cursors shows the nearest resize cursor.
+    fn set_pan_cursor(&self, pan: PanCursor) {
+        self.set_cursor_style(pan.nearest_style());
+    }
+
     /// Hides the mouse cursor until the user moves the mouse over one of
     /// this application's windows.
     fn hide_cursor_until_mouse_moves(&self);
@@ -3095,6 +3101,31 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
+}
+
+/// loom: the cursors of a browser's middle-button scrolling, shown over whatever
+/// [`CursorStyle`] the pointer is on while [`Window::set_pan_cursor`] holds one. Kept out of
+/// `CursorStyle`, whose every platform matches it whole, so a platform that doesn't draw
+/// them still builds, and shows the nearest resize cursor.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum PanCursor {
+    /// At rest where it started, able to scroll up or down.
+    UpDown,
+    /// Scrolling up.
+    Up,
+    /// Scrolling down.
+    Down,
+}
+
+impl PanCursor {
+    /// The resize cursor nearest it, for a platform without pan cursors.
+    pub fn nearest_style(self) -> CursorStyle {
+        match self {
+            PanCursor::UpDown => CursorStyle::ResizeUpDown,
+            PanCursor::Up => CursorStyle::ResizeUp,
+            PanCursor::Down => CursorStyle::ResizeDown,
+        }
+    }
 }
 
 /// A clipboard item that should be copied to the clipboard
