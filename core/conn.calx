@@ -27,6 +27,7 @@ import core.cache.{CALLS_KEPT_MS, Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import shared.reply as replies
+import shared.emoji
 import core.login.{Kind, Outcome, Pending, address, request_body}
 import core.link
 import core.relay
@@ -60,7 +61,7 @@ const FILL_PAGE: i64 = 100
 const RESTART_NS: u64 = 120000000000
 
 // What core.get reads from the cache.
-const GETS: [str; 9] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages", "sidebar"]
+const GETS: [str; 10] = ["conversations", "agents", "devices", "runs", "tools", "approvals", "outbox", "messages", "sidebar", "emoji"]
 
 /// How long to wait after `failed` tries in a row: 0.5 s, doubling up to 30 s.
 pub fn wait_ms(failed: u32) -> u64 {
@@ -206,6 +207,7 @@ pub struct Conn {
     asked: bool           // instance.updates was asked on this connection
     restarting: Instant?  // when the instance said it was restarting for an update
     pub hub: Hub?         // what's behind across the app, in the first core (core/updates.calx)
+    emojis: emoji.Table   // the built-in emoji, for the composer's shortcodes and the picker
 }
 
 impl Conn {
@@ -284,7 +286,115 @@ impl Conn {
             asked: false,
             restarting: none,
             hub: none,
+            emojis: emoji.load(),
         }
+    }
+
+    /// The person's own emoji, as the cache has them.
+    fn own_emoji(self) -> List<emoji.Custom> {
+        let list = match self.cache.emoji() {
+            ok(l) => l,
+            err(_) => List<Json>(),
+        }
+        return list.map(|e| emoji.Custom { id: str_at(e.copy(), "id") ?? String(), name: str_at(e.copy(), "name") ?? String(), animated: bool_at(e.copy(), "animated") ?? false })
+    }
+
+    /// The composer's emoji (PLAN.md, "Emoji"; README, "Between the app and the core"):
+    /// what's typed after a colon, the picker's search and groups, an emoji sent, and
+    /// the picture of one of the person's own.
+    fn emoji_frame(mut self, t: String, m: Json) {
+        let id = str_at(m.copy(), "id")
+        let tone = u32.wrap(u64.wrap(int_at(m.copy(), "tone") ?? 0))
+        let answer = Obj.new().s("t", String("core.emoji")).maybe("id", id.copy())
+        if t == "emoji.used" {
+            if let err(e) = self.cache.used_emoji(str_at(m, "emoji") ?? String()) { self.tell_error("cache", "{e}") }
+            return
+        }
+        if t == "emoji.file" {
+            self.emoji_file(id, str_at(m, "emoji") ?? String())
+            return
+        }
+        let mine = self.own_emoji()
+        if t == "emoji.picker" {
+            let recent = match self.cache.recent_emoji() {
+                ok(r) => r,
+                err(_) => List<String>(),
+            }
+            let groups = self.emojis.picker(tone, mine, recent)
+            self.tell(merge(answer.done(), groups))
+            return
+        }
+        if t == "emoji.find" {
+            let most = int_at(m.copy(), "limit") ?? 8
+            let limit = if most < 1 { 1usize } else if most > 200 { 200usize } else { usize.wrap(u64.wrap(most)) }
+            let items = self.emojis.find(str_at(m, "query") ?? String(), tone, mine, limit)
+            self.tell(answer.j("items", Json.Array(items)).done())
+            return
+        }
+        // emoji.typed: the words up to the cursor.
+        let text = str_at(m.copy(), "text") ?? String()
+        if bool_at(m, "emoticons") ?? false {
+            if let (suffix, with) = emoji.emoticon(text.copy()) {
+                self.tell(answer.j("replace", Obj.new().s("suffix", suffix).s("with", with).done()).done())
+                return
+            }
+        }
+        let typed = emoji.typed(text) else {
+            self.tell(answer.j("items", Json.Array(List<Json>())).done())
+            return
+        }
+        if typed.closed {
+            let found = self.emojis.find(typed.query.copy(), tone, mine.copy(), 1)
+            let exact = self.emojis.named(typed.query.copy(), tone, mine)
+            if let e = exact {
+                let item = if found.len() > 0 { found[0].copy() } else { Obj.new().s("emoji", e.copy()).done() }
+                self.tell(answer.j("replace", Obj.new().s("suffix", typed.suffix).s("with", e).j("item", item).done()).done())
+                return
+            }
+            self.tell(answer.j("items", Json.Array(List<Json>())).done())
+            return
+        }
+        let items = self.emojis.find(typed.query.copy(), tone, mine, 8)
+        self.tell(answer.s("suffix", typed.suffix).s("query", typed.query).j("items", Json.Array(items)).done())
+    }
+
+    /// Fetches the picture of one of the person's own emoji, or anyone's in a chat
+    /// they share, into `{files}/emoji/`, and says where with `core.file`.
+    fn emoji_file(mut self, id: String?, emoji_id: String) {
+        let fits = emoji_id.len() > 0 and emoji_id.len() <= 40 and emoji_id.to_bytes().all(|b| (b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') or b == b'_')
+        if not fits {
+            self.tell(refused(id, "not_found", "There's no emoji {emoji_id}."))
+            return
+        }
+        let known = self.server.copy() ?? String()
+        let server = self.reach(known)
+        let token = self.token.copy() ?? String()
+        if server.len() == 0 or token.len() == 0 {
+            self.tell(refused(id, "signed_out", String("Sign in to an instance first.")))
+            return
+        }
+        var dir = self.files.copy() ?? String()
+        if dir.len() == 0 {
+            dir = match fs.temp_dir() {
+                ok(d) => d,
+                err(e) => {
+                    self.tell(refused(id, "cache", "{e}"))
+                    return
+                },
+            }
+            self.files = some(dir.copy())
+        }
+        let folder = "{dir}/emoji"
+        if let err(e) = fs.make_dir_all(folder.copy()) {
+            self.tell(refused(id, "cache", "can't make {folder}: {e}"))
+            return
+        }
+        let dest = "{folder}/{emoji_id}"
+        if fs.exists(dest.copy()) {
+            self.tell(at_path(id, dest))
+            return
+        }
+        self.carry(Transfer.emoji(server, token, id.copy(), emoji_id, dest))
     }
 
     /// Where to reach `server`: itself, or for a place over Noise, the relay to it,
@@ -565,7 +675,7 @@ impl Conn {
             let title = str_at(e.copy(), "title") ?? String()
             // One from loom itself, with no agent, such as an update it made, is its title alone.
             let shown = if agent_id.len() == 0 and title.len() > 0 { title.copy() } else if title.len() > 0 { "{name}: {title}" } else { name }
-            self.tell(Obj.new().s("t", String("core.notify")).s("title", shown).s("body", str_at(e, "body") ?? String()).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).done())
+            self.tell(Obj.new().s("t", String("core.notify")).s("title", shown).s("body", emoji.as_names(str_at(e, "body") ?? String())).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).done())
             return
         }
         if kind != "run.finished" and kind != "approval.needed" { return }
@@ -600,7 +710,7 @@ impl Conn {
                 if body.len() == 0 { body = String("Done.") }
             }
         }
-        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", body).s("agent", agent_id).s("conversation", conversation).s("kind", kind).done())
+        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", emoji.as_names(body)).s("agent", agent_id).s("conversation", conversation).s("kind", kind).done())
     }
 
     /// A frame from the instance. What changes the cache is applied before the app hears
@@ -654,6 +764,8 @@ impl Conn {
             }
             // The sidebar's folders, as the instance has them.
             if let err(e) = self.cache.keep_groups(at(f.copy(), "groups")) { self.tell_error("cache", "{e}") }
+            // And the person's own emoji.
+            if let err(e) = self.cache.keep_emoji(at(f.copy(), "emoji")) { self.tell_error("cache", "{e}") }
             // Tool calls as old as the events the instance still keeps go, once a day.
             if let err(e) = self.cache.prune_calls(now() - CALLS_KEPT_MS) { self.tell_error("cache", "{e}") }
             // What catching up held from the app, on this connection and any before
@@ -1007,6 +1119,10 @@ impl Conn {
         }
         if t == "core.get" {
             self.get(m)
+            return true
+        }
+        if t == "emoji.typed" or t == "emoji.find" or t == "emoji.picker" or t == "emoji.used" or t == "emoji.file" {
+            self.emoji_frame(t.copy(), m)
             return true
         }
         if t == "send" {
@@ -2109,6 +2225,48 @@ fn catch_up_comes_to_the_app_as_one_synced() ! Error {
     assert((next_told(mut told) ?? String()).contains(#""seq":4"#))
     c.frame(String(#"{"t":"synced","seq":4,"runs":[]}"#))
     assert(next_told(mut told) == some(String(#"{"t":"synced","seq":4,"runs":[]}"#)))
+}
+
+// What the core answers the app's emoji frame `frame` with.
+fn emoji_told(c: mut Conn, told: mut Receiver<ToApp>, frame: str) -> Json ! Error {
+    c.emoji_frame(str_at(try parse(String(frame)), "t") ?? String(), try parse(String(frame)))
+    return try parse(next_told(mut told) ?? String())
+}
+
+@test
+fn the_composer_asks_the_core_about_emoji() ! Error {
+    let inbox = Receiver<String>()
+    var told = Receiver<ToApp>()
+    var c = Conn.new(none, none, String("loom-test"), try Cache.open(String(":memory:")), inbox, told.sender())
+    // The person's own, as synced or emoji.changed brings them.
+    c.frame(String(#"{"t":"synced","seq":0,"runs":[],"emoji":[{"id":"e_1","name":"sob_cat","file":"ab","animated":false,"at":1}]}"#))
+    while next_told(mut told) != none {}
+    // A colon and two letters: the row, theirs first.
+    let row = try emoji_told(mut c, mut told, #"{"t":"emoji.typed","id":"t_1","text":"so :so"}"#)
+    assert(str_at(row.copy(), "t") == some(String("core.emoji")) and str_at(row.copy(), "id") == some(String("t_1")) and str_at(row.copy(), "suffix") == some(String(":so")))
+    let items = at(row, "items")
+    assert(items.len() == 8 and str_at(items.at(0) ?? Json.Null, "emoji") == some(String("<:sob_cat:e_1>")) and str_at(items.at(1) ?? Json.Null, "emoji") == some(String("😭")))
+    // The closing colon turns it straight away, in the person's skin tone.
+    let closed = try emoji_told(mut c, mut told, #"{"t":"emoji.typed","id":"t_2","text":"nice :thumbsup:","tone":2}"#)
+    assert("{at(closed, "replace")}".starts_with(#"{"suffix":":thumbsup:","with":"👍🏼""#))
+    // Not in code, and an emoticon only when the person has that on.
+    assert(at(try emoji_told(mut c, mut told, #"{"t":"emoji.typed","text":"`x :so"}"#), "items").len() == 0)
+    assert(at(try emoji_told(mut c, mut told, #"{"t":"emoji.typed","text":"hi :) "}"#), "replace") == Json.Null)
+    assert(str_at(at(try emoji_told(mut c, mut told, #"{"t":"emoji.typed","text":"hi :) ","emoticons":true}"#), "replace"), "with") == some(String("🙂 ")))
+    // An emoji sent goes first in the picker's Recently used, and theirs come next.
+    c.emoji_frame(String("emoji.used"), try parse(String(#"{"t":"emoji.used","emoji":"😭"}"#)))
+    let picker = try emoji_told(mut c, mut told, #"{"t":"emoji.picker","id":"p_1"}"#)
+    let groups = at(picker, "groups")
+    assert(str_at(at(groups.at(0) ?? Json.Null, "emoji").at(0) ?? Json.Null, "emoji") == some(String("😭")))
+    assert(str_at(at(groups.at(1) ?? Json.Null, "emoji").at(0) ?? Json.Null, "custom") == some(String("e_1")))
+    // The picker's search finds by keyword too.
+    let found = try emoji_told(mut c, mut told, #"{"t":"emoji.find","query":"crying","limit":50}"#)
+    assert("{at(found, "items")}".contains("😭"))
+    // And emoji.changed changes them.
+    c.frame(event_text(1, "emoji.changed", Obj.new().j("emoji", Json.Array(List<Json>()))))
+    while next_told(mut told) != none {}
+    let after = try emoji_told(mut c, mut told, #"{"t":"emoji.typed","text":":sob"}"#)
+    assert(str_at(at(after, "items").at(0) ?? Json.Null, "emoji") == some(String("😭")))
 }
 
 @test

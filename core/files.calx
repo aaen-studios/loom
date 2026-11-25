@@ -81,6 +81,13 @@ impl Transfer {
         return Transfer { id: id, up: false, dest: dest, req: req }
     }
 
+    /// One of the person's own emoji's pictures, anyone's, by its id (`GET /emoji/<id>`).
+    pub fn emoji(server: String, token: String, id: own String?, emoji: String, dest: own String) -> Transfer {
+        let headers: List<Header> = [Header { name: String("Authorization"), value: "Bearer {token}" }]
+        let req = get("{server}/emoji/{emoji}", headers, TIMEOUT_MS, 1048576)
+        return Transfer { id: id, up: false, dest: dest, req: req }
+    }
+
     pub fn done(self) -> bool {
         return self.req.done()
     }
