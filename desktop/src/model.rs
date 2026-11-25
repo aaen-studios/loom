@@ -8561,6 +8561,7 @@ mod tests {
             branch_of: None,
             branch_at: None,
             routine: None,
+            asked_by: None,
             program: None,
             title: String::new(),
         }];
