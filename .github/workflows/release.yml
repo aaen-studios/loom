@@ -19,6 +19,10 @@ permissions:
 env:
   CALX_NO_UPDATE_CHECK: "1"
   NO_COLOR: "1"
+  # As ci.yml has them, so the builds main's ci cached are the ones a release builds.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
   desktop:
@@ -37,11 +41,11 @@ jobs:
       - name: Rust
         run: rustup update stable && rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      # What main's ci built as a release does (ci.yml, desktop-release), so only what
+      # changed since is built again.
+      - uses: ./.github/actions/cargo
         with:
-          workspaces: |
-            desktop
-            desktop/setup
+          job: release-windows
 
       - name: Build
         working-directory: desktop
@@ -92,9 +96,10 @@ jobs:
       - name: Rust
         run: rustup update stable && rustup default stable
 
-      - uses: Swatinem/rust-cache@v2
+      # What main's ci built for the Mac, a release build among it (ci.yml, desktop-macos).
+      - uses: ./.github/actions/cargo
         with:
-          workspaces: desktop
+          job: desktop-macos
 
       - name: Build
         working-directory: desktop

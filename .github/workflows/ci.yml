@@ -331,6 +331,35 @@ jobs:
           done
           exit 1
 
+  # The Windows app built as a release builds it, on main only, so its build is in the
+  # cache a release reads (release.yml): a release runs on a tag, and a tag reads only
+  # what main saved.
+  desktop-release:
+    name: desktop release build (windows-latest)
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.desktop == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/calx
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - uses: ./.github/actions/cargo
+        with:
+          job: release-windows
+
+      - name: Build
+        working-directory: desktop
+        run: cargo build --locked --release
+
+      - name: Setup
+        working-directory: desktop/setup
+        run: cargo build --locked --release
+
   # The Mac app: its checks, loom.app and its disk image made as a release's are, and
   # its updates from end to end (tests/setup/mac.calx).
   desktop-macos:
@@ -388,7 +417,7 @@ jobs:
   # nothing to check.
   ci:
     if: always()
-    needs: [changes, calx, site, install, docker, desktop, desktop-macos]
+    needs: [changes, calx, site, install, docker, desktop, desktop-release, desktop-macos]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
