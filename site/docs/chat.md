@@ -32,9 +32,9 @@ If the wrong agent answered, click the line and pick another. Your message goes 
 
 Each answer is the agent's own, with its memory, tools and permissions. It sees what was said in the group chat since it last answered, by whom. Your chat with each agent stays as it was: nothing from a group chat goes into it, and a message pinned in a group chat is pinned there only.
 
-Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. Everyone's members are always all your agents. Right-click a group chat in the sidebar to delete it; Everyone can't be deleted. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
+Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. **Usage** says how many tokens its agents' answers there used today and this month, and on its own line, how many loom's picking used. Everyone's members are always all your agents. Right-click a group chat in the sidebar to delete it; Everyone can't be deleted. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
 
-The picking is done by a small, fast model: Claude Haiku 5.5, unless you pick another in [Agent defaults](agents.md#agent-defaults). What it reads to pick an agent is the agent's **What it's for** line ([Making an agent](agents.md#making-an-agent)), its skills and its MCP servers.
+The picking is done by a small, fast model: Claude Haiku 5.5, unless you pick another in [Agent defaults](agents.md#agent-defaults). It's ready when you open the app or a group chat, so a message is picked for in about a second. What it reads to pick an agent is the agent's **What it's for** line ([Making an agent](agents.md#making-an-agent)), its skills and its MCP servers.
 
 ## Replying to a message
 

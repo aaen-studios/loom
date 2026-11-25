@@ -47,6 +47,27 @@ struct Correction: Identifiable, Equatable, Sendable {
     var at: Int
 }
 
+/// What a group chat used (`room.summary`): its members' turns there and the router's
+/// picks for it, in tokens.
+struct RoomUsage: Equatable, Sendable {
+    /// Its conversation.
+    var room: String
+    var tokensToday: Int
+    var tokensMonth: Int
+    var routerToday: Int
+    var routerMonth: Int
+}
+
+/// Tokens used, as the desktop says them: "850 today · 12.4k this month".
+func usageLine(_ today: Int, _ month: Int) -> String {
+    func short(_ n: Int) -> String {
+        if n < 1000 { return "\(n)" }
+        if n < 1_000_000 { return String(format: "%.1fk", Double(n) / 1000) }
+        return String(format: "%.1fM", Double(n) / 1_000_000)
+    }
+    return "\(short(today)) today · \(short(month)) this month"
+}
+
 /// How a reply in a group chat came to its agent: the line over it.
 struct Routed: Equatable, Sendable {
     var agent: String
@@ -130,6 +151,21 @@ extension Model {
     /// keeps as a correction.
     func resend(_ message: String, to agent: String) -> JSON {
         ["t": "cmd", "id": JSON(id("app.room_resend")), "name": "room.resend", "args": ["message": JSON(message), "agent": JSON(agent)]]
+    }
+
+    /// Asks what the group chat `room` used, for its settings.
+    func askRoomUsage(_ room: String) -> JSON {
+        if roomUsage?.room != room { roomUsage = nil }
+        return ["t": "cmd", "id": JSON(id("app.room_summary:\(room)")), "name": "room.summary", "args": ["conversation": JSON(room)]]
+    }
+
+    /// What a group chat used, as room.summary answered. Its id is
+    /// app.room_summary:ROOM_N, N the model's own count.
+    func roomUsageCame(_ f: JSON) {
+        let rest = f["id"].text.dropFirst("app.room_summary:".count)
+        guard let cut = rest.lastIndex(of: "_") else { return }
+        let v = f["value"]
+        roomUsage = RoomUsage(room: String(rest[..<cut]), tokensToday: v["tokens_today"].int ?? 0, tokensMonth: v["tokens_month"].int ?? 0, routerToday: v["router_today"].int ?? 0, routerMonth: v["router_month"].int ?? 0)
     }
 
     /// Forgets one of a group chat's corrections.

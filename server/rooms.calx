@@ -299,6 +299,16 @@ pub fn who_said(m: Json, me: String, names: List<(String, String)>) -> String {
     return String("Another agent")
 }
 
+// Who said a message in a chat `me` goes on from: "Your person", "You" for
+// its own replies and the ones that name no agent, as an agent's own chat's
+// older ones, or another agent's name, as in a group chat. `names` is (id, name).
+pub fn speaker(m: Json, me: String, names: List<(String, String)>) -> String {
+    if str_at(m.copy(), "role") != some(String("agent")) { return String("Your person") }
+    let id = str_at(m.copy(), "agent") ?? String()
+    if id.len() == 0 or id == me { return String("You") }
+    return who_said(m, me, names)
+}
+
 // What was said in the chat since `me` last answered there, from its
 // messages oldest first, each "WHO: WORDS", within SAID_MESSAGES_MOST and
 // SAID_BYTES_MOST, the oldest left out first. `upto`, the message being
@@ -522,6 +532,18 @@ fn what_was_said_since_it_last_answered_is_marked_by_who_said_it() {
     let msgs: List<Json> = [msg("m1", "", "old"), msg("m2", "a_5", "mine"), msg("m3", "", "the bill?"), msg("m4", "a_1", "paid"), msg("m5", "", "now mail")]
     assert(said_since(msgs.copy(), String("a_5"), String("m5"), names.copy()) == "Your person: the bill?\n\nLedger: paid")
     assert(said_since(msgs, String("a_7"), String(), names) == "Your person: old\n\nHermes: mine\n\nYour person: the bill?\n\nLedger: paid\n\nYour person: now mail")
+}
+
+@test
+fn a_chat_gone_on_from_names_each_agent_that_spoke() {
+    let names: List<(String, String)> = [(String("a_1"), String("Ledger")), (String("a_5"), String("Hermes"))]
+    assert(speaker(msg("m1", "", "hi"), String("a_5"), names.copy()) == "Your person")
+    assert(speaker(msg("m2", "a_5", "mine"), String("a_5"), names.copy()) == "You")
+    assert(speaker(msg("m3", "a_1", "paid"), String("a_5"), names.copy()) == "Ledger")
+    assert(speaker(msg("m4", "a_9", "gone"), String("a_5"), names.copy()) == "Another agent")
+    // An older reply that names no agent is the chat's own agent's.
+    let old = Obj.new().s("role", String("agent")).j("blocks", Json.Array(List<Json>())).done()
+    assert(speaker(old, String("a_5"), names) == "You")
 }
 
 @test
