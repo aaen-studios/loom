@@ -2389,7 +2389,9 @@ final class Model {
     func picks(_ query: String) -> [Pick] {
         let q = query.lowercased()
         // An empty query matches every agent, which `contains` wouldn't say.
-        let matching = agents.filter { (roomOpen.map { r in r.members.contains($0.id) } ?? ($0.id != selected)) && (q.isEmpty || $0.name.lowercased().contains(q)) }
+        // In a group chat, its members, the selected one too.
+        let members = roomOpen?.members
+        let matching = agents.filter { a in (members?.contains(a.id) ?? (a.id != selected)) && (q.isEmpty || a.name.lowercased().contains(q)) }
         let starting = matching.filter { $0.name.lowercased().hasPrefix(q) }
         let rest = matching.filter { !$0.name.lowercased().hasPrefix(q) }
         var out: [Pick] = (starting + rest).prefix(5).map { a in
