@@ -1,9 +1,27 @@
-//! A small ring that fills as something is used, such as an agent's context by the
-//! composer's Send.
+//! A small ring that fills as something is used: an agent's context by the composer's
+//! Send, and the plan's limits in the sidebar.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use gpui_kit::*;
+
+/// How full a meter reads: quiet, then orange from 75%, red from 90%.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Level {
+    Quiet,
+    Warn,
+    Bad,
+}
+
+impl Level {
+    pub fn of(percent: i64) -> Level {
+        match percent {
+            p if p >= 90 => Level::Bad,
+            p if p >= 75 => Level::Warn,
+            _ => Level::Quiet,
+        }
+    }
+}
 
 /// A ring `size` across: `track` all round, and `ink` over `fraction` of it, clockwise
 /// from the top.

@@ -10356,10 +10356,10 @@ ACTA_KEY=secret:ACTA_KEY",
                         })
                         // How full the agent's session context is, just before Send.
                         .when_some(self.model.context(), |d, fill| {
-                            let ink = match fill.level() {
-                                model::Level::Bad => p.bad,
-                                model::Level::Warn => p.warn,
-                                model::Level::Quiet => p.ink_2,
+                            let ink = match meter::Level::of(fill.percent()) {
+                                meter::Level::Bad => p.bad,
+                                meter::Level::Warn => p.warn,
+                                meter::Level::Quiet => p.ink_2,
                             };
                             d.child(
                                 div()

@@ -1647,15 +1647,6 @@ impl ContextFill {
         (self.used.max(0) as f32 / self.size as f32).clamp(0.0, 1.0)
     }
 
-    /// How the ring reads: quiet, then orange from 75%, red from 90%.
-    pub fn level(self) -> Level {
-        match self.percent() {
-            p if p >= 90 => Level::Bad,
-            p if p >= 75 => Level::Warn,
-            _ => Level::Quiet,
-        }
-    }
-
     /// What the ring says under the pointer.
     pub fn tip(self) -> String {
         format!(
@@ -1665,14 +1656,6 @@ impl ContextFill {
             tokens_short(self.size)
         )
     }
-}
-
-/// How full a meter reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Level {
-    Quiet,
-    Warn,
-    Bad,
 }
 
 /// A title as it reads after other words: "Clean out the build" goes on "Wants to clean
@@ -11256,15 +11239,14 @@ mod tests {
             fill.tip(),
             "Context 56%, 112k of 200k. A fresh session starts at 80%."
         );
-        assert_eq!(fill.level(), Level::Quiet);
         m.select(Some("a_2".into()));
         assert_eq!(m.context(), None, "nothing until its program says");
         let at = |used| ContextFill {
             used,
             size: 1_000_000,
         };
-        assert_eq!(at(750_000).level(), Level::Warn);
-        assert_eq!(at(900_000).level(), Level::Bad);
+        assert_eq!(at(750_000).percent(), 75);
+        assert_eq!(at(-5).fraction(), 0.0);
         assert_eq!(at(2_000_000).fraction(), 1.0);
         assert_eq!(tokens_short(900), "900");
         assert_eq!(tokens_short(15_600), "16k");
