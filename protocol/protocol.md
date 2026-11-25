@@ -27,6 +27,7 @@ Version 2, and version 1, which an instance still speaks ([Versions](#versions))
 - [Messages and streaming](#messages-and-streaming)
 - [Events](#events)
 - [Commands](#commands)
+- [Emoji](#emoji)
 - [Plugins](#plugins)
 - [Errors and close codes](#errors-and-close-codes)
 - [Over Noise](#over-noise)
@@ -220,6 +221,10 @@ A file goes in a message by its `file`, in [`send`](#send)'s `files`.
 ### `GET /files/<sha256>`
 
 Login needed, as above. The file, with its type, for whoever uploaded it or got it from an agent, and `404` for anyone else. With `?thumb`, a thumbnail of a PNG or JPEG image instead, at most 512 pixels a side, turned the way a photo's EXIF says it shows (the thumbnail keeps no EXIF), as a JPEG, or a PNG when it has transparency. It's made just after the upload; until it's there, and for files that have none, `?thumb` gives the file itself. Both are cached for good (`Cache-Control: private, immutable`), since a file's name is its content, except the file given while its thumbnail is still being made: that one has `X-Loom-Thumb: not-yet` and `Cache-Control: no-store`, and the core shows it without keeping it as the thumbnail.
+
+### `GET /emoji/<id>`
+
+Login needed, as above. The picture of a person's own emoji ([Emoji](#emoji)), a PNG 128 pixels square, for anyone signed in to the instance, since everyone in a chat sees the emoji in it. Cached for good (`Cache-Control: private, immutable`): a renamed emoji keeps its picture. `404` for one deleted, until `emoji.restore` brings it back.
 
 ### `GET /api/mcp/tools` and `POST /api/mcp/call`
 
@@ -441,6 +446,8 @@ Catch-up is over. Everything after this is live.
 `runs` is every one of the person's runs still going, as `run.started` gave each (without `revision`), with `routine` for a routine's quiet run, which the apps don't show as working. The app's cache makes its runs exactly these, so a run whose `run.started` or `run.finished` it never kept (the event was pruned, came before a snapshot's, or the cache couldn't write it) shows as it is: an agent shows it's working for as long as its turn goes, and stops once it's over.
 
 `groups` is every one of the person's sidebar folders, in the order they were made, as `group.list` gives them ([PLAN.md](../PLAN.md#the-sidebar)). The cache makes its folders exactly these, so one that came while an older app was in use is there too. An instance from before folders leaves it out.
+
+`emoji` is every one of the person's own emoji, as `emoji.list` gives them ([Emoji](#emoji)). The cache keeps them whole, as each `emoji.changed` brings them. An instance from before emoji leaves it out.
 
 ### `ack`
 
@@ -819,6 +826,7 @@ An approval nobody answers stays open while the run does. Cancelling the run ans
 | `agent.deleted` | `agent` (the id) | Deleted |
 | `group.updated` | `group` (the whole folder: `id`, `name`, `collapsed`, `at`), `by` (the device that changed it) | A sidebar folder was made, renamed, or opened or shut ([PLAN.md](../PLAN.md#the-sidebar)) |
 | `group.deleted` | `group` (the id), `by` | Deleted. Its agents came out of it first, each with `agent.updated` |
+| `emoji.changed` | `emoji` (all of the person's own, as `emoji.list` gives them), `by` (the device that changed them, or the one that said yes to an agent's) | One was added, renamed, deleted or brought back ([Emoji](#emoji)) |
 | `routine.updated` | `routine` (the whole routine, as `routine.list` gives it) | Made, changed, or run: `last` says how its newest run is going |
 | `routine.deleted` | `routine` (the id) | Deleted |
 | `proposal.created` | `proposal` (as `proposal.list` gives it) | An agent proposed a skill or a note, which waits for the person ([Teaching a task, and proposals](#teaching-a-task-and-proposals)) |
@@ -950,6 +958,11 @@ Version 1's commands:
 | `group.create` | `name` (1 to 80 characters, trimmed) | `group`, open. `group.updated` tells every device. `bad_request` for a blank or long name |
 | `group.update` | `group`, `name`?, `collapsed`? | `group`, as it is now, and `group.updated` to every device when it changed. Opening or shutting a folder is kept too, so every device shows it the same |
 | `group.delete` | `group` | —. Its agents stay, out of any folder, each with `agent.updated`, then `group.deleted` |
+| `emoji.list` | — | `emoji`: the person's own, oldest first, each `id`, `name`, `file` (its picture, the person's file), `animated` and `at`, and `most`, how many one person may have (200) ([Emoji](#emoji)) |
+| `emoji.add` | `file` (a picture the person sent, with `POST /files`), `name` | `emoji`, and `emoji.changed` to every device. The picture is a PNG or a JPEG of at most 256 KB and 1024 pixels a side, made 128 pixels square. `bad_name` for a name that isn't 2 to 32 of `a`–`z`, `0`–`9` and `_` (it's taken in lowercase, without colons), `name_taken`, `too_many` past 200, `bad_picture` for anything else, a GIF, a WebP or a moving PNG among them, for now, and `not_found` for a file the person doesn't have |
+| `emoji.rename` | `emoji`, `name` | `emoji`, as it is now, and `emoji.changed`. `bad_name`, `name_taken`, `not_found` |
+| `emoji.delete` | `emoji` | —, and `emoji.changed`. It's kept, for its undo, but not listed, counted or shown |
+| `emoji.restore` | `emoji` | `emoji`, back with its id, so the messages it's in show it again, and `emoji.changed`. `name_taken` when another has its name now, `too_many` |
 | `agent.delete` | `agent` | —. A sandbox of its own, for an agent closed to the network, goes with it, and its egress |
 | `device.list` | — | `devices`, the person's devices signed in, oldest first: each `id`, `name`, `kind`, `at` (when it signed in), `seen` (when it was last connected, Unix ms, or 0 for never) and `online` (connected now) |
 | `device.rename` | `device`, `name` | — |
@@ -977,6 +990,16 @@ Version 1's commands:
 | `messages.search` | `query`, `agent`?, `after`? and `before`? (Unix ms), `limit`? (up to 100, 30 if left out) | `results`, best first, each with its `message` and a `snippet`: the words around the match, on one line and without the Markdown they were written in (a link as its text, no code ticks, bold, strike, list or heading marks), with each matched word between U+0002 and U+0003. Every word of `query` must be in the message, the last as a prefix, so it works while typing. It searches text blocks and file names, in conversations that aren't deleted. A person's message counts as its conversation's agent's |
 
 Arguments marked `?` are optional. "—" means `value` is `{}`.
+
+## Emoji
+
+([PLAN.md](../PLAN.md#emoji).) A built-in emoji goes in a message's text as itself, the Unicode character, so it reads the same everywhere: to an agent, copied, in another app. One of the person's own goes as a token with its name and its id, `<:party_cat:e_3>`, or `<a:party_cat:e_3>` for one that moves, and the apps draw its picture from `GET /emoji/<id>`. A token is `<`, `a` for one that moves, `:`, its name (2 to 32 of `a`–`z`, `0`–`9` and `_`), `:`, its id, and `>`. In code, in backticks or a fenced block, nothing is a token or an emoji's name.
+
+- **What the agent reads.** Each token as `:name:`, in the message and in what it replies to. Each session is told, once and again when the person's emoji change, `[loom: In the chat, write an emoji as itself or by its name between colons, as :sob: or :thumbsup:, and it shows as the emoji. Your person's own emoji, written the same way: :party_cat:, :sob_cat:.]`.
+- **What it writes.** A reply's words are kept with each `:name:` the instance knows turned into the emoji: a built-in name (`:sob:`, `:+1:`, `:thumbsup_tone3:` for a skin tone) into the character, and one of the person's own into its token. A name it doesn't know, a time such as `12:30:45`, and anything in code stay as they are. The deltas stream the words as the agent wrote them, and the reply's `message.created` has them turned.
+- **Notifications** say a token as `:name:`, since a notification draws no pictures.
+
+The built-in names come from [`shared/emoji.calx`](../shared/emoji.calx), which the core and the instance both use: gemoji's Discord-style names (`sob`, `joy`, `+1`, `thumbsup`, `skull`) first, then CLDR's name in snake case (`loudly_crying_face`), and CLDR's keywords for finding one. The core answers the composer with them (core/README.md, "Between the app and the core").
 
 ## Plugins
 
