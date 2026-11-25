@@ -10,7 +10,8 @@ module tests.setup.mac
 // the test's folder and updates put in on their own (prefs.json, auto_update). Then:
 //
 // 1. a release whose loom can't start: the new loom puts itself in place, starts, ends
-//    with an error, and the old loom goes back and starts again;
+//    with an error, and the old loom goes back and starts again, and with the broken
+//    release still the newest, it isn't put in again on its own;
 // 2. a release that starts: it stays, running, and the old bundle is cleared away.
 //
 // Each release's loom is the same program with its version changed, signed again; the
@@ -213,6 +214,31 @@ fn run(root: String, given: String) ! Error {
         wait_ms(500)
     }
     try check(back, "the old loom is in its place again, running")
+
+    // The old loom, with updates still going in on their own, finds the broken release
+    // the newest still, and leaves it: the update icon offers it, saying why.
+    let kept = match fs.read_text("{data}/update/failed.json") {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+    try check(kept.contains(#""version":"0.0.2-dev""#), "the release that didn't start is kept")
+    var skipped = false
+    for _ in 0..STEP_MS / 500 {
+        let app_said = match fs.read_text("{root}/app.log") {
+            ok(some(t)) => t,
+            _ => String(),
+        }
+        if app_said.contains("loom {BROKEN} didn't start the last time it went in") {
+            skipped = true
+            break
+        }
+        wait_ms(500)
+    }
+    try check(skipped, "the old loom finds it again, and says it isn't put in on its own")
+    // Long enough for a second try to have put itself in place and failed.
+    wait_ms(20000)
+    try check(log_of(data.copy()).split("so the old loom goes back").len() == 2, "it isn't tried again")
+    try check(running(app.copy()) and version_of(app.copy()) == OLD, "and the old loom runs on")
 
     // A release that starts: the old loom, started again, finds it and puts it in.
     let key2 = Ed25519Key.from_seed(bytes.from_hex(String(SEED)) ?? List<u8>()) else {

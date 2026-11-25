@@ -175,7 +175,13 @@ impl Loom {
             self.awake = awake;
             shell::keep_awake(awake);
         }
-        if self.prefs.auto_update && !working && !shell::window_shown(self.hwnd) {
+        // Not a release that didn't start the last time it went in: the update icon
+        // still offers it, saying why.
+        if self.prefs.auto_update
+            && !working
+            && self.hub().update_auto
+            && !shell::window_shown(self.hwnd)
+        {
             if let Some((_, path)) = self.hub().update.clone() {
                 // Once: if the swap fails, the sidebar still offers it.
                 self.prefs.auto_update = false;

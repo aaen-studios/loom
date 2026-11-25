@@ -15,7 +15,7 @@ import std.fs
 import std.hash.{sha256}
 import std.http.{Header, Request, get}
 import std.net.{Waker}
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.random.{Random}
 import std.time.{Instant}
 import shared.files.{safe_name}
@@ -279,8 +279,46 @@ impl Updater {
     fn ready(mut self, path: String) -> Json {
         let id = if self.asked { self.asked_id.take() } else { none }
         self.asked = false
-        return answer().maybe("id", id).s("version", str_at(self.found.copy(), "version") ?? String()).s("path", path).s("notes", str_at(self.found.copy(), "notes") ?? String()).done()
+        let version = str_at(self.found.copy(), "version") ?? String()
+        // A release that didn't start when it went in isn't put in again on its own:
+        // the update icon still offers it, saying why.
+        let failed = failed_before(self.dir.copy(), version.copy())
+        if let why = failed.copy() { eprintln("loom: loom {version} didn't start the last time it went in ({why}), so it isn't put in on its own") }
+        return answer().maybe("id", id).s("version", version).s("path", path).s("notes", str_at(self.found.copy(), "notes") ?? String()).b("auto", failed == none).maybe("failed", failed).done()
     }
+}
+
+/// The file in the updates folder where the setup on Windows, or the new loom on a Mac,
+/// keeps the release that didn't start once it went in, and the old loom went back:
+/// `{"version": …, "why": …}`.
+pub const FAILED: str = "failed.json"
+
+/// Why `version` didn't start the last time it went in, as `dir`'s FAILED keeps it,
+/// or none when it isn't the release that failed.
+pub fn failed_before(dir: String, version: String) -> String? {
+    let text = match fs.read_text("{dir}/{FAILED}") {
+        ok(some(t)) => t,
+        _ => return none,
+    }
+    let kept = match parse(text) {
+        ok(j) => j,
+        err(_) => return none,
+    }
+    if str_at(kept.copy(), "version") != some(version.copy()) { return none }
+    let why = str_at(kept, "why") ?? String()
+    return some(if why.len() > 0 { why } else { String("it didn't start") })
+}
+
+@test
+fn a_release_that_didnt_start_is_known_by_its_version() {
+    let dir = fs.temp_dir()!
+    assert(failed_before(dir.copy(), String("0.2.7")) == none)
+    fs.write_text("{dir}/{FAILED}", String(#"{"version":"0.2.7","why":"it ended at once (exit code: 3)"}"#))!
+    assert(failed_before(dir.copy(), String("0.2.7")) == some(String("it ended at once (exit code: 3)")))
+    assert(failed_before(dir.copy(), String("0.2.8")) == none)
+    fs.write_text("{dir}/{FAILED}", String("not json"))!
+    assert(failed_before(dir.copy(), String("0.2.7")) == none)
+    fs.remove_dir_all(dir)!
 }
 
 /// Whether the file at `path` is the one a manifest's entry names.

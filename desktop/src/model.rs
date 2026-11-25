@@ -4258,6 +4258,9 @@ pub struct Model {
     search_id: String,
     /// A newer release, downloaded and checked: its version and where it is.
     pub update: Option<(String, String)>,
+    /// Whether that release may go in on its own, with "put updates in on their own":
+    /// not one that didn't start the last time it went in, as the core says.
+    pub update_auto: bool,
     /// What a check the person asked for found, for the app to say.
     pub checked: Option<String>,
     /// The activity log as CSV, once `activity.export` gives it, for the app to save.
@@ -5277,6 +5280,7 @@ impl Model {
                         ));
                     }
                     self.update = Some((version, path.to_string()));
+                    self.update_auto = f.get("auto").and_then(Value::as_bool) != Some(false);
                 } else if asked {
                     self.checked = Some(match f.get("error") {
                         // A build that doesn't update itself says so plainly.
@@ -10335,6 +10339,15 @@ mod tests {
             m.checked.take().as_deref(),
             Some("loom 0.2.4 is the newest.")
         );
+    }
+
+    #[test]
+    fn a_release_that_didnt_start_isnt_put_in_on_its_own() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.update", "version": "0.2.5", "path": "/u/0.2.5/loom-mac.dmg", "auto": true}));
+        assert!(m.update.is_some() && m.update_auto);
+        m.take(&json!({"t": "core.update", "version": "0.2.5", "path": "/u/0.2.5/loom-mac.dmg", "auto": false, "failed": "ended at once, exit status: 3"}));
+        assert!(m.update.is_some() && !m.update_auto);
     }
 
     #[test]

@@ -256,6 +256,10 @@ fn roll_back(
     log(&format!(
         "loom {new} didn't start: {why}; going back to {before}"
     ));
+    // Before the old loom starts again, so its core doesn't put this one in again on its own.
+    if let Err(e) = install::keep_failed(new, why) {
+        log(&format!("can't keep that loom {new} didn't start: {e}"));
+    }
     install::roll_back(dir, before)?;
     let _ = install::launch(&dir.join("loom.exe"), launch_args);
     w.lock().unwrap().rolled_back = Some(before.to_string());
