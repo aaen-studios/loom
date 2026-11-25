@@ -156,6 +156,10 @@ struct MarkdownView: View {
                 linked.foregroundColor = ink
                 out = Text("\(out)\(Text(linked).fontWeight(.medium))")
                 continue
+            case .skill:
+                // A skill from the + menu: its name, a little weathered, not a link.
+                out = Text("\(out)\(Text(verbatim: String(piece.characters)).fontWeight(.medium))")
+                continue
             case .file(_, let path) where first:
                 // A picture a reply names shows a tiny copy of itself once it's fetched.
                 if let thumb = links.icons[address], let icon = siteIcon(thumb) {

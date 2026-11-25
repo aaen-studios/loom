@@ -1,0 +1,166 @@
+module tests.protocol.add_device
+
+// Adding a device with a code another one shows (protocol.md, "Adding a device"):
+// the code is short and works once, for ten minutes; the device that uses it waits
+// with a check of four digits until the person says yes on a device signed in, which
+// is asked with the same check; a no turns it down, and an ask no one answers runs
+// out. Then the devices signed in, with when each was last connected, and removing
+// one, which signs it out. Its minutes are 400 ms (`--test-minute-ms`), so an ask runs
+// out in 2 s.
+//
+//     calx tests/protocol/add_device.calx
+import std.json.{Json}
+import std.process.{exit}
+import std.sqlite.{Database, Value}
+import std.thread.{sleep}
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, post_json}
+import tests.kit.{Instance, check}
+
+fn now_ms() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+fn error_code(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn sql(data: String, query: str, params: List<Value>) ! Error {
+    let db = try Database.open("{data}/loom.db")
+    _ = try db.execute(String(query), params)
+}
+
+// A new code from `app`, as its `value`.
+fn new_code(app: mut Session, id: str) -> Json ! Error {
+    return at(try app.cmd(id, "link.create", Obj.new().done()), "value")
+}
+
+// Uses `code` as a device named `name`: the status and the answer.
+fn use_code(base: String, code: String, name: str) -> (u32, Json) ! Error {
+    return try post_json(base, "/api/link", Obj.new().s("code", code).j("device", Obj.new().s("name", String(name)).s("kind", String("macos")).s("tz", String("Europe/Oslo")).done()).done())
+}
+
+fn wait(base: String, secret: String) -> (u32, Json) ! Error {
+    return try post_json(base, "/api/link/wait", Obj.new().s("waiting", secret).done())
+}
+
+fn listed(app: mut Session, id: str) -> List<Json> ! Error {
+    let r = try app.cmd(id, "device.list", Obj.new().done())
+    if let Json.Array(ds) = at(at(r, "value"), "devices") { return ds }
+    return List<Json>()
+}
+
+fn named(ds: List<Json>, name: str) -> Json {
+    for d in ds {
+        if str_at(d.copy(), "name") == some(String(name)) { return d.copy() }
+    }
+    return Json.Null
+}
+
+fn run(i: Instance) ! Error {
+    let base = i.base.copy()
+    var app = try Session.connect(base.copy(), i.token.copy(), 0)
+    var welcomed = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "t") == some(String("welcome")) { welcomed = f.copy() }
+    }
+    try check(bool_at(welcomed, "has_password") == some(true), "welcome says the account has a password")
+
+    // --- A short code, once, with a yes ---
+    let made = try new_code(mut app, "q_1")
+    let code = str_at(made.copy(), "code") ?? String()
+    let expires = int_at(made, "expires") ?? 0
+    try check(code.len() == 9 and code[4..5] == "-" and expires > now_ms() + 590000 and expires <= now_ms() + 600000, "link.create gives a code of two groups of four, for ten minutes")
+    let typed = code.replace("-", "").to_lower_root()
+    let (s1, asked) = try use_code(base.copy(), typed, "MacBook")
+    let secret = str_at(asked.copy(), "waiting") ?? String()
+    let digits = str_at(asked.copy(), "check") ?? String()
+    try check(s1 == 202 and secret.len() == 32 and digits.len() == 4 and error_code(asked) == "update_app", "a device that uses it, typed in any case, waits with a check of four digits, and an older app is told to update")
+    let ask = at(try app.until("event", "link.asked"), "ask")
+    try check(str_at(ask.copy(), "check") == some(digits.copy()) and str_at(ask.copy(), "name") == some(String("MacBook")) and str_at(ask.copy(), "kind") == some(String("macos")) and (int_at(ask.copy(), "expires") ?? 0) > now_ms(), "the account's devices are asked to add it, with the same check")
+    let (s2, still) = try wait(base.copy(), secret.copy())
+    try check(s2 == 202 and bool_at(still, "waiting") == some(true), "asking again before anyone answers, it still waits")
+    let (s3, stranger) = try wait(base.copy(), String("0123456789abcdef0123456789abcdef"))
+    try check(s3 == 403 and error_code(stranger) == "bad_code", "asking with what no device was given is refused")
+    let ask_id = str_at(ask, "id") ?? String()
+    let yes = try app.cmd("q_2", "link.answer", Obj.new().s("ask", ask_id.copy()).b("allow", true).done())
+    try check(bool_at(yes, "ok") == some(true), "the person says yes on a device signed in")
+    let answered = try app.event("link.answered")
+    try check(str_at(answered.copy(), "ask") == some(ask_id.copy()) and bool_at(answered, "allow") == some(true), "and every device of theirs hears it was answered")
+    let (s4, joined) = try wait(base.copy(), secret.copy())
+    let mac_token = str_at(joined.copy(), "token") ?? String()
+    try check(s4 == 200 and mac_token.len() > 0, "then the new device gets its token")
+    let added = at(try app.until("event", "device.added"), "device")
+    try check(str_at(added, "name") == some(String("MacBook")), "and device.added says it joined")
+    let (s5, again) = try wait(base.copy(), secret)
+    try check(s5 == 403 and error_code(again) == "bad_code", "what it waited with works once")
+    let (s6, reused) = try use_code(base.copy(), code, "Stranger")
+    try check(s6 == 403 and error_code(reused) == "bad_code", "and so does the code: a second use is refused")
+
+    // --- A no ---
+    let second = str_at(try new_code(mut app, "q_3"), "code") ?? String()
+    let (_, asked2) = try use_code(base.copy(), second, "Not mine")
+    let no_ask = at(try app.until("event", "link.asked"), "ask")
+    let no = try app.cmd("q_4", "link.answer", Obj.new().s("ask", str_at(no_ask.copy(), "id") ?? String()).b("allow", false).done())
+    let twice = try app.cmd("q_5", "link.answer", Obj.new().s("ask", str_at(no_ask, "id") ?? String()).b("allow", true).done())
+    try check(bool_at(no, "ok") == some(true) and error_code(twice) == "answered", "a no is the answer: it can't be changed to a yes")
+    let (s7, refused) = try wait(base.copy(), str_at(asked2, "waiting") ?? String())
+    try check(s7 == 403 and error_code(refused) == "refused", "and the new device is turned down")
+
+    // --- No answer in time, and a code that's expired ---
+    let third = str_at(try new_code(mut app, "q_6"), "code") ?? String()
+    let (_, asked3) = try use_code(base.copy(), third, "Too slow")
+    let late_ask = at(try app.until("event", "link.asked"), "ask")
+    unsafe { sleep(2500000000) }
+    let late = try app.cmd("q_7", "link.answer", Obj.new().s("ask", str_at(late_ask, "id") ?? String()).b("allow", true).done())
+    try check(error_code(late) == "expired", "a yes after the ask ran out is refused")
+    let (s8, ran_out) = try wait(base.copy(), str_at(asked3, "waiting") ?? String())
+    try check(s8 == 410 and error_code(ran_out) == "expired", "and the new device hears it ran out")
+    let fourth = str_at(try new_code(mut app, "q_8"), "code") ?? String()
+    try sql(i.data.copy(), "UPDATE link_codes SET expires = 1", List<Value>())
+    let (s9, old) = try use_code(base.copy(), fourth, "Late")
+    try check(s9 == 403 and error_code(old) == "expired", "a code past its ten minutes is refused as expired")
+
+    // --- The devices signed in, and removing one ---
+    var before = try listed(mut app, "q_9")
+    let mac = named(before.copy(), "MacBook")
+    let desk = named(before.copy(), "Desk PC")
+    try check(before.len() == 2 and bool_at(desk.copy(), "online") == some(true) and (int_at(desk, "seen") ?? 0) > 0 and bool_at(mac.copy(), "online") == some(false) and int_at(mac.copy(), "seen") == some(0) and str_at(mac.copy(), "kind") == some(String("macos")), "device.list gives each device's name, kind, whether it's connected and when it last was")
+    let mac_app = try Session.connect(base.copy(), mac_token.copy(), 0)
+    before = try listed(mut app, "q_10")
+    try check(bool_at(named(before, "MacBook"), "online") == some(true), "a device that connects is online")
+    let mac_id = str_at(mac, "id") ?? String()
+    let gone = try app.cmd("q_11", "device.revoke", Obj.new().s("device", mac_id.copy()).done())
+    try check(bool_at(gone, "ok") == some(true) and str_at(try app.event("device.revoked"), "device") == some(mac_id), "removing it signs it out, and the devices hear so")
+    mac_app.close()
+    let after = try listed(mut app, "q_12")
+    try check(after.len() == 1 and named(after, "MacBook") == Json.Null, "it's no longer listed")
+    try check(shut_out(base.copy(), mac_token), "and its token no longer opens a session")
+    app.close()
+}
+
+// Whether a session with `token` is refused.
+fn shut_out(base: String, token: String) -> bool {
+    return match Session.connect(base, token, 0) {
+        ok(s) => {
+            s.close()
+            false
+        },
+        err(_) => true,
+    }
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--test-minute-ms"), String("400")])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nadding a device: all good")
+}

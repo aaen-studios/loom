@@ -198,6 +198,27 @@ impl Session {
         }
     }
 
+    /// The newest event of `kind` among the frames read already, as one that came before
+    /// a command's result, or else the next to come.
+    pub fn event(s: mut Session, kind: str) -> Json ! Error {
+        var n = s.frames.len()
+        while n > 0 {
+            n -= 1
+            let f = s.frames[n].copy()
+            if str_at(f.copy(), "t") == some(String("event")) and str_at(f.copy(), "kind") == some(String(kind)) { return f }
+        }
+        return try s.until("event", kind)
+    }
+
+    /// Answers the next device asking to be added (`link.asked`), as the person would on
+    /// this device, with `link.answer` as `id`: the ask.
+    pub fn answer_link(s: mut Session, id: str, allow: bool) -> Json ! Error {
+        let ask = at(try s.until("event", "link.asked"), "ask")
+        let r = try s.cmd(id, "link.answer", Obj.new().s("ask", str_at(ask.copy(), "id") ?? String()).b("allow", allow).done())
+        if at(r.copy(), "error") != Json.Null { fail "link.answer was refused: {r}" }
+        return ask
+    }
+
     /// The agent's next finished message.
     pub fn reply(s: mut Session) -> Json ! Error {
         loop {

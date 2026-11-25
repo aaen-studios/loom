@@ -486,6 +486,7 @@ struct CardView: View {
         case "sign_in": signIn
         case "mcp_add": McpAddCard(card: card, tint: tint, agent: agent)
         case "secret_ask": SecretAskCard(card: card, tint: tint)
+        case "form": FormCard(card: card, tint: tint)
         case "checklist": checklist
         case "progress": progress
         case "facts":
@@ -498,12 +499,12 @@ struct CardView: View {
     }
 
     /// The question with the agent's thread beside it, tugging while it waits, then the
-    /// answers as tiles, two to a row, which answer while the reply is the chat's newest.
-    /// Once the chat has gone on, the one the person sent stays marked and the rest go
-    /// quiet.
+    /// answers as tiles, two to a row, which answer while the reply is the chat's newest
+    /// and finished (`takesAnswers`). Once the chat has gone on, the one the person sent
+    /// stays marked and the rest go quiet.
     private var choices: some View {
         let rows = stride(from: 0, to: card.options.count, by: 2).map { Array(card.options.indices)[$0..<min($0 + 2, card.options.count)] }
-        return CardFrame(card.title, tint: tint, waits: !card.passed) {
+        return CardFrame(card.title, tint: tint, waits: card.takesAnswers) {
             Grid(horizontalSpacing: Tokens.Space.s, verticalSpacing: Tokens.Space.s) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                     GridRow {
@@ -525,7 +526,7 @@ struct CardView: View {
             .multilineTextAlignment(.leading)
             .lineLimit(3)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        if !card.passed {
+        if card.takesAnswers {
             Button {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 session.send(session.model.choose(option))
@@ -1040,6 +1041,105 @@ struct SecretAskCard: View {
     }
 }
 
+/// Several questions an agent asks at once (show_card's `form`), as the desktop's
+/// `form_card`: each field under its label, text and numbers in a box, a choice as its
+/// options side by side, a toggle as a switch beside its label, then Send, which sends
+/// them as one answer. Sent, it's one quiet line, as it is once the chat has gone on
+/// without it.
+struct FormCard: View {
+    @Environment(Session.self) private var session
+    var card: Card
+    var tint: Color
+    /// What the person typed in each text and number field, by the field's place.
+    @State private var typed: [Int: String] = [:]
+
+    var body: some View {
+        if !card.answers.isNull {
+            CardDone(icon: "checkmark", how: "Sent", what: card.title)
+        } else if !card.takesAnswers {
+            CardDone(icon: "xmark", how: "Not sent", what: card.title)
+        } else {
+            CardFrame(card.title, lead: AnyView(CardIcon(icon: "list.clipboard", tint: tint)), tint: tint, waits: true) {
+                VStack(alignment: .leading, spacing: Tokens.Space.m) {
+                    ForEach(Array(card.formFields.enumerated()), id: \.offset) { k, f in
+                        field(k, f)
+                    }
+                }
+                .font(Fonts.small)
+                if !card.error.isEmpty {
+                    Text(card.error).font(Fonts.small).foregroundStyle(P.bad)
+                }
+                Flow {
+                    Button(card.sending ? "Sending…" : "Send") { send() }.buttonStyle(CardButtonStyle(primary: true))
+                }
+                .padding(.top, Tokens.Space.xs)
+            }
+        }
+    }
+
+    private func label(_ f: FormField) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: Tokens.Space.s) {
+            Text(f.label).fontWeight(.medium).foregroundStyle(P.ink).lineLimit(2)
+            if !f.required && f.kind != "toggle" {
+                Text("Optional").font(Fonts.caption).foregroundStyle(P.ink3)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func field(_ k: Int, _ f: FormField) -> some View {
+        let pick = k < card.picks.count ? card.picks[k] : .null
+        switch f.kind {
+        case "toggle":
+            Toggle(isOn: Binding(get: { pick.bool ?? false }, set: { on in self.pick(k, .bool(on)) })) {
+                label(f)
+            }
+            .tint(P.button)
+        case "choice":
+            VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                label(f)
+                Flow {
+                    ForEach(f.options, id: \.self) { o in
+                        let chosen = pick.string == o
+                        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
+                        Button { self.pick(k, .string(o)) } label: {
+                            Text(o)
+                                .font(Fonts.ui(Tokens.PhoneSize.small, chosen ? .medium : .regular))
+                                .foregroundStyle(chosen ? P.ink : P.ink2)
+                                .padding(.horizontal, Tokens.Space.m)
+                                .frame(minHeight: Tokens.Control.buttonSmall)
+                                .background(shape.fill(chosen ? tint.opacity(0.14) : Color.clear).overlay(shape.strokeBorder(chosen ? tint : P.lineStrong, lineWidth: 1)))
+                                .contentShape(shape)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(chosen ? .isSelected : [])
+                    }
+                }
+            }
+        default:
+            VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                label(f)
+                TextField(f.placeholder, text: Binding(get: { typed[k] ?? f.startText }, set: { typed[k] = $0 }))
+                    .keyboardType(f.kind == "number" ? .decimalPad : .default)
+                    .boxed()
+            }
+        }
+    }
+
+    private func pick(_ k: Int, _ value: JSON) {
+        UISelectionFeedbackGenerator().selectionChanged()
+        session.model.pickForm(message: card.message, card: card.id, field: k, value: value)
+    }
+
+    private func send() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        let values = card.formFields.indices.map { typed[$0] ?? card.formFields[$0].startText }
+        if let f = session.model.sendForm(message: card.message, card: card.id, typed: values) {
+            session.send(f)
+        }
+    }
+}
+
 /// A tick before its words, as Save as has.
 private struct Tick: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
@@ -1084,8 +1184,8 @@ private extension View {
 /// mono, and what loom knows it does in a pill; then the tools it runs as steps, or its
 /// arguments as lines, the command or script it runs, and why the agent makes it. Allow
 /// is a split button, its menu holding Always allow where that's offered, then Deny, and
-/// Details for all of it. Answered here, it's one quiet line, until the instance takes
-/// the question away.
+/// Details for all of it; on a risky one, Allow is held (`HoldButton`). Answered here,
+/// it's one quiet line, until the instance takes the question away.
 struct ApprovalCard: View {
     @Environment(Session.self) private var session
     var approval: Approval
@@ -1124,9 +1224,13 @@ struct ApprovalCard: View {
                 }
                 HStack(spacing: Tokens.Space.s) {
                     HStack(spacing: 1) {
-                        Button("Allow") { answer(true) }
-                            .buttonStyle(CardButtonStyle(primary: true, half: approval.canAlways ? .leading : .whole))
-                        if approval.canAlways {
+                        if approval.risky {
+                            HoldButton { answer(true) }
+                        } else {
+                            Button("Allow") { answer(true) }
+                                .buttonStyle(CardButtonStyle(primary: true, half: approval.canAlways ? .leading : .whole))
+                        }
+                        if approval.canAlways && !approval.risky {
                             Menu {
                                 Button { answer(true, always: true) } label: {
                                     Label("Always allow", systemImage: "checkmark.shield")
@@ -1173,5 +1277,72 @@ struct ApprovalCard: View {
     private func answer(_ allow: Bool, always: Bool = false) {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         session.send(session.model.approve(approval.call, allow: allow, always: always))
+    }
+}
+
+/// Allow on a risky question (PLAN.md, "Permissions"), as the desktop's `hold_button`:
+/// pressed and held, it fills from its leading edge, and once it's full (`holdTime`) the
+/// question is allowed. Let go sooner, it says to hold.
+struct HoldButton: View {
+    var allow: () -> Void
+    @State private var since: Date?
+    @State private var hint = false
+    @State private var done = false
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
+        TimelineView(.animation(paused: since == nil)) { t in
+            let k = since.map { min(t.date.timeIntervalSince($0) / holdTime, 1) } ?? 0
+            Text(since != nil ? "Keep holding" : hint ? "Hold to allow" : "Allow")
+                .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+                .lineLimit(1)
+                .padding(.horizontal, Tokens.Space.m + 2)
+                .frame(minHeight: Tokens.Control.button)
+                .foregroundStyle(P.buttonInk)
+                .background {
+                    GeometryReader { g in
+                        ZStack(alignment: .leading) {
+                            shape.fill(P.button)
+                            Rectangle().fill(P.bad.opacity(0.75)).frame(width: g.size.width * k)
+                        }
+                        .clipShape(shape)
+                    }
+                }
+                .contentShape(shape)
+        }
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in press() }
+                .onEnded { _ in release() }
+        )
+        .accessibilityLabel("Allow")
+        .accessibilityHint("Hold to allow")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    private func press() {
+        guard since == nil, !done else { return }
+        let start = Date.now
+        since = start
+        hint = false
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(holdTime))
+            // Still held since then: it's allowed, without waiting to be let go.
+            guard since == start else { return }
+            since = nil
+            done = true
+            allow()
+        }
+    }
+
+    private func release() {
+        guard since != nil else { return }
+        since = nil
+        hint = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2.4))
+            hint = false
+        }
     }
 }

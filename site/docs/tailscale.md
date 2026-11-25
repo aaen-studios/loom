@@ -12,6 +12,6 @@ If Tailscale isn't there when you install, loom listens only on the server itsel
 
 ## A PC at home
 
-For your phone ([Phones](phones.md)): install Tailscale on the PC and the phone, signed in to the same account, and let phones reach loom on the PC. The QR code holds the PC's Tailscale address beside its Wi-Fi one, so the phone gets through from anywhere. Loom encrypts that connection itself, so it doesn't depend on Tailscale's encryption.
+For your phone ([Adding a device](phones.md)): install Tailscale on the PC and the phone, signed in to the same account, and let other devices reach loom on the PC. The QR code holds the PC's Tailscale address beside its Wi-Fi one, so the phone gets through from anywhere. Loom encrypts that connection itself, so it doesn't depend on Tailscale's encryption.
 
 Any other VPN that puts your phone and PC on one network works the same way.

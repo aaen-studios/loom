@@ -8,7 +8,9 @@ module server.cards
 // - `checklist`: up to 30 items, each done or not;
 // - `table`: up to 8 columns and 50 rows of text;
 // - `progress`: how far along something is, 0 to 1, with a label;
-// - `facts`: up to 12 labels, each with its value.
+// - `facts`: up to 12 labels, each with its value;
+// - `form`: up to 8 fields the person fills in, each text, a choice, a toggle
+//   or a number, sent back with one Send as one answer.
 //
 // Each has a `title`, which may be empty, and an `id` the agent uses to change
 // it later in the same reply. What's here only checks and tidies the JSON the
@@ -17,7 +19,7 @@ import std.json.{Json}
 import shared.obj.{Obj, at, bool_at, merge, without, str_at}
 import shared.badge
 
-pub const TYPES: str = "choices checklist table progress facts"
+pub const TYPES: str = "choices checklist table progress facts form"
 // The most tool names an added MCP server's card lists.
 const TOOLS_MOST: usize = 50
 const TITLE_MOST: usize = 80
@@ -63,7 +65,7 @@ pub fn card_of(args: Json, id: String) -> (Json, String) {
     for t in TYPES.split(" ") {
         if kind == t { known = true }
     }
-    if not known { return (Json.Null, "type is {if kind.len() == 0 { String("missing") } else { "\"{kind}\"" }}: it's one of choices, checklist, table, progress or facts.") }
+    if not known { return (Json.Null, "type is {if kind.len() == 0 { String("missing") } else { "\"{kind}\"" }}: it's one of choices, form, checklist, table, progress or facts.") }
     let title = tidy(str_at(args.copy(), "title") ?? String(), TITLE_MOST)
     var card = Obj.new().s("id", id).s("type", kind.copy()).s("title", title)
     if kind == "choices" {
@@ -113,12 +115,175 @@ pub fn card_of(args: Json, id: String) -> (Json, String) {
         }
         if rows.len() > ROWS_MOST { return (Json.Null, "rows has {rows.len()}: {ROWS_MOST} at most. Show the rest with html_render, or a shared table.") }
         card = card.j("columns", Json.Array(columns)).j("rows", Json.Array(rows))
+    } else if kind == "form" {
+        let (fields, why) = form_fields(at(args.copy(), "fields"))
+        if why.len() > 0 { return (Json.Null, why) }
+        card = card.j("fields", Json.Array(fields))
     } else {
         let v = at(args.copy(), "value").as_f64() else return (Json.Null, String("value is missing: give how far along it is, from 0 to 1."))
         if v < 0.0 or v > 1.0 { return (Json.Null, "value is {v}: give it from 0 to 1, such as 0.4 for 40%.") }
         card = card.s("label", tidy(str_at(args, "label") ?? String(), TITLE_MOST)).j("value", Json.Float(v))
     }
     return (card.done(), String())
+}
+
+// Where a new card goes in its reply (PLAN.md, "Cards in the chat"): `end`,
+// after all the reply's words, shown once the reply is finished, or `here`,
+// after what the agent has said so far, at once. A question goes at the end
+// whatever order the agent called in, so the person reads the reply before
+// answering it: choices and forms go there unless `args` says `here`, and the
+// rest go here unless it says `end`. Or why `place` can't be.
+pub fn place_of(args: Json) -> (String, String) {
+    let kind = (str_at(args.copy(), "type") ?? String()).trim().copy()
+    let asked = (str_at(args, "place") ?? String()).trim().copy()
+    if asked == "end" or asked == "here" { return (asked, String()) }
+    if asked.len() > 0 { return (String(), "place is \"{asked}\": it's end (after all you say, once your reply is done) or here (after what you've said so far, at once).") }
+    return (String(if kind == "choices" or kind == "form" { "end" } else { "here" }), String())
+}
+
+// The kinds of field a form has: `text`, `choice` (one of its options),
+// `toggle` (on or off) and `number`.
+pub const FIELD_KINDS: str = "text choice toggle number"
+const FORM_FIELDS_MOST: usize = 8
+// The most bytes a text answer keeps.
+const ANSWER_MOST: usize = 1000
+
+// A form's fields, from show_card's `fields`, tidied, or why they can't be.
+// Each has its `label`, its `kind`, whether it must be answered (`required`,
+// yes unless the agent says no, and never for a toggle, which is always on or
+// off), what it starts as (`value`: text, one of a choice's options or "",
+// on or off, or a number or null), a choice's `options` and a text's or a
+// number's `placeholder`. Labels are told apart, since answers go back by them.
+fn form_fields(given: Json) -> (List<Json>, String) {
+    var out = List<Json>()
+    var labels = List<String>()
+    let all = list(given)
+    if all.len() == 0 or all.len() > FORM_FIELDS_MOST { return (List<Json>(), "fields has {all.len()}: give 1 to {FORM_FIELDS_MOST}, each \{\"label\", \"kind\"\}.") }
+    for f in all {
+        let label = tidy(words(at(f.copy(), "label")), OPTION_MOST)
+        if label.len() == 0 { return (List<Json>(), String("Each of fields needs a label: a few words saying what it asks.")) }
+        if labels.contains(label.copy()) { return (List<Json>(), "Two fields are labelled \"{label}\": give each its own, since the answers come back by label.") }
+        labels.push(label.copy())
+        let kind = (str_at(f.copy(), "kind") ?? String("text")).trim().copy()
+        if not " {FIELD_KINDS} ".contains(" {kind} ") { return (List<Json>(), "kind is \"{kind}\" for {label}: it's text, choice, toggle or number.") }
+        var shape = Obj.new().s("label", label.copy()).s("kind", kind.copy())
+        if kind == "toggle" {
+            out.push(shape.b("required", false).b("value", bool_at(f.copy(), "value") ?? false).done())
+            continue
+        }
+        shape = shape.b("required", bool_at(f.copy(), "required") ?? true)
+        if kind == "choice" {
+            var options = List<Json>()
+            var names = List<String>()
+            for o in list(at(f.copy(), "options")) {
+                let w = tidy(words(o), OPTION_MOST)
+                if w.len() > 0 and not names.contains(w.copy()) {
+                    names.push(w.copy())
+                    options.push(Json.Str(w))
+                }
+            }
+            if options.len() < 2 or options.len() > OPTIONS_MOST { return (List<Json>(), "options has {options.len()} for {label}: give 2 to {OPTIONS_MOST}, each a few words.") }
+            let start = tidy(words(at(f.copy(), "value")), OPTION_MOST)
+            shape = shape.j("options", Json.Array(options)).s("value", if names.contains(start.copy()) { start } else { String() })
+        } else if kind == "number" {
+            let start = at(f.copy(), "value")
+            shape = shape.j("value", if start.as_f64() != none { start } else { Json.Null })
+        } else {
+            shape = shape.s("value", tidy(words(at(f.copy(), "value")), ANSWER_MOST))
+        }
+        out.push(shape.s("placeholder", tidy(str_at(f, "placeholder") ?? String(), OPTION_MOST)).done())
+    }
+    return (out, String())
+}
+
+// Whether `n` is a whole number an i64 holds exactly.
+fn whole(n: f64) -> bool {
+    return n == n.floor() and n > -1.0e15 and n < 1.0e15
+}
+
+// A number as a form says it: 3 for 3.0, and 2.5 as it is.
+fn number_words(n: f64) -> String {
+    if whole(n) { return "{i64.saturate(n)}" }
+    return "{n}"
+}
+
+// A form's answers as the person sent them (`given`, by each field's label),
+// checked against its card: the answers, tidied, as the agent gets them; the
+// lines the person's message says them in, "Label: answer" each; and why they
+// can't be, if they can't. A text answer is cut at ANSWER_MOST bytes, a choice
+// is one of its options, a toggle is true or false, and a number is a number,
+// or text that reads as one. A required field left empty is refused, and an
+// optional one is left out. A form answers once.
+pub fn form_answer(card: Json, given: Json) -> (Json, String, String) {
+    if str_at(card.copy(), "type") != some(String("form")) { return (Json.Null, String(), String("That card isn't a form.")) }
+    if at(card.copy(), "answers") != Json.Null { return (Json.Null, String(), String("That form was sent already.")) }
+    var out = Obj.new()
+    var lines = List<String>()
+    for f in list(at(card, "fields")) {
+        let label = str_at(f.copy(), "label") ?? String()
+        let kind = str_at(f.copy(), "kind") ?? String()
+        let required = bool_at(f.copy(), "required") ?? false
+        let v = given.get(label.copy()) ?? Json.Null
+        if kind == "toggle" {
+            let on = v.as_bool() ?? false
+            out.m.insert(label.copy(), Json.Bool(on))
+            lines.push("{label}: {if on { "Yes" } else { "No" }}")
+            continue
+        }
+        if kind == "number" {
+            var n: f64? = v.as_f64()
+            if n == none {
+                if let s = v.as_str() {
+                    if s.trim().len() > 0 {
+                        n = f64.parse(s.trim().replace(String(","), String(".")))
+                        if n == none { return (Json.Null, String(), "{label} is \"{s.trim()}\", which isn't a number.") }
+                    }
+                }
+            }
+            match n {
+                some(x) => {
+                    out.m.insert(label.copy(), if whole(x) { Json.Int(i64.saturate(x)) } else { Json.Float(x) })
+                    lines.push("{label}: {number_words(x)}")
+                },
+                none => if required { return (Json.Null, String(), "{label} needs an answer.") },
+            }
+            continue
+        }
+        let text = if kind == "choice" { tidy(words(v), OPTION_MOST) } else { tidy_answer(words(v)) }
+        if text.len() == 0 {
+            if required { return (Json.Null, String(), "{label} needs an answer.") }
+            continue
+        }
+        if kind == "choice" {
+            var known = false
+            for o in list(at(f.copy(), "options")) {
+                if o.as_str() == some(text.copy()) { known = true }
+            }
+            if not known { return (Json.Null, String(), "{label} is \"{text}\", which isn't one of its options.") }
+        }
+        out.m.insert(label.copy(), Json.Str(text.copy()))
+        lines.push("{label}: {text}")
+    }
+    return (out.done(), lines.join("\n"), String())
+}
+
+// A text answer: trimmed, its lines kept, and cut at ANSWER_MOST bytes with "…".
+fn tidy_answer(text: String) -> String {
+    var out = String()
+    for r in text.trim().runes() {
+        if out.len() >= ANSWER_MOST {
+            out.push_str("…")
+            break
+        }
+        out.push(if r == '\r' or r == '\t' { ' ' } else { r })
+    }
+    return out
+}
+
+// A form's card once it's answered: the answers on it, so every device draws
+// it sent, with what was sent.
+pub fn form_answered(card: Json, answers: Json) -> Json {
+    return merge(card, Obj.new().j("answers", answers).done())
 }
 
 // The card loom itself puts in a reply when the agent found that one of its
@@ -453,4 +618,74 @@ fn checks_and_tidies() {
     assert(far.starts_with("value is 3"))
     let (l, _) = card_of(Obj.new().s("type", String("checklist")).j("items", Json.Array([Json.Str(String("Plain")), Obj.new().s("text", String("Done one")).b("done", true).done()])).done(), String("card_7"))
     assert("{at(l, "items")}" == "[\{\"text\":\"Plain\",\"done\":false\},\{\"text\":\"Done one\",\"done\":true\}]")
+}
+
+fn place_for(kind: str, asked: str) -> String {
+    var a = Obj.new().s("type", String(kind))
+    if asked.len() > 0 { a = a.s("place", String(asked)) }
+    let (p, _) = place_of(a.done())
+    return p
+}
+
+@test
+fn puts_questions_at_the_end() {
+    assert(place_for("choices", "") == "end" and place_for("form", "") == "end")
+    assert(place_for("progress", "") == "here" and place_for("checklist", "") == "here" and place_for("table", "") == "here" and place_for("facts", "") == "here")
+    assert(place_for("choices", "here") == "here" and place_for("facts", "end") == "end")
+    let (_, why) = place_of(Obj.new().s("type", String("choices")).s("place", String("top")).done())
+    assert(why.starts_with("place is \"top\""))
+}
+
+fn form_args() -> Json {
+    let fields = Json.Array([
+        Obj.new().s("label", String(" Name ")).s("placeholder", String("Your name")).done(),
+        Obj.new().s("label", String("Size")).s("kind", String("choice")).j("options", Json.Array([Json.Str(String("Small")), Json.Str(String("Large")), Json.Str(String("Large"))])).s("value", String("Huge")).done(),
+        Obj.new().s("label", String("Gift wrap")).s("kind", String("toggle")).b("required", true).done(),
+        Obj.new().s("label", String("How many")).s("kind", String("number")).j("value", Json.Int(1)).done(),
+        Obj.new().s("label", String("Note")).b("required", false).done(),
+    ])
+    return Obj.new().s("type", String("form")).s("title", String("Your order")).j("fields", fields).done()
+}
+
+fn refused(fields: Json) -> String {
+    let (_, w) = card_of(Obj.new().s("type", String("form")).j("fields", fields).done(), String("card_2"))
+    return w
+}
+
+@test
+fn makes_a_form() {
+    let (c, why) = card_of(form_args(), String("card_1"))
+    assert(why.len() == 0)
+    assert("{at(c.copy(), "fields")}" == #"[{"label":"Name","kind":"text","required":true,"value":"","placeholder":"Your name"},{"label":"Size","kind":"choice","required":true,"options":["Small","Large"],"value":"","placeholder":""},{"label":"Gift wrap","kind":"toggle","required":false,"value":false},{"label":"How many","kind":"number","required":true,"value":1,"placeholder":""},{"label":"Note","kind":"text","required":false,"value":"","placeholder":""}]"#)
+    assert(refused(Json.Array(List<Json>())).starts_with("fields has 0"))
+    assert(refused(Json.Array([Obj.new().s("label", String("A")).done(), Obj.new().s("label", String("A")).done()])).starts_with("Two fields are labelled \"A\""))
+    assert(refused(Json.Array([Obj.new().s("label", String("When")).s("kind", String("date")).done()])).starts_with("kind is \"date\" for When"))
+    assert(refused(Json.Array([Obj.new().s("label", String("Pick")).s("kind", String("choice")).j("options", Json.Array([Json.Str(String("Only"))])).done()])).starts_with("options has 1 for Pick"))
+    assert(refused(Json.Array([Obj.new().done()])).starts_with("Each of fields needs a label"))
+}
+
+@test
+fn takes_a_form_s_answers() {
+    let (c, _) = card_of(form_args(), String("card_1"))
+    let given = Obj.new().s("Name", String("  Elliot ")).s("Size", String("Large")).b("Gift wrap", true).s("How many", String("3")).s("Note", String("")).done()
+    let (answers, text, why) = form_answer(c.copy(), given)
+    assert(why.len() == 0)
+    assert("{answers}" == #"{"Name":"Elliot","Size":"Large","Gift wrap":true,"How many":3}"#)
+    assert(text == "Name: Elliot\nSize: Large\nGift wrap: Yes\nHow many: 3")
+    // A required field left empty, an answer that isn't an option, and a number that isn't one.
+    let (_, _, empty) = form_answer(c.copy(), Obj.new().s("Size", String("Large")).j("How many", Json.Int(1)).done())
+    assert(empty == "Name needs an answer.")
+    let (_, _, odd) = form_answer(c.copy(), Obj.new().s("Name", String("E")).s("Size", String("Huge")).j("How many", Json.Int(1)).done())
+    assert(odd.starts_with("Size is \"Huge\""))
+    let (_, _, nan) = form_answer(c.copy(), Obj.new().s("Name", String("E")).s("Size", String("Small")).s("How many", String("lots")).done())
+    assert(nan.starts_with("How many is \"lots\""))
+    let (half, _, _) = form_answer(c.copy(), Obj.new().s("Name", String("E")).s("Size", String("Small")).j("How many", Json.Float(2.5)).done())
+    assert("{at(half, "How many")}" == "2.5")
+    // Once answered, it's sent, and doesn't answer again.
+    let sent = form_answered(c.copy(), answers.copy())
+    assert(at(sent.copy(), "answers") == answers)
+    let (_, _, again) = form_answer(sent, Obj.new().done())
+    assert(again == "That form was sent already.")
+    let (_, _, choices) = form_answer(Obj.new().s("type", String("choices")).done(), Obj.new().done())
+    assert(choices == "That card isn't a form.")
 }

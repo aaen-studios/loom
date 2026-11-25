@@ -7,12 +7,13 @@ Each agent has one chat that never ends. Choose an agent in the sidebar to talk 
 An agent can put cards in its reply, drawn in the chat's own look:
 
 - **Choices**: two to six answers to the agent's question, as tiles. Click one, or on the desktop press Ctrl (⌘ on a Mac) and its number, and it goes as your next message. The tiles answer only while that reply is the newest in the chat.
+- **Form**: several questions at once, each a box to type in, a choice, a switch or a number. Fill them in and choose **Send**, and your answers go as one message. **Send** says which question still needs an answer.
 - **Checklist**: up to 30 items, each done or not.
 - **Table**: up to 8 columns and 50 rows.
 - **Progress**: a bar with a label.
 - **Facts**: up to 12 labels, each with its value.
 
-A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
+Choices and forms always come at the end of the reply, once the agent has finished it, so you read the whole reply before you answer. A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
 
 When one of the agent's MCP servers needs you to sign in, loom puts its own card in the reply, "Sign in to acta", with **Sign in** ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). The agent is told to wait for you rather than try to sign in itself. **Sign in** works from the iPhone app too.
 
@@ -22,7 +23,9 @@ Anything bigger, such as a report or a chart, comes as a page in the chat instea
 
 ## Pictures
 
-Two or more pictures in one message, yours or an agent's, are one fan: the first in front, and up to four more tilted behind it, which spread out when you point at them. Its corner says how many there are, or past five, how many more ("+2"). Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
+Two or more pictures in one message, yours or an agent's, are one fan: the first in front, and up to four more tilted behind it, which spread out when you point at them. Its corner says how many there are, all of them ("7"). Click it to open the viewer at the first, and step through them with the arrows. A single picture shows as it is.
+
+In the viewer, the wheel zooms toward the pointer and dragging moves the picture around. Double-click to go between fitting the window and the picture's own size; + and − zoom, and 0 fits it again. On a trackpad, pinch to zoom, and once zoomed in, swipe with two fingers to move it. On the iPhone, pinch to zoom, drag to move it, and double-tap to zoom in or out; zoomed in, a swipe moves the picture rather than going to the next one.
 
 ## Files in the message box
 
@@ -51,6 +54,18 @@ Type `@` in the message box to pick another of your agents, or a file in this ag
 In the chat and in the message box, an agent you mention shows as its thread and its name in its colour, which opens its chat, and a file as its icon and its name, which opens it. The agent knows who and what you mean, so you can ask it to message another agent for you, hand over a file, or read one. A file you send shows the same way, with a tiny copy of itself when it's a picture.
 
 A message one agent sends another sits on your side of the chat, tinted with the sender's colour, with its thread and name over it.
+
+## The + menu
+
+The **+** before the message box, or `/` in an empty one, opens a menu with a search at the top:
+
+- **Attach files** (Ctrl+U, or Cmd+U on a Mac), **Paste image** when you've copied one, and **Recent files**, the files sent or received lately in any of your chats, which go again without uploading.
+- **Skills**: pick one and it sits in your message, as a mention does. The agent reads it before it answers.
+- **Routines**: pick one to run it now, after **Run**.
+
+Type to find a file, skill or routine in any of them. The arrows move, → opens a list and ← goes back, Enter takes a row, and Esc shuts the menu. Each list ends with a link to its settings page.
+
+On an iPhone, **+** opens a sheet with the same lists, and your newest photos in a row at the top.
 
 ## How an agent uses its tools
 

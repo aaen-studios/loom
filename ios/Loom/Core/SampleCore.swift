@@ -11,6 +11,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var seq = 100
     private var next = 0
     private var signedIn: Bool
+    private var linkWaiting = false
     private var agents: [JSON]
     private var conversations: [JSON]
     private var messages: [String: [JSON]]
@@ -51,7 +52,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private func connect() {
         tell(["t": "core.conn", "state": "connecting"])
         tell(["t": "core.conn", "state": "live"])
-        tell(["t": "welcome", "version": 1, "user": "u_1", "device": "d_4", "seq": JSON(seq), "reset": false])
+        tell(["t": "welcome", "version": 1, "user": "u_1", "device": "d_4", "seq": JSON(seq), "reset": false, "has_password": false])
         tell(["t": "synced", "seq": JSON(seq)])
     }
 
@@ -98,8 +99,19 @@ final class SampleCore: CoreLink, @unchecked Sendable {
 
     private func take(_ f: JSON) {
         switch f["t"].text {
+        case "link.cancel":
+            linkWaiting = false
         case "login", "link":
-            later(0.6) { [self] in
+            // A code waits for a yes on the device that showed it, as an instance's does,
+            // which the sample gives after a few seconds.
+            if f["t"].text == "link" {
+                linkWaiting = true
+                later(0.4) { [self] in
+                    tell(["t": "core.login", "id": f["id"], "waiting": true, "check": "4821", "expires": JSON(Sample.now() + 300_000)])
+                }
+            }
+            later(f["t"].text == "link" ? 4 : 0.6) { [self] in
+                if f["t"].text == "link" && !linkWaiting { return }
                 if f["t"].text == "login" && f["password"].text.isEmpty {
                     tell(["t": "core.login", "id": f["id"], "error": ["code": "bad_password", "message": "That username and password don't match."]])
                     return
@@ -143,6 +155,24 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             // sign-in, which sample servers can't do. The files the composer's @ picker
             // finds, and a file a message mentions, kept as the person's.
             switch f["name"].text {
+            case "link.create":
+                // A code to add a device, and a Mac asking to be added with it soon after.
+                let code = "K7QF-M2XD"
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["code": JSON(code), "expires": JSON(Sample.now() + 600_000), "qr": JSON("loom://add?a=https%3A%2F%2Floom.example.com&c=\(code)&i=i_1&k=sample"), "text": JSON("\(code)@loom.example.com")]])
+                later(3) { [self] in
+                    event("link.asked", ["ask": ["id": "la_1", "name": "Elliot's MacBook", "kind": "macos", "check": "4821", "expires": JSON(Sample.now() + 300_000)]])
+                }
+            case "link.answer":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
+                event("link.answered", ["ask": f["args"]["ask"], "allow": f["args"]["allow"], "by": "d_4"])
+            case "device.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["devices": [
+                    ["id": "d_1", "name": "Desk PC", "kind": "windows", "at": 1, "seen": JSON(Sample.now() - 3_600_000), "online": false],
+                    ["id": "d_2", "name": "Elliot's MacBook", "kind": "macos", "at": 2, "seen": JSON(Sample.now()), "online": true],
+                    ["id": "d_4", "name": "iPhone", "kind": "ios", "at": 3, "seen": JSON(Sample.now()), "online": true],
+                ]]])
+            case "device.revoke", "password.set":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
             case "mcp.list":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["servers": [["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed"]]]])
             case "mcp.sign_in", "mcp.signed_in":
@@ -157,6 +187,15 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 later(0.1) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(found)]])
                 }
+            // What the composer's + menu lists.
+            case "skill.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["skills": .array(Sample.skills)]])
+            case "routine.list":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(Sample.routines)]])
+            case "files.recent":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(Sample.recent)]])
+            case "routine.run":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
             case "agent.file":
                 let path = f["args"]["path"].text
                 let name = (path as NSString).lastPathComponent
@@ -358,6 +397,25 @@ enum Sample {
         ["path": "/Users/sample/Shared/balcony plan.png", "name": "balcony plan.png", "where": "shared"],
     ]
 
+    /// The person's skills, routines and the files sent lately, for the + menu.
+    static let skills: [JSON] = [
+        ["name": "release-notes", "description": "When a version ships and its notes need writing", "at": 1795187131000],
+        ["name": "review", "description": "Before a pull request merges", "at": 1795187131000],
+        ["name": "watering", "description": "When the balcony plants need a schedule", "at": 1795187131000],
+    ]
+
+    static let routines: [JSON] = [
+        ["id": "rt_1", "name": "Morning news", "agent": "a_3", "prompt": "", "schedule": ["daily": "08:00"], "on": true,
+         "last": ["status": "done", "at": 1795165200000]],
+        ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
+         "last": ["status": "failed", "at": 1795100000000]],
+    ]
+
+    static let recent: [JSON] = [
+        ["file": "sample-leaf", "name": "leaf.png", "mime": "image/png", "size": 48_213, "at": 1795180000000, "conversation": "c_4"],
+        ["file": "sample-notes", "name": "release notes.md", "mime": "text/markdown", "size": 2_400, "at": 1795170000000, "conversation": "c_1"],
+    ]
+
     static let conversations: [JSON] = [
         // Builder's thread with Gardener (`message_agent`), newer than the person's chat
         // with Gardener and never in its place.
@@ -402,12 +460,13 @@ enum Sample {
             ["id": "msg_21", "conversation": "c_3", "role": "agent", "agent": "a_3", "routine": "rt_1", "at": 1795170090000,
              "blocks": [["kind": "text", "text": "Two things need you:\n\n1. The VPS invoice is due Friday.\n2. Ola asked whether Saturday still works."],
                         ["kind": "card", "card": ["id": "card_1", "type": "facts", "title": "Inbox, today", "items": [["label": "Unread", "value": "14"], ["label": "Need you", "value": "2"], ["label": "Newsletters", "value": "9, all archived"]]]],
-                        ["kind": "card", "card": ["id": "card_2", "type": "choices", "title": "Shall I tell Ola yes?", "options": ["Yes", "Not yet"]]],
                         ["kind": "card", "card": ["id": "sign_in_vercel", "type": "sign_in", "title": "Sign in to vercel", "server": "vercel", "badge": ["name": "vercel", "initial": "V", "color": "sky"]]],
                         ["kind": "card", "card": ["id": "mcp_add_tc_29", "type": "mcp_add", "title": "Add the MCP server tracker", "call": "tc_29", "server": "tracker",
                                                   "badge": ["name": "tracker", "initial": "T", "color": "mint"], "url": "https://mcp.tracker.example/mcp",
                                                   "settings": [["name": "Authorization", "in": "header", "secret": "TRACKER_TOKEN", "have": false], ["name": "X-Team", "in": "header", "value": "design"]],
-                                                  "state": "asking"]]]],
+                                                  "state": "asking"]],
+                        // A question goes at the end of its reply, after all of it.
+                        ["kind": "card", "card": ["id": "card_2", "type": "choices", "title": "Shall I tell Ola yes?", "options": ["Yes", "Not yet"]]]]],
         ],
         "c_4": [
             ["id": "msg_41", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187000000,
@@ -432,7 +491,7 @@ enum Sample {
             ["id": "msg_44", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187180000,
              "blocks": [["kind": "text", "text": "Once they're watered, note it in [watering.md](loom:file/a_4/notes/watering.md) and tell [@Scribe](loom:agent/a_2)."]]],
             // A reply naming an agent and a file, shown as the person's mentions are, and a
-            // fan of more than five pictures, whose corner says how many more.
+            // fan of more than five pictures, whose corner says how many there are.
             ["id": "msg_45", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_45", "at": 1795187240000,
              "mentions": [["path": "notes/watering.md", "name": "watering.md"]],
              "blocks": [["kind": "text", "text": "Noted in `notes/watering.md`, and @Scribe knows. Here's the balcony this week, a picture a day."],
@@ -442,7 +501,13 @@ enum Sample {
                         ["kind": "file", "file": "sample-night", "name": "thursday.png", "mime": "image/png", "size": 344_000],
                         ["kind": "file", "file": "sample-sprout", "name": "friday.png", "mime": "image/png", "size": 361_000],
                         ["kind": "file", "file": "sample-leaf", "name": "saturday.png", "mime": "image/png", "size": 351_000],
-                        ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000]]],
+                        ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000],
+                        // A form, at the end of the reply: several questions at once.
+                        ["kind": "card", "card": ["id": "card_1", "type": "form", "title": "Next watering", "fields": [
+                            ["label": "When", "kind": "choice", "required": true, "options": ["Morning", "Evening"], "value": "Evening", "placeholder": ""],
+                            ["label": "Litres", "kind": "number", "required": true, "value": 2, "placeholder": "2"],
+                            ["label": "Remind me", "kind": "toggle", "required": false, "value": true],
+                            ["label": "Note", "kind": "text", "required": false, "value": "", "placeholder": "For the plants on the left"]]]]]],
             // A reply naming a picture in the agent's folder, shown by its thumbnail.
             ["id": "msg_46", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_46", "at": 1795187300000,
              "mentions": [["path": "photos/seedlings.png", "name": "seedlings.png", "size": 361_000, "mime": "image/png", "thumb": "sample-sprout"]],
@@ -533,5 +598,9 @@ enum Sample {
                    "steps": [["title": "Search messages in Outlook", "badge": ["name": "outlook", "initial": "O", "color": "sky"], "chips": [["label": "query", "value": "invoice"], ["label": "top", "value": "10"]], "more": 0],
                              ["title": "Fetch emails in Gmail", "badge": ["name": "gmail", "initial": "G", "color": "teal"], "chips": [["label": "query", "value": "from:billing"], ["label": "max results", "value": "5"]], "more": 0]],
                    "steps_more": 0, "reason": "Find last month's invoices in both inboxes so I can total them."]],
+        // A risky one, which Allow is held for.
+        ["call": "tc_33", "run": "run_30", "tool": "execute", "title": "rm -rf build", "detail": ["command": "rm -rf build"], "can_always": false, "risky": true,
+         "shown": ["what": "", "lines": [], "more": 0, "code": "rm -rf build", "raw": "",
+                   "title": "Delete the build folder", "place": "", "badges": [], "effect": ["kind": "deletes", "words": "Risky"], "steps": [], "steps_more": 0, "reason": ""]],
     ]
 }

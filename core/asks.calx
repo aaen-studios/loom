@@ -30,7 +30,8 @@ module core.asks
 //   icons when the call's detail has them (`icon`, `icon_dark`).
 // - `effect`: what loom knows it does, `{"kind", "words"}`, from its kind (an ACP
 //   tool kind, or `read` for an MCP tool marked readOnlyHint): `reads` ("Only
-//   reads"), `changes`, `deletes` or `runs`, or both empty when it doesn't know.
+//   reads"), `changes`, `deletes` or `runs`, or both empty when it doesn't know;
+//   one the instance counts `risky` is `deletes`, "Risky", unless it deletes.
 // - `steps`: for a call whose argument is a list of the tools it runs, each an
 //   object naming its tool (Composio's `tools: [{tool_slug, arguments}]`): each
 //   step's `title`, `badge`, `chips` (`{"label", "value"}`, a few of its
@@ -38,7 +39,7 @@ module core.asks
 // - `reason`: why the agent makes the call, in its own words, from an argument
 //   such as `thought` or `reason`, or empty.
 import std.json.{Json, parse, pretty}
-import shared.obj.{Obj, at, str_at}
+import shared.obj.{Obj, at, bool_at, str_at}
 import shared.badge
 
 const LINES_MOST: usize = 6
@@ -598,7 +599,12 @@ pub fn shown(e: Json) -> Json {
     if badges.len() == 0 and (what == "mcp" or what == "plugin") and server.len() > 0 {
         badges.push(badge.badge(server.trim_prefix("plugin-").copy(), icon, icon_dark))
     }
-    let (effect, effect_words) = effect_of(kind, what.copy())
+    var (effect, effect_words) = effect_of(kind, what.copy())
+    // One the instance counts risky, which is held to allow, says so in red.
+    if bool_at(e.copy(), "risky") == some(true) and effect != "deletes" {
+        effect = String("deletes")
+        effect_words = String("Risky")
+    }
     // A command the title already says whole isn't said again.
     if code.trim().len() >= 3 and not code.contains("\n") and asked.contains(code.trim()) { code = String() }
     let (shown_code, code_whole) = code_of(code.copy())
@@ -733,6 +739,11 @@ fn keeps_an_agent_program_s_own_title_and_says_its_kind() {
     assert(str_at(at(gone, "effect"), "kind") == some(String("deletes")))
     let other = ask(#"{"tool": "other", "title": "Save a token", "detail": {"path": "/x"}}"#)
     assert(str_at(at(other, "effect"), "kind") == some(String()))
+    // One the instance counts risky says so, in red, unless it says it deletes.
+    let wipe = ask(#"{"tool": "execute", "title": "rm -rf build", "detail": {"command": "rm -rf build"}, "risky": true}"#)
+    assert(str_at(at(wipe.copy(), "effect"), "kind") == some(String("deletes")) and str_at(at(wipe, "effect"), "words") == some(String("Risky")))
+    let gone_risky = ask(#"{"tool": "delete", "title": "Delete the agent Pip", "detail": null, "risky": true}"#)
+    assert(str_at(at(gone_risky, "effect"), "words") == some(String("Deletes")))
 }
 
 @test

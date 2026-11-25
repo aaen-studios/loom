@@ -14,6 +14,8 @@ Whatever the mode, some things always ask: sending, paying, deleting, letting pe
 
 A question comes as a card in the chat. It says what the agent wants to do in plain words, with the badge of each service it reaches, and the server and tool under it. A pill says what loom knows the call does, such as **Only reads**, **Can change** or **Deletes**. A call that runs several tools lists each as a step, and the agent's reason, when it gave one, is under them. **Details** shows everything the call was given. **Allow** lets this one call go, and the arrow beside it has **Always allow**, where that's offered, which makes a rule. **Deny** stops it.
 
+Something that can't be undone says **Risky** in red, or **Deletes**: deleting, changing an agent's permission mode, moving the instance, or a command that deletes a folder, wipes a disk, throws away git history or drops tables. For those, press and hold **Allow** until it fills, about a second. A click only says to hold it, and there's no Always allow.
+
 ## Rules
 
 Rules say what happens when an agent touches something particular, whatever its mode. They're on the **Rules** page, under Agents in Settings.

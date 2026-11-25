@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::component::input::{
     Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState,
-    MoveDown, MoveUp, Paste, Textarea, TextareaState,
+    MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -166,7 +166,7 @@ enum Screen {
     Programs,
     ThisDevice,
     Hosts,
-    AddPhone,
+    AddDevice,
     Mcp,
     Secrets,
     Plugins,
@@ -205,12 +205,38 @@ enum Ctx {
     Folder(String),
 }
 
-/// The composer's + menu, open at its first list or at one it leads to.
+/// The composer's + menu while it's open (PLAN.md, "The composer's + menu").
+#[derive(Clone, Default)]
+struct PlusMenu {
+    /// The row lit in the menu, by its place among the menu's rows, all groups counted.
+    lit: usize,
+    /// The list open beside it, and the row lit in that once the keys have gone there.
+    sub: Option<model::PlusSub>,
+    sub_lit: Option<usize>,
+    /// The routine that asks "Run now?" in its row, by id.
+    confirm: Option<String>,
+    /// Whether the clipboard held a picture as it opened.
+    paste: bool,
+}
+
+/// Where the + menu's panels are on screen, for a click outside both, and each row
+/// that opens a list beside the menu, for the list to open by.
+#[derive(Default)]
+struct PlusBounds {
+    menu: Option<Bounds<Pixels>>,
+    sub: Option<Bounds<Pixels>>,
+    rows: HashMap<model::PlusSub, Bounds<Pixels>>,
+}
+
+/// A key in the + menu.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Plus {
-    Main,
-    Skills,
-    Routines,
+enum PlusKey {
+    Up,
+    Down,
+    Right,
+    Left,
+    Take,
+    Shut,
 }
 
 /// One row of the chat's list.
@@ -257,6 +283,11 @@ pub struct Loom {
     ctx: Option<(Point<Pixels>, Ctx)>,
     /// When the picture viewer opened, which it fades in from.
     viewer_at: Instant,
+    /// The open picture's zoom and pan (`crate::zoom`), from its fit when another shows.
+    zoom: Option<crate::zoom::Zoom>,
+    /// The size each picture the viewer has shown was laid out by (`viewer_size`), kept so
+    /// it never changes once it's shown, as when its whole comes after its thumbnail.
+    viewer_sizes: HashMap<String, (u32, u32)>,
     /// The menu item that can't be undone and waits for its second click, until the
     /// menu closes.
     armed: Option<&'static str>,
@@ -280,7 +311,15 @@ pub struct Loom {
     draw_drag: bool,
     draw_stroke: Vec<(f32, f32)>,
     draw_bounds: Rc<std::cell::Cell<Option<Bounds<Pixels>>>>,
-    plus: Option<Plus>,
+    /// The composer's + menu while it's open, its search, when a click outside last
+    /// closed it, where its panels and the rows that open a list beside it are on
+    /// screen, and how far its lists are scrolled.
+    plus: Option<PlusMenu>,
+    plus_search: Entity<InputState>,
+    plus_closed_at: Option<Instant>,
+    plus_bounds: Rc<RefCell<PlusBounds>>,
+    plus_scroll: ScrollHandle,
+    plus_sub_scroll: ScrollHandle,
     /// The settings or server popup over the window, open at this page.
     popup: Option<Screen>,
     /// The panel beside the chat on the right: an agent's page, or a plugin's panel.
@@ -318,6 +357,18 @@ pub struct Loom {
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
     pass_in: Entity<InputState>,
+    /// The code another device shows under Add a device, pasted to add this computer.
+    add_code_in: Entity<InputState>,
+    /// Whether a server is signed in to with its address and a password, rather than
+    /// with a code.
+    password_form: bool,
+    /// The first password of an account a link code made, and whether its row is open.
+    new_password_in: Entity<InputState>,
+    setting_password: bool,
+    /// Devices asking to be added that the person closed without answering, by ask.
+    asks_hidden: HashSet<String>,
+    /// Whether a `loom://` link that started loom was looked for.
+    links_looked: bool,
     /// A masked field for each secret an MCP server an agent proposed needs that the
     /// person doesn't have, by its card's call and the secret's name ("tc_4/ACTA_KEY");
     /// and for each field of a card asking for a secret, by its call and the field's
@@ -374,7 +425,7 @@ pub struct Loom {
     move_code_in: Entity<InputState>,
     /// Whether the People page's next invite makes an admin rather than a member.
     invite_admin: bool,
-    /// Whether the Add a phone page is asking "delete my account?" before it does.
+    /// Whether the Add a device page is asking "delete my account?" before it does.
     confirm_delete: bool,
     routine_at_in: Entity<InputState>,
     routine_prompt_in: Entity<TextareaState>,
@@ -701,6 +752,11 @@ impl Loom {
                             state.update(cx, |s, cx| s.set_value("", window, cx));
                         }
                     }
+                    // A / alone in the composer opens the + menu, with its search.
+                    InputEvent::Change if state.read(cx).value() == "/" => {
+                        state.update(cx, |s, cx| s.set_value("", window, cx));
+                        this.open_plus(window, cx);
+                    }
                     // The agent's thread thinks along while there's something typed, and
                     // the @ picker follows what's typed after an @.
                     InputEvent::Change => {
@@ -726,10 +782,49 @@ impl Loom {
                     .masked(masked)
             })
         };
+        // The + menu's search: what's typed finds rows in every group.
+        let plus_search = input(window, cx, "Find a file, skill or routine…", false);
+        cx.subscribe_in(
+            &plus_search,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let (InputEvent::Change, Some(menu)) = (event, this.plus.as_mut()) {
+                    menu.lit = 0;
+                    menu.sub = None;
+                    menu.sub_lit = None;
+                    menu.confirm = None;
+                    this.plus_scroll.scroll_to_item(0);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
         let server_in = input(window, cx, "Server address", false);
         let user_in = input(window, cx, "Username", false);
         let pass_in = input(window, cx, "Password", true);
         let code_in = input(window, cx, "Setup code", false);
+        let add_code_in = input(window, cx, "K7QF-M2XD@loom.example.com", false);
+        let new_password_in = input(window, cx, "At least 8 characters", true);
+        cx.subscribe_in(
+            &add_code_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.use_code(cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe_in(
+            &new_password_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.save_password(cx);
+                }
+            },
+        )
+        .detach();
         let name_in = input(window, cx, "Name", false);
         // An agent's own colour: each change that makes a whole #rrggbb sets it.
         let color_in = input(window, cx, "#5b8def", false);
@@ -1035,6 +1130,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     if crate::single::asked_to_show() {
                         shell::show_window(loom.hwnd, true);
                         crate::perf::once("shown for another start");
+                        loom.open_link(cx);
+                    }
+                    // A link that started this loom.
+                    if !loom.links_looked {
+                        loom.links_looked = true;
+                        loom.open_link(cx);
                     }
                     loom.tick_prefs(cx);
                     shell::post_notifications(cx);
@@ -1250,6 +1351,8 @@ ACTA_KEY=secret:ACTA_KEY",
             menu_at: None,
             ctx: None,
             viewer_at: Instant::now(),
+            zoom: None,
+            viewer_sizes: HashMap::new(),
             armed: None,
             fresh_armed: false,
             custom_color: false,
@@ -1263,6 +1366,11 @@ ACTA_KEY=secret:ACTA_KEY",
             draw_stroke: Vec::new(),
             draw_bounds: Rc::new(std::cell::Cell::new(None)),
             plus: None,
+            plus_search,
+            plus_closed_at: None,
+            plus_bounds: Rc::default(),
+            plus_scroll: ScrollHandle::new(),
+            plus_sub_scroll: ScrollHandle::new(),
             popup: None,
             side: None,
             settings_last: Screen::Profile,
@@ -1282,6 +1390,12 @@ ACTA_KEY=secret:ACTA_KEY",
             server_in,
             user_in,
             pass_in,
+            add_code_in,
+            password_form: false,
+            new_password_in,
+            setting_password: false,
+            asks_hidden: HashSet::new(),
+            links_looked: false,
             card_secrets: Rc::default(),
             queue_in,
             aside_in,
@@ -1669,7 +1783,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.send(f);
                 }
             }
-            Screen::AddPhone => {
+            Screen::AddDevice => {
                 // An instance in this app reaches phones only once they're on.
                 if self.local() {
                     let f = self.model.set_phones(None);
@@ -1677,8 +1791,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let f = self.model.create_link();
                 self.send(f);
-                let d = self.model.load_devices();
+                // From the instance, with when each was last on; the cache's offline.
+                let d = if self.model.synced {
+                    self.model.list_devices()
+                } else {
+                    self.model.load_devices()
+                };
                 self.send(d);
+                self.setting_password = false;
+                self.model.password_error = None;
                 let r = self.model.set_relay(None);
                 self.send(r);
             }
@@ -1689,6 +1810,9 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             Screen::AddServer => {
                 self.show_code = false;
+                // A code says where the server is; an address an agent offered goes in
+                // the form that signs in with a password.
+                self.password_form = self.fill_server.as_deref().is_some_and(|a| !a.is_empty());
                 if self.fill_server.is_none() {
                     self.fill_server = Some(String::new());
                 }
@@ -2037,9 +2161,96 @@ ACTA_KEY=secret:ACTA_KEY",
             .unwrap_or(2);
         let dir = format!("servers/{n}");
         let _ = std::fs::remove_dir_all(server_folder(&dir));
-        self.away.push(Away::start(dir.clone(), Some(server)));
+        // A code says where the server is itself, so its core starts with none.
+        self.away.push(Away::start(
+            dir.clone(),
+            Some(server).filter(|s| !s.is_empty()),
+        ));
         self.adding = Some(dir.clone());
         dir
+    }
+
+    /// Adds this computer with the code in the field, which another device shows under
+    /// Add a device: to the first server on the first screen, or beside the one on
+    /// screen in the popup. It waits for a yes on that device.
+    fn use_code(&mut self, cx: &mut Context<Self>) {
+        let text = self.add_code_in.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        if self.popup == Some(Screen::AddServer) {
+            let dir = self.start_adding("");
+            if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+                if a.model.logging_in || a.model.adding.is_some() {
+                    return;
+                }
+                let frame = a.model.use_code(&text);
+                a.core.send(&frame.to_string());
+            }
+        } else {
+            if self.model.logging_in || self.model.adding.is_some() {
+                return;
+            }
+            let frame = self.model.use_code(&text);
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
+    /// A `loom://add?…` link that opened loom: this computer is added with its code, at
+    /// the step where the person says yes on the device that showed it. On the first
+    /// screen it signs in to its first server; once signed in, it's a server beside the
+    /// one on screen, in the popup.
+    fn open_link(&mut self, cx: &mut Context<Self>) {
+        let Some(link) = crate::single::take_link(std::path::Path::new(&data_dir())) else {
+            return;
+        };
+        let signed_out = self.here.is_empty()
+            && matches!(self.model.conn, None | Some(Conn::SignedOut))
+            && !self.local();
+        if signed_out {
+            self.server_form = true;
+            self.password_form = false;
+            self.form_at = Instant::now();
+            let frame = self.model.use_code(&link);
+            self.send(frame);
+        } else {
+            self.fill_server = Some(String::new());
+            self.open(Screen::AddServer, cx);
+            let dir = self.start_adding("");
+            if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+                let frame = a.model.use_code(&link);
+                a.core.send(&frame.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Stops waiting for a yes on the other device, here or in the popup.
+    fn cancel_code(&mut self, cx: &mut Context<Self>) {
+        if self.popup == Some(Screen::AddServer) {
+            if let Some(dir) = self.adding.clone() {
+                if let Some(a) = self.away.iter_mut().find(|a| a.dir == dir) {
+                    let frame = a.model.cancel_adding();
+                    a.core.send(&frame.to_string());
+                }
+            }
+        } else {
+            let frame = self.model.cancel_adding();
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
+    /// Sets the account's first password, from the Add a device page.
+    fn save_password(&mut self, cx: &mut Context<Self>) {
+        let password = self.new_password_in.read(cx).value().to_string();
+        if password.is_empty() {
+            return;
+        }
+        let f = self.model.set_password(&password);
+        self.send(f);
+        cx.notify();
     }
 
     /// Signs in to the server in the add-a-server form: with a core of its own beside
@@ -2253,6 +2464,7 @@ ACTA_KEY=secret:ACTA_KEY",
     pub fn view(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
         if self.model.viewing.is_none() {
             self.viewer_at = Instant::now();
+            self.zoom = None;
         }
         if let Some(frame) = self.model.view(f) {
             self.send(frame);
@@ -2276,11 +2488,21 @@ ACTA_KEY=secret:ACTA_KEY",
     pub fn view_stack(&mut self, stack: &[model::FileRef], cx: &mut Context<Self>) {
         if self.model.viewing.is_none() {
             self.viewer_at = Instant::now();
+            self.zoom = None;
         }
         if let Some(frame) = self.model.view_stack(stack) {
             self.send(frame);
         }
         cx.notify();
+    }
+
+    /// Zooms the viewer's picture `by` times about its middle, or back to its fit for 0,
+    /// as + − and 0 do.
+    fn zoom_by(&mut self, by: f32, cx: &mut Context<Self>) {
+        if let Some(z) = self.zoom.as_mut() {
+            z.go(if by == 0.0 { 1.0 } else { z.target * by }, (0.0, 0.0));
+            cx.notify();
+        }
     }
 
     /// The viewer's next picture (1) or the one before (-1).
@@ -3053,8 +3275,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 (
                     "pop-phone",
                     Ico::Smartphone,
-                    "Add a phone",
-                    Screen::AddPhone,
+                    "Add a device",
+                    Screen::AddDevice,
                 ),
             ];
             // An instance somewhere else has other people, and reaches this PC as a device.
@@ -3249,7 +3471,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Hosts => self.hosts_page(cx),
             Screen::Move => self.move_page(cx),
             Screen::People => self.people_page(cx),
-            Screen::AddPhone => self.add_phone_page(cx),
+            Screen::AddDevice => self.add_device_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Secrets => self.secrets_page(cx),
             Screen::Plugins => self.plugins_page(cx),
@@ -3314,6 +3536,133 @@ ACTA_KEY=secret:ACTA_KEY",
                 .size_full()
                 // It takes the pointer: nothing behind it hovers or takes a click, so
                 // the button that opened it doesn't open it again.
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(scrim)
+                .child(card),
+        )
+    }
+
+    /// A device asking to be added to the account, on any server the app is signed in
+    /// to: `Add "Elliot's MacBook"?` with the check the new device shows, and Add or Not
+    /// me. A click outside puts it away unanswered, and it runs out on its own.
+    fn ask_view(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+        let p = self.p;
+        let hidden = self.asks_hidden.clone();
+        let mut found = None;
+        for a in self.model.open_asks() {
+            if !hidden.contains(&a.id) {
+                found = Some((self.here.clone(), a));
+                break;
+            }
+        }
+        if found.is_none() {
+            for away in &mut self.away {
+                if let Some(a) = away
+                    .model
+                    .open_asks()
+                    .into_iter()
+                    .find(|a| !hidden.contains(&a.id))
+                {
+                    found = Some((away.dir.clone(), a));
+                    break;
+                }
+            }
+        }
+        let (dir, ask) = found?;
+        let what = match ask.kind.as_str() {
+            "ios" => Ico::Smartphone,
+            "macos" => Ico::Laptop,
+            "windows" => Ico::Monitor,
+            _ => Ico::SquareTerminal,
+        };
+        let answer = |allow: bool| {
+            let (dir, id) = (dir.clone(), ask.id.clone());
+            cx.listener(move |this: &mut Loom, _, _, cx| {
+                let frame = if this.here == dir {
+                    Some(this.model.answer_ask(&id, allow))
+                } else {
+                    this.away
+                        .iter_mut()
+                        .find(|a| a.dir == dir)
+                        .map(|a| a.model.answer_ask(&id, allow))
+                };
+                if let Some(f) = frame {
+                    this.send_to(&dir, &f);
+                }
+                cx.notify();
+            })
+        };
+        let hide = ask.id.clone();
+        let card = div()
+            .id("link-ask")
+            .occlude()
+            .w(px(360.0))
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::M))
+            .p(px(space::XL))
+            .bg(p.bg)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(move |this, _, _, cx| {
+                this.asks_hidden.insert(hide.clone());
+                cx.notify();
+            }))
+            .child(self.tile(what))
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .text_center()
+                    .child(format!("Add \u{201c}{}\u{201d}?", ask.name)),
+            )
+            .child(
+                div()
+                    .font_family(crate::prefs::mono_font())
+                    .text_size(px(32.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child(spaced_digits(&ask.check)),
+            )
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .text_center()
+                    .child("Only if the new device shows the same"),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .pt(px(space::S))
+                    .flex()
+                    .gap(px(space::S))
+                    .child(
+                        self.button("ask-no", "Not me", false)
+                            .flex_1()
+                            .on_click(answer(false)),
+                    )
+                    .child(
+                        self.button("ask-yes", "Add", true)
+                            .flex_1()
+                            .on_click(answer(true)),
+                    ),
+            );
+        let mut scrim = p.bg;
+        scrim.a = 0.7;
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
                 .occlude()
                 .flex()
                 .items_center()
@@ -4997,6 +5346,56 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Picks `value` on field `field` of the form `card` in reply `message`.
+    fn pick_form(
+        &mut self,
+        message: &str,
+        card: &str,
+        field: usize,
+        value: serde_json::Value,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.pick_form(message, card, field, value);
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
+    /// Send on the form `card` in reply `message`: what's typed in its boxes and picked
+    /// on it goes as one answer, or the card says what's missing.
+    fn send_form(&mut self, message: &str, card: &str, cx: &mut Context<Self>) {
+        let count = (0..)
+            .take_while(|k| {
+                self.model
+                    .messages
+                    .iter()
+                    .find(|m| m.id == message)
+                    .and_then(|m| {
+                        m.blocks.iter().find_map(|b| match b.card.as_ref() {
+                            Some(c) if c.id == card => match &c.body {
+                                model::CardBody::Form { fields, .. } => Some(*k < fields.len()),
+                                _ => None,
+                            },
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .count();
+        let typed: Vec<String> = (0..count)
+            .map(|k| {
+                self.card_secrets
+                    .get(&form_field_key(message, card, k))
+                    .map(|i| i.read(cx).value().to_string())
+                    .unwrap_or_default()
+            })
+            .collect();
+        if let Some(f) = self.model.send_form(message, card, &typed) {
+            self.send(f);
+        }
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
     /// Ticks or unticks Save as on field `field` of the card asking for a secret for `call`.
     fn toggle_secret_keep(&mut self, call: &str, field: usize, cx: &mut Context<Self>) {
         self.model.toggle_secret_keep(call, field);
@@ -5024,9 +5423,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 Row::Approval(_) => None,
             })
             .flat_map(|m| m.blocks.iter())
-            .filter_map(|b| b.card.as_ref().map(|c| &c.body));
-        for body in cards {
-            match body {
+            .filter_map(|b| b.card.as_ref());
+        for card in cards {
+            match &card.body {
                 model::CardBody::McpAdd {
                     call,
                     settings,
@@ -5060,6 +5459,25 @@ ACTA_KEY=secret:ACTA_KEY",
                                 "Name".into(),
                                 false,
                                 f.save.clone(),
+                            ));
+                        }
+                    }
+                }
+                // A form not sent: a box for each text and number field, with what it
+                // starts as.
+                model::CardBody::Form {
+                    message,
+                    fields,
+                    answers: None,
+                    ..
+                } => {
+                    for (k, f) in fields.iter().enumerate() {
+                        if f.kind == "text" || f.kind == "number" {
+                            wanted.push((
+                                form_field_key(message, &card.id, k),
+                                f.placeholder.clone(),
+                                false,
+                                f.start_text(),
                             ));
                         }
                     }
@@ -5513,53 +5931,140 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// Signing in to an instance on a server: its address, the account, and for a new
-    /// server, the setup code it printed.
+    /// The check a device being added shows while the person says yes on the device that
+    /// showed the code: the four digits, large, and Cancel.
+    fn code_check(&self, id: &'static str, check: &str, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        div()
+            .w_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap(px(space::M))
+            .py(px(space::L))
+            .child(
+                div()
+                    .font_family(crate::prefs::mono_font())
+                    .text_size(px(40.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child(spaced_digits(check)),
+            )
+            .child(
+                div()
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .text_center()
+                    .child("Say yes on your other device if it shows the same"),
+            )
+            .child(
+                div()
+                    .id(id)
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_3)
+                    .cursor_pointer()
+                    .soft_ink(p.ink_3, p.ink)
+                    .child("Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel_code(cx))),
+            )
+    }
+
+    /// Signing in to an instance on a server: the code another device shows under Add a
+    /// device, or else its address, the account, and for a new server, the setup code it
+    /// printed.
     fn server_sign_in(&mut self, column: Div, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let busy = self.model.logging_in;
         let input = |s: &Entity<InputState>| div().w_full().child(Input::new(s).large());
-        column
-            .gap(px(space::M))
+        let header = div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pb(px(space::M))
             .child(
                 div()
-                    .w_full()
+                    .id("back")
+                    .size(px(control::ICON))
                     .flex()
                     .items_center()
-                    .gap(px(space::S))
-                    .pb(px(space::M))
-                    .child(
-                        div()
-                            .id("back")
-                            .size(px(control::ICON))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(radius::BUTTON))
-                            .text_color(p.ink_2)
-                            .cursor_pointer()
-                            .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
-                            .child(Icon::new(Ico::ArrowLeft).small())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                // A server being added goes again, back to the one before.
-                                if !this.here.is_empty() {
-                                    this.remove_server(cx);
-                                    return;
-                                }
-                                this.server_form = false;
-                                this.form_at = Instant::now();
-                                this.model.login_error = None;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(size::HEADING))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.ink)
-                            .child("Your server"),
-                    ),
+                    .justify_center()
+                    .rounded(px(radius::BUTTON))
+                    .text_color(p.ink_2)
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
+                    .child(Icon::new(Ico::ArrowLeft).small())
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if this.model.adding.is_some() {
+                            this.cancel_code(cx);
+                        }
+                        // A server being added goes again, back to the one before.
+                        if !this.here.is_empty() {
+                            this.remove_server(cx);
+                            return;
+                        }
+                        this.server_form = false;
+                        this.password_form = false;
+                        this.form_at = Instant::now();
+                        this.model.login_error = None;
+                        cx.notify();
+                    })),
             )
+            .child(
+                div()
+                    .text_size(px(size::HEADING))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(p.ink)
+                    .child("Your server"),
+            );
+        let switch = |id: &'static str, words: &'static str, to_password: bool| {
+            div()
+                .id(id)
+                .pt(px(space::S))
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .cursor_pointer()
+                .soft_ink(p.ink_3, p.ink)
+                .child(words)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.password_form = to_password;
+                    this.model.login_error = None;
+                    cx.notify();
+                }))
+        };
+        if let Some((check, _)) = self.model.adding.clone() {
+            return column
+                .gap(px(space::M))
+                .child(header)
+                .child(self.code_check("cancel-code", &check, cx));
+        }
+        if !self.password_form {
+            return column
+                .gap(px(space::M))
+                .child(header)
+                .child(input(&self.add_code_in))
+                .when_some(self.model.login_error.clone(), |d, e| {
+                    d.child(
+                        div()
+                            .w_full()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.bad)
+                            .child(e),
+                    )
+                })
+                .child(
+                    div().w_full().pt(px(space::S)).child(
+                        self.button("use-code", if busy { "Adding…" } else { "Add" }, true)
+                            .w_full()
+                            .h(px(control::BUTTON_WIDE))
+                            .on_click(cx.listener(|this, _, _, cx| this.use_code(cx))),
+                    ),
+                )
+                .child(switch("password-instead", "Sign in with a password", true));
+        }
+        column
+            .gap(px(space::M))
+            .child(header)
             .child(input(&self.server_in))
             .child(input(&self.user_in))
             .child(input(&self.pass_in))
@@ -5601,6 +6106,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 )
             })
+            .child(switch("code-instead", "Use a code instead", false))
     }
 
     /// What search found, in place of the agents.
@@ -7302,6 +7808,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             name: a.name.clone(),
                             mime: String::new(),
                             size: 0,
+                            width: 0,
+                            height: 0,
                         });
                         let small = match self.previews.get(&a.id) {
                             Some(Some(Thumb {
@@ -7746,18 +8254,478 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// The composer's + menu: attach files, start the message with one of the
-    /// person's skills, or run one of this agent's routines now.
-    fn plus_menu(&self, which: Plus, cx: &mut Context<Self>) -> Div {
+    // --- The composer's + menu (PLAN.md, "The composer's + menu") ---
+
+    /// Opens the + menu with its search empty and the keys in it, and asks for what it
+    /// lists, fresh.
+    fn open_plus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paste = cx.read_from_clipboard().is_some_and(|item| {
+            item.entries()
+                .iter()
+                .any(|e| matches!(e, ClipboardEntry::Image(_)))
+        });
+        self.plus = Some(PlusMenu {
+            paste,
+            ..PlusMenu::default()
+        });
+        self.mention = None;
+        for f in self.model.load_plus() {
+            self.send(f);
+        }
+        self.plus_search.update(cx, |s, cx| {
+            s.set_value("", window, cx);
+            s.focus(window, cx);
+        });
+        self.plus_scroll.scroll_to_item(0);
+        cx.notify();
+    }
+
+    /// Shuts the + menu, and gives the composer the keys back.
+    fn shut_plus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.plus = None;
+        self.composer.update(cx, |c, cx| c.focus(window, cx));
+        cx.notify();
+    }
+
+    /// The + menu's rows as it lists them, every group's one after another, and the
+    /// list open beside it.
+    fn plus_lists(
+        &self,
+        menu: &PlusMenu,
+        cx: &App,
+    ) -> (Vec<Vec<model::PlusRow>>, Vec<model::PlusRow>) {
+        let query = self.plus_search.read(cx).value().to_string();
+        let groups = self.model.plus_groups(&query, menu.paste);
+        let sub = menu.sub.map(|s| self.model.plus_sub(s)).unwrap_or_default();
+        (groups, sub)
+    }
+
+    /// The + menu's keys: up and down go through its rows, → opens the list a row has
+    /// beside it and ← goes back, Enter takes the row, and Escape steps back, then shuts
+    /// it. Left and right move in the search while something's typed.
+    fn plus_key(&mut self, key: PlusKey, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut menu) = self.plus.clone() else {
+            return;
+        };
+        let (groups, sub) = self.plus_lists(&menu, cx);
+        let rows: Vec<model::PlusRow> = groups.concat();
+        let typed = !self.plus_search.read(cx).value().is_empty();
+        match key {
+            PlusKey::Shut => {
+                if menu.confirm.is_some() {
+                    menu.confirm = None;
+                } else if menu.sub_lit.is_some() {
+                    menu.sub_lit = None;
+                    menu.sub = None;
+                } else {
+                    self.shut_plus(window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+            }
+            PlusKey::Up | PlusKey::Down => {
+                let down = key == PlusKey::Down;
+                let step = |at: usize, n: usize| {
+                    if down {
+                        (at + 1) % n
+                    } else {
+                        (at + n - 1) % n
+                    }
+                };
+                menu.confirm = None;
+                if let Some(at) = menu.sub_lit {
+                    if !sub.is_empty() {
+                        let next = step(at, sub.len());
+                        menu.sub_lit = Some(next);
+                        self.plus_sub_scroll.scroll_to_item(next);
+                    }
+                } else if !rows.is_empty() {
+                    menu.lit = step(menu.lit.min(rows.len() - 1), rows.len());
+                    menu.sub = None;
+                    self.plus_scroll
+                        .scroll_to_item(plus_child(&groups, menu.lit));
+                }
+            }
+            PlusKey::Right => {
+                let opens = rows.get(menu.lit).and_then(model::PlusRow::opens);
+                match opens {
+                    Some(s) if !typed && menu.sub_lit.is_none() => {
+                        menu.sub = Some(s);
+                        menu.sub_lit = Some(0);
+                        self.plus_sub_scroll.scroll_to_item(0);
+                    }
+                    _ if menu.sub_lit.is_some() => {}
+                    _ => return,
+                }
+            }
+            PlusKey::Left => {
+                if menu.sub_lit.is_none() {
+                    return;
+                }
+                menu.sub_lit = None;
+                menu.sub = None;
+            }
+            PlusKey::Take => {
+                if let Some(id) = menu.confirm.clone() {
+                    self.run_from_plus(&id, window, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                let row = match menu.sub_lit {
+                    Some(at) => sub.get(at).cloned(),
+                    None => rows.get(menu.lit).cloned(),
+                };
+                if let Some(row) = row {
+                    self.plus = Some(menu);
+                    self.plus_pick(row, true, window, cx);
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
+        self.plus = Some(menu);
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Does what a row of the + menu says. `keys` is whether the keys chose it, so a
+    /// list it opens beside the menu has them.
+    fn plus_pick(
+        &mut self,
+        row: model::PlusRow,
+        keys: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use model::{PlusRow, PlusSub};
+        match row {
+            PlusRow::Attach => {
+                self.shut_plus(window, cx);
+                self.pick_files(cx);
+            }
+            PlusRow::PasteImage => {
+                self.shut_plus(window, cx);
+                self.paste_files(cx);
+            }
+            PlusRow::Open(s) => {
+                if let Some(menu) = self.plus.as_mut() {
+                    menu.sub = Some(s);
+                    menu.sub_lit = keys.then_some(0);
+                }
+                self.plus_sub_scroll.scroll_to_item(0);
+                cx.notify();
+            }
+            PlusRow::File(f) => {
+                // It goes in the words where the cursor is, as one piece, as an attachment does.
+                if self.model.attach_sent(&f.file) {
+                    if let Some(a) = self.model.attachments.last() {
+                        let (id, name) = model::attach_token(a);
+                        self.composer_edits.push(ComposerEdit::Put(id, name));
+                    }
+                }
+                self.shut_plus(window, cx);
+            }
+            PlusRow::Skill(k) => {
+                // A pill where the cursor is, as a mention is.
+                let (link, words) = model::skill_mention(&k.name);
+                self.plus = None;
+                self.composer.update(cx, |c, cx| {
+                    let at = c.cursor();
+                    if c.replace_range_with_token(at..at, InlineToken::new(link, words), window, cx)
+                        .is_ok()
+                    {
+                        c.insert(" ", window, cx);
+                    }
+                    c.focus(window, cx);
+                });
+                cx.notify();
+            }
+            PlusRow::Routine(r) => {
+                if let Some(menu) = self.plus.as_mut() {
+                    menu.confirm = Some(r.id);
+                }
+                cx.notify();
+            }
+            PlusRow::Manage(s) => {
+                self.shut_plus(window, cx);
+                self.open(
+                    if s == PlusSub::Routines {
+                        Screen::Routines
+                    } else {
+                        Screen::Skills
+                    },
+                    cx,
+                );
+            }
+        }
+    }
+
+    /// Runs a routine the + menu asked "Run now?" about, once the person says so.
+    fn run_from_plus(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let f = self.model.run_routine(id);
+        self.send(f);
+        self.shut_plus(window, cx);
+    }
+
+    /// The highlight on the + menu's lit row: a breath of the agent's colour.
+    fn plus_tint(&self) -> Hsla {
         let p = self.p;
-        let k = motion::arrive(&SharedString::from("plus-menu"), 0.16);
-        let panel = div()
+        match self
+            .model
+            .selected
+            .as_ref()
+            .and_then(|a| self.model.agent(a))
+        {
+            Some(a) => motion::mix(p.raised, thread::color(&a.color, p.dark), 0.16),
+            None => p.hover,
+        }
+    }
+
+    /// How a row of the + menu reads: its icon, its title, and its grey line, with the
+    /// line's colour.
+    fn plus_face(&self, row: &model::PlusRow) -> (Ico, String, Option<(String, Hsla)>) {
+        use model::{PlusRow, PlusSub};
+        let p = self.p;
+        let grey = |s: String| (!s.is_empty()).then_some((s, p.ink_3));
+        match row {
+            PlusRow::Attach => (Ico::Paperclip, "Attach files".into(), None),
+            PlusRow::PasteImage => (Ico::ClipboardPaste, "Paste image".into(), None),
+            PlusRow::Open(PlusSub::Recent) => (Ico::FileClock, "Recent files".into(), None),
+            PlusRow::Open(PlusSub::Skills) => (Ico::BookOpen, "Skills".into(), None),
+            PlusRow::Open(PlusSub::Routines) => (Ico::Clock, "Routines".into(), None),
+            PlusRow::File(f) => (
+                if f.file.image() {
+                    Ico::Image
+                } else {
+                    Ico::FileText
+                },
+                f.file.name.clone(),
+                grey(line_of(f.at, chrono::Local::now())),
+            ),
+            PlusRow::Skill(k) => (
+                Ico::BookOpen,
+                k.name.clone(),
+                grey(k.description.lines().next().unwrap_or_default().to_string()),
+            ),
+            PlusRow::Routine(r) => {
+                let (line, bad) = routine_went(r);
+                let mine = self.model.selected.as_deref() == Some(r.agent.as_str());
+                let line = match self.model.agent(&r.agent) {
+                    Some(a) if !mine => format!("{} · {line}", a.name),
+                    _ => line,
+                };
+                (
+                    Ico::Clock,
+                    r.name.clone(),
+                    Some((line, if bad { p.bad } else { p.ink_3 })),
+                )
+            }
+            PlusRow::Manage(s) => {
+                let none = self.model.plus_sub(*s).len() == 1;
+                let title = match (s, none) {
+                    (_, true) => "Make one…",
+                    (PlusSub::Routines, _) => "Manage routines…",
+                    _ => "Manage skills…",
+                };
+                (Ico::Settings, title.into(), None)
+            }
+        }
+    }
+
+    /// A row of the + menu, lit or not, with its keys or a chevron on the right.
+    fn plus_row(&self, id: SharedString, row: &model::PlusRow, lit: bool) -> Stateful<Div> {
+        let p = self.p;
+        let (icon, title, line) = self.plus_face(row);
+        let keys = |k: &str| {
+            let chord = if cfg!(target_os = "macos") {
+                format!("⌘{k}")
+            } else {
+                format!("Ctrl+{k}")
+            };
+            div()
+                .flex_none()
+                .text_size(px(size::CAPTION))
+                .text_color(p.ink_3)
+                .child(chord)
+                .into_any_element()
+        };
+        let right = match row {
+            model::PlusRow::Attach => Some(keys("U")),
+            model::PlusRow::PasteImage => Some(keys("V")),
+            model::PlusRow::Open(_) => Some(
+                div()
+                    .flex_none()
+                    .text_color(p.ink_3)
+                    .child(Icon::new(IconName::ChevronRight).xsmall())
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
+        div()
+            .id(id)
+            .role(Role::MenuItem)
+            .aria_label(title.clone())
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(if line.is_some() {
+                space::XS + 1.0
+            } else {
+                space::S
+            }))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .text_size(px(size::SMALL))
+            .text_color(p.ink)
+            .when(lit, |d| d.bg(self.plus_tint()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(p.ink_2)
+                    .child(Icon::new(icon).small()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(div().truncate().child(title))
+                    .when_some(line, |d, (line, color)| {
+                        d.child(
+                            div()
+                                .truncate()
+                                .text_size(px(size::CAPTION))
+                                .text_color(color)
+                                .child(line),
+                        )
+                    }),
+            )
+            .when_some(right, |d, r| d.child(r))
+    }
+
+    /// A routine's row once it's picked: "Run it now?", with Run and Cancel.
+    fn plus_confirm(&self, r: &model::Routine, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let id = r.id.clone();
+        div()
+            .id(SharedString::from(format!("plus-confirm-{}", r.id)))
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pl(px(space::M))
+            .pr(px(space::XS))
+            .py(px(space::XS))
+            .rounded(px(radius::ROW))
+            .bg(self.plus_tint())
+            .text_size(px(size::SMALL))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(p.ink)
+                    .child(format!("Run {} now?", r.name)),
+            )
+            .child(
+                self.small_button("plus-confirm-no", "Cancel", false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(menu) = this.plus.as_mut() {
+                            menu.confirm = None;
+                        }
+                        cx.notify();
+                    })),
+            )
+            .child(self.small_button("plus-confirm-run", "Run", true).on_click(
+                cx.listener(move |this, _, window, cx| this.run_from_plus(&id, window, cx)),
+            ))
+    }
+
+    /// One row of the + menu, or of the list beside it, as it's drawn: lit as the
+    /// pointer or the keys reach it, and taken on a click. `sub` is its place in the list
+    /// beside the menu, or None for the menu's own.
+    fn plus_item(
+        &self,
+        menu: &PlusMenu,
+        row: &model::PlusRow,
+        at: usize,
+        sub: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let model::PlusRow::Routine(r) = row {
+            if menu.confirm.as_deref() == Some(r.id.as_str()) {
+                return self.plus_confirm(r, cx).into_any_element();
+            }
+        }
+        let lit = if sub {
+            menu.sub_lit == Some(at)
+        } else {
+            menu.lit == at
+        };
+        let id = SharedString::from(format!("plus-{}-{at}", if sub { "sub" } else { "row" }));
+        let opens = row.opens();
+        let taken = row.clone();
+        let mut el = self
+            .plus_row(id, row, lit)
+            .on_mouse_move(cx.listener(move |this, _, _, cx| {
+                let Some(menu) = this.plus.as_mut() else {
+                    return;
+                };
+                let (was_lit, was_sub, was_sub_lit) = (menu.lit, menu.sub, menu.sub_lit);
+                if sub {
+                    menu.sub_lit = Some(at);
+                } else {
+                    menu.lit = at;
+                    menu.sub_lit = None;
+                    menu.sub = opens;
+                }
+                if (was_lit, was_sub, was_sub_lit) != (menu.lit, menu.sub, menu.sub_lit) {
+                    cx.notify();
+                }
+            }))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.plus_pick(taken.clone(), false, window, cx);
+            }));
+        // A row that opens a list beside the menu says where it is, for the list.
+        if let Some(s) = opens {
+            let bounds = self.plus_bounds.clone();
+            el = el.child(
+                canvas(
+                    move |b, _, _| {
+                        bounds.borrow_mut().rows.insert(s, b);
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            );
+        }
+        el.into_any_element()
+    }
+
+    /// A grey line in the + menu where a list has nothing to show.
+    fn plus_none(&self, text: String) -> Div {
+        div()
+            .px(px(space::M))
+            .py(px(space::S))
+            .text_size(px(size::SMALL))
+            .text_color(self.p.ink_3)
+            .child(text)
+    }
+
+    /// A panel of the + menu: raised, with loom's radius and shadow, and shut by a click
+    /// outside it that isn't on the other panel.
+    fn plus_panel(&self, width: f32, sub: bool, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let bounds = self.plus_bounds.clone();
+        div()
             .occlude()
-            // It rises into place as it fades in.
-            .opacity(k)
-            .mb(px(space::S - 6.0 * (1.0 - k)))
-            .w(px(layout::MENU_WIDE))
-            .max_h(px(320.0))
+            .relative()
+            .w(px(width))
             .p(px(space::XS))
             .flex()
             .flex_col()
@@ -7766,125 +8734,180 @@ ACTA_KEY=secret:ACTA_KEY",
             .border_color(p.line_strong)
             .rounded(px(radius::CARD))
             .shadow_lg()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.plus = None;
-                cx.notify();
-            }));
-        let back = |this: &Self, cx: &mut Context<Self>| {
-            this.menu_item("plus-back", Ico::ArrowLeft, "Back", false)
-                .text_color(this.p.ink_2)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.plus = Some(Plus::Main);
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        let mut kept = bounds.borrow_mut();
+                        if sub {
+                            kept.sub = Some(b);
+                        } else {
+                            kept.menu = Some(b);
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .on_mouse_down_out(cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                let kept = this.plus_bounds.borrow();
+                let other = if sub {
+                    kept.menu
+                } else {
+                    kept.sub
+                        .filter(|_| this.plus.as_ref().is_some_and(|m| m.sub.is_some()))
+                };
+                if other.is_some_and(|b| b.contains(&e.position)) {
+                    return;
+                }
+                drop(kept);
+                if this.plus.take().is_some() {
+                    this.plus_closed_at = Some(Instant::now());
                     cx.notify();
-                }))
-        };
-        let none = |text: &'static str| {
-            div()
-                .px(px(space::M))
-                .py(px(space::S))
-                .text_size(px(size::SMALL))
-                .text_color(p.ink_3)
-                .child(text)
-        };
-        match which {
-            Plus::Main => panel
-                .child(
-                    self.menu_item("plus-attach", Ico::Paperclip, "Attach files", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.plus = None;
-                            this.pick_files(cx);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.menu_item("plus-skill", Ico::BookOpen, "Use a skill", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.load_skills();
-                            this.send(f);
-                            this.plus = Some(Plus::Skills);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.menu_item("plus-routine", Ico::Clock, "Run a routine", false)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            let f = this.model.load_routines();
-                            this.send(f);
-                            this.plus = Some(Plus::Routines);
-                            cx.notify();
-                        })),
-                ),
-            Plus::Skills => {
-                let mut list = div()
-                    .id("plus-skills")
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll();
-                if self.model.skills.is_empty() {
-                    list = list.child(none("No skills yet"));
                 }
-                for s in self.model.skills.clone() {
-                    let name = s.name.clone();
-                    list = list.child(
-                        self.menu_item(
-                            format!("plus-skill-{}", s.name),
-                            Ico::BookOpen,
-                            &s.name,
-                            false,
-                        )
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                let text = this.composer.read(cx).value().to_string();
-                                let next = model::with_skill(&name, &text);
-                                this.composer.update(cx, |c, cx| {
-                                    c.set_value(next, window, cx);
-                                    c.focus(window, cx);
-                                });
-                                this.plus = None;
-                                cx.notify();
-                            },
-                        )),
-                    );
-                }
-                panel.child(back(self, cx)).child(list)
+            }))
+    }
+
+    /// The composer's + menu: a search over every group, what adds to the message
+    /// (attach files, paste an image, a file sent lately) and what it does (a skill, a
+    /// routine run now), a group to each part with a line between, and the list a row
+    /// opens beside it.
+    fn plus_menu(&self, menu: &PlusMenu, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let k = motion::arrive(&SharedString::from("plus-menu"), 0.16);
+        let (groups, sub_rows) = self.plus_lists(menu, cx);
+        let query = self.plus_search.read(cx).value().to_string();
+        let search = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .pl(px(space::M))
+            .pr(px(space::XS))
+            .pb(px(space::XS))
+            .text_size(px(size::SMALL))
+            .child(Icon::new(IconName::Search).small().text_color(p.ink_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                        this.plus_key(PlusKey::Up, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
+                        this.plus_key(PlusKey::Down, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                        this.plus_key(PlusKey::Right, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+                        this.plus_key(PlusKey::Left, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &Enter, window, cx| {
+                        this.plus_key(PlusKey::Take, window, cx)
+                    }))
+                    .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                        this.plus_key(PlusKey::Shut, window, cx)
+                    }))
+                    .child(Input::new(&self.plus_search).appearance(false).small()),
+            );
+        let mut list = div()
+            .id("plus-list")
+            .flex()
+            .flex_col()
+            .max_h(px(PLUS_TALL))
+            .overflow_y_scroll()
+            .track_scroll(&self.plus_scroll);
+        let mut at = 0;
+        for (g, group) in groups.iter().enumerate() {
+            if g > 0 {
+                list = list.child(plus_line(p));
             }
-            Plus::Routines => {
-                let agent = self.model.selected.clone().unwrap_or_default();
-                let mine: Vec<model::Routine> = self
-                    .model
-                    .routines
-                    .iter()
-                    .filter(|r| r.agent == agent)
-                    .cloned()
-                    .collect();
-                let mut list = div()
-                    .id("plus-routines")
-                    .flex()
-                    .flex_col()
-                    .overflow_y_scroll();
-                if mine.is_empty() {
-                    list = list.child(none("No routines for this agent"));
-                }
-                for r in mine {
-                    let id = r.id.clone();
-                    list = list.child(
-                        self.menu_item(
-                            format!("plus-routine-{}", r.id),
-                            Ico::Clock,
-                            &r.name,
-                            false,
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.run_routine(&id);
-                            this.send(f);
-                            this.plus = None;
-                            cx.notify();
-                        })),
-                    );
-                }
-                panel.child(back(self, cx)).child(list)
+            for row in group {
+                list = list.child(self.plus_item(menu, row, at, false, cx));
+                at += 1;
             }
         }
+        if groups.is_empty() {
+            list = list.child(self.plus_none(format!("Nothing matches “{}”.", query.trim())));
+        }
+        let main = self
+            .plus_panel(PLUS_WIDE, false, cx)
+            // It rises into place as it fades in.
+            .opacity(k)
+            .mb(px(space::S - 6.0 * (1.0 - k)))
+            .child(search)
+            .child(plus_line(p))
+            .child(list);
+        // The list a row opens, beside that row: to its right, or its left where the
+        // window has no room.
+        let beside = menu.sub.and_then(|s| {
+            let row = self.plus_bounds.borrow().rows.get(&s).copied()?;
+            Some(self.plus_sub(menu, s, &sub_rows, row, cx))
+        });
+        div().child(main).when_some(beside, |d, b| d.child(b))
+    }
+
+    /// The list beside the + menu: its rows, scrolled when there are many, then its
+    /// settings page, or what it says when it has nothing.
+    fn plus_sub(
+        &self,
+        menu: &PlusMenu,
+        which: model::PlusSub,
+        rows: &[model::PlusRow],
+        by: Bounds<Pixels>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use model::{PlusRow, PlusSub};
+        let p = self.p;
+        let k = motion::arrive(&SharedString::from(format!("plus-sub-{which:?}")), 0.12);
+        let items: Vec<&PlusRow> = rows
+            .iter()
+            .filter(|r| !matches!(r, PlusRow::Manage(_)))
+            .collect();
+        let mut list = div()
+            .id("plus-sub-list")
+            .flex()
+            .flex_col()
+            .max_h(px(PLUS_TALL))
+            .overflow_y_scroll()
+            .track_scroll(&self.plus_sub_scroll);
+        for (n, row) in items.iter().enumerate() {
+            list = list.child(self.plus_item(menu, row, n, true, cx));
+        }
+        let mut panel = self.plus_panel(PLUS_SUB_WIDE, true, cx).opacity(k);
+        if items.is_empty() {
+            panel = panel.child(
+                self.plus_none(
+                    match which {
+                        PlusSub::Recent => "No files sent yet.",
+                        PlusSub::Skills => "No skills yet.",
+                        PlusSub::Routines => "No routines yet.",
+                    }
+                    .into(),
+                ),
+            );
+        } else {
+            panel = panel.child(list);
+        }
+        if let Some(n) = rows.iter().position(|r| matches!(r, PlusRow::Manage(_))) {
+            if !items.is_empty() {
+                panel = panel.child(plus_line(p));
+            }
+            panel = panel.child(self.plus_item(menu, &rows[n], n, true, cx));
+        }
+        // The menu opens above the composer, so the list grows up from its row's foot,
+        // and down from its head where there's no room above.
+        deferred(
+            anchored()
+                .attach(by, Anchor::BottomRight)
+                .anchor(Anchor::BottomLeft)
+                .offset(point(px(space::XS), px(space::XS + 1.0)))
+                .child(panel),
+        )
+        .with_priority(1)
+        .into_any_element()
     }
 
     /// A menu entry for one of the permission modes, ticked when it's the agent's.
@@ -8217,17 +9240,18 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// A picture from the chat, big over the window: whole once it's fetched, its
-    /// thumbnail until then, with its name and where it is among them. A click beside it
-    /// or Esc closes it, the arrows (or ← and →) go between the pictures of the stack it
-    /// was opened on, or else the chat's, and Open hands it to its own program.
+    /// A picture from the chat, big over the window, with its name and where it is among
+    /// them under it. It's laid out at its final size from the first frame
+    /// (`viewer_size`): its thumbnail scaled up to that place until its whole is here,
+    /// which then fades in over it. A click beside it or Esc closes it, the arrows (or ←
+    /// and →) go between the pictures of the stack it was opened on, or else the chat's,
+    /// and Open hands it to its own program. The wheel, a pinch, + and − zoom it
+    /// (`crate::zoom`), toward the pointer, dragging pans it, a double-click goes between
+    /// its fit and its own size, and 0 or its level fits it again.
     fn viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let f = self.model.viewing.clone()?;
-        let files = self.model.files.clone();
-        let path = files
-            .get(&f.file)
-            .or_else(|| files.get(&format!("{}.thumb", f.file)))
-            .cloned();
+        let whole = self.model.files.get(&f.file).cloned();
+        let thumb = self.model.files.get(&format!("{}.thumb", f.file)).cloned();
         let all = self.model.viewer_pictures();
         let at = all.iter().position(|x| x.file == f.file);
         let (before, after) = match at {
@@ -8255,52 +9279,146 @@ ACTA_KEY=secret:ACTA_KEY",
                 .hover(|s| s.bg(white().opacity(0.18)))
                 .child(Icon::new(icon).small())
         };
-        let picture = match path {
-            Some(path) => {
-                // Sized here, as in the chat (`file_view`): a most alone let a tall
-                // picture draw past the window.
-                let (most_w, most_h) = ((w - 160.0).max(100.0), (h - 140.0).max(100.0));
-                let (pw, ph) = match picture_size(&path) {
-                    Some((iw, ih)) => fit(iw, ih, most_w, most_h),
-                    None => (most_w, most_h),
-                };
-                img(std::path::PathBuf::from(path))
-                    .image_cache(&kept_images(cx).1)
-                    .w(px(pw))
-                    .h(px(ph))
-                    .rounded(px(radius::ROW))
-                    .into_any_element()
+        // Its place: fitted to the window less the room for the controls and its caption,
+        // in the middle, so the arrows and the caption never move. The size it's laid out
+        // by is kept once it's shown.
+        let (most_w, most_h) = ((w - 160.0).max(100.0), (h - 2.0 * VIEWER_EDGE).max(100.0));
+        let shown = match self.viewer_sizes.get(&f.file) {
+            Some(s) => Some(*s),
+            None => {
+                let s = viewer_size(&f, thumb.as_deref(), whole.as_deref());
+                if let Some(s) = s {
+                    self.viewer_sizes.insert(f.file.clone(), s);
+                }
+                s
             }
-            None => div()
-                .size(px(160.0))
-                .rounded(px(radius::ROW))
-                .bg(white().opacity(0.06))
-                .into_any_element(),
         };
+        let fitted = shown.map(|(iw, ih)| fit(iw, ih, most_w, most_h));
+        let (kept_chat, kept_viewer) = kept_images(cx);
+        let sharp = whole
+            .as_deref()
+            .and_then(|p| kept_picture(&kept_viewer, p, window, cx));
+        let soft = thumb
+            .as_deref()
+            .and_then(|p| kept_picture(&kept_chat, p, window, cx));
+        // Its own size, for 100% and how far it zooms in: as the instance said, else as
+        // its whole turned out once it's here.
+        let natural = f
+            .shown_size()
+            .or_else(|| {
+                sharp.as_ref().map(|i| {
+                    let s = i.size(0);
+                    (s.width.0.max(1) as u32, s.height.0.max(1) as u32)
+                })
+            })
+            .or(shown);
+        let place = fitted.unwrap_or((160.0, 160.0));
+        let actual = natural.map_or(1.0, |(nw, _)| nw as f32 / place.0.max(1.0));
+        if self.zoom.as_ref().map(|z| z.file.as_str()) != Some(f.file.as_str()) {
+            self.zoom = Some(crate::zoom::Zoom::new(&f.file));
+        }
+        let z = self.zoom.as_mut()?;
+        z.frame(place, (w, h), crate::zoom::most(actual));
+        if z.step(Instant::now()) {
+            window.request_animation_frame();
+        }
+        let first = *z.sharp_at_first.get_or_insert(sharp.is_some());
+        let (scale, pan, zoomed, dragged) = (z.scale, z.pan, z.zoomed(), z.dragged());
+        let percent = z.percent(actual);
+        let level_shown = z.changed.map_or(f32::MAX, |t| t.elapsed().as_secs_f32());
+        let middle = point(px(w / 2.0 + pan.0), px(h / 2.0 + pan.1));
+        let rect = Bounds::centered_at(
+            middle,
+            gpui_kit::size(px(place.0 * scale), px(place.1 * scale)),
+        );
+        // Rounded while it's all in the window; zoomed past it, its edges are the window's.
+        let inside = rect.origin.x >= px(0.0)
+            && rect.origin.y >= px(0.0)
+            && rect.origin.x + rect.size.width <= px(w)
+            && rect.origin.y + rect.size.height <= px(h);
+        let corner = if inside { px(radius::ROW) } else { px(0.0) };
+        // Its whole fades in over its thumbnail once it's here, unless it was here as it
+        // opened.
+        let fade = match &sharp {
+            Some(_) if first => 1.0,
+            Some(_) => motion::arrive(
+                &SharedString::from(format!("viewer-sharp-{}-{:?}", f.file, self.viewer_at)),
+                0.18,
+            ),
+            None => 0.0,
+        };
+        let frame_at = self.viewer_at.elapsed();
+        let mut picture = div().absolute().top_0().left_0().size_full();
+        if fade < 1.0 {
+            picture = match soft {
+                Some(image) => picture.child(viewer_picture(image, rect, corner, frame_at)),
+                None if fitted.is_some() || sharp.is_none() => picture.child(
+                    div()
+                        .absolute()
+                        .left(rect.origin.x)
+                        .top(rect.origin.y)
+                        .w(rect.size.width)
+                        .h(rect.size.height)
+                        .rounded(corner)
+                        .bg(white().opacity(0.06)),
+                ),
+                None => picture,
+            };
+        }
+        if let Some(image) = sharp {
+            if image.frame_count() > 1 {
+                window.request_animation_frame();
+            }
+            picture = picture.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .opacity(fade)
+                    .child(viewer_picture(image, rect, corner, frame_at)),
+            );
+        }
+        // Its zoom's level, for a moment after it changes, and while the pointer's on it.
+        let level_key = SharedString::from("viewer-level");
+        let level = if motion::hovered(&level_key) {
+            1.0
+        } else {
+            (1.0 - (level_shown - 0.9) / 0.3).clamp(0.0, 1.0)
+        };
+        if level > 0.0 && level_shown < 1.3 {
+            window.request_animation_frame();
+        }
         let opened = f.clone();
         let count = match at {
             Some(i) if all.len() > 1 => Some(format!("{} / {}", i + 1, all.len())),
             _ => None,
         };
+        // A long name cut in the middle, its type kept, and whole on hover.
+        let name = div()
+            .id("viewer-name")
+            .min_w_0()
+            .truncate()
+            .text_color(white().opacity(0.75))
+            .tooltip(tip_text(f.name.clone()))
+            .child(model::middle_cut(&f.name, 64));
+        // With a count, the name ends just left of the middle and the count starts just
+        // right of it, so the count stays put from one picture to the next.
         let caption = div()
-            .max_w(px((w - 2.0 * space::XL).max(100.0)))
+            .w(px((w - 2.0 * space::XL).max(100.0)))
             .flex()
             .items_center()
+            .justify_center()
             .gap(px(space::M))
             .text_size(px(size::SMALL))
-            .child(
-                // A long name cut in the middle, its type kept, and whole on hover.
-                div()
-                    .id("viewer-name")
-                    .min_w_0()
-                    .truncate()
-                    .text_color(white().opacity(0.75))
-                    .tooltip(tip_text(f.name.clone()))
-                    .child(model::middle_cut(&f.name, 64)),
-            )
-            .when_some(count, |d, c| {
-                d.child(div().flex_none().text_color(white().opacity(0.5)).child(c))
+            .map(|d| match count {
+                Some(c) => d
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(name))
+                    .child(div().flex_1().text_color(white().opacity(0.5)).child(c)),
+                None => d.child(name),
             });
+        // Where a point in the window is from the viewer's middle, as the zoom has it.
+        let from_middle = move |p: Point<Pixels>| (p.x.as_f32() - w / 2.0, p.y.as_f32() - h / 2.0);
         Some(
             div()
                 .id("viewer")
@@ -8311,24 +9429,139 @@ ACTA_KEY=secret:ACTA_KEY",
                 .occlude()
                 .opacity(k)
                 .bg(black().opacity(0.9))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(space::M))
+                .when(zoomed, |d| {
+                    d.cursor(if dragged {
+                        CursorStyle::ClosedHand
+                    } else {
+                        CursorStyle::OpenHand
+                    })
+                })
+                // A press is a drag once it moves; a click beside the picture closes it,
+                // and a double-click on it zooms in or back to its fit.
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.model.viewing = None;
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        let Some(z) = this.zoom.as_mut() else {
+                            return;
+                        };
+                        let on = rect.contains(&e.position);
+                        if e.click_count >= 2 && on {
+                            z.toggle(from_middle(e.position), actual);
+                            z.let_go();
+                        } else {
+                            z.grab(from_middle(e.position), on);
+                        }
                         cx.notify();
                     }),
                 )
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                    let Some(z) = this.zoom.as_mut().filter(|z| z.drag.is_some()) else {
+                        return;
+                    };
+                    if e.pressed_button == Some(MouseButton::Left) {
+                        z.pull(from_middle(e.position));
+                    } else {
+                        z.let_go();
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        let Some(d) = this.zoom.as_mut().and_then(|z| z.let_go()) else {
+                            return;
+                        };
+                        if !d.moved && !d.on_picture {
+                            this.model.viewing = None;
+                        }
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(z) = this.zoom.as_mut() {
+                            z.let_go();
+                            cx.notify();
+                        }
+                    }),
+                )
+                // A wheel's notches zoom toward the pointer, easing; a trackpad's two
+                // fingers pan once it's zoomed in, and zoom with Ctrl or ⌘ held.
+                .on_scroll(cx.listener(move |this, e: &ScrollEvent, _, cx| {
+                    let Some(z) = this.zoom.as_mut() else {
+                        return;
+                    };
+                    let at = from_middle(e.position);
+                    match e.delta {
+                        // Windows says a notch is 3 lines: about 1.4 times a notch.
+                        ScrollDelta::Lines(d) => z.go(z.target * 1.12f32.powf(d.y), at),
+                        ScrollDelta::Pixels(d) => {
+                            if e.modifiers.control || e.modifiers.platform {
+                                z.set(z.scale * (d.y.as_f32() * 0.01).exp(), at);
+                            } else if z.zoomed() {
+                                z.scroll((d.x.as_f32(), d.y.as_f32()));
+                            } else {
+                                return;
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_pinch(cx.listener(move |this, e: &PinchEvent, _, cx| {
+                    if let Some(z) = this.zoom.as_mut() {
+                        z.set(z.scale * (1.0 + e.delta), from_middle(e.position));
+                        cx.notify();
+                    }
+                }))
+                .child(picture)
                 .child(
                     div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(picture),
+                        .absolute()
+                        .left_0()
+                        .bottom_0()
+                        .w_full()
+                        .h(px(VIEWER_EDGE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(caption),
                 )
-                .child(caption)
+                .when(level > 0.0, |d| {
+                    let pill = div()
+                        .id("viewer-level")
+                        .h(px(28.0))
+                        .px(px(space::M))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .opacity(level)
+                        .text_size(px(size::SMALL))
+                        .text_color(white())
+                        .bg(white().opacity(0.08))
+                        .hover(|s| s.bg(white().opacity(0.18)))
+                        .tooltip(tip("Fit"))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(z) = this.zoom.as_mut() {
+                                z.go(1.0, (0.0, 0.0));
+                            }
+                            cx.notify();
+                        }))
+                        .child(format!("{percent}%"));
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(layout::TITLEBAR + space::S + 4.0))
+                            .left_0()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(motion::tracks_hover(pill, level_key)),
+                    )
+                })
                 .child(
                     div()
                         .absolute()
@@ -8757,6 +9990,17 @@ ACTA_KEY=secret:ACTA_KEY",
         let this = cx.entity().downgrade();
         let new_line = self.model.new_line.clone();
         let column = self.prefs.column();
+        // Allow held on a risky question: allowed once it's held long enough, and drawn
+        // filling at every frame meanwhile.
+        let now = Instant::now();
+        if let Some(f) = self.model.hold_tick(now) {
+            self.send(f);
+            self.refresh_rows(cx);
+        }
+        if self.model.holding(now) {
+            window.request_animation_frame();
+        }
+        let hold = self.model.hold_shown(now);
         // Clear of the small browser window, while it shows.
         let pad = mini.is_some().then(|| {
             let (fw, fh) = self
@@ -8784,6 +10028,7 @@ ACTA_KEY=secret:ACTA_KEY",
             width: self.chat_width(window),
             p,
             pad,
+            hold,
         };
         // The list is a view of its own, built with the window, and each finished message
         // in it another, drawn from its cache until what it shows changes (`RowView`): a
@@ -8836,7 +10081,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let attached = self.attached_row(window, cx);
         let plus_open = self.plus.is_some();
-        let plus_menu = self.plus.map(|which| self.plus_menu(which, cx));
+        let plus_menu = self.plus.clone().map(|menu| self.plus_menu(&menu, cx));
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let mut composer = Some(
@@ -8893,13 +10138,17 @@ ACTA_KEY=secret:ACTA_KEY",
                                             d.tooltip(tip("Attach, skills and routines"))
                                         })
                                         .child(Icon::new(Ico::Plus).small())
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.plus = if this.plus.is_some() {
-                                                None
-                                            } else {
-                                                Some(Plus::Main)
-                                            };
-                                            cx.notify();
+                                        // A click on it shuts the menu, which the click
+                                        // outside it did a moment before.
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let just_shut = this
+                                                .plus_closed_at
+                                                .is_some_and(|t| t.elapsed() < Duration::from_millis(300));
+                                            if this.plus.is_some() {
+                                                this.shut_plus(window, cx);
+                                            } else if !just_shut {
+                                                this.open_plus(window, cx);
+                                            }
                                         })),
                                 ),
                         )
@@ -12947,13 +14196,15 @@ ACTA_KEY=secret:ACTA_KEY",
         ))
     }
 
-    /// The Add a phone page: a QR code the phone's loom app scans to join this account,
-    /// with a token of its own. The core makes what's in it; this draws it, dark on white
-    /// in either theme so a camera reads it. Then the devices signed in.
-    fn add_phone_page(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The Add a device page: a QR code a phone scans and the code a computer pastes, to
+    /// join this account once the person says yes here. The core makes what's in them;
+    /// this draws the QR code, dark on white in either theme so a camera reads it. Then
+    /// the devices signed in, with when each was last on, to remove one; and for an
+    /// account a link code made, its first password.
+    fn add_device_page(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut groups = Vec::new();
-        // The instance in this app listens only on this computer until phones are on.
+        // The instance in this app listens only on this computer until devices may reach it.
         let local = self.local();
         let phones_on = !local || self.model.phones == Some(true);
         let mut pair = Vec::new();
@@ -12961,7 +14212,7 @@ ACTA_KEY=secret:ACTA_KEY",
             pair.push(
                 self.row(
                     Some(self.tile(Ico::Smartphone)),
-                    "Phones can reach this computer",
+                    "Other devices can reach this computer",
                     None,
                     Some(
                         self.switch("phones-switch", phones_on)
@@ -13017,9 +14268,46 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_size(px(size::BODY))
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(p.ink)
-                            .child("Scan it with loom on your phone"),
-                    )
-                    .child(caption(format!("Works once, until {}", time_of(expires))));
+                            .child("Scan it with your phone, or paste the code on a computer"),
+                    );
+                if let Some(pasted) = self.model.link_text.clone() {
+                    let (copy_code, copy_link) = (pasted.clone(), text.clone());
+                    code = code
+                        .child(
+                            div()
+                                .id("add-code")
+                                .px(px(space::M))
+                                .py(px(space::S))
+                                .rounded(px(radius::ROW))
+                                .bg(p.raised_2)
+                                .font_family(crate::prefs::mono_font())
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .child(pasted),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .gap(px(space::S))
+                                .child(
+                                    self.small_button("copy-add-code", "Copy code", true)
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_code.clone(),
+                                            ));
+                                        }),
+                                )
+                                .child(
+                                    self.small_button("copy-add-link", "Copy link", false)
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_link.clone(),
+                                            ));
+                                        }),
+                                ),
+                        );
+                }
+                code = code.child(caption(format!("Works once, until {}", time_of(expires))));
             } else {
                 code = code.child(caption("Making a code…".into()));
             }
@@ -13036,16 +14324,18 @@ ACTA_KEY=secret:ACTA_KEY",
         if let Some(relay) = self.relay_group(cx) {
             groups.push(relay);
         }
-        // Every device signed in to this account, so one that shouldn't be can be signed out.
+        // Every device signed in to this account, so one that shouldn't be can be removed,
+        // which signs it out.
+        let now = chrono::Local::now();
         let mut devices = Vec::new();
-        for (id, name, kind) in self.model.devices.clone() {
-            let (what, icon) = match kind.as_str() {
-                "ios" => ("iPhone", Ico::Smartphone),
-                "macos" => ("Mac", Ico::Laptop),
-                "windows" => ("Windows PC", Ico::Monitor),
-                _ => ("Command line", Ico::SquareTerminal),
+        for d in self.model.devices.clone() {
+            let icon = match d.kind.as_str() {
+                "ios" => Ico::Smartphone,
+                "macos" => Ico::Laptop,
+                "windows" => Ico::Monitor,
+                _ => Ico::SquareTerminal,
             };
-            let this_one = id == self.model.me;
+            let this_one = d.id == self.model.me;
             let control = if this_one {
                 div()
                     .px(px(space::S))
@@ -13057,7 +14347,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child("This one")
                     .into_any_element()
             } else {
-                self.small_button(format!("revoke-{id}"), "Sign out", false)
+                let id = d.id.clone();
+                self.small_button(format!("revoke-{id}"), "Remove", false)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         let f = this.model.revoke_device(&id);
                         this.send(f);
@@ -13065,18 +14356,72 @@ ACTA_KEY=secret:ACTA_KEY",
                     }))
                     .into_any_element()
             };
+            let line = if this_one {
+                device_line(&d.kind, 0, false, now)
+            } else {
+                device_line(&d.kind, d.seen, d.online, now)
+            };
             devices.push(
                 self.row(
                     Some(self.tile(icon)),
-                    name,
-                    Some(what.into()),
+                    d.name.clone(),
+                    Some(line),
                     Some(control),
                 )
                 .into_any_element(),
             );
         }
         if !devices.is_empty() {
-            groups.push(self.group(Some("Signed in"), devices));
+            groups.push(self.group(Some("Your devices"), devices));
+        }
+        // An account a link code made has no password until the person sets one, for
+        // signing in with it where there's no device to show a code.
+        let mut account = Vec::new();
+        if !local && self.model.has_password == Some(false) {
+            if self.setting_password {
+                account.push(self.field_row("Password", Input::new(&self.new_password_in)));
+                if let Some(e) = self.model.password_error.clone() {
+                    account.push(self.note_row(e, p.bad));
+                }
+                account.push(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .gap(px(space::S))
+                        .px(px(space::L))
+                        .pb(px(space::M))
+                        .child(
+                            self.small_button("keep-no-password", "Cancel", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.setting_password = false;
+                                    this.model.password_error = None;
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            self.small_button("save-password", "Save", true)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_password(cx))),
+                        )
+                        .into_any_element(),
+                );
+            } else {
+                account.push(
+                    self.row(
+                        None,
+                        "Set a password",
+                        None,
+                        Some(
+                            self.small_button("set-password", "Set", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.setting_password = true;
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        ),
+                    )
+                    .into_any_element(),
+                );
+            }
         }
         // Leaving an instance on a server: the account and everything of it. The instance
         // refuses the owner's, whose account goes with the instance.
@@ -13112,23 +14457,22 @@ ACTA_KEY=secret:ACTA_KEY",
                     }))
                     .into_any_element()
             };
-            groups.push(self.group(
-                Some("Your account"),
-                vec![self
-                    .row(
-                        None,
-                        "Delete my account",
-                        Some(if self.confirm_delete {
-                            "Every agent, chat, routine and secret of yours, for good".into()
-                        } else {
-                            "With everything of yours on this server".into()
-                        }),
-                        Some(control),
-                    )
-                    .into_any_element()],
-            ));
+            account.push(
+                self.row(
+                    None,
+                    "Delete my account",
+                    Some(if self.confirm_delete {
+                        "Every agent, chat, routine and secret of yours, for good".into()
+                    } else {
+                        "With everything of yours on this server".into()
+                    }),
+                    Some(control),
+                )
+                .into_any_element(),
+            );
+            groups.push(self.group(Some("Your account"), account));
         }
-        self.settings_page("add-phone-page", "Add a phone", None, groups)
+        self.settings_page("add-device-page", "Add a device", None, groups)
     }
 
     /// The This PC page: what agents may do on this computer, tool by tool. The core keeps
@@ -13302,51 +14646,101 @@ ACTA_KEY=secret:ACTA_KEY",
             .and_then(|dir| self.away.iter().find(|a| &a.dir == dir));
         let busy = pending.is_some_and(|a| a.model.logging_in);
         let error = pending.and_then(|a| a.model.login_error.clone());
-        let mut rows = vec![
-            self.field_row("Address", Input::new(&self.server_in)),
-            self.field_row("Username", Input::new(&self.user_in)),
-            self.field_row("Password", Input::new(&self.pass_in)),
-        ];
-        if self.show_code {
-            rows.push(self.field_row("Setup code", Input::new(&self.code_in)));
-        }
-        if let Some(e) = error {
-            rows.push(self.note_row(e, p.bad));
-        }
-        let actions = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(space::M))
-            .child(if self.show_code {
-                div().into_any_element()
-            } else {
+        let waiting = pending.and_then(|a| a.model.adding.clone());
+        let link = |id: &'static str, words: &'static str, to_password: bool| {
+            div()
+                .id(id)
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .cursor_pointer()
+                .soft_ink(p.ink_3, p.ink)
+                .child(words)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.password_form = to_password;
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+        let mut groups = Vec::new();
+        if let Some((check, _)) = waiting {
+            groups.push(self.group(
+                None,
+                vec![self.code_check("cancel-added-code", &check, cx).into_any_element()],
+            ));
+        } else if !self.password_form {
+            // The code another device of the person's shows under Add a device.
+            let mut rows = vec![self.field_row("Code", Input::new(&self.add_code_in))];
+            if let Some(e) = error {
+                rows.push(self.note_row(e, p.bad));
+            }
+            groups.push(self.group(None, rows));
+            groups.push(
                 div()
-                    .id("add-server-code")
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .cursor_pointer()
-                    .soft_ink(p.ink_3, p.ink)
-                    .child("New server? Add its setup code")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.show_code = true;
-                        cx.notify();
-                    }))
-                    .into_any_element()
-            })
-            .child(
-                self.button(
-                    "add-server",
-                    if busy { "Signing in…" } else { "Sign in" },
-                    true,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::M))
+                    .child(link("add-server-password", "Sign in with a password", true))
+                    .child(
+                        self.button(
+                            "add-server-code-go",
+                            if busy { "Adding…" } else { "Add" },
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.use_code(cx))),
+                    )
+                    .into_any_element(),
             );
-        let mut groups = vec![
-            self.group(None, rows),
-            actions.into_any_element(),
-            self.agent_group("add-server-prompt", ADD_SERVER_PROMPT, cx),
-        ];
+        } else {
+            let mut rows = vec![
+                self.field_row("Address", Input::new(&self.server_in)),
+                self.field_row("Username", Input::new(&self.user_in)),
+                self.field_row("Password", Input::new(&self.pass_in)),
+            ];
+            if self.show_code {
+                rows.push(self.field_row("Setup code", Input::new(&self.code_in)));
+            }
+            if let Some(e) = error {
+                rows.push(self.note_row(e, p.bad));
+            }
+            let actions = div()
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(space::M))
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(space::L))
+                        .child(link("add-server-with-code", "Use a code instead", false))
+                        .when(!self.show_code, |d| {
+                            d.child(
+                                div()
+                                    .id("add-server-code")
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink_3)
+                                    .cursor_pointer()
+                                    .soft_ink(p.ink_3, p.ink)
+                                    .child("New server? Add its setup code")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_code = true;
+                                        cx.notify();
+                                    })),
+                            )
+                        }),
+                )
+                .child(
+                    self.button(
+                        "add-server",
+                        if busy { "Signing in…" } else { "Sign in" },
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.sign_in_added(cx))),
+                );
+            groups.push(self.group(None, rows));
+            groups.push(actions.into_any_element());
+        }
+        groups.push(self.agent_group("add-server-prompt", ADD_SERVER_PROMPT, cx));
         // While the instance on this computer is out of the app, it can come back, with
         // the agents and chats it had.
         if self.first_out() {
@@ -13737,7 +15131,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.auto.stop();
                             cx.notify();
                         }
-                        if !this.smooth.catch(e, line) {
+                        // The picture viewer zooms by the notches, easing on its own.
+                        if this.model.viewing.is_some() || !this.smooth.catch(e, line) {
                             return;
                         }
                         cx.stop_propagation();
@@ -15523,14 +16918,18 @@ ACTA_KEY=secret:ACTA_KEY",
     /// Picks answer `i` on the choices card of the chat's newest message, from the key
     /// that names it (Ctrl or Cmd and its number). False when there's none to pick.
     fn choose_by_key(&mut self, i: usize, cx: &mut Context<Self>) -> bool {
-        let answer = self.newest_message().and_then(|m| {
-            m.blocks
-                .iter()
-                .find_map(|b| match b.card.as_ref().map(|c| &c.body) {
-                    Some(model::CardBody::Choices { options, .. }) => options.get(i).cloned(),
-                    _ => None,
-                })
-        });
+        // Only once the reply is finished, so the person has read it all.
+        let answer = self
+            .newest_message()
+            .filter(|m| m.takes_answers(true))
+            .and_then(|m| {
+                m.blocks
+                    .iter()
+                    .find_map(|b| match b.card.as_ref().map(|c| &c.body) {
+                        Some(model::CardBody::Choices { options, .. }) => options.get(i).cloned(),
+                        _ => None,
+                    })
+            });
         match answer {
             Some(a) => {
                 self.choose(&a, cx);
@@ -15621,6 +17020,27 @@ ACTA_KEY=secret:ACTA_KEY",
         let f = self.model.answer(&call, allow, always);
         self.send(f);
         self.refresh_rows(cx);
+        cx.notify();
+    }
+
+    /// Allow pressed on a risky question: it starts being held (`Model::press_allow`).
+    pub fn press_allow(&mut self, call: &str, cx: &mut Context<Self>) {
+        if let Some(f) = self.model.press_allow(call, Instant::now()) {
+            self.send(f);
+            self.refresh_rows(cx);
+        }
+        cx.notify();
+    }
+
+    /// Allow let go: held long enough, the question's allowed; sooner, it says to hold.
+    pub fn release_allow(&mut self, cx: &mut Context<Self>) {
+        if !self.model.is_held() {
+            return;
+        }
+        if let Some(f) = self.model.release_allow(Instant::now()) {
+            self.send(f);
+            self.refresh_rows(cx);
+        }
         cx.notify();
     }
 }
@@ -15894,23 +17314,26 @@ fn file_view(
         let most_w = PICTURE_W
             .min(room as f32 - 2.0 * space::XL)
             .max(PICTURE_LEAST);
-        let picture = match files.get(&format!("{}.thumb", f.file)) {
-            Some(path) => {
-                let (w, h) = match picture_size(path) {
-                    Some((w, h)) => fit(w, h, most_w, PICTURE_H),
-                    None => PICTURE_UNKNOWN,
-                };
-                img(std::path::PathBuf::from(path))
-                    .when_some(chat_images(), |i, c| i.image_cache(&c))
-                    .w(px(w))
-                    .h(px(h))
-                    .rounded(px(radius::BUBBLE))
-                    .into_any_element()
-            }
-            // Until the thumbnail is here, a place of about its size.
+        // Its size is the one the instance said, else its thumbnail's.
+        let thumb = files.get(&format!("{}.thumb", f.file));
+        let (w, h) = match f
+            .shown_size()
+            .or_else(|| thumb.and_then(|t| picture_size(t)))
+        {
+            Some((w, h)) => fit(w, h, most_w, PICTURE_H),
+            None => PICTURE_UNKNOWN,
+        };
+        let picture = match thumb {
+            Some(path) => img(std::path::PathBuf::from(path))
+                .when_some(chat_images(), |i, c| i.image_cache(&c))
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(radius::BUBBLE))
+                .into_any_element(),
+            // Until the thumbnail is here, its place.
             None => div()
-                .w(px(PICTURE_UNKNOWN.0))
-                .h(px(PICTURE_UNKNOWN.1))
+                .w(px(w))
+                .h(px(h))
                 .rounded(px(radius::BUBBLE))
                 .bg(p.bubble)
                 .into_any_element(),
@@ -16009,18 +17432,12 @@ fn fan_cards(n: usize) -> Vec<(usize, FanCard)> {
     }
 }
 
-/// What a fan's corner says: how many pictures there are, up to five, and past that how
-/// many more there are than the five it shows.
+/// What a fan's corner says: how many pictures there are, all of them, however many it
+/// draws (LOO-308).
 fn fan_count(n: usize) -> String {
-    if n > FAN_MOST {
-        format!("+{}", n - FAN_MOST)
-    } else {
-        n.to_string()
-    }
+    n.to_string()
 }
 
-/// The most pictures a fan draws.
-const FAN_MOST: usize = 5;
 /// How long a fan takes to open or close under the pointer, in seconds.
 const FAN_SECS: f32 = 0.28;
 /// The room kept around a tilted card's picture for its shadow, as a share of its width
@@ -16148,7 +17565,11 @@ fn picture_stack(
                 .items_center()
                 .justify_center()
                 .rounded_full()
+                // A fine light edge keeps it apart from a dark picture, as the dark fill
+                // does from a light one.
                 .bg(black().opacity(0.6))
+                .border_1()
+                .border_color(white().opacity(0.18))
                 .text_color(white())
                 .text_size(px(size::CAPTION))
                 .font_weight(FontWeight::MEDIUM)
@@ -16617,9 +18038,12 @@ fn fit(w: u32, h: u32, most_w: f32, most_h: f32) -> (f32, f32) {
     ((w * k).round().max(1.0), (h * k).round().max(1.0))
 }
 
-/// A picture's size in pixels, from its file's header, kept by path: a file's path is
-/// its SHA-256, so what's there doesn't change shape.
+/// A picture's size in pixels as it's drawn, from its file's header, its sides swapped
+/// where a photo's EXIF turns it a quarter (`jpeg_pixels` turns it), kept by path: a
+/// file's path is its SHA-256, so what's there doesn't change shape.
 fn picture_size(path: &str) -> Option<(u32, u32)> {
+    use image::metadata::Orientation;
+    use image::ImageDecoder as _;
     thread_local! {
         static SIZES: std::cell::RefCell<HashMap<String, Option<(u32, u32)>>> =
             std::cell::RefCell::new(HashMap::new());
@@ -16630,9 +18054,97 @@ fn picture_size(path: &str) -> Option<(u32, u32)> {
     let size = image::ImageReader::open(path)
         .and_then(|r| r.with_guessed_format())
         .ok()
-        .and_then(|r| r.into_dimensions().ok());
+        .and_then(|r| r.into_decoder().ok())
+        .map(|mut d| {
+            let (w, h) = d.dimensions();
+            match d.orientation() {
+                Ok(
+                    Orientation::Rotate90
+                    | Orientation::Rotate270
+                    | Orientation::Rotate90FlipH
+                    | Orientation::Rotate270FlipH,
+                ) => (h, w),
+                _ => (w, h),
+            }
+        });
     SIZES.with(|s| s.borrow_mut().insert(path.to_string(), size));
     size
+}
+
+/// The room kept above and below the viewer's picture, for its controls and its caption.
+const VIEWER_EDGE: f32 = 70.0;
+
+/// The longest side of a thumbnail, as the instance makes them (server/files.calx's THUMB).
+const THUMB_MOST: u32 = 512;
+
+/// The size the viewer lays a picture out by, before any of it is drawn (LOO-303): as the
+/// instance said, else its whole's once it's here, else its thumbnail's shape. A
+/// thumbnail under a thumbnail's most is the picture itself; one at it is of a bigger
+/// picture, taken as one that fills the viewer.
+fn viewer_size(f: &model::FileRef, thumb: Option<&str>, whole: Option<&str>) -> Option<(u32, u32)> {
+    if let Some(s) = f.shown_size().or_else(|| whole.and_then(picture_size)) {
+        return Some(s);
+    }
+    let (tw, th) = thumb.and_then(picture_size)?;
+    if tw.max(th) < THUMB_MOST {
+        return Some((tw, th));
+    }
+    let k = 16384.0 / tw.max(th).max(1) as f32;
+    Some((
+        ((tw as f32 * k).round() as u32).max(1),
+        ((th as f32 * k).round() as u32).max(1),
+    ))
+}
+
+/// The picture at `path` from `cache`, once it's loaded; it starts loading if it hasn't.
+fn kept_picture(
+    cache: &Entity<KeptImages>,
+    path: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let resource = Resource::Path(Arc::from(std::path::Path::new(path)));
+    cache
+        .update(cx, |c, cx| c.load(&resource, window, cx))
+        .and_then(Result::ok)
+}
+
+/// A picture drawn over the viewer at `rect`, in the window, with `corner`s: the frame of
+/// an animated one that's on `at` after it opened.
+fn viewer_picture(
+    image: Arc<RenderImage>,
+    rect: Bounds<Pixels>,
+    corner: Pixels,
+    at: Duration,
+) -> impl IntoElement {
+    let frames = image.frame_count();
+    let frame = if frames > 1 {
+        let delay = |i: usize| Duration::from(image.delay(i)).max(Duration::from_millis(20));
+        let total: Duration = (0..frames).map(delay).sum();
+        let mut left = Duration::from_nanos((at.as_nanos() % total.as_nanos().max(1)) as u64);
+        (0..frames)
+            .find(|&i| {
+                let d = delay(i);
+                if left < d {
+                    return true;
+                }
+                left -= d;
+                false
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let _ = window.paint_image(bounds, rect, Corners::all(corner), image, frame, false);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// What a reply shows as it's drawn, from the person's prefs.
@@ -16643,7 +18155,8 @@ struct Show {
     text_scale: f32,
     bubbles: bool,
     vibrant: bool,
-    /// Whether this is the chat's newest message, whose choices still answer.
+    /// Whether its questions answer now: it's the chat's newest message, and finished
+    /// (`Message::takes_answers`).
     newest: bool,
     /// How wide the chat's column is, to the pixel (`Loom::chat_room`), in the text's
     /// id, so text measures itself again when the column changes.
@@ -17346,6 +18859,7 @@ fn card_view(
         CardBody::SignIn { .. } => sign_in_card(p, card, key, tint, scale, this),
         CardBody::McpAdd { .. } => mcp_add_card(p, card, key, name, tint, scale, secrets, this),
         CardBody::SecretAsk { .. } => secret_ask_card(p, card, key, tint, scale, secrets, this),
+        CardBody::Form { .. } => form_card(p, card, key, tint, show, secrets, this),
         _ => shown_card(p, card, tint, scale),
     }
 }
@@ -17933,6 +19447,217 @@ fn secret_ask_card(
     div().max_w(px(CARD_MOST)).child(frame.draw(p, scale))
 }
 
+/// The key of the box for field `k` of the form `card` in reply `message`, among the
+/// card fields (`Loom::card_secrets`).
+fn form_field_key(message: &str, card: &str, k: usize) -> String {
+    format!("form/{message}/{card}/{k}")
+}
+
+/// A form's on and off switch, as the settings' own (`Loom::switch`).
+fn form_switch(p: Palette, id: SharedString, on: bool) -> Stateful<Div> {
+    let k = motion::level(&id, on, motion::SLIDE);
+    div()
+        .id(id.clone())
+        .role(Role::Switch)
+        .relative()
+        .w(px(38.0))
+        .h(px(22.0))
+        .flex_none()
+        .rounded(px(radius::ROW))
+        .cursor_pointer()
+        .bg(motion::mix(p.line_strong, p.button, k))
+        .child(
+            div()
+                .absolute()
+                .top(px(3.0))
+                .left(px(3.0 + 16.0 * k))
+                .size(px(16.0))
+                .rounded(px(4.0))
+                .bg(motion::mix(p.bg, p.button_ink, k))
+                .shadow_sm(),
+        )
+}
+
+/// Several questions an agent asks at once (show_card's `form`), in the card frame: each
+/// field under its label, text and numbers in a box, a choice as its options side by
+/// side, a toggle as a switch beside its label, then Send, which sends them as one
+/// answer. Sent, it's one quiet line, as it is once the chat has gone on without it.
+fn form_card(
+    p: Palette,
+    card: &model::Card,
+    key: &str,
+    tint: Hsla,
+    show: Show,
+    secrets: &HashMap<String, Entity<InputState>>,
+    this: WeakEntity<Loom>,
+) -> Div {
+    let model::CardBody::Form {
+        message,
+        fields,
+        picks,
+        answers,
+        sending,
+        error,
+    } = &card.body
+    else {
+        return div();
+    };
+    let scale = show.text_scale;
+    let quiet = |icon: Ico, how: &str| {
+        div().child(card_done(
+            p,
+            done_lead(p, None, icon),
+            how,
+            &card.title,
+            scale,
+        ))
+    };
+    if answers.is_some() {
+        return quiet(Ico::Check, "Sent");
+    }
+    if !show.newest {
+        return quiet(Ico::X, "Not sent");
+    }
+    let mut list = div()
+        .flex()
+        .flex_col()
+        .gap(px(space::M))
+        .text_size(px(size::SMALL * scale));
+    for (k, f) in fields.iter().enumerate() {
+        let label = div()
+            .flex()
+            .items_baseline()
+            .gap(px(space::S))
+            .min_w_0()
+            .child(
+                div()
+                    .truncate()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .child(f.label.clone()),
+            )
+            .when(!f.required && f.kind != "toggle", |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child("Optional"),
+                )
+            });
+        let pick = picks.get(k).cloned().unwrap_or(serde_json::Value::Null);
+        let picked = {
+            let this = this.clone();
+            let (message, card_id) = (message.clone(), card.id.clone());
+            move |value: serde_json::Value| {
+                let this = this.clone();
+                let (message, card_id) = (message.clone(), card_id.clone());
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    let _ = this.update(cx, |loom, cx| {
+                        loom.pick_form(&message, &card_id, k, value.clone(), cx)
+                    });
+                }
+            }
+        };
+        let one = match f.kind.as_str() {
+            "toggle" => {
+                let on = pick.as_bool().unwrap_or(false);
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .child(div().flex_1().min_w_0().child(label))
+                    .child(
+                        form_switch(p, SharedString::from(format!("form-{key}-{k}")), on)
+                            .aria_label(f.label.clone())
+                            .on_click(picked(serde_json::Value::Bool(!on))),
+                    )
+            }
+            "choice" => {
+                let mut options = div().flex().flex_wrap().gap(px(space::S));
+                for (n, o) in f.options.iter().enumerate() {
+                    let chosen = pick.as_str() == Some(o.as_str());
+                    options = options.child(
+                        div()
+                            .id(SharedString::from(format!("form-{key}-{k}-{n}")))
+                            .role(Role::RadioButton)
+                            .aria_label(o.clone())
+                            .px(px(space::M))
+                            .py(px(space::XS + 2.0))
+                            .rounded(px(radius::BUTTON))
+                            .border_1()
+                            .cursor_pointer()
+                            .when(chosen, |d| {
+                                d.border_color(tint)
+                                    .bg(motion::mix(card_fill(p), tint, 0.14))
+                                    .text_color(p.ink)
+                                    .font_weight(FontWeight::MEDIUM)
+                            })
+                            .when(!chosen, |d| {
+                                d.border_color(p.line_strong)
+                                    .text_color(p.ink_2)
+                                    .soft_hover(
+                                        card_fill(p),
+                                        motion::mix(card_fill(p), tint, 0.08),
+                                        None,
+                                    )
+                            })
+                            .child(o.clone())
+                            .on_click(picked(serde_json::Value::String(o.clone()))),
+                    );
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S))
+                    .child(label)
+                    .child(options)
+            }
+            _ => div()
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(label)
+                .children(
+                    secrets
+                        .get(&form_field_key(message, &card.id, k))
+                        .map(|input| div().w_full().child(Input::new(input).small())),
+                ),
+        };
+        list = list.child(one);
+    }
+    let mut frame = CardFrame::new()
+        .lead(card_icon(p, Ico::ClipboardPen, tint))
+        .title(card.title.clone())
+        .mark(card_mark(key, true, tint))
+        .waits(tint)
+        .row(list);
+    if !error.is_empty() {
+        frame = frame.row(
+            div()
+                .text_size(px(size::SMALL * scale))
+                .text_color(p.bad)
+                .child(error.clone()),
+        );
+    }
+    let send = {
+        let this = this.clone();
+        let (message, card_id) = (message.clone(), card.id.clone());
+        card_button(
+            p,
+            format!("form-send-{key}"),
+            if *sending { "Sending…" } else { "Send" },
+            true,
+        )
+        .on_click(move |_, _, cx| {
+            let _ = this.update(cx, |loom, cx| loom.send_form(&message, &card_id, cx));
+        })
+    };
+    div()
+        .max_w(px(CARD_MOST))
+        .child(frame.action(send).draw(p, scale))
+}
+
 /// A card that only shows: a checklist, progress, facts, or a table, in the card frame.
 fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
     use model::CardBody;
@@ -18075,7 +19800,8 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         CardBody::Choices { .. }
         | CardBody::SignIn { .. }
         | CardBody::McpAdd { .. }
-        | CardBody::SecretAsk { .. } => {}
+        | CardBody::SecretAsk { .. }
+        | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
     let wide = matches!(card.body, CardBody::Table { .. });
@@ -18488,9 +20214,21 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
 }
 
 /// A mention in the composer: an agent as its thread and its name in its colour, a file
-/// as its icon and its name, cut in the middle when it's long.
+/// as its icon and its name, cut in the middle when it's long, and a skill from the + menu
+/// as its book and its name.
 fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -> AnyElement {
     let row = div().flex().items_center().gap(px(3.0)).px(px(1.0));
+    // A skill picked from the + menu: its book and its name.
+    if link.starts_with("loom:skill/") {
+        return row
+            .child(Icon::new(Ico::BookOpen).xsmall().text_color(p.ink_2))
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .child(words.to_string()),
+            )
+            .into_any_element();
+    }
     if let Some(id) = link.strip_prefix("loom:agent/") {
         let name = words.trim_start_matches('@').to_string();
         let Some(a) = agents.iter().find(|a| a.id == id) else {
@@ -19623,14 +21361,16 @@ fn ask_icon(a: &Approval) -> Ico {
 /// in small mono, and what loom knows it does in a pill; then the tools it runs as
 /// steps, or its arguments as lines, the command or script it runs, and why the agent
 /// makes it, in its own words. Allow is a split button, its menu holding Always allow
-/// where that's offered, then Deny, and Details for all of it. Answered here, it's one
-/// quiet line with the badge, until the instance takes the question away.
+/// where that's offered, then Deny, and Details for all of it. On a risky one, Allow is
+/// held, filling as it is (`hold_button`). Answered here, it's one quiet line with the
+/// badge, until the instance takes the question away.
 fn approval(
     p: Palette,
     a: &Approval,
     tint: Hsla,
     open: &HashSet<String>,
     scale: f32,
+    hold: &HoldShown,
     this: WeakEntity<Loom>,
 ) -> Div {
     let s = &a.shown;
@@ -19700,9 +21440,19 @@ fn approval(
     // Allow, and beside it the arrow that opens Always allow, where that's offered.
     let menu_key = format!("always/{}", a.call);
     let menu_open = a.can_always && open.contains(&menu_key);
-    let allow = card_button(p, format!("allow-{}", a.call), "Allow", true)
-        .when(a.can_always, |d| d.rounded_r(px(0.0)))
-        .on_click(answer(true, false));
+    let allow = if a.risky {
+        let held = hold
+            .0
+            .as_ref()
+            .filter(|(call, _)| *call == a.call)
+            .map(|(_, k)| *k);
+        let hint = hold.1.as_deref() == Some(a.call.as_str());
+        hold_button(p, &a.call, held, hint, this.clone())
+    } else {
+        card_button(p, format!("allow-{}", a.call), "Allow", true)
+            .when(a.can_always, |d| d.rounded_r(px(0.0)))
+            .on_click(answer(true, false))
+    };
     let split = div()
         .flex()
         .items_center()
@@ -19792,6 +21542,108 @@ fn approval(
         card = card.foot(details_toggle(p, &details, details_open, this.clone()));
     }
     place.child(card.draw(p, scale))
+}
+
+/// Allow on a risky question (PLAN.md, "Permissions"): pressed and held, it fills from
+/// the left, and once it's full the question is allowed. Let go sooner, it says to hold.
+fn hold_button(
+    p: Palette,
+    call: &str,
+    held: Option<f32>,
+    hint: bool,
+    this: WeakEntity<Loom>,
+) -> Stateful<Div> {
+    let label = match (held, hint) {
+        (Some(_), _) => "Keep holding",
+        (None, true) => "Hold to allow",
+        (None, false) => "Allow",
+    };
+    let (press, release, out) = (this.clone(), this.clone(), this);
+    let call_down = call.to_string();
+    div()
+        .id(SharedString::from(format!("allow-{call}")))
+        .role(Role::Button)
+        .aria_label("Hold to allow")
+        .relative()
+        .overflow_hidden()
+        .px(px(space::M + 2.0))
+        .h(px(control::BUTTON_SMALL))
+        .flex()
+        .flex_none()
+        .items_center()
+        .rounded(px(radius::BUTTON))
+        .text_size(px(size::SMALL))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.button_ink)
+        .bg(p.button)
+        .cursor_pointer()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .h_full()
+                .w(relative(held.unwrap_or(0.0)))
+                .bg(motion::mix(p.button, p.bad, 0.75)),
+        )
+        .child(div().relative().child(label))
+        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+            cx.stop_propagation();
+            let _ = press.update(cx, |loom, cx| loom.press_allow(&call_down, cx));
+        })
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+            let _ = release.update(cx, |loom, cx| loom.release_allow(cx));
+        })
+        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
+            let _ = out.update(cx, |loom, cx| loom.release_allow(cx));
+        })
+}
+
+/// How wide the + menu is, and the list beside it, and how tall either's rows go
+/// before they scroll.
+const PLUS_WIDE: f32 = layout::MENU_WIDE + 40.0;
+const PLUS_SUB_WIDE: f32 = layout::MENU_WIDE + 60.0;
+const PLUS_TALL: f32 = 320.0;
+
+/// The line between the + menu's groups.
+fn plus_line(p: Palette) -> Div {
+    div()
+        .flex_none()
+        .h(px(1.0))
+        .mx(px(space::S))
+        .my(px(space::XS))
+        .bg(p.line)
+}
+
+/// Where the + menu's row `lit` is among its list's children: after it, a line between
+/// each group.
+fn plus_child(groups: &[Vec<model::PlusRow>], lit: usize) -> usize {
+    let mut rows = 0;
+    for (g, group) in groups.iter().enumerate() {
+        if lit < rows + group.len() {
+            return lit + g;
+        }
+        rows += group.len();
+    }
+    lit
+}
+
+/// How a routine's last run went, for the + menu: "Ran 14:05 ✓", "Failed yesterday
+/// 09:30", and whether it went wrong.
+fn routine_went(r: &model::Routine) -> (String, bool) {
+    let when = when_sent(r.last_at, chrono::Local::now());
+    let when = match when.strip_prefix("Yesterday") {
+        Some(rest) => format!("yesterday{rest}"),
+        None => when,
+    };
+    match r.last_status.as_str() {
+        "" => ("Not run yet".into(), false),
+        "running" => ("Running now".into(), false),
+        "waiting" => ("Waiting for its chat".into(), false),
+        "done" | "quiet" => (format!("Ran {when} ✓"), false),
+        "skipped" => (format!("Skipped {when}"), false),
+        _ => (format!("Failed {when}"), true),
+    }
 }
 
 /// A button's name, shown under the pointer after a moment, for buttons that are only an icon.
@@ -19917,6 +21769,43 @@ fn value_name(o: &model::ConfigOption, value: &str) -> String {
         .map_or_else(|| value.to_string(), |(_, name)| name.clone())
 }
 
+/// A check's digits with a thin space between each, so they read one by one.
+fn spaced_digits(check: &str) -> String {
+    check
+        .chars()
+        .map(String::from)
+        .collect::<Vec<_>>()
+        .join("\u{2009}")
+}
+
+/// What a device's row says of it: its kind, and whether it's connected or when it last
+/// was ("Mac · Last seen yesterday 14:05").
+fn device_line(
+    kind: &str,
+    seen: i64,
+    online: bool,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
+    let what = match kind {
+        "ios" => "iPhone",
+        "macos" => "Mac",
+        "windows" => "Windows PC",
+        _ => "Command line",
+    };
+    if online {
+        return format!("{what} · Connected");
+    }
+    if seen <= 0 {
+        return what.to_string();
+    }
+    let when = when_sent(seen, now);
+    let when = match when.strip_prefix("Yesterday") {
+        Some(rest) => format!("yesterday{rest}"),
+        None => when,
+    };
+    format!("{what} · Last seen {when}")
+}
+
 fn time_of(ms: i64) -> String {
     use chrono::TimeZone;
     if ms <= 0 || ms == i64::MAX {
@@ -20011,7 +21900,7 @@ mod fan_tests {
     use super::{fan_cards, fan_count, tilted_pixels};
 
     #[test]
-    fn a_fan_puts_its_pictures_either_side_and_counts_past_five() {
+    fn a_fan_puts_its_pictures_either_side_and_counts_them_all() {
         let places = |n: usize| fan_cards(n).iter().map(|(i, _)| *i).collect::<Vec<_>>();
         assert!(places(1).is_empty());
         assert_eq!(places(2), vec![1]);
@@ -20031,8 +21920,8 @@ mod fan_tests {
         assert!(fan_cards(5)[3].1.rest.0 < three[1].1.rest.0);
         assert_eq!(fan_count(2), "2");
         assert_eq!(fan_count(5), "5");
-        assert_eq!(fan_count(7), "+2");
-        assert_eq!(fan_count(24), "+19");
+        assert_eq!(fan_count(6), "6");
+        assert_eq!(fan_count(20), "20");
     }
 
     #[test]
@@ -20054,7 +21943,7 @@ mod fan_tests {
 
 #[cfg(test)]
 mod picture_tests {
-    use super::{card_crop, fit, picture_size, PICTURE_H, PICTURE_W};
+    use super::{card_crop, fit, picture_size, viewer_size, PICTURE_H, PICTURE_W};
 
     #[test]
     fn a_stacks_card_is_the_middle_of_its_picture() {
@@ -20090,6 +21979,46 @@ mod picture_tests {
             .unwrap();
         assert_eq!(picture_size(&path.to_string_lossy()), Some((30, 50)));
         assert_eq!(picture_size(&dir.join("gone").to_string_lossy()), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The viewer's place for a picture is known before its whole is here (LOO-303).
+    #[test]
+    fn the_viewer_knows_a_pictures_size_before_it_loads() {
+        let dir = std::env::temp_dir().join(format!("loom-viewer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |name: &str, w: u32, h: u32| {
+            let path = dir.join(name);
+            image::RgbImage::new(w, h)
+                .save_with_format(&path, image::ImageFormat::Png)
+                .unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let mut f = crate::model::FileRef {
+            file: "aa".into(),
+            name: "a.png".into(),
+            mime: "image/png".into(),
+            size: 1,
+            width: 4000,
+            height: 4000,
+        };
+        // As the instance said, whatever the thumbnail.
+        let thumb = png("wide.thumb", 512, 288);
+        assert_eq!(viewer_size(&f, Some(&thumb), None), Some((4000, 4000)));
+        // An old one: its whole, once that's here.
+        (f.width, f.height) = (0, 0);
+        let whole = png("whole", 1920, 1080);
+        assert_eq!(
+            viewer_size(&f, Some(&thumb), Some(&whole)),
+            Some((1920, 1080))
+        );
+        // Else its thumbnail: of a bigger picture at the thumbnail's most, its shape kept.
+        let (w, h) = viewer_size(&f, Some(&thumb), None).unwrap();
+        assert!(w >= 4000 && (w as f32 / h as f32 - 512.0 / 288.0).abs() < 0.01);
+        // And under it, the picture itself.
+        let small = png("small.thumb", 300, 200);
+        assert_eq!(viewer_size(&f, Some(&small), None), Some((300, 200)));
+        assert_eq!(viewer_size(&f, None, None), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
@@ -20210,6 +22139,13 @@ mod frame_tests {
             .unwrap();
         let upright = jpeg_pixels(&jpeg).unwrap();
         assert_eq!(upright.dimensions(), (16, 32));
+        // Its size, from its header, is the size it's drawn at.
+        let dir = std::env::temp_dir().join(format!("loom-turned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo");
+        std::fs::write(&path, &jpeg).unwrap();
+        assert_eq!(picture_size(&path.to_string_lossy()), Some((16, 32)));
+        std::fs::remove_dir_all(&dir).unwrap();
         // Red on top, blue under it.
         assert!(
             near(rgb(&upright, 8, 4), [255, 0, 0]),
@@ -20465,13 +22401,19 @@ impl Render for Loom {
         let unroll = self.unroll(h);
         let root = div()
             .track_focus(&self.keys)
-            // While a picture is open big, ← and → go between the chat's pictures, before
-            // the composer can take them.
+            // While a picture is open big, ← and → go between the chat's pictures, and + −
+            // and 0 zoom it, before the composer can take them.
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if this.model.viewing.is_some() {
-                    match e.keystroke.key.as_str() {
-                        "left" => this.view_step(-1, cx),
-                        "right" => this.view_step(1, cx),
+                    let k = &e.keystroke;
+                    let plain = !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
+                    let typed = k.key_char.as_deref().unwrap_or(k.key.as_str());
+                    match (k.key.as_str(), typed) {
+                        ("left", _) => this.view_step(-1, cx),
+                        ("right", _) => this.view_step(1, cx),
+                        (_, "+" | "=") if plain => this.zoom_by(1.5, cx),
+                        (_, "-") if plain => this.zoom_by(1.0 / 1.5, cx),
+                        (_, "0") if plain => this.zoom_by(0.0, cx),
                         _ => return,
                     }
                     cx.stop_propagation();
@@ -20491,6 +22433,13 @@ impl Render for Loom {
                     cx.stop_propagation();
                 } else if chord && k.key == "f" {
                     this.find(window, cx);
+                    cx.stop_propagation();
+                } else if chord && k.key == "u" && this.screen == Screen::Chat {
+                    // Ctrl+U (Cmd on a Mac) attaches files, as the + menu says.
+                    if this.plus.is_some() {
+                        this.shut_plus(window, cx);
+                    }
+                    this.pick_files(cx);
                     cx.stop_propagation();
                 } else if let Some(i) = k
                     .key
@@ -20584,6 +22533,7 @@ impl Render for Loom {
         let menu_scrim = self.menu_scrim(cx);
         let ctx_menu = self.ctx_menu(cx);
         let popup = self.popup_view(window, cx);
+        let ask = self.ask_view(cx);
         let browser_full = self.browser_full(window, cx);
         let viewer = self.viewer(window, cx);
         let toast = self.toast(window, cx);
@@ -20615,6 +22565,7 @@ impl Render for Loom {
                 |d, pop| d.child(pop),
             )
             .when_some(popup, |d, p| d.child(p))
+            .when_some(ask, |d, a| d.child(a))
             .when_some(browser_full, |d, b| d.child(b))
             .when_some(viewer, |d, v| d.child(v))
             .when_some(toast, |d, t| d.child(t))
@@ -21139,7 +23090,7 @@ fn is_server(s: Screen) -> bool {
     matches!(
         s,
         Screen::Server
-            | Screen::AddPhone
+            | Screen::AddDevice
             | Screen::People
             | Screen::ThisDevice
             | Screen::Hosts
@@ -21619,6 +23570,7 @@ mod row_tests {
             line: None,
             when: Some("14:05".into()),
             when_at: super::WhenAt::Outside,
+            hold: (None, None),
         }
     }
 
@@ -21845,7 +23797,13 @@ struct ChatInputs {
     width: f32,
     p: Palette,
     pad: Option<f32>,
+    /// Allow held on a risky question, and the one a plain click said to hold (`Model::hold_shown`).
+    hold: HoldShown,
 }
+
+/// Allow held on a risky question now, and how far along; and the question a plain click
+/// just said to hold for.
+type HoldShown = (Option<(String, f32)>, Option<String>);
 
 /// Where a message's time shows while the pointer is over it.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -21978,6 +23936,7 @@ struct RowInputs {
     line: Option<String>,
     when: Option<String>,
     when_at: WhenAt,
+    hold: HoldShown,
 }
 
 impl RowInputs {
@@ -22005,6 +23964,7 @@ impl RowInputs {
             && self.line == o.line
             && self.when == o.when
             && self.when_at == o.when_at
+            && self.hold == o.hold
     }
 }
 
@@ -22196,6 +24156,7 @@ fn chat_list(
         width,
         p,
         pad,
+        hold,
     } = i;
     let now = chrono::Local::now();
     let (content, gutter) = row_room(width, column);
@@ -22270,7 +24231,8 @@ fn chat_list(
                 open.iter().filter(|k| k.contains(of)).cloned().collect()
             },
             show: Show {
-                newest: m.is_some_and(|m| newest.as_deref() == Some(m.id.as_str())),
+                newest: m
+                    .is_some_and(|m| m.takes_answers(newest.as_deref() == Some(m.id.as_str()))),
                 ..show
             },
             is_new: m.is_some_and(|m| new_line.as_deref() == Some(m.id.as_str())),
@@ -22280,6 +24242,12 @@ fn chat_list(
             line: m.filter(|_| here.line).map(|m| line_of(m.at, now)),
             when,
             when_at,
+            // Only a question is held, so a hold never draws a message again.
+            hold: if m.is_none() {
+                hold.clone()
+            } else {
+                (None, None)
+            },
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -22456,7 +24424,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             show,
             this.clone(),
         ),
-        Row::Approval(a) => approval(p, a, tint, open, show.text_scale, this.clone()),
+        Row::Approval(a) => approval(p, a, tint, open, show.text_scale, &i.hold, this.clone()),
     };
     // A message's pin, just outside its corner: there while it's pinned, and
     // on hover to pin it.

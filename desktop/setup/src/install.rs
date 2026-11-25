@@ -24,6 +24,9 @@ const INNO_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F
 const V01_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\Loom";
 /// Where the app's "Start at login" puts it (the auto-launch crate, by the app's name).
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+/// What makes `loom://` links open loom, such as the one that adds a device
+/// (protocol.md, "Adding a device").
+const LINKS_KEY: &str = r"Software\Classes\loom";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub fn wide(s: impl AsRef<OsStr>) -> Vec<u16> {
@@ -64,6 +67,7 @@ fn reg(path: &str) -> String {
             r"Software\Microsoft\Windows\CurrentVersion",
             r"Software\loom-setup-sandbox",
         )
+        .replace(r"Software\Classes", r"Software\loom-setup-sandbox\Classes")
     } else {
         path.to_string()
     }
@@ -178,7 +182,50 @@ fn register(dir: &Path, version: &str, bytes: u64) -> Result<(), String> {
     // SAFETY: the key opened above.
     unsafe { RegCloseKey(key) };
     reg_delete_tree(INNO_KEY);
+    own_links(&exe);
     Ok(())
+}
+
+/// Creates or opens `path` under HKCU for writing; the caller closes it.
+fn make_key(path: &str) -> Option<HKEY> {
+    let k = wide(reg(path));
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: creates or opens a key under HKCU, closed by the caller.
+    let r = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            k.as_ptr(),
+            0,
+            std::ptr::null(),
+            0,
+            KEY_WRITE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    (r == 0).then_some(key)
+}
+
+/// Makes `loom://` links open `exe`, with the link as its one argument, for this person
+/// alone. A link that can't be registered leaves the code to paste.
+fn own_links(exe: &Path) {
+    if let Some(key) = make_key(LINKS_KEY) {
+        reg_set(key, "", "URL:loom");
+        reg_set(key, "URL Protocol", "");
+        // SAFETY: opened by make_key.
+        unsafe { RegCloseKey(key) };
+    }
+    if let Some(key) = make_key(&format!(r"{LINKS_KEY}\DefaultIcon")) {
+        reg_set(key, "", &format!("\"{}\",0", exe.display()));
+        // SAFETY: opened by make_key.
+        unsafe { RegCloseKey(key) };
+    }
+    if let Some(key) = make_key(&format!(r"{LINKS_KEY}\shell\open\command")) {
+        reg_set(key, "", &format!("\"{}\" \"%1\"", exe.display()));
+        // SAFETY: opened by make_key.
+        unsafe { RegCloseKey(key) };
+    }
 }
 
 // --- v0.1 ---
@@ -494,6 +541,7 @@ pub fn remove(dir: &Path, data: bool) -> Result<(), String> {
     reg_delete_value(RUN_KEY, "loom");
     reg_delete_tree(UNINSTALL_KEY);
     reg_delete_tree(INNO_KEY);
+    reg_delete_tree(LINKS_KEY);
     if data {
         let d = data_dir()?;
         if d.ends_with("Loom") && d.exists() {

@@ -209,6 +209,8 @@ struct ChatView: View {
             // An agent it mentions opens its chat (LOO-301).
             if model.agent(id) != nil { model.openAgent = id }
             return .handled
+        case .skill:
+            return .handled
         case .page, .other:
             return .systemAction
         }
@@ -605,10 +607,11 @@ struct FileView: View {
         } label: {
             if file.isImage {
                 let image = path.flatMap { thumb ?? Pictures.kept($0) }
-                // Its own place in the message, sized from its file's header before it's
-                // decoded: scaled down to fit the column and 360 × 400, its shape kept,
-                // and never up, as on the desktop. Until its size is known, 240 × 160.
-                let pixels = path.flatMap { Pictures.size($0) } ?? image.map { CGSize(width: $0.size.width * $0.scale, height: $0.size.height * $0.scale) }
+                // Its own place in the message, sized by what the instance said, else
+                // its file's header, before it's decoded: scaled down to fit the column
+                // and 360 × 400, its shape kept, and never up, as on the desktop. Until
+                // its size is known, 240 × 160.
+                let pixels = file.shownSize ?? path.flatMap { Pictures.size($0) } ?? image.map { CGSize(width: $0.size.width * $0.scale, height: $0.size.height * $0.scale) }
                 let size = pixels.map { Pictures.fit($0, in: FileView.most) } ?? FileView.unknown
                 Group {
                     if let image {
@@ -735,6 +738,9 @@ private struct FanPicture: View {
                     .padding(.horizontal, 6)
                     .frame(minWidth: 20, minHeight: 20)
                     .background(.black.opacity(0.6), in: Capsule())
+                    // A fine light edge keeps it apart from a dark picture, as the
+                    // dark fill does from a light one.
+                    .overlay(Capsule().strokeBorder(.white.opacity(0.18), lineWidth: 1))
                     .padding(Tokens.Space.s)
             }
         }
@@ -745,24 +751,40 @@ private struct FanPicture: View {
     }
 }
 
-/// A stack's pictures big, over everything, a page each: whole once fetched, the
-/// thumbnail until then, with the picture's name and where it is among them.
+/// A stack's pictures big, over everything, a page each, with the picture's name and
+/// where it is among them. Each is laid out at its final size from the first frame, its
+/// thumbnail scaled up there until it's whole. Pinched, it zooms; zoomed, a swipe pans
+/// it rather than going to the next, and going to another puts it back at its fit.
 struct PictureViewer: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
     var stack: [FileRef]
     @State private var page = 0
+    @State private var shown: Int? = 0
+    @State private var zoomed = false
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
-            TabView(selection: $page) {
-                ForEach(Array(stack.enumerated()), id: \.offset) { i, f in
-                    WholePicture(file: f).tag(i)
+            ScrollView(.horizontal) {
+                LazyHStack(spacing: 0) {
+                    ForEach(Array(stack.enumerated()), id: \.offset) { i, f in
+                        WholePicture(file: f, current: i == page, zoomed: $zoomed)
+                            .containerRelativeFrame([.horizontal, .vertical])
+                            .id(i)
+                    }
                 }
+                .scrollTargetLayout()
             }
-            .tabViewStyle(.page(indexDisplayMode: .never))
+            .scrollTargetBehavior(.paging)
+            .scrollPosition(id: $shown)
+            .scrollIndicators(.hidden)
+            .scrollDisabled(zoomed)
             .ignoresSafeArea()
+            .onChange(of: shown) {
+                page = shown ?? 0
+                zoomed = false
+            }
         }
         .overlay(alignment: .topTrailing) {
             Button {
@@ -778,15 +800,19 @@ struct PictureViewer: View {
             .padding(.horizontal, Tokens.PhoneSpace.gutter)
         }
         .overlay(alignment: .bottom) {
+            // With a count, the name ends just left of the middle and the count starts
+            // just right of it, so the count stays put from one picture to the next.
             HStack(spacing: Tokens.Space.m) {
                 Text(middleCut(stack[min(page, stack.count - 1)].name, 64))
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .foregroundStyle(.white.opacity(0.75))
+                    .frame(maxWidth: stack.count > 1 ? .infinity : nil, alignment: .trailing)
                 if stack.count > 1 {
                     Text("\(page + 1) / \(stack.count)")
                         .monospacedDigit()
                         .foregroundStyle(.white.opacity(0.5))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .font(Fonts.small)
@@ -802,31 +828,195 @@ struct PictureViewer: View {
     }
 }
 
-/// One page of the viewer: the picture fitted to the screen.
+/// One page of the viewer: the picture fitted to the screen, in the shape the instance
+/// said it is (or its thumbnail's), from the first frame (LOO-303). Its thumbnail shows
+/// scaled up to that place until the picture's here, which then fades in over it; zoomed
+/// in, it's decoded whole, so it stays sharp.
 private struct WholePicture: View {
     @Environment(Session.self) private var session
     var file: FileRef
-    @State private var image: UIImage?
+    /// Whether it's the page on screen: one that isn't goes back to its fit.
+    var current: Bool
+    @Binding var zoomed: Bool
+    @State private var thumb: UIImage?
+    @State private var screen: UIImage?
+    @State private var whole: UIImage?
+    /// The shape it was first laid out in, kept so it never changes once it's shown.
+    @State private var kept: CGSize?
 
-    /// Points across it's decoded for, at the screen's scale.
+    /// Points across it's decoded for at its fit, at the screen's scale.
     static let side: CGFloat = 600
 
     var body: some View {
-        let path = session.model.files[file.file] ?? session.model.files["\(file.file).thumb"]
+        let thumbPath = session.model.files["\(file.file).thumb"]
+        let wholePath = session.model.files[file.file]
+        let known = kept ?? file.shownSize ?? wholePath.flatMap { Pictures.size($0) } ?? thumbPath.flatMap { Pictures.size($0) }
+        let shown = whole ?? screen ?? wholePath.flatMap { Pictures.kept($0, side: Self.side) } ?? thumb ?? thumbPath.flatMap { Pictures.kept($0) }
         Group {
-            if let shown = image ?? path.flatMap({ Pictures.kept($0, side: Self.side) }) {
-                Image(uiImage: shown).resizable().scaledToFit()
+            if let known {
+                ZoomingPicture(image: shown, shape: known, natural: file.shownSize ?? wholePath.flatMap { Pictures.size($0) } ?? known, current: current, zoomed: $zoomed)
             } else {
                 ProgressView().tint(.white)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.vertical, 56)
         .accessibilityLabel("Picture, \(file.name)")
-        .task(id: path) {
-            guard let path else { return }
-            image = await Pictures.load(path, side: Self.side)
+        .onChange(of: known, initial: true) {
+            if kept == nil { kept = known }
         }
+        .task(id: thumbPath) {
+            guard let thumbPath, Pictures.kept(thumbPath) == nil else { return }
+            thumb = await Pictures.load(thumbPath)
+        }
+        .task(id: wholePath) {
+            guard let wholePath else { return }
+            screen = await Pictures.load(wholePath, side: Self.side)
+        }
+        .task(id: current && zoomed && wholePath != nil) {
+            guard current, zoomed, let wholePath, whole == nil else { return }
+            whole = await Pictures.load(wholePath)
+        }
+    }
+}
+
+/// A picture that pinches to zoom, toward the fingers, from its fit up to 8 times it, or
+/// four times its own size where that's more, pans with a finger once zoomed, with the
+/// scroll view's give at its edges, and goes between its fit and zoomed in with a double
+/// tap. Its place is `shape` fitted to the page, never the image's own, so a sharper image
+/// coming in takes the same place, faded in over the one before.
+private struct ZoomingPicture: UIViewRepresentable {
+    var image: UIImage?
+    var shape: CGSize
+    var natural: CGSize
+    var current: Bool
+    @Binding var zoomed: Bool
+
+    func makeCoordinator() -> PictureZoom {
+        PictureZoom(zoomed: $zoomed)
+    }
+
+    func makeUIView(context: Context) -> PictureScroll {
+        let v = PictureScroll()
+        v.delegate = context.coordinator
+        v.picture.image = image
+        let twice = UITapGestureRecognizer(target: context.coordinator, action: #selector(PictureZoom.doubleTap(_:)))
+        twice.numberOfTapsRequired = 2
+        v.addGestureRecognizer(twice)
+        return v
+    }
+
+    func updateUIView(_ v: PictureScroll, context: Context) {
+        context.coordinator.zoomed = $zoomed
+        v.shape = shape
+        v.natural = natural
+        if !current && v.zoomScale > 1 {
+            v.setZoomScale(1, animated: false)
+        }
+        if v.picture.image !== image {
+            if v.picture.image == nil || image == nil {
+                v.picture.image = image
+            } else {
+                UIView.transition(with: v.picture, duration: 0.18, options: [.transitionCrossDissolve, .allowUserInteraction]) {
+                    v.picture.image = image
+                }
+            }
+        }
+    }
+}
+
+/// The scroll view a viewer's picture zooms in: the picture in the middle, at `shape`
+/// fitted inside the page less room above and below for the controls and the caption.
+final class PictureScroll: UIScrollView {
+    let picture = UIImageView()
+    var shape = CGSize(width: 1, height: 1) {
+        didSet { if shape != oldValue { fittedFor = .zero; setNeedsLayout() } }
+    }
+    var natural = CGSize.zero
+    /// The page size it was last fitted for.
+    private var fittedFor = CGSize.zero
+
+    /// The room kept above and below it at its fit.
+    static let edge: CGFloat = 56
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        picture.contentMode = .scaleToFill
+        addSubview(picture)
+        showsHorizontalScrollIndicator = false
+        showsVerticalScrollIndicator = false
+        contentInsetAdjustmentBehavior = .never
+        bouncesZoom = true
+        decelerationRate = .fast
+        minimumZoomScale = 1
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    /// How many times its fit its own size is, at the screen's scale.
+    var actual: CGFloat {
+        let scale = traitCollection.displayScale
+        return natural.width / max(picture.bounds.width * scale, 1)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if bounds.size != fittedFor, bounds.width > 0, bounds.height > 0 {
+            fittedFor = bounds.size
+            zoomScale = 1
+            let room = CGSize(width: bounds.width, height: max(bounds.height - 2 * Self.edge, 1))
+            let k = min(room.width / max(shape.width, 1), room.height / max(shape.height, 1))
+            let size = CGSize(width: (shape.width * k).rounded(), height: (shape.height * k).rounded())
+            picture.frame = CGRect(origin: .zero, size: size)
+            contentSize = size
+            maximumZoomScale = max(8, 4 * actual)
+        }
+        centre()
+    }
+
+    /// Keeps it in the middle while it's smaller than the page either way.
+    func centre() {
+        let x = max((bounds.width - contentSize.width) / 2, 0)
+        let y = max((bounds.height - contentSize.height) / 2, 0)
+        contentInset = UIEdgeInsets(top: y, left: x, bottom: y, right: x)
+    }
+}
+
+/// What a viewer's picture does as it's zoomed: tells the viewer whether it's zoomed in,
+/// so its swipes pan it, and zooms with a double tap.
+@MainActor
+final class PictureZoom: NSObject, UIScrollViewDelegate {
+    var zoomed: Binding<Bool>
+
+    init(zoomed: Binding<Bool>) {
+        self.zoomed = zoomed
+    }
+
+    func viewForZooming(in scrollView: UIScrollView) -> UIView? {
+        (scrollView as? PictureScroll)?.picture
+    }
+
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        (scrollView as? PictureScroll)?.centre()
+        let now = scrollView.zoomScale > 1.01
+        if zoomed.wrappedValue != now {
+            let zoomed = zoomed
+            Task { @MainActor in zoomed.wrappedValue = now }
+        }
+    }
+
+    /// Back to its fit when zoomed, else in to its own size, or 2.5 times its fit for
+    /// one that's smaller, about where it was tapped.
+    @objc func doubleTap(_ g: UITapGestureRecognizer) {
+        guard let v = g.view as? PictureScroll else { return }
+        if v.zoomScale > 1.01 {
+            v.setZoomScale(1, animated: true)
+            return
+        }
+        let to = min(v.maximumZoomScale, max(2.5, v.actual))
+        let at = g.location(in: v.picture)
+        let size = CGSize(width: v.bounds.width / to, height: v.bounds.height / to)
+        v.zoom(to: CGRect(x: at.x - size.width / 2, y: at.y - size.height / 2, width: size.width, height: size.height), animated: true)
     }
 }
 

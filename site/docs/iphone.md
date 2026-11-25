@@ -26,7 +26,7 @@ The script makes the project anew each time, from `ios/project.yml`, so what you
 
 In Xcode, pick an iPhone simulator at the top and choose **Run**.
 
-The simulator has no camera, so **Scan a code** gives you a field to paste the code's text into instead, which starts with `loom://link`. Or sign in with the instance's address, your username and your password. An instance on the same Mac is at `http://127.0.0.1:` and its port.
+The simulator has no camera, so **Scan a code** gives you a field to paste the code's text into instead, which starts with `loom://add`, or paste the short code into the field under it. Or choose **Sign in with a password** and give the instance's address, your username and your password. An instance on the same Mac is at `http://127.0.0.1:` and its port.
 
 ## On your phone
 
@@ -34,7 +34,7 @@ The simulator has no camera, so **Scan a code** gives you a field to paste the c
 2. Select the **Loom** project, then the **Loom** target, and open **Signing & Capabilities**. Pick your team, and change the bundle identifier from `no.aaenz.loom` to one of your own, such as `com.yourname.loom`.
 3. Connect your phone with a cable, and pick it at the top of Xcode's window. The first time, the phone asks you to turn on Developer Mode, in **Settings → Privacy & Security**, and to restart.
 4. Choose **Run**. The first time, the phone won't open an app from a developer it doesn't know: in **Settings → General → VPN & Device Management**, trust your account.
-5. Open loom and add your phone as [Phones](phones.md) says.
+5. Open loom and add your phone as [Adding a device](phones.md) says.
 
 ## Notifications
 
