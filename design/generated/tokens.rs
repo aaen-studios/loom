@@ -74,6 +74,7 @@ pub mod control {
     pub const ICON_LARGE: f32 = 34.0;
     pub const LEAD: f32 = 30.0;
     pub const SERVER: f32 = 46.0;
+    pub const LIMIT_RING: f32 = 14.0;
     pub const CHOICE: f32 = 50.0;
     pub const ROW: f32 = 54.0;
     pub const ROW_TALL: f32 = 68.0;
