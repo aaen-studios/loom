@@ -10,7 +10,8 @@ import shapes from '../../../design/generated/shapes.json';
 const agents = [
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
 	{ name: 'Pip', color: 'lavender', pinned: true },
-	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true },
+	// Open, with Biscuit's thread with it (message_agent) under it, as the app lists it.
+	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true, asks: [{ from: 'Biscuit', color: 'apricot', shape: 'star' }] },
 	{ name: 'Moss', color: 'mint', shape: 'heart' },
 	{ name: 'Otto', color: 'coral', shape: 'snail', folder: 'Home' },
 ];
@@ -79,13 +80,22 @@ const GITHUB =
 			</div>
 			{
 				rest.map((a) => (
-					<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
-						<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
-						<span class="agent-text">
-							<span class="agent-name">{a.name}</span>
-							<span class="agent-preview" />
-						</span>
-					</div>
+					<>
+						<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
+							<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
+							<span class="agent-text">
+								<span class="agent-name">{a.name}</span>
+								<span class="agent-preview" />
+							</span>
+						</div>
+						{a.on &&
+							a.asks?.map((k) => (
+								<div class="ask">
+									<svg data-thread data-color={k.color} data-shape={k.shape} width="18" height={k.shape ? 22 : 8} />
+									<span class="ask-name">From {k.from}</span>
+								</div>
+							))}
+					</>
 				))
 			}
 			<div class="group-head folder">
@@ -468,6 +478,34 @@ const GITHUB =
 	.app.railed .group-head {
 		display: none;
 	}
+	/* Another agent's thread with the open one, under its row (app.rs, ask_row): the
+	   asker's thread, small, and "From NAME". */
+	.ask {
+		display: flex;
+		align-items: center;
+		min-width: 0;
+		gap: 12px;
+		padding: 4px 12px 4px 20px;
+		border-radius: var(--radius-row);
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+		transition: background-color 0.12s;
+	}
+	.ask:hover {
+		background: var(--hover);
+	}
+	.ask svg {
+		width: 18px;
+		height: 22px;
+		flex: none;
+	}
+	.ask-name {
+		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
 	/* The pinned agents over the rest: tiles three across, each with its thread drawn large
 	   in its shape and its name under it. */
 	.pins {
@@ -575,6 +613,10 @@ const GITHUB =
 	.app.railed .side-top {
 		justify-content: center;
 		padding: 0;
+	}
+	/* The rail lists the agents alone, as the app's does. */
+	.app.railed .ask {
+		display: none;
 	}
 	.app.railed :is(.brand, .new, .agent-text, .tile-name, .server-text) {
 		display: none;

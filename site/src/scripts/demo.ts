@@ -101,16 +101,19 @@ export function play(app: HTMLElement) {
 	// An agent waiting on the person goes to the top of the sidebar, under Waiting on you, and
 	// back to its place once it's answered (core/sidebar.calx).
 	const waitingGroup = app.querySelector<HTMLElement>('[data-waiting]')!;
-	const places = new Map<string, Node | null>();
+	const places = new Map<string, { parent: Node; before: Node | null }>();
 	const waitingOn = (agent: string, on: boolean) => {
 		const row = app.querySelector<HTMLElement>(`.agent[data-agent="${agent}"]`);
 		if (!row) return;
+		// Its row, and other agents' threads with it under it.
+		const rows: Element[] = [row];
+		for (let n = row.nextElementSibling; n?.classList.contains('ask'); n = n.nextElementSibling) rows.push(n);
 		if (on && !places.has(agent)) {
-			places.set(agent, row.nextSibling);
-			waitingGroup.append(row);
+			places.set(agent, { parent: row.parentNode!, before: rows[rows.length - 1].nextSibling });
+			waitingGroup.append(...rows);
 		} else if (!on && places.has(agent)) {
-			const before = places.get(agent)!;
-			before?.parentNode?.insertBefore(row, before);
+			const { parent, before } = places.get(agent)!;
+			for (const r of rows) parent.insertBefore(r, before);
 			places.delete(agent);
 		}
 		waitingGroup.hidden = places.size === 0;

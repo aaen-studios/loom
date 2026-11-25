@@ -69,7 +69,7 @@ BEGIN;
 ALTER TABLE conversations ADD COLUMN agent TEXT;
 ALTER TABLE conversations ADD COLUMN chat INTEGER NOT NULL DEFAULT 0;
 UPDATE conversations SET agent = json_extract(json, '$.agent'),
-    chat = (json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL AND json_extract(json, '$.routine') IS NULL);
+    chat = (json_extract(json, '$.task') IS NULL AND json_extract(json, '$.side') IS NULL AND json_extract(json, '$.branch_of') IS NULL AND json_extract(json, '$.routine') IS NULL AND json_extract(json, '$.asked_by') IS NULL);
 COMMIT;
 "#
 // A cache from before calls kept their block.
@@ -138,9 +138,9 @@ fn maybe(s: own String?) -> Value {
 }
 
 // Whether a conversation is its agent's chat, rather than a task's, a side
-// question's, a branch's or a routine's: 1 or 0.
+// question's, a branch's, a routine's or another agent's (`asked_by`): 1 or 0.
 fn chat_of(c: Json) -> i64 {
-    for key in ["task", "side", "branch_of", "routine"] {
+    for key in ["task", "side", "branch_of", "routine", "asked_by"] {
         if at(c, key) != Json.Null { return 0 }
     }
     return 1
@@ -825,6 +825,23 @@ fn a_routines_thread_isnt_the_agents_chat() ! Error {
     let thread = Obj.new().s("id", String("c_thread")).s("agent", String("a_1")).s("title", String("News")).s("routine", String("rt_1")).i("at", 20).done()
     _ = try c.apply(ev(1, "conversation.created", Obj.new().j("conversation", chat).done()))
     _ = try c.apply(ev(2, "conversation.created", Obj.new().j("conversation", thread).done()))
+    assert(try c.conversation_for(String("a_1")) == some(String("c_chat")))
+}
+
+@test
+fn another_agents_thread_isnt_the_agents_chat() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    let chat = Obj.new().s("id", String("c_chat")).s("agent", String("a_1")).s("title", String("Chat")).i("at", 10).done()
+    let asked = Obj.new().s("id", String("c_asked")).s("agent", String("a_1")).s("title", String("From Casper")).s("asked_by", String("a_2")).i("at", 20).done()
+    _ = try c.apply(ev(1, "conversation.created", Obj.new().j("conversation", chat).done()))
+    _ = try c.apply(ev(2, "conversation.created", Obj.new().j("conversation", asked).done()))
+    assert(try c.conversation_for(String("a_1")) == some(String("c_chat")))
+    // One an older instance made, newer than the chat, is the chat until the
+    // instance says whose it is.
+    let old = Obj.new().s("id", String("c_old")).s("agent", String("a_1")).s("title", String("From Hermes")).i("at", 30).done()
+    _ = try c.apply(ev(3, "conversation.created", Obj.new().j("conversation", old).done()))
+    assert(try c.conversation_for(String("a_1")) == some(String("c_old")))
+    _ = try c.apply(ev(4, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_old")).s("asked_by", String("a_3")).done()).done()))
     assert(try c.conversation_for(String("a_1")) == some(String("c_chat")))
 }
 

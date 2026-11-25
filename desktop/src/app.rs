@@ -2697,6 +2697,8 @@ ACTA_KEY=secret:ACTA_KEY",
         self.menu = None;
         self.model.select(Some(agent));
         self.model.show_task(None);
+        // Its chat with the person, never a branch or another agent's thread with it.
+        self.model.show_branch(None);
         self.focus_composer = true;
         self.fetch();
         self.refresh_rows(cx);
@@ -3748,15 +3750,9 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
-    /// Over a branch, or a routine's thread, in the chat: its title, and the way back to the
-    /// agent's chat.
-    fn branch_strip(
-        &self,
-        title: String,
-        routine: bool,
-        tint: Hsla,
-        cx: &mut Context<Self>,
-    ) -> Div {
+    /// Over a branch, a routine's thread or another agent's thread with the agent, in the
+    /// chat: its mark and title, and the way back to the agent's chat.
+    fn branch_strip(&self, title: String, mark: AnyElement, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         div()
             .w_full()
@@ -3791,12 +3787,9 @@ ACTA_KEY=secret:ACTA_KEY",
                             .child(Icon::new(Ico::ArrowLeft).small())
                             .on_click(cx.listener(|this, _, _, cx| this.open_branch(None, cx))),
                     )
-                    .child(
-                        Icon::new(if routine { Ico::Clock } else { Ico::GitBranch })
-                            .small()
-                            .text_color(tint),
-                    )
-                    // Its icon says whether it's a routine's thread or a branch.
+                    // Its mark says whether it's a routine's thread, a branch or which
+                    // agent's thread it is.
+                    .child(mark)
                     .child(
                         div()
                             .flex_1()
@@ -3807,6 +3800,77 @@ ACTA_KEY=secret:ACTA_KEY",
                             .text_color(p.ink)
                             .child(title),
                     ),
+            )
+    }
+
+    /// The colour of the agent that keeps a thread with another: its thread's, or a plain
+    /// ink for a plugin's panel or an agent that's gone.
+    fn ask_tint(&self, k: &model::Ask) -> Hsla {
+        k.by.as_deref()
+            .and_then(|id| self.model.agent(id))
+            .map(|a| thread::color(&a.color, self.p.dark))
+            .unwrap_or(self.p.ink_3)
+    }
+
+    /// The asking agent's thread, small, as an ask's row and strip show it.
+    fn ask_strand(&self, key: String, k: &model::Ask) -> AnyElement {
+        let asker = k.by.as_deref().and_then(|id| self.model.agent(id));
+        thread::strand(
+            key,
+            Mood::Idle,
+            self.ask_tint(k),
+            asker.and_then(|a| a.outline()),
+            18.0,
+            8.0,
+            None,
+        )
+    }
+
+    /// Another agent's thread with `agent`, under its row in the sidebar: the asker's
+    /// thread and "From NAME", which opens it in the chat's place.
+    fn ask_row(
+        &self,
+        agent: &str,
+        k: &model::Ask,
+        open: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        let agent = agent.to_string();
+        let conversation = k.conversation.clone();
+        div()
+            .id(SharedString::from(format!("ask-{}", k.conversation)))
+            .role(Role::Button)
+            .aria_label(k.label.clone())
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .pl(px(space::M + space::S))
+            .pr(px(space::M))
+            .py(px(space::XS))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .when(open, |d| d.bg(p.active))
+            .when(!open, move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            })
+            .on_click(
+                cx.listener(move |this, _, _, cx| this.open_thread(&agent, &conversation, cx)),
+            )
+            .child(self.ask_strand(format!("ask-side-{}", k.conversation), k))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(size::CAPTION))
+                    .font_weight(if k.unread {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::NORMAL
+                    })
+                    .text_color(if k.unread || open { p.ink } else { p.ink_2 })
+                    .child(k.label.clone()),
             )
     }
 
@@ -5680,6 +5744,20 @@ ACTA_KEY=secret:ACTA_KEY",
         let preview = self.model.preview(a);
         // A reply that came while its chat wasn't open: the row is bold until it is.
         let unread = self.model.unread.contains(&a.id);
+        // While one of other agents' threads with it has a reply not seen, a dot in the
+        // asker's colour on its row; and while one of them is open, the row isn't lit.
+        let ask_open = self
+            .model
+            .ask_open()
+            .filter(|_| selected)
+            .map(|k| k.conversation);
+        let dot = self
+            .model
+            .asks(&a.id)
+            .iter()
+            .find(|k| k.unread)
+            .filter(|_| !selected)
+            .map(|k| self.ask_tint(k));
         let id = a.id.clone();
         div()
             .id(SharedString::from(format!("agent-{}", a.id)))
@@ -5692,8 +5770,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .py(px(space::S))
             .rounded(px(radius::ROW))
             .cursor_pointer()
-            .when(selected, |d| d.bg(p.active))
-            .when(!selected, move |d| {
+            .when(selected && ask_open.is_none(), |d| d.bg(p.active))
+            .when(!selected || ask_open.is_some(), move |d| {
                 d.soft_hover(transparent_black(), p.hover, None)
             })
             .on_mouse_down(MouseButton::Right, {
@@ -5756,8 +5834,28 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .truncate()
                                 .child(preview),
                         )
+                    })
+                    .when_some(dot, |d, tint| {
+                        d.child(div().size(px(6.0)).flex_none().rounded_full().bg(tint))
                     }),
             )
+    }
+
+    /// Other agents' threads with the agent `a`, each a labelled row under it, while its
+    /// chat is open (its tile has no room under it: they head the list then).
+    fn ask_rows(&self, a: &model::Agent, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
+        if self.model.selected.as_deref() != Some(a.id.as_str()) || self.screen != Screen::Chat {
+            return Vec::new();
+        }
+        let open = self.model.ask_open().map(|k| k.conversation);
+        self.model
+            .asks(&a.id)
+            .iter()
+            .map(|k| {
+                let here = open.as_deref() == Some(k.conversation.as_str());
+                self.ask_row(&a.id, k, here, cx)
+            })
+            .collect()
     }
 
     /// A group's head in the sidebar: its name, small and quiet, with a chevron when it
@@ -5882,16 +5980,21 @@ ACTA_KEY=secret:ACTA_KEY",
                     ));
                     for a in members {
                         top = top.child(self.agent_row(a, cx));
+                        top = top.children(self.ask_rows(a, cx));
                     }
                 }
                 model::SidePart::Pinned => {
                     for a in members {
                         tiles.push(self.pinned_tile(a, cx));
+                        // Its tile has no room under it for other agents' threads with it:
+                        // they head the list while it's open.
+                        list = list.children(self.ask_rows(a, cx));
                     }
                 }
                 model::SidePart::Agents => {
                     for a in members.into_iter().chain(extra.iter().copied()) {
                         list = list.child(self.agent_row(a, cx));
+                        list = list.children(self.ask_rows(a, cx));
                     }
                 }
                 model::SidePart::Folder {
@@ -5903,6 +6006,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     if !collapsed {
                         for a in members {
                             list = list.child(self.agent_row(a, cx));
+                            list = list.children(self.ask_rows(a, cx));
                         }
                     }
                 }
@@ -5923,6 +6027,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     if open {
                         for a in members {
                             list = list.child(self.agent_row(a, cx));
+                            list = list.children(self.ask_rows(a, cx));
                         }
                     }
                 }
@@ -5933,8 +6038,10 @@ ACTA_KEY=secret:ACTA_KEY",
             for a in agents.iter() {
                 if a.pinned.is_some() {
                     tiles.push(self.pinned_tile(a, cx));
+                    list = list.children(self.ask_rows(a, cx));
                 } else {
                     list = list.child(self.agent_row(a, cx));
+                    list = list.children(self.ask_rows(a, cx));
                 }
             }
         }
@@ -6161,6 +6268,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     finished: model.finished_at(&a.id),
                     preview: model.preview(a),
                     unread: model.unread.contains(&a.id),
+                    asks: model.asks(&a.id),
                 })
                 .collect(),
             selected: model
@@ -6170,6 +6278,7 @@ ACTA_KEY=secret:ACTA_KEY",
             sections: model.sidebar.clone(),
             renaming: self.renaming_folder.clone(),
             hidden_open: self.hidden_open,
+            ask_open: model.ask_open().map(|k| k.conversation),
             query: model.query.clone(),
             hits: model
                 .hits
@@ -8207,11 +8316,25 @@ ACTA_KEY=secret:ACTA_KEY",
         ) {
             (Some(t), Some(a), _) => Some(self.task_strip(&t, thread::color(&a.color, p.dark), cx)),
             (None, Some(a), Some(title)) => {
-                let routine = self
-                    .model
-                    .branch_open()
-                    .is_some_and(|c| c.routine.is_some());
-                Some(self.branch_strip(title, routine, thread::color(&a.color, p.dark), cx))
+                let tint = thread::color(&a.color, p.dark);
+                // Another agent's thread with it: "From NAME", by the asker's thread.
+                let strip = match self.model.ask_open() {
+                    Some(k) => {
+                        let mark = self.ask_strand(format!("ask-strip-{}", k.conversation), &k);
+                        self.branch_strip(k.label, mark, cx)
+                    }
+                    None => {
+                        let routine = self
+                            .model
+                            .branch_open()
+                            .is_some_and(|c| c.routine.is_some());
+                        let icon = Icon::new(if routine { Ico::Clock } else { Ico::GitBranch })
+                            .small()
+                            .text_color(tint);
+                        self.branch_strip(title, icon.into_any_element(), cx)
+                    }
+                };
+                Some(strip)
             }
             _ => None,
         };
@@ -20798,6 +20921,8 @@ struct SidebarKey {
     hidden_open: bool,
     /// The agent whose chat is on screen.
     selected: Option<String>,
+    /// Another agent's thread with it, when that's on screen in its chat's place.
+    ask_open: Option<String>,
     query: String,
     hits: Vec<SidebarHit>,
     search: bool,
@@ -20822,6 +20947,7 @@ struct SidebarAgent {
     finished: Option<Instant>,
     preview: String,
     unread: bool,
+    asks: Vec<model::Ask>,
 }
 
 /// A server, as the sidebar shows it.

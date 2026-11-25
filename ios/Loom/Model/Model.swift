@@ -87,20 +87,40 @@ struct Conversation: Equatable, Sendable {
     var id: String
     var agent: String
     /// Whether it's the agent's chat, the one the core's `send` with `agent` goes to: not
-    /// a task's conversation, the side questions', a branch or a routine's own thread.
+    /// a task's conversation, the side questions', a branch, a routine's own thread or
+    /// another agent's thread with it.
     var isChat = true
+    /// For another agent's thread with it (`message_agent`), that agent's id, or
+    /// `plugin:ID` for a plugin's panel.
+    var askedBy: String?
+    var title = ""
 
-    init(id: String, agent: String, isChat: Bool = true) {
+    init(id: String, agent: String, isChat: Bool = true, askedBy: String? = nil, title: String = "") {
         self.id = id
         self.agent = agent
-        self.isChat = isChat
+        self.isChat = isChat && askedBy == nil
+        self.askedBy = askedBy
+        self.title = title
     }
 
     init(_ c: JSON) {
         id = c["id"].text
         agent = c["agent"].text
-        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull
+        askedBy = c["asked_by"].string
+        title = c["title"].text
+        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil
     }
+}
+
+/// Another agent's thread with an agent, as its chat lists it.
+struct Ask: Hashable, Identifiable {
+    func hash(into h: inout Hasher) { h.combine(id) }
+
+    var id: String
+    /// The agent that asks, when it's one of the person's agents still.
+    var by: Agent?
+    /// "From Casper", by the asking agent's name now, or the thread's own title.
+    var label: String
 }
 
 /// Pictures shown big, to page through.
@@ -1165,6 +1185,8 @@ final class Model {
     var messagesCame = false
     var moreMessages = false
     var selected: String?
+    /// Another agent's thread with the selected agent, while it's shown in its chat's place.
+    private(set) var thread: String?
     /// This device's id and the account's, from `welcome`.
     var me: (user: String, device: String)?
     /// Something to tell the person, once.
@@ -1228,13 +1250,33 @@ final class Model {
 
     func agent(_ id: String) -> Agent? { agents.first { $0.id == id } }
 
-    /// The conversation an agent's chat shows: its newest.
+    /// The conversation an agent's chat shows: its newest, never another agent's thread
+    /// with it, however new that is.
     func conversation(of agent: String?) -> String? {
         guard let agent else { return nil }
         return conversations.first { $0.agent == agent && $0.isChat }?.id
     }
 
-    var conversation: String? { conversation(of: selected) }
+    /// The selected agent's chat, or another agent's thread with it while that's open.
+    var conversation: String? { thread ?? conversation(of: selected) }
+
+    /// The threads other agents (and plugins' panels) keep with `agent`, newest first.
+    func asks(_ agent: String) -> [Ask] {
+        conversations.filter { $0.agent == agent && $0.askedBy != nil }.map { c in
+            let by = c.askedBy.flatMap { self.agent($0) }
+            return Ask(id: c.id, by: by, label: by.map { "From \($0.name)" } ?? c.title)
+        }
+    }
+
+    /// Shows another agent's thread with the selected agent in its chat's place, or
+    /// with nil, its chat again.
+    func open(thread: String?) {
+        guard self.thread != thread else { return }
+        self.thread = thread
+        messages = []
+        messagesCame = false
+        dirty.insert(.messages)
+    }
 
     /// The selected chat's messages, with the replies still being written at the end.
     var shown: [Message] {
@@ -1347,6 +1389,7 @@ final class Model {
     func select(_ agent: String?) {
         guard selected != agent else { return }
         selected = agent
+        thread = nil
         messages = []
         messagesCame = false
         dirty.insert(.messages)
