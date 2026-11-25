@@ -75,6 +75,7 @@ context-ring = 16    # the ring by Send that fills with the agent's context
 icon-large = 34      # the settings gear, or a colour to pick
 lead = 30            # the icon or initial at a row's start
 server = 46          # the server's row atop the sidebar
+limit-ring = 14      # the ring of each of a plan's limits in the sidebar
 choice = 50          # a big choice, such as where the server runs
 row = 54             # a settings row, at least
 row-tall = 68        # a settings row with a picture, at least
