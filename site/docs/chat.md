@@ -14,7 +14,7 @@ The sidebar lists your agents in groups:
 
 Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
 
-When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads.
+When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads. The thread is only read: where you'd write, **Continue in your own chat** opens your chat with the agent, ready to write.
 
 ## Replying to a message
 
@@ -22,7 +22,7 @@ Point at a message, yours or an agent's, and choose **Reply** by its corner, or 
 
 Select words in a message for a small bar with **Copy**, **Quote** and, in an agent's reply, **Ask about this**. These are in the right-click menu too. Quote and Ask about this quote only the words you selected. On the iPhone, long-press a message and choose **Select text**; the selection has Quote and Ask about this.
 
-What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it over the bubble. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
+What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it on one line over the bubble: who said it and the start of what. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
 
 ## Cards in replies
 

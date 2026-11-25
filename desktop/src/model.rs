@@ -696,6 +696,83 @@ pub struct Program {
     pub share: Option<Share>,
     /// To the owner, the people it's kept to, by id; none is everyone.
     pub members: Option<Vec<String>>,
+    /// The limits of the person's plan with it, where it reports them.
+    pub limits: Option<PlanLimits>,
+}
+
+/// The limits of the person's plan with an agent program, as it last reported them
+/// (PLAN.md, "Usage limits"): the plan's name, and the session's and the week's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct PlanLimits {
+    pub plan: String,
+    pub session: Option<LimitWindow>,
+    pub week: Option<LimitWindow>,
+}
+
+/// One window of a plan's limits: how much of it is used, in percent, and when it
+/// resets (Unix ms).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct LimitWindow {
+    pub used: i64,
+    pub resets: i64,
+}
+
+impl PlanLimits {
+    /// The `limits` the instance keeps, or none when they say nothing of the session or
+    /// the week, as for a login that isn't a plan's.
+    pub fn of(v: &Value) -> Option<PlanLimits> {
+        let window = |k: &str| {
+            let w = v.get(k)?;
+            Some(LimitWindow {
+                used: w.get("used")?.as_i64()?,
+                resets: w.get("resets").and_then(Value::as_i64).unwrap_or(0),
+            })
+        };
+        let limits = PlanLimits {
+            plan: s(v, "plan"),
+            session: window("session"),
+            week: window("week"),
+        };
+        (limits.session.is_some() || limits.week.is_some()).then_some(limits)
+    }
+}
+
+impl LimitWindow {
+    /// As it is at `now` (Unix ms): once it has reset, none of it is used, until the
+    /// program says more.
+    pub fn at(self, now: i64) -> LimitWindow {
+        if self.resets > 0 && now >= self.resets {
+            LimitWindow { used: 0, resets: 0 }
+        } else {
+            self
+        }
+    }
+
+    /// How much of the ring is filled, from 0 to 1.
+    pub fn fraction(self) -> f32 {
+        (self.used.clamp(0, 100) as f32) / 100.0
+    }
+
+    /// What its line says on the right: how much is used, and when it resets, as a time
+    /// within a day and a weekday after: "42% · 15:30", "78% · Mon".
+    pub fn words<Tz: chrono::TimeZone>(self, now: chrono::DateTime<Tz>) -> String
+    where
+        Tz::Offset: std::fmt::Display,
+    {
+        let used = format!("{}%", self.used.max(0));
+        if self.resets <= 0 {
+            return used;
+        }
+        let Some(at) = now.timezone().timestamp_millis_opt(self.resets).single() else {
+            return used;
+        };
+        let when = if self.resets - now.timestamp_millis() < 24 * 60 * 60 * 1000 {
+            at.format("%H:%M").to_string()
+        } else {
+            at.format("%a").to_string()
+        };
+        format!("{used} · {when}")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2267,7 +2344,8 @@ pub fn size_of(bytes: u64) -> String {
 }
 
 /// How many of a chat's newest messages it shows, and how many more it reaches back for
-/// a message a quote jumps to, a page at a time (the core gives 2,000 at most).
+/// as the person scrolls up or a quote jumps, a page at a time (the core gives 2,000 at
+/// most).
 const MESSAGES_PAGE: usize = 200;
 const MESSAGES_FURTHEST: usize = 1800;
 
@@ -3275,6 +3353,54 @@ pub fn spoken(md: &str) -> String {
     out
 }
 
+/// The most characters a quote's line keeps; the app cuts it to its width with "…".
+pub const QUOTE_MOST: usize = 240;
+
+/// Markdown on one plain line, as a quote over a message shows it: its words without
+/// their marks, list marks and rules, its lines run together with spaces, and cut at
+/// `QUOTE_MOST` characters with "…".
+pub fn one_line(md: &str) -> String {
+    let mut out = String::new();
+    for line in spoken(md).lines() {
+        let line = line.trim();
+        // A rule, or a table's divider, says nothing.
+        if line
+            .chars()
+            .all(|c| matches!(c, '-' | '=' | '_' | '|' | ':' | ' '))
+        {
+            continue;
+        }
+        let mut line = line;
+        for mark in ["- ", "+ ", "• "] {
+            if let Some(rest) = line.strip_prefix(mark) {
+                line = rest.trim_start();
+                break;
+            }
+        }
+        for mark in ["[ ] ", "[x] ", "[X] "] {
+            if let Some(rest) = line.strip_prefix(mark) {
+                line = rest.trim_start();
+                break;
+            }
+        }
+        for word in line.split(|c: char| c.is_whitespace() || c == '|') {
+            if word.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+            if out.chars().count() > QUOTE_MOST {
+                let mut cut: String = out.chars().take(QUOTE_MOST).collect();
+                cut.push('…');
+                return cut;
+            }
+        }
+    }
+    out
+}
+
 /// A tool call's title, as its agent named it.
 pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
     call.and_then(|c| tools.get(c))
@@ -4173,8 +4299,8 @@ pub struct Model {
     /// The selected agent's messages, oldest first, with the queued ones last.
     pub messages: Vec<Message>,
     pub more_messages: bool,
-    /// How many of the chat's newest messages it asks for beyond the first page, to
-    /// reach one far back that a quote jumps to.
+    /// How many of the chat's newest messages it asks for beyond the first page, as the
+    /// person scrolls up or a quote jumps to one far back.
     messages_more: usize,
     /// Asked for more of them, which haven't come yet.
     reaching: bool,
@@ -4799,6 +4925,7 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
+            self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
@@ -4824,6 +4951,7 @@ impl Model {
             self.open_branch = branch;
             self.messages.clear();
             self.messages_for = None;
+            self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.pins.clear();
@@ -4992,7 +5120,7 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
-            self.messages_more = 0;
+            self.first_page();
             self.replying = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
@@ -5179,6 +5307,8 @@ impl Model {
                 self.queue_stale = true;
                 self.tasks_stale = true;
                 self.updates_stale = true;
+                // The programs, for the limits of the person's plans in the sidebar.
+                self.programs_stale = true;
                 for l in [
                     List::Agents,
                     List::Conversations,
@@ -5428,6 +5558,15 @@ impl Model {
             "account" => {
                 if let Some(has) = f.get("has_password").and_then(Value::as_bool) {
                     self.has_password = Some(has);
+                }
+            }
+            // A program reported the limits of the person's plan with it.
+            "limits" => {
+                let name = s(f, "program");
+                let limits = f.get("limits").and_then(PlanLimits::of);
+                match self.installed.iter_mut().find(|p| p.name == name) {
+                    Some(p) => p.limits = limits,
+                    None => self.programs_stale = true,
                 }
             }
             "agent" => {
@@ -6806,6 +6945,7 @@ impl Model {
                                 members: ids(sh.get("members")),
                             }),
                             members: ids(p.get("members")),
+                            limits: p.get("limits").and_then(PlanLimits::of),
                         })
                         .collect()
                 })
@@ -7047,7 +7187,13 @@ impl Model {
                 }
                 self.messages_for = current;
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
-                self.reaching = false;
+                // The page asked for is here when it's as long as asked, or the chat has
+                // no more. A shorter one with more is an earlier ask's, or the core's
+                // while it fetches older ones from the instance, and `core.filled` reads
+                // the chat again once they're in.
+                if !self.more_messages || items.len() >= MESSAGES_PAGE + self.messages_more {
+                    self.reaching = false;
+                }
                 let messages: Vec<Message> = items
                     .iter()
                     .filter(|m| !routine_prompt(m))
@@ -7545,9 +7691,13 @@ impl Model {
         self.replying.take().is_some()
     }
 
-    /// Asks for more of the chat's older messages, to reach one a quote jumps to. False
-    /// when the chat has no more.
+    /// Asks for the next page of the chat's older messages, as the person scrolls up to
+    /// them or a quote jumps to one further back. True while a page is on its way, the
+    /// one asked for now or one asked for already; false when the chat has no more.
     pub fn load_further_back(&mut self) -> bool {
+        if self.reaching {
+            return true;
+        }
         if !self.more_messages || self.messages_more >= MESSAGES_FURTHEST {
             return false;
         }
@@ -7555,6 +7705,13 @@ impl Model {
         self.reaching = true;
         self.dirty.insert(List::Messages);
         true
+    }
+
+    /// A chat just opened shows its newest page, with nothing on its way.
+    fn first_page(&mut self) {
+        self.more_messages = false;
+        self.messages_more = 0;
+        self.reaching = false;
     }
 
     /// Whether older messages asked for with `load_further_back` are still to come.
@@ -7919,6 +8076,20 @@ impl Model {
             frame["username"] = json!(offer.username);
         }
         frame
+    }
+
+    /// The sidebar's plan limits: one for each program that reports them and that the
+    /// person's agents run on, their own or as their backup, in the order installed.
+    pub fn plan_limits(&self) -> Vec<(String, PlanLimits)> {
+        self.installed
+            .iter()
+            .filter(|p| {
+                self.agents
+                    .iter()
+                    .any(|a| a.program == p.name || a.backup == p.name)
+            })
+            .filter_map(|p| Some((p.name.clone(), p.limits.clone()?)))
+            .collect()
     }
 
     pub fn programs(&mut self) -> Value {
@@ -9817,20 +9988,48 @@ mod tests {
             .is_some_and(|x| selected_in(x, words))
     }
 
+    // LOO-296: scrolling up and a quote's jump share the same pages.
     #[test]
-    fn a_quote_far_back_reaches_for_older_messages_a_page_at_a_time() {
+    fn older_messages_come_a_page_at_a_time() {
+        let page = |n: usize, more: bool| {
+            let items: Vec<Value> = (0..n)
+                .map(|i| json!({"id": format!("msg_{i}"), "role": "agent", "at": i, "blocks": []}))
+                .collect();
+            json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": more, "items": items})
+        };
+        let asked_for = |m: &mut Model| {
+            m.fetches()
+                .iter()
+                .find(|f| f["what"] == "messages")
+                .map(|f| f["limit"].clone())
+        };
         let mut m = in_chat();
         _ = m.fetches();
-        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": true, "items": []}));
+        m.take(&page(200, true));
         assert!(m.load_further_back());
         assert!(m.reaching_back());
-        let asked = m.fetches();
-        assert!(asked
-            .iter()
-            .any(|f| f["what"] == "messages" && f["limit"] == 400));
-        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": false, "items": []}));
+        assert_eq!(asked_for(&mut m), Some(json!(400)));
+        // Asked again while it comes, as a jump does while scrolling asked: the same page.
+        assert!(m.load_further_back());
+        assert_eq!(asked_for(&mut m), None);
+        // The core's own 300 while it fetches the rest from the instance: still coming.
+        m.take(&page(300, true));
+        assert!(m.reaching_back());
+        // Once they're in, the page is whole.
+        m.take(&page(400, true));
+        assert!(!m.reaching_back());
+        assert!(m.load_further_back());
+        assert_eq!(asked_for(&mut m), Some(json!(600)));
+        // The oldest of all: nothing more to ask for.
+        m.take(&page(450, false));
         assert!(!m.reaching_back());
         assert!(!m.load_further_back());
+        // Another chat starts from its newest page.
+        m.select(Some("a_2".into()));
+        assert!(!m.reaching_back());
+        _ = m.fetches();
+        m.select(Some("a_1".into()));
+        assert_eq!(asked_for(&mut m), Some(json!(200)));
     }
 
     #[test]
@@ -10928,6 +11127,18 @@ mod tests {
     }
 
     #[test]
+    fn a_quote_is_one_plain_line() {
+        assert_eq!(
+            one_line("I can:\n\n- create agents\n* **pin** them\n1. first\n- [ ] later\n\n---\n## Next\n| a | b |\n|---|---|"),
+            "I can: create agents pin them 1. first later Next a b"
+        );
+        assert_eq!(one_line("  \n\n "), "");
+        let long = one_line(&"word ".repeat(200));
+        assert_eq!(long.chars().count(), QUOTE_MOST + 1);
+        assert!(long.ends_with('…') && !long.contains('\n'));
+    }
+
+    #[test]
     fn a_time_line_goes_where_the_chat_paused_and_a_reply_is_named_once_after_it() {
         const MIN: i64 = 60 * 1000;
         let at = |m: Message, at: i64| Message { at, ..m };
@@ -11018,6 +11229,69 @@ mod tests {
 
     fn conversations(items: Value) -> Value {
         json!({"t": "core.data", "what": "conversations", "items": items})
+    }
+
+    #[test]
+    fn the_sidebar_has_the_limits_of_the_plans_the_agents_run_on() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Main", "acp_agent": "claude"},
+        ]}));
+        let limits = json!({"plan": "Claude Max", "session": {"used": 42, "resets": 1_795_620_600_000i64}, "week": {"used": 78, "resets": 1_795_900_000_000i64}});
+        m.take(
+            &json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [
+                {"name": "claude", "limits": limits},
+                {"name": "codex"},
+                {"name": "other", "limits": limits},
+            ]}}),
+        );
+        let shown = m.plan_limits();
+        assert_eq!(
+            shown.len(),
+            1,
+            "only the programs that report them and that agents use"
+        );
+        assert_eq!(shown[0].0, "claude");
+        assert_eq!(shown[0].1.plan, "Claude Max");
+        assert_eq!(
+            shown[0].1.session,
+            Some(LimitWindow {
+                used: 42,
+                resets: 1_795_620_600_000
+            })
+        );
+        // A later report changes them in place.
+        m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {"plan": "Claude Max", "session": {"used": 50, "resets": 1_795_620_600_000i64}}}));
+        let shown = m.plan_limits();
+        assert_eq!(shown[0].1.session.map(|w| w.used), Some(50));
+        assert_eq!(shown[0].1.week, None);
+        // A login that isn't a plan's has none to show.
+        m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {}}));
+        assert!(m.plan_limits().is_empty());
+    }
+
+    #[test]
+    fn a_limit_says_how_much_is_used_and_when_it_resets() {
+        use chrono::TimeZone;
+        let utc = chrono::FixedOffset::east_opt(0).unwrap();
+        let now = utc.with_ymd_and_hms(2026, 11, 25, 10, 0, 0).unwrap();
+        let at = |h: i64| now.timestamp_millis() + h * 60 * 60 * 1000;
+        let soon = LimitWindow {
+            used: 42,
+            resets: at(5) + 30 * 60 * 1000,
+        };
+        assert_eq!(soon.words(now), "42% · 15:30");
+        // Past a day, its weekday: Monday 30 November.
+        let week = LimitWindow {
+            used: 78,
+            resets: at(5 * 24),
+        };
+        assert_eq!(week.words(now), "78% · Mon");
+        // Once it has reset, none of it is used.
+        assert_eq!(soon.at(at(6)), LimitWindow { used: 0, resets: 0 });
+        assert_eq!(soon.at(at(6)).words(now), "0%");
+        assert_eq!(soon.at(at(1)), soon);
+        assert_eq!(week.fraction(), 0.78);
     }
 
     #[test]

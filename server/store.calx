@@ -163,6 +163,12 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS acp_sessions (
     user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, program TEXT NOT NULL,
     session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', PRIMARY KEY (user, conversation));
+-- The limits of a person's plan with an agent program, as the program last reported them
+-- (PLAN.md, "Usage limits"): its plan's name, and how much of the session and the week
+-- is used, with when each resets.
+CREATE TABLE IF NOT EXISTS plan_limits (
+    user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL, json TEXT NOT NULL,
+    PRIMARY KEY (user, program));
 CREATE TABLE IF NOT EXISTS files (
     sha TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
     mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, width INTEGER NOT NULL DEFAULT 0,
@@ -2350,7 +2356,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "rooms", "events", "acp_sessions", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "rooms", "events", "acp_sessions", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2441,6 +2447,16 @@ impl Store {
     // A turn in `session` ended now.
     pub fn used_acp_session(self, user: String, conversation: String, session: String) ! Error {
         _ = try self.db.execute(String("UPDATE acp_sessions SET at = ? WHERE user = ? AND conversation = ? AND session = ?"), [Value.Int(now()), t(user), t(conversation), t(session)])
+    }
+
+    // The limits of `user`'s plan with `program`, as it last reported them, or none.
+    pub fn plan_limits(self, user: String, program: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT json FROM plan_limits WHERE user = ? AND program = ?"), [t(user), t(program)]) else return none
+        return some(try parse(text(r[0].copy())))
+    }
+
+    pub fn put_plan_limits(self, user: String, program: String, limits: Json) ! Error {
+        _ = try self.db.execute(String("INSERT INTO plan_limits (user, program, json) VALUES (?, ?, ?) ON CONFLICT (user, program) DO UPDATE SET json = excluded.json"), [t(user), t(program), t("{limits}")])
     }
 
     pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String, tools: str) ! Error {

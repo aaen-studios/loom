@@ -693,6 +693,48 @@ enum Renew {
     Idle    // nothing was said in it for SESSION_IDLE_CLOSE_MS
 }
 
+// One window of a plan's limits, from Claude Code's rate-limit info: how much of
+// it is used, in percent (its `utilization` is 0 to 1), and when it resets, in Unix
+// ms (its `resetsAt` is in seconds). None without both.
+fn limit_window(w: Json) -> Json? {
+    let used = at(w.copy(), "utilization").as_f64() else return none
+    let resets = at(w, "resetsAt").as_f64() else return none
+    return some(Obj.new().i("used", i64.round(used * 100.0)).i("resets", i64.round(resets * 1000.0)).done())
+}
+
+// A plan's limits as `had` them, with what Claude's adapter reported on a
+// usage_update as `_claude/rateLimit` (Claude Code's SDKRateLimitInfo): its
+// windows for the session, five hours, and the week, in `unifiedWindows`, or
+// else the one window it names in `rateLimitType`. None when it says nothing of them.
+fn with_rate_limit(had: Json, info: Json) -> Json? {
+    let windows = at(info.copy(), "unifiedWindows")
+    var session = limit_window(at(windows.copy(), "five_hour"))
+    var week = limit_window(at(windows, "seven_day"))
+    if session == none and week == none {
+        let kind = str_at(info.copy(), "rateLimitType") ?? String()
+        if kind == "five_hour" { session = limit_window(info) } else if kind == "seven_day" { week = limit_window(info) }
+    }
+    if session == none and week == none { return none }
+    var now_limits = if had == Json.Null { Obj.new().done() } else { had.copy() }
+    if let w = session { now_limits = merge(now_limits, Obj.new().j("session", w).done()) }
+    if let w = week { now_limits = merge(now_limits, Obj.new().j("week", w).done()) }
+    return some(now_limits)
+}
+
+@test
+fn a_plans_limits_come_from_claudes_rate_limit_info() {
+    let both = parse(#"{"status":"allowed","rateLimitType":"five_hour","utilization":0.42,"resetsAt":1795620600,"unifiedWindows":{"five_hour":{"utilization":0.42,"resetsAt":1795620600},"seven_day":{"utilization":0.78,"resetsAt":1795900000}}}"#)!
+    let limits = with_rate_limit(Json.Null, both) ?? Json.Null
+    assert("{limits}" == #"{"session":{"used":42,"resets":1795620600000},"week":{"used":78,"resets":1795900000000}}"#)
+    // An older Claude Code names one window: the rest stay as they were, with the plan.
+    let had = merge(limits, parse(#"{"plan":"Claude Max"}"#)!)
+    let one = parse(#"{"status":"allowed_warning","rateLimitType":"seven_day","utilization":0.9,"resetsAt":1795900000}"#)!
+    let after = with_rate_limit(had, one) ?? Json.Null
+    assert(int_at(at(after.copy(), "week"), "used") == some(90i64) and int_at(at(after.copy(), "session"), "used") == some(42i64) and str_at(after, "plan") == some(String("Claude Max")))
+    // Nothing of them: nothing changes.
+    assert(with_rate_limit(Json.Null, parse(#"{"status":"allowed"}"#)!) == none)
+}
+
 // Whether an idle program is kept for its adapter to compact a session whose
 // last turn ended at `turned`, with `tokens` in its context, at `t`.
 fn waits_to_compact(t: i64, turned: i64, tokens: i64) -> bool {
@@ -10544,6 +10586,12 @@ impl Instance {
                             p.to.send(Out.Send(acp.respond(rpc, Obj.new().j("outcome", Obj.new().s("outcome", String("cancelled")).done()).done())))
                         },
                     }
+                } else if name == "_auth/status_update" and id == none {
+                    // Claude's adapter says which login it runs on: a plan's by its
+                    // name ("Claude Max"), or another kind, which has none of its limits.
+                    let status = at(at(m, "params"), "authStatus")
+                    let plan = if str_at(status.copy(), "kind") == some(String("account")) { str_at(status, "label") ?? String() } else { String() }
+                    if let err(e) = i.keep_limits(p, Json.Null, some(plan)) { eprintln("loom: keeping a plan's name: {e}") }
                 } else if let rid = id {
                     p.to.send(Out.Send(acp.respond_error(rid, -32601, "loom doesn't offer {name}")))
                 }
@@ -10871,8 +10919,13 @@ impl Instance {
         let kind = str_at(u.copy(), "sessionUpdate") ?? String()
         if kind == "usage_update" {
             let used = int_at(u.copy(), "used") ?? 0
-            let size = int_at(u, "size") ?? 0
+            let size = int_at(u.copy(), "size") ?? 0
             if size > 0 and session.len() > 0 { i.context.insert(session, (used, size)) }
+            // Claude's adapter puts its plan's limits on it, as Claude Code's rate-limit info.
+            let info = at(at(u, "_meta"), "_claude/rateLimit")
+            if info != Json.Null {
+                if let err(e) = i.keep_limits(p, info, none) { eprintln("loom: keeping a plan's limits: {e}") }
+            }
         } else if kind == "available_commands_update" {
             if let Json.Array(offered) = at(u, "availableCommands") {
                 for c in offered {
@@ -10880,6 +10933,26 @@ impl Instance {
                 }
             }
         }
+    }
+
+    // The limits of the person's plan with `p`'s program (PLAN.md, "Usage limits"):
+    // what a usage_update's rate-limit info, `info`, says of them, or the plan's
+    // name, `plan`, as the program's `_auth/status_update` gives it ("" for a login
+    // that isn't a plan's, as an API key's, which has none of its limits). Kept as
+    // the person's, and told to their apps when they change. A program on the
+    // settings the owner shares isn't the person's own login, so its limits aren't theirs.
+    fn keep_limits(i: Instance, p: Proc, info: Json, plan: String?) ! Error {
+        if p.shared { return }
+        let had = try i.store.plan_limits(p.user.copy(), p.program.copy()) ?? Json.Null
+        var now_limits = Json.Null
+        if let name = plan {
+            now_limits = if name.len() > 0 { merge(if had == Json.Null { Obj.new().done() } else { had.copy() }, Obj.new().s("plan", name).done()) } else { Obj.new().done() }
+        } else {
+            now_limits = with_rate_limit(had.copy(), info) ?? Json.Null
+        }
+        if now_limits == Json.Null or now_limits == had { return }
+        try i.store.put_plan_limits(p.user.copy(), p.program.copy(), now_limits.copy())
+        try i.event(p.user.copy(), "limits.updated", Obj.new().s("program", p.program.copy()).j("limits", now_limits).done())
     }
 
     fn run_for_session(i: Instance, session: String) -> String? {
@@ -13482,9 +13555,14 @@ impl Instance {
             for a in try i.store.acp_agents() {
                 if not try i.may_use(user.copy(), a.name.copy()) { continue }
                 let title = registry_title(i.registry.copy(), a.name.copy())
+                // The limits of the person's plan with it, where it reports them.
+                let limits = try i.store.plan_limits(user.copy(), a.name.copy())
                 var program = try i.program_shared(user.copy(), a)
                 if let t = title {
                     if let Json.Object(m) = mut program { m.insert(String("title"), Json.Str(t)) }
+                }
+                if let l = limits {
+                    if let Json.Object(m) = mut program { m.insert(String("limits"), l) }
                 }
                 programs.push(program)
             }

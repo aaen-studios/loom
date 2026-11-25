@@ -17,7 +17,7 @@
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
 // rail, as the app's does (desktop/src/rail.rs). "From Biscuit" under Juniper opens Biscuit's
-// thread with it in the chat's place.
+// thread with it in the chat's place, to read, with Continue in your own chat for a composer.
 //
 // It plays only while it's on screen, and with reduced motion it shows the finished chat instead.
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
@@ -109,7 +109,7 @@ export function play(app: HTMLElement) {
 	// put a bar over the composer's words; the message goes with a quote over its bubble, which
 	// goes back to the original and lights it (app.rs, reply_bar, quote_view, jump_to).
 	const replyBar = app.querySelector<HTMLElement>('[data-reply-bar]')!;
-	type Replying = { row: HTMLElement; who: string; words: string; ask: boolean };
+	type Replying = { row: HTMLElement; who: string; words: string; part: boolean; ask: boolean };
 	let replying: Replying | null = null;
 	/** A message's words, on one line: an agent's answer, or what the person wrote. */
 	const wordsOf = (row: HTMLElement) =>
@@ -117,7 +117,7 @@ export function play(app: HTMLElement) {
 	const replyTo = (row: HTMLElement, part?: string, ask = false) => {
 		const agent = row.classList.contains('reply');
 		const who = agent ? (row.querySelector('.who')?.textContent ?? 'Juniper') : 'You';
-		replying = { row, who, words: part ?? wordsOf(row), ask: ask && !!part };
+		replying = { row, who, words: (part ?? wordsOf(row)).replace(/\s+/g, ' ').trim(), part: !!part, ask: ask && !!part };
 		replyBar.querySelector('.rb-head')!.textContent = replying.ask ? `Asking ${who} about` : agent ? `Replying to ${who}` : 'Replying to yourself';
 		replyBar.querySelector('.rb-words')!.textContent = replying.words;
 		replyBar.hidden = false;
@@ -175,12 +175,14 @@ export function play(app: HTMLElement) {
 	document.addEventListener('pointerdown', (e) => {
 		if (picked && !picked.contains(e.target as Node)) unpick();
 	});
-	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place;
-	// the strip's arrow, or Juniper's own row, goes back to the person's chat (app.rs,
-	// open_thread, branch_strip). The chat goes on meanwhile.
+	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place,
+	// read only; the strip's arrow, Continue in your own chat in the composer's place, or
+	// Juniper's own row, goes back to the person's chat (app.rs, open_thread, branch_strip,
+	// continue_button). The chat goes on meanwhile.
 	const inThread = (on: boolean) => app.classList.toggle('in-thread', on);
 	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));
 	app.querySelector('[data-back]')?.addEventListener('click', () => inThread(false));
+	app.querySelector('[data-continue]')?.addEventListener('click', () => inThread(false));
 	app.querySelector('.agent.on')?.addEventListener('click', () => inThread(false));
 	const tpl =(id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.
@@ -324,13 +326,19 @@ export function play(app: HTMLElement) {
 			}
 		}
 		bubble.before(...overs.children);
-		// What it replies to, over everything else.
+		// What it replies to, over everything else, on one line: the agent's thread, who
+		// ("You" quiet, with none), and the words, picked ones in curly quotes.
 		if (to) {
-			const quote = tpl('demo-quote');
+			const quoted = tpl('demo-quote');
+			const quote = quoted.querySelector<HTMLElement>('.quote')!;
+			const mine = to.who === 'You';
+			quote.classList.toggle('mine', mine);
+			if (mine) quote.querySelector('.mention-thread')!.remove();
 			quote.querySelector('.q-who')!.textContent = to.who;
-			quote.querySelector('.q-words')!.textContent = to.words;
+			quote.querySelector('.q-words')!.textContent = to.part ? `“${to.words}”` : to.words;
+			quote.setAttribute('aria-label', `Replying to ${to.who}: ${to.words}`);
 			quote.addEventListener('click', () => jump(to.row));
-			you.prepend(quote);
+			you.prepend(quoted);
 		}
 		return you;
 	}
@@ -511,7 +519,7 @@ export function play(app: HTMLElement) {
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
 		cleared();
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
-		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), ask: false });
+		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), part: false, ask: false });
 		const reply = tpl('demo-reply');
 		reply.classList.remove('fresh');
 		const { steps, say } = foldOf(reply);
