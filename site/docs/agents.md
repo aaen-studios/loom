@@ -32,12 +32,13 @@ Loom keeps them sealed with the instance's `secret.key`, never shows their value
 
 Choose **+** at the top of the sidebar. An agent has a name, the program it runs on, its instructions, its permission mode (how often it asks first), and the MCP servers and skills it gets. Agents can change their own instructions, and every change is a revision you can go back to.
 
-**Edit agent**, in the agent's menu, opens its settings beside the chat, in groups:
+**Edit agent**, in the agent's menu, opens its settings beside the chat. At the top are its colour, under its thread, its name, its instructions, and **What it's for**, one line that group chats read to pick it ([In the chat](chat.md#group-chats)), filled from its instructions to start with. **Save** keeps the name, instructions and what it's for; everything else changes as you pick it. Under them, in groups:
 
-- **Brain**: its name, model and effort, permission mode, what a message while it answers does, its backup program, its colour, its instructions, and **What it's for**, one line that group chats read to pick it ([In the chat](chat.md#group-chats)), filled from its instructions to start with. **Save** keeps the name, instructions and what it's for; the rest changes as you pick it.
+- **Brain**: its model and effort, permission mode, what a message while it answers does, and its backup program.
 - **Knows**: its memories, skills, tables and files, each counted, its MCP servers, and Code Mode ([In the chat](chat.md#how-an-agent-uses-its-tools)).
-- **Does**: its routines, and the tokens it used today and this month.
-- **Runs**: whether it's isolated, and its network ([Permissions](permissions.md#isolated-agents)).
+- **Does**: its activity, its routines, and the tokens it used today and this month.
+- **Runs**: whether it's isolated, and its network ([Permissions](permissions.md#isolated-agents)), then the versions of its instructions, to go back to one.
+- **This chat**: the program the chat runs on ([Moving a chat to another program](chat.md#moving-a-chat-to-another-program)), and **Start fresh**.
 
 ## Agent defaults
 
