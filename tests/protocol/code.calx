@@ -29,7 +29,7 @@ import tests.kit.{Instance, calx, check}
 const LONG: u32 = 600000
 
 // What loom mcp lists in Code Mode.
-const DIRECT: str = "tools: search_tools, run_code, search_messages, list_devices, use_device, show_card, add_server, install_server, add_mcp_server"
+const DIRECT: str = "tools: search_tools, run_code, search_messages, propose_note, skill_failed, fix_skill, list_devices, use_device, show_card, add_server, install_server, add_mcp_server"
 
 fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
@@ -131,10 +131,10 @@ fn run(i: Instance) ! Error {
     try check(hints.starts_with("search_tools {#"{"readOnlyHint":true,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false}"#}\nrun_code {#"{"readOnlyHint":false,"destructiveHint":false,"idempotentHint":false,"openWorldHint":false}"#}\n"), "their annotations say search_tools only reads, and run_code destroys nothing and reaches nothing by itself, which Codex asks no one about")
     n += 1
     let meta = try say(mut app, chat.copy(), "m_{n}", String("/meta"))
-    try check(meta == "meta {#"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code"]}}}"#}", "Claude's adapter is told to allow them, in the session's _meta")
+    try check(meta == "meta {#"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code","mcp__loom__propose_note","mcp__loom__skill_failed","mcp__loom__fix_skill"]}}}"#}", "Claude's adapter is told to allow them, in the session's _meta")
     n += 1
     let opencode = try say(mut app, chat.copy(), "m_{n}", String("/env OPENCODE_CONFIG_CONTENT"))
-    try check(opencode == "OPENCODE_CONFIG_CONTENT={#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow"}}"#}", "and OpenCode, in its config")
+    try check(opencode == "OPENCODE_CONFIG_CONTENT={#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow"}}"#}", "and OpenCode, in its config")
 
     // --- The app's tools are called directly, and the tools stay put (LOO-168) ---
     n += 1
