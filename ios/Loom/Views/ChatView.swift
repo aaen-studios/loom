@@ -41,7 +41,9 @@ struct ChatView: View {
                     }
                     ForEach(messages) { m in
                         Group {
-                            if m.isPerson {
+                            if m.deleted {
+                                DeletedMark(message: m, agent: agent)
+                            } else if m.isPerson {
                                 PersonMessage(message: m, agent: agent)
                             } else {
                                 Reply(message: m, agent: agent, openThoughts: $openThoughts)
@@ -49,12 +51,12 @@ struct ChatView: View {
                         }
                         // Lit for a moment, once a quote went to it.
                         .background(lit == m.id ? P.thread(agent?.color ?? "").opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
-                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued) { model.reply(to: m.id) })
+                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted) { model.reply(to: m.id) })
                         .contextMenu {
                             // One menu a message rather than selectable text in each
                             // paragraph, which made each row many times dearer to build.
                             let text = m.text
-                            if thread == nil && !m.live && !m.queued {
+                            if thread == nil && !m.live && !m.queued && !m.deleted {
                                 Button {
                                     model.reply(to: m.id)
                                 } label: {
@@ -71,6 +73,15 @@ struct ChatView: View {
                                     reading = Reading(text: text, message: thread == nil && !m.queued ? m.id : nil, agent: !m.isPerson)
                                 } label: {
                                     Label("Select text", systemImage: "selection.pin.in.out")
+                                }
+                            }
+                            // At once, leaving a mark where it was (PLAN.md, "Deleting a message").
+                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                                Divider()
+                                Button(role: .destructive) {
+                                    session.send(model.deleteMessage(m.id))
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
                                 }
                             }
                         }
@@ -414,7 +425,11 @@ struct QuoteView: View {
                     .font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption))
                     .foregroundStyle(id.isEmpty ? P.ink3 : color)
                     .fixedSize()
-                if let first {
+                if reply.deleted {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(P.ink3)
+                } else if let first {
                     if let image = path.flatMap({ thumb ?? Pictures.kept($0) }) {
                         Image(uiImage: image)
                             .resizable()
@@ -428,7 +443,7 @@ struct QuoteView: View {
                     }
                 }
                 if !shown.isEmpty {
-                    Text(shown).font(Fonts.caption).foregroundStyle(P.ink2).lineLimit(1).truncationMode(.tail)
+                    Text(shown).font(Fonts.caption).foregroundStyle(reply.deleted ? P.ink3 : P.ink2).lineLimit(1).truncationMode(.tail)
                 }
             }
             .frame(height: 20)
@@ -444,7 +459,9 @@ struct QuoteView: View {
     }
 
     /// Its words, picked words in curly quotes; with none, "Picture" or its files' names.
+    /// Once the original is deleted, that it was.
     private var shown: String {
+        if reply.deleted { return "The original was deleted" }
         let words = reply.oneLine
         if !words.isEmpty { return reply.part ? "“\(words)”" : words }
         let pictures = reply.files.filter(\.isImage).count
@@ -476,6 +493,26 @@ struct QuoteSpine: Shape {
 /// more with Vibrant bubbles, with its files above it. What another agent sent sits on
 /// the same side, its bubble a breath of the sender's colour, with the sender's thread
 /// and name in its colour over it.
+/// What's left of a deleted message (PLAN.md, "Deleting a message"): a quiet line where it
+/// was, so replies to it still make sense, on the side of who said it.
+struct DeletedMark: View {
+    var message: Message
+    var agent: Agent?
+
+    var body: some View {
+        let said = message.isPerson
+            ? message.from.map { "\($0)'s message was deleted" } ?? "You deleted a message"
+            : "\(agent?.name ?? "The agent")'s message was deleted"
+        HStack(spacing: 4) {
+            Image(systemName: "trash").font(.system(size: 11))
+            Text(said).font(Fonts.caption)
+        }
+        .foregroundStyle(P.ink3)
+        .frame(maxWidth: .infinity, alignment: message.isPerson ? .trailing : .leading)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct PersonMessage: View {
     @Environment(Session.self) private var session
     @AppStorage(Prefs.vibrant) private var vibrant = false
