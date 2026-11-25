@@ -1526,7 +1526,7 @@ impl Conn {
         if let s = said {
             // A newer app, downloaded and checked, is one of the updates the icon offers.
             if let path = str_at(s.copy(), "path") {
-                if let h = mut self.hub { h.app_ready(str_at(s.copy(), "version") ?? String(), path) }
+                if let h = mut self.hub { h.app_ready(str_at(s.copy(), "version") ?? String(), path, str_at(s.copy(), "failed") ?? String()) }
                 self.tell_updates()
             }
             self.tell(s)
