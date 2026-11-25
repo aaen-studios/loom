@@ -2,7 +2,7 @@
 
 The gear at the bottom of the sidebar opens Settings, as a popup over the chat. Its pages are down the left, under three headings:
 
-- **You**: About you, Appearance, Chat, and App & notifications.
+- **You**: About you, Appearance, Chat, Emoji, and App & notifications.
 - **Agents**: Defaults, Rules, Brains, Skills, Proposals, MCP servers, Secrets and Plugins.
 - **Work**: Routines and Tasks.
 
@@ -72,7 +72,7 @@ Under **Notifications**:
 Under **Updates**:
 
 - Loom's version, and **Check now**. Loom also looks for a new version every few hours.
-- **Update on its own**: a new version goes in by itself, while loom is in the tray and no agent is working. Otherwise the sidebar offers it, to restart into.
+- **Update on its own**: a new version goes in by itself, while loom is in the tray and no agent is working. Otherwise the sidebar offers it, to restart into. A version that didn't start when it went in isn't put in again by itself: the update icon still offers it, saying why it didn't start, and a newer version goes in by itself as usual.
 
 Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), © Twitter, Jason Sofonia and Justine De Caires, under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 

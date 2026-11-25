@@ -1,6 +1,6 @@
 # In the chat
 
-Each agent has one chat that never ends. Choose an agent in the sidebar to talk to it, and on the desktop start typing: the message box has the keys as a chat opens, and when you come back to the window. Its name over the chat opens its menu: Edit agent, Activity, Memory, Ask on the side, Move to…, Start fresh and Delete agent. Start fresh and Delete agent can't be undone, so each asks for a second click.
+Each agent has one chat that never ends. Choose an agent in the sidebar to talk to it, and on the desktop start typing: the message box has the keys as a chat opens, and when you come back to the window. Its name over the chat opens its menu: Pin to top, Move to folder, Hide, Edit agent, Ask on the side and Delete agent. Its activity, its memory, the program the chat runs on and **Start fresh** are on its edit page ([Making an agent](agents.md#making-an-agent)). Start fresh and Delete agent can't be undone, so each asks for a second click.
 
 ## The sidebar
 
@@ -14,6 +14,8 @@ The sidebar lists your group chats first ([Group chats](#group-chats)), then you
 
 Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
 
+At the bottom of the sidebar, over the server, a box shows your plan's limits as the agent program reports them: its icon and the plan's name, such as "Claude Max", then how much of the session and of the week is used, each a small ring with when it resets ("42% · 15:30", "78% · Mon"). A ring turns orange from 75% and red from 90%. Click the box to open the program under **Brains**. There's a box for each program your agents run on that reports its limits. Claude does; Codex doesn't, and a program on an API key has no plan, so neither has a box. The iPhone app doesn't show them yet.
+
 When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads. The thread is only read: where you'd write, **Continue in your own chat** opens your chat with the agent, ready to write.
 
 ## Back to the newest
@@ -21,6 +23,18 @@ When one agent messages another, they talk in a thread of their own, never in yo
 When you scroll up in a chat, a round button with a down arrow shows at the bottom of the chat, over the message box. Click it to go down to the newest message. If messages came while you were up there, its corner says how many.
 
 A chat you open with replies you haven't seen has a line over the first of them, "3 new". It stays until you leave the chat.
+
+On the desktop, a chat opens on its newest 200 messages. Scroll near the top and it loads the 200 before, with "Loading older messages…" over the chat while they come, up to the newest 2,000. Search and Ctrl+F find anything older.
+
+## How full the chat is
+
+The chat never ends, but the agent program's session under it does. The ring just before Send fills with the session's context, orange from 75% and red from 90%, and under the pointer it says how full it is: "Context 41%, 82k of 200k. A fresh session starts at 80%." Once it's 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost.
+
+A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context itself, "Context compacted · 182k → 16k". The iPhone app doesn't show the ring or the lines yet.
+
+## Branching
+
+To try another way from some point without losing the chat, point at a message and choose **Branch from here** by its corner, or right-click it and choose it. A branch is a chat of its own with the same agent, named after the message's first words, which goes on from that message: the agent is given the chat up to it, and nothing after. Your chat goes on as it was. Each branch is a line under the message it goes on from; click it to open the branch in the chat's place, under a strip with the way back.
 
 ## Group chats
 
@@ -141,7 +155,9 @@ The smiley beside the microphone opens the picker: search at the top, a tab for 
 
 A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
 
-Your own emoji are pictures you add in **Settings → Emoji**. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
+On the iPhone, the row of matches runs sideways over the message box, and the smiley opens the picker as a sheet, with the same groups and search. When the smiley is hidden, the **+** sheet has **Emoji**. An emoji from the keyboard shows as loom draws it.
+
+Your own emoji are pictures you add in **Settings → Emoji**. On the iPhone, **Add** takes one from Photos and asks its name, and a tile's menu has Rename and Delete. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
 
 ## How an agent uses its tools
 
@@ -185,7 +201,7 @@ The chat stays on the backup from then on, since usage limits last hours and onl
 
 ## Moving a chat to another program
 
-**Move to…** in the agent's menu lists the programs on the instance, with the one the chat runs on ticked. Pick another, and the next reply says the chat moved, in one line.
+**Runs on**, under **This chat** on the agent's edit page, lists the programs on the instance, with the one the chat runs on picked. Pick another, and the next reply says the chat moved, in one line.
 
 The new program starts with loom's own summary of the chat: what you asked, oldest first, then the newest of the chat word for word. It's made from the chat itself, not by a model, so it costs nothing and works even when the old program can't answer. The agent can search the chat for anything older.
 

@@ -20,7 +20,7 @@ The script downloads the newest `loom` for the machine (x64 or Arm) and checks i
 
 In the desktop app, choose **I have a server**, then **Sign in with a password**, and give its address. Pick a username and password, then choose **New server? Add its setup code** and put the code in. That account is the owner.
 
-Run the script again to update loom, or use `loom update`, which checks the release's signature before it swaps the program.
+Run the script again to update loom, or use `sudo loom update`, which checks the release's signature before it swaps the program. The service runs its own copy of loom, in `/var/lib/loom/bin`, which updates itself when you update the server from the app; `sudo loom update` brings the `loom` command in `/usr/local/bin` and the service's copy to the same version. When the service runs a newer loom than the command, the command says so.
 
 To check a server answers, open `/api/version` at its address: it gives loom's version, and `set_up`, whether it has its owner yet, with no sign-in.
 

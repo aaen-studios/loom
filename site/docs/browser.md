@@ -42,7 +42,7 @@ Four minutes after your last message gets its answer, the chat has paused, and t
 What happens next depends on the agent's [permission mode](permissions.md#permission-modes):
 
 - **Doesn't ask**: the agent keeps its notes and fixes on its own. A line under its reply says so, such as "Remembered 2 things" or "Fixed the skill post-release-notes". Open it to see each one, with **Forget** or **Undo**.
-- **Asks first** or **Asks when it's risky**: a card under the reply asks. For notes it says what the agent would remember and who each is for: untick any you don't want, then **Keep** or **Not now**. A fix says why the skill failed and shows the lines it removes and adds, with **Keep the fix**, **Change it** and **Drop**.
+- **Asks first** or **Asks when it's risky**: a card under the reply asks. For notes it says what the agent would remember and who each is for: untick any you don't want, then **Keep** (it says how many, "Keep 2", or **Drop them** with none ticked) or **Not now**. A fix says why the skill failed and shows the lines it removes and adds, with **Keep the fix**, **Change it** and **Drop**.
 
 A note for all your agents always asks, whatever the mode.
 
