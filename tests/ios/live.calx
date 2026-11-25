@@ -62,7 +62,7 @@ impl Phone {
 fn qr(base: String, made: Json) -> String {
     let v = at(made, "value")
     let pairs: List<(String, String)> = [(String("a"), "http://{base}"), (String("c"), str_at(v.copy(), "code") ?? String()), (String("i"), str_at(v.copy(), "instance") ?? String()), (String("k"), str_at(v, "key") ?? String())]
-    return "loom://link?{form_encode(pairs)}"
+    return "loom://add?{form_encode(pairs)}"
 }
 
 // The next message.created whose message has `role`.
@@ -105,8 +105,14 @@ fn run(inst: mut Instance, phone: Phone) ! Error {
     let link = try owner.cmd("q_link", "link.create", Obj.new().done())
     try check(at(link.copy(), "ok") == Json.Bool(true), "the owner's device makes a code to add a phone")
 
-    // Joining with the code, as the desktop app's Add a phone shows it.
+    // Joining with the code, as the desktop app's Add a device shows it, and a yes from
+    // the owner's device, with the check the phone shows.
     try phone.launch([String("-link"), qr(inst.base.copy(), link)])
+    let ask = at(try owner.until("event", "link.asked", 60000), "ask")
+    wait_ms(2000)
+    try phone.shot(String("0-check"))
+    let yes = try owner.cmd("q_yes", "link.answer", Obj.new().s("ask", str_at(ask.copy(), "id") ?? String()).b("allow", true).done())
+    try check(at(yes, "ok") == Json.Bool(true) and (str_at(ask, "check") ?? String()).len() == 4, "the phone waits with a check, and the owner says yes")
     let added = try owner.until("event", "device.added", 60000)
     try check(str_at(at(added, "device"), "kind") == some(String("ios")), "the app joins with the QR code's text, as an iPhone")
     wait_ms(3000)

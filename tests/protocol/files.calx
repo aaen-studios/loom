@@ -30,6 +30,11 @@ fn file_blocks(message: Json) -> List<Json> {
     return out
 }
 
+fn file_list(files: Json) -> List<Json> {
+    if let Json.Array(fs) = files { return fs.copy() }
+    return List<Json>()
+}
+
 fn results(found: Json) -> usize {
     if let Json.Array(rs) = at(at(found, "value"), "results") { return rs.len() }
     return 0
@@ -103,6 +108,13 @@ fn run(inst: Instance) ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", conversation.copy()).s("text", String("hi")).j("files", Json.Array([Json.Str("b".repeat(64))])).done())
     let refused = try app.until("error", "")
     try check(str_at(refused, "code") == some(String("unknown_file")), "a file that wasn't uploaded is refused")
+    let recent = try app.cmd("q_6", "files.recent", Obj.new().done())
+    let lately = file_list(at(at(recent, "value"), "files"))
+    try check(lately.len() == 3 and str_at(lately[0].copy(), "mime") == some(String("image/png")) and str_at(lately[2].copy(), "name") == some(String("notes.txt")), "files.recent has the files sent and received, newest first")
+    var bob_recent = try Session.connect(base.copy(), bob.copy(), 0)
+    let none_theirs = try bob_recent.cmd("q_1", "files.recent", Obj.new().done())
+    try check(file_list(at(at(none_theirs, "value"), "files")).len() == 0, "and no one else's")
+    bob_recent.close()
 
     // --- Search ---
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", conversation.copy()).s("text", String("Remember the deploy checklist")).done())

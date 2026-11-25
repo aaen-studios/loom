@@ -37,6 +37,21 @@ struct RootView: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: model.notice)
+        .alert(askTitle(model), isPresented: asking(model), presenting: model.openAsks.first) { ask in
+            Button("Not me", role: .cancel) { session.send(model.answerAsk(ask.id, allow: false)) }
+            Button("Add") { session.send(model.answerAsk(ask.id, allow: true)) }
+        } message: { ask in
+            Text("\(ask.check.map(String.init).joined(separator: " "))\nOnly if the new device shows the same")
+        }
+    }
+
+    private func askTitle(_ model: Model) -> String {
+        model.openAsks.first.map { "Add \u{201c}\($0.name)\u{201d}?" } ?? ""
+    }
+
+    /// Whether a device is asking to be added. Its buttons answer it, which takes it away.
+    private func asking(_ model: Model) -> Binding<Bool> {
+        Binding(get: { !model.openAsks.isEmpty }, set: { _ in })
     }
 }
 

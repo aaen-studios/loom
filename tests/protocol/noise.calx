@@ -138,9 +138,13 @@ fn run() ! Error {
 
     // The phone joins, says hello, and sends and fetches a file, all through the socket.
     var phone = try Phone.connect(port, key.copy())
-    let (status, _, joined) = try phone.request("POST", String("/api/link"), json_headers(), "{Obj.new().s("code", code).j("device", device("iPhone")).done()}".to_bytes())
+    let (asking, _, waits) = try phone.request("POST", String("/api/link"), json_headers(), "{Obj.new().s("code", code).j("device", device("iPhone")).done()}".to_bytes())
+    let secret = str_at(json_of(waits), "waiting") ?? String()
+    try check(asking == 202 and secret.len() > 0, "the phone uses the QR code's code over Noise, and waits for a yes")
+    _ = try app.answer_link("q_yes", true)
+    let (status, _, joined) = try phone.request("POST", String("/api/link/wait"), json_headers(), "{Obj.new().s("waiting", secret).done()}".to_bytes())
     let token = str_at(json_of(joined.copy()), "token") ?? String()
-    try check(status == 200 and token.len() > 0, "the phone joins with the QR code's code, over Noise")
+    try check(status == 200 and token.len() > 0, "and once it's said yes to, it joins")
     try phone.send(Obj.new().s("t", String("hello")).s("token", token.copy()).j("versions", Json.Array([Json.Int(1)])).i("after", 0).done())
     let welcome = try phone.until("welcome")
     try check(str_at(welcome, "device") != none, "the phone is welcomed over Noise")

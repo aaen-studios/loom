@@ -41,7 +41,7 @@ docker logs loom   # the setup code
 
 Put a proxy with TLS in front of it.
 
-**Your phone.** In the desktop app, **Add a phone** shows a QR code. The phone reaches your computer over Noise, end to end, on your Wi-Fi or over Tailscale. Push notifications go through an opt-in relay and are sealed end to end. The iPhone app isn't released yet.
+**Your other devices.** **Add a device**, on a device signed in, shows a QR code for a phone and a code to paste on a computer, and the new device joins once you say yes there. A phone reaches your computer over Noise, end to end, on your Wi-Fi or over Tailscale. Push notifications go through an opt-in relay and are sealed end to end. The iPhone app isn't released yet.
 
 **The server on a Mac.** `loom-macos` in each release is the `loom` server for macOS.
 
