@@ -21,6 +21,7 @@ use gpui_kit::*;
 use serde_json::Value;
 
 use crate::core::Core;
+use crate::meter;
 use crate::model::{
     self, Approval, Conn, ImportSource, Message, Model, Mood, Offer, ServerUpdate, SignIn,
 };
@@ -4249,6 +4250,35 @@ ACTA_KEY=secret:ACTA_KEY",
             )
     }
 
+    /// In another agent's thread, in the composer's place: back to your own chat with
+    /// `agent`, ready to write.
+    fn continue_button(&self, agent: &str, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        let agent = agent.to_string();
+        div().w_full().max_w(px(self.prefs.column())).child(
+            div()
+                .id("continue-own-chat")
+                .role(Role::Button)
+                .aria_label("Continue in your own chat")
+                .w_full()
+                // As tall as the composer, which it stands in for.
+                .h(px(control::ICON_COMPOSER + 2.0 * space::S + 2.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::COMPOSER))
+                .border_1()
+                .border_color(p.line)
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink_2)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
+                .child("Continue in your own chat")
+                .on_click(cx.listener(move |this, _, _, cx| this.select(agent.clone(), cx))),
+        )
+    }
+
     /// The colour of the agent that keeps a thread with another: its thread's, or a plain
     /// ink for a plugin's panel or an agent that's gone.
     fn ask_tint(&self, k: &model::Ask) -> Hsla {
@@ -6775,6 +6805,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(self.update_pop(false, cx), |d, pop| d.child(pop))
+            .children(self.limit_boxes(cx))
             // The server, as its spool, on the left, and the settings on the right: each
             // opens the popup. While anything loom runs is behind, the update icon sits
             // just left of the gear.
@@ -6922,6 +6953,12 @@ ACTA_KEY=secret:ACTA_KEY",
             behind: behind.to_vec(),
             behind_all: self.hub().behind_all,
             update_open: !behind.is_empty() && self.update_pop_open(),
+            minute: if model.plan_limits().is_empty() {
+                0
+            } else {
+                chrono::Local::now().timestamp_millis() / 60_000
+            },
+            limits: model.plan_limits(),
         }
     }
 
@@ -6991,6 +7028,90 @@ ACTA_KEY=secret:ACTA_KEY",
             .soft_hover(transparent_black(), p.hover, None)
             .child(Icon::new(IconName::Plus).small())
             .on_click(cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)))
+    }
+
+    /// The limits of the person's plans, over the server's row: a box for each program
+    /// that reports them and that their agents run on, with its icon and its plan's name,
+    /// then a line each for the session and the week, a ring with how much is used and
+    /// when it resets. A click opens the program under Brains. The rail leaves them out.
+    fn limit_boxes(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        let now = chrono::Local::now();
+        let mut out = Vec::new();
+        for (name, limits) in self.model.plan_limits() {
+            let listed = self.model.program_listed(&name).cloned();
+            let plan = if limits.plan.is_empty() {
+                self.model.program_title(&name)
+            } else {
+                limits.plan.clone()
+            };
+            let mut lines = Vec::new();
+            for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
+                let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
+                    continue;
+                };
+                let ink = match meter::Level::of(w.used) {
+                    meter::Level::Bad => p.bad,
+                    meter::Level::Warn => p.warn,
+                    meter::Level::Quiet => p.ink_2,
+                };
+                lines.push(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::S))
+                        .child(meter::ring(
+                            control::LIMIT_RING,
+                            w.fraction(),
+                            ink,
+                            p.line_strong,
+                        ))
+                        .child(div().flex_1().text_color(p.ink_2).child(label))
+                        .child(div().text_color(p.ink_3).child(w.words(now))),
+                );
+            }
+            let open = name.clone();
+            out.push(
+                div()
+                    .id(SharedString::from(format!("limits-{name}")))
+                    .role(Role::Button)
+                    .aria_label(format!("{plan} limits"))
+                    .mx(px(space::S))
+                    .mb(px(space::XS))
+                    .p(px(space::S))
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::XS))
+                    .rounded(px(radius::BUTTON))
+                    .border_1()
+                    .border_color(p.line)
+                    .text_size(px(size::CAPTION))
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(self.brain_icon(listed.as_ref(), control::LIMIT_RING))
+                            .child(
+                                div()
+                                    .text_size(px(size::SMALL))
+                                    .text_color(p.ink)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .child(plan),
+                            ),
+                    )
+                    .children(lines)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // Brains opens on its list, so the program's page after.
+                        this.open(Screen::Programs, cx);
+                        this.program_open = Some(open.clone());
+                    }))
+                    .into_any_element(),
+            );
+        }
+        out
     }
 
     /// The settings gear, which opens the popup on the page last open.
@@ -9937,6 +10058,8 @@ ACTA_KEY=secret:ACTA_KEY",
             || self.menu.is_some()
             || self.browser_big
             || self.model.selected.is_none()
+            // Another agent's thread has no composer to type in.
+            || self.model.branch_open().is_some_and(|c| c.asked_by.is_some())
         {
             return;
         }
@@ -9994,6 +10117,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 .map(|c| c.title.clone())
                 .unwrap_or_else(|| "Branch".into())
         });
+        // Another agent's thread is read only: where the composer would be, the way to
+        // your own chat with the agent it's under.
+        let theirs = self.model.ask_open().is_some();
         let strip = match (
             self.model.task_open().cloned(),
             agent.as_ref(),
@@ -10395,16 +10521,25 @@ ACTA_KEY=secret:ACTA_KEY",
                         ),
                 ),
         );
+        let continue_button = match agent.as_ref() {
+            Some(a) if theirs => {
+                composer = None;
+                Some(self.continue_button(&a.id, cx))
+            }
+            _ => None,
+        };
         let column = div()
             .flex_1()
             .min_w_0()
             .min_h_0()
             .flex()
             .flex_col()
-            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
-                this.attach(paths.paths(), cx);
-            }))
-            .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
+            .when(!theirs, |d| {
+                d.on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                    this.attach(paths.paths(), cx);
+                }))
+                .drag_over::<ExternalPaths>(move |s, _, _, _| s.bg(p.hover))
+            })
             .when_some(strip, |d, s| d.child(s))
             .child(
                 div()
@@ -10472,7 +10607,7 @@ ACTA_KEY=secret:ACTA_KEY",
             )
             .when_some(ask, |d, a| d.child(a))
             .when_some(queue, |d, q| d.child(q))
-            .when_some(composer, |d, c| {
+            .when_some(composer.or(continue_button), |d, c| {
                 d.child(
                     div()
                         .w_full()
@@ -24405,6 +24540,9 @@ struct SidebarKey {
     behind: Vec<model::Behind>,
     behind_all: bool,
     update_open: bool,
+    /// The limits of the person's plans, and the minute, for the 0% once one resets.
+    limits: Vec<(String, model::PlanLimits)>,
+    minute: i64,
 }
 
 /// An agent, as the sidebar shows it.
