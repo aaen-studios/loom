@@ -42,7 +42,7 @@ Under **Composer**:
 
 Under **Sidebar**:
 
-- **Search in the sidebar**: a search box over the agents. Off by default.
+- **Search in the sidebar**: a search box over the agents that finds words in every chat. Off by default; Ctrl+Shift+F (⌘⇧F on a Mac) opens it either way.
 
 ## App & notifications
 

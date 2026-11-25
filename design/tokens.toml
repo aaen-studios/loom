@@ -111,6 +111,8 @@ bubble = "#1c1c1f"
 ok = "#6ccf9a"
 bad = "#ff7a6b"
 warn = "#f2a77a"     # what can change something, such as a question's "Can change"
+find = "#3b3417"     # a match found in a chat (Ctrl+F)
+find-current = "#94781a" # the match it's on
 
 [color.light]
 bg = "#ffffff"
@@ -130,6 +132,8 @@ bubble = "#f1f1f3"
 ok = "#1f8a55"
 bad = "#d4442f"
 warn = "#c2621f"
+find = "#fbefb4"
+find-current = "#f2cc3d"
 
 # An agent's thread colour, picked when the agent is made. Twelve, chosen so
 # any two tell apart, in both themes.

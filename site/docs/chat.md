@@ -24,6 +24,12 @@ Select words in a message for a small bar with **Copy**, **Quote** and, in an ag
 
 What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it over the bubble. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
 
+## Finding in a chat
+
+Press Ctrl+F (⌘F on a Mac) to find words in the open chat. A small box opens at the top right of the chat, and every match is marked in yellow, the one you're on brighter, with where it is ("3 of 7"). It finds in the whole chat, however far back, and starts on the newest match. Enter goes back to the one before, Shift+Enter on to the next, and so do the arrows in the box. Esc or × closes it and the marks go.
+
+To search every chat at once, press Ctrl+Shift+F (⌘⇧F) for the search in the sidebar.
+
 ## Cards in replies
 
 An agent can put cards in its reply, drawn in the chat's own look:

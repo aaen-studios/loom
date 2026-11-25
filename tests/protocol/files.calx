@@ -128,6 +128,14 @@ fn run(inst: Instance) ! Error {
     try check(results(by_name) == 1, "file names are searched too")
     let other = try app.cmd("q_5", "messages.search", Obj.new().s("query", String("deploy")).s("agent", String("a_999")).done())
     try check(results(other) == 0, "and an agent's filter keeps to that agent")
+    let in_chat = try app.cmd("q_6", "messages.search", Obj.new().s("query", String("deploy")).s("conversation", conversation.copy()).done())
+    try check(results(in_chat.copy()) == 2, "finding in a chat finds its messages")
+    if let Json.Array(rs) = at(at(in_chat, "value"), "results") {
+        let first = at(rs[0].copy(), "message")
+        try check(str_at(first, "role") == some(String("person")), "oldest first, the person's message before the agent's echo")
+    }
+    let elsewhere = try app.cmd("q_7", "messages.search", Obj.new().s("query", String("deploy")).s("conversation", String("c_999")).done())
+    try check(results(elsewhere) == 0, "and keeps to that chat")
     var bob_app = try Session.connect(base.copy(), bob, 0)
     let theirs = try bob_app.cmd("q_1", "messages.search", Obj.new().s("query", String("deploy")).done())
     try check(results(theirs) == 0, "no one finds someone else's messages")

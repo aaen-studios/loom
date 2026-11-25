@@ -111,6 +111,8 @@ pub mod color_dark {
     pub const OK: u32 = 0x6ccf9a;
     pub const BAD: u32 = 0xff7a6b;
     pub const WARN: u32 = 0xf2a77a;
+    pub const FIND: u32 = 0x3b3417;
+    pub const FIND_CURRENT: u32 = 0x94781a;
 }
 
 pub mod color_light {
@@ -131,6 +133,8 @@ pub mod color_light {
     pub const OK: u32 = 0x1f8a55;
     pub const BAD: u32 = 0xd4442f;
     pub const WARN: u32 = 0xc2621f;
+    pub const FIND: u32 = 0xfbefb4;
+    pub const FIND_CURRENT: u32 = 0xf2cc3d;
 }
 
 pub mod thread_color_dark {
