@@ -6526,6 +6526,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    // The middle button scrolls it, as it does the chat.
+                    .on_mouse_down(
+                        MouseButton::Middle,
+                        cx.listener(|this, e: &MouseDownEvent, window, cx| {
+                            this.auto_press(e.position, false, window, cx);
+                        }),
+                    )
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -9157,7 +9164,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             .on_mouse_down(
                                 MouseButton::Middle,
                                 cx.listener(|this, e: &MouseDownEvent, window, cx| {
-                                    this.auto_press(e.position, window, cx);
+                                    this.auto_press(e.position, true, window, cx);
                                 }),
                             )
                             .child(list)
@@ -14040,6 +14047,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                         }
                         this.auto.moved(e.position);
+                        this.auto_cursor(window, cx);
                         this.auto_run(window, cx);
                     });
                 });
@@ -14058,13 +14066,32 @@ ACTA_KEY=secret:ACTA_KEY",
         }
     }
 
-    /// The middle button went down in the chat at `at`: the chat scrolls by where the
-    /// pointer is from there.
-    fn auto_press(&mut self, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    /// The middle button went down in the chat or the sidebar at `at`: what's under it
+    /// scrolls by where the pointer is from there. In the chat (`links`), not on a link or
+    /// a pill, which have the pointing hand there, as its buttons do: the middle button
+    /// opens a link, as it does in a browser. The sidebar's rows have the hand too, all of
+    /// it, and nothing there takes the middle button, so it starts anywhere there.
+    fn auto_press(
+        &mut self,
+        at: Point<Pixels>,
+        links: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if links && window.hovered_cursor_style() == Some(CursorStyle::PointingHand) {
+            return;
+        }
         self.auto.press(at);
+        self.auto_cursor(window, cx);
         self.auto_run(window, cx);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Shows the middle button's cursor while it's on, the way it scrolls once it does,
+    /// and the cursor of what's under the pointer again once it's off.
+    fn auto_cursor(&self, window: &mut Window, cx: &mut App) {
+        window.set_pan_cursor(self.auto.cursor(), cx);
     }
 
     /// Starts the middle button's steps, one a frame, unless they're coming: started
@@ -17224,12 +17251,40 @@ fn details_toggle(p: Palette, key: &str, open: bool, this: WeakEntity<Loom>) -> 
 }
 
 /// All of what a card shows only some of, in a box of its own that scrolls past a few
-/// lines.
-fn details_box(p: Palette, key: &str, raw: &str, scale: f32) -> Stateful<Div> {
-    card_code(p, raw.to_string(), scale)
-        .id(SharedString::from(format!("r-{key}")))
-        .max_h(px(280.0))
-        .overflow_y_scroll()
+/// lines. The chat's list takes the wheel, and the middle button's scrolling, from
+/// anything inside it that doesn't claim them, so the box claims them, as a long code
+/// block does (`ScrollBounce`): under the pointer, the box scrolls and the chat stays.
+fn details_box(p: Palette, key: &str, raw: &str, scale: f32) -> impl IntoElement {
+    thread_local! {
+        /// Each box's scrolling, which outlives a frame, by the box's key. Few are open
+        /// at once; past a few dozen, the oldest go.
+        static SCROLLS: RefCell<Vec<(String, ScrollHandle)>> = const { RefCell::new(Vec::new()) };
+    }
+    let handle = SCROLLS.with(|s| {
+        let mut s = s.borrow_mut();
+        if let Some(i) = s.iter().position(|(k, _)| k == key) {
+            let kept = s.remove(i);
+            let handle = kept.1.clone();
+            s.push(kept);
+            return handle;
+        }
+        if s.len() >= 32 {
+            s.remove(0);
+        }
+        let handle = ScrollHandle::new();
+        s.push((key.to_string(), handle.clone()));
+        handle
+    });
+    let id = SharedString::from(format!("r-{key}"));
+    gpui_kit::base::ScrollBounce::new(
+        SharedString::from(format!("rb-{key}")),
+        &handle,
+        card_code(p, raw.to_string(), scale)
+            .id(id)
+            .max_h(px(280.0))
+            .overflow_y_scroll()
+            .track_scroll(&handle),
+    )
 }
 
 /// A card's button, as tall as an approval's: the main one filled, the rest outlined.
@@ -20251,6 +20306,8 @@ impl Render for Loom {
                 self.auto_run(window, cx);
             }
         }
+        // Its cursor, or none once a click, key or wheel stopped it.
+        self.auto_cursor(window, cx);
         let h = window.viewport_size().height.as_f32();
         let splash = self.splash(h);
         // A new agent's curtain covers what its weave covered: the whole window for the
@@ -21928,21 +21985,21 @@ fn auto_step(this: WeakEntity<Loom>, run: u64, last: Instant, window: &mut Windo
     window.on_next_frame(move |window, cx| auto_step(this, run, now, window, cx));
 }
 
-/// The middle button's marker, where it was pressed: a round button with an arrow up and
-/// one down, and a dot between.
+/// The middle button's marker, where it was pressed, as a browser's: small, plain and
+/// see-through, an arrow up and one down with a dot between. It stays as it is: the
+/// cursor shows which way it scrolls.
 fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
-    const SIZE: f32 = 30.0;
-    let ink = p.ink_2;
+    const SIZE: f32 = 24.0;
+    let ink = p.ink_2.opacity(0.75);
     div()
         .absolute()
         .left(at.x - px(SIZE / 2.0))
         .top(at.y - px(SIZE / 2.0))
         .size(px(SIZE))
         .rounded_full()
-        .bg(p.bg)
+        .bg(p.bg.opacity(0.7))
         .border_1()
-        .border_color(p.line_strong)
-        .shadow(card_shadow(p))
+        .border_color(p.ink_3.opacity(0.5))
         .child(
             canvas(
                 |_, _, _| {},
@@ -21950,7 +22007,7 @@ fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
                     let c = bounds.center();
                     // An arrow: its tip `dir` (−1 up, 1 down) from the middle.
                     let arrow = |dir: f32| {
-                        let (tip, base, half) = (9.0 * dir, 4.5 * dir, 3.5);
+                        let (tip, base, half) = (7.5 * dir, 3.5 * dir, 3.0);
                         let mut b = PathBuilder::fill();
                         b.move_to(point(c.x, c.y + px(tip)));
                         b.line_to(point(c.x + px(half), c.y + px(base)));
@@ -21963,7 +22020,7 @@ fn auto_marker(p: Palette, at: Point<Pixels>) -> impl IntoElement {
                             window.paint_path(path, ink);
                         }
                     }
-                    let r = px(1.5);
+                    let r = px(1.25);
                     window.paint_quad(
                         fill(
                             Bounds::new(point(c.x - r, c.y - r), size(r * 2.0, r * 2.0)),
