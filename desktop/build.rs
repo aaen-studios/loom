@@ -75,4 +75,29 @@ fn main() {
     for dir in ["core", "shared", "server"] {
         println!("cargo:rerun-if-changed={}", root.join(dir).display());
     }
+    // Twemoji's pictures (design/twemoji), which the app draws built-in emoji with: each
+    // SVG's name and bytes, in the order of their names, for src/emoji.rs.
+    let twemoji = root.join("design/twemoji/svg");
+    let mut names: Vec<String> = std::fs::read_dir(&twemoji)
+        .expect("design/twemoji/svg isn't there: run calx scripts/emoji.calx")
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter_map(|n| n.strip_suffix(".svg").map(String::from))
+        .collect();
+    // By name without .svg, as src/emoji.rs looks them up: `270b` before `270b-1f3fb`.
+    names.sort();
+    let mut table = String::from("pub static SVGS: &[(&str, &[u8])] = &[\n");
+    for n in &names {
+        let path = twemoji.join(format!("{n}.svg"));
+        table.push_str(&format!(
+            "    ({:?}, include_bytes!({:?})),\n",
+            n,
+            path.to_string_lossy()
+        ));
+    }
+    table.push_str("];\n");
+    std::fs::write(out.join("twemoji.rs"), table).expect("can't write twemoji.rs");
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("design/twemoji").display()
+    );
 }
