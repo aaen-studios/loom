@@ -16,6 +16,12 @@ Your folders and hidden agents are kept on the server, so every device shows the
 
 When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads. The thread is only read: where you'd write, **Continue in your own chat** opens your chat with the agent, ready to write.
 
+## Back to the newest
+
+When you scroll up in a chat, a round button with a down arrow shows at the bottom of the chat, over the message box. Click it to go down to the newest message. If messages came while you were up there, its corner says how many.
+
+A chat you open with replies you haven't seen has a line over the first of them, "3 new". It stays until you leave the chat.
+
 ## Replying to a message
 
 Point at a message, yours or an agent's, and choose **Reply** by its corner, or right-click it and choose **Reply**. With the message box empty, ↑ replies to the newest message. On the iPhone, swipe right on a message, or long-press it and choose **Reply**.
@@ -88,6 +94,16 @@ The **+** before the message box, or `/` in an empty one, opens a menu with a se
 Type to find a file, skill or routine in any of them. The arrows move, → opens a list and ← goes back, Enter takes a row, and Esc shuts the menu. Each list ends with a link to its settings page.
 
 On an iPhone, **+** opens a sheet with the same lists, and your newest photos in a row at the top.
+
+## Emoji
+
+Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
+
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. Shift+click takes one and keeps the picker open. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+
+A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
+
+Your own emoji are pictures you add in **Settings → Emoji**. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
 
 ## How an agent uses its tools
 

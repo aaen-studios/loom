@@ -9,7 +9,9 @@ module tests.protocol.learn
 // stops that turn and goes at once. A skill it said failed is fixed: the fix
 // is put in, with the lines it removes and adds, and undone. With a mode that
 // asks, the same wait on a card under the reply: put off, they wait on the
-// Proposals page, and a fix the person changed is kept as they changed it.
+// Proposals page, and a fix the person changed is kept as they changed it. In
+// a group chat, each member that answered looks back over its own part, one
+// after the other, and what it keeps goes under its own reply.
 //
 //     calx tests/protocol/learn.calx
 import std.json.{Json}
@@ -192,6 +194,46 @@ fn card_part(app: mut Session, agent: String, chat: String) ! Error {
     try check(str_at(at(late, "error"), "code") == some(String("changed")), "a fix isn't undone once the skill has changed since")
 }
 
+// A group chat: each member that answered looks back over its own part once it
+// pauses, one after the other, and what each keeps goes under its own reply.
+fn room_part(app: mut Session, juniper: String) ! Error {
+    try agent_cmd(mut app, "q_g0", juniper.copy(), "allow")
+    let made = try app.cmd("q_g1", "agent.create", Obj.new().s("name", String("Moss")).s("acp_agent", String("fake")).s("instructions", String("You are a test too.")).done())
+    let moss = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    try agent_cmd(mut app, "q_g2", moss.copy(), "allow")
+    let room = try app.cmd("q_g3", "room.create", Obj.new().s("name", String("Pair")).j("members", Json.Array([Json.Str(juniper.copy()), Json.Str(moss.copy())])).done())
+    let pair = str_at(at(at(room, "value"), "conversation"), "id") ?? String()
+    let first = try say(mut app, pair.copy(), "m_g1", "[@Juniper](loom:agent/{juniper})\n/next /mcp propose_note \{\"text\":\"Ann plays chess.\"\}\nok")
+    let second = try say(mut app, pair.copy(), "m_g2", "[@Moss](loom:agent/{moss})\n/next /mcp propose_note \{\"text\":\"Ann runs on Sundays.\"\}\nok")
+    try check(str_at(first.copy(), "agent") == some(juniper.copy()) and str_at(second.copy(), "agent") == some(moss.copy()), "two members answer in a group chat")
+    var quiet = List<Json>()
+    var overlapped = false
+    var running = String()
+    var looked: usize = 0
+    while quiet.len() < 2 or running.len() > 0 {
+        while looked < app.frames.len() {
+            let f = app.frames[looked].copy()
+            looked += 1
+            let kind = str_at(f.copy(), "kind") ?? String()
+            if kind == "run.started" and bool_at(f.copy(), "quiet") == some(true) and str_at(f.copy(), "conversation") == some(pair.copy()) {
+                if running.len() > 0 { overlapped = true }
+                running = str_at(f.copy(), "run") ?? String()
+                quiet.push(f)
+            } else if kind == "run.finished" and running.len() > 0 and str_at(f.copy(), "run") == some(running.copy()) {
+                running = String()
+            }
+        }
+        if quiet.len() < 2 or running.len() > 0 { _ = try app.until("event", "", 30000) }
+    }
+    try see(str_at(quiet[0].copy(), "agent") == some(juniper.copy()) and str_at(quiet[1].copy(), "agent") == some(moss.copy()) and not overlapped, "once it pauses, each member looks back over its part, one after the other", "{quiet}")
+    let j = try under(mut app, str_at(first, "id") ?? String(), "Ann plays chess.")
+    let m = try under(mut app, str_at(second, "id") ?? String(), "Ann runs on Sundays.")
+    let j_items = learned(j)
+    let m_items = learned(m)
+    try see(j_items.len() == 1 and str_at(j_items[0].copy(), "agent") == some(juniper.copy()) and m_items.len() == 1 and str_at(m_items[0].copy(), "agent") == some(moss.copy()), "and what each keeps goes under its own reply, as its own note", "{j_items} {m_items}")
+    _ = try app.cmd("q_g4", "agent.delete", Obj.new().s("agent", moss).done())
+}
+
 fn run(i: Instance) ! Error {
     var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_a", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
@@ -201,6 +243,7 @@ fn run(i: Instance) ! Error {
     try kept_part(mut app, agent.copy(), chat.copy())
     try look_back_part(mut app, chat.copy())
     try card_part(mut app, agent.copy(), chat)
+    try room_part(mut app, agent.copy())
     _ = try app.cmd("q_d", "agent.delete", Obj.new().s("agent", agent).done())
     app.close()
 }

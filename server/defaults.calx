@@ -13,6 +13,9 @@ module server.defaults
 // - `instructions`: what every agent is told, beside the person's profile;
 // - `busy`: what a message to an agent that's still answering does, `queue`
 //   (it waits its turn) or `steer` (the turn stops for it).
+// - `router_brain` and `router_model`: the program and the model the group chats'
+//   router runs on (PLAN.md, "Group chats"); "" for the program is the one loom
+//   picks, and the model is `haiku` until the person picks another.
 //
 // The instance does the rest, with the store. What's here only reads and
 // checks JSON.
@@ -22,11 +25,11 @@ import shared.obj.{Obj, at, str_at}
 // How long the instructions every agent follows may be: they go into every session.
 pub const INSTRUCTIONS_MOST: usize = 8000
 
-const FIELDS: str = "brain backup config permission instructions busy"
+const FIELDS: str = "brain backup config permission instructions busy router_brain router_model"
 
 // The defaults a person has before they change any.
 pub fn blank() -> Json {
-    return Obj.new().s("brain", String()).s("backup", String()).j("config", Obj.new().done()).s("permission", String("ask")).s("instructions", String()).s("busy", String("queue")).i("revision", 0).s("by", String()).i("at", 0).done()
+    return Obj.new().s("brain", String()).s("backup", String()).j("config", Obj.new().done()).s("permission", String("ask")).s("instructions", String()).s("busy", String("queue")).s("router_brain", String()).s("router_model", String("haiku")).i("revision", 0).s("by", String()).i("at", 0).done()
 }
 
 // The defaults as kept, with each field there, its blank where it's missing.
@@ -120,6 +123,16 @@ pub fn apply(old: Json, args: Json) -> Json ! Error {
         let busy = text_or(v, "queue") ?? String()
         if busy != "queue" and busy != "steer" { fail "busy is queue or steer." }
         o.m.insert(String("busy"), Json.Str(busy))
+    }
+    if has(args.copy(), "router_brain") {
+        let v = at(args.copy(), "router_brain")
+        let brain = text_or(v, "") else fail "router_brain is the name of an agent program, or null."
+        o.m.insert(String("router_brain"), Json.Str(brain))
+    }
+    if has(args.copy(), "router_model") {
+        let v = at(args.copy(), "router_model")
+        let model = text_or(v, "haiku") else fail "router_model is a model's id, or null."
+        o.m.insert(String("router_model"), Json.Str(if model.trim().len() == 0 { String("haiku") } else { model.trim().copy() }))
     }
     if has(args.copy(), "config") {
         let changes = at(args.copy(), "config")
@@ -276,4 +289,13 @@ fn refused(args: Json) -> bool {
         ok(_) => false,
         err(_) => true,
     }
+}
+
+@test
+fn the_router_runs_on_haiku_until_the_person_picks() {
+    assert(str_at(blank(), "router_model") == some(String("haiku")))
+    let d = apply(blank(), Obj.new().s("router_brain", String("codex")).s("router_model", String("gpt-5-mini")).done())!
+    assert(str_at(d.copy(), "router_brain") == some(String("codex")) and str_at(d.copy(), "router_model") == some(String("gpt-5-mini")))
+    let back = apply(d, Obj.new().j("router_brain", Json.Null).j("router_model", Json.Null).done())!
+    assert(str_at(back.copy(), "router_brain") == some(String()) and str_at(back, "router_model") == some(String("haiku")))
 }

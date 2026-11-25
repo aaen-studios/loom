@@ -30,8 +30,9 @@ pub fn keeps_itself(mode: String) -> bool {
 }
 
 // What the agent is told in its quiet turn once its chat has paused, with the
-// failures of skills it said that no fix was proposed for.
-pub fn look_back(failures: List<Json>) -> String {
+// failures of skills it said that no fix was proposed for. In a group chat it's
+// one of the members that answered there, and looks back over its own part.
+pub fn look_back(failures: List<Json>, in_room: bool) -> String {
     var fixes = String()
     if failures.len() > 0 {
         var said = List<String>()
@@ -40,7 +41,8 @@ pub fn look_back(failures: List<Json>) -> String {
         }
         fixes = " You said {if said.len() == 1 { "a skill" } else { "skills" }} failed: {said.join("; ")}. Fix {if said.len() == 1 { "it" } else { "each" }} with fix_skill: read it with read_skill, and give it whole, with what went wrong put right and the rest as it was."
     }
-    return "[loom: Your chat with your person has paused. Look back over it, from where you last did this or from its start, for what's worth keeping, and keep each with propose_note: a lasting fact about them or their work that you'd want in a later chat, one fact a note, with shared for one every agent of theirs should know, and site for one about a site. Not what recall has already, what only mattered today, or a secret.{fixes} Nothing at all is a fine answer. Your person doesn't see this turn or what you say in it, only what you keep, so don't answer them, and say nothing more than a word.]"
+    let chat = if in_room { "The group chat you answer in with your person and their other agents has paused. Look back over your part of it" } else { "Your chat with your person has paused. Look back over it" }
+    return "[loom: {chat}, from where you last did this or from its start, for what's worth keeping, and keep each with propose_note: a lasting fact about them or their work that you'd want in a later chat, one fact a note, with shared for one every agent of theirs should know, and site for one about a site. Not what recall has already, what only mattered today, or a secret.{fixes} Nothing at all is a fine answer. Your person doesn't see this turn or what you say in it, only what you keep, so don't answer them, and say nothing more than a word.]"
 }
 
 // What a failure an agent says of a skill keeps: its step and why, cut short.
@@ -200,10 +202,11 @@ fn a_fix_shows_what_it_removes_and_adds_around_it() {
 
 @test
 fn looking_back_asks_for_notes_and_fixes() {
-    let plain = look_back(List<Json>())
+    let plain = look_back(List<Json>(), false)
     assert(plain.starts_with("[loom: Your chat with your person has paused.") and plain.contains("propose_note") and not plain.contains("fix_skill"))
-    let failed = look_back([Obj.new().s("skill", String("post-release-notes")).s("step", String("Press Publish")).s("why", String("There's no Publish button.")).done()])
+    let failed = look_back([Obj.new().s("skill", String("post-release-notes")).s("step", String("Press Publish")).s("why", String("There's no Publish button.")).done()], false)
     assert(failed.contains("You said a skill failed: post-release-notes, at \"Press Publish\" (There's no Publish button.). Fix it with fix_skill"))
+    assert(look_back(List<Json>(), true).starts_with("[loom: The group chat you answer in with your person and their other agents has paused. Look back over your part of it, from where"))
 }
 
 @test
