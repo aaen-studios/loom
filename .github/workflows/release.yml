@@ -32,11 +32,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-dry"; fi
           echo "LOOM_VERSION=$v" >> "$GITHUB_ENV"
 
-      - name: Install Calx
-        shell: pwsh
-        run: |
-          irm https://calxlang.com/install.ps1 | iex
-          "$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: ./.github/actions/calx
 
       - name: Rust
         run: rustup update stable && rustup default stable
@@ -91,10 +87,7 @@ jobs:
           if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="0.0.0-dry"; fi
           echo "LOOM_VERSION=$v" >> "$GITHUB_ENV"
 
-      - name: Install Calx
-        run: |
-          curl -fsSL https://calxlang.com/install.sh | sh
-          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/calx
 
       - name: Rust
         run: rustup update stable && rustup default stable
@@ -137,18 +130,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx (Linux, macOS)
-        if: runner.os != 'Windows'
-        run: |
-          curl -fsSL https://calxlang.com/install.sh | sh
-          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
-
-      - name: Install Calx (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          irm https://calxlang.com/install.ps1 | iex
-          "$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: ./.github/actions/calx
 
       - name: Build
         shell: bash
@@ -182,10 +164,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx
-        run: |
-          curl -fsSL https://calxlang.com/install.sh | sh
-          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/calx
 
       - uses: actions/download-artifact@v4
         with:

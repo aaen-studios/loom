@@ -64,7 +64,7 @@ The apps hold no logic, so the desktop and the phone can't disagree about data o
 
 ## Building
 
-You need [`calx`](https://calxlang.com) on your PATH, and for the desktop app, a recent stable Rust.
+You need [`calx`](https://calxlang.com) on your PATH, the version in [`.calx-version`](.calx-version), and for the desktop app, a recent stable Rust. `calx scripts/calx_pin.calx` says whether yours is that one, and how to install it if it isn't.
 
 ```sh
 calx build server/main.calx -o loom      # the server: loom serve, loom install, …

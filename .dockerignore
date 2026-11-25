@@ -1,4 +1,6 @@
-# The image needs only server/ and shared/.
+# The image needs only server/ and shared/, and the pinned Calx with its installer.
 *
 !server/
 !shared/
+!.calx-version
+!.github/actions/calx/install.sh

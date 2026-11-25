@@ -6,7 +6,7 @@ Loom isn't on TestFlight or the App Store yet. Until it is, you build the app on
 
 - A Mac with Xcode.
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen): `brew install xcodegen`.
-- [Calx](https://calxlang.com), nightly 202611231257 or newer (`calx update` brings an older one up to date).
+- [Calx](https://calxlang.com), the version in loom's [`.calx-version`](https://github.com/aaen-studios/loom/blob/main/.calx-version). `calx scripts/calx_pin.calx` says whether yours is that one, and how to install it.
 - For your phone, an Apple account. A free one works, but the app it signs stops after 7 days and has to be installed again. With Apple's developer program (99 USD a year) it lasts a year.
 
 ## Building it

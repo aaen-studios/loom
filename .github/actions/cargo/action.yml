@@ -1,0 +1,48 @@
+name: Cargo cache
+description: >
+  The desktop app's build, kept between runs: the registry, and desktop/target and
+  desktop/setup/target whole, the vendored GPUI crates (desktop/vendor) too, which
+  Swatinem/rust-cache leaves out as it does every path crate in a workspace. Saved
+  from main only; a pull request reads what main saved.
+
+inputs:
+  job:
+    description: The job's own part of the key, since jobs build different things
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # Cargo rebuilds a path crate whose files are newer than what it built, and a
+    # checkout makes every file new. The vendored crates' files get one old time, so
+    # what the cache built from them counts, and the key below has their hash, so
+    # the cache only ever holds what was built from exactly these files.
+    - name: Settle desktop/vendor's file times
+      shell: bash
+      run: |
+        git ls-files -z desktop/vendor | xargs -0 touch -t 200001010000
+        echo "RUSTC_VERSION=$(rustc -V | tr -c 'a-zA-Z0-9.\n' '-')" >> "$GITHUB_ENV"
+
+    - if: github.ref == 'refs/heads/main'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          desktop/target/
+          desktop/setup/target/
+        key: cargo-${{ inputs.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTC_VERSION }}-${{ hashFiles('desktop/vendor/**') }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/Cargo.toml', 'desktop/setup/Cargo.lock', 'desktop/setup/Cargo.toml') }}
+        restore-keys: cargo-${{ inputs.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTC_VERSION }}-${{ hashFiles('desktop/vendor/**') }}-
+
+    - if: github.ref != 'refs/heads/main'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          desktop/target/
+          desktop/setup/target/
+        key: cargo-${{ inputs.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTC_VERSION }}-${{ hashFiles('desktop/vendor/**') }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/Cargo.toml', 'desktop/setup/Cargo.lock', 'desktop/setup/Cargo.toml') }}
+        restore-keys: cargo-${{ inputs.job }}-${{ runner.os }}-${{ runner.arch }}-${{ env.RUSTC_VERSION }}-${{ hashFiles('desktop/vendor/**') }}-

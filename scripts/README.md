@@ -2,7 +2,9 @@
 
 Calx: building and testing everything, releases, the install script for servers, and generating the design tokens. Run each from the repository's root.
 
-- `calx scripts/check.calx` checks and tests all of loom's Calx code, as CI does: formatting, that every file builds, every file's tests, and the design tokens.
+- `calx scripts/check.calx` checks and tests all of loom's Calx code, as CI does: that the Calx is the pinned one, formatting, that every file builds, every file's tests, the design tokens, and the protocol tests, several at once, with one that fails run again alone.
+- `calx scripts/calx_pin.calx` says whether the Calx on PATH is the one loom is pinned to in `.calx-version`, which CI, the release and the Docker image install (`.github/actions/calx`), and how to install it: `CALX_RELEASES=https://github.com/aaen-studios/loom-calx/releases calx update --to VERSION`. `bump` pins the Calx on PATH: it copies its release and toolchains from Calx's to `aaen-studios/loom-calx`, which keeps every version loom has pinned, and writes `.calx-version`.
+- `calx scripts/ci_times.calx` says how long CI's last runs took, queued to finished, and each job's wait for a runner and its own time, at the middle and the 95th percentile. A number after it says how many runs.
 - `calx scripts/icons.calx` makes the Mac and iPhone app icons from the PNGs in `design/logo/png`.
 - `calx scripts/wordmark.calx` outlines the wordmark into `design/logo/wordmark.svg`.
 - `calx scripts/tokens.calx` generates the design tokens from `design/tokens.toml` into `design/generated/`. `--check` fails if they're out of date.

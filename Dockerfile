@@ -8,12 +8,14 @@
 #
 # Commands go to the same program: docker exec loom loom user list --data /data
 
-# The build: Calx, with the toolchain it brings, and loom's server.
+# The build: the Calx loom is pinned to (.calx-version), with the toolchain it
+# brings, and loom's server.
 FROM debian:bookworm-slim AS build
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl xz-utils libc6-dev libcurl4 \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://calxlang.com/install.sh | sh
+COPY .calx-version .github/actions/calx/install.sh /calx-pin/
+RUN sh /calx-pin/install.sh /calx-pin/.calx-version
 ENV PATH=/root/.calx/bin:$PATH \
     CALX_NO_UPDATE_CHECK=1 \
     NO_COLOR=1
