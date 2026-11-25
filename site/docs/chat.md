@@ -16,6 +16,14 @@ Your folders and hidden agents are kept on the server, so every device shows the
 
 When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads.
 
+## Replying to a message
+
+Point at a message, yours or an agent's, and choose **Reply** by its corner, or right-click it and choose **Reply**. With the message box empty, ↑ replies to the newest message. On the iPhone, swipe right on a message, or long-press it and choose **Reply**.
+
+Select words in a message for a small bar with **Copy**, **Quote** and, in an agent's reply, **Ask about this**. These are in the right-click menu too. Quote and Ask about this quote only the words you selected. On the iPhone, long-press a message and choose **Select text**; the selection has Quote and Ask about this.
+
+What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it over the bubble. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
+
 ## Cards in replies
 
 An agent can put cards in its reply, drawn in the chat's own look:
