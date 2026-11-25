@@ -10,7 +10,7 @@ Import sits under them. Click outside the popup, or press Esc, to close it.
 
 The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" finds Defaults.
 
-What's about the server rather than you (Add a phone, People, Move, Add a server) is in the server popup instead. Click the server's name at the bottom of the sidebar to open it.
+What's about the server rather than you (Add a device, People, Move, Add a server) is in the server popup instead. Click the server's name at the bottom of the sidebar to open it.
 
 ## This device's settings
 

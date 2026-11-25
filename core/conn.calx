@@ -1329,7 +1329,7 @@ impl Conn {
             return
         }
         let l = link.read(str_at(m.copy(), "qr") ?? String()) else {
-            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. On a device that's signed in, open Settings, then Add a device.")).done()).done())
+            self.tell(Obj.new().s("t", String("core.login")).maybe("id", id).j("error", Obj.new().s("code", String("bad_qr")).s("message", String("That isn't a loom code. Open Add a device on a device that's signed in for one.")).done()).done())
             return
         }
         // A new code goes in place of one waiting for a yes.

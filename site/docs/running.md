@@ -18,7 +18,7 @@ The script downloads the newest `loom` for the machine (x64 or Arm) and checks i
 - puts Caddy in front for TLS when you give `--domain`, or, without one, serves it on your tailnet if Tailscale is installed ([Tailscale](tailscale.md));
 - prints the address and the one-time **setup code**. With `--json` it prints them as JSON instead: `address`, `setup_code`, `version` and the rest.
 
-In the desktop app, choose **I have a server** and give its address. Pick a username and password, then choose **New server? Add its setup code** and put the code in. That account is the owner.
+In the desktop app, choose **I have a server**, then **Sign in with a password**, and give its address. Pick a username and password, then choose **New server? Add its setup code** and put the code in. That account is the owner.
 
 Run the script again to update loom, or use `loom update`, which checks the release's signature before it swaps the program.
 

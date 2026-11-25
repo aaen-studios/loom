@@ -71,12 +71,16 @@ pub fn read(text: String) -> Link? {
 // The code to paste: the code, `@` and the address, spaces around `@` let be.
 fn pasted(t: String) -> Link? {
     let (code, at) = t.split_once("@") else return none
-    let c = code.trim().copy()
+    // A code typed by hand may come with spaces in it, as "K7QF M2XD".
+    let c = code.replace(" ", "")
     var server = at.trim().copy()
     while server.ends_with("/") {
         server = server[0..server.len() - 1].copy()
     }
-    if c.len() == 0 or server.len() == 0 or c.contains(" ") or server.contains(" ") { return none }
+    if c.len() == 0 or server.len() == 0 or server.contains(" ") { return none }
+    for r in c.runes() {
+        if not ((r >= '0' and r <= '9') or (r >= 'A' and r <= 'Z') or (r >= 'a' and r <= 'z') or r == '-') { return none }
+    }
     if not server.contains("://") { server = "https://{server}" }
     if not reachable(server.copy()) { return none }
     return some(Link { server: server, code: c, instance: String(), key: String() })
@@ -97,9 +101,15 @@ fn reads_the_code_to_paste() {
     assert(paste(l) == "K7QF-M2XD@loom.example.com:8443")
     let back = read(String(" K7QF-M2XD @ loom.example.com:8443/ ")) else panic("it didn't read back")
     assert(back.server == "https://loom.example.com:8443" and back.code == "K7QF-M2XD")
+    let typed = read(String("k7qf m2xd@loom.example.com")) else panic("a code typed with a space didn't read")
+    assert(typed.code == "k7qfm2xd")
     let local = Link { server: String("http://127.0.0.1:8080"), code: String("AB"), instance: String(), key: String() }
     assert(paste(local.copy()) == "AB@http://127.0.0.1:8080")
     assert((read(paste(local)) ?? panic("no")).server == "http://127.0.0.1:8080")
+    // An instance in the desktop app: its key and addresses, after an @ of their own.
+    let pc = Link { server: String("noise://ab12@192.168.1.4:47420,100.64.0.7:47420"), code: String("K7QF-M2XD"), instance: String(), key: String() }
+    let back_pc = read(paste(pc)) else panic("it didn't read back")
+    assert(back_pc.server == "noise://ab12@192.168.1.4:47420,100.64.0.7:47420" and back_pc.code == "K7QF-M2XD")
 }
 
 @test

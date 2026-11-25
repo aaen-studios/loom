@@ -166,7 +166,7 @@ enum Screen {
     Programs,
     ThisDevice,
     Hosts,
-    AddPhone,
+    AddDevice,
     Mcp,
     Secrets,
     Plugins,
@@ -378,7 +378,7 @@ pub struct Loom {
     move_code_in: Entity<InputState>,
     /// Whether the People page's next invite makes an admin rather than a member.
     invite_admin: bool,
-    /// Whether the Add a phone page is asking "delete my account?" before it does.
+    /// Whether the Add a device page is asking "delete my account?" before it does.
     confirm_delete: bool,
     routine_at_in: Entity<InputState>,
     routine_prompt_in: Entity<TextareaState>,
@@ -1687,7 +1687,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.send(f);
                 }
             }
-            Screen::AddPhone => {
+            Screen::AddDevice => {
                 // An instance in this app reaches phones only once they're on.
                 if self.local() {
                     let f = self.model.set_phones(None);
@@ -3072,7 +3072,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     "pop-phone",
                     Ico::Smartphone,
                     "Add a device",
-                    Screen::AddPhone,
+                    Screen::AddDevice,
                 ),
             ];
             // An instance somewhere else has other people, and reaches this PC as a device.
@@ -3267,7 +3267,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Hosts => self.hosts_page(cx),
             Screen::Move => self.move_page(cx),
             Screen::People => self.people_page(cx),
-            Screen::AddPhone => self.add_device_page(cx),
+            Screen::AddDevice => self.add_device_page(cx),
             Screen::Mcp => self.mcp_page(cx),
             Screen::Secrets => self.secrets_page(cx),
             Screen::Plugins => self.plugins_page(cx),
@@ -3356,7 +3356,12 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         if found.is_none() {
             for away in &mut self.away {
-                if let Some(a) = away.model.open_asks().into_iter().find(|a| !hidden.contains(&a.id)) {
+                if let Some(a) = away
+                    .model
+                    .open_asks()
+                    .into_iter()
+                    .find(|a| !hidden.contains(&a.id))
+                {
                     found = Some((away.dir.clone(), a));
                     break;
                 }
@@ -12553,20 +12558,22 @@ ACTA_KEY=secret:ACTA_KEY",
                             div()
                                 .flex()
                                 .gap(px(space::S))
-                                .child(self.small_button("copy-add-code", "Copy code", true).on_click(
-                                    move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_code.clone(),
-                                        ));
-                                    },
-                                ))
-                                .child(self.small_button("copy-add-link", "Copy link", false).on_click(
-                                    move |_, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_link.clone(),
-                                        ));
-                                    },
-                                )),
+                                .child(
+                                    self.small_button("copy-add-code", "Copy code", true)
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_code.clone(),
+                                            ));
+                                        }),
+                                )
+                                .child(
+                                    self.small_button("copy-add-link", "Copy link", false)
+                                        .on_click(move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copy_link.clone(),
+                                            ));
+                                        }),
+                                ),
                         );
                 }
                 code = code.child(caption(format!("Works once, until {}", time_of(expires))));
@@ -12624,8 +12631,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 device_line(&d.kind, d.seen, d.online, now)
             };
             devices.push(
-                self.row(Some(self.tile(icon)), d.name.clone(), Some(line), Some(control))
-                    .into_any_element(),
+                self.row(
+                    Some(self.tile(icon)),
+                    d.name.clone(),
+                    Some(line),
+                    Some(control),
+                )
+                .into_any_element(),
             );
         }
         if !devices.is_empty() {
@@ -12647,13 +12659,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         .gap(px(space::S))
                         .px(px(space::L))
                         .pb(px(space::M))
-                        .child(self.small_button("keep-no-password", "Cancel", false).on_click(
-                            cx.listener(|this, _, _, cx| {
-                                this.setting_password = false;
-                                this.model.password_error = None;
-                                cx.notify();
-                            }),
-                        ))
+                        .child(
+                            self.small_button("keep-no-password", "Cancel", false)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.setting_password = false;
+                                    this.model.password_error = None;
+                                    cx.notify();
+                                })),
+                        )
                         .child(
                             self.small_button("save-password", "Save", true)
                                 .on_click(cx.listener(|this, _, _, cx| this.save_password(cx))),
@@ -12938,8 +12951,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .gap(px(space::M))
                     .child(link("add-server-password", "Sign in with a password", true))
                     .child(
-                        self.button("add-server-code-go", if busy { "Adding…" } else { "Add" }, true)
-                            .on_click(cx.listener(|this, _, _, cx| this.use_code(cx))),
+                        self.button(
+                            "add-server-code-go",
+                            if busy { "Adding…" } else { "Add" },
+                            true,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.use_code(cx))),
                     )
                     .into_any_element(),
             );
@@ -19055,7 +19072,12 @@ fn spaced_digits(check: &str) -> String {
 
 /// What a device's row says of it: its kind, and whether it's connected or when it last
 /// was ("Mac · Last seen yesterday 14:05").
-fn device_line(kind: &str, seen: i64, online: bool, now: chrono::DateTime<chrono::Local>) -> String {
+fn device_line(
+    kind: &str,
+    seen: i64,
+    online: bool,
+    now: chrono::DateTime<chrono::Local>,
+) -> String {
     let what = match kind {
         "ios" => "iPhone",
         "macos" => "Mac",
@@ -20294,7 +20316,7 @@ fn is_server(s: Screen) -> bool {
     matches!(
         s,
         Screen::Server
-            | Screen::AddPhone
+            | Screen::AddDevice
             | Screen::People
             | Screen::ThisDevice
             | Screen::Hosts

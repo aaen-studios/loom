@@ -10804,7 +10804,10 @@ mod tests {
         m.take(&asked("la_old", 1));
         let open = m.open_asks();
         assert_eq!(open.len(), 1, "once each, and not one that ran out");
-        assert_eq!((open[0].name.as_str(), open[0].check.as_str()), ("Elliot's MacBook", "4821"));
+        assert_eq!(
+            (open[0].name.as_str(), open[0].check.as_str()),
+            ("Elliot's MacBook", "4821")
+        );
         let yes = m.answer_ask("la_1", true);
         assert_eq!(yes["name"], "link.answer");
         assert_eq!(yes["args"], json!({"ask": "la_1", "allow": true}));
@@ -10848,12 +10851,18 @@ mod tests {
         assert_eq!(m.has_password, Some(false));
         let weak = m.set_password("short");
         m.result(&json!({"t": "result", "id": weak["id"], "ok": false, "error": {"code": "weak_password", "message": "A password needs at least 8 characters."}}));
-        assert_eq!(m.password_error.as_deref(), Some("A password needs at least 8 characters."));
+        assert_eq!(
+            m.password_error.as_deref(),
+            Some("A password needs at least 8 characters.")
+        );
         assert_eq!(m.has_password, Some(false));
         let set = m.set_password("a fine password");
         assert_eq!(set["args"], json!({"password": "a fine password"}));
         m.result(&json!({"t": "result", "id": set["id"], "ok": true, "value": {}}));
-        assert_eq!((m.has_password, m.password_error.clone()), (Some(true), None));
+        assert_eq!(
+            (m.has_password, m.password_error.clone()),
+            (Some(true), None)
+        );
         // Set on another device.
         m.has_password = Some(false);
         m.take(&json!({"t": "event", "kind": "account.updated", "has_password": true}));
