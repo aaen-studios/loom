@@ -11,7 +11,7 @@ use windows::{
         Foundation::*, Graphics::Dwm::*, System::LibraryLoader::LoadLibraryA,
         UI::WindowsAndMessaging::*,
     },
-    core::{BOOL, PCSTR},
+    core::{BOOL, PCSTR, PCWSTR},
 };
 
 use crate::*;
@@ -128,6 +128,43 @@ pub(crate) fn load_cursor(style: CursorStyle) -> Option<HCURSOR> {
             .into()
         })),
     )
+}
+
+/// loom: the system's own cursors for a browser's middle-button scrolling, which user32
+/// has as resources without names: 32652 at rest, able to go up or down, 32655 going up,
+/// 32656 going down (the ones beside them go across and corner to corner). Where one
+/// can't be had, the nearest resize cursor.
+pub(crate) fn load_pan_cursor(pan: PanCursor) -> Option<HCURSOR> {
+    static UP_DOWN: OnceLock<SafeCursor> = OnceLock::new();
+    static UP: OnceLock<SafeCursor> = OnceLock::new();
+    static DOWN: OnceLock<SafeCursor> = OnceLock::new();
+    let (lock, id) = match pan {
+        PanCursor::UpDown => (&UP_DOWN, 32652u16),
+        PanCursor::Up => (&UP, 32655),
+        PanCursor::Down => (&DOWN, 32656),
+    };
+    let cursor = *(*lock.get_or_init(|| {
+        HCURSOR(
+            unsafe {
+                LoadImageW(
+                    None,
+                    PCWSTR(id as usize as *const u16),
+                    IMAGE_CURSOR,
+                    0,
+                    0,
+                    LR_DEFAULTSIZE | LR_SHARED,
+                )
+            }
+            .log_err()
+            .unwrap_or_default()
+            .0,
+        )
+        .into()
+    }));
+    if cursor.0.is_null() {
+        return load_cursor(pan.nearest_style());
+    }
+    Some(cursor)
 }
 
 /// This function is used to configure the dark mode for the window built-in title bar.

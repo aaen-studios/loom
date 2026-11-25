@@ -14,9 +14,9 @@ use crate::{
     EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
     Hsla, InputHandler, InputPreference, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent,
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
-    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, PanCursor, Path,
+    Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
+    Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, Subscription, SystemWindowTab,
@@ -1264,6 +1264,8 @@ pub struct Window {
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
+    // loom: the pan cursor shown over everything, while there is one.
+    pan_cursor: Option<PanCursor>,
     modifiers: Modifiers,
     capslock: Capslock,
     scale_factor: f32,
@@ -2387,6 +2389,7 @@ impl Window {
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
+            pan_cursor: None,
             modifiers,
             capslock,
             scale_factor,
@@ -4393,6 +4396,22 @@ impl Window {
         })
     }
 
+    /// loom: shows `pan` as the cursor over the whole window, ahead of every cursor style,
+    /// until it's set to `None`. Unlike the styles it isn't part of a frame: it can be set
+    /// at any time, and shows at once.
+    pub fn set_pan_cursor(&mut self, pan: Option<PanCursor>, cx: &mut App) {
+        if self.pan_cursor != pan {
+            self.pan_cursor = pan;
+            self.reset_cursor_style(cx);
+        }
+    }
+
+    /// loom: the cursor style of what's under the pointer, as the last frame drew it: a
+    /// pointing hand over a link or a button, for one.
+    pub fn hovered_cursor_style(&self) -> Option<CursorStyle> {
+        self.rendered_frame.cursor_style(self)
+    }
+
     /// Sets a tooltip to be rendered for the upcoming frame. This method should only be called
     /// during the paint phase of element drawing.
     pub fn set_tooltip(&mut self, tooltip: AnyTooltip) -> TooltipId {
@@ -5843,6 +5862,11 @@ impl Window {
     fn reset_cursor_style(&self, cx: &mut App) {
         // Set the cursor only if we're the active window.
         if self.is_window_hovered() {
+            // loom: a pan cursor shows over everything.
+            if let Some(pan) = self.pan_cursor {
+                cx.platform.set_pan_cursor(pan);
+                return;
+            }
             // A drag can start before the next paint records its cursor in the frame.
             let style = cx
                 .active_drag_cursor_style()
