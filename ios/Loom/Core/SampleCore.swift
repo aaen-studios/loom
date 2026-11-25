@@ -362,7 +362,10 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             else { loose.append(id) }
         }
         let part = { (kind: String, ids: [String]) -> JSON in ["kind": JSON(kind), "agents": JSON(ids)] }
-        var out = [part("waiting", asking), part("pinned", pinned), part("agents", loose)]
+        // The group chats first, Everyone at the top (core/sidebar.calx).
+        let rooms = conversations.filter { !$0["room"].isNull }.map { c -> JSON in ["id": c["id"], "name": c["room"]["name"], "color": c["room"]["color"], "everyone": JSON(c["room"]["everyone"].bool ?? false)] }
+        var out: [JSON] = rooms.isEmpty ? [] : [["kind": "rooms", "rooms": .array(rooms), "agents": []]]
+        out += [part("waiting", asking), part("pinned", pinned), part("agents", loose)]
         for g in groups {
             out.append(["kind": "group", "id": g["id"], "name": g["name"], "collapsed": JSON(g["collapsed"].bool ?? false), "agents": JSON(inFolder[g["id"].text] ?? [])])
         }
@@ -458,7 +461,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         next += 1
         let cid = f["cid"].string ?? "m_s\(next)"
         let conversation = f["conversation"].string ?? conversations.first { $0["agent"] == f["agent"] }?["id"].text ?? "c_1"
-        let agent = conversations.first { $0["id"].text == conversation }?["agent"].text ?? "a_1"
+        // In a group chat, its first member answers.
+        let agent = conversations.first { $0["id"].text == conversation }.map { c in c["agent"].text.isEmpty ? (c["room"]["members"].array.first?.text ?? "a_1") : c["agent"].text } ?? "a_1"
         tell(["t": "core.queued", "cid": JSON(cid), "conversation": JSON(conversation), "text": f["text"], "at": JSON(Sample.now())])
         let mine = "msg_p\(next)", theirs = "msg_r\(next)", run = "run_s\(next)", call = "tc_s\(next)"
         later(0.3) { [self] in
@@ -625,6 +629,9 @@ enum Sample {
     ]
 
     static let conversations: [JSON] = [
+        // Everyone, the group chat with all the person's agents (PLAN.md, "Group chats").
+        ["id": "c_6", "agent": "", "title": "Everyone", "at": 1795187400000,
+         "room": ["name": "Everyone", "everyone": true, "members": ["a_1", "a_2", "a_3", "a_4"], "color": "", "default": "", "corrections": [["id": "k_1", "text": "Anything from the landlord?", "to": "a_3", "from": "a_2", "at": 1795187390000]]]],
         // Builder's thread with Gardener (`message_agent`), newer than the person's chat
         // with Gardener and never in its place.
         ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000],
@@ -640,6 +647,18 @@ enum Sample {
     ]
 
     static let messages: [String: [JSON]] = [
+        "c_6": [
+            ["id": "msg_60", "conversation": "c_6", "role": "person", "from": "d_4", "at": 1795187350000,
+             "blocks": [["kind": "text", "text": "Is the build on main green?"]]],
+            ["id": "msg_61", "conversation": "c_6", "role": "agent", "agent": "a_1", "run": "run_60", "at": 1795187360000,
+             "routed": ["by": "router", "why": "the build", "said": "the build", "answers": "msg_60"],
+             "blocks": [["kind": "text", "text": "Yes: the last run passed at 09:12."]]],
+            ["id": "msg_62", "conversation": "c_6", "role": "person", "from": "d_4", "at": 1795187380000,
+             "blocks": [["kind": "text", "text": "Anything from the landlord?"]]],
+            ["id": "msg_63", "conversation": "c_6", "role": "agent", "agent": "a_3", "run": "run_62", "at": 1795187400000,
+             "routed": ["by": "person", "why": "", "said": "you picked", "answers": "msg_62"],
+             "blocks": [["kind": "text", "text": "One mail, yesterday: the rent goes up in March."]]],
+        ],
         "c_1": [
             ["id": "msg_1", "conversation": "c_1", "role": "person", "from": "d_1", "at": 1795180000000,
              "blocks": [["kind": "text", "text": "Can you make the release notes for 0.3 from the merged PRs?"]]],

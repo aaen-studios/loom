@@ -85,7 +85,7 @@ struct PinsSheet: View {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: Tokens.Space.l) {
                             ForEach(model.pins) { p in
-                                PinRow(pin: p, agent: agent, cut: PinCut(open: open) { key in
+                                PinRow(pin: p, chatAgent: agent, cut: PinCut(open: open) { key in
                                     if open.contains(key) { open.remove(key) } else { open.insert(key) }
                                 })
                                 .contextMenu { menu(p) }
@@ -191,8 +191,13 @@ struct PinsSheet: View {
 private struct PinRow: View {
     @Environment(Session.self) private var session
     var pin: Pin
-    var agent: Agent?
+    var chatAgent: Agent?
     var cut: PinCut
+
+    /// Whose reply it is: in a group chat, the member it went to.
+    private var agent: Agent? {
+        pin.message.routed.flatMap { session.model.agent($0.agent) } ?? chatAgent
+    }
 
     var body: some View {
         let m = pin.message

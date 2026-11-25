@@ -10,6 +10,8 @@ struct ChatView: View {
     let agentId: String
     /// Another agent's thread with it, shown in place of its chat, with no composer.
     var thread: Ask? = nil
+    /// A group chat, shown in place of an agent's chat: each reply by the agent that gave it.
+    var roomId: String? = nil
     /// In a thread: back to the agent's own chat, ready to write.
     var continueChat: (() -> Void)? = nil
     /// Drawn once, hidden, before any chat is opened, so the first one opened doesn't
@@ -26,11 +28,15 @@ struct ChatView: View {
     @State private var lit: String?
     /// The chat's pins, open in a sheet from the header's pin.
     @State private var pinsOpen = false
+    /// The group chat's settings, open in a sheet.
+    @State private var roomSettings = false
 
     var body: some View {
         let model = session.model
-        let agent = model.agent(agentId)
-        let here = model.selected == agentId && model.thread == thread?.id
+        let room = roomId.flatMap { model.roomNamed($0) }
+        // In a group chat, the member the router would fall back to stands for the chat.
+        let agent = room == nil ? model.agent(agentId) : model.selected.flatMap { model.agent($0) }
+        let here = roomId != nil ? model.room == roomId : model.selected == agentId && model.thread == thread?.id && model.room == nil
         let messages = here ? model.shown : []
         let approvals = here ? model.shownApprovals : []
         ScrollViewReader { proxy in
@@ -44,11 +50,11 @@ struct ChatView: View {
                     ForEach(messages) { m in
                         Group {
                             if m.deleted {
-                                DeletedMark(message: m, agent: agent)
+                                DeletedMark(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent)
                             } else if m.isPerson {
-                                PersonMessage(message: m, agent: agent)
+                                PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
                             } else {
-                                Reply(message: m, agent: agent, openThoughts: $openThoughts)
+                                Reply(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent, openThoughts: $openThoughts)
                             }
                         }
                         // Lit for a moment, once a quote went to it.
@@ -139,7 +145,7 @@ struct ChatView: View {
                 // The composer writes to the agent's chat, so a thread is only read here,
                 // with the way back to that chat in the composer's place.
                 if thread == nil {
-                    Composer(agentName: agent?.name ?? "the agent") {
+                    Composer(agentName: room?.name ?? agent?.name ?? "the agent") {
                         withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                     }
                 } else {
@@ -153,8 +159,11 @@ struct ChatView: View {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 1) {
                     HStack(spacing: 6) {
-                        // A thread is titled by the agent that asks, in its colour.
-                        if let thread {
+                        // A group chat by its name and its members' woven threads.
+                        if let room {
+                            RoomMark(colors: model.roomColors(room)).frame(width: 22, height: 10)
+                            Text(room.name).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink)
+                        } else if let thread {
                             if let by = thread.by {
                                 ThreadView(mood: .idle, color: P.thread(by.color))
                                     .frame(width: 18, height: 10)
@@ -187,6 +196,17 @@ struct ChatView: View {
                     }
                     .accessibilityLabel(pinned > 0 ? "Pinned, \(pinned)" : "Pinned")
                 }
+            }
+            if roomId != nil {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        roomSettings = true
+                    } label: {
+                        Image(systemName: "person.2")
+                    }
+                    .accessibilityLabel("Group chat settings")
+                }
+            } else if thread == nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
@@ -220,6 +240,9 @@ struct ChatView: View {
                 threadOpen = nil
             }
         }
+        .sheet(isPresented: $roomSettings) {
+            if let roomId { RoomSettingsSheet(roomId: roomId) }
+        }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
         .fullScreenCover(item: warming ? .constant(nil) : Bindable(model).viewing) { v in
@@ -246,6 +269,11 @@ struct ChatView: View {
         }
         .onAppear {
             guard !warming else { return }
+            if let roomId {
+                model.open(room: roomId)
+                session.flush()
+                return
+            }
             model.select(agentId)
             // Back from a thread, the chat is the agent's own again.
             model.open(thread: thread?.id)
@@ -551,6 +579,8 @@ struct PersonMessage: View {
     var agent: Agent?
     /// Drawn as a pin in the Pinned sheet rather than in the chat.
     var pin: PinCut? = nil
+    /// In a group chat, its colour, or grey with none: no one member's.
+    var tint: String? = nil
 
     var body: some View {
         let model = session.model
@@ -621,7 +651,7 @@ struct PersonMessage: View {
     /// The person's own bubble in the agent's colour; another agent's, a breath of the
     /// sender's, or grey for one that's gone.
     private func bubble(_ sender: Agent?) -> Color {
-        if message.from == nil { return P.personBubble(agent?.color ?? "", vibrant: vibrant) }
+        if message.from == nil { return P.personBubble(tint ?? agent?.color ?? "", vibrant: vibrant) }
         return sender.map { P.agentBubble($0.color) } ?? P.bubble
     }
 }
@@ -676,7 +706,12 @@ struct Reply: View {
                         }
                     }
                     .frame(width: 16, height: 10)
-                    Text(agent?.name ?? "Agent").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink)
+                    // In a group chat, how it came to its agent, which a tap sends elsewhere.
+                    if let routed = message.routed {
+                        RouteLine(message: message, routed: routed, agent: agent)
+                    } else {
+                        Text(agent?.name ?? "Agent").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink)
+                    }
                     Text(message.live ? "now" : When.time(message.at)).font(Fonts.caption).foregroundStyle(P.ink3)
                 }
             }

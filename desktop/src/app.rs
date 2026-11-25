@@ -38,6 +38,9 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
+#[path = "room_view.rs"]
+mod room_view;
+use room_view::RoomForm;
 #[path = "learned.rs"]
 mod learned;
 
@@ -189,6 +192,8 @@ enum Screen {
     Move,
     People,
     AddServer,
+    /// A group chat's settings, or the form that makes one.
+    Room,
     Aside,
     Page,
     Tables,
@@ -219,6 +224,10 @@ enum Ctx {
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
+    /// A group chat in the sidebar, by its conversation.
+    Room(String),
+    /// The line over a reply in a group chat: the reply, and the agent that gave it.
+    Resend(String, String),
     /// A table in a reply, by its rows, header first: the ways to copy it.
     Table(Vec<Vec<String>>),
     /// The composer's smiley.
@@ -371,6 +380,13 @@ pub struct Loom {
     /// and when a click outside last closed it.
     custom_color: bool,
     color_closed_at: Option<Instant>,
+    /// The group chats' panel: the one being made, its name field, and the open one's
+    /// name to put in that field when the panel next draws.
+    room_form: RoomForm,
+    room_name_in: Entity<InputState>,
+    room_name_fill: Option<String>,
+    /// An agent's what-I'm-for line, on its edit panel.
+    for_in: Entity<InputState>,
     /// Whether a press on the colour wheel is being dragged.
     wheel_drag: bool,
     /// Where the colour wheel is on screen, for a click on it.
@@ -935,6 +951,19 @@ impl Loom {
         )
         .detach();
         let name_in = input(window, cx, "Name", false);
+        let for_in = input(window, cx, "Keeps money and bills", false);
+        let room_name_in = input(window, cx, "Money", false);
+        // Enter in a group chat's name: makes it, or keeps the new name.
+        cx.subscribe_in(
+            &room_name_in,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| match event {
+                InputEvent::PressEnter { .. } => this.room_name_entered(cx),
+                InputEvent::Change => cx.notify(),
+                _ => {}
+            },
+        )
+        .detach();
         // An agent's own colour: each change that makes a whole #rrggbb sets it.
         let color_in = input(window, cx, "#5b8def", false);
         cx.subscribe_in(
@@ -1506,6 +1535,10 @@ ACTA_KEY=secret:ACTA_KEY",
             fresh_armed: false,
             custom_color: false,
             color_closed_at: None,
+            room_form: RoomForm::default(),
+            room_name_in,
+            room_name_fill: None,
+            for_in,
             wheel_drag: false,
             wheel_bounds: Rc::new(std::cell::Cell::new(None)),
             color_in,
@@ -2137,9 +2170,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.popup = None;
                 self.side = None;
             }
-            Screen::EditAgent | Screen::Activity | Screen::Memory | Screen::Tables => {
-                self.show_side(screen, cx)
-            }
+            Screen::EditAgent
+            | Screen::Activity
+            | Screen::Memory
+            | Screen::Room
+            | Screen::Tables => self.show_side(screen, cx),
             _ => {
                 if !is_server(screen) {
                     self.settings_last = screen;
@@ -3326,6 +3361,13 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent => (Ico::Pencil, format!("Edit {name}")),
             Screen::Activity => (Ico::Activity, format!("What {name} did")),
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
+            Screen::Room => (
+                Ico::Users,
+                match self.model.room_open() {
+                    Some(r) if !self.room_form.making => r.name.clone(),
+                    _ => "New group chat".to_string(),
+                },
+            ),
             Screen::Tables => (Ico::Sheet, format!("{name}'s tables")),
             Screen::Aside => (
                 Ico::MessageCircleQuestionMark,
@@ -3352,6 +3394,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::EditAgent => self.edit_agent(cx),
             Screen::Activity => self.activity_page(cx),
             Screen::Memory => self.memory_page(cx),
+            Screen::Room => self.room_panel(window, cx),
             Screen::Tables => self.tables_panel(cx),
             Screen::Aside => self.aside_page(&name),
             // The page's web view sits over this, once it's here.
@@ -6555,8 +6598,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// click opens its chat, a right-click its menu, and it drags into a new place.
     fn pinned_tile(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
-        let selected =
-            self.model.selected.as_deref() == Some(a.id.as_str()) && self.screen == Screen::Chat;
+        let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+            && self.screen == Screen::Chat
+            && self.model.open_room.is_none();
         let unread = self.model.unread.contains(&a.id);
         let preview = self.model.preview(a);
         let id = a.id.clone();
@@ -6635,8 +6679,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// into a folder.
     fn agent_row(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
-        let selected =
-            self.model.selected.as_deref() == Some(a.id.as_str()) && self.screen == Screen::Chat;
+        let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+            && self.screen == Screen::Chat
+            && self.model.open_room.is_none();
         let mood = self.model.mood(&a.id);
         let preview = self.model.preview(a);
         // A reply that came while its chat wasn't open: the row is bold until it is.
@@ -6946,6 +6991,14 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .flex_col()
             .gap(px(space::S))
+            .when_some(self.room_list(cx), |d, rooms| {
+                d.child(rooms)
+                    .child(div().px(px(space::S)).child(self.group_head(
+                        "group-agents".into(),
+                        "Agents".into(),
+                        None,
+                    )))
+            })
             .when(waiting, |d| d.child(top))
             .when(!tiles.is_empty(), |d| {
                 d.child(
@@ -7178,6 +7231,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .collect(),
             selected: model
                 .selected
+                .clone()
+                .filter(|_| self.screen == Screen::Chat && model.open_room.is_none()),
+            rooms: model.sidebar_rooms().into_iter().cloned().collect(),
+            room_open: model
+                .open_room
                 .clone()
                 .filter(|_| self.screen == Screen::Chat),
             sections: model.sidebar.clone(),
@@ -7456,7 +7514,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let agents = self.rail_agents();
         for (n, a) in agents.iter().enumerate() {
             let selected = self.model.selected.as_deref() == Some(a.id.as_str())
-                && self.screen == Screen::Chat;
+                && self.screen == Screen::Chat
+                && self.model.open_room.is_none();
             let unread = self.model.unread.contains(&a.id);
             let id = a.id.clone();
             let el = SharedString::from(format!("rail-{}", a.id));
@@ -8017,6 +8076,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
             )
         });
+        // A group chat: its mark and name, which open its settings, and its pins.
+        if let Some(room) = self.model.room_open().cloned() {
+            return bar.child(self.room_head(&room, cx)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .when(pinned > 0 || pins_open, |d| d.child(pins)),
+            );
+        }
         bar.child(
             div()
                 .id("agent-menu")
@@ -9760,6 +9828,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             .on_click(cx.listener(|this, _, _, cx| this.new_folder(None, cx))),
                     );
             }
+            Ctx::Room(room) => panel = self.room_menu(panel, room, cx),
+            Ctx::Resend(message, agent) => panel = self.resend_menu(panel, message, agent, cx),
             Ctx::Folder(folder) => {
                 let rename = folder.clone();
                 panel = panel
@@ -10275,6 +10345,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .and_then(|id| this.model.agent(id))
                             {
                                 let (name, instructions) = (a.name.clone(), a.instructions.clone());
+                                let does = a.for_line.clone();
+                                this.for_in
+                                    .update(cx, |s, cx| s.set_value(does, window, cx));
                                 this.name_in
                                     .update(cx, |s, cx| s.set_value(name, window, cx));
                                 this.instructions_in
@@ -10524,10 +10597,20 @@ ACTA_KEY=secret:ACTA_KEY",
         // Where each message's branches go, for the links under it.
         let branches = Rc::new(self.model.branches());
         let name = agent.as_ref().map(|a| a.name.clone()).unwrap_or_default();
-        let tint = agent
-            .as_ref()
-            .map(|a| thread::color(&a.color, p.dark))
-            .unwrap_or(p.ink_3);
+        // A group chat's is its own colour, or none: no one member's.
+        let room_tint = self.model.room_open().map(|r| {
+            if r.color.is_empty() {
+                p.ink_3
+            } else {
+                thread::color(&r.color, p.dark)
+            }
+        });
+        let tint = room_tint.unwrap_or_else(|| {
+            agent
+                .as_ref()
+                .map(|a| thread::color(&a.color, p.dark))
+                .unwrap_or(p.ink_3)
+        });
         let mood = agent
             .as_ref()
             .map(|a| self.model.mood(&a.id))
@@ -10690,7 +10773,9 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .map(|a| a.name.as_str())
             .unwrap_or("the agent");
-        let placeholder = if empty {
+        let placeholder = if let Some(r) = self.model.room_open() {
+            format!("Message {}", r.name)
+        } else if empty {
             format!("Ask {who} anything")
         } else {
             format!("Reply to {who}")
@@ -11754,6 +11839,10 @@ ACTA_KEY=secret:ACTA_KEY",
         composer: Option<Div>,
         cx: &mut Context<Self>,
     ) -> Div {
+        // An empty group chat: its members' threads woven, and its name.
+        if let Some(r) = self.model.room_open().cloned() {
+            return self.room_hero(&r, composer);
+        }
         let p = self.p;
         let Some(a) = agent else {
             return div().flex_1();
@@ -12885,6 +12974,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 if let Some(f) = this.model.save_agent(&name, &instructions) {
                     this.send(f);
                 }
+                // What it's for goes on its own: it isn't a new revision.
+                let does = this.for_in.read(cx).value().trim().to_string();
+                let agent = this.model.editing.clone().unwrap_or_default();
+                if this.model.agent(&agent).is_some_and(|a| a.for_line != does) {
+                    let f = this.model.save_for(&agent, &does);
+                    this.send(f);
+                }
                 this.close_side(cx);
                 cx.notify();
             }));
@@ -12915,6 +13011,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     // changes as it's picked.
                     .child(self.field("Name", Input::new(&self.name_in)))
                     .child(self.field("Instructions", Textarea::new(&self.instructions_in)))
+                    .child(self.field("What it's for", Input::new(&self.for_in)))
                     .child(div().flex().gap(px(space::S)).child(save).child(cancel))
                     .when(!picks.is_empty(), |d| {
                         d.child(group("Brain")).children(picks)
@@ -16461,11 +16558,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }))
             .into_any_element();
+        let rooms = self.router_group(&d, cx);
         self.settings_page(
             "defaults-page",
             "Agent defaults",
             Some(save),
-            vec![new_agents, ways, models, instructions],
+            vec![new_agents, ways, models, rooms, instructions],
         )
     }
 
@@ -22842,7 +22940,13 @@ fn reply(
 ) -> Div {
     let mut body = div().flex().flex_col().gap(px(space::S)).flex_1().min_w_0();
     // Its agent's name, over the first reply after a time line (`model::flow`).
-    if head {
+    // In a group chat, the line that says how it came to its agent takes its place, over
+    // every reply.
+    let routed = room_view::route_line(p, m, this.clone());
+    let head = head || routed.is_some();
+    if let Some(line) = routed {
+        body = body.child(line);
+    } else if head {
         body = body.child(
             div()
                 .text_size(px(size::SMALL))
@@ -25271,6 +25375,7 @@ mod row_tests {
             live: false,
             queued: false,
             from_agent: None,
+            routed: None,
             routine: String::new(),
             routine_name: String::new(),
             deleted: false,
@@ -25485,6 +25590,9 @@ struct SidebarKey {
     hidden_open: bool,
     /// The agent whose chat is on screen.
     selected: Option<String>,
+    /// The group chats, and the one on screen.
+    rooms: Vec<model::Room>,
+    room_open: Option<String>,
     /// Another agent's thread with it, when that's on screen in its chat's place.
     ask_open: Option<String>,
     query: String,
@@ -26380,8 +26488,8 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         Row::Message(m) => reply(
             p,
             m,
-            name,
-            tint,
+            &room_view::reply_look(p, m).map_or_else(|| name.clone(), |(n, _)| n),
+            room_view::reply_look(p, m).map_or(tint, |(_, t)| t),
             mood,
             here.head,
             open,

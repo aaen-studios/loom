@@ -4,7 +4,7 @@ Each agent has one chat that never ends. Choose an agent in the sidebar to talk 
 
 ## The sidebar
 
-The sidebar lists your agents in groups:
+The sidebar lists your group chats first ([Group chats](#group-chats)), then your agents in groups:
 
 - **Waiting on you**, at the top, while an agent waits on a question or a permission. It goes back to its place once you've answered. A pinned agent keeps its tile instead.
 - **Pinned agents**, as tiles, three across. **Pin to top** is in the agent's menu.
@@ -21,6 +21,20 @@ When one agent messages another, they talk in a thread of their own, never in yo
 When you scroll up in a chat, a round button with a down arrow shows at the bottom of the chat, over the message box. Click it to go down to the newest message. If messages came while you were up there, its corner says how many.
 
 A chat you open with replies you haven't seen has a line over the first of them, "3 new". It stays until you leave the chat.
+
+## Group chats
+
+A group chat is a chat with several of your agents in it, where loom picks which one answers each message. **Everyone** has all your agents in it, and is there once you have two. To make another, choose **+** by **Group chats** in the sidebar, name it, pick two or more agents, and a colour if you want one. On the iPhone, the **+** is by **Group chats** in the agent list.
+
+You just write. One agent answers each message: the one your message is for, or the one that answered last while you stay on the same subject. A line over each answer says who answered and why, "→ Ledger · money question", in that agent's shape and colour. To pick yourself, mention an agent: "@Hermes any new mail?" goes to Hermes, and the line says "you asked".
+
+If the wrong agent answered, click the line and pick another. Your message goes to that one, and loom keeps it as an example: the next message like it goes to the agent you picked. An agent can also hand a message to another member when it's that one's to answer, "→ Hermes · handed off by Ledger".
+
+Each answer is the agent's own, with its memory, tools and permissions. It sees what was said in the group chat since it last answered, by whom. Your chat with each agent stays as it was: nothing from a group chat goes into it, and a message pinned in a group chat is pinned there only.
+
+Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. Everyone's members are always all your agents. Right-click a group chat in the sidebar to delete it; Everyone can't be deleted. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
+
+The picking is done by a small, fast model: Claude Haiku 5.5, unless you pick another in [Agent defaults](agents.md#agent-defaults). What it reads to pick an agent is the agent's **What it's for** line ([Making an agent](agents.md#making-an-agent)), its skills and its MCP servers.
 
 ## Replying to a message
 
