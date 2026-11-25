@@ -11,4 +11,9 @@ enum Prefs {
     /// default). `@AppStorage` keeps it only once the person sets it, so a phone that never
     /// did takes the default, and one whose person picked Vibrant keeps it.
     static let vibrant = "loom.vibrant_bubbles"
+    /// Settings → Emoji (PLAN.md, "Emoji"): the smiley in the composer (on), whether `:)`
+    /// and a space turn into 🙂 (off), and the skin tone, 0 for none and 1 to 5.
+    static let emojiButton = "loom.emoji_button"
+    static let emoticons = "loom.emoticons"
+    static let skinTone = "loom.skin_tone"
 }
