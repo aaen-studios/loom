@@ -1,11 +1,15 @@
 // Plays the live copy of the app (src/components/AppDemo.astro) in a loop: the earlier answer's
 // Reply, by its corner on hover, puts it over the composer's words, and the message that goes
 // has its quote over its bubble, which goes back to the answer and lights it (desktop/src/app.rs,
-// reply_bar, quote_view, jump_to); a message's Reply, or words selected in one with the bar
+// reply_bar, quote_view, jump_to), while the reply comes: the round button at the bottom of the
+// chat counts it in the agent's colour and takes the chat back down (app.rs, jump_button); a
+// message's Reply, or words selected in one with the bar
 // that comes over them (Copy, Quote, Ask about this), does the same by hand. A message is typed,
 // with a link pasted and a file attached among its words, each a piece in them, the file with its
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
-// asks before it deploys and waits for the yes, then finishes. While the turn runs, one quiet
+// asks before it deploys and waits for the yes, then finishes. Once it's shipped, `:tada` typed
+// opens the emoji row over the composer, which puts 🎉 in the words as Twemoji's picture, and a
+// message of only it is big (emoji_ui.rs, emoji_row_view; PLAN.md, "Emoji"). While the turn runs, one quiet
 // line under the reply says the step it's on; once it's done, its last words are the answer and
 // the steps before them fold under one line that opens (desktop/src/model.rs, parts), and a
 // subagent's call in the earlier reply opens to show what its subagent did inside it (model.rs,
@@ -106,6 +110,17 @@ export function play(app: HTMLElement) {
 	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
+	const composer = app.querySelector<HTMLElement>('.composer')!;
+
+	/** A message of only 🎉, which the chat shows big (PLAN.md, "Emoji"). */
+	function cheer(fresh: boolean) {
+		const you = tpl('demo-you');
+		you.classList.toggle('fresh', fresh);
+		const tada = tpl('demo-tada');
+		tada.classList.add('jumbo');
+		you.querySelector('.bubble')!.append(tada);
+		return you;
+	}
 
 	// How full Juniper's session context is, by Send, in thousands of tokens of its 200k: it
 	// fills a little with each turn (app.rs, meter::ring; model.rs, ContextFill).
@@ -144,18 +159,44 @@ export function play(app: HTMLElement) {
 	for (const b of msgs.querySelectorAll<HTMLButtonElement>('.reply-btn')) {
 		b.addEventListener('click', () => replyTo(b.closest<HTMLElement>('.row')!));
 	}
-	/** Goes to the original a quote names: the chat moves to show it, lit, then back. */
+	// While the chat isn't at its bottom, a button goes down to the newest, with how many
+	// messages came meanwhile, not the person's, at its corner (app.rs, jump_button).
+	const jumpBtn = app.querySelector<HTMLButtonElement>('[data-jump]')!;
+	const jumpCount = jumpBtn.querySelector<HTMLElement>('.jump-count')!;
+	let came = 0;
+	let back: ReturnType<typeof setTimeout> | undefined;
+	const counted = () => {
+		jumpCount.textContent = String(came);
+		jumpCount.hidden = came === 0;
+	};
+	new MutationObserver((changes) => {
+		if (jumpBtn.hidden) return;
+		for (const c of changes) for (const n of c.addedNodes) if (n instanceof HTMLElement && n.classList.contains('reply')) came++;
+		counted();
+	}).observe(msgs, { childList: true });
+	/** Back to the bottom: the chat as it was, and the button gone. */
+	const toBottom = () => {
+		clearTimeout(back);
+		msgs.style.transform = '';
+		jumpBtn.hidden = true;
+		setTimeout(() => msgs.classList.remove('jumping'), 400);
+	};
+	jumpBtn.addEventListener('click', toBottom);
+	/** Goes to the original a quote names: the chat moves to show it, lit, and stays there
+	 * until the jump button takes it back down, or a few seconds pass. */
 	const jump = (row: HTMLElement) => {
 		const chat = app.querySelector<HTMLElement>('.chat')!;
 		const by = chat.getBoundingClientRect().top + 24 - row.getBoundingClientRect().top;
 		msgs.classList.add('jumping');
-		if (by > 0) msgs.style.transform = `translateY(${by}px)`;
 		row.classList.add('lit');
-		setTimeout(() => {
-			row.classList.remove('lit');
-			msgs.style.transform = '';
-			setTimeout(() => msgs.classList.remove('jumping'), 400);
-		}, 1800);
+		setTimeout(() => row.classList.remove('lit'), 1800);
+		if (by <= 0) return;
+		msgs.style.transform = `translateY(${by}px)`;
+		came = 0;
+		counted();
+		jumpBtn.hidden = false;
+		clearTimeout(back);
+		back = setTimeout(toBottom, 6000);
 	};
 	// Words selected in a message have a small bar where the selection ended.
 	let picked: HTMLElement | null = null;
@@ -595,7 +636,11 @@ export function play(app: HTMLElement) {
 		const to = replying;
 		cleared();
 		msgs.append(sent(true, to));
-		await wait(250, id);
+		await wait(450, id);
+		// Its quote goes back to the answer, and the reply comes while the chat is there: the
+		// jump button counts it, and takes the chat back down.
+		if (to) jump(to.row);
+		await wait(500, id);
 
 		const reply = tpl('demo-reply');
 		msgs.append(reply);
@@ -606,6 +651,7 @@ export function play(app: HTMLElement) {
 		preview('Juniper', 'Thinking', 'thinking');
 		say('Thinking…');
 		await wait(1700, id);
+		toBottom();
 
 		mood('tool', replyThread);
 		preview('Juniper', TOOL, 'tool');
@@ -648,6 +694,22 @@ export function play(app: HTMLElement) {
 		await wait(200, id);
 		mood('idle', replyThread);
 		preview('Juniper', '', 'idle');
+
+		// A name typed after a colon opens the row of emoji over the composer; Tab takes the
+		// lit one, which goes in the words as its picture, and a message of only it is big.
+		if (answer === 'allow') {
+			await wait(1200, id);
+			await type(':tada', id);
+			const row = tpl('demo-emoji-row');
+			composer.append(row);
+			await wait(1100, id);
+			row.remove();
+			typed.lastChild?.remove();
+			typed.append(tpl('demo-tada'));
+			await wait(700, id);
+			cleared();
+			msgs.append(cheer(true));
+		}
 		await wait(6000, id);
 
 		// Back to the start, quietly, and again.
@@ -669,6 +731,7 @@ export function play(app: HTMLElement) {
 	/** The finished chat, still, for reduced motion. */
 	function still() {
 		run++;
+		toBottom();
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
 		cleared();
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
@@ -681,7 +744,7 @@ export function play(app: HTMLElement) {
 		tool(steps, ASK)('done');
 		finish(reply, say, steps, SHIPPED);
 		context(92);
-		msgs.append(you, reply);
+		msgs.append(you, reply, cheer(false));
 		threadsIn(reply);
 		mood('idle');
 		for (const a of byAgent.keys()) preview(a, '', 'idle');

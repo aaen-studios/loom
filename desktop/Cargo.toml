@@ -20,7 +20,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # GPUI is pre-1.0, so take each new version on purpose, at the latest.
 gpui-kit = "=0.10.0"
 png = "0.18.1"
-image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "webp"] }
 # Every JPEG the app shows: Chrome on Linux writes them as a scan per color, which
 # image's JPEG decoder, zune-jpeg 0.5.15, and so GPUI's, draws as green stripes.
 jpeg-decoder = { version = "0.3.2", default-features = false }
@@ -77,9 +77,11 @@ gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] 
 # says more.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
-# GPUI Base, as 0.10.0 with two changes (marked "loom:"): an inline <span> in Markdown can
-# give its text a color and weight, for an agent's name where a message mentions it, and a
-# link in such a span keeps that colour, with a light background of it under the pointer.
+# GPUI Base, as 0.10.0 with four changes (marked "loom:"): an inline <span> in Markdown can
+# give its text a color and weight, for an agent's name where a message mentions it; a
+# link in such a span keeps that colour, with a light background of it under the pointer;
+# an emoji drawn as a picture (a `loom-emoji` source) copies as its alt text; and a
+# picture in a line of text shows its link's tooltip, for the emoji card.
 gpui-base = { path = "vendor/gpui-base" }
 # GPUI, as 0.3.12 with two changes (marked "loom:"): an image can be drawn rotated, as an SVG
 # icon can, through Window::paint_image_transformed, for the tilted cards of a message's

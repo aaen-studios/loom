@@ -1,0 +1,612 @@
+module shared.emoji
+
+// Emoji (PLAN.md, "Emoji"): the built-in set, shortcodes, and the person's own.
+//
+// The built-in set is the standard Unicode emoji, from shared/emoji/emoji.tsv,
+// which scripts/emoji.calx makes from Unicode's emoji-test.txt, CLDR's English
+// annotations and gemoji's aliases. Each has its group in the picker, its names
+// (`sob` first, then CLDR's `loudly_crying_face`), CLDR's keywords for finding it,
+// and its five skin tones when it has them. A built-in emoji is sent as itself,
+// the Unicode character.
+//
+// A person's own emoji is sent as a token, `<:party_cat:e_3>`, or `<a:party_cat:e_3>`
+// for one that moves, with its id on the instance. Agents read it as `:party_cat:`,
+// and write either kind by name, `:sob:` or `:party_cat:`, which the instance turns
+// into the emoji (`from_names`). Inside code, nothing is turned into anything.
+//
+// The core answers the composer from here: what's typed after a colon (`typed`),
+// the suggestions for it (`find`), the picker's groups (`picker`), and an emoticon,
+// `:)`, turned into 🙂 when the person has that on (`emoticon`).
+import std.json.{Json}
+import shared.obj.{Obj, at, merge, str_at}
+
+const TABLE: [u8; 186896] = embed("emoji/emoji.tsv")
+
+// The emoticons turned into emoji, each followed by its emoji, Discord's.
+const EMOTICONS: str = ":) 🙂|:-) 🙂|(: 🙂|:( 🙁|:-( 🙁|): 🙁|:D 😃|:-D 😃|;) 😉|;-) 😉|:P 😛|:-P 😛|:p 😛|:-p 😛|:O 😮|:-O 😮|:o 😮|:'( 😢|:| 😐|:-| 😐|<3 ❤️|</3 💔|XD 😆|xD 😆|:* 😗|:S 😕|:s 😕|:/ 😕|:-/ 😕|>:( 😠|8) 😎|B) 😎"
+
+// The groups, in the picker's order, with what they're called.
+const GROUPS: str = "smileys Smileys & Emotion|people People & Body|nature Animals & Nature|food Food & Drink|travel Travel & Places|activities Activities|objects Objects|symbols Symbols|flags Flags"
+
+// How many emoji of their own a person may have.
+pub const MOST: usize = 200
+
+// The longest a name may be.
+const NAME_MOST: usize = 32
+
+pub struct Emoji {
+    pub text: String
+    pub group: String
+    pub names: List<String>
+    pub keywords: List<String>
+    pub tones: List<String>    // the five skin tones, lightest first, or none
+    pub tts: String    // CLDR's name for it: "loudly crying face"
+}
+
+// One of the person's own emoji, as the instance keeps it.
+pub struct Custom {
+    pub id: String
+    pub name: String
+    pub animated: bool
+}
+
+pub struct Table {
+    pub list: List<Emoji>
+    by_name: Map<String, usize>
+    by_text: Map<String, usize>    // each emoji and each of its tones, without U+FE0F
+}
+
+// The built-in set, read from the table. Read it once and keep it.
+pub fn load() -> Table {
+    var t = Table { list: List<Emoji>(), by_name: Map<String, usize>(), by_text: Map<String, usize>() }
+    let text = String.from_utf8(TABLE[..]) ?? String()
+    for line in text.lines() {
+        if line.starts_with("#") or line.len() == 0 { continue }
+        let cells = line.split("\t")
+        if cells.len() < 6 { continue }
+        let e = Emoji {
+            text: cells[0].copy(),
+            group: cells[1].copy(),
+            names: cells[2].split(" ").map(|n| n.copy()),
+            keywords: if cells[3].len() > 0 { cells[3].split("|").map(|k| k.copy()) } else { List<String>() },
+            tones: if cells[4].len() > 0 { cells[4].split(" ").map(|k| k.copy()) } else { List<String>() },
+            tts: cells[5].copy(),
+        }
+        let pos = t.list.len()
+        for n in e.names.copy() { t.by_name.insert(n.copy(), pos) }
+        t.by_text.insert(bare(e.text.copy()), pos)
+        for tone in e.tones.copy() { t.by_text.insert(bare(tone.copy()), pos) }
+        t.list.push(e)
+    }
+    return t
+}
+
+// `text` without U+FE0F, which says to draw what's before it as an emoji.
+fn bare(text: String) -> String {
+    return text.replace("\u{FE0F}", "")
+}
+
+// Whether a name is one a person's own emoji may have: 2 to 32 of a to z, 0 to 9 and _.
+pub fn name_ok(name: String) -> bool {
+    if name.len() < 2 or name.len() > NAME_MOST { return false }
+    for b in name.to_bytes() {
+        let fits = (b >= b'a' and b <= b'z') or (b >= b'0' and b <= b'9') or b == b'_'
+        if not fits { return false }
+    }
+    return true
+}
+
+// What a name typed between colons may hold: a name, `+1`, `-1`, and capitals.
+fn name_byte(b: u8) -> bool {
+    return (b >= b'a' and b <= b'z') or (b >= b'A' and b <= b'Z') or (b >= b'0' and b <= b'9') or b == b'_' or b == b'+' or b == b'-'
+}
+
+// The token a person's own emoji is sent as.
+pub fn token(c: Custom) -> String {
+    let a = if c.animated { "a" } else { "" }
+    return "<{a}:{c.name}:{c.id}>"
+}
+
+// A token in a message's text: `<:name:id>` or `<a:name:id>`, from `start` up to `end`.
+pub struct Token {
+    pub start: usize
+    pub end: usize
+    pub name: String
+    pub id: String
+    pub animated: bool
+}
+
+// The tokens of the person's own emoji in `text`, in order.
+pub fn tokens(text: String) -> List<Token> {
+    var out = List<Token>()
+    let b = text.to_bytes()
+    var i: usize = 0
+    while i < b.len() {
+        if b[i] != b'<' {
+            i += 1
+            continue
+        }
+        if let t = token_at(b.copy(), i) {
+            i = t.end
+            out.push(t)
+        } else {
+            i += 1
+        }
+    }
+    return out
+}
+
+// The token that starts at byte `i`, if one does.
+fn token_at(b: List<u8>, i: usize) -> Token? {
+    var j = i + 1
+    var animated = false
+    if j < b.len() and b[j] == b'a' {
+        animated = true
+        j += 1
+    }
+    if j >= b.len() or b[j] != b':' { return none }
+    j += 1
+    let name_from = j
+    while j < b.len() and b[j] != b':' {
+        let fits = (b[j] >= b'a' and b[j] <= b'z') or (b[j] >= b'0' and b[j] <= b'9') or b[j] == b'_'
+        if not fits { return none }
+        j += 1
+    }
+    if j >= b.len() or j - name_from < 2 or j - name_from > NAME_MOST { return none }
+    let name_to = j
+    j += 1
+    let id_from = j
+    while j < b.len() and b[j] != b'>' {
+        let fits = (b[j] >= b'a' and b[j] <= b'z') or (b[j] >= b'A' and b[j] <= b'Z') or (b[j] >= b'0' and b[j] <= b'9') or b[j] == b'_'
+        if not fits { return none }
+        j += 1
+    }
+    if j >= b.len() or j == id_from or j - id_from > 40 { return none }
+    let name = String.from_utf8(b[name_from..name_to]) ?? String()
+    let id = String.from_utf8(b[id_from..j]) ?? String()
+    return some(Token { start: i, end: j + 1, name: name, id: id, animated: animated })
+}
+
+// `text` with each of the person's own emoji as `:name:`, as an agent reads it, a
+// notification says it and copying gives it.
+pub fn as_names(text: String) -> String {
+    let found = tokens(text.copy())
+    if found.is_empty() { return text.copy() }
+    var out = String()
+    var from: usize = 0
+    for t in found {
+        out.push_str(text[from..t.start])
+        out.push_str(":{t.name}:")
+        from = t.end
+    }
+    out.push_str(text[from..])
+    return out
+}
+
+// The parts of `text` that are code: each fenced block, from its fence to the end
+// of its closing one, and each span in backticks. A fence or a run of backticks
+// that isn't closed is code up to the end, as it is while it's being typed.
+pub fn code_ranges(text: String) -> List<(usize, usize)> {
+    var out = List<(usize, usize)>()
+    let b = text.to_bytes()
+    let n = b.len()
+    var i: usize = 0
+    var line_start = true
+    while i < n {
+        if line_start {
+            line_start = false
+            var j = i
+            while j < n and j < i + 3 and b[j] == b' ' { j += 1 }
+            if j + 2 < n and (b[j] == b'`' or b[j] == b'~') and b[j + 1] == b[j] and b[j + 2] == b[j] {
+                let fence = b[j]
+                var run: usize = 0
+                while j + run < n and b[j + run] == fence { run += 1 }
+                // The block ends with the line of at least as many of the same.
+                var k = j + run
+                var end = n
+                while k < n {
+                    if b[k] == b'\n' {
+                        var m = k + 1
+                        while m < n and m < k + 4 and b[m] == b' ' { m += 1 }
+                        var got: usize = 0
+                        while m + got < n and b[m + got] == fence { got += 1 }
+                        if got >= run {
+                            var e = m + got
+                            while e < n and b[e] != b'\n' { e += 1 }
+                            end = e
+                            break
+                        }
+                    }
+                    k += 1
+                }
+                out.push((i, end))
+                i = end
+                continue
+            }
+        }
+        let c = b[i]
+        if c == b'\n' {
+            line_start = true
+            i += 1
+            continue
+        }
+        if c == b'\\' {
+            i += 2
+            continue
+        }
+        if c == b'`' {
+            var run: usize = 0
+            while i + run < n and b[i + run] == b'`' { run += 1 }
+            var k = i + run
+            var end = n
+            while k < n {
+                if b[k] == b'`' {
+                    var got: usize = 0
+                    while k + got < n and b[k + got] == b'`' { got += 1 }
+                    if got == run {
+                        end = k + got
+                        break
+                    }
+                    k += got
+                } else {
+                    k += 1
+                }
+            }
+            out.push((i, end))
+            i = end
+            continue
+        }
+        i += 1
+    }
+    return out
+}
+
+// Whether the end of `text`, where the person is typing, is in code.
+pub fn in_code(text: String) -> bool {
+    let n = text.len()
+    for r in code_ranges(text) {
+        if r.0 < n and r.1 >= n { return true }
+    }
+    return false
+}
+
+// What's being typed after a colon at the end of `before`, the composer's words up
+// to the cursor: `suffix` is what a suggestion takes the place of, from the colon,
+// and `query` the name typed so far, in lowercase. `closed` when it ends with the
+// closing colon, `:sob:`, which turns into its emoji straight away. None in code, or
+// when the colon is in a word or a time (`12:30`), or fewer than 2 letters follow it.
+pub struct Typed {
+    pub suffix: String
+    pub query: String
+    pub closed: bool
+}
+
+pub fn typed(before: String) -> Typed? {
+    let b = before.to_bytes()
+    let n = b.len()
+    if n < 3 { return none }
+    var end = n
+    var closed = false
+    if b[n - 1] == b':' {
+        closed = true
+        end = n - 1
+    }
+    var i = end
+    while i > 0 and name_byte(b[i - 1]) { i -= 1 }
+    if i == 0 or b[i - 1] != b':' or end - i < 2 { return none }
+    let colon = i - 1
+    // The colon starts the text or follows something other than a letter or digit.
+    if colon > 0 {
+        let p = b[colon - 1]
+        if (p >= b'a' and p <= b'z') or (p >= b'A' and p <= b'Z') or (p >= b'0' and p <= b'9') or p == b':' { return none }
+    }
+    if in_code(before.copy()) { return none }
+    let query = (String.from_utf8(b[i..end]) ?? String()).to_lower_root()
+    let suffix = String.from_utf8(b[colon..n]) ?? String()
+    return some(Typed { suffix: suffix, query: query, closed: closed })
+}
+
+// An emoticon the person just finished with a space at the end of `before`, such as
+// `:) `: what it takes the place of, and its emoji with the space. None in code.
+pub fn emoticon(before: String) -> (String, String)? {
+    if not before.ends_with(" ") { return none }
+    let face_end = before.trim_suffix(" ")
+    for pair in EMOTICONS.split("|") {
+        let (face, emoji) = pair.split_once(" ") ?? (pair.copy(), String())
+        if not face_end.ends_with(face.copy()) { continue }
+        let start = face_end.len() - face.len()
+        let alone = start == 0 or face_end[start - 1..start] == " " or face_end[start - 1..start] == "\n"
+        if not alone { continue }
+        if in_code(face_end.copy()) { return none }
+        return some(("{face} ", "{emoji} "))
+    }
+    return none
+}
+
+// The emoji `e` in skin tone `tone`, 1 to 5, or as it is for 0 or one without tones.
+pub fn toned(e: Emoji, tone: u32) -> String {
+    if tone >= 1 and tone <= 5 and e.tones.len() == 5 { return e.tones[usize(tone - 1)].copy() }
+    return e.text.copy()
+}
+
+// `name_tone3` as `name` and the tone it names.
+fn tone_suffix(name: String) -> (String, u32) {
+    for t in 1u32..6 {
+        let s = "_tone{t}"
+        if name.ends_with(s.copy()) { return (name.trim_suffix(s).copy(), t) }
+    }
+    return (name.copy(), 0)
+}
+
+// A candidate for the suggestion row or the picker's search: how well it matched,
+// lower first, and its name.
+struct Hit {
+    rank: u32
+    name: String
+    at: usize
+    json: Json
+}
+
+impl Table {
+    // The emoji that's written `text`, any of its tones too.
+    pub fn of(self, text: String) -> Emoji? {
+        let pos = self.by_text.get(bare(text)) else return none
+        return some(self.list[pos].copy())
+    }
+
+    // The emoji a name is, between colons: a person's own first, then built-in, with
+    // `_tone1` to `_tone5` on the end for that skin tone, else in `tone`. What it's
+    // sent as: the Unicode character, or the token.
+    pub fn named(self, name: String, tone: u32, custom: List<Custom>) -> String? {
+        let lower = name.to_lower_root()
+        for c in custom {
+            if c.name == lower { return some(token(c)) }
+        }
+        let (base, own_tone) = tone_suffix(lower.copy())
+        let pos = self.by_name.get(base) else return none
+        let e = self.list[pos].copy()
+        return some(toned(e, if own_tone > 0 { own_tone } else { tone }))
+    }
+
+    // The emoji whose names match `query`, best first, the person's own before the
+    // rest, up to `most`: a name that is it, then one that starts with it, then one
+    // with a word that does (`sob_cat` for `cat`), then a keyword that does.
+    pub fn find(self, query: String, tone: u32, custom: List<Custom>, most: usize) -> List<Json> {
+        let q = query.to_lower_root().trim_prefix(":").trim_suffix(":")
+        if q.len() == 0 { return List<Json>() }
+        let word = "_{q}"
+        var hits = List<Hit>()
+        for (k, c) in custom.enumerate() {
+            let rank: u32 = if c.name == q { 0 } else if c.name.starts_with(q.copy()) { 1 } else if c.name.contains(word.copy()) or c.name.contains(q.copy()) { 2 } else { 99 }
+            if rank == 99 { continue }
+            let j = Obj.new().s("emoji", token(c.copy())).s("name", c.name.copy()).s("custom", c.id.copy()).b("animated", c.animated).done()
+            hits.push(Hit { rank: rank, name: c.name.copy(), at: k, json: j })
+        }
+        for (k, e) in self.list.enumerate() {
+            var rank: u32 = 99
+            var best = String()
+            for n in e.names {
+                let r: u32 = if n == q { 3 } else if n.starts_with(q.copy()) { 4 } else if n.contains(word.copy()) { 5 } else { 99 }
+                if r < rank or (r == rank and n.len() < best.len()) {
+                    rank = r
+                    best = n.copy()
+                }
+            }
+            if rank == 99 {
+                for kw in e.keywords {
+                    if kw.starts_with(q.copy()) or kw.contains(" {q}") {
+                        rank = 6
+                        best = e.names[0].copy()
+                        break
+                    }
+                }
+            }
+            if rank == 99 { continue }
+            hits.push(Hit { rank: rank, name: best, at: k, json: item(e.copy(), tone) })
+        }
+        hits.sort_by(|a, b| if a.rank != b.rank { a.rank.cmp(b.rank) } else if a.name.len() != b.name.len() { a.name.len().cmp(b.name.len()) } else { a.at.cmp(b.at) })
+        var out = List<Json>()
+        for h in hits {
+            if out.len() >= most { break }
+            out.push(merge_name(h.json, h.name))
+        }
+        return out
+    }
+
+    // The picker's groups, in order: those used lately (`recent`, as they were sent:
+    // an emoji or a token), the person's own, then each of Unicode's, with every emoji
+    // in `tone`.
+    pub fn picker(self, tone: u32, custom: List<Custom>, recent: List<String>) -> Json {
+        var groups = List<Json>()
+        var used = List<Json>()
+        for r in recent {
+            if let t = token_at(r.to_bytes(), 0) {
+                for c in custom.copy() {
+                    if c.id == t.id { used.push(custom_item(c)) }
+                }
+            } else if let e = self.of(r.copy()) {
+                used.push(item(e, tone))
+            }
+        }
+        groups.push(Obj.new().s("id", String("recent")).s("name", String("Recently used")).j("emoji", Json.Array(used)).done())
+        groups.push(Obj.new().s("id", String("custom")).s("name", String("Your emoji")).j("emoji", Json.Array(custom.map(|c| custom_item(c.copy())))).done())
+        for g in GROUPS.split("|") {
+            let (id, name) = g.split_once(" ") ?? (g.copy(), String())
+            var list = List<Json>()
+            for e in self.list {
+                if e.group == id { list.push(item(e.copy(), tone)) }
+            }
+            groups.push(Obj.new().s("id", id).s("name", name).j("emoji", Json.Array(list)).done())
+        }
+        return Obj.new().j("groups", Json.Array(groups)).done()
+    }
+
+    // An agent's reply with each `:name:` it wrote turned into its emoji: a built-in
+    // one into the character, in `tone`, and one of the person's own into its token.
+    // Names it doesn't know, and anything in code, stay as they are.
+    pub fn from_names(self, text: String, tone: u32, custom: List<Custom>) -> String {
+        if not text.contains(":") { return text.copy() }
+        let code = code_ranges(text.copy())
+        let b = text.to_bytes()
+        var out = String()
+        var from: usize = 0
+        var i: usize = 0
+        while i < b.len() {
+            if b[i] != b':' {
+                i += 1
+                continue
+            }
+            if code.any(|r| r.0 <= i and i < r.1) {
+                i += 1
+                continue
+            }
+            var j = i + 1
+            while j < b.len() and name_byte(b[j]) { j += 1 }
+            let word_before = i > 0 and name_byte(b[i - 1])
+            if j < b.len() and b[j] == b':' and j - i > 2 and not word_before {
+                let name = String.from_utf8(b[i + 1..j]) ?? String()
+                if let e = self.named(name, tone, custom.copy()) {
+                    out.push_str(text[from..i])
+                    out.push_str(e)
+                    from = j + 1
+                    i = j + 1
+                    continue
+                }
+            }
+            i += 1
+        }
+        out.push_str(text[from..])
+        return out
+    }
+}
+
+// A built-in emoji as the apps get it: itself in `tone`, its names, and whether it
+// has skin tones.
+fn item(e: Emoji, tone: u32) -> Json {
+    return Obj.new().s("emoji", toned(e.copy(), tone)).j("names", Json.Array(e.names.map(|n| Json.Str(n.copy())))).b("tones", e.tones.len() == 5).done()
+}
+
+fn merge_name(j: Json, name: String) -> Json {
+    return merge(j, Obj.new().s("name", name).done())
+}
+
+// One of the person's own as the apps get it.
+pub fn custom_item(c: Custom) -> Json {
+    return Obj.new().s("emoji", token(c.copy())).s("custom", c.id.copy()).j("names", Json.Array([Json.Str(c.name.copy())])).b("animated", c.animated).done()
+}
+
+@test
+fn a_shortcode_finds_its_emoji_first() {
+    let t = load()
+    let found = t.find(String("sob"), 0, List<Custom>(), 8)
+    assert(found.len() > 0)
+    assert(str_at(found[0].copy(), "emoji") == some(String("😭")))
+    assert(str_at(found[0].copy(), "name") == some(String("sob")))
+    assert(t.named(String("joy"), 0, List<Custom>()) == some(String("😂")))
+    assert(t.named(String("+1"), 0, List<Custom>()) == some(String("👍")))
+    assert(t.named(String("thumbsup"), 0, List<Custom>()) == some(String("👍")))
+    assert(t.named(String("skull"), 0, List<Custom>()) == some(String("💀")))
+    assert(t.named(String("nothing_like_it"), 0, List<Custom>()) == none)
+}
+
+@test
+fn the_persons_own_come_first() {
+    let t = load()
+    let mine: List<Custom> = [Custom { id: String("e_1"), name: String("sob_cat"), animated: false }]
+    let found = t.find(String("sob"), 0, mine.copy(), 8)
+    assert(str_at(found[0].copy(), "emoji") == some(String("<:sob_cat:e_1>")))
+    assert(str_at(found[1].copy(), "emoji") == some(String("😭")))
+    assert(found.len() <= 8)
+    // A word in a name matches: `cat` finds `sob_cat`.
+    let cats = t.find(String("cat"), 0, mine, 8)
+    assert(str_at(cats[0].copy(), "custom") == some(String("e_1")))
+}
+
+@test
+fn skin_tones_follow_the_setting_or_the_name() {
+    let t = load()
+    assert(t.named(String("thumbsup"), 3, List<Custom>()) == some(String("👍🏽")))
+    assert(t.named(String("thumbsup_tone1"), 0, List<Custom>()) == some(String("👍🏻")))
+    // An emoji without tones stays as it is.
+    assert(t.named(String("sob"), 3, List<Custom>()) == some(String("😭")))
+    assert(t.of(String("👍🏿")) != none)
+}
+
+@test
+fn typing_a_colon_and_two_letters_asks() {
+    let t = typed(String("well :so")) ?? Typed { suffix: String(), query: String(), closed: false }
+    assert(t.query == "so" and t.suffix == ":so" and not t.closed)
+    let c = typed(String(":sob:")) ?? Typed { suffix: String(), query: String(), closed: false }
+    assert(c.closed and c.query == "sob" and c.suffix == ":sob:")
+    assert(typed(String("well :s")) == none)
+    assert(typed(String("at 12:30")) == none)
+    assert(typed(String("http://x")) == none)
+    assert(typed(String("see:so")) == none)
+    assert(typed(String(":+1")) != none)
+}
+
+@test
+fn code_is_left_alone() {
+    assert(typed(String("`a :so")) == none)
+    assert(typed(String("```\nlet a = :so")) == none)
+    assert(typed(String("`a` :so")) != none)
+    assert(typed(String("```\nx\n```\n:so")) != none)
+    let t = load()
+    assert(t.from_names(String("I'm :sob: about `:sob:`"), 0, List<Custom>()) == "I'm 😭 about `:sob:`")
+    assert(t.from_names(String("```\n:joy:\n```\n:joy:"), 0, List<Custom>()) == "```\n:joy:\n```\n😂")
+    assert(emoticon(String("`:) ")) == none)
+}
+
+@test
+fn an_agent_writes_emoji_by_name() {
+    let t = load()
+    let mine: List<Custom> = [Custom { id: String("e_7"), name: String("party_cat"), animated: true }]
+    assert(t.from_names(String("Done :party_cat: :tada: at 12:30:45, :nope:"), 0, mine) == "Done <a:party_cat:e_7> 🎉 at 12:30:45, :nope:")
+}
+
+@test
+fn tokens_go_both_ways() {
+    let c = Custom { id: String("e_12"), name: String("sob_cat"), animated: false }
+    let a = Custom { id: String("e_13"), name: String("dance"), animated: true }
+    let text = "so {token(c)} and {token(a)}!"
+    assert(text == "so <:sob_cat:e_12> and <a:dance:e_13>!")
+    let found = tokens(text.copy())
+    assert(found.len() == 2)
+    assert(found[0].name == "sob_cat" and found[0].id == "e_12" and not found[0].animated)
+    assert(found[1].name == "dance" and found[1].animated)
+    assert(text[found[0].start..found[0].end] == "<:sob_cat:e_12>")
+    assert(as_names(text) == "so :sob_cat: and :dance:!")
+    // Not tokens: no id, a capital in the name, a name too short.
+    assert(tokens(String("<:a:e_1> <:Sob:e_1> <:sob:> <b:sob:e_1> a < b")).is_empty())
+}
+
+@test
+fn names_are_checked() {
+    assert(name_ok(String("sob_cat")))
+    assert(name_ok(String("a1")))
+    assert(not name_ok(String("a")))
+    assert(not name_ok(String("Sob")))
+    assert(not name_ok(String("sob-cat")))
+    assert(not name_ok(String("abcdefghijklmnopqrstuvwxyz1234567")))
+}
+
+@test
+fn emoticons_turn_only_when_finished() {
+    assert(emoticon(String("hi :) ")) == some((String(":) "), String("🙂 "))))
+    assert(emoticon(String(":D ")) == some((String(":D "), String("😃 "))))
+    assert(emoticon(String("hi :)")) == none)
+    assert(emoticon(String("a:) ")) == none)
+}
+
+@test
+fn the_picker_has_every_group() {
+    let t = load()
+    let p = t.picker(0, List<Custom>(), [String("😭"), String("<:x1:e_9>")])
+    let groups = at(p, "groups")
+    assert(groups.len() == 11)
+    let recent = at(groups.at(0) ?? Json.Null, "emoji")
+    assert(recent.len() == 1)
+    let smileys = groups.at(2) ?? Json.Null
+    assert(str_at(smileys.copy(), "id") == some(String("smileys")))
+    assert(at(smileys, "emoji").len() > 100)
+}
