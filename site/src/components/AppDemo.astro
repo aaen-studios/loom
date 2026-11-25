@@ -1,9 +1,12 @@
 ---
-// A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads in their shapes, the
-// pinned ones as tiles over the rest, a folder, and an agent waiting on the person at the top while it asks, an agent's chat with a reply that thinks, uses a tool, writes and asks before it deploys. Its sizes,
-// colours and words are the app's (desktop/src/app.rs, design/tokens.toml); the script that plays
-// it is src/scripts/demo.ts. The approval's buttons answer it, a reply's steps open, and the
-// sidebar collapses to the rail, as the app's do.
+// A live copy of loom's desktop app, for the first screen: the sidebar with the agents' threads
+// in their shapes, the pinned ones as tiles over the rest, a folder, and an agent waiting on the
+// person at the top while it asks; an agent's chat with a message written with a link and a file
+// in it, and a reply that thinks, uses a tool, writes and asks before it deploys; and another
+// agent's thread with it, opened from its row. Its sizes, colours and words are the app's
+// (desktop/src/app.rs, design/tokens.toml); the script that plays it is src/scripts/demo.ts. The
+// approval's buttons answer it, a reply's steps open, the thread's row opens it, and the sidebar
+// collapses to the rail, as the app's do.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
 
@@ -90,7 +93,7 @@ const GITHUB =
 						</div>
 						{a.on &&
 							a.asks?.map((k) => (
-								<div class="ask">
+								<div class="ask" data-ask>
 									<svg data-thread data-color={k.color} data-shape={k.shape} width="18" height={k.shape ? 22 : 8} />
 									<span class="ask-name">From {k.from}</span>
 								</div>
@@ -159,13 +162,34 @@ const GITHUB =
 			</div>
 		</div>
 
+		<!-- Another agent's thread with Juniper, opened from its row in the sidebar in the chat's
+		     place, under a strip that says whose it is, with the way back (app.rs, branch_strip). -->
+		<div class="strip-wrap">
+			<div class="strip">
+				<button type="button" class="strip-back" data-back aria-label="Back to the chat"
+					><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"></path></svg></button
+				>
+				<svg data-thread data-color="apricot" data-shape="star" width="18" height="22" class="strip-mark" aria-hidden="true"></svg>
+				<span class="strip-title">From Biscuit</span>
+			</div>
+		</div>
 		<div class="chat">
-			<div class="msgs" aria-live="off">
-				<div class="time-line">Today 09:02</div>
+			<div class="msgs asked" aria-live="off">
+				<div class="time-line">Today 08:47</div>
 				<div class="row from-agent" style="--from: var(--thread-apricot)">
 					<div class="from-who"><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</div>
 					<div class="from-bubble">The billing fix is ready. It needs a review before 2.4 goes out.</div>
 				</div>
+				<div class="row reply">
+					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
+					<div class="body">
+						<div class="who">Juniper</div>
+						<div class="said"><p>Got it. I'll put it at the top of today's list.</p></div>
+					</div>
+				</div>
+			</div>
+			<div class="msgs mine" aria-live="off">
+				<div class="time-line">Today 09:02</div>
 				<div class="row you">
 					<div class="bubble">What's on my plate today?</div>
 				</div>
@@ -217,17 +241,22 @@ const GITHUB =
 
 		<div class="composer-wrap" aria-hidden="true">
 			<div class="composer">
-				<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
-				<span class="field"><span class="typed"></span><span class="placeholder">Reply to Juniper</span></span>
-				<span class="icon-btn c"
-					><svg class="i" viewBox="0 0 24 24"
-						><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg
-					></span
-				>
-				<span class="send">
-					<svg class="i up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"></path></svg>
-					<svg class="i stop" viewBox="0 0 24 24"><rect width="14" height="14" x="5" y="5" rx="2"></rect></svg>
-				</span>
+				<!-- What's attached, over the words, as the sent message will have it (app.rs,
+				     attached_row): a file as its pill, a pasted link as its card. -->
+				<div class="attached" data-attached hidden></div>
+				<div class="composer-row">
+					<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
+					<span class="field"><span class="typed"></span><span class="placeholder">Reply to Juniper</span></span>
+					<span class="icon-btn c"
+						><svg class="i" viewBox="0 0 24 24"
+							><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg
+						></span
+					>
+					<span class="send">
+						<svg class="i up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"></path></svg>
+						<svg class="i stop" viewBox="0 0 24 24"><rect width="14" height="14" x="5" y="5" rx="2"></rect></svg>
+					</span>
+				</div>
 			</div>
 		</div>
 	</div>
@@ -235,6 +264,45 @@ const GITHUB =
 
 <template id="demo-you">
 	<div class="row you fresh"><div class="bubble"></div></div>
+</template>
+<!-- A link pasted on its own, as one piece in the words: its site's icon and its page's
+     title (app.rs, composer_token). The sent message shows it the same way. -->
+<template id="demo-link">
+	<span class="piece" title="https://github.com/acme/shop/actions"
+		><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="piece-name">Actions · acme/shop</span></span
+	>
+</template>
+<!-- An attached file, as one piece where it was attached: its icon and its name. -->
+<template id="demo-file">
+	<span class="piece" title="notes-2.4.md"
+		><svg class="i file-icon" viewBox="0 0 24 24" aria-hidden="true"
+			><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"></path></svg
+		><span class="piece-name">notes-2.4.md</span></span
+	>
+</template>
+<!-- The pasted link's card (app.rs, link_card): its site's icon where the page has no
+     picture, its title and its site. Over the words in the composer, with its ×, and over
+     the sent message's words. -->
+<template id="demo-link-card">
+	<span class="link-card" title="https://github.com/acme/shop/actions">
+		<span class="link-pic"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg></span>
+		<span class="link-text">
+			<span class="link-title">Actions · acme/shop</span>
+			<span class="link-site"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>github.com</span>
+		</span>
+		<span class="unattach"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></span>
+	</span>
+</template>
+<!-- The attached file as the composer has it (app.rs, attached_row): its icon, name, size and
+     ×; and as the sent message has it over its words (file_view): its name over its size. -->
+<template id="demo-file-pill">
+	<span class="file-pill">
+		<svg class="i file-icon" viewBox="0 0 24 24" aria-hidden="true"
+			><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"></path></svg
+		>
+		<span class="file-text"><span class="file-name">notes-2.4.md</span><span class="file-size">4 KB</span></span>
+		<span class="file-x"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></span>
+	</span>
 </template>
 <template id="demo-reply">
 	<div class="row reply fresh">
@@ -1112,6 +1180,242 @@ const GITHUB =
 		margin-right: 4px;
 	}
 
+	/* Another agent's thread with the open one (app.rs, branch_strip): in the chat's place,
+	   with a strip over it that says whose it is, the asker's thread beside its name, and the
+	   arrow back to the person's own chat. */
+	.strip-wrap {
+		display: none;
+		padding: 8px 24px 0;
+		flex: none;
+	}
+	.app.in-thread .strip-wrap {
+		display: block;
+	}
+	.strip {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		max-width: var(--space-column);
+		margin: 0 auto;
+		padding: 8px 12px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-button);
+	}
+	.strip-back {
+		display: grid;
+		place-items: center;
+		width: var(--control-icon);
+		height: var(--control-icon);
+		flex: none;
+		border-radius: var(--radius-row);
+		color: var(--ink-2);
+		cursor: pointer;
+		transition:
+			background-color 0.12s,
+			color 0.12s;
+	}
+	.strip-back:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	.strip-mark {
+		width: 18px;
+		height: 22px;
+		flex: none;
+	}
+	.strip-title {
+		min-width: 0;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.msgs.asked,
+	.app.in-thread .msgs.mine {
+		display: none;
+	}
+	.app.in-thread .msgs.asked {
+		display: block;
+	}
+	/* While the thread is open, its row is the one lit, and the agent's own row takes you back. */
+	.app.in-thread .agent.on {
+		background: none;
+		cursor: pointer;
+	}
+	.app.in-thread .agent.on:hover {
+		background: var(--hover);
+	}
+	.ask {
+		cursor: pointer;
+	}
+	.app.in-thread .ask {
+		background: var(--active);
+		color: var(--ink);
+	}
+
+	/* A file or a pasted link in the words (app.rs, composer_token, linked_words): its icon
+	   and its name or page's title, underlined, with the hand and a light background under
+	   the pointer. */
+	.piece {
+		display: inline-flex;
+		align-items: center;
+		gap: 3px;
+		padding: 0 2px;
+		margin: 0 -1px;
+		border-radius: 4px;
+		vertical-align: bottom;
+		white-space: nowrap;
+		cursor: pointer;
+		transition: background-color 0.12s;
+	}
+	.piece:hover {
+		background: color-mix(in srgb, var(--ink) 14%, transparent);
+	}
+	.piece-name {
+		text-decoration: underline;
+		text-underline-offset: 2px;
+		text-decoration-color: var(--line-strong);
+	}
+	.file-icon {
+		color: var(--ink-3);
+	}
+	/* A pasted link's card: 300 by 72, the site's icon on the bubble's grey where the page
+	   has no picture, then its title, two lines at most, and its site. */
+	.link-card {
+		position: relative;
+		display: flex;
+		align-items: center;
+		flex: none;
+		width: 300px;
+		height: 72px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		overflow: hidden;
+		background: var(--bg);
+		cursor: pointer;
+		transition: background-color 0.12s;
+	}
+	.link-card:hover {
+		background: var(--hover);
+	}
+	.link-pic {
+		display: grid;
+		place-items: center;
+		width: 72px;
+		height: 72px;
+		flex: none;
+		background: var(--bubble);
+	}
+	.link-pic .site-icon {
+		width: 24px;
+		height: 24px;
+		border-radius: 4px;
+	}
+	.link-text {
+		display: flex;
+		flex-direction: column;
+		justify-content: center;
+		gap: 2px;
+		min-width: 0;
+		padding: 0 12px;
+	}
+	.link-title {
+		font-size: var(--size-small);
+		line-height: 1.4;
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+	.link-site {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	/* Its × in the composer: it goes back to plain text. */
+	.unattach {
+		position: absolute;
+		top: 3px;
+		right: 3px;
+		display: grid;
+		place-items: center;
+		width: 18px;
+		height: 18px;
+		border-radius: 50%;
+		background: rgb(0 0 0 / 0.6);
+		color: #fff;
+	}
+	.unattach .i {
+		width: 10px;
+		height: 10px;
+	}
+	.you .unattach {
+		display: none;
+	}
+	/* A file over the words: in the composer its icon, name, size and ×; sent, its name
+	   over its size. */
+	.file-pill {
+		display: flex;
+		align-items: center;
+		flex: none;
+		gap: 8px;
+		padding: 4px 4px 4px 12px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		white-space: nowrap;
+	}
+	.file-text {
+		display: flex;
+		align-items: baseline;
+		gap: 8px;
+	}
+	.file-size {
+		color: var(--ink-3);
+	}
+	.file-x {
+		display: grid;
+		place-items: center;
+		width: 22px;
+		height: 22px;
+		border-radius: var(--radius-row);
+		color: var(--ink-3);
+	}
+	.file-x .i {
+		width: 10px;
+		height: 10px;
+	}
+	.you .file-pill {
+		gap: 12px;
+		max-width: 320px;
+		padding: 8px 12px;
+		cursor: pointer;
+		transition: background-color 0.12s;
+	}
+	.you .file-pill:hover {
+		background: var(--hover);
+	}
+	.you .file-text {
+		flex-direction: column;
+		gap: 0;
+		line-height: 1.4;
+	}
+	.you .file-size {
+		font-size: var(--size-caption);
+	}
+	.you .file-x {
+		display: none;
+	}
+	/* A message with files or a link card has them over its words, on its side. */
+	.you:has(.file-pill, .link-card) {
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 4px;
+	}
+
 	/* A reply's sources (desktop/src/app.rs, sources_tab): a tab hanging from its bubble's
 	   bottom-left corner, tucked under it, a shade lighter than the bubble; open, a shade
 	   darker. Its list opens under it, a line each. */
@@ -1431,14 +1735,14 @@ const GITHUB =
 		transform: scale(0.97);
 	}
 
-	/* The composer. */
+	/* The composer: what's attached over the words, then the + , the words and the buttons. */
 	.composer-wrap {
 		padding: 4px 24px 16px;
 		flex: none;
 	}
 	.composer {
 		display: flex;
-		align-items: flex-end;
+		flex-direction: column;
 		gap: 8px;
 		max-width: var(--space-column);
 		margin: 0 auto;
@@ -1447,22 +1751,41 @@ const GITHUB =
 		border: 1px solid var(--line);
 		border-radius: var(--radius-composer);
 	}
+	.composer-row {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+	}
+	.attached {
+		display: flex;
+		align-items: flex-end;
+		gap: 8px;
+		overflow: hidden;
+	}
+	.attached[hidden] {
+		display: none;
+	}
+	.attached > * {
+		animation: rise 0.2s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
 	.icon-btn.c {
 		width: var(--control-icon-composer);
 		height: var(--control-icon-composer);
 	}
+	/* The words wrap onto more lines as they grow, as the app's do. */
 	.field {
 		position: relative;
 		flex: 1;
 		min-width: 0;
-		height: 32px;
+		min-height: 32px;
 		display: flex;
 		align-items: center;
-		padding-left: 4px;
-		white-space: nowrap;
+		padding: 4px 0 4px 4px;
+		line-height: 1.5;
 		overflow: hidden;
 	}
 	.placeholder {
+		white-space: nowrap;
 		color: var(--ink-3);
 	}
 	.typed:not(:empty) + .placeholder {
