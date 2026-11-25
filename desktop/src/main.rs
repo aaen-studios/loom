@@ -354,6 +354,7 @@ gpui_kit::assets::icon_assets!(
         Lock,
         Image,
         ClipboardPaste,
+        ClipboardPen,
         FileClock,
         FolderInput,
         FolderOutput,

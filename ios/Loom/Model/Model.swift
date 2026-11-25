@@ -2142,6 +2142,9 @@ final class Model {
         for case .ready(let l) in linkPreviews.values { wanted += [l.icon, l.image].compactMap { $0 } }
         // The thumbnails of the pictures its replies name.
         wanted += shown.flatMap { $0.named.compactMap(\.thumb) }
+        // And those of pictures sent before and picked to go again, which the composer
+        // has no file of its own to draw.
+        wanted += attachments.filter { $0.path.isEmpty && isPicture($0.name) }.compactMap { $0.file?.file }
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }
@@ -2337,6 +2340,13 @@ final class Model {
     /// A file from the + menu's recent files, for the next message: it's on the instance
     /// already, so nothing goes up. Whether it was added, which it isn't when it waits
     /// already.
+    /// Where an attached picture is drawn from: its file on this phone, or for one sent
+    /// before and picked to go again, its thumbnail once that has come.
+    func picturePath(_ a: Attachment) -> String {
+        guard a.path.isEmpty else { return a.path }
+        return a.file.flatMap { files["\($0.file).thumb"] } ?? ""
+    }
+
     func attachSent(_ f: FileRef) -> Bool {
         if attachments.contains(where: { $0.file?.file == f.file }) { return false }
         attachments.append(Attachment(id: id("app.sent"), name: f.name, path: "", file: f))

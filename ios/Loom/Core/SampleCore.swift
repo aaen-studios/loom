@@ -194,6 +194,13 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(Sample.routines)]])
             case "files.recent":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(Sample.recent)]])
+            case "link.preview":
+                // A link pasted in the composer, looked up as the instance does, with its
+                // preview picture.
+                let url = f["args"]["url"].text
+                later(0.3) { [self] in
+                    tell(["t": "result", "id": f["id"], "ok": true, "value": ["link": ["title": "Watering schedule for balcony tomatoes", "site": JSON(siteOf(url)), "image": "sample-dusk"]]])
+                }
             case "routine.run":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
             case "agent.file":
@@ -490,8 +497,13 @@ enum Sample {
             // Mentions of an agent and of a file in the agent's folder.
             ["id": "msg_44", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187180000,
              "blocks": [["kind": "text", "text": "Once they're watered, note it in [watering.md](loom:file/a_4/notes/watering.md) and tell [@Scribe](loom:agent/a_2)."]]],
+            // A reply naming a picture in the agent's folder, shown by its thumbnail.
+            ["id": "msg_46", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_46", "at": 1795187210000,
+             "mentions": [["path": "photos/seedlings.png", "name": "seedlings.png", "size": 361_000, "mime": "image/png", "thumb": "sample-sprout"]],
+             "blocks": [["kind": "text", "text": "Last week's seedlings are in `photos/seedlings.png`."]]],
             // A reply naming an agent and a file, shown as the person's mentions are, and a
-            // fan of more than five pictures, whose corner says how many there are.
+            // fan of more than five pictures, whose corner says how many there are. It's the
+            // chat's last, so its form still takes answers.
             ["id": "msg_45", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_45", "at": 1795187240000,
              "mentions": [["path": "notes/watering.md", "name": "watering.md"]],
              "blocks": [["kind": "text", "text": "Noted in `notes/watering.md`, and @Scribe knows. Here's the balcony this week, a picture a day."],
@@ -508,10 +520,6 @@ enum Sample {
                             ["label": "Litres", "kind": "number", "required": true, "value": 2, "placeholder": "2"],
                             ["label": "Remind me", "kind": "toggle", "required": false, "value": true],
                             ["label": "Note", "kind": "text", "required": false, "value": "", "placeholder": "For the plants on the left"]]]]]],
-            // A reply naming a picture in the agent's folder, shown by its thumbnail.
-            ["id": "msg_46", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_46", "at": 1795187300000,
-             "mentions": [["path": "photos/seedlings.png", "name": "seedlings.png", "size": 361_000, "mime": "image/png", "thumb": "sample-sprout"]],
-             "blocks": [["kind": "text", "text": "Last week's seedlings are in `photos/seedlings.png`."]]],
         ],
         "c_5": [
             ["id": "msg_50", "conversation": "c_5", "role": "person", "from": "a_1", "at": 1795187300000,

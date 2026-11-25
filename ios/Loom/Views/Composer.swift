@@ -56,8 +56,42 @@ struct Composer: View {
         .onAppear {
             box.opened = { piece in open(piece) }
             box.pasted = { url in session.send(model.previewLink(url)) }
+            #if DEBUG
+            // Once the chat has selected its agent and the field is made.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { fromLaunch() }
+            #endif
         }
     }
+
+    #if DEBUG
+    /// Whether the launch arguments were done, once for the app, not each time a chat opens.
+    @MainActor private static var launchDone = false
+
+    /// `-skill <name>`, `-attach <path>` and `-paste <url>` at launch, with `-open`, do
+    /// what picking that skill in the + sheet, attaching that file and pasting that link
+    /// do, for screenshots of the composer (ios/README.md). Each can be given again.
+    private func fromLaunch() {
+        guard !Composer.launchDone else { return }
+        Composer.launchDone = true
+        let args = ProcessInfo.processInfo.arguments
+        func values(_ flag: String) -> [String] {
+            args.indices.filter { args[$0] == flag && $0 + 1 < args.count }.map { args[$0 + 1] }
+        }
+        for name in values("-skill") { take(.skill(name)) }
+        // A recent file, once the + menu's lists have come.
+        let recent = values("-recent")
+        if !recent.isEmpty {
+            for f in session.model.loadPlus() { session.send(f) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                for case .file(let f) in session.model.plusSub(.recent) where recent.contains(f.file.name) { take(.sent(f.file)) }
+            }
+        }
+        Task {
+            for path in values("-attach") { await attach(path: path, name: (path as NSString).lastPathComponent) }
+            for url in values("-paste") { box.view?.pasteLink(url) }
+        }
+    }
+    #endif
 
     /// The composer itself: what's attached over the field, with + before it and Send
     /// after.
@@ -161,7 +195,12 @@ struct Composer: View {
                 Task { @MainActor in await attachPhoto(data: data) }
             }
         case .sent(let f):
-            _ = model.attachSent(f)
+            // Its piece where the person was writing, as an attachment's: the composer
+            // keeps only the files whose pieces are in the words.
+            if model.attachSent(f), let a = model.attachments.last {
+                box.put(attachPiece(a))
+                session.flush()
+            }
         case .skill(let name):
             // Where the person was writing, as the @ picker puts a mention.
             let mention = skillMention(name)
@@ -196,8 +235,11 @@ struct Composer: View {
         }
     }
 
-    /// Sends a file for the next message, and puts its piece in the words at the caret.
-    private func attach(path: String, name: String) {
+    /// Sends a file for the next message, and puts its piece in the words at the caret. A
+    /// picture's tiny copy is made first, so its piece is drawn with it, from Photos or
+    /// from Files.
+    private func attach(path: String, name: String) async {
+        if isPicture(name) { _ = await Pictures.load(path, side: AttachedRow.picture) }
         let model = session.model
         session.send(model.attach(path: path, name: name))
         if let a = model.attachments.last { box.put(attachPiece(a)) }
@@ -231,8 +273,7 @@ struct Composer: View {
             session.model.notice = "That photo couldn't be read."
             return
         }
-        _ = await Pictures.load(url.path, side: AttachedRow.picture)
-        attach(path: url.path, name: name)
+        await attach(path: url.path, name: name)
     }
 
     /// A file from Files is copied in first, since its own place is only open for a
@@ -245,7 +286,7 @@ struct Composer: View {
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: url, to: copy)
-            attach(path: copy.path, name: url.lastPathComponent)
+            Task { await attach(path: copy.path, name: url.lastPathComponent) }
         } catch {
             session.model.notice = "\(url.lastPathComponent) couldn't be read."
         }
@@ -381,7 +422,7 @@ final class PieceTextView: UITextView {
 
     /// A link pasted on its own: first as its address, then, as an edit of its own, as
     /// its piece, so an undo right after takes it back to the address.
-    private func pasteLink(_ url: String) {
+    func pasteLink(_ url: String) {
         let at = selectedRange.location
         edit(selectedRange, NSAttributedString(string: url, attributes: typingAttributes))
         box?.pasted(url)
@@ -394,11 +435,29 @@ final class PieceTextView: UITextView {
         }
     }
 
+    /// How wide a piece may be: the field's line, once it has one.
+    private var line: CGFloat {
+        let w = bounds.width - textContainerInset.left - textContainerInset.right - textContainer.lineFragmentPadding * 2
+        return w > 40 ? w.rounded(.down) : .greatestFiniteMagnitude
+    }
+
+    /// The width the pieces were last drawn for.
+    private var drawnFor: CGFloat = 0
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        // A piece drawn before the field had its width is cut to it now.
+        if bounds.width != drawnFor {
+            drawnFor = bounds.width
+            redraw()
+        }
+    }
+
     /// A piece as its attachment, drawn in the field's font.
     func piece(_ p: Piece) -> NSAttributedString {
         let a = PieceAttachment()
         a.piece = p
-        art.draw(a, font: font ?? UIFont.systemFont(ofSize: 17))
+        art.draw(a, font: font ?? UIFont.systemFont(ofSize: 17), most: line)
         let made = NSMutableAttributedString(attachment: a)
         made.addAttributes(typingAttributes, range: NSRange(location: 0, length: made.length))
         return made
@@ -435,7 +494,7 @@ final class PieceTextView: UITextView {
         textStorage.beginEditing()
         textStorage.enumerateAttribute(.attachment, in: all) { value, range, _ in
             guard let a = value as? PieceAttachment else { return }
-            if art.draw(a, font: font ?? UIFont.systemFont(ofSize: 17)) {
+            if art.draw(a, font: font ?? UIFont.systemFont(ofSize: 17), most: line) {
                 textStorage.edited(.editedAttributes, range: range, changeInLength: 0)
             }
         }
@@ -475,7 +534,7 @@ struct PieceArt {
     @MainActor init(model: Model) {
         for a in model.agents { agents[a.id] = (a.color, a.outline) }
         for a in model.attachments + model.dropped {
-            files[PieceKind.attach + a.id] = (a.name, a.path, isPicture(a.name))
+            files[PieceKind.attach + a.id] = (a.name, model.picturePath(a), isPicture(a.name))
         }
         for (url, p) in model.linkPreviews {
             switch p {
@@ -487,9 +546,10 @@ struct PieceArt {
         }
     }
 
-    /// Draws `a` as its piece is shown, and gives whether it looks different now.
+    /// Draws `a` as its piece is shown, no wider than `most` (its words cut at the end to
+    /// fit), and gives whether it looks different now.
     @MainActor @discardableResult
-    func draw(_ a: PieceAttachment, font: UIFont) -> Bool {
+    func draw(_ a: PieceAttachment, font: UIFont, most: CGFloat = .greatestFiniteMagnitude) -> Bool {
         let p = a.piece
         let ink = UIColor(P.ink)
         var icon: UIImage?
@@ -525,7 +585,7 @@ struct PieceArt {
                 if let f, f.picture, let small = Pictures.kept(f.path, side: AttachedRow.picture) {
                     icon = small
                 } else {
-                    icon = UIImage(systemName: "doc")?.withTintColor(UIColor(P.ink3), renderingMode: .alwaysOriginal)
+                    icon = UIImage(systemName: f?.picture == true ? "photo" : "doc")?.withTintColor(UIColor(P.ink3), renderingMode: .alwaysOriginal)
                 }
                 words = together.contains(p.id) ? "" : middleCut(f?.name ?? p.text)
             } else if p.id.hasPrefix(PieceKind.link) {
@@ -540,18 +600,23 @@ struct PieceArt {
                 words = title.isEmpty ? siteOf(url) : middleCut(title, 40)
             }
         }
-        let key = "\(p.id)|\(words)|\(icon.map { ObjectIdentifier($0).hashValue } ?? 0)|\(color)"
+        let key = "\(p.id)|\(words)|\(icon.map { ObjectIdentifier($0).hashValue } ?? 0)|\(color)|\(most)"
         if a.drawn == key { return false }
         a.drawn = key
         let face = medium ? (UIFont(name: "Geist-Medium", size: font.pointSize) ?? font) : font
         var attrs: [NSAttributedString.Key: Any] = [.font: face, .foregroundColor: color]
         if underline { attrs[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        attrs[.paragraphStyle] = style
         let text = NSAttributedString(string: words, attributes: attrs)
         let side: CGFloat = 16
         let gap: CGFloat = words.isEmpty || icon == nil ? 0 : 3
         let textSize = text.size()
         let height = ceil(font.lineHeight)
-        let width = ceil((icon == nil ? 0 : side) + gap + textSize.width) + 4
+        let before = (icon == nil ? 0 : side) + gap + 4
+        let textWidth = min(ceil(textSize.width), max(0, most - before))
+        let width = ceil(before + textWidth)
         let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height)).image { _ in
             var x: CGFloat = 2
             if let icon {
@@ -561,7 +626,9 @@ struct PieceArt {
                 UIGraphicsGetCurrentContext()?.resetClip()
                 x += side + gap
             }
-            text.draw(at: CGPoint(x: x, y: (height - textSize.height) / 2))
+            // One line, cut with an ellipsis where it doesn't fit.
+            text.draw(with: CGRect(x: x, y: (height - textSize.height) / 2, width: textWidth, height: textSize.height),
+                      options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], context: nil)
         }
         a.image = image
         a.bounds = CGRect(x: 0, y: font.descender, width: width, height: height)
@@ -667,10 +734,10 @@ private struct AttachedRow: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(alignment: .bottom, spacing: Tokens.Space.s) {
                 if pictures.count == 1, let a = pictures.first {
-                    AttachedPicture(attachment: a)
+                    AttachedPicture(attachment: a, path: model.picturePath(a))
                         .overlay(alignment: .topTrailing) { cross("Remove \(a.name)") { take(a.id) } }
                 } else if pictures.count > 1 {
-                    AttachedFan(pictures: pictures)
+                    AttachedFan(pictures: pictures, paths: pictures.map(model.picturePath))
                         .overlay(alignment: .topTrailing) {
                             cross("Remove \(pictures.count) pictures") { for a in pictures { take(a.id) } }
                         }
@@ -704,11 +771,13 @@ private struct AttachedRow: View {
 /// A picture waiting to go, as itself, faint while it goes up.
 private struct AttachedPicture: View {
     var attachment: Attachment
+    /// Where it's drawn from (`Model.picturePath`).
+    var path: String
     @State private var image: UIImage?
 
     var body: some View {
         let side: CGFloat = 96
-        let shown = image ?? Pictures.kept(attachment.path, side: side)
+        let shown = image ?? Pictures.kept(path, side: side)
         let size = shown.map { Pictures.fit($0.size, in: CGSize(width: 200, height: side)) } ?? CGSize(width: side, height: side)
         Group {
             if let shown {
@@ -721,8 +790,8 @@ private struct AttachedPicture: View {
         .clipShape(RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
         .opacity(attachment.file == nil ? 0.6 : 1)
         .accessibilityLabel("Picture, \(attachment.name)")
-        .task(id: attachment.path) {
-            if Pictures.kept(attachment.path, side: side) == nil { image = await Pictures.load(attachment.path, side: side) }
+        .task(id: path) {
+            if !path.isEmpty, Pictures.kept(path, side: side) == nil { image = await Pictures.load(path, side: side) }
         }
     }
 }
@@ -730,18 +799,20 @@ private struct AttachedPicture: View {
 /// Two or more pictures waiting to go as the fan the message will have, at half its size.
 private struct AttachedFan: View {
     var pictures: [Attachment]
+    /// Where each is drawn from (`Model.picturePath`).
+    var paths: [String]
 
     var body: some View {
         let (w, h): (CGFloat, CGFloat) = (120, 90)
         let reach = fanReach(pictures.count, aspect: h / w)
         ZStack {
             ForEach(fanCards(pictures.count), id: \.picture) { c in
-                FanCard(attachment: pictures[c.picture], size: CGSize(width: w, height: h), count: nil)
+                FanCard(path: paths[c.picture], size: CGSize(width: w, height: h), count: nil)
                     .scaleEffect(c.scale)
                     .rotationEffect(.degrees(c.tilt))
                     .offset(x: c.x * w)
             }
-            FanCard(attachment: pictures[0], size: CGSize(width: w, height: h), count: fanCount(pictures.count))
+            FanCard(path: paths[0], size: CGSize(width: w, height: h), count: fanCount(pictures.count))
         }
         .frame(width: w, height: h)
         .padding(.leading, (reach.left * w).rounded(.up) + 4)
@@ -752,14 +823,14 @@ private struct AttachedFan: View {
     }
 
     private struct FanCard: View {
-        var attachment: Attachment
+        var path: String
         var size: CGSize
         var count: String?
         @State private var image: UIImage?
 
         var body: some View {
             let shape = RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous)
-            let shown = image ?? Pictures.kept(attachment.path, side: size.width)
+            let shown = image ?? Pictures.kept(path, side: size.width)
             Group {
                 if let shown { Image(uiImage: shown).resizable().scaledToFill() } else { P.bubble }
             }
@@ -779,8 +850,8 @@ private struct AttachedFan: View {
                 }
             }
             .shadow(color: .black.opacity(0.14), radius: 4, x: 0, y: 2)
-            .task(id: attachment.path) {
-                if Pictures.kept(attachment.path, side: size.width) == nil { image = await Pictures.load(attachment.path, side: size.width) }
+            .task(id: path) {
+                if !path.isEmpty, Pictures.kept(path, side: size.width) == nil { image = await Pictures.load(path, side: size.width) }
             }
         }
     }

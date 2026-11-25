@@ -1296,7 +1296,12 @@ struct HoldButton: View {
         let shape = RoundedRectangle(cornerRadius: Tokens.Radius.button, style: .continuous)
         TimelineView(.animation(paused: since == nil)) { t in
             let k = since.map { min(t.date.timeIntervalSince($0) / holdTime, 1) } ?? 0
-            Text(since != nil ? "Keep holding" : hint ? "Hold to allow" : "Allow")
+            // As wide as its longest words from the start, so its fill grows across one
+            // width and Deny doesn't move as the words change.
+            ZStack {
+                Text("Keep holding").hidden()
+                Text(since != nil ? "Keep holding" : hint ? "Hold to allow" : "Allow")
+            }
                 .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
                 .lineLimit(1)
                 .padding(.horizontal, Tokens.Space.m + 2)

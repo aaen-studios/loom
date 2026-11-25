@@ -128,6 +128,12 @@ final class Session {
                 send(model.approve(a.call, allow: true))
             }
         }
+        // `-view` opens the chat's last pictures in the viewer, for screenshots of it.
+        if args.contains("-view"), !launchDone.contains("-view"),
+           let stack = model.shown.reversed().lazy.map({ $0.blocks.compactMap(\.file).filter(\.isImage) }).first(where: { !$0.isEmpty }) {
+            launchDone.insert("-view")
+            model.view(stack)
+        }
         if args.contains("-signIn") {
             for c in model.shown.flatMap(\.blocks).compactMap(\.card) where c.type == "sign_in" && c.signedAs == nil && launchDone.insert("-signIn \(c.server)").inserted {
                 signIn(c.server)
