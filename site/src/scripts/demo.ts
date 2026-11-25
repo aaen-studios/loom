@@ -1,5 +1,5 @@
 // Plays the live copy of the app (src/components/AppDemo.astro) in a loop: a message is typed,
-// with a link pasted and a file attached among its words, each a piece in them with its card or
+// with a link pasted and a file attached among its words, each a piece in them, the file with its
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
 // asks before it deploys and waits for the yes, then finishes. While the turn runs, one quiet
 // line under the reply says the step it's on; once it's done, its last words are the answer and
@@ -19,10 +19,11 @@
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
 
 /** What the person writes: words typed, and pieces put in among them, a link pasted on its own
- * and a file attached, each by the template that draws it (app.rs, composer_token). */
-const SEND: (string | { piece: string; over: string })[] = [
+ * and a file attached, each by the template that draws it (app.rs, composer_token), and the
+ * file's pill over the words. A link is only its piece. */
+const SEND: (string | { piece: string; over?: string })[] = [
 	'Is main green on ',
-	{ piece: 'demo-link', over: 'demo-link-card' },
+	{ piece: 'demo-link' },
 	'? If it is, ship it with ',
 	{ piece: 'demo-file', over: 'demo-file-pill' },
 ];
@@ -204,14 +205,13 @@ export function play(app: HTMLElement) {
 		}
 	}
 
-	/** Puts what a piece brings over the words where the app does: files, then links. */
-	function over(row: HTMLElement, el: HTMLElement) {
-		if (el.classList.contains('file-pill')) row.prepend(el);
-		else row.append(el);
+	/** Puts what a piece brings over the words, if it brings anything. */
+	function over(row: HTMLElement, template?: string) {
+		if (template) row.append(tpl(template));
 	}
 
 	/** The person's message written: its words typed, and its link pasted and its file
-	 * attached where they go, each a piece in the words with its card or pill over them. */
+	 * attached where they go, each a piece in the words, the file with its pill over them. */
 	async function compose(id: number) {
 		for (const part of SEND) {
 			if (typeof part === 'string') {
@@ -220,8 +220,8 @@ export function play(app: HTMLElement) {
 			}
 			await wait(300, id);
 			typed.append(tpl(part.piece));
-			over(attached, tpl(part.over));
-			attached.hidden = false;
+			over(attached, part.over);
+			attached.hidden = attached.childElementCount === 0;
 			await wait(450, id);
 		}
 	}
@@ -233,8 +233,8 @@ export function play(app: HTMLElement) {
 		attached.hidden = true;
 	}
 
-	/** The person's message in the chat, as the composer showed it: its file and its link's
-	 * card over its words, and the pieces in them (app.rs, person). */
+	/** The person's message in the chat, as the composer showed it: its file over its words,
+	 * and the pieces in them (app.rs, person). */
 	function sent(fresh: boolean) {
 		const you = tpl('demo-you');
 		you.classList.toggle('fresh', fresh);
@@ -244,7 +244,7 @@ export function play(app: HTMLElement) {
 			if (typeof part === 'string') bubble.append(part);
 			else {
 				bubble.append(tpl(part.piece));
-				over(overs, tpl(part.over));
+				over(overs, part.over);
 			}
 		}
 		bubble.before(...overs.children);

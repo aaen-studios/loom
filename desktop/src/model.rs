@@ -2517,50 +2517,6 @@ pub enum Preview {
     Failed,
 }
 
-/// The pages a person's message shows a preview of, over its words: each bare
-/// address in it, in order, once, and at most `LINK_CARDS_MOST`. One the person sent
-/// as plain text (`<https://…>`), one in a Markdown link and one in code aren't.
-pub fn previewed_links(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for_bare_links(text, |url| {
-        if !out.iter().any(|u| u == url) && out.len() < LINK_CARDS_MOST {
-            out.push(url.to_string());
-        }
-    });
-    out
-}
-
-/// The most link previews a message shows.
-pub const LINK_CARDS_MOST: usize = 3;
-
-/// Calls `f` with each bare http or https address in `text`, outside code, Markdown
-/// links and `<…>`, without what usually ends a sentence after it.
-fn for_bare_links(text: &str, mut f: impl FnMut(&str)) {
-    let mut fenced = false;
-    for line in text.split('\n') {
-        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced {
-            continue;
-        }
-        let mut rest = line;
-        while let Some(c) = rest.chars().next() {
-            if let Some(len) = skipped_span(rest) {
-                rest = &rest[len..];
-                continue;
-            }
-            if let Some(url) = bare_link(rest) {
-                f(url);
-                rest = &rest[url.len()..];
-                continue;
-            }
-            rest = &rest[c.len_utf8()..];
-        }
-    }
-}
-
 /// How long the code, Markdown link or `<…>` at the start of `s` is, which a bare
 /// address isn't looked for in.
 fn skipped_span(s: &str) -> Option<usize> {
@@ -9201,13 +9157,6 @@ mod tests {
         assert_eq!(
             plain_links("`https://a.example` [x](https://b.example) <https://c.example>\n```\nhttps://d.example\n```"),
             "`https://a.example` [x](https://b.example) <https://c.example>\n```\nhttps://d.example\n```"
-        );
-        // Only a bare address in a sent message has a card; each once.
-        assert_eq!(
-            previewed_links(
-                "https://a.example/x, <https://b.example> `https://c.example` https://a.example/x"
-            ),
-            vec!["https://a.example/x".to_string()]
         );
         assert_eq!(
             pasted_link(" https://a.example/x?y=1 "),

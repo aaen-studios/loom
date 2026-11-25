@@ -274,8 +274,6 @@ struct PersonMessage: View {
         // Each file reads as a link where it was attached, which opens it, its name cut
         // in the middle when it's long.
         let words = cutFileNames(linkFiles(text, message.blocks.compactMap(\.file)))
-        // Each link sent as a preview, as its card, as the composer showed it.
-        let cards = previewedLinks(message.blocks.filter { $0.kind == "text" }.map(\.text).joined(separator: "\n"))
         let sender = message.fromAgent.flatMap { model.agent($0) }
         VStack(alignment: .trailing, spacing: Tokens.Space.xs + 2) {
             if let from = message.from {
@@ -299,9 +297,6 @@ struct PersonMessage: View {
                 default:
                     EmptyView()
                 }
-            }
-            ForEach(cards, id: \.self) { url in
-                LinkCard(url: url, preview: message.links[url].map { .ready($0) } ?? .failed)
             }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(titledLinks(words, message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
@@ -1048,94 +1043,6 @@ struct SiteIcon: View {
                     guard let path, Pictures.kept(path) == nil else { return }
                     picture = await Pictures.load(path)
                 }
-        }
-    }
-}
-
-/// A link pasted as a preview (PLAN.md, "Links in the composer"), the same in the
-/// composer and over the sent message: its page's picture, or else its site's icon, on
-/// the left, and its title and its site. While it's looked up, a place of the card's
-/// size; with no title, or when the lookup failed, a pill of its icon and its site. A tap
-/// opens the page.
-struct LinkCard: View {
-    @Environment(Session.self) private var session
-    @Environment(\.openURL) private var openURL
-    var url: String
-    var preview: Preview
-    @State private var picture: UIImage?
-
-    static let size = CGSize(width: 280, height: 72)
-
-    var body: some View {
-        let shape = RoundedRectangle(cornerRadius: Tokens.Radius.row, style: .continuous)
-        Button {
-            if let u = URL(string: url) { openURL(u) }
-        } label: {
-            Group {
-                switch preview {
-                case .ready(let l) where !l.title.trimmingCharacters(in: .whitespaces).isEmpty:
-                    card(l)
-                case .loading:
-                    HStack(spacing: 0) {
-                        P.bubble.frame(width: Self.size.height, height: Self.size.height)
-                        VStack(alignment: .leading, spacing: Tokens.Space.s) {
-                            Capsule().fill(P.bubble).frame(width: 150, height: 10)
-                            Capsule().fill(P.bubble).frame(width: 84, height: 8)
-                        }
-                        .padding(.horizontal, Tokens.Space.m)
-                        Spacer(minLength: 0)
-                    }
-                    .frame(width: Self.size.width, height: Self.size.height)
-                default:
-                    site(preview)
-                        .padding(.horizontal, Tokens.Space.m)
-                        .padding(.vertical, Tokens.Space.xs + 2)
-                }
-            }
-            .clipShape(shape)
-            .overlay(shape.strokeBorder(P.line, lineWidth: 1))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(url)
-    }
-
-    private func card(_ l: PageLink) -> some View {
-        let path = l.image.flatMap { session.model.files["\($0).thumb"] }
-        return HStack(spacing: 0) {
-            Group {
-                if let image = path.flatMap({ picture ?? Pictures.kept($0, side: Self.size.height) }) {
-                    Image(uiImage: image).resizable().scaledToFill()
-                } else {
-                    P.bubble.overlay { SiteIcon(icon: l.icon, size: 24) }
-                }
-            }
-            .frame(width: Self.size.height, height: Self.size.height)
-            .clipped()
-            VStack(alignment: .leading, spacing: 2) {
-                Text(l.title.trimmingCharacters(in: .whitespaces))
-                    .font(Fonts.small)
-                    .foregroundStyle(P.ink)
-                    .lineLimit(2)
-                HStack(spacing: Tokens.Space.xs) {
-                    SiteIcon(icon: l.icon, size: 14)
-                    Text(l.site.isEmpty ? siteOf(url) : l.site).font(Fonts.caption).foregroundStyle(P.ink3).lineLimit(1)
-                }
-            }
-            .padding(.horizontal, Tokens.Space.m)
-            Spacer(minLength: 0)
-        }
-        .frame(width: Self.size.width, height: Self.size.height)
-        .task(id: path) {
-            guard let path, Pictures.kept(path, side: Self.size.height) == nil else { return }
-            picture = await Pictures.load(path, side: Self.size.height)
-        }
-    }
-
-    private func site(_ p: Preview) -> some View {
-        let icon: String? = if case .ready(let l) = p { l.icon } else { nil }
-        return HStack(spacing: Tokens.Space.xs) {
-            SiteIcon(icon: icon, size: 14)
-            Text(siteOf(url)).font(Fonts.caption).foregroundStyle(P.ink3).lineLimit(1)
         }
     }
 }

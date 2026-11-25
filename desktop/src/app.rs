@@ -7687,10 +7687,9 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// What's attached to the next message, over the composer's words, as the sent
-    /// message shows it (PLAN.md, "Files and images" and "Links in the composer"): a
-    /// picture as itself, two or more as a fan, any other file as its pill, and each link
-    /// pasted as a preview as its card. One row, however many there are. None with
-    /// nothing attached.
+    /// message shows it (PLAN.md, "Files and images"): a picture as itself, two or more as
+    /// a fan, any other file as its pill. One row, however many there are. None with
+    /// nothing attached. A link is never in it: it's a piece in the words.
     fn attached_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let p = self.p;
         // Previews of pictures that aren't attached any more leave the GPU: not those an
@@ -7729,14 +7728,7 @@ ACTA_KEY=secret:ACTA_KEY",
         for (id, path) in again {
             self.make_preview(id, path, cx);
         }
-        let links: Vec<String> = self
-            .composer
-            .read(cx)
-            .tokens()
-            .iter()
-            .filter_map(|t| t.token().id().strip_prefix(model::LINK).map(String::from))
-            .collect();
-        if self.model.attachments.is_empty() && links.is_empty() {
+        if self.model.attachments.is_empty() {
             return None;
         }
         let x = |id: SharedString, name: String, take: Vec<String>, cx: &mut Context<Self>| {
@@ -7919,44 +7911,6 @@ ACTA_KEY=secret:ACTA_KEY",
                             .tooltip(tip_text(format!("Remove {}", a.name)))
                             .child(Icon::new(IconName::Close).xsmall())
                             .on_click(cx.listener(move |this, _, _, cx| this.unattach(&id, cx))),
-                    ),
-            );
-        }
-        for url in links {
-            let preview = self
-                .model
-                .link_previews
-                .get(&url)
-                .cloned()
-                .unwrap_or(model::Preview::Loading);
-            let token = format!("{}{url}", model::LINK);
-            let unpreview = cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.composer_edits
-                    .push(ComposerEdit::Unpreview(token.clone()));
-                cx.notify();
-            });
-            row = row.child(
-                div()
-                    .relative()
-                    .flex_none()
-                    .child(link_card(p, &url, &preview, &self.model.files))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("unpreview-{url}")))
-                            .absolute()
-                            .top(px(3.0))
-                            .right(px(3.0))
-                            .size(px(18.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(black().opacity(0.6))
-                            .text_color(white())
-                            .cursor_pointer()
-                            .tooltip(tip("As plain text"))
-                            .child(Icon::new(IconName::Close).xsmall())
-                            .on_click(unpreview),
                     ),
             );
         }
@@ -17214,14 +17168,6 @@ fn person(
     // the window, anything else in its own program. A stack's pictures only listed by
     // name are left out, since the stack shows them and the viewer their names.
     // What a person typed keeps its line breaks, which Markdown would join.
-    // Each link it sent as a preview, as its card, as the composer showed it.
-    for url in model::previewed_links(&text) {
-        let preview = match m.links.get(&url) {
-            Some(l) => model::Preview::Ready(l.clone()),
-            None => model::Preview::Failed,
-        };
-        out = out.child(link_card(p, &url, &preview, files));
-    }
     let text = model::unmark_stacked(&text, &stacked).replace('\n', "  \n");
     let attached: Vec<model::FileRef> = m.blocks.iter().filter_map(|b| b.file.clone()).collect();
     FILE_NAMES.with(|n| {
@@ -17746,147 +17692,113 @@ const TILTED: &str = "loom-tilted:";
 /// The place a picture attached in the composer takes, at most.
 const COMPOSER_PICTURE_W: f32 = 200.0;
 const COMPOSER_PICTURE_H: f32 = 96.0;
-/// A link preview's card, in the composer and over a sent message.
-const LINK_CARD_W: f32 = 300.0;
-const LINK_CARD_H: f32 = 72.0;
+/// How wide a link's preview under the pointer is.
+const LINK_TIP_W: f32 = 280.0;
 
-/// A link pasted as a preview (PLAN.md, "Links in the composer"), the same in the
-/// composer and over the sent message: its page's picture, or else its site's icon, on
-/// the left, and its title and its site. While it's looked up, a place of the card's
-/// size; with no title, or when the lookup failed, a pill of its icon and its site.
-/// Clicking it opens the page.
-fn link_card(
+/// A link's preview, under the pointer on its piece in the composer and on it in the
+/// chat (PLAN.md, "Links in the composer"): its page's picture, when it has one, over
+/// its title and its site with the site's icon.
+#[derive(Clone)]
+struct LinkTip {
     p: Palette,
-    url: &str,
-    preview: &model::Preview,
-    files: &HashMap<String, String>,
-) -> AnyElement {
-    let thumb = |sha: &Option<String>| {
-        sha.as_ref()
-            .and_then(|s| files.get(&format!("{s}.thumb")))
-            .cloned()
-    };
-    let open = {
-        let url = url.to_string();
-        move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(&url)
-    };
-    let id = SharedString::from(format!("link-card-{url}"));
-    let tip_url = url.to_string();
-    let base = div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .items_center()
-        .rounded(px(radius::ROW))
-        .border_1()
-        .border_color(p.line)
-        .overflow_hidden()
-        .cursor_pointer()
-        .tooltip(move |window, cx| {
-            gpui_kit::component::tooltip::Tooltip::new(tip_url.clone()).build(window, cx)
-        })
-        .on_click(open);
-    let site_row = |icon: Option<String>, site: String| {
+    title: String,
+    site: String,
+    icon: Option<String>,
+    picture: Option<String>,
+}
+
+impl Render for LinkTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        let p = self.p;
         div()
+            .w(px(LINK_TIP_W))
             .flex()
-            .items_center()
-            .gap(px(space::XS))
-            .min_w_0()
-            .text_size(px(size::CAPTION))
-            .text_color(p.ink_3)
-            .when_some(icon, |d, path| {
+            .flex_col()
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_color(p.line)
+            .bg(card_fill(p))
+            .shadow(card_shadow(p))
+            .overflow_hidden()
+            .when_some(self.picture.clone(), |d, path| {
                 d.child(
                     img(std::path::PathBuf::from(path))
-                        .size(px(14.0))
-                        .flex_none()
-                        .rounded(px(3.0)),
+                        .w_full()
+                        .h(px(LINK_TIP_W / 1.91))
+                        .object_fit(ObjectFit::Cover),
                 )
             })
-            .child(div().truncate().child(site))
-    };
-    match preview {
-        model::Preview::Ready(l) if !l.title.trim().is_empty() => {
-            let site = if l.site.is_empty() {
-                model::site_of(url)
-            } else {
-                l.site.clone()
-            };
-            let icon = thumb(&l.icon);
-            base.w(px(LINK_CARD_W))
-                .h(px(LINK_CARD_H))
-                .soft_hover(transparent_black(), p.hover, None)
-                .child(
-                    div()
-                        .flex_none()
-                        .size(px(LINK_CARD_H))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .bg(p.bubble)
-                        .child(match (thumb(&l.image), &icon) {
-                            (Some(path), _) => img(std::path::PathBuf::from(path))
-                                .size_full()
-                                .object_fit(ObjectFit::Cover)
-                                .into_any_element(),
-                            (None, Some(path)) => img(std::path::PathBuf::from(path.clone()))
-                                .size(px(24.0))
-                                .rounded(px(4.0))
-                                .into_any_element(),
-                            (None, None) => {
-                                Icon::new(Ico::Globe).text_color(p.ink_3).into_any_element()
-                            }
-                        }),
-                )
-                .child(
-                    // Its own width, which the title wraps in.
-                    div()
-                        .w(px(LINK_CARD_W - LINK_CARD_H - 2.0))
-                        .h_full()
-                        .overflow_hidden()
-                        .flex()
-                        .flex_col()
-                        .justify_center()
-                        .gap(px(2.0))
-                        .px(px(space::M))
-                        .child(
-                            div()
-                                .w_full()
-                                .text_size(px(size::SMALL))
-                                .text_color(p.ink)
-                                .line_clamp(2)
-                                .child(l.title.trim().to_string()),
-                        )
-                        .child(site_row(icon, site)),
-                )
-                .into_any_element()
-        }
-        model::Preview::Loading => base
-            .w(px(LINK_CARD_W))
-            .h(px(LINK_CARD_H))
-            .child(div().flex_none().size(px(LINK_CARD_H)).bg(p.bubble))
             .child(
                 div()
-                    .flex_1()
                     .flex()
                     .flex_col()
-                    .gap(px(space::S))
+                    .gap(px(2.0))
                     .px(px(space::M))
-                    .child(div().w(px(160.0)).h(px(10.0)).rounded_full().bg(p.bubble))
-                    .child(div().w(px(90.0)).h(px(8.0)).rounded_full().bg(p.bubble)),
+                    .py(px(space::S))
+                    .child(
+                        div()
+                            .text_size(px(size::SMALL))
+                            .text_color(p.ink)
+                            .line_clamp(2)
+                            .child(self.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS))
+                            .min_w_0()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .when_some(self.icon.clone(), |d, path| {
+                                d.child(
+                                    img(std::path::PathBuf::from(path))
+                                        .size(px(14.0))
+                                        .flex_none()
+                                        .rounded(px(3.0)),
+                                )
+                            })
+                            .child(div().truncate().child(self.site.clone())),
+                    ),
             )
-            .into_any_element(),
-        _ => {
-            let icon = match preview {
-                model::Preview::Ready(l) => thumb(&l.icon),
-                _ => None,
-            };
-            base.px(px(space::M))
-                .py(px(space::XS + 2.0))
-                .soft_hover(transparent_black(), p.hover, None)
-                .child(site_row(icon, model::site_of(url)))
-                .into_any_element()
-        }
     }
+}
+
+/// What's under the pointer on a link: its preview once it's looked up, with `file`
+/// giving where a fetched icon or picture is, or else its whole address.
+fn link_tip(
+    p: Palette,
+    url: &str,
+    link: Option<&model::Link>,
+    file: &dyn Fn(&str) -> Option<String>,
+) -> impl Fn(&mut Window, &mut App) -> AnyView + 'static {
+    let url = SharedString::from(url.to_string());
+    let tip = link
+        .filter(|l| !l.title.trim().is_empty())
+        .map(|l| LinkTip {
+            p,
+            title: l.title.trim().to_string(),
+            site: if l.site.is_empty() {
+                model::site_of(&url)
+            } else {
+                l.site.clone()
+            },
+            icon: l.icon.as_deref().and_then(file),
+            picture: l.image.as_deref().and_then(file),
+        });
+    move |window, cx| match &tip {
+        Some(t) => {
+            let t = t.clone();
+            cx.new(|_| t).into()
+        }
+        None => gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx),
+    }
+}
+
+thread_local! {
+    /// The pages the messages drawn link to, as the instance looked them up, with the
+    /// palette they're drawn in, for a link's preview under the pointer (`with_links`).
+    static LINK_TIPS: RefCell<HashMap<String, (Palette, model::Link)>> = RefCell::new(HashMap::new());
 }
 
 /// A stack's place, wide and tall, at most.
@@ -20022,6 +19934,14 @@ fn linked_words(p: Palette, text: &str, m: &Message) -> String {
             .find(|x| model::file_mention(&x.agent, &x.path, &x.name).0 == url)?;
         icon_src(x.thumb.as_deref()?)
     };
+    LINK_TIPS.with(|t| {
+        let mut t = t.borrow_mut();
+        for (url, l) in &m.links {
+            if t.get(url).is_none_or(|(tp, tl)| *tp != p || tl != l) {
+                t.insert(url.clone(), (p, l.clone()));
+            }
+        }
+    });
     model::with_link_icons(
         text,
         &model::Inline {
@@ -20066,8 +19986,6 @@ enum ComposerEdit {
     Put(String, String),
     /// Takes out the piece with this id, and the space after it.
     Take(String),
-    /// Turns the link preview with this id back into its address, as plain text.
-    Unpreview(String),
 }
 
 /// Makes a `ComposerEdit` to the composer's words.
@@ -20102,13 +20020,6 @@ fn composer_edit(
             };
             c.set_selected_range(range.start..end, cx);
             c.replace("", window, cx);
-        }
-        ComposerEdit::Unpreview(id) => {
-            let (Some(range), Some(url)) = (find(c, &id), id.strip_prefix(model::LINK)) else {
-                return;
-            };
-            c.set_selected_range(range, cx);
-            c.replace(url.to_string(), window, cx);
         }
     }
 }
@@ -20238,20 +20149,28 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
             .into_any_element();
     }
     if let Some(url) = id.strip_prefix(model::LINK) {
-        let (title, icon) = match pieces.previews.get(url) {
-            Some(model::Preview::Ready(l)) => (
-                Some(l.title.trim().to_string()).filter(|t| !t.is_empty()),
-                l.icon
-                    .as_ref()
-                    .and_then(|s| pieces.thumbs.get(&format!("{s}.thumb")))
-                    .cloned(),
-            ),
-            _ => (None, None),
+        let link = match pieces.previews.get(url) {
+            Some(model::Preview::Ready(l)) => Some(l),
+            _ => None,
         };
+        let thumb = |s: &str| pieces.thumbs.get(&format!("{s}.thumb")).cloned();
+        let title = link
+            .map(|l| l.title.trim().to_string())
+            .filter(|t| !t.is_empty());
+        let icon = link.and_then(|l| l.icon.as_deref()).and_then(thumb);
         let shown = title
             .map(|t| model::short_title(&t))
             .unwrap_or_else(|| model::site_of(url));
-        return row(url.to_string(), p.ink)
+        return div()
+            .id(SharedString::from(format!("piece-{id}")))
+            .flex()
+            .items_center()
+            .gap(px(3.0))
+            .px(px(2.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(p.ink.opacity(0.14)))
+            .tooltip(link_tip(p, url, link, &thumb))
             .child(match icon {
                 Some(path) => icon_img(path).rounded(px(3.0)).into_any_element(),
                 None => Icon::new(Ico::Globe)
@@ -20447,7 +20366,11 @@ fn with_links(v: TextView) -> TextView {
             FILE_NAMES.with(|n| n.borrow().get(sha).cloned())
         });
         if url.starts_with("https://") || url.starts_with("http://") {
-            gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+            // Its preview, once it's looked up.
+            match LINK_TIPS.with(|t| t.borrow().get(url.as_ref()).cloned()) {
+                Some((p, l)) => link_tip(p, url, Some(&l), &badge_icon)(window, cx),
+                None => gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx),
+            }
         } else if let Some(name) = file {
             gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
         } else {
@@ -24872,15 +24795,6 @@ mod composer_tests {
             c.read_with(cx, |c, _| composer_text(c)),
             "See <https://a.example/x>"
         );
-        // Its × does the same.
-        cx.simulate_keystrokes("secondary-a backspace");
-        cx.update(|window, cx| {
-            c.update(cx, |c, cx| paste_link(c, "https://a.example/x", window, cx))
-        });
-        let id = "loom-link:https://a.example/x".to_string();
-        assert_eq!(shown(&c, cx).1, vec![id.clone()]);
-        edit(&c, ComposerEdit::Unpreview(id), cx);
-        assert_eq!(shown(&c, cx), ("https://a.example/x".into(), vec![]));
     }
 }
 

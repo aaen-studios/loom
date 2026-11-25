@@ -100,8 +100,8 @@ struct Composer: View {
         let busy = model.busy
         let idle = box.typed.isEmpty && model.attachments.isEmpty
         return VStack(alignment: .leading, spacing: Tokens.Space.s) {
-            if !model.attachments.isEmpty || !box.links.isEmpty {
-                AttachedRow(links: box.links, take: { box.take($0) }, unpreview: { box.unpreview($0) })
+            if !model.attachments.isEmpty {
+                AttachedRow(take: { box.take($0) })
             }
             HStack(alignment: .bottom, spacing: Tokens.Space.s) {
                 Button {
@@ -374,12 +374,6 @@ final class ComposerBox {
         let s = v.textStorage.string as NSString
         let end = range.upperBound < s.length && s.substring(with: NSRange(location: range.upperBound, length: 1)) == " " ? range.length + 1 : range.length
         v.edit(NSRange(location: range.location, length: end), NSAttributedString())
-    }
-
-    /// Turns a link's preview back into its address, as plain text.
-    func unpreview(_ url: String) {
-        guard let v = view, let range = v.range(of: PieceKind.link + url) else { return }
-        v.edit(range, NSAttributedString(string: url, attributes: v.typingAttributes))
     }
 
     /// Empties the field once the message has gone.
@@ -717,13 +711,11 @@ private struct ComposerField: UIViewRepresentable {
 // MARK: What's attached, over the words
 
 /// What's attached to the next message, as the sent message shows it: a picture as
-/// itself, two or more as their fan, any other file as its pill, and each link pasted as
-/// a preview as its card. One row, however many there are.
+/// itself, two or more as their fan, any other file as its pill. One row, however many
+/// there are. A link is never in it: it's a piece in the words.
 private struct AttachedRow: View {
     @Environment(Session.self) private var session
-    var links: [String]
     var take: (String) -> Void
-    var unpreview: (String) -> Void
     /// How big a piece's tiny picture is made, in points.
     static let picture: CGFloat = 32
 
@@ -744,10 +736,6 @@ private struct AttachedRow: View {
                 }
                 ForEach(others) { a in
                     FilePill(attachment: a) { take(a.id) }
-                }
-                ForEach(links, id: \.self) { url in
-                    LinkCard(url: url, preview: model.linkPreviews[url] ?? .loading)
-                        .overlay(alignment: .topTrailing) { cross("As plain text") { unpreview(url) } }
                 }
             }
             .padding(.horizontal, Tokens.Space.xs)

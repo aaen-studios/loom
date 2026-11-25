@@ -2136,10 +2136,11 @@ final class Model {
         let cardBadges = shown.flatMap(\.blocks).compactMap { $0.card?.badge }
         let askBadges = approvals.flatMap { $0.shown.badges + $0.shown.steps.compactMap(\.badge) }
         wanted += (cardBadges + askBadges).flatMap(\.icons)
-        // The icons of the sites its messages link to, and their pages' pictures.
-        wanted += shown.flatMap { $0.links.values.flatMap { [$0.icon, $0.image].compactMap { $0 } } }
+        // The icons of the sites its messages link to. A page's picture is shown only
+        // under a pointer, which the iPhone hasn't, so it isn't fetched.
+        wanted += shown.flatMap { $0.links.values.compactMap(\.icon) }
         // And the links pasted in the composer.
-        for case .ready(let l) in linkPreviews.values { wanted += [l.icon, l.image].compactMap { $0 } }
+        for case .ready(let l) in linkPreviews.values { if let icon = l.icon { wanted.append(icon) } }
         // The thumbnails of the pictures its replies name.
         wanted += shown.flatMap { $0.named.compactMap(\.thumb) }
         // And those of pictures sent before and picked to go again, which the composer
