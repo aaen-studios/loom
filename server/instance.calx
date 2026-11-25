@@ -1696,6 +1696,13 @@ fn keep_file(writes: mut List<(String, List<u8>)>, path: String, data: List<u8>)
     writes.push((path.copy(), data.copy()))
 }
 
+// A file's answer or block with a picture's `width` and `height` (protocol.md, "Files"),
+// where they're known.
+fn sized(o: own Obj, shown: (u32, u32)?) -> Obj {
+    if let (w, h) = shown { return o.i("width", i64(w)).i("height", i64(h)) }
+    return o
+}
+
 fn valid_username(name: String) -> bool {
     if name.len() == 0 or name.len() > 32 { return false }
     for r in name.runes() {
@@ -3825,7 +3832,7 @@ impl Instance {
             },
         }
         let sha = bytes.hex(sha256(png.copy()))
-        try i.keep_file(user, sha.copy(), "{server}.png", String("image/png"), png)
+        _ = try i.keep_file(user, sha.copy(), "{server}.png", String("image/png"), png)
         return sha
     }
 
@@ -5256,7 +5263,7 @@ impl Instance {
         if let p = i.site_icons.find(site.copy()) { png = p.copy() }
         if png.len() > 0 {
             let sha = bytes.hex(sha256(png.copy()))
-            try i.keep_file(user, sha.copy(), "{site}.png", String("image/png"), png)
+            _ = try i.keep_file(user, sha.copy(), "{site}.png", String("image/png"), png)
             o = o.s("icon", sha)
         }
         return o.done()
@@ -7249,13 +7256,14 @@ impl Instance {
         // What the bytes say beats what was given, for the types loom shows or passes on.
         var mime = files.sniff(req.body) ?? (if given.len() > 0 and given != "application/octet-stream" { given } else { content_type(name.copy()) })
         if let semi = mime.find(";") { mime = mime[..semi].trim().copy() }
-        try i.keep_file(user.copy(), sha.copy(), name.copy(), mime.copy(), req.body)
-        return json_response(200, Obj.new().s("file", sha).s("name", name).s("mime", mime).i("size", size).done())
+        let shown = try i.keep_file(user.copy(), sha.copy(), name.copy(), mime.copy(), req.body)
+        return json_response(200, sized(Obj.new().s("file", sha).s("name", name).s("mime", mime).i("size", size), shown).done())
     }
 
-    // Keeps a file's bytes under their SHA-256, once, notes that `user` has it, and has
-    // a thumbnail made of an image.
-    fn keep_file(i: mut Instance, user: String, sha: String, name: String, mime: String, data: List<u8>) ! Error {
+    // Keeps a file's bytes under their SHA-256, once, notes that `user` has it, with a
+    // picture's width and height, which it gives, and has a thumbnail made of an image.
+    fn keep_file(i: mut Instance, user: String, sha: String, name: String, mime: String, data: List<u8>) -> (u32, u32)? ! Error {
+        let shown = if files.agent_image(mime.copy()) { files.picture_size(data) } else { none }
         let path = "{i.data}/files/{sha}"
         if not fs.exists(path.copy()) {
             let part = "{path}.part"
@@ -7265,7 +7273,8 @@ impl Instance {
                 i.thumbs.send(Thumb { src: path.copy(), dst: "{path}.thumb" })
             }
         }
-        try i.store.add_file(user, sha, name, mime, i64.wrap(u64(data.len())))
+        try i.store.add_file(user, sha, name, mime, i64.wrap(u64(data.len())), shown)
+        return shown
     }
 
     // html_render (PLAN.md, "Pages in the chat"): the page goes in the chat as a
@@ -7709,8 +7718,8 @@ impl Instance {
     fn agent_file(i: mut Instance, user: String, name: String, mime: String, data: List<u8>) -> Json ! Error {
         let sha = bytes.hex(sha256(data))
         let size = i64.wrap(u64(data.len()))
-        try i.keep_file(user, sha.copy(), name.copy(), mime.copy(), data)
-        return Obj.new().s("kind", String("file")).s("file", sha).s("name", name).s("mime", mime).i("size", size).done()
+        let shown = try i.keep_file(user, sha.copy(), name.copy(), mime.copy(), data)
+        return sized(Obj.new().s("kind", String("file")).s("file", sha).s("name", name).s("mime", mime).i("size", size), shown).done()
     }
 
     // --- Files an agent puts in its reply (PLAN.md, "Files and images") ---
@@ -7925,7 +7934,7 @@ impl Instance {
         }
         let sha = bytes.hex(sha256(d.thumb.copy()))
         let name = if let cut = d.path.replace("\\", "/").find_last("/") { d.path[cut + 1..].copy() } else { d.path.copy() }
-        try i.keep_file(d.user.copy(), sha.copy(), name, d.mime.copy(), d.thumb.copy())
+        _ = try i.keep_file(d.user.copy(), sha.copy(), name, d.mime.copy(), d.thumb.copy())
         i.picture_thumbs.insert(d.key.copy(), sha.copy())
         let message = try i.store.message(d.user.copy(), d.message.copy()) else return
         var list = List<Json>()

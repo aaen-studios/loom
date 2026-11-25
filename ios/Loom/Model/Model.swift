@@ -135,19 +135,32 @@ struct FileRef: Equatable, Sendable {
     var name: String
     var mime: String
     var size: Int
+    /// A picture's width and height in pixels as it shows, as the instance read them from
+    /// its header (protocol.md, "Files"); 0 where they aren't known.
+    var width: Int
+    var height: Int
 
     init(_ v: JSON) {
         file = v["file"].text
         name = v["name"].text
         mime = v["mime"].text
         size = v["size"].int ?? 0
+        width = v["width"].int ?? 0
+        height = v["height"].int ?? 0
     }
 
-    init(file: String, name: String, mime: String, size: Int) {
+    init(file: String, name: String, mime: String, size: Int, width: Int = 0, height: Int = 0) {
         self.file = file
         self.name = name
         self.mime = mime
         self.size = size
+        self.width = width
+        self.height = height
+    }
+
+    /// A picture's size, where the instance said it.
+    var shownSize: CGSize? {
+        width > 0 && height > 0 ? CGSize(width: width, height: height) : nil
     }
 
     /// Whether the chat shows it as a picture.
@@ -947,9 +960,6 @@ struct FanCard: Equatable, Sendable {
     var scale: CGFloat
 }
 
-/// The most pictures a fan draws.
-let fanMost = 5
-
 /// The cards behind the first in a fan of `n` pictures, the ones furthest back first, as
 /// desktop/src/app.rs's `fan_cards` lays them out at rest:
 /// - two: one behind, tilted to the right;
@@ -988,9 +998,9 @@ func fanReach(_ n: Int, aspect: CGFloat) -> (left: CGFloat, right: CGFloat, up: 
 }
 
 /// What a fan's corner says, as desktop/src/app.rs's `fan_count`: how many pictures there
-/// are, up to five, and past that how many more there are than the five it shows.
+/// are, all of them, however many it draws.
 func fanCount(_ n: Int) -> String {
-    n > fanMost ? "+\(n - fanMost)" : "\(n)"
+    "\(n)"
 }
 
 /// A person's words without the marks (`[name]`) of the pictures in a stack where they

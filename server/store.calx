@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', PRIMARY KEY (user, conversation));
 CREATE TABLE IF NOT EXISTS files (
     sha TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL,
-    mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (sha, user));
+    mime TEXT NOT NULL, size INTEGER NOT NULL, at INTEGER NOT NULL, width INTEGER NOT NULL DEFAULT 0,
+    height INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (sha, user));
 CREATE TABLE IF NOT EXISTS profiles (
     user TEXT NOT NULL REFERENCES users(id), revision INTEGER NOT NULL, text TEXT NOT NULL,
     by TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, revision));
@@ -461,6 +462,13 @@ impl Store {
         if not seen { try s.db.execute_script(String("ALTER TABLE devices ADD COLUMN seen INTEGER NOT NULL DEFAULT 0;")) }
         // A person's routine runs by when they started, which the status reads for the last 24 hours.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_routine ON runs (user, at) WHERE routine != '';"))
+        // Files from before a picture kept its width and height get the columns, 0 for not
+        // known: the apps size those by their thumbnails.
+        var sized = false
+        for r in try s.db.query(String("PRAGMA table_info(files)")) {
+            if text(r[1].copy()) == "width" { sized = true }
+        }
+        if not sized { try s.db.execute_script(String("ALTER TABLE files ADD COLUMN width INTEGER NOT NULL DEFAULT 0; ALTER TABLE files ADD COLUMN height INTEGER NOT NULL DEFAULT 0;")) }
         // Client ids from before they kept when they came count from now, so they're
         // pruned as old a while after the update, not at once.
         var dated = false
@@ -2388,9 +2396,12 @@ impl Store {
 
     // --- Files ---
 
-    // Notes that `user` has the file `sha`. The first name and type they gave it stay.
-    pub fn add_file(self, user: String, sha: String, name: String, mime: String, size: i64) ! Error {
-        _ = try self.db.execute(String("INSERT INTO files (sha, user, name, mime, size, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (sha, user) DO NOTHING"), [t(sha), t(user), t(name), t(mime), Value.Int(size), Value.Int(now())])
+    // Notes that `user` has the file `sha`, and a picture's width and height (`files.picture_size`,
+    // none for anything else). The first name and type they gave it stay; a picture kept
+    // before its size was known gets it.
+    pub fn add_file(self, user: String, sha: String, name: String, mime: String, size: i64, shown: (u32, u32)?) ! Error {
+        let (w, h) = shown ?? (0u32, 0u32)
+        _ = try self.db.execute(String("INSERT INTO files (sha, user, name, mime, size, at, width, height) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (sha, user) DO UPDATE SET width = excluded.width, height = excluded.height WHERE files.width = 0"), [t(sha), t(user), t(name), t(mime), Value.Int(size), Value.Int(now()), Value.Int(i64(w)), Value.Int(i64(h))])
     }
 
     // The files sent or received in `user`'s chats, newest first, each once by
@@ -2406,15 +2417,23 @@ impl Store {
             let sha = str_at(block.copy(), "file") ?? String()
             if sha.len() == 0 or seen.contains(sha.copy()) { continue }
             seen.push(sha.copy())
-            out.push(Obj.new().s("file", sha).s("name", str_at(block.copy(), "name") ?? String()).s("mime", str_at(block.copy(), "mime") ?? String()).i("size", int_at(block, "size") ?? 0).i("at", int(r[2].copy())).s("conversation", text(r[1].copy())).done())
+            var o = Obj.new().s("file", sha).s("name", str_at(block.copy(), "name") ?? String()).s("mime", str_at(block.copy(), "mime") ?? String()).i("size", int_at(block.copy(), "size") ?? 0).i("at", int(r[2].copy())).s("conversation", text(r[1].copy()))
+            // A picture's size, where its block has it, so it opens at its size.
+            let (w, h) = (int_at(block.copy(), "width") ?? 0, int_at(block, "height") ?? 0)
+            if w > 0 and h > 0 { o = o.i("width", w).i("height", h) }
+            out.push(o.done())
         }
         return out
     }
 
-    // The file `sha`, if `user` has it: `file`, `name`, `mime` and `size`, as a file block has them.
+    // The file `sha`, if `user` has it: `file`, `name`, `mime` and `size`, as a file block has
+    // them, and a picture's `width` and `height` where they're known.
     pub fn file(self, user: String, sha: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT sha, name, mime, size FROM files WHERE sha = ? AND user = ?"), [t(sha), t(user)]) else return none
-        return some(Obj.new().s("file", text(r[0].copy())).s("name", text(r[1].copy())).s("mime", text(r[2].copy())).i("size", int(r[3].copy())).done())
+        let r = try self.db.query_one(String("SELECT sha, name, mime, size, width, height FROM files WHERE sha = ? AND user = ?"), [t(sha), t(user)]) else return none
+        let f = Obj.new().s("file", text(r[0].copy())).s("name", text(r[1].copy())).s("mime", text(r[2].copy())).i("size", int(r[3].copy()))
+        let (w, h) = (int(r[4].copy()), int(r[5].copy()))
+        if w > 0 and h > 0 { return some(f.i("width", w).i("height", h).done()) }
+        return some(f.done())
     }
 
     // The bytes of the files `user` has, counting each once.
@@ -3283,9 +3302,12 @@ fn files_are_per_person() {
     let a = s.add_user(String("a"), String("password1"), "owner")!
     let b = s.add_user(String("b"), String("password2"), "member")!
     let sha = "a".repeat(64)
-    s.add_file(a.id.copy(), sha.copy(), String("x.png"), String("image/png"), 10)!
-    s.add_file(a.id.copy(), sha.copy(), String("again.png"), String("image/png"), 10)!
-    assert("{s.file(a.id.copy(), sha.copy())!}".contains("x.png"))
+    s.add_file(a.id.copy(), sha.copy(), String("x.png"), String("image/png"), 10, none)!
+    assert(int_at(s.file(a.id.copy(), sha.copy())! ?? Json.Null, "width") == none)
+    // Sent again once its size is known, it gets it, and keeps its first name.
+    s.add_file(a.id.copy(), sha.copy(), String("again.png"), String("image/png"), 10, some((4000u32, 3000u32)))!
+    let f = s.file(a.id.copy(), sha.copy())! ?? Json.Null
+    assert("{f}".contains("x.png") and int_at(f.copy(), "width") == some(4000i64) and int_at(f, "height") == some(3000i64))
     assert(s.file(b.id.copy(), sha)! == none)
     assert(s.file_usage(a.id.copy())! == 10 and s.file_usage(b.id.copy())! == 0)
 }

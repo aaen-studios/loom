@@ -29,6 +29,7 @@ mod thread;
 #[allow(dead_code)]
 mod tokens;
 mod wake;
+mod zoom;
 
 use std::borrow::Cow;
 

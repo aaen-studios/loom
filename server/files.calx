@@ -47,7 +47,8 @@ pub fn start() -> Sender<Thumb> {
 }
 
 /// Writes a thumbnail of the image at `src` to `dst`: a JPEG, or a PNG when it has
-/// alpha. It's written beside `dst` first and moved, so half a thumbnail is never served.
+/// alpha, turned the way a photo's EXIF says it shows, since the thumbnail keeps none.
+/// It's written beside `dst` first and moved, so half a thumbnail is never served.
 pub fn make_thumb(src: String, dst: String) ! Error {
     let (small, _) = try thumb_of(try fs.read(src))
     let part = "{dst}.part"
@@ -55,14 +56,15 @@ pub fn make_thumb(src: String, dst: String) ! Error {
     try fs.rename(part, dst)
 }
 
-/// A thumbnail of an image, at most `THUMB` pixels a side: a JPEG, or a PNG when it
-/// has alpha, and which of the two.
+/// A thumbnail of an image, at most `THUMB` pixels a side and turned the way a photo's
+/// EXIF says it shows: a JPEG, or a PNG when it has alpha, and which of the two.
 pub fn thumb_of(data: List<u8>) -> (List<u8>, String) ! Error {
+    let turn = if sniff(data[..if data.len() < 12 { data.len() } else { 12 }]) == some(String("image/jpeg")) { jpeg_orientation(data.copy()) } else { 1u16 }
     let im = match Image.decode(data) {
         ok(i) => i,
         err(why) => fail "it isn't an image loom can read: {why}",
     }
-    let small = im.thumbnail(THUMB, THUMB)
+    let small = upright(im.thumbnail(THUMB, THUMB), turn)
     if small.kind().has_alpha() { return (small.encode_png(), String("image/png")) }
     return (small.to(Kind.Rgb).encode_jpeg(80), String("image/jpeg"))
 }
@@ -127,6 +129,20 @@ pub fn start_pictures(wake: LoopWaker) -> (Sender<Picture>, Receiver<Pictured>) 
     return (to, done)
 }
 
+/// `im` turned and mirrored the way an EXIF orientation of `turn` says it shows.
+fn upright(im: own Image, turn: u16) -> Image {
+    return match turn {
+        2 => im.flip_horizontal(),
+        3 => im.rotate_180(),
+        4 => im.flip_vertical(),
+        5 => im.rotate_right().flip_horizontal(),
+        6 => im.rotate_right(),
+        7 => im.rotate_left().flip_horizontal(),
+        8 => im.rotate_left(),
+        _ => im,
+    }
+}
+
 /// The type of an image or a PDF, from how its bytes start, or none.
 pub fn sniff(head: List<u8>) -> String? {
     let n = head.len()
@@ -167,6 +183,104 @@ fn header_size(data: List<u8>) -> (u32, u32)? {
         i += 2 + usize(bytes.u16_be(data.copy(), i + 2))
     }
     return none
+}
+
+/// A picture's width and height in pixels as it shows, from its header alone, or none:
+/// a PNG, a GIF, a WebP, or a JPEG, its sides swapped where its EXIF turns it a quarter
+/// (orientations 5 to 8). The apps lay a picture out by it before it's fetched.
+pub fn picture_size(data: List<u8>) -> (u32, u32)? {
+    let n = data.len()
+    let mime = sniff(data[..if n < 12 { n } else { 12 }]) ?? String()
+    if mime == "image/png" or mime == "image/jpeg" {
+        let (w, h) = header_size(data.copy()) else return none
+        if w == 0 or h == 0 { return none }
+        if mime == "image/jpeg" and jpeg_orientation(data) >= 5 { return some((h, w)) }
+        return some((w, h))
+    }
+    if mime == "image/gif" {
+        if n < 10 { return none }
+        let (w, h) = (u32(bytes.u16_le(data.copy(), 6)), u32(bytes.u16_le(data.copy(), 8)))
+        if w == 0 or h == 0 { return none }
+        return some((w, h))
+    }
+    if mime == "image/webp" { return webp_size(data) }
+    return none
+}
+
+/// A WebP's canvas, from its first chunk: lossy (`VP8 `), lossless (`VP8L`) or
+/// extended (`VP8X`).
+fn webp_size(data: List<u8>) -> (u32, u32)? {
+    let n = data.len()
+    if n < 30 { return none }
+    let (a, b, c, d) = (data[12], data[13], data[14], data[15])
+    if a != 0x56 or b != 0x50 or c != 0x38 { return none }
+    if d == 0x20 {
+        // The frame's start code, then each side in 14 bits.
+        if data[23] != 0x9d or data[24] != 0x01 or data[25] != 0x2a { return none }
+        return some((u32(bytes.u16_le(data.copy(), 26) & 0x3fff), u32(bytes.u16_le(data.copy(), 28) & 0x3fff)))
+    }
+    if d == 0x4c {
+        if data[20] != 0x2f { return none }
+        let bits = bytes.u32_le(data.copy(), 21)
+        return some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
+    }
+    if d == 0x58 {
+        let w = u32(data[24]) | (u32(data[25]) << 8) | (u32(data[26]) << 16)
+        let h = u32(data[27]) | (u32(data[28]) << 8) | (u32(data[29]) << 16)
+        return some((w + 1, h + 1))
+    }
+    return none
+}
+
+/// How a JPEG's EXIF says it's turned, 1 to 8, as its camera kept it: 1 when it doesn't say.
+/// From 5 on it's turned a quarter, and shows with its width and height swapped.
+pub fn jpeg_orientation(data: List<u8>) -> u16 {
+    let n = data.len()
+    var i: usize = 2
+    while i + 4 <= n {
+        if data[i] != 0xff { return 1 }
+        let marker = data[i + 1]
+        if marker == 0xff {
+            i += 1
+            continue
+        }
+        // The EXIF comes before the frame and the scan.
+        if marker == 0xda or (marker >= 0xc0 and marker <= 0xcf and marker != 0xc4 and marker != 0xc8 and marker != 0xcc) { return 1 }
+        let len = usize(bytes.u16_be(data.copy(), i + 2))
+        if marker == 0xe1 and len >= 16 and i + 2 + len <= n and data[i + 4] == 0x45 and data[i + 5] == 0x78 and data[i + 6] == 0x69 and data[i + 7] == 0x66 and data[i + 8] == 0 and data[i + 9] == 0 {
+            return exif_orientation(data[i + 10..i + 2 + len])
+        }
+        i += 2 + len
+    }
+    return 1
+}
+
+/// The orientation in an EXIF block's (its TIFF header on) first directory, 1 to 8, or 1.
+fn exif_orientation(tiff: List<u8>) -> u16 {
+    let n = tiff.len()
+    if n < 8 { return 1 }
+    let little = tiff[0] == 0x49 and tiff[1] == 0x49
+    if not little and not (tiff[0] == 0x4d and tiff[1] == 0x4d) { return 1 }
+    let dir = usize(tiff_u32(tiff, 4, little))
+    if dir + 2 > n { return 1 }
+    let count = usize(tiff_u16(tiff, dir, little))
+    for k in 0usize..count {
+        let e = dir + 2 + k * 12
+        if e + 12 > n { return 1 }
+        if tiff_u16(tiff, e, little) == 0x0112 {
+            let turn = tiff_u16(tiff, e + 8, little)
+            return if turn >= 1 and turn <= 8 { turn } else { 1u16 }
+        }
+    }
+    return 1
+}
+
+fn tiff_u16(b: List<u8>, at: usize, little: bool) -> u16 {
+    return if little { bytes.u16_le(b.copy(), at) } else { bytes.u16_be(b.copy(), at) }
+}
+
+fn tiff_u32(b: List<u8>, at: usize, little: bool) -> u32 {
+    return if little { bytes.u32_le(b.copy(), at) } else { bytes.u32_be(b.copy(), at) }
 }
 
 /// An MCP server's icon (PLAN.md, "Cards in the chat"), checked and made ready
@@ -264,6 +378,41 @@ fn a_sites_icon_is_read_from_an_ico_too() {
         ok(_) => false,
         err(_) => true,
     })
+}
+
+@test
+fn a_pictures_size_is_read_from_its_header() {
+    assert(picture_size(Image.new(300, 200, Kind.Rgba, Color.rgba(0, 0, 0, 255)).encode_png()) == some((300u32, 200u32)))
+    assert(picture_size(Image.new(64, 48, Kind.Rgb, Color.rgb(9, 9, 9)).encode_jpeg(80)) == some((64u32, 48u32)))
+    // A GIF's logical screen, 7 × 5.
+    let gif: List<u8> = [0x47u8, 0x49, 0x46, 0x38, 0x39, 0x61, 7, 0, 5, 0, 0, 0, 0]
+    assert(picture_size(gif) == some((7u32, 5u32)))
+    // A lossless WebP, 4000 × 3000: each side less one, in 14 bits.
+    var webp: List<u8> = [0x52u8, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x4c, 0, 0, 0, 0, 0x2f]
+    bytes.put_u32_le(mut webp, 3999u32 | (2999u32 << 14))
+    for _ in 0..8 { webp.push(0u8) }
+    assert(picture_size(webp) == some((4000u32, 3000u32)))
+    assert(picture_size("not a picture".to_bytes()) == none)
+}
+
+@test
+fn a_photo_turned_by_its_exif_has_its_sides_swapped() {
+    let photo = Image.new(64, 48, Kind.Rgb, Color.rgb(9, 9, 9)).encode_jpeg(80)
+    // APP1 with an EXIF block, big-endian, one entry: the orientation, 6.
+    let exif = [0xffu8, 0xe1, 0, 34, 0x45, 0x78, 0x69, 0x66, 0, 0, 0x4d, 0x4d, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]
+    var turned: List<u8> = [0xffu8, 0xd8]
+    turned.extend(exif)
+    turned.extend(photo[2..])
+    assert(picture_size(turned.copy()) == some((48u32, 64u32)))
+    assert(jpeg_orientation(turned.copy()) == 6 and jpeg_orientation(photo) == 1)
+    // Its thumbnail is turned too, as it shows, since it keeps no EXIF.
+    let dir = fs.temp_dir()!
+    let (src, dst) = ("{dir}/turned.jpg", "{dir}/turned.jpg.thumb")
+    fs.write(src.copy(), turned)!
+    make_thumb(src.copy(), dst.copy())!
+    let small = Image.decode(fs.read(dst.copy())!)!
+    assert(small.width() == 48 and small.height() == 64)
+    fs.remove_dir_all(dir)!
 }
 
 @test

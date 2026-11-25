@@ -491,7 +491,7 @@ enum Sample {
             ["id": "msg_44", "conversation": "c_4", "role": "person", "from": "d_4", "at": 1795187180000,
              "blocks": [["kind": "text", "text": "Once they're watered, note it in [watering.md](loom:file/a_4/notes/watering.md) and tell [@Scribe](loom:agent/a_2)."]]],
             // A reply naming an agent and a file, shown as the person's mentions are, and a
-            // fan of more than five pictures, whose corner says how many more.
+            // fan of more than five pictures, whose corner says how many there are.
             ["id": "msg_45", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_45", "at": 1795187240000,
              "mentions": [["path": "notes/watering.md", "name": "watering.md"]],
              "blocks": [["kind": "text", "text": "Noted in `notes/watering.md`, and @Scribe knows. Here's the balcony this week, a picture a day."],

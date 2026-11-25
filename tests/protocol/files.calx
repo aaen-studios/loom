@@ -5,7 +5,7 @@ module tests.protocol.files
 //
 // - a file goes up with POST /files, is kept once under its SHA-256, and
 //   comes back with GET /files/<sha256>, only for whoever sent it;
-// - an image gets a thumbnail;
+// - an image gets a thumbnail, and its width and height in its answer and blocks;
 // - a send with files gives the agent an image and a link to a copy of the
 //   rest, and an image the agent sends back becomes a file block;
 // - messages.search finds words in text and in file names;
@@ -52,6 +52,7 @@ fn run(inst: Instance) ! Error {
     try check(s1 == 200 and sha.len() == 64 and str_at(shot.copy(), "mime") == some(String("image/png")) and int_at(shot, "size") == some(i64.wrap(u64(png.len()))), "POST /files keeps a file under its SHA-256, and tells its type from its bytes")
     let (_, again) = try upload(base.copy(), token.copy(), "shot.png", "image/png", png.copy())
     try check(str_at(again, "file") == some(sha.copy()), "the same file is kept once")
+    try check(int_at(shot.copy(), "width") == some(600i64) and int_at(shot.copy(), "height") == some(400i64), "a picture's answer has its width and height")
     let (s2, notes) = try upload(base.copy(), token.copy(), "notes.txt", "text/plain", "the quarterly numbers".to_bytes())
     let notes_sha = str_at(notes.copy(), "file") ?? String()
     try check(s2 == 200 and str_at(notes, "mime") == some(String("text/plain")), "a text file keeps the type it was sent with")
@@ -94,12 +95,13 @@ fn run(inst: Instance) ! Error {
     let mine = try app.until("event", "message.created")
     let sent = file_blocks(at(mine, "message"))
     try check(sent.len() == 2 and str_at(sent[1].copy(), "name") == some(String("notes.txt")), "a send with files makes file blocks")
+    try check(int_at(sent[0].copy(), "width") == some(600i64) and int_at(sent[0].copy(), "height") == some(400i64) and int_at(sent[1].copy(), "width") == none, "a picture's file block has its width and height, and another file's none")
     let reply = try app.reply()
     let said = reply_text(reply.copy())
     println("      the agent said: {said}")
     try check(said.contains("image image/png") and said.contains("link notes.txt"), "the agent gets the image, and a link to a copy of the other file")
     let back = file_blocks(reply)
-    try check(back.len() == 1 and str_at(back[0].copy(), "mime") == some(String("image/png")), "an image the agent sends back is a file block")
+    try check(back.len() == 1 and str_at(back[0].copy(), "mime") == some(String("image/png")) and (int_at(back[0].copy(), "width") ?? 0) > 0, "an image the agent sends back is a file block, with its size")
     let (g5, _, _) = try fetch(base.copy(), token.copy(), "/files/{str_at(back[0].copy(), "file") ?? String()}")
     try check(g5 == 200, "and the person can fetch it")
     _ = try app.until("event", "run.finished")

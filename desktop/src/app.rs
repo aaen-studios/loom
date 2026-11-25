@@ -283,6 +283,11 @@ pub struct Loom {
     ctx: Option<(Point<Pixels>, Ctx)>,
     /// When the picture viewer opened, which it fades in from.
     viewer_at: Instant,
+    /// The open picture's zoom and pan (`crate::zoom`), from its fit when another shows.
+    zoom: Option<crate::zoom::Zoom>,
+    /// The size each picture the viewer has shown was laid out by (`viewer_size`), kept so
+    /// it never changes once it's shown, as when its whole comes after its thumbnail.
+    viewer_sizes: HashMap<String, (u32, u32)>,
     /// The menu item that can't be undone and waits for its second click, until the
     /// menu closes.
     armed: Option<&'static str>,
@@ -1344,6 +1349,8 @@ ACTA_KEY=secret:ACTA_KEY",
             menu_at: None,
             ctx: None,
             viewer_at: Instant::now(),
+            zoom: None,
+            viewer_sizes: HashMap::new(),
             armed: None,
             fresh_armed: false,
             custom_color: false,
@@ -2455,6 +2462,7 @@ ACTA_KEY=secret:ACTA_KEY",
     pub fn view(&mut self, f: &model::FileRef, cx: &mut Context<Self>) {
         if self.model.viewing.is_none() {
             self.viewer_at = Instant::now();
+            self.zoom = None;
         }
         if let Some(frame) = self.model.view(f) {
             self.send(frame);
@@ -2478,11 +2486,21 @@ ACTA_KEY=secret:ACTA_KEY",
     pub fn view_stack(&mut self, stack: &[model::FileRef], cx: &mut Context<Self>) {
         if self.model.viewing.is_none() {
             self.viewer_at = Instant::now();
+            self.zoom = None;
         }
         if let Some(frame) = self.model.view_stack(stack) {
             self.send(frame);
         }
         cx.notify();
+    }
+
+    /// Zooms the viewer's picture `by` times about its middle, or back to its fit for 0,
+    /// as + − and 0 do.
+    fn zoom_by(&mut self, by: f32, cx: &mut Context<Self>) {
+        if let Some(z) = self.zoom.as_mut() {
+            z.go(if by == 0.0 { 1.0 } else { z.target * by }, (0.0, 0.0));
+            cx.notify();
+        }
     }
 
     /// The viewer's next picture (1) or the one before (-1).
@@ -8852,17 +8870,18 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// A picture from the chat, big over the window: whole once it's fetched, its
-    /// thumbnail until then, with its name and where it is among them. A click beside it
-    /// or Esc closes it, the arrows (or ← and →) go between the pictures of the stack it
-    /// was opened on, or else the chat's, and Open hands it to its own program.
+    /// A picture from the chat, big over the window, with its name and where it is among
+    /// them under it. It's laid out at its final size from the first frame
+    /// (`viewer_size`): its thumbnail scaled up to that place until its whole is here,
+    /// which then fades in over it. A click beside it or Esc closes it, the arrows (or ←
+    /// and →) go between the pictures of the stack it was opened on, or else the chat's,
+    /// and Open hands it to its own program. The wheel, a pinch, + and − zoom it
+    /// (`crate::zoom`), toward the pointer, dragging pans it, a double-click goes between
+    /// its fit and its own size, and 0 or its level fits it again.
     fn viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let f = self.model.viewing.clone()?;
-        let files = self.model.files.clone();
-        let path = files
-            .get(&f.file)
-            .or_else(|| files.get(&format!("{}.thumb", f.file)))
-            .cloned();
+        let whole = self.model.files.get(&f.file).cloned();
+        let thumb = self.model.files.get(&format!("{}.thumb", f.file)).cloned();
         let all = self.model.viewer_pictures();
         let at = all.iter().position(|x| x.file == f.file);
         let (before, after) = match at {
@@ -8890,49 +8909,143 @@ ACTA_KEY=secret:ACTA_KEY",
                 .hover(|s| s.bg(white().opacity(0.18)))
                 .child(Icon::new(icon).small())
         };
-        let picture = match path {
-            Some(path) => {
-                // Sized here, as in the chat (`file_view`): a most alone let a tall
-                // picture draw past the window.
-                let (most_w, most_h) = ((w - 160.0).max(100.0), (h - 140.0).max(100.0));
-                let (pw, ph) = match picture_size(&path) {
-                    Some((iw, ih)) => fit(iw, ih, most_w, most_h),
-                    None => (most_w, most_h),
-                };
-                img(std::path::PathBuf::from(path))
-                    .image_cache(&kept_images(cx).1)
-                    .w(px(pw))
-                    .h(px(ph))
-                    .rounded(px(radius::ROW))
-                    .into_any_element()
+        // Its place: fitted to the window less the room for the controls and its caption,
+        // in the middle, so the arrows and the caption never move. The size it's laid out
+        // by is kept once it's shown.
+        let (most_w, most_h) = ((w - 160.0).max(100.0), (h - 2.0 * VIEWER_EDGE).max(100.0));
+        let shown = match self.viewer_sizes.get(&f.file) {
+            Some(s) => Some(*s),
+            None => {
+                let s = viewer_size(&f, thumb.as_deref(), whole.as_deref());
+                if let Some(s) = s {
+                    self.viewer_sizes.insert(f.file.clone(), s);
+                }
+                s
             }
-            None => div()
-                .size(px(160.0))
-                .rounded(px(radius::ROW))
-                .bg(white().opacity(0.06))
-                .into_any_element(),
         };
+        let fitted = shown.map(|(iw, ih)| fit(iw, ih, most_w, most_h));
+        let (kept_chat, kept_viewer) = kept_images(cx);
+        let sharp = whole
+            .as_deref()
+            .and_then(|p| kept_picture(&kept_viewer, p, window, cx));
+        let soft = thumb
+            .as_deref()
+            .and_then(|p| kept_picture(&kept_chat, p, window, cx));
+        // Its own size, for 100% and how far it zooms in: as the instance said, else as
+        // its whole turned out once it's here.
+        let natural = f
+            .shown_size()
+            .or_else(|| {
+                sharp.as_ref().map(|i| {
+                    let s = i.size(0);
+                    (s.width.0.max(1) as u32, s.height.0.max(1) as u32)
+                })
+            })
+            .or(shown);
+        let place = fitted.unwrap_or((160.0, 160.0));
+        let actual = natural.map_or(1.0, |(nw, _)| nw as f32 / place.0.max(1.0));
+        if self.zoom.as_ref().map(|z| z.file.as_str()) != Some(f.file.as_str()) {
+            self.zoom = Some(crate::zoom::Zoom::new(&f.file));
+        }
+        let z = self.zoom.as_mut()?;
+        z.frame(place, (w, h), crate::zoom::most(actual));
+        if z.step(Instant::now()) {
+            window.request_animation_frame();
+        }
+        let first = *z.sharp_at_first.get_or_insert(sharp.is_some());
+        let (scale, pan, zoomed, dragged) = (z.scale, z.pan, z.zoomed(), z.dragged());
+        let percent = z.percent(actual);
+        let level_shown = z.changed.map_or(f32::MAX, |t| t.elapsed().as_secs_f32());
+        let middle = point(px(w / 2.0 + pan.0), px(h / 2.0 + pan.1));
+        let rect = Bounds::centered_at(
+            middle,
+            gpui_kit::size(px(place.0 * scale), px(place.1 * scale)),
+        );
+        // Rounded while it's all in the window; zoomed past it, its edges are the window's.
+        let inside = rect.origin.x >= px(0.0)
+            && rect.origin.y >= px(0.0)
+            && rect.origin.x + rect.size.width <= px(w)
+            && rect.origin.y + rect.size.height <= px(h);
+        let corner = if inside { px(radius::ROW) } else { px(0.0) };
+        // Its whole fades in over its thumbnail once it's here, unless it was here as it
+        // opened.
+        let fade = match &sharp {
+            Some(_) if first => 1.0,
+            Some(_) => motion::arrive(
+                &SharedString::from(format!("viewer-sharp-{}-{:?}", f.file, self.viewer_at)),
+                0.18,
+            ),
+            None => 0.0,
+        };
+        let frame_at = self.viewer_at.elapsed();
+        let mut picture = div().absolute().top_0().left_0().size_full();
+        if fade < 1.0 {
+            picture = match soft {
+                Some(image) => picture.child(viewer_picture(image, rect, corner, frame_at)),
+                None if fitted.is_some() || sharp.is_none() => picture.child(
+                    div()
+                        .absolute()
+                        .left(rect.origin.x)
+                        .top(rect.origin.y)
+                        .w(rect.size.width)
+                        .h(rect.size.height)
+                        .rounded(corner)
+                        .bg(white().opacity(0.06)),
+                ),
+                None => picture,
+            };
+        }
+        if let Some(image) = sharp {
+            if image.frame_count() > 1 {
+                window.request_animation_frame();
+            }
+            picture = picture.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .opacity(fade)
+                    .child(viewer_picture(image, rect, corner, frame_at)),
+            );
+        }
+        // Its zoom's level, for a moment after it changes, and while the pointer's on it.
+        let level_key = SharedString::from("viewer-level");
+        let level = if motion::hovered(&level_key) {
+            1.0
+        } else {
+            (1.0 - (level_shown - 0.9) / 0.3).clamp(0.0, 1.0)
+        };
+        if level > 0.0 && level_shown < 1.3 {
+            window.request_animation_frame();
+        }
         let opened = f.clone();
         let count = match at {
             Some(i) if all.len() > 1 => Some(format!("{} / {}", i + 1, all.len())),
             _ => None,
         };
+        let name = div()
+            .min_w_0()
+            .truncate()
+            .text_color(white().opacity(0.75))
+            .child(f.name.clone());
+        // With a count, the name ends just left of the middle and the count starts just
+        // right of it, so the count stays put from one picture to the next.
         let caption = div()
-            .max_w(px((w - 2.0 * space::XL).max(100.0)))
+            .w(px((w - 2.0 * space::XL).max(100.0)))
             .flex()
             .items_center()
+            .justify_center()
             .gap(px(space::M))
             .text_size(px(size::SMALL))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(white().opacity(0.75))
-                    .child(f.name.clone()),
-            )
-            .when_some(count, |d, c| {
-                d.child(div().flex_none().text_color(white().opacity(0.5)).child(c))
+            .map(|d| match count {
+                Some(c) => d
+                    .child(div().flex_1().min_w_0().flex().justify_end().child(name))
+                    .child(div().flex_1().text_color(white().opacity(0.5)).child(c)),
+                None => d.child(name),
             });
+        // Where a point in the window is from the viewer's middle, as the zoom has it.
+        let from_middle = move |p: Point<Pixels>| (p.x.as_f32() - w / 2.0, p.y.as_f32() - h / 2.0);
         Some(
             div()
                 .id("viewer")
@@ -8943,24 +9056,139 @@ ACTA_KEY=secret:ACTA_KEY",
                 .occlude()
                 .opacity(k)
                 .bg(black().opacity(0.9))
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(space::M))
+                .when(zoomed, |d| {
+                    d.cursor(if dragged {
+                        CursorStyle::ClosedHand
+                    } else {
+                        CursorStyle::OpenHand
+                    })
+                })
+                // A press is a drag once it moves; a click beside the picture closes it,
+                // and a double-click on it zooms in or back to its fit.
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
-                        this.model.viewing = None;
+                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                        let Some(z) = this.zoom.as_mut() else {
+                            return;
+                        };
+                        let on = rect.contains(&e.position);
+                        if e.click_count >= 2 && on {
+                            z.toggle(from_middle(e.position), actual);
+                            z.let_go();
+                        } else {
+                            z.grab(from_middle(e.position), on);
+                        }
                         cx.notify();
                     }),
                 )
+                .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
+                    let Some(z) = this.zoom.as_mut().filter(|z| z.drag.is_some()) else {
+                        return;
+                    };
+                    if e.pressed_button == Some(MouseButton::Left) {
+                        z.pull(from_middle(e.position));
+                    } else {
+                        z.let_go();
+                    }
+                    cx.notify();
+                }))
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        let Some(d) = this.zoom.as_mut().and_then(|z| z.let_go()) else {
+                            return;
+                        };
+                        if !d.moved && !d.on_picture {
+                            this.model.viewing = None;
+                        }
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        if let Some(z) = this.zoom.as_mut() {
+                            z.let_go();
+                            cx.notify();
+                        }
+                    }),
+                )
+                // A wheel's notches zoom toward the pointer, easing; a trackpad's two
+                // fingers pan once it's zoomed in, and zoom with Ctrl or ⌘ held.
+                .on_scroll(cx.listener(move |this, e: &ScrollEvent, _, cx| {
+                    let Some(z) = this.zoom.as_mut() else {
+                        return;
+                    };
+                    let at = from_middle(e.position);
+                    match e.delta {
+                        // Windows says a notch is 3 lines: about 1.4 times a notch.
+                        ScrollDelta::Lines(d) => z.go(z.target * 1.12f32.powf(d.y), at),
+                        ScrollDelta::Pixels(d) => {
+                            if e.modifiers.control || e.modifiers.platform {
+                                z.set(z.scale * (d.y.as_f32() * 0.01).exp(), at);
+                            } else if z.zoomed() {
+                                z.scroll((d.x.as_f32(), d.y.as_f32()));
+                            } else {
+                                return;
+                            }
+                        }
+                    }
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_pinch(cx.listener(move |this, e: &PinchEvent, _, cx| {
+                    if let Some(z) = this.zoom.as_mut() {
+                        z.set(z.scale * (1.0 + e.delta), from_middle(e.position));
+                        cx.notify();
+                    }
+                }))
+                .child(picture)
                 .child(
                     div()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(picture),
+                        .absolute()
+                        .left_0()
+                        .bottom_0()
+                        .w_full()
+                        .h(px(VIEWER_EDGE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(caption),
                 )
-                .child(caption)
+                .when(level > 0.0, |d| {
+                    let pill = div()
+                        .id("viewer-level")
+                        .h(px(28.0))
+                        .px(px(space::M))
+                        .flex()
+                        .items_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .opacity(level)
+                        .text_size(px(size::SMALL))
+                        .text_color(white())
+                        .bg(white().opacity(0.08))
+                        .hover(|s| s.bg(white().opacity(0.18)))
+                        .tooltip(tip("Fit"))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            if let Some(z) = this.zoom.as_mut() {
+                                z.go(1.0, (0.0, 0.0));
+                            }
+                            cx.notify();
+                        }))
+                        .child(format!("{percent}%"));
+                    d.child(
+                        div()
+                            .absolute()
+                            .top(px(layout::TITLEBAR + space::S + 4.0))
+                            .left_0()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .child(motion::tracks_hover(pill, level_key)),
+                    )
+                })
                 .child(
                     div()
                         .absolute()
@@ -14617,7 +14845,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.auto.stop();
                             cx.notify();
                         }
-                        if !this.smooth.catch(e, line) {
+                        // The picture viewer zooms by the notches, easing on its own.
+                        if this.model.viewing.is_some() || !this.smooth.catch(e, line) {
                             return;
                         }
                         cx.stop_propagation();
@@ -16778,23 +17007,26 @@ fn file_view(
         let most_w = PICTURE_W
             .min(room as f32 - 2.0 * space::XL)
             .max(PICTURE_LEAST);
-        let picture = match files.get(&format!("{}.thumb", f.file)) {
-            Some(path) => {
-                let (w, h) = match picture_size(path) {
-                    Some((w, h)) => fit(w, h, most_w, PICTURE_H),
-                    None => PICTURE_UNKNOWN,
-                };
-                img(std::path::PathBuf::from(path))
-                    .when_some(chat_images(), |i, c| i.image_cache(&c))
-                    .w(px(w))
-                    .h(px(h))
-                    .rounded(px(radius::BUBBLE))
-                    .into_any_element()
-            }
-            // Until the thumbnail is here, a place of about its size.
+        // Its size is the one the instance said, else its thumbnail's.
+        let thumb = files.get(&format!("{}.thumb", f.file));
+        let (w, h) = match f
+            .shown_size()
+            .or_else(|| thumb.and_then(|t| picture_size(t)))
+        {
+            Some((w, h)) => fit(w, h, most_w, PICTURE_H),
+            None => PICTURE_UNKNOWN,
+        };
+        let picture = match thumb {
+            Some(path) => img(std::path::PathBuf::from(path))
+                .when_some(chat_images(), |i, c| i.image_cache(&c))
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(radius::BUBBLE))
+                .into_any_element(),
+            // Until the thumbnail is here, its place.
             None => div()
-                .w(px(PICTURE_UNKNOWN.0))
-                .h(px(PICTURE_UNKNOWN.1))
+                .w(px(w))
+                .h(px(h))
                 .rounded(px(radius::BUBBLE))
                 .bg(p.bubble)
                 .into_any_element(),
@@ -16892,18 +17124,12 @@ fn fan_cards(n: usize) -> Vec<(usize, FanCard)> {
     }
 }
 
-/// What a fan's corner says: how many pictures there are, up to five, and past that how
-/// many more there are than the five it shows.
+/// What a fan's corner says: how many pictures there are, all of them, however many it
+/// draws (LOO-308).
 fn fan_count(n: usize) -> String {
-    if n > FAN_MOST {
-        format!("+{}", n - FAN_MOST)
-    } else {
-        n.to_string()
-    }
+    n.to_string()
 }
 
-/// The most pictures a fan draws.
-const FAN_MOST: usize = 5;
 /// How long a fan takes to open or close under the pointer, in seconds.
 const FAN_SECS: f32 = 0.28;
 /// The room kept around a tilted card's picture for its shadow, as a share of its width
@@ -17031,7 +17257,11 @@ fn picture_stack(
                 .items_center()
                 .justify_center()
                 .rounded_full()
+                // A fine light edge keeps it apart from a dark picture, as the dark fill
+                // does from a light one.
                 .bg(black().opacity(0.6))
+                .border_1()
+                .border_color(white().opacity(0.18))
                 .text_color(white())
                 .text_size(px(size::CAPTION))
                 .font_weight(FontWeight::MEDIUM)
@@ -17354,9 +17584,12 @@ fn fit(w: u32, h: u32, most_w: f32, most_h: f32) -> (f32, f32) {
     ((w * k).round().max(1.0), (h * k).round().max(1.0))
 }
 
-/// A picture's size in pixels, from its file's header, kept by path: a file's path is
-/// its SHA-256, so what's there doesn't change shape.
+/// A picture's size in pixels as it's drawn, from its file's header, its sides swapped
+/// where a photo's EXIF turns it a quarter (`jpeg_pixels` turns it), kept by path: a
+/// file's path is its SHA-256, so what's there doesn't change shape.
 fn picture_size(path: &str) -> Option<(u32, u32)> {
+    use image::metadata::Orientation;
+    use image::ImageDecoder as _;
     thread_local! {
         static SIZES: std::cell::RefCell<HashMap<String, Option<(u32, u32)>>> =
             std::cell::RefCell::new(HashMap::new());
@@ -17367,9 +17600,97 @@ fn picture_size(path: &str) -> Option<(u32, u32)> {
     let size = image::ImageReader::open(path)
         .and_then(|r| r.with_guessed_format())
         .ok()
-        .and_then(|r| r.into_dimensions().ok());
+        .and_then(|r| r.into_decoder().ok())
+        .map(|mut d| {
+            let (w, h) = d.dimensions();
+            match d.orientation() {
+                Ok(
+                    Orientation::Rotate90
+                    | Orientation::Rotate270
+                    | Orientation::Rotate90FlipH
+                    | Orientation::Rotate270FlipH,
+                ) => (h, w),
+                _ => (w, h),
+            }
+        });
     SIZES.with(|s| s.borrow_mut().insert(path.to_string(), size));
     size
+}
+
+/// The room kept above and below the viewer's picture, for its controls and its caption.
+const VIEWER_EDGE: f32 = 70.0;
+
+/// The longest side of a thumbnail, as the instance makes them (server/files.calx's THUMB).
+const THUMB_MOST: u32 = 512;
+
+/// The size the viewer lays a picture out by, before any of it is drawn (LOO-303): as the
+/// instance said, else its whole's once it's here, else its thumbnail's shape. A
+/// thumbnail under a thumbnail's most is the picture itself; one at it is of a bigger
+/// picture, taken as one that fills the viewer.
+fn viewer_size(f: &model::FileRef, thumb: Option<&str>, whole: Option<&str>) -> Option<(u32, u32)> {
+    if let Some(s) = f.shown_size().or_else(|| whole.and_then(picture_size)) {
+        return Some(s);
+    }
+    let (tw, th) = thumb.and_then(picture_size)?;
+    if tw.max(th) < THUMB_MOST {
+        return Some((tw, th));
+    }
+    let k = 16384.0 / tw.max(th).max(1) as f32;
+    Some((
+        ((tw as f32 * k).round() as u32).max(1),
+        ((th as f32 * k).round() as u32).max(1),
+    ))
+}
+
+/// The picture at `path` from `cache`, once it's loaded; it starts loading if it hasn't.
+fn kept_picture(
+    cache: &Entity<KeptImages>,
+    path: &str,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<Arc<RenderImage>> {
+    let resource = Resource::Path(Arc::from(std::path::Path::new(path)));
+    cache
+        .update(cx, |c, cx| c.load(&resource, window, cx))
+        .and_then(Result::ok)
+}
+
+/// A picture drawn over the viewer at `rect`, in the window, with `corner`s: the frame of
+/// an animated one that's on `at` after it opened.
+fn viewer_picture(
+    image: Arc<RenderImage>,
+    rect: Bounds<Pixels>,
+    corner: Pixels,
+    at: Duration,
+) -> impl IntoElement {
+    let frames = image.frame_count();
+    let frame = if frames > 1 {
+        let delay = |i: usize| Duration::from(image.delay(i)).max(Duration::from_millis(20));
+        let total: Duration = (0..frames).map(delay).sum();
+        let mut left = Duration::from_nanos((at.as_nanos() % total.as_nanos().max(1)) as u64);
+        (0..frames)
+            .find(|&i| {
+                let d = delay(i);
+                if left < d {
+                    return true;
+                }
+                left -= d;
+                false
+            })
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| {
+            let _ = window.paint_image(bounds, rect, Corners::all(corner), image, frame, false);
+        },
+    )
+    .absolute()
+    .top_0()
+    .left_0()
+    .size_full()
 }
 
 /// What a reply shows as it's drawn, from the person's prefs.
@@ -20911,7 +21232,7 @@ mod fan_tests {
     use super::{fan_cards, fan_count, tilted_pixels};
 
     #[test]
-    fn a_fan_puts_its_pictures_either_side_and_counts_past_five() {
+    fn a_fan_puts_its_pictures_either_side_and_counts_them_all() {
         let places = |n: usize| fan_cards(n).iter().map(|(i, _)| *i).collect::<Vec<_>>();
         assert!(places(1).is_empty());
         assert_eq!(places(2), vec![1]);
@@ -20931,8 +21252,8 @@ mod fan_tests {
         assert!(fan_cards(5)[3].1.rest.0 < three[1].1.rest.0);
         assert_eq!(fan_count(2), "2");
         assert_eq!(fan_count(5), "5");
-        assert_eq!(fan_count(7), "+2");
-        assert_eq!(fan_count(24), "+19");
+        assert_eq!(fan_count(6), "6");
+        assert_eq!(fan_count(20), "20");
     }
 
     #[test]
@@ -20954,7 +21275,7 @@ mod fan_tests {
 
 #[cfg(test)]
 mod picture_tests {
-    use super::{card_crop, fit, picture_size, PICTURE_H, PICTURE_W};
+    use super::{card_crop, fit, picture_size, viewer_size, PICTURE_H, PICTURE_W};
 
     #[test]
     fn a_stacks_card_is_the_middle_of_its_picture() {
@@ -20990,6 +21311,46 @@ mod picture_tests {
             .unwrap();
         assert_eq!(picture_size(&path.to_string_lossy()), Some((30, 50)));
         assert_eq!(picture_size(&dir.join("gone").to_string_lossy()), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The viewer's place for a picture is known before its whole is here (LOO-303).
+    #[test]
+    fn the_viewer_knows_a_pictures_size_before_it_loads() {
+        let dir = std::env::temp_dir().join(format!("loom-viewer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = |name: &str, w: u32, h: u32| {
+            let path = dir.join(name);
+            image::RgbImage::new(w, h)
+                .save_with_format(&path, image::ImageFormat::Png)
+                .unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        let mut f = crate::model::FileRef {
+            file: "aa".into(),
+            name: "a.png".into(),
+            mime: "image/png".into(),
+            size: 1,
+            width: 4000,
+            height: 4000,
+        };
+        // As the instance said, whatever the thumbnail.
+        let thumb = png("wide.thumb", 512, 288);
+        assert_eq!(viewer_size(&f, Some(&thumb), None), Some((4000, 4000)));
+        // An old one: its whole, once that's here.
+        (f.width, f.height) = (0, 0);
+        let whole = png("whole", 1920, 1080);
+        assert_eq!(
+            viewer_size(&f, Some(&thumb), Some(&whole)),
+            Some((1920, 1080))
+        );
+        // Else its thumbnail: of a bigger picture at the thumbnail's most, its shape kept.
+        let (w, h) = viewer_size(&f, Some(&thumb), None).unwrap();
+        assert!(w >= 4000 && (w as f32 / h as f32 - 512.0 / 288.0).abs() < 0.01);
+        // And under it, the picture itself.
+        let small = png("small.thumb", 300, 200);
+        assert_eq!(viewer_size(&f, Some(&small), None), Some((300, 200)));
+        assert_eq!(viewer_size(&f, None, None), None);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
@@ -21110,6 +21471,13 @@ mod frame_tests {
             .unwrap();
         let upright = jpeg_pixels(&jpeg).unwrap();
         assert_eq!(upright.dimensions(), (16, 32));
+        // Its size, from its header, is the size it's drawn at.
+        let dir = std::env::temp_dir().join(format!("loom-turned-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("photo");
+        std::fs::write(&path, &jpeg).unwrap();
+        assert_eq!(picture_size(&path.to_string_lossy()), Some((16, 32)));
+        std::fs::remove_dir_all(&dir).unwrap();
         // Red on top, blue under it.
         assert!(
             near(rgb(&upright, 8, 4), [255, 0, 0]),
@@ -21365,13 +21733,19 @@ impl Render for Loom {
         let unroll = self.unroll(h);
         let root = div()
             .track_focus(&self.keys)
-            // While a picture is open big, ← and → go between the chat's pictures, before
-            // the composer can take them.
+            // While a picture is open big, ← and → go between the chat's pictures, and + −
+            // and 0 zoom it, before the composer can take them.
             .capture_key_down(cx.listener(|this, e: &KeyDownEvent, _, cx| {
                 if this.model.viewing.is_some() {
-                    match e.keystroke.key.as_str() {
-                        "left" => this.view_step(-1, cx),
-                        "right" => this.view_step(1, cx),
+                    let k = &e.keystroke;
+                    let plain = !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform;
+                    let typed = k.key_char.as_deref().unwrap_or(k.key.as_str());
+                    match (k.key.as_str(), typed) {
+                        ("left", _) => this.view_step(-1, cx),
+                        ("right", _) => this.view_step(1, cx),
+                        (_, "+" | "=") if plain => this.zoom_by(1.5, cx),
+                        (_, "-") if plain => this.zoom_by(1.0 / 1.5, cx),
+                        (_, "0") if plain => this.zoom_by(0.0, cx),
                         _ => return,
                     }
                     cx.stop_propagation();
