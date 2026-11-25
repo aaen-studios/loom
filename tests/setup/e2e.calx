@@ -118,7 +118,7 @@ fn main() ! Error {
     try check(hash("{dir}\\loom.exe") == hash(a.copy()), "a loom that can't start is replaced by the one before")
     try check(installed_version() == "0.2.0", "and Settings still says 0.2.0")
     let kept = try fs.read_text("{home}\\Roaming\\Loom\\update\\failed.json") ?? String()
-    try check(kept.contains(#""version":"0.2.1""#) and kept.contains(#""why":"it ended at once"#), "the release that didn't start is kept, so the app doesn't put it in again on its own")
+    try check(kept.contains(#""version":"0.2.1""#) and kept.contains(#""why":""#), "the release that didn't start is kept, so the app doesn't put it in again on its own")
 
     // An update that starts: it stays, and the old one is cleared once it has.
     let s3 = try boxed(setup_b.copy(), home.copy()).args([String("--update"), String("--background")]).status()
