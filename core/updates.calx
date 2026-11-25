@@ -33,6 +33,7 @@ pub struct Hub {
     version: String     // the app's
     ready: String       // a newer app, downloaded and checked: its version
     path: String        // and its setup
+    failed: String      // why it didn't start the last time it went in, so it isn't put in on its own; empty when it did, or never went in
     servers: List<Server>
     pending: List<String>    // the servers "update everything" waits for, by folder
     app_after: bool          // and then the app goes
@@ -54,7 +55,7 @@ fn going(state: String) -> bool {
 
 impl Hub {
     pub fn new(version: own String) -> Hub {
-        return Hub { version: version, ready: String(), path: String(), servers: List<Server>(), pending: List<String>(), app_after: false, since: none, told: String(), app_why: String() }
+        return Hub { version: version, ready: String(), path: String(), failed: String(), servers: List<Server>(), pending: List<String>(), app_after: false, since: none, told: String(), app_why: String() }
     }
 
     /// The hub for an app that can't update itself where it runs, and says `why`.
@@ -64,10 +65,12 @@ impl Hub {
         return h
     }
 
-    /// A newer app is ready, from the updater's `core.update`.
-    pub fn app_ready(mut self, version: String, path: String) {
+    /// A newer app is ready, from the updater's `core.update`: with `failed`, why it didn't
+    /// start the last time it went in, or "".
+    pub fn app_ready(mut self, version: String, path: String, failed: String) {
         self.ready = version.copy()
         self.path = path.copy()
+        self.failed = failed.copy()
     }
 
     /// A server's `core.server`, from its core: `dir` is its folder. `gone` forgets it.
@@ -100,8 +103,9 @@ impl Hub {
         var any = false
         if self.ready.len() > 0 {
             let can = self.app_why.len() == 0
-            var d = Obj.new().s("device", String("app")).s("kind", String("app")).s("version", self.version.copy()).s("latest", self.ready.copy()).b("may", true).b("can", can).s("state", if self.app_after { String("asked") } else { String() })
+            var d = Obj.new().s("device", String("app")).s("kind", String("app")).s("version", self.version.copy()).s("latest", self.ready.copy()).b("may", true).b("can", can).s("state", if self.app_after { String("asked") } else if self.failed.len() > 0 { String("failed") } else { String() })
             if not can { d = d.s("why", self.app_why.copy()) }
+            if self.failed.len() > 0 and not self.app_after { d = d.s("error", self.failed.copy()) }
             devices.push(d.done())
             if can { any = true }
         }
@@ -203,7 +207,7 @@ fn a_server_that_cant_restart_says_why_and_isnt_updated() {
 @test
 fn update_everything_does_the_servers_first_and_the_app_last() {
     var h = Hub.new(String("0.2.0"))
-    h.app_ready(String("0.2.1"), String("C:/update/0.2.1/loom-setup.exe"))
+    h.app_ready(String("0.2.1"), String("C:/update/0.2.1/loom-setup.exe"), String())
     h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).done())
     h.server(String("servers/3"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", false).b("can", true).done())
     let out = h.run(none)
@@ -221,7 +225,7 @@ fn update_everything_does_the_servers_first_and_the_app_last() {
 @test
 fn the_app_alone_goes_at_once_and_a_server_alone_leaves_the_app() {
     var h = Hub.new(String("0.2.0"))
-    h.app_ready(String("0.2.1"), String("setup.exe"))
+    h.app_ready(String("0.2.1"), String("setup.exe"), String())
     h.server(String("servers/2"), Obj.new().s("loom", String("0.2.0")).s("latest", String("0.2.1")).b("behind", true).b("may", true).b("can", true).done())
     let server = h.run(some(String("servers/2")))
     assert(server.len() == 1 and str_at(server[0].copy(), "t") == some(String("core.relay")))
@@ -232,7 +236,7 @@ fn the_app_alone_goes_at_once_and_a_server_alone_leaves_the_app() {
 @test
 fn an_app_that_cant_update_where_it_runs_says_why_and_isnt_restarted() {
     var h = Hub.new(String("0.2.5")).cant_update(String("loom is running from its disk image."))
-    h.app_ready(String("0.2.6"), String("/update/0.2.6/loom-mac.dmg"))
+    h.app_ready(String("0.2.6"), String("/update/0.2.6/loom-mac.dmg"), String())
     let v = h.view()
     assert("{v}".contains("disk image") and "{v}".contains("0.2.6"))
     assert(bool_at(v, "all") == some(false))
@@ -250,4 +254,15 @@ fn a_server_that_came_back_new_is_no_longer_listed_and_only_a_change_is_said() {
     assert(not "{v}".contains("servers/2") and bool_at(v, "all") == some(false))
     h.server(String("servers/2"), Obj.new().b("gone", true).done())
     assert(h.changed() == none)
+}
+
+@test
+fn a_release_that_didnt_start_is_still_offered_saying_why() {
+    var h = Hub.new(String("0.2.6"))
+    h.app_ready(String("0.2.7"), String("/update/0.2.7/loom-mac.dmg"), String("ended at once, exit status: 3"))
+    let v = "{h.view()}"
+    assert(v.contains(#""state":"failed""#) and v.contains(#""error":"ended at once, exit status: 3""#) and v.contains(#""latest":"0.2.7""#))
+    // The person can still put it in.
+    let out = h.run(some(String("app")))
+    assert(out.len() == 1 and str_at(out[0].copy(), "t") == some(String("core.restart")))
 }
