@@ -223,7 +223,6 @@ export function play(app: HTMLElement) {
 			clip.style.maxHeight = open ? '' : '6.2em';
 			const long = open || clip.scrollHeight > clip.clientHeight + 1;
 			clip.style.maskImage = long && !open ? 'linear-gradient(#000 45%, transparent)' : '';
-			clip.style.webkitMaskImage = clip.style.maskImage;
 			more.hidden = !long;
 			more.textContent = open ? 'Show less' : 'Show more';
 		};
@@ -300,7 +299,7 @@ export function play(app: HTMLElement) {
 		}
 	};
 	drawPins();
-	pinsBtn.addEventListener('click', () => showPins(pop.hidden));
+	pinsBtn.addEventListener('click', () => showPins(pop.hidden === true));
 	pinList.addEventListener('scroll', () => pop.classList.toggle('scrolled', pinList.scrollTop > 0));
 	document.addEventListener('pointerdown', (e) => {
 		if (!pop.hidden && !pop.parentElement!.contains(e.target as Node)) showPins(false);
@@ -309,7 +308,7 @@ export function play(app: HTMLElement) {
 		const key = e.key.toLowerCase();
 		if (key === 'p' && e.shiftKey && (e.ctrlKey || e.metaKey) && app.matches(':hover, :focus-within')) {
 			e.preventDefault();
-			showPins(pop.hidden);
+			showPins(pop.hidden === true);
 			return;
 		}
 		if (pop.hidden) return;
