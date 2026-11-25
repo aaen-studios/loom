@@ -136,26 +136,46 @@ const GITHUB =
 	</aside>
 
 	<div class="main">
-		<div class="titlebar" aria-hidden="true">
+		<div class="titlebar">
 			<div class="header">
-				<span class="agent-btn">
+				<span class="agent-btn" aria-hidden="true">
 					<svg data-thread data-color="sky" data-head width="26" height="10"></svg>
 					<span>Juniper</span>
 					<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 				</span>
 				<span class="chips">
-					<span class="chip brain">
+					<!-- The chat's pins: how many, and the popover under it with each pin drawn as the
+					     chat draws its message (app.rs, pins_pop, pin_row). -->
+					<span class="pins-at">
+						<button type="button" class="chip pins-btn" data-pins aria-expanded="false" aria-label="Pinned" title="Pinned  Ctrl+Shift+P"
+							><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg
+							><span data-pins-count>2</span></button
+						>
+						<div class="pins-pop" data-pins-pop role="dialog" aria-label="Pinned" hidden>
+							<div class="pp-head"><span class="pp-title">Pinned</span><span class="pp-count" data-pins-count>2</span></div>
+							<div class="pp-wrap">
+								<div class="pp-list" data-pins-list tabindex="-1"></div>
+								<div class="pp-empty" hidden>
+									<span class="pp-ring"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></span>
+									<b>Nothing pinned yet</b>
+									<span>Hover a message and pick Pin</span>
+								</div>
+								<div class="pp-note" data-pins-note hidden></div>
+							</div>
+						</div>
+					</span>
+					<span class="chip brain" aria-hidden="true">
 						{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
 						Opus 5.5 · Medium
 						<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 					</span>
-					<span class="chip">
+					<span class="chip" aria-hidden="true">
 						Asks when it's risky
 						<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 					</span>
 				</span>
 			</div>
-			<div class="winctl">
+			<div class="winctl" aria-hidden="true">
 				<span><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14"></path></svg></span>
 				<span><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg></span>
 				<span class="close"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></span>
@@ -190,11 +210,11 @@ const GITHUB =
 			</div>
 			<div class="msgs mine" aria-live="off">
 				<div class="time-line">Today 09:02</div>
-				<div class="row you" data-msg>
+				<div class="row you" data-msg data-pin="2" data-when="Today 09:02">
 					<div class="bubble">What's on my plate today?</div>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
 				</div>
-				<div class="row reply" data-msg>
+				<div class="row reply" data-msg data-pin="1" data-when="Today 09:03">
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
 					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
@@ -274,6 +294,27 @@ const GITHUB =
 </template>
 <!-- What a message replies to, over its bubble (app.rs, quote_view): who said it and a line
      or two of what, along a thin line in their colour. A click goes to the original. -->
+<!-- A pin in the Pinned popover (app.rs, pin_row): who said it and when, a line in their colour
+     down its left, the message as the chat draws it, cut at about four lines with Show more, and
+     its Jump, Copy and Unpin under the pointer. -->
+<template id="demo-pin">
+	<div class="pin" tabindex="-1">
+		<div class="pin-who"><b></b><time></time></div>
+		<div class="pin-msg"></div>
+		<button type="button" class="pin-more" hidden>Show more</button>
+		<div class="pin-acts">
+			<button type="button" class="pin-act jump" data-act="jump"
+				><svg class="i" viewBox="0 0 24 24"><path d="m15 10 5 5-5 5"></path><path d="M4 4v7a4 4 0 0 0 4 4h12"></path></svg>Jump</button
+			>
+			<button type="button" class="pin-act" data-act="copy" aria-label="Copy" title="Copy"
+				><svg class="i" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg></button
+			>
+			<button type="button" class="pin-act" data-act="unpin" aria-label="Unpin" title="Unpin"
+				><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89"></path><path d="m2 2 20 20"></path><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11"></path></svg></button
+			>
+		</div>
+	</div>
+</template>
 <template id="demo-quote">
 	<button type="button" class="quote"><span class="q-who"></span><span class="q-words"></span></button>
 </template>
@@ -1446,6 +1487,282 @@ const GITHUB =
 	@media (max-width: 640px) {
 		.reply-btn {
 			display: none;
+		}
+	}
+	/* The Pinned popover (PLAN.md, "Pinned messages"; app.rs, pins_pop): under the header's pin,
+	   over the chat, which keeps its width. */
+	.pins-at {
+		position: relative;
+		display: inline-flex;
+	}
+	.pins-btn {
+		border: 0;
+		background: transparent;
+		font: inherit;
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+		cursor: pointer;
+		font-variant-numeric: tabular-nums;
+	}
+	.pins-btn[aria-expanded='true'] {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	.pins-pop {
+		position: absolute;
+		z-index: 20;
+		top: calc(100% + 8px);
+		right: 0;
+		width: 460px;
+		max-width: calc(100vw - 32px);
+		display: flex;
+		flex-direction: column;
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: 12px;
+		box-shadow: 0 16px 40px -16px rgb(0 0 0 / 0.35);
+		overflow: hidden;
+		text-align: left;
+		white-space: normal;
+		font-size: var(--size-body);
+		color: var(--ink);
+	}
+	.pins-pop[hidden] {
+		display: none;
+	}
+	.pp-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 12px 16px 10px;
+		border-bottom: 1px solid transparent;
+		transition: border-color 0.15s;
+	}
+	.pins-pop.scrolled .pp-head {
+		border-bottom-color: var(--line);
+	}
+	.pp-title {
+		font-weight: var(--weight-semibold);
+	}
+	.pp-count {
+		color: var(--ink-3);
+		font-size: 13px;
+	}
+	.pp-wrap {
+		position: relative;
+	}
+	.pp-list {
+		max-height: 380px;
+		overflow-y: auto;
+		padding: 0 8px 8px;
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		overscroll-behavior: contain;
+	}
+	.pp-list:focus {
+		outline: none;
+	}
+	.pin {
+		position: relative;
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		padding: 8px 10px 10px 16px;
+		border-radius: 8px;
+		border: 1px solid transparent;
+		transition: background-color 0.12s;
+	}
+	.pin::before {
+		content: '';
+		position: absolute;
+		left: 6px;
+		top: 10px;
+		bottom: 10px;
+		width: 2px;
+		border-radius: 2px;
+		background: var(--from, var(--ink-3));
+		opacity: 0.75;
+	}
+	.pin:hover,
+	.pin.lit {
+		background: var(--hover);
+	}
+	.pin.lit {
+		border-color: var(--line-strong);
+	}
+	.pin:focus {
+		outline: none;
+	}
+	.pin-who {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 18px;
+		font-size: var(--size-small);
+	}
+	.pin-who b {
+		font-weight: var(--weight-medium);
+	}
+	.pin-who time {
+		color: var(--ink-3);
+		font-size: var(--size-caption);
+	}
+	.pin-who svg {
+		width: 22px;
+		height: 10px;
+	}
+	.pin-msg {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		min-width: 0;
+	}
+	.pin-msg .bubble,
+	.pin-msg .said {
+		max-width: 100%;
+	}
+	.pp-list[hidden] {
+		display: none;
+	}
+	.pin-more {
+		align-self: flex-start;
+		margin: -2px 0 0 -4px;
+		padding: 1px 4px;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: transparent;
+		font: inherit;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+		cursor: pointer;
+	}
+	.pin-more:hover {
+		background: var(--active);
+		color: var(--ink);
+	}
+	.pin-acts {
+		position: absolute;
+		top: 4px;
+		right: 6px;
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		padding: 2px;
+		border-radius: 8px;
+		border: 1px solid var(--line-strong);
+		background: var(--raised);
+		box-shadow: 0 6px 16px -8px rgb(0 0 0 / 0.35);
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 0.12s;
+	}
+	.pin:hover .pin-acts,
+	.pin.lit .pin-acts,
+	.pin:focus-within .pin-acts {
+		opacity: 1;
+		pointer-events: auto;
+	}
+	.pin-act {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		gap: 5px;
+		height: 26px;
+		min-width: 26px;
+		padding: 0 6px;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: transparent;
+		font: inherit;
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+		cursor: pointer;
+	}
+	.pin-act.jump {
+		padding: 0 8px;
+	}
+	.pin-act:hover {
+		background: var(--active);
+		color: var(--ink);
+	}
+	.pin-act .i {
+		width: 13px;
+		height: 13px;
+	}
+	.pp-empty {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 6px;
+		padding: 24px 24px 30px;
+		text-align: center;
+	}
+	.pp-empty[hidden] {
+		display: none;
+	}
+	.pp-empty b {
+		font-weight: var(--weight-medium);
+	}
+	.pp-empty span:last-child {
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.pp-ring {
+		display: grid;
+		place-items: center;
+		width: 36px;
+		height: 36px;
+		margin-bottom: 4px;
+		border-radius: 50%;
+		background: var(--raised-2);
+		color: var(--ink-3);
+	}
+	.pp-ring .i {
+		width: 16px;
+		height: 16px;
+	}
+	.pp-note {
+		position: absolute;
+		left: 50%;
+		bottom: 12px;
+		transform: translateX(-50%);
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 6px 6px 6px 12px;
+		border-radius: 8px;
+		background: var(--button);
+		color: var(--button-ink);
+		font-size: var(--size-small);
+		white-space: nowrap;
+		box-shadow: 0 8px 24px -10px rgb(0 0 0 / 0.5);
+	}
+	.pp-note[hidden] {
+		display: none;
+	}
+	.pp-note.copied {
+		padding-right: 12px;
+	}
+	.pp-note button {
+		height: 24px;
+		padding: 0 8px;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: color-mix(in srgb, var(--button-ink) 14%, transparent);
+		color: var(--button-ink);
+		font: inherit;
+		font-weight: var(--weight-medium);
+		cursor: pointer;
+	}
+	@media (max-width: 640px) {
+		.pins-pop {
+			position: fixed;
+			top: auto;
+			left: 16px;
+			right: 16px;
+			bottom: 16px;
+			width: auto;
 		}
 	}
 	/* Lit for a moment, once a quote went to it. */

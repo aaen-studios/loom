@@ -24,6 +24,14 @@ Select words in a message for a small bar with **Copy**, **Quote** and, in an ag
 
 What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it over the bubble. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
 
+## Pinned messages
+
+Point at a message and choose the pin by its corner, or right-click it and choose **Pin**, to keep it at hand. Agents can pin messages too. Each chat has its own pins.
+
+The pin over the chat, with how many there are, opens them under it, newest first; so does Ctrl+Shift+P (⌘⇧P on a Mac). Each pin shows as in the chat, under who said it and when. Long ones are cut at about four lines, and **Show more** opens them. Point at a pin for **Jump**, which goes to the message in the chat, **Copy** and **Unpin**, which has **Undo** for a few seconds. ↑ and ↓ move between pins and Enter jumps. Click outside or press Esc to close it.
+
+On the iPhone, the pin over the chat opens them in a sheet. Long-press a pin for **Jump to message**, **Copy** and **Unpin**, and long-press a message in the chat to pin it.
+
 ## Cards in replies
 
 An agent can put cards in its reply, drawn in the chat's own look:
