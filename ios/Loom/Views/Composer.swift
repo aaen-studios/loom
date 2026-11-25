@@ -53,6 +53,10 @@ struct Composer: View {
             if let q = mentionQuery(now) { session.send(model.findFiles(q.query)) }
         }
         .onChange(of: box.attached) { _, ids in model.syncAttachments(ids) }
+        // Starting a reply puts the cursor in the composer.
+        .onChange(of: model.replying) { _, now in
+            if now != nil { box.view?.becomeFirstResponder() }
+        }
         .onAppear {
             box.opened = { piece in open(piece) }
             box.pasted = { url in session.send(model.previewLink(url)) }
@@ -100,6 +104,9 @@ struct Composer: View {
         let busy = model.busy
         let idle = box.typed.isEmpty && model.attachments.isEmpty
         return VStack(alignment: .leading, spacing: Tokens.Space.s) {
+            if let r = model.replyingHere {
+                ReplyBar(reply: r) { model.replying = nil }
+            }
             if !model.attachments.isEmpty {
                 AttachedRow(take: { box.take($0) })
             }
@@ -627,6 +634,36 @@ struct PieceArt {
         a.image = image
         a.bounds = CGRect(x: 0, y: font.descender, width: width, height: height)
         return true
+    }
+}
+
+/// Over the composer's words while a reply is written (PLAN.md, "Replying to a message"):
+/// whom it replies to and the first line of what, along a thin line in the colour of who
+/// said it, and its ×.
+private struct ReplyBar: View {
+    @Environment(Session.self) private var session
+    var reply: ReplyTo
+    var cancel: () -> Void
+
+    var body: some View {
+        let (who, color) = quotedBy(reply, model: session.model)
+        let head = reply.ask ? "Asking \(who) about" : reply.role == "person" && !reply.from.hasPrefix("a_") ? "Replying to yourself" : "Replying to \(who)"
+        HStack(spacing: Tokens.Space.s) {
+            RoundedRectangle(cornerRadius: 1).fill(color).frame(width: 2)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(head).font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption)).foregroundStyle(color)
+                Text(reply.line.isEmpty ? reply.files.first?.name ?? "" : reply.line)
+                    .font(Fonts.caption).foregroundStyle(P.ink2).lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            Button(action: cancel) {
+                Image(systemName: "xmark").font(.system(size: 12, weight: .semibold)).foregroundStyle(P.ink3)
+                    .frame(width: 28, height: 28).contentShape(Rectangle())
+            }
+            .accessibilityLabel("Cancel reply")
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .padding(.leading, Tokens.Space.s)
     }
 }
 

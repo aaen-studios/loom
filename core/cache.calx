@@ -717,6 +717,11 @@ impl Cache {
         _ = try self.db.execute(String("INSERT OR REPLACE INTO outbox (cid, conversation, json, at) VALUES (?, ?, ?, ?)"), [t(cid), t(conversation), t("{frame}"), Value.Int(now())])
     }
 
+    /// A message the cache has, by its id.
+    pub fn message(self, id: String) -> Json? ! Error {
+        return try self.one("SELECT json FROM messages WHERE id = ?", id.copy())
+    }
+
     /// A run still going, as its run.started event.
     pub fn run(self, id: String) -> Json? ! Error {
         return try self.one("SELECT json FROM runs WHERE id = ?", id.copy())

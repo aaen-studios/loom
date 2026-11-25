@@ -20,6 +20,8 @@ struct ChatView: View {
     @State private var reading: Reading?
     /// Another agent's thread with it, opened from the menu.
     @State private var threadOpen: Ask?
+    /// The message a quote went to, lit for a moment.
+    @State private var lit: String?
 
     var body: some View {
         let model = session.model
@@ -43,10 +45,20 @@ struct ChatView: View {
                                 Reply(message: m, agent: agent, openThoughts: $openThoughts)
                             }
                         }
+                        // Lit for a moment, once a quote went to it.
+                        .background(lit == m.id ? P.thread(agent?.color ?? "").opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
+                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued) { model.reply(to: m.id) })
                         .contextMenu {
                             // One menu a message rather than selectable text in each
                             // paragraph, which made each row many times dearer to build.
                             let text = m.text
+                            if thread == nil && !m.live && !m.queued {
+                                Button {
+                                    model.reply(to: m.id)
+                                } label: {
+                                    Label("Reply", systemImage: "arrowshape.turn.up.left")
+                                }
+                            }
                             if !m.live && !text.isEmpty {
                                 Button {
                                     UIPasteboard.general.string = text
@@ -54,7 +66,7 @@ struct ChatView: View {
                                     Label("Copy", systemImage: "doc.on.doc")
                                 }
                                 Button {
-                                    reading = Reading(text: text)
+                                    reading = Reading(text: text, message: thread == nil && !m.queued ? m.id : nil, agent: !m.isPerson)
                                 } label: {
                                     Label("Select text", systemImage: "selection.pin.in.out")
                                 }
@@ -77,6 +89,13 @@ struct ChatView: View {
                 g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 80
             } action: { _, near in
                 atBottom = near
+            }
+            // A quote tapped: to its original, once the chat has it, reaching back for it.
+            .onChange(of: model.jumpTo) { _, to in
+                if let to { jump(to, proxy) }
+            }
+            .onChange(of: messages.count) { _, _ in
+                if let to = model.jumpTo, !model.reaching { jump(to, proxy) }
             }
             .onChange(of: Follow(messages: messages, approvals: approvals.count)) { before, _ in
                 // Follow a reply as it's written, unless the person scrolled up to read.
@@ -165,7 +184,10 @@ struct ChatView: View {
         }
         .sheet(item: $reading) { r in
             NavigationStack {
-                SelectableText(text: r.text)
+                SelectableText(text: r.text, message: r.message, agent: r.agent) { quote, ask in
+                    reading = nil
+                    if let id = r.message { session.model.reply(to: id, quote: quote, ask: ask) }
+                }
                     .navigationTitle("Select text")
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -190,6 +212,12 @@ struct ChatView: View {
     /// another, for screenshots of it (ios/README.md).
     private func openFromLaunch() {
         let args = ProcessInfo.processInfo.arguments
+        // `-reply <message>` starts a reply to that message, once the chat's messages have
+        // come, for screenshots of the composer's bar.
+        if thread == nil, let i = args.firstIndex(of: "-reply"), i + 1 < args.count {
+            let id = args[i + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { session.model.reply(to: id) }
+        }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
         threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
     }
@@ -222,18 +250,61 @@ struct ChatView: View {
         var approvals: Int
     }
 
+    /// Goes to the message `to` a quote names and lights it for a moment, or reaches back
+    /// for older messages while the chat doesn't have it.
+    private func jump(_ to: String, _ proxy: ScrollViewProxy) {
+        let model = session.model
+        if model.messages.contains(where: { $0.id == to }) {
+            model.jumpTo = nil
+            withAnimation(.easeOut(duration: 0.25)) { proxy.scrollTo(to, anchor: .center) }
+            lit = to
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
+                if lit == to { withAnimation { lit = nil } }
+            }
+        } else if !model.loadFurtherBack() {
+            model.jumpTo = nil
+        } else {
+            session.flush()
+        }
+    }
+
     private struct Reading: Identifiable {
         let id = UUID()
         var text: String
+        /// The message it's from, to reply to a part of; nil for one that can't be.
+        var message: String? = nil
+        var agent = false
     }
 }
 
-/// A message's text, to select any part of it.
+/// A message's text, to select any part of it, and with a part selected, to quote it or,
+/// in an agent's reply, ask about it (LOO-200).
 private struct SelectableText: UIViewRepresentable {
     var text: String
+    var message: String?
+    var agent: Bool
+    var quote: (String, Bool) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UITextViewDelegate {
+        var parent: SelectableText
+        init(_ parent: SelectableText) { self.parent = parent }
+
+        func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
+            guard parent.message != nil, range.length > 0, let r = Range(range, in: textView.text) else { return nil }
+            let words = String(textView.text[r])
+            var mine = [UIAction(title: "Quote", image: UIImage(systemName: "text.quote")) { [parent] _ in parent.quote(words, false) }]
+            if parent.agent {
+                mine.append(UIAction(title: "Ask about this", image: UIImage(systemName: "questionmark.bubble")) { [parent] _ in parent.quote(words, true) })
+            }
+            return UIMenu(children: mine + suggestedActions)
+        }
+    }
 
     func makeUIView(context: Context) -> UITextView {
         let v = UITextView()
+        v.delegate = context.coordinator
         v.isEditable = false
         v.isSelectable = true
         v.backgroundColor = .clear
@@ -245,7 +316,90 @@ private struct SelectableText: UIViewRepresentable {
     }
 
     func updateUIView(_ v: UITextView, context: Context) {
+        context.coordinator.parent = self
         if v.text != text { v.text = text }
+    }
+}
+
+/// A swipe right on a message starts a reply to it, as in Messages: the message follows
+/// the finger a little, with the reply arrow showing behind it, and goes back once let go.
+private struct SwipeToReply: ViewModifier {
+    var enabled: Bool
+    var reply: () -> Void
+    @State private var dx: CGFloat = 0
+    private let enough: CGFloat = 56
+
+    func body(content: Content) -> some View {
+        content
+            .offset(x: dx)
+            .background(alignment: .leading) {
+                if dx > 0 {
+                    Image(systemName: "arrowshape.turn.up.left.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(dx >= enough ? P.ink : P.ink3)
+                        .opacity(Double(min(dx / enough, 1)))
+                        .padding(.leading, 4)
+                }
+            }
+            .simultaneousGesture(
+                DragGesture(minimumDistance: 16)
+                    .onChanged { g in
+                        // Only a swipe across, to the right; a scroll stays a scroll.
+                        guard enabled, g.translation.width > 0, abs(g.translation.width) > abs(g.translation.height) * 1.5 else { return }
+                        let was = dx
+                        dx = min(g.translation.width * 0.6, enough + 16)
+                        if was < enough && dx >= enough { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
+                    }
+                    .onEnded { _ in
+                        if dx >= enough { reply() }
+                        withAnimation(.spring(duration: 0.25)) { dx = 0 }
+                    },
+                including: enabled ? .all : .subviews
+            )
+    }
+}
+
+/// Who said what a quote quotes, as the chat names them, and their colour: the agent,
+/// another agent that sent it, or the person, "You", in this chat's agent's colour.
+@MainActor
+func quotedBy(_ r: ReplyTo, model: Model) -> (String, Color) {
+    let id = r.role == "agent" ? r.agent : (r.from.hasPrefix("a_") ? r.from : "")
+    if !id.isEmpty {
+        guard let a = model.agent(id) else { return ("An agent", P.ink2) }
+        return (a.name, P.thread(a.color))
+    }
+    return ("You", P.thread(model.selected.flatMap { model.agent($0) }?.color ?? ""))
+}
+
+/// The quote over a message that replies to another: who said it, in their colour, and a
+/// line or two of what, with its files' names, along a thin line of that colour. A tap goes
+/// to the original (PLAN.md, "Replying to a message").
+struct QuoteView: View {
+    @Environment(Session.self) private var session
+    var reply: ReplyTo
+
+    var body: some View {
+        let (who, color) = quotedBy(reply, model: session.model)
+        Button {
+            session.model.jumpTo = reply.message
+        } label: {
+            HStack(spacing: Tokens.Space.s) {
+                RoundedRectangle(cornerRadius: 1).fill(color).frame(width: 2)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(who).font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption)).foregroundStyle(color)
+                    if !reply.words.isEmpty {
+                        Text(reply.words.trimmingCharacters(in: .whitespacesAndNewlines)).font(Fonts.caption).foregroundStyle(P.ink2).lineLimit(2).multilineTextAlignment(.leading)
+                    }
+                    if !reply.files.isEmpty {
+                        Text(reply.files.map(\.name).joined(separator: ", "))
+                            .font(Fonts.caption).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.middle)
+                    }
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Replying to \(who): \(reply.line)")
     }
 }
 
@@ -287,6 +441,9 @@ struct PersonMessage: View {
                 }
                 .font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption))
                 .foregroundStyle(sender.map { P.mention($0.color) } ?? P.ink3)
+            }
+            if let reply = message.reply {
+                QuoteView(reply: reply)
             }
             ForEach(Array(files.enumerated()), id: \.offset) { _, part in
                 switch part {

@@ -440,6 +440,8 @@ struct Message: Identifiable, Equatable, Sendable {
     /// For a reply, the files it names in code that are in its agent's folder or the shared
     /// one (`mentions`): each path as it wrote it, and the file's name.
     var named: [NamedFile] = []
+    /// For a person's message that replies to another, what it replies to.
+    var reply: ReplyTo?
 
     var isPerson: Bool { role == "person" }
 
@@ -461,6 +463,57 @@ struct Message: Identifiable, Equatable, Sendable {
     var text: String {
         blocks.filter { $0.kind == "text" && $0.parent == nil && !$0.text.isEmpty }.map(\.text).joined(separator: "\n\n")
     }
+}
+
+/// What a person's message replies to (PLAN.md, "Replying to a message"), as the instance
+/// keeps it with the message, and as the composer's bar shows it while it's written:
+/// desktop/src/model.rs's `ReplyTo`.
+struct ReplyTo: Equatable, Sendable {
+    var message: String
+    /// `agent` or `person`.
+    var role: String
+    /// The agent that said it, for an agent's; the device or agent that sent it, for a person's.
+    var agent = ""
+    var from = ""
+    /// The part selected, or the message's words.
+    var text: String
+    var part = false
+    var ask = false
+    var files: [FileRef] = []
+
+    static func of(_ m: JSON) -> ReplyTo? {
+        let r = m["reply"]
+        guard !r["message"].text.isEmpty else { return nil }
+        return ReplyTo(message: r["message"].text, role: r["role"].text, agent: r["agent"].text, from: r["from"].text, text: r["text"].text, part: r["part"].bool ?? false, ask: r["ask"].bool ?? false, files: r["files"].array.map(FileRef.init))
+    }
+
+    /// A reply to `m` in `agent`'s chat: to the part `quote` when one was selected, asking
+    /// about it with `ask`. A reply's words are its answer, its last words; a person's, all.
+    static func to(_ m: Message, agent: String, quote: String?, ask: Bool) -> ReplyTo {
+        let quote = quote?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        let words = m.blocks.filter { $0.kind == "text" && $0.parent == nil }.map { $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let text = quote ?? (m.isPerson ? words.joined(separator: "\n") : words.last ?? "")
+        return ReplyTo(message: m.id, role: m.role, agent: m.isPerson ? "" : agent, from: m.fromAgent ?? "", text: text, part: quote != nil, ask: ask && quote != nil, files: quote != nil ? [] : m.blocks.compactMap(\.file))
+    }
+
+    /// Its words without their Markdown, each line's heading or quote marks taken off, as
+    /// the desktop's `spoken` has them.
+    var words: String {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        let plain = String(((try? AttributedString(markdown: text, options: options)) ?? AttributedString(text)).characters)
+        return plain.split(separator: "\n", omittingEmptySubsequences: false)
+            .map { $0.drop { $0 == "#" || $0 == ">" || $0 == " " } }
+            .joined(separator: "\n")
+    }
+
+    /// Its first line with something in it.
+    var line: String {
+        words.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
+    }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 /// One of a reply's sources (PLAN.md, "Links and sources").
@@ -1340,6 +1393,8 @@ private struct Queued: Sendable {
     var conversation: String?
     var text: String
     var files: Int
+    /// What it replies to, as the core worked it out.
+    var reply: ReplyTo?
     /// The id it gets once it goes, for one the instance keeps in the conversation's
     /// queue while the agent answers (`ack` with `queued`).
     var message: String?
@@ -1350,6 +1405,7 @@ private struct Queued: Sendable {
         conversation = q["conversation"].string
         text = q["text"].text
         files = q["files"].array.count
+        reply = ReplyTo.of(q)
     }
 }
 
@@ -1395,6 +1451,14 @@ final class Model {
     /// Whether the selected chat's messages have come since it was selected.
     var messagesCame = false
     var moreMessages = false
+    /// How many more of the chat's messages it asks for, to reach one a quote goes to.
+    private var messagesMore = 0
+    /// Asked for more of them, which haven't come yet.
+    private(set) var reaching = false
+    /// The message the next message replies to, while it's written.
+    var replying: ReplyTo?
+    /// The message a quote was tapped to go to, until the chat is there.
+    var jumpTo: String?
     var selected: String?
     /// Another agent's thread with the selected agent, while it's shown in its chat's place.
     private(set) var thread: String?
@@ -1634,6 +1698,9 @@ final class Model {
         thread = nil
         messages = []
         messagesCame = false
+        messagesMore = 0
+        replying = nil
+        jumpTo = nil
         dirty.insert(.messages)
     }
 
@@ -1985,8 +2052,9 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty })
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m))
             }
+            reaching = false
             placeQueued()
             // The tool calls these messages name.
             dirty.insert(.tools)
@@ -2061,7 +2129,7 @@ final class Model {
                 let files = q.files == 1 ? "1 file" : "\(q.files) files"
                 text = text.isEmpty ? files : "\(text)\n\n\(files)"
             }
-            messages.append(Message(id: q.cid, role: "person", at: .max, blocks: [.text("text", text)], queued: true))
+            messages.append(Message(id: q.cid, role: "person", at: .max, blocks: [.text("text", text)], queued: true, reply: q.reply))
         }
     }
 
@@ -2114,7 +2182,7 @@ final class Model {
                     placeQueued()
                     continue
                 }
-                out.append(["t": "core.get", "id": "app.messages", "what": "messages", "conversation": JSON(conversation), "limit": 200])
+                out.append(["t": "core.get", "id": "app.messages", "what": "messages", "conversation": JSON(conversation), "limit": JSON(200 + messagesMore)])
             } else if l == .tools {
                 // Only the calls the shown chat's blocks name, and the runs going on: a
                 // heavy user has tens of thousands of calls, and this comes at each one.
@@ -2169,7 +2237,39 @@ final class Model {
         dropped = []
         var frame: [String: JSON] = ["t": "send", "agent": JSON(agent), "text": JSON(text)]
         if !files.isEmpty { frame["files"] = JSON(files) }
+        if let r = replyingHere {
+            var reply: [String: JSON] = ["message": JSON(r.message)]
+            if r.part { reply["quote"] = JSON(r.text) }
+            if r.ask { reply["ask"] = true }
+            frame["reply"] = .object(reply)
+        }
+        replying = nil
         return .object(frame)
+    }
+
+    // MARK: Replying to a message (PLAN.md, "Replying to a message")
+
+    /// Starts a reply to the chat's message `message`: to the part `quote` when one was
+    /// selected, asking about it with `ask`.
+    func reply(to message: String, quote: String? = nil, ask: Bool = false) {
+        guard let m = messages.first(where: { $0.id == message && !$0.live && !$0.queued }) else { return }
+        replying = ReplyTo.to(m, agent: selected ?? "", quote: quote, ask: ask)
+    }
+
+    /// What the message being written replies to, while it's in the chat on screen.
+    var replyingHere: ReplyTo? {
+        guard let r = replying, messages.contains(where: { $0.id == r.message }) else { return nil }
+        return r
+    }
+
+    /// Asks for more of the chat's older messages, to reach one a quote goes to. False when
+    /// the chat has no more.
+    func loadFurtherBack() -> Bool {
+        guard moreMessages, messagesMore < 1800 else { return false }
+        messagesMore += 200
+        reaching = true
+        dirty.insert(.messages)
+        return true
     }
 
     /// Starts sending a file for the next message.

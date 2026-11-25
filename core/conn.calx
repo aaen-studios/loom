@@ -26,6 +26,7 @@ import shared.protocol.{APP_QUIET_MS, APP_WAIT_MS, CLOSE_MOVED, CLOSE_TOKEN, CLO
 import core.cache.{CALLS_KEPT_MS, Cache, now}
 import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
+import shared.reply as replies
 import core.login.{Kind, Outcome, Pending, address, request_body}
 import core.link
 import core.relay
@@ -743,9 +744,10 @@ impl Conn {
             // A command that failed gets no result, so its id goes.
             if let id = str_at(f, "id") { self.forget_command(id) }
             // A send the instance can't take, ever: it leaves the outbox. So does
-            // a form's answer it refused, which the card says why of.
+            // a form's answer it refused, which the card says why of, and a reply to a
+            // message that's gone.
             let code = str_at(f.copy(), "code") ?? String()
-            if code == "unknown_conversation" or code == "bad_form" {
+            if code == "unknown_conversation" or code == "bad_form" or code == "bad_reply" {
                 if let cid = str_at(f, "ref") {
                     match self.cache.sent(cid) {
                         ok => {},
@@ -1143,12 +1145,23 @@ impl Conn {
                 }
             }
         }
+        // A reply: its quote as the instance will keep it, from the message the cache
+        // has, so the message waiting to go shows it too. The instance reads only
+        // what the app gave.
+        let given = at(m.copy(), "reply")
+        if given != Json.Null {
+            match self.cache.message(str_at(given.copy(), "message") ?? String()) {
+                ok(found) => if let original = found { extra = extra.j("reply", merge(replies.kept(given.copy(), original), given)) },
+                err(e) => self.tell_error("cache", "{e}"),
+            }
+        }
         let frame = merge(m.copy(), extra.done())
         match self.cache.queue(frame.copy()) {
             ok => {},
             err(e) => self.tell_error("cache", "{e}"),
         }
         var queued = Obj.new().s("t", String("core.queued")).s("cid", cid).maybe("conversation", str_at(frame.copy(), "conversation")).maybe("agent", str_at(frame.copy(), "agent")).maybe("text", str_at(m.copy(), "text")).i("at", now())
+        if at(frame.copy(), "reply") != Json.Null { queued = queued.j("reply", at(frame.copy(), "reply")) }
         if let Json.Array(_) = at(m, "files") {
             queued = queued.j("files", at(frame.copy(), "files"))
         }
@@ -1196,7 +1209,7 @@ impl Conn {
         if let list = try self.cache.list_text(what) { return (list, false) }
         let limit = int_at(m.copy(), "limit") ?? 50
         let conversation = str_at(m.copy(), "conversation") ?? String()
-        let (page, more) = try self.cache.messages_text(conversation.copy(), str_at(m, "before"), if limit < 1 or limit > 500 { 50 } else { limit })
+        let (page, more) = try self.cache.messages_text(conversation.copy(), str_at(m, "before"), if limit < 1 or limit > 2000 { 50 } else { limit })
         // The cache ran out of a conversation the instance has older messages of: they're
         // fetched, and `core.filled` says when they're here.
         if not more and try self.cache.partial(conversation.copy()) {
@@ -2096,4 +2109,23 @@ fn catch_up_comes_to_the_app_as_one_synced() ! Error {
     assert((next_told(mut told) ?? String()).contains(#""seq":4"#))
     c.frame(String(#"{"t":"synced","seq":4,"runs":[]}"#))
     assert(next_told(mut told) == some(String(#"{"t":"synced","seq":4,"runs":[]}"#)))
+}
+
+@test
+fn a_reply_waiting_to_go_shows_its_quote() ! Error {
+    let inbox = Receiver<String>()
+    var told = Receiver<ToApp>()
+    var c = Conn.new(none, none, String("loom-test"), try Cache.open(String(":memory:")), inbox, told.sender())
+    c.frame(event_text(1, "conversation.created", Obj.new().j("conversation", Obj.new().s("id", String("c_1")).s("agent", String("a_1")).i("at", 1).done())))
+    let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", String("The build passed.")).done()])
+    c.frame(event_text(2, "message.created", Obj.new().s("conversation", String("c_1")).j("message", Obj.new().s("id", String("msg_2")).s("conversation", String("c_1")).s("role", String("agent")).s("agent", String("a_1")).i("at", 2).j("blocks", blocks).done())))
+    c.frame(String(#"{"t":"synced","seq":2,"runs":[]}"#))
+    while next_told(mut told) != none {}
+    c.send(try parse(String(#"{"t":"send","cid":"m_1","conversation":"c_1","text":"Which one?","reply":{"message":"msg_2","quote":"build"}}"#)))
+    let queued = try parse(next_told(mut told) ?? String())
+    assert(str_at(queued.copy(), "t") == some(String("core.queued")))
+    assert("{at(queued, "reply")}" == #"{"message":"msg_2","role":"agent","agent":"a_1","text":"build","part":true,"quote":"build"}"#)
+    // The outbox keeps it so too, and the instance reads what the app gave.
+    let kept = try c.cache.queued(String("m_1")) ?? Json.Null
+    assert(str_at(at(kept, "reply"), "quote") == some(String("build")))
 }
