@@ -2933,13 +2933,38 @@ pub fn search_in(db: Database, user: String, query: String, agent: String?, afte
     return out
 }
 
+// `user`'s messages in `conversation` that have every word of `query`, the last one as
+// a prefix, in the chat's order, oldest first, the newest `limit` of them: what finding
+// in a chat steps through (PLAN.md, "Finding in a chat"). Each with its snippet, as
+// `search_in` gives them.
+pub fn find_in(db: Database, user: String, query: String, conversation: String, limit: usize) -> List<(Json, String)> ! Error {
+    var out = List<(Json, String)>()
+    let fts = fts_query(query) else return out
+    let sql = String("SELECT json, s FROM (SELECT m.json AS json, snippet(messages_fts, 0, char(2), char(3), '…', 16) AS s, m.at AS at, m.rowid AS r FROM messages_fts f JOIN messages m ON m.rowid = f.rowid JOIN conversations c ON c.id = m.conversation AND c.deleted = 0 WHERE messages_fts MATCH ? AND f.user = ? AND m.conversation = ? ORDER BY m.at DESC, m.rowid DESC LIMIT ?) ORDER BY at, r")
+    let args: List<Value> = [t(fts), t(user), t(conversation), Value.Int(i64.wrap(u64(limit)))]
+    for r in try db.query(sql, args) {
+        out.push((try parse(text(r[0].copy())), plain_snippet(text(r[1].copy()))))
+    }
+    return out
+}
+
 // `messages.search`'s answer for `args`: `results`, each a `message` and its `snippet`,
-// 30 unless `limit` says otherwise, from 1 to 100.
+// 30 unless `limit` says otherwise, from 1 to 100; or with `conversation`, that chat's,
+// oldest first, 500 unless `limit` says otherwise, from 1 to 500.
 pub fn search_answer_in(db: Database, user: String, args: Json) -> Json ! Error {
-    let limit = int_at(args.copy(), "limit") ?? 30
-    let n: i64 = if limit < 1 { 1 } else if limit > 100 { 100 } else { limit }
+    let query = str_at(args.copy(), "query") ?? String()
+    let conversation = str_at(args.copy(), "conversation")
+    let most: i64 = if conversation == none { 100 } else { 500 }
+    let fewest: i64 = if conversation == none { 30 } else { 500 }
+    let limit = int_at(args.copy(), "limit") ?? fewest
+    let clamped: i64 = if limit < 1 { 1 } else if limit > most { most } else { limit }
+    let n = usize.try_from(clamped) ?? 30
+    let found = match conversation {
+        some(c) => try find_in(db, user, query, c, n),
+        none => try search_in(db, user, query, str_at(args.copy(), "agent"), int_at(args.copy(), "after"), int_at(args, "before"), n),
+    }
     var results = List<Json>()
-    for (message, snippet) in try search_in(db, user, str_at(args.copy(), "query") ?? String(), str_at(args.copy(), "agent"), int_at(args.copy(), "after"), int_at(args, "before"), usize.try_from(n) ?? 30) {
+    for (message, snippet) in found {
         results.push(Obj.new().j("message", message).s("snippet", snippet).done())
     }
     return Obj.new().j("results", Json.Array(results)).done()
@@ -3440,11 +3465,18 @@ fn search_finds_words_per_person() {
     assert(s.search(a.id.copy(), String("build"), none, none, some(150), 10)!.len() == 1)
     let found = s.search(a.id.copy(), String("receipts"), none, none, none, 10)!
     assert(found[0].1.contains("{MARK_START}receipts{MARK_END}"))
+    // Finding in one chat: its messages alone, oldest first, the newest when there are more.
+    s.put_message(a.id.copy(), text_message("msg_5", id2.copy(), "a_2", "A build of the mail", 50))!
+    let in_chat = search_answer_in(s.db, a.id.copy(), Obj.new().s("query", String("build")).s("conversation", id1.copy()).done())!
+    assert(("{in_chat}".find("msg_1") ?? 9999) < ("{in_chat}".find("msg_2") ?? 0) and not "{in_chat}".contains("msg_5"))
+    let newest = search_answer_in(s.db, a.id.copy(), Obj.new().s("query", String("build")).s("conversation", id1.copy()).i("limit", 1).done())!
+    assert("{newest}".contains("msg_2") and not "{newest}".contains("msg_1"))
     // Storing a message again replaces its words, and a deleted conversation's don't show.
     s.put_message(a.id.copy(), text_message("msg_3", id2.copy(), "a_2", "Nothing here now", 300))!
     assert(s.search(a.id.copy(), String("receipts"), none, none, none, 10)!.len() == 0)
+    // The other chat's build is all that's left.
     s.delete_conversation(a.id.copy(), id1)!
-    assert(s.search(a.id.copy(), String("build"), none, none, none, 10)!.len() == 0)
+    assert(s.search(a.id.copy(), String("build"), none, none, none, 10)!.len() == 1)
     assert(s.search(a.id.copy(), String("   "), none, none, none, 10)!.len() == 0)
 }
 
