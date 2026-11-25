@@ -1361,6 +1361,16 @@ fn emit_run(
 }
 
 /// The Markdown source for an inline image, e.g. `![alt](url "title")`.
+/// loom: the alt text of an emoji loom draws as a picture, whose source starts with
+/// `loom-emoji`: the emoji itself, or `:name:` for one of the person's own. It copies
+/// as that, where any other picture copies as nothing.
+fn loom_emoji_alt(image: &ImageNode) -> Option<String> {
+    if !image.url.starts_with("loom-emoji") {
+        return None;
+    }
+    image.alt.as_ref().map(|a| a.to_string()).filter(|a| !a.is_empty())
+}
+
 fn image_markdown(image: &ImageNode) -> String {
     let alt = image.alt.clone().unwrap_or_default();
     let title = image
@@ -1799,13 +1809,40 @@ impl Paragraph {
 
     pub(super) fn selected_text(&self) -> String {
         let mut text = String::new();
+        // loom: an emoji drawn as a picture (`loom_emoji_alt`) copies as its alt text, the
+        // emoji itself, when the selection runs over it, as `selected_markdown` decides:
+        // reaching the end of the run before it and starting at the beginning of the run
+        // after it, where a missing run counts as reaching it.
+        let mut pending = String::new();
+        let mut reach = true;
+        let mut take_run = |state: &InlineState, text: &mut String, pending: &mut String| {
+            match state.selection.as_ref().filter(|s| s.start < s.end) {
+                Some(selection) => {
+                    if selection.start == 0 {
+                        text.push_str(pending);
+                    }
+                    pending.clear();
+                    text.push_str(&state.text[selection.start..selection.end]);
+                    reach = selection.end >= state.text.len();
+                }
+                None if !state.text.is_empty() => {
+                    pending.clear();
+                    reach = false;
+                }
+                None => {}
+            }
+            reach
+        };
 
         for c in self.children.iter() {
             let Ok(state) = c.state.lock() else {
                 continue;
             };
-            if let Some(selection) = &state.selection {
-                text.push_str(&state.text[selection.start..selection.end]);
+            let reached = take_run(&state, &mut text, &mut pending);
+            if let Some(alt) = c.image.as_ref().and_then(loom_emoji_alt)
+                && reached
+            {
+                pending.push_str(&alt);
             }
             if let Some(custom) = &c.custom
                 && c.custom_selection.lock().is_ok_and(|selected| *selected)
@@ -1814,10 +1851,11 @@ impl Paragraph {
             }
         }
 
-        if let Ok(state) = self.state.lock()
-            && let Some(selection) = &state.selection
-        {
-            text.push_str(&state.text[selection.start..selection.end]);
+        if let Ok(state) = self.state.lock() {
+            let reached = take_run(&state, &mut text, &mut pending);
+            if reached && !text.is_empty() {
+                text.push_str(&pending);
+            }
         }
 
         text
@@ -2046,6 +2084,10 @@ impl Paragraph {
         let mut text = String::new();
         for node in self.children.iter() {
             text.push_str(&node.text);
+            // loom: an emoji drawn as a picture is its alt text.
+            if let Some(alt) = node.image.as_ref().and_then(loom_emoji_alt) {
+                text.push_str(&alt);
+            }
         }
         text
     }

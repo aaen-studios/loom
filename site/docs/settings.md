@@ -14,7 +14,7 @@ What's about the server rather than you (Add a device, People, Move, Add a serve
 
 ## This device's settings
 
-Appearance, Chat, and App & notifications belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
+Appearance, Chat, App & notifications, and the options under your emoji in Emoji belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
 
 Everything else in Settings is kept on the instance, so every device you sign in on has it.
 
@@ -44,6 +44,17 @@ Under **Sidebar**:
 
 - **Search in the sidebar**: a search box over the agents that finds words in every chat. Off by default; Ctrl+Shift+F (⌘⇧F on a Mac) opens it either way.
 
+## Emoji
+
+**Your emoji** are pictures you add to use as emoji, up to 200. **Add** takes a PNG or a JPEG of up to 256 KB. It's made 128 × 128 on the instance and named after its file. Click a name to change it: 2 to 32 letters a to z, digits and `_`. Point at one and click × to delete it, and **Undo** brings it back. Moving GIFs, WebP and animated PNGs can't be added yet.
+
+The rest belong to this device:
+
+- **Play animated emoji**: Always, or On hover. Neither plays while the system's reduce motion is on.
+- **Skin tone**: the tone emoji that have one come in, from six hands.
+- **Turn :) into 🙂**: an emoticon followed by a space becomes its emoji. Off by default.
+- **Show the emoji button in the composer**. On by default.
+
 ## App & notifications
 
 Under **This computer**:
@@ -62,6 +73,8 @@ Under **Updates**:
 
 - Loom's version, and **Check now**. Loom also looks for a new version every few hours.
 - **Update on its own**: a new version goes in by itself, while loom is in the tray and no agent is working. Otherwise the sidebar offers it, to restart into.
+
+Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), © Twitter, Jason Sofonia and Justine De Caires, under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 
 ## Routines
 
