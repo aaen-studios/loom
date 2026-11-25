@@ -519,6 +519,29 @@ struct ReplyTo: Equatable, Sendable {
     var line: String {
         words.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
     }
+
+    /// Its words on one plain line, as the quote over a message shows them, as the
+    /// desktop's `one_line`: list marks and rules taken off too, its lines run together
+    /// with spaces, and cut at 240 characters with "…".
+    var oneLine: String {
+        var out: [Substring] = []
+        for raw in words.split(separator: "\n") {
+            var line = Substring(raw.trimmingCharacters(in: .whitespaces))
+            // A rule, or a table's divider, says nothing.
+            if line.allSatisfy({ "-=_|: ".contains($0) }) { continue }
+            for mark in ["- ", "+ ", "* ", "• "] where line.hasPrefix(mark) {
+                line = line.dropFirst(mark.count).drop { $0 == " " }
+                break
+            }
+            for mark in ["[ ] ", "[x] ", "[X] "] where line.hasPrefix(mark) {
+                line = line.dropFirst(mark.count).drop { $0 == " " }
+                break
+            }
+            out += line.split { $0.isWhitespace || $0 == "|" }
+        }
+        let joined = out.joined(separator: " ")
+        return joined.count > 240 ? String(joined.prefix(240)) + "…" : joined
+    }
 }
 
 private extension String {

@@ -18055,9 +18055,10 @@ fn quoted_by(
     }
 }
 
-/// The quote over a message that replies to another: who said it, in their colour, and
-/// a line or two of what, with its files' pills, along a thin line of that colour. A
-/// click goes to the original (PLAN.md, "Replying to a message").
+/// The quote over a message that replies to another, on one line: the agent's thread,
+/// who said it in their colour ("You" quiet), a picture's thumbnail or a file's icon,
+/// and what, as plain words cut with "…" (picked words in curly quotes). A click goes
+/// to the original (PLAN.md, "Replying to a message").
 fn quote_view(
     p: Palette,
     r: &model::ReplyTo,
@@ -18068,72 +18069,89 @@ fn quote_view(
 ) -> Stateful<Div> {
     let agents = MENTION_AGENTS.with(|a| a.borrow().clone());
     let (who, color) = quoted_by(p, r, &agents, tint);
-    let words = model::spoken(&r.text);
-    let mut pills = div().flex().flex_wrap().gap(px(space::XS));
-    for f in &r.files {
-        let thumb = files
+    let agent = if r.role == "agent" {
+        Some(r.agent.as_str())
+    } else {
+        Some(r.from.as_str()).filter(|f| f.starts_with("a_"))
+    };
+    let mark = agent
+        .and_then(|id| agents.iter().find(|a| a.id == id))
+        .and_then(|a| mention_thread(a, &hex_of(color)));
+    let words = model::one_line(&r.text);
+    let pictures = r.files.iter().filter(|f| f.image()).count();
+    let shown = if !words.is_empty() {
+        if r.part {
+            format!("“{words}”")
+        } else {
+            words
+        }
+    } else if pictures == r.files.len() && pictures > 0 {
+        if pictures == 1 {
+            "Picture".to_string()
+        } else {
+            format!("{pictures} pictures")
+        }
+    } else {
+        r.files
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let lead = r.files.first().map(|f| {
+        match files
             .get(&format!("{}.thumb", f.file))
-            .filter(|_| f.image());
-        pills = pills.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(space::XS))
-                .text_size(px(size::CAPTION))
-                .text_color(p.ink_2)
-                .child(match thumb {
-                    Some(path) => img(std::path::PathBuf::from(path))
-                        .when_some(chat_images(), |i, c| i.image_cache(&c))
-                        .size(px(16.0))
-                        .rounded(px(3.0))
-                        .object_fit(ObjectFit::Cover)
-                        .into_any_element(),
-                    None => Icon::new(if f.image() { Ico::Image } else { Ico::FileText })
-                        .xsmall()
-                        .text_color(p.ink_3)
-                        .into_any_element(),
-                })
-                .child(model::middle_cut(&f.name, model::PILL_NAME)),
-        );
-    }
+            .filter(|_| f.image())
+        {
+            Some(path) => img(std::path::PathBuf::from(path))
+                .when_some(chat_images(), |i, c| i.image_cache(&c))
+                .flex_none()
+                .size(px(16.0))
+                .rounded(px(3.0))
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            None => Icon::new(if f.image() { Ico::Image } else { Ico::FileText })
+                .xsmall()
+                .flex_none()
+                .text_color(p.ink_3)
+                .into_any_element(),
+        }
+    });
     let to = r.message.clone();
     div()
         .id(SharedString::from(format!("quote-{key}")))
         .role(Role::Button)
-        .aria_label(format!("Replying to {who}: {}", r.line()))
-        .max_w(px(420.0))
+        .aria_label(format!("Replying to {who}: {shown}"))
+        .min_w_0()
+        .max_w(px(440.0))
+        .h(px(20.0))
         .flex()
-        .gap(px(space::S))
-        .px(px(space::S))
-        .py(px(2.0))
+        .items_center()
+        .gap(px(space::XS + 1.0))
+        .px(px(6.0))
         .rounded(px(radius::ROW))
+        .text_size(px(size::SMALL))
+        .whitespace_nowrap()
         .cursor_pointer()
         .soft_hover(transparent_black(), p.hover, None)
-        .child(div().flex_none().w(px(2.0)).rounded_full().bg(color))
+        .when_some(mark, |d, path| {
+            d.child(
+                img(std::path::PathBuf::from(path))
+                    .flex_none()
+                    .size(px(14.0)),
+            )
+        })
         .child(
             div()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap(px(1.0))
-                .child(
-                    div()
-                        .text_size(px(size::CAPTION))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(color)
-                        .child(who),
-                )
-                .when(!words.trim().is_empty(), |d| {
-                    d.child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink_2)
-                            .line_clamp(2)
-                            .child(words.trim().to_string()),
-                    )
-                })
-                .when(!r.files.is_empty(), |d| d.child(pills)),
+                .flex_none()
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(if agent.is_some() { color } else { p.ink_3 })
+                .child(who),
         )
+        .children(lead)
+        .when(!shown.is_empty(), |d| {
+            d.child(div().min_w_0().truncate().text_color(p.ink_2).child(shown))
+        })
         .on_click(move |_, _, cx| {
             let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
         })
@@ -18215,6 +18233,33 @@ fn pin_cut(
         .into_any_element()
 }
 
+/// A quote over the person's message, with its spine: a short line from the quote's
+/// middle that curves down at its right end onto the bubble, 20 px in from its edge.
+fn spined_quote(p: Palette, quote: Stateful<Div>) -> Div {
+    div()
+        .w_full()
+        .flex()
+        .justify_end()
+        .pr(px(20.0))
+        // The spine meets what's under it.
+        .mb(px(-space::XS + 1.0))
+        .child(quote)
+        .child(
+            div().relative().flex_none().w(px(14.0)).h(px(20.0)).child(
+                div()
+                    .absolute()
+                    .top(px(9.0))
+                    .left_0()
+                    .w(px(14.0))
+                    .h(px(13.0))
+                    .border_t(px(2.0))
+                    .border_r(px(2.0))
+                    .border_color(p.line_strong)
+                    .rounded_tr(px(7.0)),
+            ),
+        )
+}
+
 fn person_bubble(p: Palette, tint: Hsla, vibrant: bool) -> Hsla {
     if vibrant {
         return Hsla {
@@ -18289,7 +18334,10 @@ fn person(
     }
     // What it replies to, over everything else.
     if let Some(r) = &m.reply {
-        out = out.child(quote_view(p, r, tint, files, m.id.clone(), this.clone()));
+        out = out.child(spined_quote(
+            p,
+            quote_view(p, r, tint, files, m.id.clone(), this.clone()),
+        ));
     }
     // Its files over its words, two or more pictures as one stack.
     let mut stacked: Vec<model::FileRef> = Vec::new();

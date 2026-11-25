@@ -110,7 +110,7 @@ export function play(app: HTMLElement) {
 	// put a bar over the composer's words; the message goes with a quote over its bubble, which
 	// goes back to the original and lights it (app.rs, reply_bar, quote_view, jump_to).
 	const replyBar = app.querySelector<HTMLElement>('[data-reply-bar]')!;
-	type Replying = { row: HTMLElement; who: string; words: string; ask: boolean };
+	type Replying = { row: HTMLElement; who: string; words: string; part: boolean; ask: boolean };
 	let replying: Replying | null = null;
 	/** A message's words, on one line: an agent's answer, or what the person wrote. */
 	const wordsOf = (row: HTMLElement) =>
@@ -118,7 +118,7 @@ export function play(app: HTMLElement) {
 	const replyTo = (row: HTMLElement, part?: string, ask = false) => {
 		const agent = row.classList.contains('reply');
 		const who = agent ? (row.querySelector('.who')?.textContent ?? 'Juniper') : 'You';
-		replying = { row, who, words: part ?? wordsOf(row), ask: ask && !!part };
+		replying = { row, who, words: (part ?? wordsOf(row)).replace(/\s+/g, ' ').trim(), part: !!part, ask: ask && !!part };
 		replyBar.querySelector('.rb-head')!.textContent = replying.ask ? `Asking ${who} about` : agent ? `Replying to ${who}` : 'Replying to yourself';
 		replyBar.querySelector('.rb-words')!.textContent = replying.words;
 		replyBar.hidden = false;
@@ -462,13 +462,19 @@ export function play(app: HTMLElement) {
 			}
 		}
 		bubble.before(...overs.children);
-		// What it replies to, over everything else.
+		// What it replies to, over everything else, on one line: the agent's thread, who
+		// ("You" quiet, with none), and the words, picked ones in curly quotes.
 		if (to) {
-			const quote = tpl('demo-quote');
+			const quoted = tpl('demo-quote');
+			const quote = quoted.querySelector<HTMLElement>('.quote')!;
+			const mine = to.who === 'You';
+			quote.classList.toggle('mine', mine);
+			if (mine) quote.querySelector('.mention-thread')!.remove();
 			quote.querySelector('.q-who')!.textContent = to.who;
-			quote.querySelector('.q-words')!.textContent = to.words;
+			quote.querySelector('.q-words')!.textContent = to.part ? `“${to.words}”` : to.words;
+			quote.setAttribute('aria-label', `Replying to ${to.who}: ${to.words}`);
 			quote.addEventListener('click', () => jump(to.row));
-			you.prepend(quote);
+			you.prepend(quoted);
 		}
 		return you;
 	}
@@ -649,7 +655,7 @@ export function play(app: HTMLElement) {
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
 		cleared();
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
-		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), ask: false });
+		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), part: false, ask: false });
 		const reply = tpl('demo-reply');
 		reply.classList.remove('fresh');
 		const { steps, say } = foldOf(reply);

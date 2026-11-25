@@ -38,6 +38,7 @@ function mentionThread(shape: keyof typeof shapes): string {
 	return pts.map(([x, y], i) => `${i ? 'L' : 'M'}${(7 + x * scale).toFixed(2)} ${(7 + y * scale).toFixed(2)}`).join(' ');
 }
 const BISCUIT = mentionThread('star');
+const JUNIPER = mentionThread('yarn');
 
 // GitHub's mark, as its site icon on the reply's link and sources.
 const GITHUB =
@@ -292,8 +293,6 @@ const GITHUB =
 <template id="demo-you">
 	<div class="row you fresh"><div class="bubble"></div></div>
 </template>
-<!-- What a message replies to, over its bubble (app.rs, quote_view): who said it and a line
-     or two of what, along a thin line in their colour. A click goes to the original. -->
 <!-- A pin in the Pinned popover (app.rs, pin_row): who said it and when, a line in their colour
      down its left, the message as the chat draws it, cut at about four lines with Show more, and
      its Jump, Copy and Unpin under the pointer. -->
@@ -315,8 +314,15 @@ const GITHUB =
 		</div>
 	</div>
 </template>
+<!-- What a message replies to, over its bubble, on one line (app.rs, quote_view): the agent's
+     thread, who said it and what, with a spine down onto the bubble. A click goes to the original. -->
 <template id="demo-quote">
-	<button type="button" class="quote"><span class="q-who"></span><span class="q-words"></span></button>
+	<div class="quoted">
+		<button type="button" class="quote"
+			><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={JUNIPER}></path></svg><span class="q-who"></span><span
+				class="q-words"></span></button
+		><span class="q-spine" aria-hidden="true"></span>
+	</div>
 </template>
 <!-- Words selected in a message: what can be done with them (app.rs, picked_bar). -->
 <template id="demo-picked">
@@ -1772,41 +1778,80 @@ const GITHUB =
 	.msgs.jumping {
 		transition: transform 0.35s cubic-bezier(0.2, 0.7, 0.3, 1);
 	}
-	/* The quote over a sent message: who said it in their colour, and a line or two of what,
-	   along a thin line of that colour. */
+	/* The quote over a sent message, on one line: the agent's thread, who said it in their
+	   colour ("You" quiet), and what, cut with "…". A spine from its middle curves down onto
+	   the bubble, 20px in from its edge. */
+	.quoted {
+		display: flex;
+		justify-content: flex-end;
+		max-width: 100%;
+		min-width: 0;
+		padding-right: 20px;
+		margin-bottom: -3px;
+	}
 	.quote {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 1px;
-		max-width: 420px;
-		padding: 2px 8px 2px 10px;
+		align-items: center;
+		gap: 5px;
+		min-width: 0;
+		max-width: 440px;
+		height: 20px;
+		padding: 0 6px;
 		border: 0;
-		border-left: 2px solid var(--q, var(--tint));
-		border-radius: 0 var(--radius-row) var(--radius-row) 0;
+		border-radius: var(--radius-row);
 		background: transparent;
 		color: inherit;
 		font: inherit;
-		text-align: left;
+		font-size: var(--size-small);
+		white-space: nowrap;
 		cursor: pointer;
 		transition: background-color 0.12s;
 	}
 	.quote:hover {
 		background: var(--hover);
 	}
-	.q-who,
+	.quote .mention-thread {
+		flex: none;
+		margin: 0;
+		stroke: var(--q, var(--tint));
+		vertical-align: 0;
+	}
+	.q-who {
+		flex: none;
+		font-weight: 500;
+		color: var(--q, var(--tint));
+	}
+	.quote.mine .q-who {
+		color: var(--ink-3);
+	}
+	.q-words {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		color: var(--ink-2);
+	}
+	.q-spine {
+		position: relative;
+		flex: none;
+		width: 14px;
+		height: 20px;
+	}
+	.q-spine::before {
+		content: '';
+		position: absolute;
+		top: 9px;
+		left: 0;
+		box-sizing: border-box;
+		width: 14px;
+		height: 13px;
+		border-top: 2px solid var(--line-strong);
+		border-right: 2px solid var(--line-strong);
+		border-top-right-radius: 7px;
+	}
 	.rb-head {
 		font-size: var(--size-caption);
 		font-weight: 500;
 		color: var(--q, var(--tint));
-	}
-	.q-words {
-		display: -webkit-box;
-		-webkit-box-orient: vertical;
-		-webkit-line-clamp: 2;
-		overflow: hidden;
-		font-size: var(--size-small);
-		color: var(--ink-2);
 	}
 	/* Over the composer's words while a reply is written, with its ×. */
 	.reply-bar {
