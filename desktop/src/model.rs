@@ -789,7 +789,7 @@ pub enum PlusRow {
     Open(PlusSub),
     File(RecentFile),
     Skill(Skill),
-    Routine(Routine),
+    Routine(Box<Routine>),
     /// The end of a list beside the menu: its settings page.
     Manage(PlusSub),
 }
@@ -881,7 +881,7 @@ impl Model {
             &q,
             &routines_for(&self.routines, &agent),
             |r| (r.name.as_str(), ""),
-            PlusRow::Routine,
+            |r| PlusRow::Routine(Box::new(r)),
         ));
         vec![add, act]
             .into_iter()
@@ -903,7 +903,7 @@ impl Model {
             PlusSub::Skills => self.skills.iter().cloned().map(PlusRow::Skill).collect(),
             PlusSub::Routines => routines_for(&self.routines, &agent)
                 .into_iter()
-                .map(PlusRow::Routine)
+                .map(|r| PlusRow::Routine(Box::new(r)))
                 .collect(),
         };
         if which != PlusSub::Recent {
@@ -10551,7 +10551,7 @@ mod tests {
             found[1],
             vec![
                 PlusRow::Skill(m.skills[1].clone()),
-                PlusRow::Routine(m.routines[1].clone())
+                PlusRow::Routine(Box::new(m.routines[1].clone()))
             ]
         );
         let by_use = m.plus_groups("ships", false);
@@ -10560,7 +10560,10 @@ mod tests {
         assert!(m.plus_groups("nothing like it", true).is_empty());
         // The lists beside it end in their settings page; recent files has none.
         let routines = m.plus_sub(PlusSub::Routines);
-        assert_eq!(routines[0], PlusRow::Routine(m.routines[1].clone()));
+        assert_eq!(
+            routines[0],
+            PlusRow::Routine(Box::new(m.routines[1].clone()))
+        );
         assert_eq!(routines.last(), Some(&PlusRow::Manage(PlusSub::Routines)));
         assert_eq!(m.plus_sub(PlusSub::Recent).len(), 2);
         m.skills.clear();
