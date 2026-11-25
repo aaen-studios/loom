@@ -1,22 +1,31 @@
-// Plays the live copy of the app (src/components/AppDemo.astro) in a loop: a message is typed and
-// sent, the agent thinks, uses a tool, writes, asks before it deploys and waits for the yes, then
-// finishes. While the turn runs, one quiet line under the reply says the step it's on; once it's
-// done, its last words are the answer and the steps before them fold under one line that opens
-// (desktop/src/model.rs, parts), and a subagent's call in the earlier reply opens to show what
-// its subagent did inside it (model.rs, inside). The earlier reply's sources tab opens their
-// list (app.rs, sources_tab). The moods, what the sidebar says after an agent's name on its
-// one line ("Thinking", the tool's title, "Wants to …"), or under the pointer on a pinned agent's
-// tile, and the wording are the app's. Clicking
-// Allow, Always allow (under the arrow beside Allow) or Deny answers the approval, which says how
-// in one quiet line before it goes; left alone, it's allowed after a moment.
+// Plays the live copy of the app (src/components/AppDemo.astro) in a loop: a message is typed,
+// with a link pasted and a file attached among its words, each a piece in them with its card or
+// pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
+// asks before it deploys and waits for the yes, then finishes. While the turn runs, one quiet
+// line under the reply says the step it's on; once it's done, its last words are the answer and
+// the steps before them fold under one line that opens (desktop/src/model.rs, parts), and a
+// subagent's call in the earlier reply opens to show what its subagent did inside it (model.rs,
+// inside). The earlier reply's sources tab opens their list (app.rs, sources_tab). The moods,
+// what the sidebar says after an agent's name on its one line ("Thinking", the tool's title,
+// "Wants to …"), or under the pointer on a pinned agent's tile, and the wording are the app's.
+// Clicking Allow, Always allow (under the arrow beside Allow) or Deny answers the approval,
+// which says how in one quiet line before it goes; left alone, it's allowed after a moment.
 //
 // The sidebar's control collapses it to the rail and opens it again, and a narrow window has the
-// rail, as the app's does (desktop/src/rail.rs).
+// rail, as the app's does (desktop/src/rail.rs). "From Biscuit" under Juniper opens Biscuit's
+// thread with it in the chat's place.
 //
 // It plays only while it's on screen, and with reduced motion it shows the finished chat instead.
 import { Thread, threadsIn, yarnsIn, type Mood } from './thread';
 
-const SEND = 'Is main green? If it is, ship it.';
+/** What the person writes: words typed, and pieces put in among them, a link pasted on its own
+ * and a file attached, each by the template that draws it (app.rs, composer_token). */
+const SEND: (string | { piece: string; over: string })[] = [
+	'Is main green on ',
+	{ piece: 'demo-link', over: 'demo-link-card' },
+	'? If it is, ship it with ',
+	{ piece: 'demo-file', over: 'demo-file-pill' },
+];
 const TOOL = 'Fetch github.com/acme/shop/actions';
 const ANSWER = 'Main is green. The last run passed at 09:12, with all four jobs.';
 const ASK = 'Run ./deploy.sh production';
@@ -58,7 +67,7 @@ export function play(app: HTMLElement) {
 		if (th) byAgent.set(row.dataset.agent!, th);
 	}
 	const head = threads.find((t) => t.svg.hasAttribute('data-head'))!;
-	const msgs = app.querySelector<HTMLElement>('.msgs')!;
+	const msgs = app.querySelector<HTMLElement>('.msgs.mine')!;
 	const history = [...msgs.children];
 	for (const reply of msgs.querySelectorAll<HTMLElement>('.reply')) foldOf(reply);
 	// A subagent's call opens to show what its subagent did inside it.
@@ -89,7 +98,15 @@ export function play(app: HTMLElement) {
 		});
 	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
-	const tpl = (id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
+	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
+	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place;
+	// the strip's arrow, or Juniper's own row, goes back to the person's chat (app.rs,
+	// open_thread, branch_strip). The chat goes on meanwhile.
+	const inThread = (on: boolean) => app.classList.toggle('in-thread', on);
+	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));
+	app.querySelector('[data-back]')?.addEventListener('click', () => inThread(false));
+	app.querySelector('.agent.on')?.addEventListener('click', () => inThread(false));
+	const tpl =(id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	// A row says what its agent is on after its name; a pinned agent's tile, under the pointer.
 	const preview = (agent: string, text: string, mood: Mood) => {
 		const row = app.querySelector<HTMLElement>(`[data-agent="${agent}"]`);
@@ -177,11 +194,61 @@ export function play(app: HTMLElement) {
 		app.classList.toggle('busy', m !== 'idle');
 	};
 
+	/** Words typed into the composer, after what's in it. */
 	async function type(text: string, id: number) {
+		const words = document.createTextNode('');
+		typed.append(words);
 		for (let i = 1; i <= text.length; i++) {
-			typed.textContent = text.slice(0, i);
+			words.data = text.slice(0, i);
 			await wait(text[i - 1] === ' ' ? 70 : 38 + Math.random() * 40, id);
 		}
+	}
+
+	/** Puts what a piece brings over the words where the app does: files, then links. */
+	function over(row: HTMLElement, el: HTMLElement) {
+		if (el.classList.contains('file-pill')) row.prepend(el);
+		else row.append(el);
+	}
+
+	/** The person's message written: its words typed, and its link pasted and its file
+	 * attached where they go, each a piece in the words with its card or pill over them. */
+	async function compose(id: number) {
+		for (const part of SEND) {
+			if (typeof part === 'string') {
+				await type(part, id);
+				continue;
+			}
+			await wait(300, id);
+			typed.append(tpl(part.piece));
+			over(attached, tpl(part.over));
+			attached.hidden = false;
+			await wait(450, id);
+		}
+	}
+
+	/** The composer empty again, once its message has gone. */
+	function cleared() {
+		typed.replaceChildren();
+		attached.replaceChildren();
+		attached.hidden = true;
+	}
+
+	/** The person's message in the chat, as the composer showed it: its file and its link's
+	 * card over its words, and the pieces in them (app.rs, person). */
+	function sent(fresh: boolean) {
+		const you = tpl('demo-you');
+		you.classList.toggle('fresh', fresh);
+		const bubble = you.querySelector<HTMLElement>('.bubble')!;
+		const overs = document.createElement('div');
+		for (const part of SEND) {
+			if (typeof part === 'string') bubble.append(part);
+			else {
+				bubble.append(tpl(part.piece));
+				over(overs, tpl(part.over));
+			}
+		}
+		bubble.before(...overs.children);
+		return you;
 	}
 
 	/** Words as they come, on the fold's quiet line, the step the turn is on. */
@@ -270,13 +337,12 @@ export function play(app: HTMLElement) {
 
 	async function scene(id: number) {
 		waitingOn('Juniper', false);
+		cleared();
 		await wait(900, id);
-		await type(SEND, id);
-		await wait(350, id);
-		typed.textContent = '';
-		const you = tpl('demo-you');
-		you.querySelector('.bubble')!.textContent = SEND;
-		msgs.append(you);
+		await compose(id);
+		await wait(500, id);
+		cleared();
+		msgs.append(sent(true));
 		await wait(250, id);
 
 		const reply = tpl('demo-reply');
@@ -351,10 +417,8 @@ export function play(app: HTMLElement) {
 	function still() {
 		run++;
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
-		typed.textContent = '';
-		const you = tpl('demo-you');
-		you.classList.remove('fresh');
-		you.querySelector('.bubble')!.textContent = SEND;
+		cleared();
+		const you = sent(false);
 		const reply = tpl('demo-reply');
 		reply.classList.remove('fresh');
 		const { steps, say } = foldOf(reply);

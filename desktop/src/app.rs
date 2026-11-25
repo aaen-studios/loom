@@ -520,6 +520,12 @@ pub struct Loom {
     launched: Option<Instant>,
     /// The window's own focus, so keys like Esc reach it when no field has focus.
     keys: FocusHandle,
+    /// The focus each risky question's Allow takes, by its call, so Tab reaches it and
+    /// Enter or Space held on it holds it as the mouse does (`hold_button`).
+    hold_keys: Rc<HashMap<String, FocusHandle>>,
+    /// That the Allow held now is held by a key, so letting go of it anywhere, or the
+    /// window going to the back, lets go of the Allow.
+    hold_by_key: bool,
     /// The watched browser's page, decoded, and the frame it's from.
     page_image: Option<(u64, Arc<RenderImage>)>,
     /// Frames drawn before, let go of at the next render.
@@ -1435,6 +1441,8 @@ ACTA_KEY=secret:ACTA_KEY",
             make: Making::default(),
             launched: None,
             keys: cx.focus_handle(),
+            hold_keys: Rc::default(),
+            hold_by_key: false,
             page_image: None,
             old_pages: Vec::new(),
             previews: HashMap::new(),
@@ -10000,6 +10008,7 @@ ACTA_KEY=secret:ACTA_KEY",
             bubbles: self.prefs.bubbles,
             vibrant: self.prefs.vibrant(),
             newest: false,
+            later: false,
             room: self.chat_room(window),
         };
         // The newest message, whose choices still answer.
@@ -10015,7 +10024,12 @@ ACTA_KEY=secret:ACTA_KEY",
         // Allow held on a risky question: allowed once it's held long enough, and drawn
         // filling at every frame meanwhile.
         let now = Instant::now();
+        // Held by a key, a window gone to the back never hears it let go: it lets go then.
+        if self.hold_by_key && !window.is_window_active() {
+            self.release_allow(cx);
+        }
         if let Some(f) = self.model.hold_tick(now) {
+            self.hold_by_key = false;
             self.send(f);
             self.refresh_rows(cx);
         }
@@ -10023,6 +10037,29 @@ ACTA_KEY=secret:ACTA_KEY",
             window.request_animation_frame();
         }
         let hold = self.model.hold_shown(now);
+        // A focus for each risky question's Allow still waiting, kept while it shows.
+        let risky: Vec<&str> = self
+            .model
+            .approvals
+            .iter()
+            .filter(|a| a.risky && a.answered.is_none())
+            .map(|a| a.call.as_str())
+            .collect();
+        if risky.len() != self.hold_keys.len()
+            || risky.iter().any(|c| !self.hold_keys.contains_key(*c))
+        {
+            let mut keys = HashMap::new();
+            for call in risky {
+                let f = self
+                    .hold_keys
+                    .get(call)
+                    .cloned()
+                    .unwrap_or_else(|| cx.focus_handle());
+                keys.insert(call.to_string(), f);
+            }
+            self.hold_keys = Rc::new(keys);
+        }
+        let hold_keys = self.hold_keys.clone();
         // Clear of the small browser window, while it shows.
         let pad = mini.is_some().then(|| {
             let (fw, fh) = self
@@ -10051,6 +10088,7 @@ ACTA_KEY=secret:ACTA_KEY",
             p,
             pad,
             hold,
+            hold_keys,
         };
         // The list is a view of its own, built with the window, and each finished message
         // in it another, drawn from its cache until what it shows changes (`RowView`): a
@@ -17045,8 +17083,10 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
-    /// Allow pressed on a risky question: it starts being held (`Model::press_allow`).
-    pub fn press_allow(&mut self, call: &str, cx: &mut Context<Self>) {
+    /// Allow pressed on a risky question, with the mouse or a key: it starts being held
+    /// (`Model::press_allow`).
+    pub fn press_allow(&mut self, call: &str, by_key: bool, cx: &mut Context<Self>) {
+        self.hold_by_key = by_key;
         if let Some(f) = self.model.press_allow(call, Instant::now()) {
             self.send(f);
             self.refresh_rows(cx);
@@ -17056,6 +17096,7 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// Allow let go: held long enough, the question's allowed; sooner, it says to hold.
     pub fn release_allow(&mut self, cx: &mut Context<Self>) {
+        self.hold_by_key = false;
         if !self.model.is_held() {
             return;
         }
@@ -18180,6 +18221,9 @@ struct Show {
     /// Whether its questions answer now: it's the chat's newest message, and finished
     /// (`Message::takes_answers`).
     newest: bool,
+    /// Whether they will once it's finished: it's the newest, still being written
+    /// (`Message::answers_later`).
+    later: bool,
     /// How wide the chat's column is, to the pixel (`Loom::chat_room`), in the text's
     /// id, so text measures itself again when the column changes.
     room: i32,
@@ -19469,6 +19513,9 @@ fn secret_ask_card(
     div().max_w(px(CARD_MOST)).child(frame.draw(p, scale))
 }
 
+/// What a form's quiet line says while its reply is still being written.
+const FORM_WAITS: &str = "Opens once the reply is done";
+
 /// The key of the box for field `k` of the form `card` in reply `message`, among the
 /// card fields (`Loom::card_secrets`).
 fn form_field_key(message: &str, card: &str, k: usize) -> String {
@@ -19503,7 +19550,8 @@ fn form_switch(p: Palette, id: SharedString, on: bool) -> Stateful<Div> {
 /// Several questions an agent asks at once (show_card's `form`), in the card frame: each
 /// field under its label, text and numbers in a box, a choice as its options side by
 /// side, a toggle as a switch beside its label, then Send, which sends them as one
-/// answer. Sent, it's one quiet line, as it is once the chat has gone on without it.
+/// answer. Sent, it's one quiet line, as it is once the chat has gone on without it, and
+/// while its reply is still being written, when it says it opens once that's done.
 fn form_card(
     p: Palette,
     card: &model::Card,
@@ -19534,11 +19582,11 @@ fn form_card(
             scale,
         ))
     };
-    if answers.is_some() {
-        return quiet(Ico::Check, "Sent");
-    }
-    if !show.newest {
-        return quiet(Ico::X, "Not sent");
+    match model::FormStands::of(answers.is_some(), show.newest, show.later) {
+        model::FormStands::Sent => return quiet(Ico::Check, "Sent"),
+        model::FormStands::NotSent => return quiet(Ico::X, "Not sent"),
+        model::FormStands::Waiting => return quiet(Ico::Clock, FORM_WAITS),
+        model::FormStands::Open => {}
     }
     let mut list = div()
         .flex()
@@ -21386,6 +21434,7 @@ fn ask_icon(a: &Approval) -> Ico {
 /// where that's offered, then Deny, and Details for all of it. On a risky one, Allow is
 /// held, filling as it is (`hold_button`). Answered here, it's one quiet line with the
 /// badge, until the instance takes the question away.
+#[allow(clippy::too_many_arguments)]
 fn approval(
     p: Palette,
     a: &Approval,
@@ -21393,6 +21442,7 @@ fn approval(
     open: &HashSet<String>,
     scale: f32,
     hold: &HoldShown,
+    hold_keys: &HashMap<String, FocusHandle>,
     this: WeakEntity<Loom>,
 ) -> Div {
     let s = &a.shown;
@@ -21469,7 +21519,21 @@ fn approval(
             .filter(|(call, _)| *call == a.call)
             .map(|(_, k)| *k);
         let hint = hold.1.as_deref() == Some(a.call.as_str());
-        hold_button(p, &a.call, held, hint, this.clone())
+        let (press, release) = (this.clone(), this.clone());
+        let call = a.call.clone();
+        hold_button(
+            p,
+            &a.call,
+            held,
+            hint,
+            hold_keys.get(&a.call),
+            move |by_key, cx| {
+                let _ = press.update(cx, |loom, cx| loom.press_allow(&call, by_key, cx));
+            },
+            move |cx| {
+                let _ = release.update(cx, |loom, cx| loom.release_allow(cx));
+            },
+        )
     } else {
         card_button(p, format!("allow-{}", a.call), "Allow", true)
             .when(a.can_always, |d| d.rounded_r(px(0.0)))
@@ -21571,27 +21635,35 @@ const HOLD_WIDE: f32 = 108.0;
 
 /// Allow on a risky question (PLAN.md, "Permissions"): pressed and held, it fills from
 /// the left, and once it's full the question is allowed. Let go sooner, it says to hold.
+/// With `focus`, Tab reaches it, and Enter or Space held while it has the focus holds it
+/// the same way (`holds_allow`), its edge in the fill's colour to show it has the focus.
+/// `press` is told whether a key pressed it; `release` lets go.
 fn hold_button(
     p: Palette,
     call: &str,
     held: Option<f32>,
     hint: bool,
-    this: WeakEntity<Loom>,
+    focus: Option<&FocusHandle>,
+    press: impl Fn(bool, &mut App) + 'static,
+    release: impl Fn(&mut App) + 'static,
 ) -> Stateful<Div> {
     let label = match (held, hint) {
         (Some(_), _) => "Keep holding",
         (None, true) => "Hold to allow",
         (None, false) => "Allow",
     };
-    let (press, release, out) = (this.clone(), this.clone(), this);
-    let call_down = call.to_string();
+    let fill = motion::mix(p.button, p.bad, 0.75);
+    let press = Rc::new(press);
+    let release = Rc::new(release);
+    let (by_mouse, by_key) = (press.clone(), press);
+    let (up, out, key_up) = (release.clone(), release.clone(), release);
     div()
         .id(SharedString::from(format!("allow-{call}")))
         .role(Role::Button)
         .aria_label("Hold to allow")
         .relative()
         .overflow_hidden()
-        .px(px(space::M + 2.0))
+        .px(px(space::M))
         // As wide as its longest words from the start, so its fill grows across one width
         // and Deny doesn't move under the pointer as the words change.
         .min_w(px(HOLD_WIDE))
@@ -21601,11 +21673,17 @@ fn hold_button(
         .items_center()
         .justify_center()
         .rounded(px(radius::BUTTON))
+        .border_2()
+        .border_color(p.button)
         .text_size(px(size::SMALL))
         .font_weight(FontWeight::MEDIUM)
         .text_color(p.button_ink)
         .bg(p.button)
         .cursor_pointer()
+        .when_some(focus, |d, f| {
+            d.track_focus(f)
+                .focus_visible(move |s| s.border_color(fill))
+        })
         .child(
             div()
                 .absolute()
@@ -21613,19 +21691,36 @@ fn hold_button(
                 .left_0()
                 .h_full()
                 .w(relative(held.unwrap_or(0.0)))
-                .bg(motion::mix(p.button, p.bad, 0.75)),
+                .bg(fill),
         )
         .child(div().relative().child(label))
         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
             cx.stop_propagation();
-            let _ = press.update(cx, |loom, cx| loom.press_allow(&call_down, cx));
+            by_mouse(false, cx);
         })
-        .on_mouse_up(MouseButton::Left, move |_, _, cx| {
-            let _ = release.update(cx, |loom, cx| loom.release_allow(cx));
+        .on_mouse_up(MouseButton::Left, move |_, _, cx| up(cx))
+        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| out(cx))
+        // A key held down repeats: only its first press starts the hold.
+        .on_key_down(move |e, _, cx| {
+            if holds_allow(&e.keystroke) {
+                cx.stop_propagation();
+                if !e.is_held {
+                    by_key(true, cx);
+                }
+            }
         })
-        .on_mouse_up_out(MouseButton::Left, move |_, _, cx| {
-            let _ = out.update(cx, |loom, cx| loom.release_allow(cx));
+        .on_key_up(move |e, _, cx| {
+            if holds_allow(&e.keystroke) {
+                cx.stop_propagation();
+                key_up(cx);
+            }
         })
+}
+
+/// Whether a key holds a risky Allow that has the focus, as the mouse's button does:
+/// Enter or Space, with nothing else held.
+fn holds_allow(k: &Keystroke) -> bool {
+    matches!(k.key.as_str(), "enter" | "space") && !k.modifiers.modified()
 }
 
 /// How wide the + menu is, and the list beside it, and how tall either's rows go
@@ -22446,6 +22541,13 @@ impl Render for Loom {
                         _ => return,
                     }
                     cx.stop_propagation();
+                }
+            }))
+            // A risky Allow held by a key lets go when the key does, wherever the focus
+            // went meanwhile.
+            .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| {
+                if this.hold_by_key && holds_allow(&e.keystroke) {
+                    this.release_allow(cx);
                 }
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
@@ -23591,6 +23693,7 @@ mod row_tests {
                 bubbles: true,
                 vibrant: false,
                 newest: false,
+                later: false,
                 room: 720,
             },
             is_new: false,
@@ -23600,6 +23703,7 @@ mod row_tests {
             when: Some("14:05".into()),
             when_at: super::WhenAt::Outside,
             hold: (None, None),
+            hold_keys: Rc::default(),
         }
     }
 
@@ -23828,6 +23932,8 @@ struct ChatInputs {
     pad: Option<f32>,
     /// Allow held on a risky question, and the one a plain click said to hold (`Model::hold_shown`).
     hold: HoldShown,
+    /// The focus each risky question's Allow takes (`Loom::hold_keys`).
+    hold_keys: Rc<HashMap<String, FocusHandle>>,
 }
 
 /// Allow held on a risky question now, and how far along; and the question a plain click
@@ -23966,6 +24072,7 @@ struct RowInputs {
     when: Option<String>,
     when_at: WhenAt,
     hold: HoldShown,
+    hold_keys: Rc<HashMap<String, FocusHandle>>,
 }
 
 impl RowInputs {
@@ -23994,6 +24101,7 @@ impl RowInputs {
             && self.when == o.when
             && self.when_at == o.when_at
             && self.hold == o.hold
+            && self.hold_keys == o.hold_keys
     }
 }
 
@@ -24186,6 +24294,7 @@ fn chat_list(
         p,
         pad,
         hold,
+        hold_keys,
     } = i;
     let now = chrono::Local::now();
     let (content, gutter) = row_room(width, column);
@@ -24262,6 +24371,7 @@ fn chat_list(
             show: Show {
                 newest: m
                     .is_some_and(|m| m.takes_answers(newest.as_deref() == Some(m.id.as_str()))),
+                later: m.is_some_and(|m| m.answers_later(newest.as_deref() == Some(m.id.as_str()))),
                 ..show
             },
             is_new: m.is_some_and(|m| new_line.as_deref() == Some(m.id.as_str())),
@@ -24276,6 +24386,11 @@ fn chat_list(
                 hold.clone()
             } else {
                 (None, None)
+            },
+            hold_keys: if m.is_none() {
+                hold_keys.clone()
+            } else {
+                Rc::default()
             },
         };
         // A reply still being written, and one with a card waiting for the person, whose
@@ -24453,7 +24568,16 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             show,
             this.clone(),
         ),
-        Row::Approval(a) => approval(p, a, tint, open, show.text_scale, &i.hold, this.clone()),
+        Row::Approval(a) => approval(
+            p,
+            a,
+            tint,
+            open,
+            show.text_scale,
+            &i.hold,
+            &i.hold_keys,
+            this.clone(),
+        ),
     };
     // A message's pin, just outside its corner: there while it's pinned, and
     // on hover to pin it.
@@ -24757,5 +24881,90 @@ mod composer_tests {
         assert_eq!(shown(&c, cx).1, vec![id.clone()]);
         edit(&c, ComposerEdit::Unpreview(id), cx);
         assert_eq!(shown(&c, cx), ("https://a.example/x".into(), vec![]));
+    }
+}
+
+// A risky Allow held from the keyboard (LOO-313): with the focus on it, Enter or Space held
+// down holds it as the mouse's button does, a key's repeats don't start it again, and
+// letting go lets go of it.
+#[cfg(test)]
+mod hold_tests {
+    // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
+    use super::{hold_button, holds_allow, Palette};
+    use gpui::{
+        div, Context, FocusHandle, IntoElement, KeyDownEvent, KeyUpEvent, Keystroke,
+        ParentElement as _, Render, Styled as _, TestAppContext, VisualTestContext, Window,
+    };
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    struct Host {
+        focus: FocusHandle,
+        said: Rc<RefCell<Vec<&'static str>>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let (down, up) = (self.said.clone(), self.said.clone());
+            div().size_full().child(hold_button(
+                Palette::new(false),
+                "tc_1",
+                None,
+                false,
+                Some(&self.focus),
+                move |by_key, _| {
+                    down.borrow_mut()
+                        .push(if by_key { "key down" } else { "mouse down" })
+                },
+                move |_| up.borrow_mut().push("up"),
+            ))
+        }
+    }
+
+    fn key(cx: &mut VisualTestContext, k: &str, down: bool, held: bool) {
+        let keystroke =
+            cx.update(|_, cx| Keystroke::parse_with_os(k, cx.platform_info().os).unwrap());
+        if down {
+            cx.simulate_event(KeyDownEvent {
+                keystroke,
+                is_held: held,
+                prefer_character_input: false,
+            });
+        } else {
+            cx.simulate_event(KeyUpEvent { keystroke });
+        }
+    }
+
+    #[gpui::test]
+    fn enter_or_space_held_on_a_risky_allow_holds_it(cx: &mut TestAppContext) {
+        let said = Rc::new(RefCell::new(Vec::new()));
+        let focus = cx.update(|cx| cx.focus_handle());
+        let (_, cx) = cx.add_window_view({
+            let (said, focus) = (said.clone(), focus.clone());
+            move |_, _| Host { focus, said }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            focus.focus(window, cx);
+            window.draw(cx).clear(cx);
+        });
+        for k in ["space", "enter"] {
+            key(cx, k, true, false);
+            // Held, the key repeats: the hold isn't started again.
+            key(cx, k, true, true);
+            key(cx, k, true, true);
+            key(cx, k, false, false);
+        }
+        assert_eq!(*said.borrow(), vec!["key down", "up", "key down", "up"]);
+        // With another key held, or another key, nothing.
+        said.borrow_mut().clear();
+        for k in ["shift-space", "ctrl-enter", "a"] {
+            key(cx, k, true, false);
+            key(cx, k, false, false);
+        }
+        assert!(said.borrow().is_empty());
+        let plain = |k: &'static str| holds_allow(&Keystroke::parse(k).unwrap());
+        assert!(plain("enter") && plain("space"));
+        assert!(!plain("shift-enter") && !plain("cmd-space") && !plain("tab"));
     }
 }

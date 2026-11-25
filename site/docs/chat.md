@@ -2,6 +2,20 @@
 
 Each agent has one chat that never ends. Choose an agent in the sidebar to talk to it, and on the desktop start typing: the message box has the keys as a chat opens, and when you come back to the window. Its name over the chat opens its menu: Edit agent, Activity, Memory, Ask on the side, Move to…, Start fresh and Delete agent. Start fresh and Delete agent can't be undone, so each asks for a second click.
 
+## The sidebar
+
+The sidebar lists your agents in groups:
+
+- **Waiting on you**, at the top, while an agent waits on a question or a permission. It goes back to its place once you've answered. A pinned agent keeps its tile instead.
+- **Pinned agents**, as tiles, three across. **Pin to top** is in the agent's menu.
+- **The rest**, a line each, with what an agent is on after its name while it works.
+- **Folders** you make: **New folder** in the space under the agents, or **Move to folder** in an agent's menu. Click a folder's name to open or shut it, and right-click it to rename or delete it. Drag an agent onto a folder's name to put it in, or onto an agent outside to take it out. Deleting a folder keeps its agents.
+- **Hidden**, at the bottom and shut until you open it: agents you hid with **Hide** in their menu. **Show** brings one back.
+
+Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
+
+When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads.
+
 ## Cards in replies
 
 An agent can put cards in its reply, drawn in the chat's own look:
@@ -13,7 +27,7 @@ An agent can put cards in its reply, drawn in the chat's own look:
 - **Progress**: a bar with a label.
 - **Facts**: up to 12 labels, each with its value.
 
-Choices and forms always come at the end of the reply, once the agent has finished it, so you read the whole reply before you answer. A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
+Choices and forms come at the end of the reply, once the agent has finished it, so you read the whole reply before you answer. An agent can put a form where it is in the reply instead, which says "Opens once the reply is done" until the reply is finished. A card can change while the agent works: a checklist ticks itself off, and a bar fills. The finished reply keeps each card as it was last.
 
 When one of the agent's MCP servers needs you to sign in, loom puts its own card in the reply, "Sign in to acta", with **Sign in** ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). The agent is told to wait for you rather than try to sign in itself. **Sign in** works from the iPhone app too.
 
@@ -53,7 +67,7 @@ Type `@` in the message box to pick another of your agents, or a file in this ag
 
 In the chat and in the message box, an agent you mention shows as its thread and its name in its colour, which opens its chat, and a file as its icon and its name, which opens it. The agent knows who and what you mean, so you can ask it to message another agent for you, hand over a file, or read one. A file you send shows the same way, with a tiny copy of itself when it's a picture.
 
-A message one agent sends another sits on your side of the chat, tinted with the sender's colour, with its thread and name over it.
+In their thread, a message one agent sends another sits on your side, tinted with the sender's colour, with its thread and name over it.
 
 ## The + menu
 
