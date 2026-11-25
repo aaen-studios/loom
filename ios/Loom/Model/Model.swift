@@ -517,6 +517,29 @@ struct ReplyTo: Equatable, Sendable {
     var line: String {
         words.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
     }
+
+    /// Its words on one plain line, as the quote over a message shows them, as the
+    /// desktop's `one_line`: list marks and rules taken off too, its lines run together
+    /// with spaces, and cut at 240 characters with "…".
+    var oneLine: String {
+        var out: [Substring] = []
+        for raw in words.split(separator: "\n") {
+            var line = Substring(raw.trimmingCharacters(in: .whitespaces))
+            // A rule, or a table's divider, says nothing.
+            if line.allSatisfy({ "-=_|: ".contains($0) }) { continue }
+            for mark in ["- ", "+ ", "* ", "• "] where line.hasPrefix(mark) {
+                line = line.dropFirst(mark.count).drop { $0 == " " }
+                break
+            }
+            for mark in ["[ ] ", "[x] ", "[X] "] where line.hasPrefix(mark) {
+                line = line.dropFirst(mark.count).drop { $0 == " " }
+                break
+            }
+            out += line.split { $0.isWhitespace || $0 == "|" }
+        }
+        let joined = out.joined(separator: " ")
+        return joined.count > 240 ? String(joined.prefix(240)) + "…" : joined
+    }
 }
 
 private extension String {
@@ -1464,6 +1487,9 @@ final class Model {
     private(set) var reaching = false
     /// The message the next message replies to, while it's written.
     var replying: ReplyTo?
+    /// Continue in your own chat was tapped in a thread: the agent's composer takes the
+    /// cursor once it's on screen.
+    var writeNow = false
     /// The message a quote was tapped to go to, until the chat is there.
     var jumpTo: String?
     var selected: String?

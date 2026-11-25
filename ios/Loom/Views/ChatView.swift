@@ -12,6 +12,8 @@ struct ChatView: View {
     var thread: Ask? = nil
     /// A group chat, shown in place of an agent's chat: each reply by the agent that gave it.
     var roomId: String? = nil
+    /// In a thread: back to the agent's own chat, ready to write.
+    var continueChat: (() -> Void)? = nil
     /// Drawn once, hidden, before any chat is opened, so the first one opened doesn't
     /// pay for building the screen the first time (AgentsView's `Warmup`). It selects
     /// nothing and fetches nothing.
@@ -120,11 +122,14 @@ struct ChatView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                // The composer writes to the agent's chat, so a thread is only read here.
+                // The composer writes to the agent's chat, so a thread is only read here,
+                // with the way back to that chat in the composer's place.
                 if thread == nil {
                     Composer(agentName: room?.name ?? agent?.name ?? "the agent") {
                         withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                     }
+                } else {
+                    ContinueButton { continueChat?() }
                 }
             }
         }
@@ -193,7 +198,10 @@ struct ChatView: View {
             }
         }
         .navigationDestination(item: $threadOpen) { k in
-            ChatView(agentId: agentId, thread: k)
+            ChatView(agentId: agentId, thread: k) {
+                session.model.writeNow = true
+                threadOpen = nil
+            }
         }
         .sheet(isPresented: $roomSettings) {
             if let roomId { RoomSettingsSheet(roomId: roomId) }
@@ -238,6 +246,10 @@ struct ChatView: View {
     /// another, for screenshots of it (ios/README.md).
     private func openFromLaunch() {
         let args = ProcessInfo.processInfo.arguments
+        // `-continue` in that thread does what its Continue in your own chat does.
+        if thread != nil, args.contains("-continue") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { continueChat?() }
+        }
         // `-reply <message>` starts a reply to that message, once the chat's messages have
         // come, for screenshots of the composer's bar.
         if thread == nil, let i = args.firstIndex(of: "-reply"), i + 1 < args.count {
@@ -397,35 +409,90 @@ func quotedBy(_ r: ReplyTo, model: Model) -> (String, Color) {
     return ("You", P.thread(model.selected.flatMap { model.agent($0) }?.color ?? ""))
 }
 
-/// The quote over a message that replies to another: who said it, in their colour, and a
-/// line or two of what, with its files' names, along a thin line of that colour. A tap goes
-/// to the original (PLAN.md, "Replying to a message").
+/// The quote over a message that replies to another, on one line: the agent's thread, who
+/// said it in their colour ("You" quiet), a picture's thumbnail or a file's icon, and what,
+/// as plain words cut with "…" (picked words in curly quotes). A tap goes to the original
+/// (PLAN.md, "Replying to a message").
 struct QuoteView: View {
     @Environment(Session.self) private var session
     var reply: ReplyTo
+    /// The picture's thumbnail, read and decoded off the main thread.
+    @State private var thumb: UIImage?
 
     var body: some View {
-        let (who, color) = quotedBy(reply, model: session.model)
+        let model = session.model
+        let (who, color) = quotedBy(reply, model: model)
+        let id = reply.role == "agent" ? reply.agent : (reply.from.hasPrefix("a_") ? reply.from : "")
+        let agent = id.isEmpty ? nil : model.agent(id)
+        let first = reply.files.first
+        let path = first.flatMap { $0.isImage ? model.files["\($0.file).thumb"] : nil }
+        let shown = self.shown
         Button {
-            session.model.jumpTo = reply.message
+            model.jumpTo = reply.message
         } label: {
-            HStack(spacing: Tokens.Space.s) {
-                RoundedRectangle(cornerRadius: 1).fill(color).frame(width: 2)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(who).font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption)).foregroundStyle(color)
-                    if !reply.words.isEmpty {
-                        Text(reply.words.trimmingCharacters(in: .whitespacesAndNewlines)).font(Fonts.caption).foregroundStyle(P.ink2).lineLimit(2).multilineTextAlignment(.leading)
-                    }
-                    if !reply.files.isEmpty {
-                        Text(reply.files.map(\.name).joined(separator: ", "))
-                            .font(Fonts.caption).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.middle)
+            HStack(spacing: 5) {
+                if let agent {
+                    Image(uiImage: MentionGlyph.thread(agent.outline))
+                        .renderingMode(.template)
+                        .foregroundStyle(color)
+                }
+                Text(who)
+                    .font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption))
+                    .foregroundStyle(id.isEmpty ? P.ink3 : color)
+                    .fixedSize()
+                if let first {
+                    if let image = path.flatMap({ thumb ?? Pictures.kept($0) }) {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(width: 16, height: 16)
+                            .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                    } else {
+                        Image(systemName: first.isImage ? "photo" : "doc.text")
+                            .font(.system(size: 11))
+                            .foregroundStyle(P.ink3)
                     }
                 }
+                if !shown.isEmpty {
+                    Text(shown).font(Fonts.caption).foregroundStyle(P.ink2).lineLimit(1).truncationMode(.tail)
+                }
             }
-            .fixedSize(horizontal: false, vertical: true)
+            .frame(height: 20)
+            .padding(.horizontal, 6)
+            .contentShape(RoundedRectangle(cornerRadius: Tokens.Radius.row, style: .continuous))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Replying to \(who): \(reply.line)")
+        .accessibilityLabel("Replying to \(who): \(shown)")
+        .task(id: path) {
+            guard let path, Pictures.kept(path) == nil else { return }
+            thumb = await Pictures.load(path)
+        }
+    }
+
+    /// Its words, picked words in curly quotes; with none, "Picture" or its files' names.
+    private var shown: String {
+        let words = reply.oneLine
+        if !words.isEmpty { return reply.part ? "“\(words)”" : words }
+        let pictures = reply.files.filter(\.isImage).count
+        if pictures > 0 && pictures == reply.files.count {
+            return pictures == 1 ? "Picture" : "\(pictures) pictures"
+        }
+        return reply.files.map(\.name).joined(separator: ", ")
+    }
+}
+
+/// The spine from a quote over the person's message down onto its bubble: a 2-point line
+/// in line-strong from the line's middle, turning down with a 7-point corner, 14 wide and
+/// 13 tall, its foot 20 points in from the bubble's edge.
+struct QuoteSpine: Shape {
+    func path(in r: CGRect) -> Path {
+        var p = Path()
+        let x = r.maxX - 1
+        let top = r.minY + 10
+        p.move(to: CGPoint(x: r.minX, y: top))
+        p.addArc(tangent1End: CGPoint(x: x, y: top), tangent2End: CGPoint(x: x, y: top + 13), radius: 7)
+        p.addLine(to: CGPoint(x: x, y: top + 13))
+        return p
     }
 }
 
@@ -471,7 +538,15 @@ struct PersonMessage: View {
                 .foregroundStyle(sender.map { P.mention($0.color) } ?? P.ink3)
             }
             if let reply = message.reply {
-                QuoteView(reply: reply)
+                HStack(spacing: 0) {
+                    QuoteView(reply: reply)
+                    QuoteSpine()
+                        .stroke(P.lineStrong, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        .frame(width: 14, height: 20)
+                }
+                .padding(.trailing, 20)
+                // The spine meets what's under it.
+                .padding(.bottom, -(Tokens.Space.xs + 1))
             }
             ForEach(Array(files.enumerated()), id: \.offset) { _, part in
                 switch part {
@@ -504,6 +579,29 @@ struct PersonMessage: View {
     private func bubble(_ sender: Agent?) -> Color {
         if message.from == nil { return P.personBubble(tint ?? agent?.color ?? "", vibrant: vibrant) }
         return sender.map { P.agentBubble($0.color) } ?? P.bubble
+    }
+}
+
+/// In another agent's thread, where the composer would be: back to the person's own chat
+/// with the agent, with the cursor in its composer.
+private struct ContinueButton: View {
+    var action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Continue in your own chat")
+                .font(Fonts.ui(Tokens.PhoneSize.body, .medium))
+                .foregroundStyle(P.ink2)
+                // As tall as the composer, which it stands in for.
+                .frame(maxWidth: .infinity, minHeight: Tokens.Control.iconComposer + 2 * (Tokens.Space.xs + 2) + 2)
+                .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.composer, style: .continuous).strokeBorder(P.line, lineWidth: 1))
+                .contentShape(RoundedRectangle(cornerRadius: Tokens.Radius.composer, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .padding(.horizontal, Tokens.Space.m)
+        .padding(.top, Tokens.Space.xs)
+        .padding(.bottom, Tokens.Space.s)
+        .background(P.bg)
     }
 }
 
