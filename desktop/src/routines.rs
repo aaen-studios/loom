@@ -472,22 +472,22 @@ impl Loom {
                 .border_l_1()
                 .border_color(p.line)
                 .when(is_today, |c| {
-                    c.bg(motion::mix(self.card_fill(), p.button, 0.06))
+                    c.bg(motion::mix(self.card_fill(), p.button, 0.035))
                 });
             let in_day: Vec<&Mark> = marks.iter().filter(|m| m.day == d).collect();
             for m in &in_day {
                 let id = m.id.clone();
                 if m.tick {
+                    // In the lanes right of the blocks, one a routine.
                     let lane = tick_lanes.iter().position(|l| *l == m.id).unwrap_or(0) % 4;
+                    let lane_w = (1.0 - block_share - 0.06) / lanes as f32;
                     column = column.child(
                         div()
                             .absolute()
                             .top(px(top_of(m.minute) - 1.0))
                             .h(px(2.0))
-                            .right(relative(
-                                (lanes - 1 - lane.min(lanes - 1)) as f32 * 0.075 + 0.02,
-                            ))
-                            .w(relative(0.06))
+                            .left(relative(block_share + 0.03 + lane as f32 * lane_w))
+                            .w(relative(lane_w * 0.8))
                             .rounded(px(1.0))
                             .bg(m.tint),
                     );

@@ -372,7 +372,7 @@ pub fn hint(status: String, error: String) -> String {
     if status == "failed" {
         if error == "The instance restarted." { return String("The instance stopped while it ran. Run it again, or wait for its next time.") }
         if error == "Its agent was deleted." { return String("Pick another agent for it, or delete it.") }
-        return String("Read what its agent said above. If the prompt asks for something it can't do, change the prompt; if it was a passing problem, run it again.")
+        return String("If the prompt asks for something its agent can't do, change the prompt. If it was a passing problem, run it again.")
     }
     if status == "limit" { return String("Its agent ran out of what it can use. Add your own key in the agent's settings, or wait for it to reset.") }
     if status == "cancelled" { return String("It was stopped before it finished. Run it again to finish it.") }
