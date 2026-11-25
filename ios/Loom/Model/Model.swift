@@ -505,10 +505,18 @@ func linkFiles(_ text: String, _ files: [FileRef]) -> String {
 }
 
 /// A file a reply names in code that's in its agent's folder or the shared one: its path as
-/// the reply wrote it, and its name.
+/// the reply wrote it, its name, and for a picture, its thumbnail, kept as the person's
+/// file once the instance has made it, which the reply shows (PLAN.md, "Mentions").
 struct NamedFile: Equatable, Sendable {
     var path: String
     var name: String
+    var size: Int = 0
+    var thumb: String? = nil
+
+    /// Its thumbnail as a picture in the chat draws it, a file like any other.
+    var picture: FileRef? {
+        thumb.map { FileRef(file: $0, name: name, mime: "image/jpeg", size: size) }
+    }
 }
 
 /// A mention the composer put in: the words it put in the field, and the `loom:` link it
@@ -1230,6 +1238,10 @@ final class Model {
     var toOpen: URL?
     /// A stack of pictures shown big, to page through.
     var viewing: Viewing?
+    /// The pictures a reply names that the viewer waits for the instance to keep as the
+    /// person's (`viewNamed`): the ask's id, and each one's file once it's answered, or
+    /// nil inside for one that couldn't be kept.
+    var mentionStack: (id: String, files: [FileRef??])?
     /// The person's secrets, for the Secrets page, read again when they change.
     var secrets: [SecretItem] = []
     private var secretsStale = false
@@ -1614,12 +1626,29 @@ final class Model {
             }
         case let id where id.hasPrefix("app.recent_files"):
             recentFiles = f["value"]["files"].array.map { RecentFile(file: FileRef($0), at: $0["at"].int ?? 0) }
+        case let id where id.hasPrefix("app.agent_file.pictures"):
+            // One of the pictures a reply names, for the viewer: it opens on them once
+            // they're all kept, without those that couldn't be.
+            guard var asked = mentionStack, let hash = id.lastIndex(of: "#"), String(id[..<hash]) == asked.id,
+                  let k = Int(id[id.index(after: hash)...]), k < asked.files.count else { break }
+            asked.files[k] = .some(f["value"]["file"].isNull ? nil : FileRef(f["value"]["file"]))
+            mentionStack = asked
+            if asked.files.allSatisfy({ $0 != nil }) {
+                mentionStack = nil
+                view(asked.files.compactMap { $0 ?? nil })
+            }
         case let id where id.hasPrefix("app.agent_file"):
-            // A file a message mentions, kept as the person's: it opens once it's here.
+            // A file a message mentions, kept as the person's: a picture opens big, as the
+            // chat's do, and anything else once it's here.
             if let error {
                 notice = error
-            } else if !f["value"]["file"].isNull, let frame = open(FileRef(f["value"]["file"])) {
-                pending.append(frame)
+            } else if !f["value"]["file"].isNull {
+                let file = FileRef(f["value"]["file"])
+                if file.isImage {
+                    view([file])
+                } else if let frame = open(file) {
+                    pending.append(frame)
+                }
             }
         case let id where id.hasPrefix("app.secret_fill:"):
             // The card's own frame says how it went; a refusal shows on the card, which
@@ -1683,7 +1712,7 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text) }.filter { !$0.path.isEmpty })
+                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty })
             }
             placeQueued()
             // The tool calls these messages name.
@@ -1830,6 +1859,8 @@ final class Model {
         wanted += (cardBadges + askBadges).flatMap(\.icons)
         // The icons of the sites its messages link to.
         wanted += shown.flatMap { $0.links.values.compactMap(\.icon) }
+        // The thumbnails of the pictures its replies name.
+        wanted += shown.flatMap { $0.named.compactMap(\.thumb) }
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }
@@ -1895,6 +1926,10 @@ final class Model {
         }
         for f in m.blocks.compactMap(\.file) where f.isImage {
             if let path = files["\(f.file).thumb"] { out.icons["loom-file:\(f.file)"] = path }
+        }
+        // A picture a reply names, by its tiny thumbnail where it's named.
+        for n in m.named {
+            if let thumb = n.thumb, let path = files["\(thumb).thumb"] { out.icons[fileMention(agent: selected ?? "", path: n.path, name: n.name).link] = path }
         }
         // A reply names agents as @Name, which become links only as it's shown.
         let words = m.role == "agent" ? m.blocks.map { replyWords(m, $0.text) } : m.blocks.map(\.text)
@@ -2029,6 +2064,17 @@ final class Model {
             return nil
         }
         return open(f)
+    }
+
+    /// Opens the viewer on the pictures a reply names, at the first: the instance keeps
+    /// each as the person's first, and the viewer opens once they're all kept.
+    func viewNamed(_ named: [NamedFile]) -> [JSON] {
+        guard let agent = selected, !named.isEmpty else { return [] }
+        let group = id("app.agent_file.pictures")
+        mentionStack = (group, Array(repeating: nil, count: named.count))
+        return named.enumerated().map { k, n in
+            ["t": "cmd", "id": JSON("\(group)#\(k)"), "name": "agent.file", "args": ["agent": JSON(agent), "path": JSON(n.path)]]
+        }
     }
 
     /// Shows a stack of pictures big, at its first.
