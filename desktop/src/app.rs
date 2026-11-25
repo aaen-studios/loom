@@ -2258,6 +2258,18 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Opens the pictures a reply names big over the window, at the first, once the
+    /// instance has kept them as the person's.
+    pub fn view_mentions(&mut self, named: &[model::Mention], cx: &mut Context<Self>) {
+        if self.model.viewing.is_none() {
+            self.viewer_at = Instant::now();
+        }
+        for frame in self.model.view_mentions(named) {
+            self.send(frame);
+        }
+        cx.notify();
+    }
+
     /// Opens a stack of pictures from the chat big over the window, at its first.
     pub fn view_stack(&mut self, stack: &[model::FileRef], cx: &mut Context<Self>) {
         if self.model.viewing.is_none() {
@@ -15387,6 +15399,7 @@ fn person(
                     format!("{}/{}", m.id, run[0]),
                     room,
                     this.clone(),
+                    &[],
                 ));
                 stacked.extend(stack);
             }
@@ -15686,7 +15699,8 @@ const FAN_SHADOW: f32 = 0.06;
 /// Two or more pictures in a message as a fan of a fixed size, however many there are:
 /// the first in front, filling its place, up to four more tilted behind it either side,
 /// and how many there are in its corner. Under the pointer the ones behind fan out.
-/// Clicking it opens the viewer at the first, to step through them.
+/// Clicking it opens the viewer at the first, to step through them: the pictures a reply
+/// names (`named`, drawn by their thumbnails) once the instance has kept them.
 fn picture_stack(
     p: Palette,
     stack: &[model::FileRef],
@@ -15694,6 +15708,7 @@ fn picture_stack(
     key: String,
     room: i32,
     this: WeakEntity<Loom>,
+    named: &[model::Mention],
 ) -> AnyElement {
     let behind = fan_cards(stack.len());
     // As far as the fan reaches either side, open, with its tilted corners.
@@ -15788,6 +15803,7 @@ fn picture_stack(
         );
     }
     let opened = stack.to_vec();
+    let named = named.to_vec();
     out.child(
         card(&stack[0]).child(
             div()
@@ -15809,9 +15825,68 @@ fn picture_stack(
         ),
     )
     .on_click(move |_, _, cx| {
-        let _ = this.update(cx, |loom, cx| loom.view_stack(&opened, cx));
+        let _ = this.update(cx, |loom, cx| {
+            if named.is_empty() {
+                loom.view_stack(&opened, cx)
+            } else {
+                loom.view_mentions(&named, cx)
+            }
+        });
     })
     .into_any_element()
+}
+
+/// The pictures a reply names that are in its agent's folder or the shared one, by their
+/// thumbnails, as the chat's pictures are (PLAN.md, "Mentions"): one alone at its own
+/// size, two or more as a fan. Clicking opens them in the viewer once the instance has
+/// kept them as the person's.
+fn named_pictures(
+    p: Palette,
+    named: &[model::Mention],
+    files: &HashMap<String, String>,
+    key: String,
+    room: i32,
+    this: WeakEntity<Loom>,
+) -> AnyElement {
+    let stack: Vec<model::FileRef> = named.iter().filter_map(model::Mention::picture).collect();
+    if stack.len() > 1 {
+        return picture_stack(p, &stack, files, key, room, this, named);
+    }
+    let opened = named.to_vec();
+    let most_w = PICTURE_W
+        .min(room as f32 - 2.0 * space::XL)
+        .max(PICTURE_LEAST);
+    let picture = match stack
+        .first()
+        .and_then(|f| files.get(&format!("{}.thumb", f.file)))
+    {
+        Some(path) => {
+            let (w, h) = match picture_size(path) {
+                Some((w, h)) => fit(w, h, most_w, PICTURE_H),
+                None => PICTURE_UNKNOWN,
+            };
+            img(std::path::PathBuf::from(path))
+                .when_some(chat_images(), |i, c| i.image_cache(&c))
+                .w(px(w))
+                .h(px(h))
+                .rounded(px(radius::BUBBLE))
+                .into_any_element()
+        }
+        None => div()
+            .w(px(PICTURE_UNKNOWN.0))
+            .h(px(PICTURE_UNKNOWN.1))
+            .rounded(px(radius::BUBBLE))
+            .bg(p.bubble)
+            .into_any_element(),
+    };
+    div()
+        .id(SharedString::from(format!("named-{key}")))
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            let _ = this.update(cx, |loom, cx| loom.view_mentions(&opened, cx));
+        })
+        .child(picture)
+        .into_any_element()
 }
 
 /// A picture behind the first in a fan, over the first's place: `dx` to the side, tilted
@@ -17638,6 +17713,14 @@ fn linked_words(p: Palette, text: &str, m: &Message) -> String {
             .map(|path| format!("{SITE_ICON}{path}"))
             .unwrap_or_default()
     };
+    // A picture a reply names, by its tiny thumbnail.
+    let file_thumb = |url: &str| {
+        let x = m
+            .mentions
+            .iter()
+            .find(|x| model::file_mention(&x.agent, &x.path, &x.name).0 == url)?;
+        icon_src(x.thumb.as_deref()?)
+    };
     model::with_link_icons(
         text,
         &model::Inline {
@@ -17645,6 +17728,7 @@ fn linked_words(p: Palette, text: &str, m: &Message) -> String {
             icon_src: &icon_src,
             agent: &agent,
             file_icon: &file_icon,
+            file_thumb: &file_thumb,
         },
     )
 }
@@ -18056,6 +18140,7 @@ impl ReplyDraw<'_> {
                     self.key(run[0]),
                     self.show.room,
                     self.this.clone(),
+                    &[],
                 )
             }
             Part::Fold {
@@ -18708,10 +18793,28 @@ fn reply(
         .filter(|b| b.kind == "text")
         .map(|b| b.text.as_str())
         .collect();
+    // The pictures it names, as the chat's pictures are, opening in the viewer (PLAN.md,
+    // "Mentions").
+    let pictured: Vec<model::Mention> = m
+        .mentions
+        .iter()
+        .filter(|x| x.thumb.is_some())
+        .cloned()
+        .collect();
+    if !pictured.is_empty() {
+        body = body.child(div().flex().child(named_pictures(
+            p,
+            &pictured,
+            files,
+            format!("{}-named", m.id),
+            show.room,
+            this.clone(),
+        )));
+    }
     let unshown: Vec<&model::Mention> = m
         .mentions
         .iter()
-        .filter(|x| !said.contains(&format!("`{}`", x.path)))
+        .filter(|x| x.thumb.is_none() && !said.contains(&format!("`{}`", x.path)))
         .collect();
     if !unshown.is_empty() {
         let mut chips = div().flex().flex_wrap().gap(px(space::S));
