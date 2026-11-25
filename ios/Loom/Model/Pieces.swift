@@ -131,17 +131,6 @@ func plainLinks(_ text: String) -> String {
     return out
 }
 
-/// The pages a person's message shows a card of, over its words: each bare address in
-/// it, in order, once, at most three, as desktop/src/model.rs's `previewed_links`.
-func previewedLinks(_ text: String) -> [String] {
-    var out: [String] = []
-    eachLine(text) { piece, isLink in
-        let url = String(piece)
-        if isLink, !out.contains(url), out.count < 3 { out.append(url) }
-    }
-    return out
-}
-
 /// The address a whole paste is, when it's one http or https address and nothing else.
 func pastedLink(_ text: String) -> String? {
     let t = text.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -57,7 +57,7 @@ A link in any message, yours or an agent's, has its site's icon before it, and a
 
 When an agent ends a reply with a list of its sources, the list comes off the reply and onto a tab under it, with the sites' icons and how many there are. Click the tab for the list, a line each with the page's title and its site, and click a line to open the page. On the iPhone, the list opens as a sheet.
 
-Paste a link on its own into the message box and it shows as it will in the chat: its site's icon and its page's title in your words, and over them a card with the page's picture. Ctrl+Z right after, or the × on the card, makes it plain text again, and Ctrl+Shift+V (⌘⇧V on a Mac) pastes it as plain text to begin with. A plain link, or one you type, stays as you wrote it. The agent gets the address either way.
+Paste a link on its own into the message box and it shows as it will in the chat: its site's icon and its page's title in your words, never as an attachment. On a computer, point at it to see its preview, with the page's picture, and click it to open it. A YouTube link shows the video's title; a page with no title of its own shows its address. Ctrl+Z right after makes it plain text again, and Ctrl+Shift+V (⌘⇧V on a Mac) pastes it as plain text to begin with. A plain link, or one you type, stays as you wrote it. The agent gets the address either way.
 
 Loom looks the pages up itself, for their titles and icons, and a pasted link's picture. It looks up only https pages on the internet, never one on your own network, and at most twelve a message.
 

@@ -242,7 +242,7 @@ const GITHUB =
 		<div class="composer-wrap" aria-hidden="true">
 			<div class="composer">
 				<!-- What's attached, over the words, as the sent message will have it (app.rs,
-				     attached_row): a file as its pill, a pasted link as its card. -->
+				     attached_row): a file as its pill. A pasted link is only its piece in the words. -->
 				<div class="attached" data-attached hidden></div>
 				<div class="composer-row">
 					<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
@@ -266,10 +266,15 @@ const GITHUB =
 	<div class="row you fresh"><div class="bubble"></div></div>
 </template>
 <!-- A link pasted on its own, as one piece in the words: its site's icon and its page's
-     title (app.rs, composer_token). The sent message shows it the same way. -->
+     title (app.rs, composer_token). The sent message shows it the same way. Under the
+     pointer, its preview (app.rs, link_tip): its title, and its site with its icon. -->
 <template id="demo-link">
-	<span class="piece" title="https://github.com/acme/shop/actions"
-		><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="piece-name">Actions · acme/shop</span></span
+	<span class="piece link-piece"
+		><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="piece-name">Actions · acme/shop</span
+		><span class="link-tip" aria-hidden="true"
+			><span class="link-title">Actions · acme/shop</span
+			><span class="link-site"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>github.com</span></span
+		></span
 	>
 </template>
 <!-- An attached file, as one piece where it was attached: its icon and its name. -->
@@ -279,19 +284,6 @@ const GITHUB =
 			><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"></path></svg
 		><span class="piece-name">notes-2.4.md</span></span
 	>
-</template>
-<!-- The pasted link's card (app.rs, link_card): its site's icon where the page has no
-     picture, its title and its site. Over the words in the composer, with its ×, and over
-     the sent message's words. -->
-<template id="demo-link-card">
-	<span class="link-card" title="https://github.com/acme/shop/actions">
-		<span class="link-pic"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg></span>
-		<span class="link-text">
-			<span class="link-title">Actions · acme/shop</span>
-			<span class="link-site"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>github.com</span>
-		</span>
-		<span class="unattach"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></span>
-	</span>
 </template>
 <!-- The attached file as the composer has it (app.rs, attached_row): its icon, name, size and
      ×; and as the sent message has it over its words (file_view): its name over its size. -->
@@ -1280,45 +1272,43 @@ const GITHUB =
 	.file-icon {
 		color: var(--ink-3);
 	}
-	/* A pasted link's card: 300 by 72, the site's icon on the bubble's grey where the page
-	   has no picture, then its title, two lines at most, and its site. */
-	.link-card {
+	/* A pasted link's preview, over its piece under the pointer (app.rs, link_tip): 280
+	   wide, its title, two lines at most, and its site with its icon. */
+	.link-piece {
 		position: relative;
-		display: flex;
-		align-items: center;
-		flex: none;
-		width: 300px;
-		height: 72px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-row);
-		overflow: hidden;
-		background: var(--bg);
-		cursor: pointer;
-		transition: background-color 0.12s;
 	}
-	.link-card:hover {
-		background: var(--hover);
-	}
-	.link-pic {
-		display: grid;
-		place-items: center;
-		width: 72px;
-		height: 72px;
-		flex: none;
-		background: var(--bubble);
-	}
-	.link-pic .site-icon {
-		width: 24px;
-		height: 24px;
-		border-radius: 4px;
-	}
-	.link-text {
+	.link-tip {
+		position: absolute;
+		left: 0;
+		bottom: calc(100% + 6px);
+		z-index: 5;
 		display: flex;
 		flex-direction: column;
-		justify-content: center;
 		gap: 2px;
-		min-width: 0;
-		padding: 0 12px;
+		width: 280px;
+		padding: 8px 12px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		background: var(--bg);
+		box-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.25);
+		color: var(--ink);
+		white-space: normal;
+		text-align: left;
+		opacity: 0;
+		visibility: hidden;
+		pointer-events: none;
+		transition:
+			opacity 0.12s,
+			visibility 0.12s;
+	}
+	.you .link-tip {
+		left: auto;
+		right: 0;
+	}
+	.link-piece:hover .link-tip {
+		opacity: 1;
+		visibility: visible;
+		transition-delay: 0.4s;
 	}
 	.link-title {
 		font-size: var(--size-small);
@@ -1334,26 +1324,6 @@ const GITHUB =
 		gap: 4px;
 		font-size: var(--size-caption);
 		color: var(--ink-3);
-	}
-	/* Its × in the composer: it goes back to plain text. */
-	.unattach {
-		position: absolute;
-		top: 3px;
-		right: 3px;
-		display: grid;
-		place-items: center;
-		width: 18px;
-		height: 18px;
-		border-radius: 50%;
-		background: rgb(0 0 0 / 0.6);
-		color: #fff;
-	}
-	.unattach .i {
-		width: 10px;
-		height: 10px;
-	}
-	.you .unattach {
-		display: none;
 	}
 	/* A file over the words: in the composer its icon, name, size and ×; sent, its name
 	   over its size. */
@@ -1409,8 +1379,8 @@ const GITHUB =
 	.you .file-x {
 		display: none;
 	}
-	/* A message with files or a link card has them over its words, on its side. */
-	.you:has(.file-pill, .link-card) {
+	/* A message with files has them over its words, on its side. */
+	.you:has(.file-pill) {
 		flex-direction: column;
 		align-items: flex-end;
 		gap: 4px;

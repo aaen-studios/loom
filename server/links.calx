@@ -12,12 +12,12 @@ module server.links
 // person's router, their other computers or the instance itself. An address
 // of a network of the person's own, or a name only it knows, isn't looked
 // up at all.
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.http.{Header, get}
 import std.net.{Ip}
 import std.thread.{Task}
 import std.text.utf8.{decode_lossy}
-import std.url.{Url}
+import std.url.{Url, decode, encode}
 import shared.obj.{Obj, str_at}
 import server.files
 
@@ -28,6 +28,8 @@ const PAGE_MOST: usize = 2097152
 const ICON_MOST: usize = 262144
 // The most of a page's preview picture that's read.
 const PICTURE_MOST: usize = 4194304
+// The most of an oEmbed answer that's read.
+const EMBED_MOST: usize = 65536
 const WAIT_MS: u32 = 6000
 // The longest title kept.
 const TITLE_MOST: usize = 160
@@ -303,28 +305,9 @@ fn tags(html: String, name: str) -> List<String> {
     return out
 }
 
-/// A page's title: its `og:title`, or else its `<title>`, read as text and cut
-/// short, or "" when it has none.
-pub fn title_of(html: String) -> String {
-    var title = String()
-    for m in tags(html.copy(), "meta") {
-        let p = (attr(m.copy(), "property") ?? attr(m.copy(), "name") ?? String()).to_lower_root()
-        if p == "og:title" {
-            title = attr(m, "content") ?? String()
-            break
-        }
-    }
-    if title.trim().len() == 0 {
-        let low = html.to_lower_root()
-        if let open = low.find("<title") {
-            if let gt = low[open..].find(">") {
-                let from = open + gt + 1
-                let close = low[from..].find("</title") ?? 0
-                title = html[from..from + close].copy()
-            }
-        }
-    }
-    var t = text_of(title).trim().copy()
+// Text cut to the longest title kept.
+fn cut_short(text: String) -> String {
+    var t = text.trim().copy()
     if t.len() > TITLE_MOST {
         var cut: usize = 0
         for r in t.runes() {
@@ -334,6 +317,196 @@ pub fn title_of(html: String) -> String {
         t = "{t[..cut].trim_end()}…"
     }
     return t
+}
+
+// What a page's `<meta>` of this property or name says, read as text, or none.
+fn meta_of(html: String, name: str) -> String? {
+    for m in tags(html, "meta") {
+        let p = (attr(m.copy(), "property") ?? attr(m.copy(), "name") ?? String()).to_lower_root()
+        if p == name {
+            let v = cut_short(text_of(attr(m, "content") ?? String()))
+            if v.len() > 0 { return some(v) }
+        }
+    }
+    return none
+}
+
+// A title without the marks that join a page's title to its site's name.
+fn unmarked(title: String) -> String {
+    var s = title.trim().copy()
+    loop {
+        var cut = false
+        for mark in ["-", "–", "—", "|", ":", "·", "•", "»", "«", "/"] {
+            if s.starts_with(mark) {
+                s = s[mark.len()..].trim().copy()
+                cut = true
+            }
+            if s.ends_with(mark) {
+                s = s[..s.len() - mark.len()].trim().copy()
+                cut = true
+            }
+        }
+        if not cut { break }
+    }
+    return s
+}
+
+// Only the letters and digits, in lowercase.
+fn letters(text: String) -> String {
+    var out = String()
+    for r in text.to_lower_root().runes() {
+        if (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') { out.push(r) }
+    }
+    return out
+}
+
+/// Whether `title` is the page's own: not empty, not only its site's name or a
+/// piece of a title around it ("- YouTube", which YouTube's page has until its
+/// script fills it in), and not a page a site shows in place of the one asked
+/// for ("Just a moment...", "Before you continue to YouTube"). `site_name` is
+/// what the page calls its site (`og:site_name`), maybe empty.
+pub fn real_title(title: String, url: String, site_name: String) -> bool {
+    let t = unmarked(title)
+    if t.len() == 0 { return false }
+    let low = t.to_lower_root()
+    for junk in ["untitled", "untitled document", "error", "forbidden", "403 forbidden", "not found", "404 not found", "page not found", "home", "loading", "loading...", "loading…", "redirecting", "redirecting...", "please wait", "sign in", "log in", "login"] {
+        if low == junk { return false }
+    }
+    for junk in ["just a moment", "attention required", "access denied", "before you continue", "are you a robot", "are you a human", "verify you are human", "one moment, please"] {
+        if low.starts_with(junk) { return false }
+    }
+    // Only the site's name, or its address.
+    let site = site_of(url)
+    let parts = site.split(".")
+    var names = [letters(site.copy()), letters(site_name)].to_list()
+    if parts.len() > 1 {
+        names.push(letters(parts[0].copy()))
+        names.push(letters(parts[..parts.len() - 1].join(".")))
+    }
+    let mine = letters(t)
+    for n in names {
+        if n.len() > 0 and mine == n { return false }
+    }
+    return true
+}
+
+/// A page's own title (`real_title`), read as text and cut short: its
+/// `og:title`, or else its `twitter:title`, or else its `<title>`; or "" when
+/// it has none.
+pub fn title_of(html: String, url: String) -> String {
+    let site_name = meta_of(html.copy(), "og:site_name") ?? meta_of(html.copy(), "application-name") ?? String()
+    var titles = List<String>()
+    if let t = meta_of(html.copy(), "og:title") { titles.push(t) }
+    if let t = meta_of(html.copy(), "twitter:title") { titles.push(t) }
+    let low = html.to_lower_root()
+    if let open = low.find("<title") {
+        if let gt = low[open..].find(">") {
+            let from = open + gt + 1
+            let close = low[from..].find("</title") ?? 0
+            titles.push(cut_short(text_of(html[from..from + close].copy())))
+        }
+    }
+    for t in titles {
+        if real_title(t.copy(), url.copy(), site_name.copy()) { return t.copy() }
+    }
+    return String()
+}
+
+/// An address as it's shown when its page has no title of its own: without its
+/// scheme, `www.`, its fragment, a slash at its end and the parts of its query
+/// that only track where it was shared from, its path read as text, and cut
+/// short: `youtube.com/watch?v=dQw4w9WgXcQ`.
+pub fn bare_address(url: String) -> String {
+    var s = url.trim().copy()
+    for scheme in ["https://", "http://"] {
+        if s.to_lower_root().starts_with(scheme) { s = s[scheme.len()..].copy() }
+    }
+    if let k = s.find("#") { s = s[..k].copy() }
+    var query = String()
+    if let k = s.find("?") {
+        query = s[k + 1..].copy()
+        s = s[..k].copy()
+    }
+    var host = s.copy()
+    var path = String()
+    if let k = s.find("/") {
+        host = s[..k].copy()
+        path = decode(s[k..].copy())
+    }
+    host = host.to_lower_root()
+    if host.starts_with("www.") { host = host[4..].copy() }
+    while path.ends_with("/") { path = path[..path.len() - 1].copy() }
+    var kept = List<String>()
+    for pair in query.split("&") {
+        let name = pair.split("=")[0].to_lower_root()
+        if name.len() == 0 or name.starts_with("utm_") { continue }
+        var tracks = false
+        for t in ["fbclid", "gclid", "dclid", "msclkid", "igshid", "mc_cid", "mc_eid", "si", "feature", "ref_src", "ref_url"] {
+            if name == t { tracks = true }
+        }
+        if not tracks { kept.push(pair.copy()) }
+    }
+    var out = "{host}{path}"
+    if kept.len() > 0 { out = "{out}?{kept.join("&")}" }
+    return cut_short(out)
+}
+
+// --- oEmbed ---
+
+/// The oEmbed address for a page on a site whose page may not carry its title
+/// without its script, which loom asks first: a YouTube video's, short's or
+/// list's, or none.
+pub fn oembed_for(url: String) -> String? {
+    let site = site_of(url.copy())
+    if not (site == "youtube.com" or site.ends_with(".youtube.com") or site == "youtu.be") { return none }
+    let u = match Url.parse(url.copy()) {
+        ok(x) => x,
+        err(_) => return none,
+    }
+    if u.path.trim_suffix("/").len() == 0 { return none }
+    return some("https://www.youtube.com/oembed?format=json&url={encode(url, safe: "")}")
+}
+
+/// The oEmbed address a page names for itself (`<link rel="alternate"
+/// type="application/json+oembed">`), as an https address of a public host, or
+/// none.
+pub fn oembed_of(html: String, page: String) -> String? {
+    let base = match Url.parse(page) {
+        ok(x) => x,
+        err(_) => return none,
+    }
+    for l in tags(html, "link") {
+        let kind = (attr(l.copy(), "type") ?? String()).to_lower_root()
+        if kind != "application/json+oembed" { continue }
+        let href = text_of(attr(l, "href") ?? String()).trim().copy()
+        if href.len() == 0 { continue }
+        let full = match base.join(href) {
+            ok(x) => x,
+            err(_) => continue,
+        }
+        let u = "{full}"
+        if lookable(u.copy()) { return some(u) }
+    }
+    return none
+}
+
+/// What an oEmbed answer says of its page: its title, cut short ("" when it has
+/// none), and its picture (`thumbnail_url`), an https address of a public host.
+pub struct Embed {
+    pub title: String
+    pub picture: String?
+}
+
+pub fn embed_of(body: String) -> Embed {
+    var e = Embed { title: String(), picture: none }
+    let j = match parse(body) {
+        ok(x) => x,
+        err(_) => return e,
+    }
+    e.title = cut_short(text_of(str_at(j.copy(), "title") ?? String()))
+    let thumb = (str_at(j, "thumbnail_url") ?? String()).trim().copy()
+    if lookable(thumb.copy()) { e.picture = some(thumb) }
+    return e
 }
 
 /// Where a page's icon may be, best first: the icons it names that loom can
@@ -409,7 +582,7 @@ pub struct Job {
 
 pub struct Done {
     pub url: String
-    pub title: String    // "" when the page has none, or couldn't be had
+    pub title: String    // the page's own, or else its address as it's shown (`bare_address`); "" for one that isn't looked up
     pub icon: List<u8>    // the icon's bytes, as they came, or empty
     pub icon_asked: bool    // the job asked for it, so empty means the site has none
     pub picture: List<u8>    // its preview picture, made small (files.page_picture), or empty
@@ -445,17 +618,44 @@ fn fetch(url: String, most: usize, accept: str) -> List<u8> ! Error {
     return r.body
 }
 
+// An oEmbed answer, or one with nothing in it when it couldn't be had.
+fn embed_at(url: String) -> Embed {
+    return match fetch(url, EMBED_MOST, "application/json") {
+        ok(b) => embed_of(decode_lossy(b.copy(), 0, b.len())),
+        err(_) => Embed { title: String(), picture: none },
+    }
+}
+
+// A page's title, its site's icon and its preview picture. The title is the
+// page's own: from its site's oEmbed first where its page may not carry it
+// (YouTube's), else from its page (`title_of`), else from the oEmbed the page
+// names; and when there's none of those, its address as it's shown
+// (`bare_address`), never a piece of one like "- YouTube".
 fn look_up(job: Job) -> Done {
     var done = Done { url: job.url.copy(), title: String(), icon: List<u8>(), icon_asked: job.icon, picture: List<u8>(), picture_asked: job.picture }
     if not lookable(job.url.copy()) { return done }
-    // Only the page's start, where its head is: a page over the limit isn't read at all.
-    let page = match fetch(job.url.copy(), PAGE_MOST, "text/html,application/xhtml+xml") {
-        ok(b) => decode_lossy(b.copy(), 0, b.len()),
-        err(_) => String(),
+    var embed = Embed { title: String(), picture: none }
+    if let e = oembed_for(job.url.copy()) { embed = embed_at(e) }
+    var title = if real_title(embed.title.copy(), job.url.copy(), String()) { embed.title.copy() } else { String() }
+    // The page, unless the oEmbed gave all that's wanted. Only its start, where
+    // its head is: a page over the limit isn't read at all.
+    let want_page = title.len() == 0 or job.icon or (job.picture and embed.picture == none)
+    let page = if not want_page { String() } else {
+        match fetch(job.url.copy(), PAGE_MOST, "text/html,application/xhtml+xml") {
+            ok(b) => decode_lossy(b.copy(), 0, b.len()),
+            err(_) => String(),
+        }
     }
-    done.title = title_of(page.copy())
+    if title.len() == 0 { title = title_of(page.copy(), job.url.copy()) }
+    if title.len() == 0 {
+        if let e = oembed_of(page.copy(), job.url.copy()) {
+            embed = embed_at(e)
+            if real_title(embed.title.copy(), job.url.copy(), String()) { title = embed.title.copy() }
+        }
+    }
+    done.title = if title.len() > 0 { title } else { bare_address(job.url.copy()) }
     if job.picture {
-        if let src = picture_of(page.copy(), job.url.copy()) {
+        if let src = picture_of(page.copy(), job.url.copy()) ?? embed.picture.copy() {
             if let ok(b) = fetch(src, PICTURE_MOST, "image/*") {
                 match files.page_picture(b) {
                     ok(small) => done.picture = small,
@@ -527,10 +727,11 @@ fn looks_up_only_public_https_pages() {
 @test
 fn reads_a_pages_title_and_icons() {
     let html = "<html><head><title>\n  Gemini 4 Neon &amp; you &#8211; 9to5Google\n</title><link rel=\"icon\" href=\"/i/16.png\" sizes=\"16x16\"><link rel='icon' type='image/png' sizes='32x32' href='/i/32.png'><link rel=\"icon\" href=\"/i.svg\" type=\"image/svg+xml\"><link rel=\"apple-touch-icon\" href=\"https://cdn.9to5google.com/t.png\"></head>"
-    assert(title_of(String(html)) == "Gemini 4 Neon & you – 9to5Google")
+    let page = String("https://9to5google.com/2026/neon")
+    assert(title_of(String(html), page.copy()) == "Gemini 4 Neon & you – 9to5Google")
     let og = "<meta name=\"x\" content=\"y\"><meta property=\"og:title\" content=\"Neon, explained\"><title>Other</title>"
-    assert(title_of(String(og)) == "Neon, explained")
-    assert(title_of(String("<p>no title</p>")) == "")
+    assert(title_of(String(og), page.copy()) == "Neon, explained")
+    assert(title_of(String("<p>no title</p>"), page.copy()) == "")
     let icons = icons_of(String(html), String("https://9to5google.com/2026/neon"))
     assert(icons.len() == 4)
     assert(icons[0] == "https://9to5google.com/i/32.png")
@@ -553,4 +754,58 @@ fn finds_a_pages_preview_picture() {
     assert(picture_of(String("<meta property=\"og:image\" content=\"http://a.example.org/a.jpg\">"), page.copy()) == none)
     assert(picture_of(String("<meta property=\"og:image\" content=\"https://192.168.1.2/a.jpg\">"), page.copy()) == none)
     assert(picture_of(String("<title>x</title>"), page) == none)
+}
+
+@test
+fn takes_a_title_only_when_its_the_pages_own() {
+    let video = String("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    // YouTube's page without its script: a piece of a title, and its site's name.
+    assert(title_of(String("<title> - YouTube</title><meta property=\"og:site_name\" content=\"YouTube\">"), video.copy()) == "")
+    assert(title_of(String("<title>YouTube</title>"), video.copy()) == "")
+    assert(title_of(String("<title>Before you continue to YouTube</title>"), video.copy()) == "")
+    assert(title_of(String("<title>Just a moment...</title>"), String("https://news.example.org/a")) == "")
+    // og:title, then twitter:title, then <title>, past one that isn't real.
+    let page = String("https://news.example.org/a")
+    let both = "<meta property=\"og:title\" content=\"News\"><meta name=\"twitter:title\" content=\"Neon is out\"><title>Other</title>"
+    assert(title_of(String(both), page.copy()) == "Neon is out")
+    assert(title_of(String("<meta property=\"og:title\" content=\"\"><title>Neon &amp; you</title>"), page.copy()) == "Neon & you")
+    // A title that only has its site's name in it is still its own.
+    assert(title_of(String("<title>GitHub - aaen/loom: the app</title>"), String("https://github.com/aaen/loom")) == "GitHub - aaen/loom: the app")
+    assert(title_of(String("<title>GitHub</title>"), String("https://github.com/")) == "")
+    // Words in any script are words.
+    assert(real_title(String("ネオンの話"), page.copy(), String()))
+    assert(not real_title(String(" — | "), page, String()))
+}
+
+@test
+fn shows_an_address_cleaned_up_when_its_page_has_no_title() {
+    assert(bare_address(String("https://www.youtube.com/watch?v=dQw4w9WgXcQ&si=abc123&feature=shared")) == "youtube.com/watch?v=dQw4w9WgXcQ")
+    assert(bare_address(String("https://youtu.be/dQw4w9WgXcQ?si=x")) == "youtu.be/dQw4w9WgXcQ")
+    assert(bare_address(String("https://Example.org/")) == "example.org")
+    assert(bare_address(String("https://en.wikipedia.org/wiki/Caf%C3%A9#History")) == "en.wikipedia.org/wiki/Café")
+    assert(bare_address(String("https://shop.example.org/a/?utm_source=x&id=7&fbclid=y")) == "shop.example.org/a?id=7")
+}
+
+@test
+fn reads_a_videos_title_from_its_oembed() {
+    let video = String("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    assert(oembed_for(video.copy()) == some(String("https://www.youtube.com/oembed?format=json&url=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3DdQw4w9WgXcQ")))
+    assert(oembed_for(String("https://youtu.be/dQw4w9WgXcQ")) != none)
+    assert(oembed_for(String("https://m.youtube.com/shorts/abc")) != none)
+    // Not YouTube's own page, nor another site.
+    assert(oembed_for(String("https://www.youtube.com/")) == none)
+    assert(oembed_for(String("https://vimeo.com/76979871")) == none)
+    // YouTube's answer: the video's title and its picture.
+    let answer = #"{"title":"Rick Astley - Never Gonna Give You Up (Official Video)","author_name":"Rick Astley","type":"video","thumbnail_url":"https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg"}"#
+    let e = embed_of(String(answer))
+    assert(e.title == "Rick Astley - Never Gonna Give You Up (Official Video)")
+    assert(real_title(e.title.copy(), video.copy(), String()))
+    assert(e.picture == some(String("https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg")))
+    // An answer that isn't one, or a picture over http.
+    assert(embed_of(String("<html>")).title == "")
+    assert(embed_of(String(#"{"title":"A","thumbnail_url":"http://a.example.org/a.jpg"}"#)).picture == none)
+    // The oEmbed a page names for itself, its entities read.
+    let named = "<link rel=\"alternate\" type=\"application/json+oembed\" href=\"https://vimeo.com/api/oembed.json?url=https%3A%2F%2Fvimeo.com%2F1&amp;w=1\">"
+    assert(oembed_of(String(named), String("https://vimeo.com/1")) == some(String("https://vimeo.com/api/oembed.json?url=https%3A%2F%2Fvimeo.com%2F1&w=1")))
+    assert(oembed_of(String("<link rel=\"alternate\" type=\"application/json+oembed\" href=\"http://a.example.org/o\">"), String("https://vimeo.com/1")) == none)
 }
