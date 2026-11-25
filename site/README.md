@@ -41,6 +41,7 @@ bun install
 bun run dev      # http://localhost:4321/, reloading as you edit
 bun run build    # the whole site, into dist/
 bun run preview  # serves dist/
+bun run check    # the TypeScript check, as CI runs it
 ```
 
 `public/og.png`, the picture link previews show, is made from [`og.html`](og.html); its first lines say how.

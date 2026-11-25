@@ -51,6 +51,24 @@ jobs:
         if: runner.os == 'Linux'
         run: calx tests/setup/browser_fetch.calx
 
+  # loom.rip's TypeScript check. The site itself is built on the VPS (site/README.md).
+  site:
+    name: site (ubuntu-latest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install
+        run: bun install --frozen-lockfile
+
+      - name: Check
+        run: bun run check
+
   # loom install on a fresh server, through install.sh as a person runs it, with a
   # release served from a folder: the user, the service, and the instance answering.
   install:
