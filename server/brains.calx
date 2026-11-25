@@ -6,6 +6,7 @@ module server.brains
 // with. The instance does the moving; what's here only reads JSON and text.
 import std.json.{Json}
 import shared.obj.{Obj, at, str_at}
+import server.rooms
 
 // How long the summary a moved chat starts with may be, in bytes.
 pub const SUMMARY_MOST: usize = 8000
@@ -82,16 +83,13 @@ fn cut(text: String, most: usize) -> String {
     return out
 }
 
-fn who(m: Json) -> String {
-    return if str_at(m, "role") == some(String("person")) { String("Your person") } else { String("You") }
-}
-
 // Loom's summary of a chat that moves from the program `from` to another, for
 // the new one to start with: `messages` are the chat's, oldest first, up to
 // the one being answered. It's made from the chat itself, not by a model, so it
 // costs nothing and works when the old program can't answer: what the person
-// asked, then the newest of it word for word, in SUMMARY_MOST bytes at most.
-pub fn summary(messages: List<Json>, from: String) -> String {
+// asked, then the newest of it word for word, in SUMMARY_MOST bytes at most,
+// each by who said it, as the agent `me` reads it; `names` is (id, name).
+pub fn summary(messages: List<Json>, from: String, me: String, names: List<(String, String)>) -> String {
     var spoken = List<Json>()
     for m in messages {
         if said(m.copy()).len() > 0 { spoken.push(m.copy()) }
@@ -113,7 +111,7 @@ pub fn summary(messages: List<Json>, from: String) -> String {
     let from_at = if spoken.len() > NEWEST { spoken.len() - NEWEST } else { 0 }
     var k: usize = 0
     for m in spoken {
-        if k >= from_at { newest.push("{who(m.copy())}: {cut(said(m.copy()), NEWEST_CUT)}") }
+        if k >= from_at { newest.push("{rooms.speaker(m.copy(), me.copy(), names.copy())}: {cut(said(m.copy()), NEWEST_CUT)}") }
         k += 1
     }
     var text = put_together(head.copy(), spoken.len(), asked.copy(), earlier, newest.copy(), tail.copy())
@@ -179,14 +177,14 @@ fn said_by(role: str, text: String) -> Json {
 
 @test
 fn a_summary_lists_the_asks_and_the_newest() {
-    let empty = summary(List<Json>(), String("claude"))
+    let empty = summary(List<Json>(), String("claude"), String(), List<(String, String)>())
     assert(empty.contains("(Nothing said yet.)") and empty.starts_with("[loom:") and empty.ends_with("]"))
     var chat = List<Json>()
     for n in 0..20 {
         chat.push(said_by("person", "Question {n}\nwith more"))
         chat.push(said_by("agent", "Answer {n}"))
     }
-    let s = summary(chat, String("claude"))
+    let s = summary(chat, String("claude"), String(), List<(String, String)>())
     assert(s.contains("from Claude Code") and s.contains("It has 40 messages."))
     assert(s.contains("- (and 8 earlier)") and s.contains("- Question 8") and not s.contains("- Question 7\n"))
     assert(s.contains("You: Answer 19") and s.contains("Your person: Question 17 with more") and not s.contains("Your person: Question 16"))
@@ -202,7 +200,7 @@ fn a_long_chat_is_cut_to_the_limit() {
         chat.push(said_by("person", long.copy()))
         chat.push(said_by("agent", long.copy()))
     }
-    let s = summary(chat, String("codex"))
+    let s = summary(chat, String("codex"), String(), List<(String, String)>())
     assert(s.len() <= SUMMARY_MOST and s.ends_with("search_messages finds it.]"))
     assert(s.contains("The newest of it"))
 }

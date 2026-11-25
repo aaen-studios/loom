@@ -1,0 +1,85 @@
+module tests.protocol.rooms_restart
+
+// A group chat after a restart (PLAN.md, "Group chats"): when one of the
+// person's apps connects, the router's program starts and readies a session,
+// so the first pick doesn't wait for it; and a member whose session there
+// can't be picked up again goes on in a fresh one of its own, given its part
+// of the chat with each reply by who said it.
+//
+//     calx tests/protocol/rooms_restart.calx
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+fn agent(app: mut Session, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake-forget")).s("instructions", String("")).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+// The reply to `text` in `conversation`.
+fn say(app: mut Session, conversation: String, cid: str, text: str) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", String(text)).done())
+    loop {
+        let e = try app.until("event", "")
+        if str_at(e.copy(), "kind") != some(String("message.created")) { continue }
+        let m = at(e, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+// A group chat with two members on a program that never picks a session up again.
+fn before(i: Instance) -> (String, String) ! Error {
+    try i.add_fake(String("fake-forget"), String("--forget"))
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_0", "defaults.put", Obj.new().s("router_brain", String("fake")).done())
+    let ledger = try agent(mut app, "q_1", "Ledger")
+    let hermes = try agent(mut app, "q_2", "Hermes")
+    let room = try app.cmd("q_3", "room.create", Obj.new().s("name", String("Money")).j("members", Json.Array([Json.Str(ledger), Json.Str(hermes.copy())])).done())
+    let money = str_at(at(at(room, "value"), "conversation"), "id") ?? String()
+    _ = try say(mut app, money.copy(), "m_1", "ROUTE:Ledger the bill is paid")
+    let first = try say(mut app, money.copy(), "m_2", "ROUTE:Hermes any mail?")
+    try check(str_at(first, "agent") == some(hermes.copy()), "each member answers in the group chat")
+    app.close()
+    return (money, hermes)
+}
+
+fn after(i: Instance, money: String, hermes: String) ! Error {
+    var back = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    unsafe { sleep(1500000000) }
+    let m = try say(mut back, money, "m_3", "ROUTE:Hermes WHY:UPTIME and now?\n/context")
+    let why = str_at(at(m.copy(), "routed"), "said") ?? String()
+    let up = if why.starts_with("up ") { i64.parse(why[3..].trim_suffix(" ms").copy()) ?? -1 } else { -1 }
+    println("      the router started {up} ms before the message")
+    try check(up >= 1000, "when an app connects, the group chats' router starts before the first pick")
+    let told = reply_text(m.copy())
+    try check(str_at(m, "agent") == some(hermes.copy()) and told.contains("Your part in this group chat goes on from an earlier session of yours, which couldn't be picked up again"), "a member whose session there won't load goes on in a fresh one of its own")
+    try check(told.contains("Ledger: ROUTE:Ledger the bill is paid") and told.contains("You: ROUTE:Hermes any mail?"), "given its part of the chat, each reply by who said it")
+    back.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    var money = String()
+    var hermes = String()
+    match before(inst.copy()) {
+        ok((c, h)) => {
+            money = c
+            hermes = h
+        },
+        err(e) => failure = some("{e}"),
+    }
+    let again = try inst.restart()
+    if failure == none {
+        if let err(e) = after(again.copy(), money, hermes) { failure = some("{e}") }
+    }
+    again.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nrooms_restart: all good")
+}

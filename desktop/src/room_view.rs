@@ -95,6 +95,8 @@ impl Loom {
         if self.side == Some(Screen::Room) {
             self.room_form = RoomForm::default();
             self.fill_room_form(cx);
+            let f = self.model.ask_room_usage(&id);
+            self.send(f);
         }
         self.focus_composer = true;
         self.fetch();
@@ -121,6 +123,10 @@ impl Loom {
         self.ctx = None;
         self.room_form = RoomForm::default();
         self.fill_room_form(cx);
+        if let Some(id) = self.model.open_room.clone() {
+            let f = self.model.ask_room_usage(&id);
+            self.send(f);
+        }
         self.show_side(Screen::Room, cx);
     }
 
@@ -470,6 +476,9 @@ impl Loom {
             page = page
                 .child(self.field("When it can't pick", self.default_chips(&r, cx)))
                 .child(self.field("Corrections", self.corrections(&r, cx)));
+            if let Some(u) = self.model.open_room_usage().cloned() {
+                page = page.child(self.field("Usage", self.room_usage(&u)));
+            }
         }
         div().flex_1().min_h_0().child(
             div()
@@ -484,6 +493,29 @@ impl Loom {
                 .pb(px(space::XXL))
                 .child(page),
         )
+    }
+
+    /// What the group chat used: its members' turns, then the router's picks.
+    fn room_usage(&self, u: &model::RoomUsage) -> Div {
+        let line = |label: &str, today: i64, month: i64| {
+            div()
+                .flex()
+                .gap(px(space::S))
+                .text_size(px(size::SMALL))
+                .child(
+                    div()
+                        .w(px(64.0))
+                        .text_color(self.p.ink_2)
+                        .child(label.to_string()),
+                )
+                .child(div().text_color(self.p.ink).child(usage_line(today, month)))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XS))
+            .child(line("Agents", u.tokens_today, u.tokens_month))
+            .child(line("Router", u.router_today, u.router_month))
     }
 
     fn member_chip(&self, id: String, a: &model::Agent, on: bool) -> Stateful<Div> {
@@ -852,6 +884,15 @@ impl Loom {
         );
         self.group(Some("Group chats"), rows)
     }
+}
+
+/// Tokens used, as an agent's settings say them: "850 today · 12.4k this month".
+fn usage_line(today: i64, month: i64) -> String {
+    format!(
+        "{} today · {} this month",
+        model::tokens_text(today),
+        model::tokens_text(month)
+    )
 }
 
 fn members_line(n: usize) -> String {

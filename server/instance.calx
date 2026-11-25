@@ -344,6 +344,8 @@ enum Pending {
     RouteSession(String)    // a router session started for a pick, by its run
     RouteConfig(String, String)    // the router session set to its model, for a pick: its run and the session
     Route(String)    // the router asked for a pick, by its run
+    RouteWarm    // a router session started ahead of its next pick
+    RouteWarmConfig(String)    // that session set to the router's model
 }
 
 struct Proc {
@@ -722,6 +724,7 @@ enum Renew {
     Full    // its context was nearly full
     Tools    // its agent's tools changed, and a session keeps its tools
     Idle    // nothing was said in it for SESSION_IDLE_CLOSE_MS
+    Lost    // its program couldn't pick it up again after a restart
 }
 
 // Whether a tool call's report is a compaction of its session's context, as
@@ -6078,9 +6081,12 @@ impl Instance {
         return tool_text("Saved to {file}.")
     }
 
-    // A chat in words, for an agent to go on: its newest messages, up to and
-    // with `upto` when it's given, newest last. The oldest go first when it's long.
-    fn transcript(i: Instance, user: String, conversation: String, upto: String?) -> String ! Error {
+    // A chat in words, for the agent `me` to go on: its newest messages, up to
+    // and with `upto` when it's given, newest last, each by who said it, so in a
+    // group chat another member's reply is by its name. The oldest go first
+    // when it's long.
+    fn transcript(i: Instance, user: String, conversation: String, upto: String?, me: String) -> String ! Error {
+        let names = try i.names_of_agents(user.copy())
         // Only the last SIDE_MESSAGES are used: up to `upto` and it, or the newest.
         let last = if let u = upto { try i.store.message(user.copy(), u) } else { none }
         var messages = List<Json>()
@@ -6106,8 +6112,7 @@ impl Instance {
                 }
             }
             if said.trim().len() == 0 { continue }
-            let who = if str_at(m, "role") == some(String("person")) { String("Your person") } else { String("You") }
-            lines.push("{who}: {cut_short(said.trim().copy(), 1500)}")
+            lines.push("{rooms.speaker(m, me.copy(), names.copy())}: {cut_short(said.trim().copy(), 1500)}")
         }
         var transcript = lines.join("\n\n")
         while transcript.len() > SIDE_TRANSCRIPT_MOST and lines.len() > 1 {
@@ -6813,7 +6818,7 @@ impl Instance {
             i.answer_cmd(w, Answer.Refused(String("busy"), "{agent_name} is still answering the last side question."))
             return
         }
-        let transcript = try i.transcript(user.copy(), chat_id, none)
+        let transcript = try i.transcript(user.copy(), chat_id, none, agent_id.copy())
         let note = "[loom: This is a side question from your person about your chat with them, asked beside it: the question and your answer stay out of that chat. Answer from the chat and what you know, briefly. Don't use tools here: any that ask are refused. Your chat, newest last:\n\n{if transcript.len() > 0 { transcript } else { String("(Nothing said yet.)") }}]"
         let message_id = try i.store.new_id("msg")
         let blocks = Json.Array([Obj.new().s("kind", String("text")).s("text", question.copy()).done()])
@@ -8185,7 +8190,7 @@ impl Instance {
             // With Code Mode off, the agent program has its servers only from a session's
             // start, so its chat's next message goes to a fresh session that has it.
             if not (bool_at(a, "code_mode") ?? true) {
-                if let r = i.runs.find(run_id) { try i.store.stale_acp_session(user.copy(), r.conversation.copy()) }
+                if let r = i.runs.find(run_id) { try i.store.stale_acp_session(user.copy(), r.seat.copy()) }
             }
         }
         i.log(user.copy(), agent.copy(), "approval", "Added the MCP server {server}, as {i.agent_name(user.copy(), agent.copy())} asked", device)
@@ -9610,14 +9615,8 @@ impl Instance {
         }
         let last = try i.store.last_answered(user.copy(), conversation_id.copy())
         let fallback = rooms.fallback(str_at(room.copy(), "default") ?? String(), last.copy(), members.copy())
-        let d = try i.store.defaults(user.copy())
-        var programs = List<(String, String)>()
-        for a in try i.store.acp_agents() {
-            if try i.may_use(user.copy(), a.name.copy()) { programs.push((a.name.copy(), a.source.copy())) }
-        }
-        let program = rooms.router_program(str_at(d.copy(), "router_brain") ?? String(), str_at(d.copy(), "brain") ?? String(), programs)
-        let model = str_at(d, "router_model") ?? String(rooms.ROUTER_MODEL)
-        if program.len() == 0 or try i.store.acp_agent(program.copy()) == none {
+        let (program, model) = try i.router_of(user.copy())
+        if program.len() == 0 {
             try i.start_run_as(user, conversation, run_id, message_id.copy(), said, sent_files, from, note, starter, fallback, with_answers(rooms.routed("default", String(), String(), String()), message_id), List<String>())
             return
         }
@@ -9647,6 +9646,120 @@ impl Instance {
         let key = proc_key("router-{user}", program.copy())
         i.picks.insert(run_id.copy(), Pick { run: run_id.copy(), user: user.copy(), conversation: conversation_id, message: message_id.copy(), text: said.copy(), files: sent_files.copy(), from: from.copy(), note: note.copy(), starter: starter.copy(), members: members, fallback: fallback, told: told, prompt: prompt, program: program.copy(), proc: key.copy(), model: model, session: String(), said: String(), at: now() })
         try i.ask_router(user, run_id)
+    }
+
+    // The program `user`'s router runs on, or "" for none they may use that's
+    // installed, and the model it's set to.
+    fn router_of(i: Instance, user: String) -> (String, String) ! Error {
+        let d = try i.store.defaults(user.copy())
+        var programs = List<(String, String)>()
+        for a in try i.store.acp_agents() {
+            if try i.may_use(user.copy(), a.name.copy()) { programs.push((a.name.copy(), a.source.copy())) }
+        }
+        let program = rooms.router_program(str_at(d.copy(), "router_brain") ?? String(), str_at(d.copy(), "brain") ?? String(), programs)
+        let model = str_at(d, "router_model") ?? String(rooms.ROUTER_MODEL)
+        if program.len() == 0 or try i.store.acp_agent(program.copy()) == none { return (String(), model) }
+        return (program, model)
+    }
+
+    // --- The router, ready before the first pick ---
+    //
+    // Its program takes a second or two to start and its session as long again,
+    // which the first pick would wait for. So once the person has a group chat,
+    // the router's program starts when one of their apps connects, when they
+    // make a group chat or open one, and when they change its program or model,
+    // with a session set to its model; and a session that has made its picks is
+    // followed by a fresh one at once. It stops after 30 idle minutes, as an
+    // agent's program does.
+
+    // Readies `user`'s router, unless it's ready or they have no group chat.
+    fn warm_router(i: mut Instance, user: String) {
+        if let err(e) = i.warm_router_in(user) { eprintln("loom: starting the group chats' router ahead: {e}") }
+    }
+
+    fn warm_router_in(i: mut Instance, user: String) ! Error {
+        if i.holding() or i.moving.len() > 0 { return }
+        if (try i.store.rooms(user.copy())).len() == 0 { return }
+        let (program, _) = try i.router_of(user.copy())
+        if program.len() == 0 { return }
+        if let (left, _) = try i.budget_left(user.copy(), program.copy()) {
+            if left <= 0 { return }
+        }
+        let key = proc_key("router-{user}", program.copy())
+        if not i.procs.contains(key.copy()) { try i.start_proc(user.copy(), router_agent(user.copy()), program) }
+        var p = i.procs.remove(key.copy()) else return
+        if p.ready {
+            i.route_warm(mut p)
+        } else if not p.warm_next.contains(String(ROUTE_SEAT)) {
+            p.warm_next.push(String(ROUTE_SEAT))
+        }
+        i.procs.insert(key, p)
+    }
+
+    // Whether the router `p`'s session `sid` takes the next pick: it has made
+    // fewer than PICKS_PER_SESSION, and is on the router's model where its
+    // program offers that.
+    fn route_fits(i: Instance, p: Proc, sid: String, model: String) -> bool {
+        if (i.route_counts.get(sid.copy()) ?? 0) >= rooms.PICKS_PER_SESSION { return false }
+        let config = if let c = p.configs.find(sid) { c.copy() } else { Json.Null }
+        return acp.config_todo(config, Obj.new().s("model", model).done()).len() == 0
+    }
+
+    // The router's model now, as `user` set it.
+    fn router_model(i: Instance, user: String) -> String {
+        return match i.router_of(user) {
+            ok((_, m)) => m,
+            err(_) => String(rooms.ROUTER_MODEL),
+        }
+    }
+
+    // Starts a router session in `p` ahead of its next pick, set to the router's
+    // model, unless it has one that fits, one is being readied, or it's picking.
+    fn route_warm(i: Instance, p: mut Proc) {
+        if p.warming.contains(String(ROUTE_SEAT)) or i.routing(p.key.copy()) { return }
+        if let s = p.sessions.find(String(ROUTE_SEAT)) {
+            if i.route_fits(p, s.copy(), i.router_model(p.user.copy())) { return }
+        }
+        let folder = match fs.absolute(i.agent_folder(p.user.copy(), router_agent(p.user.copy()))) {
+            ok(path) => path,
+            err(_) => String("."),
+        }
+        p.warming.push(String(ROUTE_SEAT))
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.RouteWarm)
+        p.to.send(Out.Send(acp.request(p.next_id, "session/new", Obj.new().s("cwd", folder).j("mcpServers", Json.Array(List<Json>())).j("_meta", acp.session_meta()).done())))
+    }
+
+    // A router session readied ahead is there, or `sid` is "" when it couldn't
+    // start: it takes the place of the one before, and is set to the router's
+    // model before the picks waiting go to it.
+    fn route_warmed(i: mut Instance, p: mut Proc, sid: String, config: Json) {
+        if sid.len() == 0 {
+            i.route_warm_done(mut p)
+            return
+        }
+        if let old = p.sessions.remove(String(ROUTE_SEAT)) {
+            p.forget(old.copy())
+            _ = i.route_counts.remove(old)
+        }
+        p.sessions.insert(String(ROUTE_SEAT), sid.copy())
+        i.route_counts.insert(sid.copy(), 0)
+        if let Json.Array(_) = config { p.configs.insert(sid.copy(), config.copy()) }
+        let todo = acp.config_todo(config, Obj.new().s("model", i.router_model(p.user.copy())).done())
+        if todo.len() == 0 {
+            i.route_warm_done(mut p)
+            return
+        }
+        let (option, value) = todo[0].copy()
+        p.next_id += 1
+        p.pending.insert(p.next_id, Pending.RouteWarmConfig(sid.copy()))
+        p.to.send(Out.Send(acp.request(p.next_id, "session/set_config_option", Obj.new().s("sessionId", sid).s("configId", option).s("value", value).done())))
+    }
+
+    // The router's session is ready, or isn't coming: the picks waiting go on.
+    fn route_warm_done(i: mut Instance, p: mut Proc) {
+        if let k = p.warming.position(|c| c == ROUTE_SEAT) { _ = p.warming.remove(k) }
+        i.route_next(mut p)
     }
 
     // Asks the router for pick `run`, starting its program first if it isn't running.
@@ -9685,7 +9798,8 @@ impl Instance {
 
     // The next pick waiting for the router `p`, once it's free.
     fn route_next(i: mut Instance, p: mut Proc) {
-        if i.routing(p.key.copy()) { return }
+        // A session being readied ahead takes them once it's ready.
+        if i.routing(p.key.copy()) or p.warming.contains(String(ROUTE_SEAT)) { return }
         while p.routes.len() > 0 {
             let run = p.routes.remove(0)
             if not i.picks.contains(run.copy()) { continue }
@@ -9695,12 +9809,17 @@ impl Instance {
     }
 
     // Asks for pick `run` in the router's session, or in a fresh one once a
-    // session has made PICKS_PER_SESSION, so its context stays small.
+    // session has made PICKS_PER_SESSION, so its context stays small, or the
+    // person set the router to another model.
     fn route_go(i: mut Instance, p: mut Proc, run: String) {
-        if let k = mut i.picks.find(run.copy()) { k.session = String("…") }
+        var model = String(rooms.ROUTER_MODEL)
+        if let k = mut i.picks.find(run.copy()) {
+            k.session = String("…")
+            model = k.model.copy()
+        }
         var known = String()
         if let s = p.sessions.find(String(ROUTE_SEAT)) { known = s.copy() }
-        if known.len() > 0 and (i.route_counts.get(known.copy()) ?? 0) < rooms.PICKS_PER_SESSION {
+        if known.len() > 0 and i.route_fits(p, known.copy(), model) {
             i.route_prompt(mut p, run, known)
             return
         }
@@ -9859,6 +9978,15 @@ impl Instance {
         let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
         let room = at(c.copy(), "room")
         if room == Json.Null and name != "room.resend" { return Answer.Refused(String("bad_request"), String("That's an agent's own chat, not a group chat.")) }
+        if name == "room.summary" {
+            // What its settings show: the tokens its members' turns there used,
+            // and the router's picks for it, from the start of the day and month in UTC.
+            let moment = now()
+            let (day, month) = (period_start(String("day"), moment), period_start(String("month"), moment))
+            let (said_today, picked_today) = try i.store.room_usage(user.copy(), id.copy(), day)
+            let (said_month, picked_month) = try i.store.room_usage(user, id, month)
+            return Answer.Value(Obj.new().i("tokens_today", said_today).i("tokens_month", said_month).i("router_today", picked_today).i("router_month", picked_month).done())
+        }
         if name == "room.update" {
             let (changed, why) = rooms.room_changed(room, args, all, color_ok)
             if why.len() > 0 { return refusal(why) }
@@ -10129,7 +10257,7 @@ impl Instance {
         // A branch's first turn: the agent is handed the chat it goes on from.
         var note = given_note.copy()
         if let (chat, at_message) = try i.store.branch_to_hand(user.copy(), conversation_id.copy()) {
-            let before = try i.transcript(user.copy(), chat, some(at_message))
+            let before = try i.transcript(user.copy(), chat, some(at_message), agent_id.copy())
             let handoff = "[loom: This conversation is a branch of your chat with your person: it goes on from the last message below, apart from that chat, which goes on as it was. Your chat up to there, newest last:\n\n{if before.len() > 0 { before } else { String("(Nothing said yet.)") }}]"
             note = if note.len() > 0 { "{handoff}\n\n{note}" } else { handoff }
             try i.store.branch_handed(conversation_id.copy())
@@ -10167,7 +10295,7 @@ impl Instance {
         // starts with loom's summary of it, and the reply says so first.
         var notice = String()
         if let moved_from = try i.store.summary_to_hand(user.copy(), conversation_id.copy()) {
-            let summary = try i.summary_of(user.copy(), conversation_id.copy(), answering.copy(), moved_from.copy())
+            let summary = try i.summary_of(user.copy(), conversation_id.copy(), answering.copy(), moved_from.copy(), agent_id.copy())
             note = if note.len() > 0 { "{summary}\n\n{note}" } else { summary }
             notice = brains.moved_line(moved_from, program.copy(), "hand")
             try i.store.summary_handed(conversation_id.copy())
@@ -10257,11 +10385,12 @@ impl Instance {
 
     // Loom's summary of a conversation up to the message `answering` (left out
     // of it, since the prompt has it), for a program it moves to from `from`.
-    fn summary_of(i: Instance, user: String, conversation: String, answering: String, from: String) -> String ! Error {
+    fn summary_of(i: Instance, user: String, conversation: String, answering: String, from: String, me: String) -> String ! Error {
         // What came before the message being answered, when it's there.
         let cut = if answering.len() > 0 and try i.store.message(user.copy(), answering.copy()) != none { some(answering.copy()) } else { none }
+        let names = try i.names_of_agents(user.copy())
         let (before, _) = try i.store.messages(user, conversation, cut, 500)
-        return brains.summary(before, from)
+        return brains.summary(before, from, me, names)
     }
 
     // A run its program couldn't take, because its usage ran out (`why`
@@ -10290,7 +10419,7 @@ impl Instance {
         let backup = brains.backup_of(agent.copy(), try i.store.defaults(user.copy()))
         if backup.len() == 0 or backup == program or tried.contains(backup.copy()) { return false }
         if try i.store.acp_agent(backup.copy()) == none or not try i.may_use(user.copy(), backup.copy()) { return false }
-        let summary = try i.summary_of(user.copy(), conversation.copy(), answering, program.copy())
+        let summary = try i.summary_of(user.copy(), conversation.copy(), answering, program.copy(), agent_id.copy())
         let line = brains.moved_line(program.copy(), backup.copy(), why)
         if let r = mut i.runs.find(run_id.copy()) {
             r.tried.push(program.copy())
@@ -10458,40 +10587,58 @@ impl Instance {
     }
 
     // A run that goes into a fresh session in place of a full one, one whose
-    // tools changed, or one left idle: it's given the newest of the chat before
-    // its message, and told where the rest is.
+    // tools changed, one left idle or one that couldn't be picked up again:
+    // it's given the newest of the chat before its message, and told where the
+    // rest is. In a group chat it's the member's own seat that goes on afresh,
+    // and the chat up to its last reply there: what came after is in the
+    // room's note already.
     fn carry_over(i: mut Instance, user: String, agent: String, run_id: String, renew: Renew) ! Error {
         var conversation = String()
+        var seat = String()
         var answering = String()
         if let r = i.runs.find(run_id.copy()) {
             conversation = r.conversation.copy()
+            seat = r.seat.copy()
             answering = r.answering.copy()
         } else {
             return
         }
-        try i.went_fresh(user.copy(), conversation.copy(), renew)
+        let in_room = seat != conversation
+        try i.went_fresh(user.copy(), conversation.copy(), seat.copy(), renew)
         // A turn with no message of its own, as a routine's quiet run, goes on from the newest.
-        let (before, _) = try i.store.messages(user.copy(), conversation.copy(), if answering.len() > 0 { some(answering) } else { none }, 1)
-        var said = String()
-        if before.len() > 0 {
-            let last = str_at(before[before.len() - 1].copy(), "id") ?? String()
-            said = try i.transcript(user.copy(), conversation, some(last))
+        let (before, _) = try i.store.messages(user.copy(), conversation.copy(), if answering.len() > 0 { some(answering) } else { none }, if in_room { 100 } else { 1 })
+        var upto = String()
+        if in_room {
+            for m in before {
+                if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "agent") == some(agent.copy()) { upto = str_at(m, "id") ?? String() }
+            }
+        } else if before.len() > 0 {
+            upto = str_at(before[before.len() - 1].copy(), "id") ?? String()
         }
+        let said = if upto.len() > 0 { try i.transcript(user.copy(), conversation, some(upto), agent.copy()) } else { String() }
         let why = match renew {
             Renew.Full => "which grew too long, so this one starts fresh.",
             Renew.Tools => "which had other tools, since your person changed them, so this one starts fresh. Use the tools you have now, whatever the chat below used.",
             Renew.Idle => "which had been idle for hours, so this one starts fresh. Files and pages you looked at then may have changed: look again before relying on them.",
+            Renew.Lost => "which couldn't be picked up again, so this one starts fresh.",
         }
-        let carried = "[loom: Your chat with your person goes on from an earlier session, {why} To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
+        let carried = if in_room {
+            let upto_there = if said.len() > 0 { " The chat up to your last reply there, newest last:\n\n{said}\n\nWhat was said since is below." } else { String(" What was said there is below.") }
+            "[loom: Your part in this group chat goes on from an earlier session of yours, {why} To your person it's one conversation: carry on as if nothing changed, and don't mention it.{upto_there} For anything older, search_messages finds it.]"
+        } else {
+            "[loom: Your chat with your person goes on from an earlier session, {why} To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
+        }
         if let r = mut i.runs.find(run_id) {
             r.note = if r.note.len() > 0 { "{carried}\n\n{r.note}" } else { carried }
         }
         let logged = match renew {
-            Renew.Full => "Carried the chat on in a fresh session: the last one's context was nearly full",
-            Renew.Tools => "Carried the chat on in a fresh session: the agent's tools changed, and a session keeps its tools",
-            Renew.Idle => "Carried the chat on in a fresh session: nothing had been said in the last one for 12 hours",
+            Renew.Full => "the last one's context was nearly full",
+            Renew.Tools => "the agent's tools changed, and a session keeps its tools",
+            Renew.Idle => "nothing had been said in the last one for 12 hours",
+            Renew.Lost => "the last one couldn't be picked up again",
         }
-        i.log(user, agent.copy(), "session", String(logged), agent)
+        let what = if in_room { "its part of a group chat" } else { "the chat" }
+        i.log(user, agent.copy(), "session", "Carried {what} on in a fresh session: {logged}", agent)
     }
 
     // Gives a run to its agent: a new ACP session first if the conversation
@@ -10631,6 +10778,7 @@ impl Instance {
 
     // Starts `user`'s last chat's program and readies its session, unless they're running.
     fn prestart(i: mut Instance, user: String) {
+        i.warm_router(user.copy())
         if let err(e) = i.prestart_in(user) { eprintln("loom: starting an agent program ahead: {e}") }
     }
 
@@ -11017,7 +11165,7 @@ impl Instance {
                 let warm = p.warm_next.copy()
                 p.warm_next = List<String>()
                 for conversation in warm {
-                    i.warm_session(mut p, conversation)
+                    if conversation == ROUTE_SEAT { i.route_warm(mut p) } else { i.warm_session(mut p, conversation) }
                 }
                 let waiting = p.waiting.copy()
                 p.waiting = List<String>()
@@ -11070,8 +11218,13 @@ impl Instance {
             },
             Pending.Resume(run, sid) => {
                 if let e = error {
-                    // Gone, or too old: a new session instead.
+                    // Gone, or too old: a new session instead, given the newest of
+                    // the chat as a full one's is, or in a group chat the member's part.
                     eprintln("loom: agent {p.agent} couldn't pick session {sid} up again: {str_at(e, "message") ?? String()}")
+                    let agent = if let r = i.runs.find(run.copy()) { r.agent.copy() } else { String() }
+                    if agent.len() > 0 {
+                        if let err(failed) = i.carry_over(p.user.copy(), agent, run.copy(), Renew.Lost) { eprintln("loom: carrying a chat over to a fresh session: {failed}") }
+                    }
                     i.new_session(mut p, run)
                     return
                 }
@@ -11129,6 +11282,27 @@ impl Instance {
                 }
                 try i.picked(run, chosen)
                 i.route_next(mut p)
+                // A session that has made its picks is followed by a fresh one now.
+                i.route_warm(mut p)
+            },
+            Pending.RouteWarm => {
+                match error {
+                    some(e) => {
+                        eprintln("loom: the group chats' router couldn't start a session ahead: {str_at(e, "message") ?? String()}")
+                        i.route_warmed(mut p, String(), Json.Null)
+                    },
+                    none => i.route_warmed(mut p, str_at(result.copy(), "sessionId") ?? String(), at(result, "configOptions")),
+                }
+            },
+            Pending.RouteWarmConfig(sid) => {
+                match error {
+                    some(e) => eprintln("loom: the group chats' router stays on its program's model: {str_at(e, "message") ?? String()}"),
+                    none => {
+                        let config = at(result, "configOptions")
+                        if let Json.Array(_) = config { p.configs.insert(sid, config.copy()) }
+                    },
+                }
+                i.route_warm_done(mut p)
             },
             Pending.Prompt(run) => {
                 // When the session's last turn ended, for compacting it and
@@ -11338,7 +11512,8 @@ impl Instance {
         let (was, window): (i64, i64) = try i.store.context(p.user.copy(), conversation.copy()) ?? (i64(0), i64(0))
         if window == size and was * 100 / window == used * 100 / size { return }
         try i.store.put_context(p.user.copy(), conversation.copy(), used, size)
-        try i.tell_context(p.user.copy(), conversation, used, size)
+        // A member's seat in a group chat isn't a conversation the apps know.
+        if not conversation.contains("/") { try i.tell_context(p.user.copy(), conversation, used, size) }
     }
 
     fn tell_context(i: Instance, user: String, conversation: String, used: i64, size: i64) ! Error {
@@ -11348,13 +11523,15 @@ impl Instance {
 
     // A chat goes on in a fresh session: its context starts again from nothing,
     // and when the last one was nearly full, a line in the chat says so (PLAN.md,
-    // "One endless chat").
-    fn went_fresh(i: Instance, user: String, conversation: String, renew: Renew) ! Error {
-        let (_, size): (i64, i64) = try i.store.context(user.copy(), conversation.copy()) ?? (i64(0), i64(0))
+    // "One endless chat"). In a group chat it's one member's seat that does,
+    // whose context is kept apart and drawn nowhere, so the chat has no line.
+    fn went_fresh(i: Instance, user: String, conversation: String, seat: String, renew: Renew) ! Error {
+        let (_, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
         if size > 0 {
-            try i.store.put_context(user.copy(), conversation.copy(), 0, size)
-            try i.tell_context(user.copy(), conversation.copy(), 0, size)
+            try i.store.put_context(user.copy(), seat.copy(), 0, size)
+            if seat == conversation { try i.tell_context(user.copy(), conversation.copy(), 0, size) }
         }
+        if seat != conversation { return }
         if let Renew.Full = renew { _ = try i.chat_line(user, conversation, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
     }
 
@@ -13051,7 +13228,7 @@ impl Instance {
             let agent_id = str_at(agent.copy(), "id") ?? String()
             var chat = String()
             if let c = try i.store.newest_conversation(user.copy(), agent_id.copy()) {
-                let transcript = try i.transcript(user.copy(), str_at(c, "id") ?? String(), none)
+                let transcript = try i.transcript(user.copy(), str_at(c, "id") ?? String(), none, agent_id.copy())
                 if transcript.len() > 0 { chat = "\n\nYour chat with them, newest last:\n\n{transcript}" }
             }
             let prompt = "Your person asks you to look over your past chats with them for what's worth keeping, and propose it: a way of doing a kind of task they'd want done the same way again, with propose_skill, and a lasting fact about them or their work, with propose_note (tied to a site, with site, when it's about one). Look further back with search_messages. Don't propose what's in list_skills or recall already, or what only mattered once; nothing at all is a fine answer. Your person keeps or drops each one, so say in why where it came from. End with a line on what you proposed.{chat}"
@@ -13153,7 +13330,14 @@ impl Instance {
             return Answer.Value(empty)
         }
         if name == "room.resend" { return try i.resend(user, device, args) }
-        if name.starts_with("room.") { return try i.room_cmd(user, device, name, args) }
+        if name.starts_with("room.") {
+            let answer = try i.room_cmd(user.copy(), device, name.copy(), args)
+            // A new group chat's first message is likely soon.
+            if name == "room.create" {
+                if let Answer.Value(_) = answer { i.warm_router(user) }
+            }
+            return answer
+        }
         if name == "conversation.branch" { return try i.branch(user, device, args) }
         if name.starts_with("table.") { return try i.table_command(user, device, name, args) }
         if name.starts_with("import.") { return try i.import_cmd(user, device, name, args) }
@@ -13321,7 +13505,9 @@ impl Instance {
         }
         if name == "messages.list" {
             let id = str_at(args.copy(), "conversation") ?? String()
-            if try i.store.conversation(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
+            let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
+            // A group chat opened: its router gets ready for the message likely to come.
+            if at(c, "room") != Json.Null and str_at(args.copy(), "before") == none { i.warm_router(user.copy()) }
             let limit = int_at(args.copy(), "limit") ?? 50
             let n: i64 = if limit < 1 { 1 } else if limit > 100 { 100 } else { limit }
             let (messages, more) = try i.store.messages(user, id, str_at(args, "before"), usize.try_from(n) ?? 50)
@@ -13761,9 +13947,12 @@ impl Instance {
             if router.len() > 0 and some(router.copy()) != str_at(old.copy(), "router_brain") {
                 if let why = try i.backup_refused(user.copy(), router) { return why }
             }
+            let rerouted = str_at(next.copy(), "router_brain") != str_at(old.copy(), "router_brain") or str_at(next.copy(), "router_model") != str_at(old.copy(), "router_model")
             let kept = try i.store.put_defaults(user.copy(), next, device.copy())
             i.log(user.copy(), String(), "agent", "Changed the agent defaults: revision {int_at(kept.copy(), "revision") ?? 0}", device.copy())
-            try i.event(user, "defaults.updated", Obj.new().j("defaults", kept.copy()).s("by", device).done())
+            try i.event(user.copy(), "defaults.updated", Obj.new().j("defaults", kept.copy()).s("by", device).done())
+            // The router on its new program or model, ready for the next pick.
+            if rerouted { i.warm_router(user) }
             return Answer.Value(Obj.new().j("defaults", kept).done())
         }
         if name.starts_with("rule.") { return try i.rule_command(user, device, name, args) }

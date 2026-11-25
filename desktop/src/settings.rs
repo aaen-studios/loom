@@ -89,7 +89,7 @@ fn page_words(screen: Screen) -> &'static str {
         }
         Screen::Programs => "brains models agent programs claude code codex gemini opencode acp registry install tokens limits share",
         Screen::Defaults => {
-            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer"
+            "defaults every agent brain backup model effort permission mode ask allow instructions busy queue steer group chats everyone router haiku"
         }
         Screen::Rules => {
             "rules allow deny ask what if permissions site path file folder command shell tool webhook routine"
@@ -555,6 +555,8 @@ mod tests {
         assert!(screens("claude code") == vec![Screen::Programs]);
         assert!(screens("steer") == vec![Screen::Defaults]);
         assert!(screens("webhook deny") == vec![Screen::Rules]);
+        assert!(screens("Group chats") == vec![Screen::Defaults]);
+        assert!(screens("router model") == vec![Screen::Defaults]);
         assert!(screens("zzz").is_empty());
     }
 }
