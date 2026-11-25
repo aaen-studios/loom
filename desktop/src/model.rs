@@ -2736,6 +2736,16 @@ pub fn size_of(bytes: u64) -> String {
 const MESSAGES_PAGE: usize = 200;
 const MESSAGES_FURTHEST: usize = 1800;
 
+/// How many pins the Pinned popover asks for at a time.
+const PINS_PAGE: usize = 30;
+
+/// A pinned message, with when it was pinned.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pin {
+    pub message: Message,
+    pub at: i64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Message {
     pub id: String,
@@ -5231,10 +5241,15 @@ pub struct Model {
     /// The person's tasks, newest first, a page at a time, and whether there are older ones.
     pub tasks: Vec<Task>,
     pub tasks_more: bool,
-    /// The open conversation's pinned messages, the newest pin first, while the pins
-    /// are open beside the chat, and whether they changed since.
-    pub pins: Vec<Message>,
-    pub pins_open: bool,
+    /// The open conversation's pinned messages, the newest pin first, as far as they've
+    /// been loaded, how many it has, whether there are more, and whether more are being
+    /// asked for (PLAN.md, "Pinned messages").
+    pub pins: Vec<Pin>,
+    pub pins_count: usize,
+    pub pins_more: bool,
+    pins_asked: bool,
+    /// The pin last taken off, where it was among the pins, for Undo.
+    pub unpinned: Option<(Pin, usize)>,
     /// Side questions asked while the app runs, oldest first.
     pub asides: Vec<Aside>,
     pins_stale: bool,
@@ -5564,7 +5579,7 @@ impl Model {
         if std::mem::take(&mut self.plugins_stale) {
             out.push(self.load_plugins());
         }
-        if self.pins_stale && self.pins_open {
+        if self.pins_stale {
             out.extend(self.load_pins());
         }
         if std::mem::take(&mut self.people_stale) {
@@ -5768,7 +5783,7 @@ impl Model {
             self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
-            self.pins.clear();
+            self.forget_pins();
             self.pins_stale = true;
         }
     }
@@ -5794,7 +5809,7 @@ impl Model {
             self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
-            self.pins.clear();
+            self.forget_pins();
             self.pins_stale = true;
         }
     }
@@ -5969,7 +5984,7 @@ impl Model {
             self.replying = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
-            self.pins.clear();
+            self.forget_pins();
             self.pins_stale = true;
         }
     }
@@ -6057,12 +6072,65 @@ impl Model {
         }
     }
 
-    /// The open conversation's pinned messages, for the pins beside the chat.
+    /// Another chat opened: its pins are asked for again.
+    fn forget_pins(&mut self) {
+        self.pins.clear();
+        self.pins_count = 0;
+        self.pins_more = false;
+        self.pins_asked = false;
+        self.unpinned = None;
+    }
+
+    /// The open conversation's pinned messages, for the count on the chat's header and
+    /// the Pinned popover: as many as are loaded already, and at least a page.
     pub fn load_pins(&mut self) -> Option<Value> {
         let conversation = self.conversation()?;
         self.pins_stale = false;
+        let limit = self.pins.len().clamp(PINS_PAGE, 100);
         Some(
-            json!({"t": "cmd", "id": "app.pins", "name": "messages.pinned", "args": {"conversation": conversation}}),
+            json!({"t": "cmd", "id": "app.pins", "name": "messages.pinned", "args": {"conversation": conversation, "limit": limit}}),
+        )
+    }
+
+    /// The next page of older pins, while there are more and none are being asked for.
+    pub fn load_more_pins(&mut self) -> Option<Value> {
+        if !self.pins_more || self.pins_asked {
+            return None;
+        }
+        let conversation = self.conversation()?;
+        let before = self.pins.last()?.message.id.clone();
+        self.pins_asked = true;
+        Some(
+            json!({"t": "cmd", "id": "app.pins.more", "name": "messages.pinned", "args": {"conversation": conversation, "before": before, "limit": PINS_PAGE}}),
+        )
+    }
+
+    /// Whether older pins are being loaded.
+    pub fn pins_loading(&self) -> bool {
+        self.pins_asked
+    }
+
+    /// Takes a pin off from the Pinned popover: it goes from the list at once, kept for
+    /// Undo, which puts it back where it was.
+    pub fn unpin(&mut self, message: &str) -> Option<Value> {
+        let at = self.pins.iter().position(|p| p.message.id == message)?;
+        let m = self.pins.remove(at);
+        self.pins_count = self.pins_count.saturating_sub(1);
+        self.unpinned = Some((m, at));
+        Some(self.pin(message, false))
+    }
+
+    /// Puts the pin last taken off back, at its place and with its time.
+    pub fn undo_unpin(&mut self) -> Option<Value> {
+        let (pin, at) = self.unpinned.take()?;
+        let when = pin.at;
+        let id = pin.message.id.clone();
+        if !self.pins.iter().any(|p| p.message.id == id) {
+            self.pins.insert(at.min(self.pins.len()), pin);
+            self.pins_count += 1;
+        }
+        Some(
+            json!({"t": "cmd", "id": self.id("app.pin"), "name": "message.pin", "args": {"message": id, "pinned": true, "at": when}}),
         )
     }
 
@@ -6468,8 +6536,13 @@ impl Model {
                         // The tool calls it names.
                         self.dirty.insert(List::Tools);
                     }
-                    // A pin put on or taken off here, or a pinned message gone.
-                    if kind == "message.updated" || kind == "message.deleted" {
+                    // A pin put on or taken off here, a pinned message changed, or a
+                    // message gone, which may have been pinned.
+                    let pinned = message.get("pinned").is_some_and(|p| !p.is_null());
+                    if kind == "message.deleted"
+                        || (kind == "message.updated"
+                            && (pinned || self.pins.iter().any(|p| p.message.id == id)))
+                    {
                         self.pins_stale = true;
                     }
                 } else if kind == "message.created" && self.synced && s(&message, "role") == "agent"
@@ -7047,13 +7120,38 @@ impl Model {
             }
             return;
         }
-        if id == "app.pins" {
-            let pins: Vec<Message> = f
-                .pointer("/value/messages")
+        if id == "app.pins" || id == "app.pins.more" {
+            let Some(v) = f.get("value") else {
+                self.pins_asked = false;
+                return;
+            };
+            let pins: Vec<Pin> = v
+                .get("messages")
                 .and_then(Value::as_array)
-                .map(|ms| ms.iter().map(|m| self.message_of(m)).collect())
+                .map(|ms| {
+                    ms.iter()
+                        .map(|m| Pin {
+                            message: self.message_of(m),
+                            at: m.pointer("/pinned/at").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
-            self.pins = pins;
+            if id == "app.pins" {
+                self.pins = pins;
+            } else {
+                for p in pins {
+                    if !self.pins.iter().any(|o| o.message.id == p.message.id) {
+                        self.pins.push(p);
+                    }
+                }
+            }
+            self.pins_more = v.get("more").and_then(Value::as_bool).unwrap_or(false);
+            self.pins_count = v
+                .get("count")
+                .and_then(Value::as_u64)
+                .map_or(self.pins.len(), |n| n as usize);
+            self.pins_asked = false;
             return;
         }
         if id.starts_with("app.branch_") {
@@ -12414,6 +12512,64 @@ mod tests {
         // None of it asked the core for the page again, or for the conversations.
         assert!(!m.dirty.contains(&List::Messages));
         assert!(!m.dirty.contains(&List::Conversations));
+    }
+
+    #[test]
+    fn the_pins_come_a_page_at_a_time_and_undo_puts_one_back_in_its_place() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            asked_by: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        let pin = |id: &str, at: i64| json!({"id": id, "conversation": "c_1", "role": "agent", "at": 1, "blocks": [], "pinned": {"at": at, "by": "d_1"}});
+        let ask = m.load_pins().unwrap();
+        assert_eq!(ask["args"]["limit"], 30);
+        m.take(&json!({"t": "result", "id": "app.pins", "ok": true, "value": {"messages": [pin("m_3", 30), pin("m_2", 20)], "more": true, "count": 3}}));
+        assert_eq!((m.pins.len(), m.pins_count, m.pins_more), (2, 3, true));
+        // Older ones as the list scrolls, after the last shown, once at a time.
+        let more = m.load_more_pins().unwrap();
+        assert_eq!(more["args"]["before"], "m_2");
+        assert!(m.pins_loading() && m.load_more_pins().is_none());
+        m.take(&json!({"t": "result", "id": "app.pins.more", "ok": true, "value": {"messages": [pin("m_1", 10)], "more": false, "count": 3}}));
+        let ids = |m: &Model| {
+            m.pins
+                .iter()
+                .map(|p| p.message.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&m), vec!["m_3", "m_2", "m_1"]);
+        assert!(!m.pins_loading() && m.load_more_pins().is_none());
+        // Unpinned, it's gone at once; Undo puts it back where it was, with its time.
+        let off = m.unpin("m_2").unwrap();
+        assert_eq!(off["args"]["pinned"], false);
+        assert_eq!(
+            (ids(&m), m.pins_count),
+            (vec!["m_3".into(), "m_1".into()], 2)
+        );
+        let back = m.undo_unpin().unwrap();
+        assert_eq!(
+            (back["args"]["pinned"].clone(), back["args"]["at"].clone()),
+            (json!(true), json!(20))
+        );
+        assert_eq!(
+            (ids(&m), m.pins_count),
+            (vec!["m_3".into(), "m_2".into(), "m_1".into()], 3)
+        );
+        assert!(m.undo_unpin().is_none());
+        // A pinned message changing asks for the pins again; another one doesn't.
+        m.take(&json!({"t": "event", "kind": "message.updated", "conversation": "c_1", "message": {"id": "m_9", "conversation": "c_1", "role": "agent", "at": 1, "blocks": []}}));
+        assert!(!m.pins_stale);
+        m.take(&json!({"t": "event", "kind": "message.updated", "conversation": "c_1", "message": pin("m_9", 40)}));
+        assert!(m.pins_stale);
     }
 
     fn conversations(items: Value) -> Value {
