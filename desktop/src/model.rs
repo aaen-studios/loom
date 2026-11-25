@@ -2267,7 +2267,8 @@ pub fn size_of(bytes: u64) -> String {
 }
 
 /// How many of a chat's newest messages it shows, and how many more it reaches back for
-/// a message a quote jumps to, a page at a time (the core gives 2,000 at most).
+/// as the person scrolls up or a quote jumps, a page at a time (the core gives 2,000 at
+/// most).
 const MESSAGES_PAGE: usize = 200;
 const MESSAGES_FURTHEST: usize = 1800;
 
@@ -4183,8 +4184,8 @@ pub struct Model {
     /// The selected agent's messages, oldest first, with the queued ones last.
     pub messages: Vec<Message>,
     pub more_messages: bool,
-    /// How many of the chat's newest messages it asks for beyond the first page, to
-    /// reach one far back that a quote jumps to.
+    /// How many of the chat's newest messages it asks for beyond the first page, as the
+    /// person scrolls up or a quote jumps to one far back.
     messages_more: usize,
     /// Asked for more of them, which haven't come yet.
     reaching: bool,
@@ -4814,6 +4815,7 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
+            self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.forget_pins();
@@ -4839,6 +4841,7 @@ impl Model {
             self.open_branch = branch;
             self.messages.clear();
             self.messages_for = None;
+            self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
             self.forget_pins();
@@ -5007,7 +5010,7 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
-            self.messages_more = 0;
+            self.first_page();
             self.replying = None;
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
@@ -7145,7 +7148,13 @@ impl Model {
                 }
                 self.messages_for = current;
                 self.more_messages = f.get("more").and_then(Value::as_bool).unwrap_or(false);
-                self.reaching = false;
+                // The page asked for is here when it's as long as asked, or the chat has
+                // no more. A shorter one with more is an earlier ask's, or the core's
+                // while it fetches older ones from the instance, and `core.filled` reads
+                // the chat again once they're in.
+                if !self.more_messages || items.len() >= MESSAGES_PAGE + self.messages_more {
+                    self.reaching = false;
+                }
                 let messages: Vec<Message> = items
                     .iter()
                     .filter(|m| !routine_prompt(m))
@@ -7643,9 +7652,13 @@ impl Model {
         self.replying.take().is_some()
     }
 
-    /// Asks for more of the chat's older messages, to reach one a quote jumps to. False
-    /// when the chat has no more.
+    /// Asks for the next page of the chat's older messages, as the person scrolls up to
+    /// them or a quote jumps to one further back. True while a page is on its way, the
+    /// one asked for now or one asked for already; false when the chat has no more.
     pub fn load_further_back(&mut self) -> bool {
+        if self.reaching {
+            return true;
+        }
         if !self.more_messages || self.messages_more >= MESSAGES_FURTHEST {
             return false;
         }
@@ -7653,6 +7666,13 @@ impl Model {
         self.reaching = true;
         self.dirty.insert(List::Messages);
         true
+    }
+
+    /// A chat just opened shows its newest page, with nothing on its way.
+    fn first_page(&mut self) {
+        self.more_messages = false;
+        self.messages_more = 0;
+        self.reaching = false;
     }
 
     /// Whether older messages asked for with `load_further_back` are still to come.
@@ -9915,20 +9935,48 @@ mod tests {
             .is_some_and(|x| selected_in(x, words))
     }
 
+    // LOO-296: scrolling up and a quote's jump share the same pages.
     #[test]
-    fn a_quote_far_back_reaches_for_older_messages_a_page_at_a_time() {
+    fn older_messages_come_a_page_at_a_time() {
+        let page = |n: usize, more: bool| {
+            let items: Vec<Value> = (0..n)
+                .map(|i| json!({"id": format!("msg_{i}"), "role": "agent", "at": i, "blocks": []}))
+                .collect();
+            json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": more, "items": items})
+        };
+        let asked_for = |m: &mut Model| {
+            m.fetches()
+                .iter()
+                .find(|f| f["what"] == "messages")
+                .map(|f| f["limit"].clone())
+        };
         let mut m = in_chat();
         _ = m.fetches();
-        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": true, "items": []}));
+        m.take(&page(200, true));
         assert!(m.load_further_back());
         assert!(m.reaching_back());
-        let asked = m.fetches();
-        assert!(asked
-            .iter()
-            .any(|f| f["what"] == "messages" && f["limit"] == 400));
-        m.take(&json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "more": false, "items": []}));
+        assert_eq!(asked_for(&mut m), Some(json!(400)));
+        // Asked again while it comes, as a jump does while scrolling asked: the same page.
+        assert!(m.load_further_back());
+        assert_eq!(asked_for(&mut m), None);
+        // The core's own 300 while it fetches the rest from the instance: still coming.
+        m.take(&page(300, true));
+        assert!(m.reaching_back());
+        // Once they're in, the page is whole.
+        m.take(&page(400, true));
+        assert!(!m.reaching_back());
+        assert!(m.load_further_back());
+        assert_eq!(asked_for(&mut m), Some(json!(600)));
+        // The oldest of all: nothing more to ask for.
+        m.take(&page(450, false));
         assert!(!m.reaching_back());
         assert!(!m.load_further_back());
+        // Another chat starts from its newest page.
+        m.select(Some("a_2".into()));
+        assert!(!m.reaching_back());
+        _ = m.fetches();
+        m.select(Some("a_1".into()));
+        assert_eq!(asked_for(&mut m), Some(json!(200)));
     }
 
     #[test]

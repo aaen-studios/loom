@@ -195,6 +195,54 @@ pub fn unit(port: u16, boxes: String?) -> String {
     return lines.join("\n")
 }
 
+/// Puts the program at `from` in the service's own copy, SERVICE_BIN, as the loom
+/// user's, for `loom install` and for `loom update` run as root. BIN is never a link
+/// to it: /var/lib/loom is the loom user's alone, so no one else could run it, and
+/// root would run a program the service, and so any agent of the owner's, can
+/// write. It goes beside it first, under a name of its own, since the instance
+/// stages its own updates there as `.new`, and is renamed over it, since the
+/// service may be running it.
+pub fn give_service(from: String) ! Error {
+    let folder = String(SERVICE_BIN[..SERVICE_BIN.find_last("/") ?? 0])
+    try fs.make_dir_all(folder.copy())
+    let next = "{SERVICE_BIN}.next"
+    try fs.copy(from, next.copy())
+    try fs.set_mode(next.copy(), 0o755)
+    _ = try sh("chown", [String("loom:loom"), next.copy()])
+    try fs.rename_synced(next, String(SERVICE_BIN))
+    _ = try sh("chown", [String("-R"), String("loom:loom"), folder])
+}
+
+/// The port a unit loom wrote has the service listen on.
+pub fn port_of_unit(text: String) -> u16? {
+    for line in text.lines() {
+        if not line.starts_with("ExecStart=") { continue }
+        let parts = line.split(" ")
+        var k: usize = 0
+        while k + 1 < parts.len() {
+            if parts[k] == "--port" { return u16.parse(parts[k + 1].copy()) }
+            k += 1
+        }
+    }
+    return none
+}
+
+/// The port the service listens on, from its unit, or none where loom install didn't set one up.
+pub fn service_port() -> u16? {
+    let text = match fs.read_text(String(UNIT)) {
+        ok(some(t)) => t,
+        _ => return none,
+    }
+    if not text.contains(MARK) { return none }
+    return port_of_unit(text)
+}
+
+/// Whether this program is the command line of a server `loom install` set up, BIN,
+/// beside the service's own copy. Only root and the loom user can see that copy.
+pub fn is_command_line() -> bool {
+    return env.os() == "linux" and current_exe() == BIN and fs.exists(String(SERVICE_BIN))
+}
+
 /// The first id of a free range of 65,536 for `/etc/subuid` or `/etc/subgid`, after
 /// every range `text` gives out already, and never below 100,000.
 pub fn free_range(text: String) -> i64 {
@@ -419,13 +467,7 @@ pub fn install(plan: Plan) -> Done ! Error {
         steps.push("put loom in {BIN}")
     }
     // And the service's own copy, which it updates itself.
-    let folder = String(SERVICE_BIN[..SERVICE_BIN.find_last("/") ?? 0])
-    try fs.make_dir_all(folder.copy())
-    let service_next = "{SERVICE_BIN}.new"
-    try fs.copy(String(BIN), service_next.copy())
-    try fs.set_mode(service_next.copy(), 0o755)
-    try fs.rename_synced(service_next, String(SERVICE_BIN))
-    _ = try sh("chown", [String("-R"), String("loom:loom"), folder])
+    try give_service(String(BIN))
     steps.push("the service runs its own copy, {SERVICE_BIN}, which it can update")
 
     // Sandboxes, for everyone but the owner.
@@ -561,6 +603,8 @@ fn the_unit_runs_it_as_loom() {
     let boxed = unit(8790, some(String("998")))
     assert(boxed.contains("--port 8790 --sandboxes podman") and boxed.contains("XDG_RUNTIME_DIR=/run/user/998") and boxed.contains("After=user@998.service") and boxed.contains("ReadWritePaths=/run/user/998"))
     assert(not boxed.contains("NoNewPrivileges"))
+    assert(port_of_unit(u) == some(8790u16) and port_of_unit(boxed) == some(8790u16))
+    assert(port_of_unit(unit(9001, none)) == some(9001u16) and port_of_unit(String("[Service]\nExecStart=/x serve\n")) == none)
 }
 
 @test

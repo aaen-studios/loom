@@ -98,7 +98,7 @@ export function play(app: HTMLElement) {
 			tab.setAttribute('aria-expanded', String(open));
 			tab.querySelector('.chev path')!.setAttribute('d', open ? 'm18 15-6-6-6 6' : 'm6 9 6 6 6-6');
 		};
-		tab.addEventListener('click', () => show(list.hidden));
+		tab.addEventListener('click', () => show(list.hidden !== false));
 		document.addEventListener('pointerdown', (e) => {
 			if (!list.hidden && !tab.parentElement!.contains(e.target as Node)) show(false);
 		});
