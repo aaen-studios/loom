@@ -364,6 +364,10 @@ enum Sample {
                         ["kind": "file", "file": "sample-sprout", "name": "friday.png", "mime": "image/png", "size": 361_000],
                         ["kind": "file", "file": "sample-leaf", "name": "saturday.png", "mime": "image/png", "size": 351_000],
                         ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000]]],
+            // A reply naming a picture in the agent's folder, shown by its thumbnail.
+            ["id": "msg_46", "conversation": "c_4", "role": "agent", "agent": "a_4", "run": "run_46", "at": 1795187300000,
+             "mentions": [["path": "photos/seedlings.png", "name": "seedlings.png", "size": 361_000, "mime": "image/png", "thumb": "sample-sprout"]],
+             "blocks": [["kind": "text", "text": "Last week's seedlings are in `photos/seedlings.png`."]]],
         ],
         "c_5": [
             ["id": "msg_50", "conversation": "c_5", "role": "person", "from": "a_1", "at": 1795187300000,

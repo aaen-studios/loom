@@ -8,6 +8,7 @@ module server.files
 import std.bytes
 import std.fs
 import std.image.{Color, Image, Kind, decode_ico, encode_ico}
+import std.net.{Waker as LoopWaker}
 import std.thread.{Task}
 
 /// The longest side of a thumbnail, in pixels.
@@ -49,20 +50,83 @@ pub fn start() -> Sender<Thumb> {
 /// alpha, turned the way a photo's EXIF says it shows, since the thumbnail keeps none.
 /// It's written beside `dst` first and moved, so half a thumbnail is never served.
 pub fn make_thumb(src: String, dst: String) ! Error {
-    let data = try fs.read(src)
+    let (small, _) = try thumb_of(try fs.read(src))
+    let part = "{dst}.part"
+    try fs.write(part.copy(), small)
+    try fs.rename(part, dst)
+}
+
+/// A thumbnail of an image, at most `THUMB` pixels a side and turned the way a photo's
+/// EXIF says it shows: a JPEG, or a PNG when it has alpha, and which of the two.
+pub fn thumb_of(data: List<u8>) -> (List<u8>, String) ! Error {
     let turn = if sniff(data[..if data.len() < 12 { data.len() } else { 12 }]) == some(String("image/jpeg")) { jpeg_orientation(data.copy()) } else { 1u16 }
     let im = match Image.decode(data) {
         ok(i) => i,
         err(why) => fail "it isn't an image loom can read: {why}",
     }
     let small = upright(im.thumbnail(THUMB, THUMB), turn)
-    let part = "{dst}.part"
-    if small.kind().has_alpha() {
-        try fs.write(part.copy(), small.encode_png())
-    } else {
-        try fs.write(part.copy(), small.to(Kind.Rgb).encode_jpeg(80))
+    if small.kind().has_alpha() { return (small.encode_png(), String("image/png")) }
+    return (small.to(Kind.Rgb).encode_jpeg(80), String("image/jpeg"))
+}
+
+// --- Pictures a reply names (PLAN.md, "Mentions") ---
+
+/// A picture in an agent's folder or the shared one that a reply names, to make a
+/// thumbnail of: the reply's `message`, of `user`, names it as `named`, and it's at
+/// `path`.
+pub struct Picture {
+    pub user: String
+    pub message: String
+    pub named: String
+    pub path: String
+    pub key: String    // the picture's path, size and time, which its thumbnail is kept by
+}
+
+/// Its thumbnail, or why there's none.
+pub struct Pictured {
+    pub user: String
+    pub message: String
+    pub named: String
+    pub path: String
+    pub key: String
+    pub thumb: List<u8>    // empty when it couldn't be made
+    pub mime: String
+    pub error: String
+}
+
+fn picture_thumb(path: String) -> (List<u8>, String) ! Error {
+    return try thumb_of(try fs.read(path))
+}
+
+struct PictureWorker {
+    jobs: Receiver<Picture>
+    done: Sender<Pictured>
+    wake: LoopWaker
+}
+
+impl Task for PictureWorker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            let out = match picture_thumb(job.path.copy()) {
+                ok(t) => Pictured { user: job.user, message: job.message, named: job.named, path: job.path, key: job.key, thumb: t.0.copy(), mime: t.1.copy(), error: String() },
+                err(e) => Pictured { user: job.user, message: job.message, named: job.named, path: job.path, key: job.key, thumb: List<u8>(), mime: String(), error: "{e}" },
+            }
+            w.done.send(out)
+            w.wake.wake()
+        }
     }
-    try fs.rename(part, dst)
+}
+
+/// Starts the thread that makes thumbnails of the pictures replies name, and gives the
+/// end that sends it work and the one its thumbnails come back on. It wakes the loop
+/// with each.
+pub fn start_pictures(wake: LoopWaker) -> (Sender<Picture>, Receiver<Pictured>) {
+    let jobs = Receiver<Picture>()
+    let to = jobs.sender()
+    let done = Receiver<Pictured>()
+    _ = unsafe { Thread.spawn(PictureWorker { jobs: jobs, done: done.sender(), wake: wake }) }
+    return (to, done)
 }
 
 /// `im` turned and mirrored the way an EXIF orientation of `turn` says it shows.
@@ -349,6 +413,15 @@ fn a_photo_turned_by_its_exif_has_its_sides_swapped() {
     let small = Image.decode(fs.read(dst.copy())!)!
     assert(small.width() == 48 and small.height() == 64)
     fs.remove_dir_all(dir)!
+}
+
+@test
+fn a_thumbnail_is_a_small_jpeg_or_png() {
+    let (photo, kind) = thumb_of(Image.new(1600, 800, Kind.Rgb, Color.rgb(20, 120, 200)).encode_png())!
+    let small = Image.decode(photo)!
+    assert(kind == "image/jpeg" and small.width() == THUMB and small.height() == 256)
+    let (clear, clear_kind) = thumb_of(Image.new(40, 30, Kind.Rgba, Color.rgba(0, 0, 0, 100)).encode_png())!
+    assert(clear_kind == "image/png" and Image.decode(clear)!.width() == 40)
 }
 
 fn refused(data: List<u8>) -> bool {
