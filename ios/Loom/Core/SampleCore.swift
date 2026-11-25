@@ -281,7 +281,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             tell(["t": "event", "kind": "message.updated", "seq": JSON(seq), "at": JSON(Sample.now()), "conversation": JSON(c), "message": .object(m)])
             return
         }
-        tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": "There's no message \(id.text)."]])
+        tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": JSON("There's no message \(id.text).")]])
     }
 
     /// The folder commands, as the instance answers them.
