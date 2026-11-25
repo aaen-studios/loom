@@ -3276,6 +3276,54 @@ pub fn spoken(md: &str) -> String {
     out
 }
 
+/// The most characters a quote's line keeps; the app cuts it to its width with "…".
+pub const QUOTE_MOST: usize = 240;
+
+/// Markdown on one plain line, as a quote over a message shows it: its words without
+/// their marks, list marks and rules, its lines run together with spaces, and cut at
+/// `QUOTE_MOST` characters with "…".
+pub fn one_line(md: &str) -> String {
+    let mut out = String::new();
+    for line in spoken(md).lines() {
+        let line = line.trim();
+        // A rule, or a table's divider, says nothing.
+        if line
+            .chars()
+            .all(|c| matches!(c, '-' | '=' | '_' | '|' | ':' | ' '))
+        {
+            continue;
+        }
+        let mut line = line;
+        for mark in ["- ", "+ ", "• "] {
+            if let Some(rest) = line.strip_prefix(mark) {
+                line = rest.trim_start();
+                break;
+            }
+        }
+        for mark in ["[ ] ", "[x] ", "[X] "] {
+            if let Some(rest) = line.strip_prefix(mark) {
+                line = rest.trim_start();
+                break;
+            }
+        }
+        for word in line.split(|c: char| c.is_whitespace() || c == '|') {
+            if word.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push(' ');
+            }
+            out.push_str(word);
+            if out.chars().count() > QUOTE_MOST {
+                let mut cut: String = out.chars().take(QUOTE_MOST).collect();
+                cut.push('…');
+                return cut;
+            }
+        }
+    }
+    out
+}
+
 /// A tool call's title, as its agent named it.
 pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
     call.and_then(|c| tools.get(c))
@@ -10973,6 +11021,18 @@ mod tests {
             "snake_case [stays] gone"
         );
         assert_eq!(spoken("日本語の*テスト*"), "日本語のテスト");
+    }
+
+    #[test]
+    fn a_quote_is_one_plain_line() {
+        assert_eq!(
+            one_line("I can:\n\n- create agents\n* **pin** them\n1. first\n- [ ] later\n\n---\n## Next\n| a | b |\n|---|---|"),
+            "I can: create agents pin them 1. first later Next a b"
+        );
+        assert_eq!(one_line("  \n\n "), "");
+        let long = one_line(&"word ".repeat(200));
+        assert_eq!(long.chars().count(), QUOTE_MOST + 1);
+        assert!(long.ends_with('…') && !long.contains('\n'));
     }
 
     #[test]
