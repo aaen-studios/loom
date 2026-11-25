@@ -175,6 +175,59 @@ export function play(app: HTMLElement) {
 	document.addEventListener('pointerdown', (e) => {
 		if (picked && !picked.contains(e.target as Node)) unpick();
 	});
+	// A message's ⋯ by its corner opens its menu: Reply, Copy and, after a line, Delete,
+	// which goes at once and leaves a quiet mark where it was; a quote of it says the
+	// original was deleted (PLAN.md, "Deleting a message"; app.rs, ctx_menu, deleted_mark).
+	let menu: HTMLElement | null = null;
+	const unmenu = () => {
+		menu?.remove();
+		menu = null;
+	};
+	const quotes = new Map<HTMLElement, HTMLElement>();
+	const remove = (row: HTMLElement) => {
+		const agent = row.classList.contains('reply');
+		const mark = tpl('demo-gone');
+		mark.querySelector('.gone-words')!.textContent = agent
+			? `${row.querySelector('.who')?.textContent ?? 'Juniper'}'s message was deleted`
+			: 'You deleted a message';
+		row.classList.add('deleted');
+		row.append(mark);
+		for (const [quote, to] of quotes) {
+			if (to !== row) continue;
+			quote.classList.add('original-gone');
+			quote.querySelector('.q-words')!.textContent = 'The original was deleted';
+		}
+	};
+	/** The chat's first messages back as they were, as the scene starts again. */
+	const undelete = () => {
+		for (const row of msgs.querySelectorAll<HTMLElement>('.row.deleted')) {
+			row.classList.remove('deleted');
+			row.querySelector('.gone')?.remove();
+		}
+	};
+	for (const b of msgs.querySelectorAll<HTMLButtonElement>('.more-btn')) {
+		b.addEventListener('click', (e) => {
+			unmenu();
+			const row = b.closest<HTMLElement>('.row')!;
+			menu = tpl('demo-more');
+			const at = app.getBoundingClientRect();
+			menu.style.left = `${Math.min(e.clientX - at.left, at.width - 210)}px`;
+			menu.style.top = `${e.clientY - at.top + 6}px`;
+			for (const item of menu.querySelectorAll<HTMLButtonElement>('[data-act]')) {
+				item.addEventListener('click', () => {
+					if (item.dataset.act === 'reply') replyTo(row);
+					else if (item.dataset.act === 'copy') navigator.clipboard?.writeText(wordsOf(row)).catch(() => {});
+					else remove(row);
+					unmenu();
+				});
+			}
+			app.append(menu);
+		});
+	}
+	document.addEventListener('pointerdown', (e) => {
+		const on = e.target as Element;
+		if (menu && !menu.contains(on) && !on.closest?.('.more-btn')) unmenu();
+	});
 	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place;
 	// the strip's arrow, or Juniper's own row, goes back to the person's chat (app.rs,
 	// open_thread, branch_strip). The chat goes on meanwhile.
@@ -336,6 +389,11 @@ export function play(app: HTMLElement) {
 			quote.querySelector('.q-words')!.textContent = to.part ? `“${to.words}”` : to.words;
 			quote.setAttribute('aria-label', `Replying to ${to.who}: ${to.words}`);
 			quote.addEventListener('click', () => jump(to.row));
+			quotes.set(quote, to.row);
+			if (to.row.classList.contains('deleted')) {
+				quote.classList.add('original-gone');
+				quote.querySelector('.q-words')!.textContent = 'The original was deleted';
+			}
 			you.prepend(quoted);
 		}
 		return you;
@@ -499,6 +557,8 @@ export function play(app: HTMLElement) {
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.classList.add('leaving');
 		await wait(400, id);
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
+		quotes.clear();
+		undelete();
 	}
 
 	async function loop() {
@@ -515,6 +575,8 @@ export function play(app: HTMLElement) {
 	function still() {
 		run++;
 		for (const el of [...msgs.children]) if (!history.includes(el)) el.remove();
+		quotes.clear();
+		undelete();
 		cleared();
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
 		const you = sent(false, { row: earlier, who: 'Juniper', words: wordsOf(earlier), part: false, ask: false });

@@ -204,6 +204,8 @@ enum Ctx {
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
+    /// A table in a reply, by its rows, header first: the ways to copy it.
+    Table(Vec<Vec<String>>),
 }
 
 /// Words selected in a message, and where the selection ended: a small bar there has
@@ -9134,10 +9136,14 @@ ACTA_KEY=secret:ACTA_KEY",
             .on_mouse_down_out(cx.listener(move |this, _, _, cx| close(this, cx)));
         match on {
             Ctx::Message(id, picked) => {
-                let m = self.rows.iter().find_map(|r| match r {
-                    Row::Message(m) if m.id == id => Some(m.clone()),
-                    _ => None,
-                })?;
+                let m = self
+                    .rows
+                    .iter()
+                    .find_map(|r| match r {
+                        Row::Message(m) if m.id == id => Some(m.clone()),
+                        _ => None,
+                    })
+                    .filter(|m| !m.deleted)?;
                 // Words selected in it: what's done with them, first (LOO-200).
                 if let Some(words) = picked.filter(|w| model::selected_in(&m, w)) {
                     for (n, (act, icon, title)) in
@@ -9182,6 +9188,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let pinned = m.pinned;
                 let pin_id = m.id.clone();
+                let (gone_id, can_delete) = (m.id.clone(), !m.live && !m.queued);
                 panel = panel
                     .child(
                         self.menu_item(
@@ -9204,6 +9211,44 @@ ACTA_KEY=secret:ACTA_KEY",
                                 close(this, cx);
                             })),
                     );
+                // Delete, in red after a line: at once, leaving a mark (LOO-208).
+                if can_delete {
+                    panel = panel
+                        .child(div().my(px(space::XS)).h(px(1.0)).bg(p.line))
+                        .child(
+                            self.menu_item("ctx-delete", Ico::Trash, "Delete", true)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    let f = this.model.delete_message(&gone_id);
+                                    this.send(f);
+                                    close(this, cx);
+                                })),
+                        );
+                }
+            }
+            Ctx::Table(rows) => {
+                for (n, (how, title)) in [
+                    (model::TableAs::Csv, "Copy as CSV"),
+                    (model::TableAs::Markdown, "Copy as Markdown"),
+                    (model::TableAs::Text, "Copy as text"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let text = model::table_copy(&rows, how);
+                    panel = panel.child(
+                        self.menu_item(
+                            SharedString::from(format!("ctx-table-{n}")),
+                            Ico::Copy,
+                            title,
+                            false,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                            this.notice = Some(("Copied.".into(), Instant::now(), true));
+                            close(this, cx);
+                        })),
+                    );
+                }
             }
             Ctx::Server(dir) => {
                 let name = self
@@ -17522,7 +17567,10 @@ fn quote_view(
         .and_then(|a| mention_thread(a, &hex_of(color)));
     let words = model::one_line(&r.text);
     let pictures = r.files.iter().filter(|f| f.image()).count();
-    let shown = if !words.is_empty() {
+    // Once the original is deleted, it says so, quietly, and nothing of what it said.
+    let shown = if r.deleted {
+        "The original was deleted".to_string()
+    } else if !words.is_empty() {
         if r.part {
             format!("“{words}”")
         } else {
@@ -17541,7 +17589,7 @@ fn quote_view(
             .collect::<Vec<_>>()
             .join(", ")
     };
-    let lead = r.files.first().map(|f| {
+    let lead = r.files.first().filter(|_| !r.deleted).map(|f| {
         match files
             .get(&format!("{}.thumb", f.file))
             .filter(|_| f.image())
@@ -17592,8 +17640,22 @@ fn quote_view(
                 .child(who),
         )
         .children(lead)
+        .when(r.deleted, |d| {
+            d.child(
+                Icon::new(Ico::Trash)
+                    .xsmall()
+                    .flex_none()
+                    .text_color(p.ink_3),
+            )
+        })
         .when(!shown.is_empty(), |d| {
-            d.child(div().min_w_0().truncate().text_color(p.ink_2).child(shown))
+            d.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(if r.deleted { p.ink_3 } else { p.ink_2 })
+                    .child(shown),
+            )
         })
         .on_click(move |_, _, cx| {
             let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
@@ -17627,6 +17689,205 @@ fn spined_quote(p: Palette, quote: Stateful<Div>) -> Div {
         )
 }
 
+/// What's left of a deleted message (PLAN.md, "Deleting a message"): a quiet line
+/// where it was, so replies to it still make sense. The person's on their side, an
+/// agent's level with its replies' words, past where its thread would be.
+fn deleted_mark(p: Palette, m: &Message, name: &str, scale: f32) -> Div {
+    let mine = m.role == "person";
+    let said = match (&m.from_agent, mine) {
+        (None, true) => "You deleted a message".to_string(),
+        (Some(from), true) => format!("{from}'s message was deleted"),
+        (_, false) => format!("{name}'s message was deleted"),
+    };
+    div()
+        .w_full()
+        .flex()
+        .when(mine, |d| d.justify_end())
+        .when(!mine, |d| d.pl(px(14.0 + space::M)))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS))
+                .py(px(2.0))
+                .text_size(px(size::SMALL * scale))
+                .text_color(p.ink_3)
+                .child(Icon::new(Ico::Trash).xsmall())
+                .child(said),
+        )
+}
+
+/// How many lines a long message shows before it's cut (PLAN.md, "Long messages and
+/// tables").
+const FOLD_LINES: f32 = 10.0;
+
+thread_local! {
+    /// How tall what each cut could fold was laid out, by its key, to know which are
+    /// long before they're drawn again.
+    static TALL: RefCell<HashMap<String, f32>> = RefCell::new(HashMap::new());
+}
+
+/// What a long message says, cut after `lines` lines of `line_h` with a fade into `bg`
+/// over the last, and a quiet "Show more" under it in `quiet`, which opens it in place
+/// ("Show less" folds it again) through `toggle`. Words that fit, or that only just
+/// don't, show whole. Each is measured as it's laid out, and its row drawn again when
+/// that finds it long, or no longer long.
+#[allow(clippy::too_many_arguments)]
+fn cut_long(
+    key: String,
+    words: AnyElement,
+    line_h: f32,
+    lines: f32,
+    bg: Hsla,
+    quiet: Hsla,
+    hover: Hsla,
+    open: bool,
+    toggle: impl Fn(&mut App) + 'static,
+) -> Div {
+    let limit = line_h * lines;
+    // Cut only what's more than a line and a half past it: nothing opens to one line.
+    let long_at = limit + line_h * 1.5;
+    let long = TALL
+        .with(|t| t.borrow().get(&key).copied())
+        .is_some_and(|h| h > long_at);
+    let view = motion::scope();
+    let measured = key.clone();
+    let whole = div().flex_none().relative().child(words).child(
+        canvas(
+            move |b, _, cx| {
+                let h = b.size.height.as_f32();
+                let was = TALL.with(|t| {
+                    let mut t = t.borrow_mut();
+                    if t.len() > 4000 {
+                        t.clear();
+                    }
+                    t.insert(measured.clone(), h)
+                });
+                if was.is_some_and(|w| w > long_at) != (h > long_at) {
+                    if let Some(v) = view {
+                        cx.notify(v);
+                    }
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    );
+    let cut = long && !open;
+    div()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .relative()
+                .flex()
+                .flex_col()
+                .when(cut, |d| d.max_h(px(limit)).overflow_hidden())
+                .child(whole)
+                .when(cut, |d| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .left_0()
+                            .right_0()
+                            .bottom_0()
+                            .h(px(line_h * 2.0))
+                            .bg(linear_gradient(
+                                180.0,
+                                linear_color_stop(bg.opacity(0.0), 0.0),
+                                linear_color_stop(bg, 1.0),
+                            )),
+                    )
+                }),
+        )
+        .when(long, |d| {
+            d.child(
+                div().flex().child(
+                    div()
+                        .id(SharedString::from(format!("more-{key}")))
+                        .role(Role::Button)
+                        .mt(px(2.0))
+                        .text_size(px(size::SMALL))
+                        .text_color(quiet)
+                        .cursor_pointer()
+                        .soft_ink(quiet, hover)
+                        .child(if open { "Show less" } else { "Show more" })
+                        .on_click(move |_, _, cx| toggle(cx)),
+                ),
+            )
+        })
+}
+
+/// Under a table in a reply: how many rows it has, and a small Copy button that copies
+/// it as CSV, whose chevron opens the other ways to copy it.
+fn table_line(p: Palette, key: String, rows: Vec<Vec<String>>, this: WeakEntity<Loom>) -> Div {
+    let csv = model::table_copy(&rows, model::TableAs::Csv);
+    let copier = this.clone();
+    let count = model::table_rows(&rows);
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::S))
+        .text_size(px(size::SMALL))
+        .text_color(p.ink_3)
+        .child(count)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .h(px(22.0))
+                .border_1()
+                .border_color(p.line)
+                .rounded(px(radius::ROW))
+                .overflow_hidden()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("table-copy-{key}")))
+                        .role(Role::Button)
+                        .aria_label("Copy as CSV")
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::XS))
+                        .px(px(space::S))
+                        .cursor_pointer()
+                        .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                        .child(Icon::new(Ico::Copy).xsmall())
+                        .child("Copy")
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(csv.clone()));
+                            let _ = copier.update(cx, |loom, cx| {
+                                loom.notice = Some(("Copied.".into(), Instant::now(), true));
+                                cx.notify();
+                            });
+                        }),
+                )
+                .child(div().w(px(1.0)).h_full().bg(p.line))
+                .child(
+                    div()
+                        .id(SharedString::from(format!("table-more-{key}")))
+                        .role(Role::Button)
+                        .aria_label("Copy as")
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .px(px(3.0))
+                        .cursor_pointer()
+                        .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                        .child(Icon::new(Ico::ChevronDown).xsmall())
+                        .on_click(move |e, _, cx| {
+                            let _ = this.update(cx, |loom, cx| {
+                                loom.picked = None;
+                                loom.open_ctx(e.position(), Ctx::Table(rows.clone()), cx)
+                            });
+                        }),
+                ),
+        )
+}
+
 fn person_bubble(p: Palette, tint: Hsla, vibrant: bool) -> Hsla {
     if vibrant {
         return Hsla {
@@ -17648,6 +17909,7 @@ fn person(
     room: i32,
     joined: model::Joined,
     beside: Option<Div>,
+    open: &HashSet<String>,
     this: WeakEntity<Loom>,
 ) -> Div {
     let text: String = m
@@ -17793,6 +18055,28 @@ fn person(
         None => person_bubble(p, tint, vibrant),
     };
     let ink = motion::ink_on(bg, p.ink, p.bg);
+    // Cut after ten lines, to open in place.
+    let fold = format!("more-{}", m.id);
+    let unfolded = open.contains(&fold);
+    let toggler = this.clone();
+    let said = cut_long(
+        fold.clone(),
+        KeptText::new(
+            SharedString::from(format!("m-{}-{room}", m.id)),
+            words,
+            move |v| with_links(v.selectable(true).on_link_click(on_link)),
+        )
+        .into_any_element(),
+        size::BODY * scale * line::BODY,
+        FOLD_LINES,
+        bg,
+        ink.opacity(0.6),
+        ink,
+        unfolded,
+        move |cx| {
+            let _ = toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+        },
+    );
     out.when(!text.trim().is_empty(), |d| {
         d.child(
             div()
@@ -17807,11 +18091,7 @@ fn person(
                 .text_size(px(size::BODY * scale))
                 .text_color(ink)
                 .when(m.queued, |d| d.opacity(0.6))
-                .child(KeptText::new(
-                    SharedString::from(format!("m-{}-{room}", m.id)),
-                    words,
-                    move |v| with_links(v.selectable(true).on_link_click(on_link)),
-                ))
+                .child(said)
                 // Its time on hover, just left of it.
                 .when_some(beside, |d, t| d.relative().child(t)),
         )
@@ -21138,6 +21418,34 @@ impl ReplyDraw<'_> {
         format!("{}/{}", self.m.id, i)
     }
 
+    /// A reply's words, kept as `key`, with its links and mentions opening.
+    fn kept(&self, key: String, md: &str) -> KeptText {
+        let opener = self.this.clone();
+        KeptText::new(
+            SharedString::from(key),
+            linked_words(self.p, md, self.m),
+            move |v| {
+                with_links(v.selectable(true).on_link_click(
+                    move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| {
+                        if url.starts_with("loom:file/") {
+                            let _ = opener.update(cx, |loom, _| {
+                                if let Some(frame) = loom.model.open_file_mention(url) {
+                                    loom.send(frame);
+                                }
+                            });
+                        } else if let Some(agent) = url.strip_prefix("loom:agent/") {
+                            // An agent it mentions opens its chat (LOO-301).
+                            let agent = agent.to_string();
+                            let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
+                        } else if !url.starts_with("loom:") {
+                            cx.open_url(url);
+                        }
+                    },
+                ))
+            },
+        )
+    }
+
     fn part(&self, part: &model::Part) -> AnyElement {
         use model::Part;
         match part {
@@ -21188,36 +21496,47 @@ impl ReplyDraw<'_> {
                 &mention_agents(),
                 &self.m.mentions,
             );
-            let opener = self.this.clone();
+            // Each table on its own, with the line under it that copies it.
+            let key = self.key(i);
+            let mut said_in = div().flex().flex_col().gap(px(space::XS));
+            let pieces = model::pieces(&said);
+            // A table takes the column's width, rather than squeezing into its narrowest.
+            let wide = pieces
+                .iter()
+                .any(|piece| matches!(piece, model::Piece::Table { .. }));
+            for (n, piece) in pieces.into_iter().enumerate() {
+                let at = if n == 0 {
+                    format!("r-{key}-{}", show.room)
+                } else {
+                    format!("r-{key}.{n}-{}", show.room)
+                };
+                said_in = match piece {
+                    model::Piece::Words(w) => said_in.child(self.kept(at, &w)),
+                    model::Piece::Table { markdown, rows } => said_in
+                        .child(self.kept(at, &markdown))
+                        .child(table_line(p, format!("{key}.{n}"), rows, self.this.clone())),
+                };
+            }
+            // Cut after ten lines, to open in place.
+            let fold = format!("more-{key}");
+            let open = self.open.contains(&fold);
+            let toggler = self.this.clone();
             let words = div()
                 .text_size(px(size::REPLY * show.text_scale))
                 .line_height(relative(line::REPLY))
                 .text_color(p.ink)
-                .child(KeptText::new(
-                    SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    linked_words(p, &said, self.m),
-                    move |v| {
-                        let opener = opener.clone();
-                        with_links(v.selectable(true).on_link_click(
-                            move |url: &SharedString,
-                                  _: &ClickEvent,
-                                  _: &mut Window,
-                                  cx: &mut App| {
-                                if url.starts_with("loom:file/") {
-                                    let _ = opener.update(cx, |loom, _| {
-                                        if let Some(frame) = loom.model.open_file_mention(url) {
-                                            loom.send(frame);
-                                        }
-                                    });
-                                } else if let Some(agent) = url.strip_prefix("loom:agent/") {
-                                    // An agent it mentions opens its chat (LOO-301).
-                                    let agent = agent.to_string();
-                                    let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
-                                } else if !url.starts_with("loom:") {
-                                    cx.open_url(url);
-                                }
-                            },
-                        ))
+                .child(cut_long(
+                    fold.clone(),
+                    said_in.into_any_element(),
+                    size::REPLY * show.text_scale * line::REPLY,
+                    FOLD_LINES,
+                    if show.bubbles { p.bubble } else { p.bg },
+                    p.ink_3,
+                    p.ink,
+                    open,
+                    move |cx| {
+                        let _ =
+                            toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
                     },
                 ));
             let sources = (self.sources_at == Some(i)).then(|| self.sources_tab());
@@ -21240,12 +21559,16 @@ impl ReplyDraw<'_> {
                     Some(tab) => div()
                         .relative()
                         .max_w(relative(0.94))
+                        .when(wide, |d| d.w(relative(0.94)))
                         .pb(px(SOURCES_HANG))
                         .child(div().absolute().left(px(14.0)).bottom_0().child(tab))
                         .child(bubble),
-                    None => bubble.max_w(relative(0.94)),
+                    None => bubble
+                        .max_w(relative(0.94))
+                        .when(wide, |d| d.w(relative(0.94))),
                 })
             } else {
+                let words = words.when(wide, |d| d.w_full());
                 match sources {
                     Some(tab) => div()
                         .flex()
@@ -24132,6 +24455,7 @@ mod row_tests {
             from_agent: None,
             routine: String::new(),
             routine_name: String::new(),
+            deleted: false,
             pinned: false,
             reply: None,
             mentions: Vec::new(),
@@ -25047,6 +25371,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         ),
     };
     let inner = match row {
+        Row::Message(m) if m.deleted => deleted_mark(p, m, name, show.text_scale),
         Row::Message(m) if m.role == "person" => person(
             p,
             m,
@@ -25057,6 +25382,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             show.room,
             joined,
             beside,
+            open,
             this.clone(),
         ),
         Row::Message(m) => reply(
@@ -25087,7 +25413,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     // A message's pin, just outside its corner: there while it's pinned, and
     // on hover to pin it.
     let pin = match row {
-        Row::Message(m) if !m.live && !m.queued => Some((m.id.clone(), m.pinned)),
+        Row::Message(m) if !m.live && !m.queued && !m.deleted => Some((m.id.clone(), m.pinned)),
         _ => None,
     };
     // Under it, a link to each branch that goes on from it; and beside it, on
@@ -25141,9 +25467,11 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             let _ = this.update(cx, |loom, cx| loom.picked_in(&id, words, e.position, cx));
         }
     });
-    // Beside it, on hover, a way to reply to it.
+    // Beside it, on hover, a way to reply to it, and its menu (LOO-208).
     let reply_at = branch_at.clone();
     let to_reply = this.clone();
+    let more_at = branch_at.clone();
+    let to_more = this.clone();
     let lit = i.lit;
     // To a screen reader, a message is an item in the chat, named by who said
     // what.
@@ -25246,6 +25574,36 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                                 let _ = to_branch.update(cx, |loom, _| {
                                     let f = loom.model.branch(&id);
                                     loom.send(f);
+                                });
+                            }),
+                    )
+                })
+                .when_some(more_at, |d, id| {
+                    d.child(
+                        div()
+                            .id(SharedString::from(format!("more-row-{id}")))
+                            .role(Role::Button)
+                            .aria_label("More")
+                            .absolute()
+                            .top(px(space::XS + 84.0))
+                            .right(px(HOVER_REACH - 30.0))
+                            .size(px(24.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .cursor_pointer()
+                            .text_color(p.ink_3)
+                            .opacity(0.0)
+                            .group_hover("row", |s| s.opacity(1.0))
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                            .tooltip(tip("More"))
+                            .child(Icon::new(Ico::Ellipsis).xsmall())
+                            .on_mouse_down(MouseButton::Left, move |e, _, cx| {
+                                cx.stop_propagation();
+                                let _ = to_more.update(cx, |loom, cx| {
+                                    loom.picked = None;
+                                    loom.open_ctx(e.position, Ctx::Message(id.clone(), None), cx)
                                 });
                             }),
                     )
