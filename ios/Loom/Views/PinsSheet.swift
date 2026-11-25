@@ -74,7 +74,8 @@ struct PinsSheet: View {
         let model = session.model
         NavigationStack {
             Group {
-                if model.pins.isEmpty {
+                // Not while the pins it has are still on their way.
+                if model.pins.isEmpty && model.pinsCount == 0 {
                     VStack(spacing: Tokens.Space.xs) {
                         Text("Nothing pinned yet").font(Fonts.ui(Tokens.PhoneSize.body, .medium)).foregroundStyle(P.ink)
                         Text("Long-press a message and pick Pin").font(Fonts.small).foregroundStyle(P.ink3)

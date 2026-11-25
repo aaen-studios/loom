@@ -2350,7 +2350,8 @@ final class Model {
 
     /// Puts the pin last taken off back, at its place and with its time.
     func undoUnpin() -> JSON? {
-        guard let (p, at) = unpinned else { return nil }
+        guard let u = unpinned else { return nil }
+        let (p, at) = (u.pin, u.at)
         unpinned = nil
         if !pins.contains(where: { $0.id == p.id }) {
             pins.insert(p, at: min(at, pins.count))
