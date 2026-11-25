@@ -442,6 +442,8 @@ struct Message: Identifiable, Equatable, Sendable {
     var named: [NamedFile] = []
     /// For a person's message that replies to another, what it replies to.
     var reply: ReplyTo?
+    /// Pinned in its conversation (PLAN.md, "Pinned messages").
+    var pinned = false
 
     var isPerson: Bool { role == "person" }
 
@@ -463,6 +465,13 @@ struct Message: Identifiable, Equatable, Sendable {
     var text: String {
         blocks.filter { $0.kind == "text" && $0.parent == nil && !$0.text.isEmpty }.map(\.text).joined(separator: "\n\n")
     }
+}
+
+/// A pinned message, with when it was pinned.
+struct Pin: Identifiable, Equatable, Sendable {
+    var message: Message
+    var at: Int
+    var id: String { message.id }
 }
 
 /// What a person's message replies to (PLAN.md, "Replying to a message"), as the instance
@@ -1459,6 +1468,18 @@ final class Model {
     var replying: ReplyTo?
     /// The message a quote was tapped to go to, until the chat is there.
     var jumpTo: String?
+    /// The shown chat's pinned messages, the newest pin first, as far as they've been
+    /// loaded; how many it has; whether there are more, and more are being asked for; the
+    /// chat they're of; and whether they're to be asked for again (PLAN.md, "Pinned
+    /// messages", desktop/src/model.rs's `pins`).
+    var pins: [Pin] = []
+    var pinsCount = 0
+    private(set) var pinsMore = false
+    private(set) var pinsLoading = false
+    private var pinsFor: String?
+    private var pinsStale = false
+    /// The pin last taken off, where it was among the pins, for Undo.
+    private(set) var unpinned: (pin: Pin, at: Int)?
     var selected: String?
     /// Another agent's thread with the selected agent, while it's shown in its chat's place.
     private(set) var thread: String?
@@ -1828,6 +1849,12 @@ final class Model {
             live[id] = nil
             if kind == "message.created" { queued.removeAll { $0.message == id } }
             if f["conversation"].string == conversation { dirty.insert(.messages) }
+            // A pin put on or taken off, a pinned message changed, or one gone that may
+            // have been pinned: the pins are asked for again.
+            if f["conversation"].string == pinsFor,
+               kind == "message.deleted" || (kind == "message.updated" && (!f["message"]["pinned"].isNull || pins.contains { $0.id == id })) {
+                pinsStale = true
+            }
             dirty.insert(.conversations)
         case "run":
             dirty.insert(.runs)
@@ -1912,6 +1939,18 @@ final class Model {
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
         switch f["id"].text {
+        case "app.pins", "app.pins.more":
+            pinsLoading = false
+            guard error == nil, f["error"].isNull else { break }
+            let v = f["value"]
+            let came = v["messages"].array.map { Pin(message: messageOf($0), at: $0["pinned"]["at"].int ?? 0) }
+            if f["id"].text == "app.pins" {
+                pins = came
+            } else {
+                pins += came.filter { p in !pins.contains { $0.id == p.id } }
+            }
+            pinsMore = v["more"].bool ?? false
+            pinsCount = v["count"].int ?? pins.count
         case let id where id.hasPrefix("app.preview:"):
             // A link pasted in the composer, looked up: its preview, or its site when
             // the lookup failed.
@@ -2051,9 +2090,7 @@ final class Model {
         case .messages:
             moreMessages = f["more"].bool ?? false
             messagesCame = true
-            messages = items.filter { !routinePrompt($0) }.map { m in
-                Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m))
-            }
+            messages = items.filter { !routinePrompt($0) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.
@@ -2064,6 +2101,11 @@ final class Model {
                 mcpStale = true
             }
         }
+    }
+
+    /// A stored message, as the instance keeps it.
+    private func messageOf(_ m: JSON) -> Message {
+        Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull)
     }
 
     /// Takes the answer to one of the MCP commands the model sent, if it is one: the
@@ -2199,6 +2241,22 @@ final class Model {
             secretsStale = false
             out.append(["t": "cmd", "id": JSON(id("app.secrets")), "name": "secret.list"])
         }
+        // The shown chat's pins, for the count on its header and the Pinned sheet: as many
+        // as are loaded, and at least a page. Never a thread's.
+        let chat = thread == nil ? conversation : nil
+        if chat != pinsFor {
+            pinsFor = chat
+            pins = []
+            pinsCount = 0
+            pinsMore = false
+            pinsLoading = false
+            unpinned = nil
+            pinsStale = chat != nil
+        }
+        if pinsStale, let chat {
+            pinsStale = false
+            out.append(["t": "cmd", "id": "app.pins", "name": "messages.pinned", "args": ["conversation": JSON(chat), "limit": JSON(min(max(pins.count, Model.pinsPage), 100))]])
+        }
         var wanted = shown.flatMap(\.blocks).compactMap(\.file).filter(\.isImage).map(\.file)
         // The icons of the badges on its cards and its questions.
         let cardBadges = shown.flatMap(\.blocks).compactMap { $0.card?.badge }
@@ -2211,6 +2269,8 @@ final class Model {
         for case .ready(let l) in linkPreviews.values { if let icon = l.icon { wanted.append(icon) } }
         // The thumbnails of the pictures its replies name.
         wanted += shown.flatMap { $0.named.compactMap(\.thumb) }
+        // And the pictures of its pins, which may be older than what's loaded.
+        wanted += pins.flatMap { $0.message.blocks.compactMap(\.file).filter(\.isImage).map(\.file) + $0.message.named.compactMap(\.thumb) }
         // And those of pictures sent before and picked to go again, which the composer
         // has no file of its own to draw.
         wanted += attachments.filter { $0.path.isEmpty && isPicture($0.name) }.compactMap { $0.file?.file }
@@ -2261,6 +2321,46 @@ final class Model {
         guard let r = replying, messages.contains(where: { $0.id == r.message }) else { return nil }
         return r
     }
+
+    // MARK: Pinned messages (PLAN.md, "Pinned messages")
+
+    /// How many pins the Pinned sheet asks for at a time.
+    static let pinsPage = 30
+
+    /// Pins a message of the chat, or takes its pin off.
+    func pin(_ message: String, _ pinned: Bool) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.pin")), "name": "message.pin", "args": ["message": JSON(message), "pinned": JSON(pinned)]]
+    }
+
+    /// The next page of older pins, while there are more and none are being asked for.
+    func loadMorePins() -> JSON? {
+        guard pinsMore, !pinsLoading, let chat = pinsFor, let last = pins.last else { return nil }
+        pinsLoading = true
+        return ["t": "cmd", "id": "app.pins.more", "name": "messages.pinned", "args": ["conversation": JSON(chat), "before": JSON(last.id), "limit": JSON(Model.pinsPage)]]
+    }
+
+    /// Takes a pin off from the Pinned sheet: it goes from the list at once, kept for Undo,
+    /// which puts it back where it was.
+    func unpin(_ message: String) -> JSON? {
+        guard let at = pins.firstIndex(where: { $0.id == message }) else { return nil }
+        unpinned = (pins.remove(at: at), at)
+        pinsCount = max(pinsCount - 1, 0)
+        return pin(message, false)
+    }
+
+    /// Puts the pin last taken off back, at its place and with its time.
+    func undoUnpin() -> JSON? {
+        guard let (p, at) = unpinned else { return nil }
+        unpinned = nil
+        if !pins.contains(where: { $0.id == p.id }) {
+            pins.insert(p, at: min(at, pins.count))
+            pinsCount += 1
+        }
+        return ["t": "cmd", "id": JSON(id("app.pin")), "name": "message.pin", "args": ["message": JSON(p.id), "pinned": true, "at": JSON(p.at)]]
+    }
+
+    /// Undo's time is up.
+    func forgetUnpinned() { unpinned = nil }
 
     /// Asks for more of the chat's older messages, to reach one a quote goes to. False when
     /// the chat has no more.

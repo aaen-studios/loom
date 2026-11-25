@@ -29,6 +29,12 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         agents = s.agents
         conversations = s.conversations
         messages = s.messages
+        // A few of the Gardener's messages are pinned, as they would be on an instance.
+        for (n, id) in ["msg_42", "msg_43", "msg_40", "msg_44"].enumerated() {
+            guard let i = messages["c_4"]?.firstIndex(where: { $0["id"].text == id }), case .object(var m) = messages["c_4"]![i] else { continue }
+            m["pinned"] = ["at": JSON(1795187400000 + n * 60_000), "by": "d_4"]
+            messages["c_4"]![i] = .object(m)
+        }
         runs = s.runs
         tools = s.tools
         approvals = s.approvals
@@ -201,6 +207,18 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 later(0.3) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": true, "value": ["link": ["title": "Watering schedule for balcony tomatoes", "site": JSON(siteOf(url)), "image": "sample-dusk"]]])
                 }
+            case "message.pin":
+                pin(f)
+            case "messages.pinned":
+                // The newest pin first, a page at a time after `before`, as the instance gives them.
+                let all = (messages[f["args"]["conversation"].text] ?? [])
+                    .filter { !$0["pinned"].isNull }
+                    .sorted { ($0["pinned"]["at"].int ?? 0) > ($1["pinned"]["at"].int ?? 0) }
+                let limit = f["args"]["limit"].int ?? 50
+                var from = 0
+                if let before = f["args"]["before"].string, let i = all.firstIndex(where: { $0["id"].text == before }) { from = i + 1 }
+                let page = Array(all.dropFirst(from).prefix(limit))
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["messages": .array(page), "count": JSON(all.count), "more": JSON(from + page.count < all.count)]])
             case "routine.run":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
             case "agent.file":
@@ -244,6 +262,26 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         }
         out.append(part("hidden", hidden))
         return out
+    }
+
+    /// A message pinned or its pin taken off, as the instance does it: kept on the message,
+    /// with when and who, and told as message.updated.
+    private func pin(_ f: JSON) {
+        let id = f["args"]["message"]
+        for (c, list) in messages {
+            guard let i = list.firstIndex(where: { $0["id"] == id }), case .object(var m) = list[i] else { continue }
+            if f["args"]["pinned"].bool ?? true {
+                m["pinned"] = ["at": JSON(f["args"]["at"].int ?? Sample.now()), "by": "d_4"]
+            } else {
+                m["pinned"] = nil
+            }
+            messages[c]![i] = .object(m)
+            tell(["t": "result", "id": f["id"], "ok": true, "value": ["message": .object(m)]])
+            seq += 1
+            tell(["t": "event", "kind": "message.updated", "seq": JSON(seq), "at": JSON(Sample.now()), "conversation": JSON(c), "message": .object(m)])
+            return
+        }
+        tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": "There's no message \(id.text)."]])
     }
 
     /// The folder commands, as the instance answers them.

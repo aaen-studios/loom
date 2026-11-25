@@ -22,6 +22,8 @@ struct ChatView: View {
     @State private var threadOpen: Ask?
     /// The message a quote went to, lit for a moment.
     @State private var lit: String?
+    /// The chat's pins, open in a sheet from the header's pin.
+    @State private var pinsOpen = false
 
     var body: some View {
         let model = session.model
@@ -57,6 +59,13 @@ struct ChatView: View {
                                     model.reply(to: m.id)
                                 } label: {
                                     Label("Reply", systemImage: "arrowshape.turn.up.left")
+                                }
+                            }
+                            if thread == nil && !m.live && !m.queued {
+                                Button {
+                                    session.send(model.pin(m.id, !m.pinned))
+                                } label: {
+                                    Label(m.pinned ? "Unpin" : "Pin", systemImage: m.pinned ? "pin.slash" : "pin")
                                 }
                             }
                             if !m.live && !text.isEmpty {
@@ -148,6 +157,21 @@ struct ChatView: View {
             }
             if thread == nil {
                 ToolbarItem(placement: .topBarTrailing) {
+                    // The chat's pins, with how many there are.
+                    let pinned = max(model.pinsCount, model.pins.count)
+                    Button {
+                        pinsOpen = true
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "pin")
+                            if pinned > 0 {
+                                Text("\(pinned)").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).monospacedDigit()
+                            }
+                        }
+                    }
+                    .accessibilityLabel(pinned > 0 ? "Pinned, \(pinned)" : "Pinned")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
                             session.send(model.startFresh())
@@ -181,6 +205,9 @@ struct ChatView: View {
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
         .fullScreenCover(item: warming ? .constant(nil) : Bindable(model).viewing) { v in
             PictureViewer(stack: v.stack)
+        }
+        .sheet(isPresented: warming ? .constant(false) : $pinsOpen) {
+            PinsSheet(agent: agent)
         }
         .sheet(item: $reading) { r in
             NavigationStack {
@@ -217,6 +244,10 @@ struct ChatView: View {
         if thread == nil, let i = args.firstIndex(of: "-reply"), i + 1 < args.count {
             let id = args[i + 1]
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { session.model.reply(to: id) }
+        }
+        // `-pins` opens the chat's pins, for screenshots of the sheet.
+        if thread == nil, args.contains("-pins") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pinsOpen = true }
         }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
         threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
@@ -414,6 +445,8 @@ struct PersonMessage: View {
     @AppStorage(Prefs.vibrant) private var vibrant = false
     var message: Message
     var agent: Agent?
+    /// Drawn as a pin in the Pinned sheet rather than in the chat.
+    var pin: PinCut? = nil
 
     var body: some View {
         let model = session.model
@@ -429,8 +462,9 @@ struct PersonMessage: View {
         // in the middle when it's long.
         let words = cutFileNames(linkFiles(text, message.blocks.compactMap(\.file)))
         let sender = message.fromAgent.flatMap { model.agent($0) }
-        VStack(alignment: .trailing, spacing: Tokens.Space.xs + 2) {
-            if let from = message.from {
+        // In a pin it starts at the left, under who said it, which the pin says over it.
+        VStack(alignment: pin == nil ? .trailing : .leading, spacing: Tokens.Space.xs + 2) {
+            if let from = message.from, pin == nil {
                 HStack(spacing: Tokens.Space.xs) {
                     if let sender {
                         Image(uiImage: MentionGlyph.thread(sender.outline))
@@ -458,6 +492,7 @@ struct PersonMessage: View {
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(titledLinks(words, message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
                     .fixedSize(horizontal: false, vertical: true)
+                    .pinCut(pin, key: message.id)
                     .padding(.horizontal, Tokens.Space.l)
                     .padding(.vertical, Tokens.Space.s + 3)
                     .background(bubble(sender), in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
@@ -467,8 +502,8 @@ struct PersonMessage: View {
                 Text("Waiting to send").font(Fonts.caption).foregroundStyle(P.ink3)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .padding(.leading, 48)
+        .frame(maxWidth: .infinity, alignment: pin == nil ? .trailing : .leading)
+        .padding(.leading, pin == nil ? 48 : 0)
     }
 
     /// The person's own bubble in the agent's colour; another agent's, a breath of the
@@ -487,23 +522,28 @@ struct Reply: View {
     var message: Message
     var agent: Agent?
     @Binding var openThoughts: Set<String>
+    /// Drawn as a pin in the Pinned sheet: what it said, with its pictures, files and
+    /// cards, under the pin's own line of who and when, without its steps.
+    var pin: PinCut? = nil
 
     var body: some View {
         let model = session.model
         VStack(alignment: .leading, spacing: Tokens.Space.s + 2) {
-            HStack(spacing: Tokens.Space.s) {
-                Group {
-                    if message.live {
-                        ThreadView(mood: model.mood(agent?.id ?? ""), color: P.thread(agent?.color ?? ""))
-                    } else {
-                        // A finished reply's thread is still: a line, with no timeline or
-                        // canvas of its own.
-                        StillThread().stroke(P.thread(agent?.color ?? ""), style: StrokeStyle(lineWidth: Tokens.ThreadStroke.small, lineCap: .round, lineJoin: .round))
+            if pin == nil {
+                HStack(spacing: Tokens.Space.s) {
+                    Group {
+                        if message.live {
+                            ThreadView(mood: model.mood(agent?.id ?? ""), color: P.thread(agent?.color ?? ""))
+                        } else {
+                            // A finished reply's thread is still: a line, with no timeline or
+                            // canvas of its own.
+                            StillThread().stroke(P.thread(agent?.color ?? ""), style: StrokeStyle(lineWidth: Tokens.ThreadStroke.small, lineCap: .round, lineJoin: .round))
+                        }
                     }
+                    .frame(width: 16, height: 10)
+                    Text(agent?.name ?? "Agent").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink)
+                    Text(message.live ? "now" : When.time(message.at)).font(Fonts.caption).foregroundStyle(P.ink3)
                 }
-                .frame(width: 16, height: 10)
-                Text(agent?.name ?? "Agent").font(Fonts.ui(Tokens.PhoneSize.small, .medium)).foregroundStyle(P.ink)
-                Text(message.live ? "now" : When.time(message.at)).font(Fonts.caption).foregroundStyle(P.ink3)
             }
             let laid = parts(message, tools: model.tools)
             ForEach(Array(laid.enumerated()), id: \.offset) { _, part in
@@ -517,7 +557,7 @@ struct Reply: View {
             } else if pictured.count > 1 {
                 PictureFan(files: pictured.compactMap(\.picture), named: pictured)
             }
-            if !message.sources.isEmpty && sourcesAt(laid) == nil {
+            if pin == nil && !message.sources.isEmpty && sourcesAt(laid) == nil {
                 SourcesTab(message: message)
             }
         }
@@ -527,7 +567,7 @@ struct Reply: View {
     private var links: Inline { session.model.inline(message) }
 
     /// The block whose bubble the reply's sources hang from: its last words.
-    private var sourcesAt: Int? { message.sources.isEmpty ? nil : sourcesAt(parts(message, tools: session.model.tools)) }
+    private var sourcesAt: Int? { message.sources.isEmpty || pin != nil ? nil : sourcesAt(parts(message, tools: session.model.tools)) }
 
     private func sourcesAt(_ laid: [Part]) -> Int? {
         for part in laid.reversed() {
@@ -552,6 +592,7 @@ struct Reply: View {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
                     let bubble = MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
+                        .pinCut(pin, key: "\(message.id)/\(i)")
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
                         .background(P.bubble, in: UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubbleJoined, bottomLeadingRadius: Tokens.Radius.bubble, bottomTrailingRadius: Tokens.Radius.bubble, topTrailingRadius: Tokens.Radius.bubble, style: .continuous))
@@ -567,9 +608,12 @@ struct Reply: View {
                     }
                 } else {
                     MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
+                        .pinCut(pin, key: "\(message.id)/\(i)")
                     if i == sourcesAt { SourcesTab(message: message) }
                 }
             }
+        case .tools where pin != nil, .fold where pin != nil:
+            EmptyView()
         case .tools(let run):
             VStack(alignment: .leading, spacing: Tokens.Space.xs + 2) {
                 ForEach(run, id: \.self) { i in
@@ -596,6 +640,8 @@ struct Reply: View {
     @ViewBuilder
     private func block(_ b: Block, key: String) -> some View {
         switch b.kind {
+        case "thought" where pin != nil, "tool" where pin != nil, "plan" where pin != nil:
+            EmptyView()
         case "thought" where !b.text.isEmpty:
             Thought(text: b.text, open: openThoughts.contains(key)) {
                 if openThoughts.contains(key) { openThoughts.remove(key) } else { openThoughts.insert(key) }
@@ -741,12 +787,16 @@ struct FileView: View {
     @Environment(Session.self) private var session
     var file: FileRef
     var named: [NamedFile] = []
+    @Environment(\.inPin) private var inPin
     /// Its thumbnail, read and decoded off the main thread.
     @State private var thumb: UIImage?
 
-    /// The most room a picture takes, and the place it keeps while its size isn't known.
+    /// The most room a picture takes, and the place it keeps while its size isn't known;
+    /// in a pin, less.
     static let most = CGSize(width: 360, height: 400)
     static let unknown = CGSize(width: 240, height: 160)
+    static let mostInPin = CGSize(width: 200, height: 200)
+    static let unknownInPin = CGSize(width: 160, height: 110)
 
     var body: some View {
         let path = file.isImage ? session.model.files["\(file.file).thumb"] : nil
@@ -764,7 +814,7 @@ struct FileView: View {
                 // and 360 × 400, its shape kept, and never up, as on the desktop. Until
                 // its size is known, 240 × 160.
                 let pixels = file.shownSize ?? path.flatMap { Pictures.size($0) } ?? image.map { CGSize(width: $0.size.width * $0.scale, height: $0.size.height * $0.scale) }
-                let size = pixels.map { Pictures.fit($0, in: FileView.most) } ?? FileView.unknown
+                let size = pixels.map { Pictures.fit($0, in: inPin ? FileView.mostInPin : FileView.most) } ?? (inPin ? FileView.unknownInPin : FileView.unknown)
                 Group {
                     if let image {
                         Image(uiImage: image)
@@ -808,14 +858,17 @@ struct PictureFan: View {
     @Environment(Session.self) private var session
     var files: [FileRef]
     var named: [NamedFile] = []
+    @Environment(\.inPin) private var inPin
 
-    /// The front card's size.
+    /// The front card's size, and in a pin.
     static let size = CGSize(width: 240, height: 180)
+    static let sizeInPin = CGSize(width: 136, height: 102)
     /// The room kept past the cards for their shadows.
     static let shadowRoom: CGFloat = 8
 
     var body: some View {
-        let (w, h) = (Self.size.width, Self.size.height)
+        let card = inPin ? Self.sizeInPin : Self.size
+        let (w, h) = (card.width, card.height)
         let reach = fanReach(files.count, aspect: h / w)
         let (left, right) = ((reach.left * w).rounded(.up) + Self.shadowRoom, (reach.right * w).rounded(.up) + Self.shadowRoom)
         let up = (reach.up * w).rounded(.up) + Self.shadowRoom
@@ -828,13 +881,13 @@ struct PictureFan: View {
         } label: {
             ZStack {
                 ForEach(fanCards(files.count), id: \.picture) { c in
-                    FanPicture(file: files[c.picture], behind: true, count: nil)
+                    FanPicture(file: files[c.picture], size: card, behind: true, count: nil)
                         .scaleEffect(c.scale)
                         .rotationEffect(.degrees(c.tilt))
                         .offset(x: c.x * w)
                         .fanShadow()
                 }
-                FanPicture(file: files[0], behind: false, count: fanCount(files.count))
+                FanPicture(file: files[0], size: card, behind: false, count: fanCount(files.count))
                     .fanShadow()
             }
             .frame(width: w, height: h)
@@ -861,6 +914,7 @@ private extension View {
 private struct FanPicture: View {
     @Environment(Session.self) private var session
     var file: FileRef
+    var size: CGSize
     var behind: Bool
     var count: String?
     @State private var thumb: UIImage?
@@ -876,7 +930,7 @@ private struct FanPicture: View {
                 P.bubble
             }
         }
-        .frame(width: PictureFan.size.width, height: PictureFan.size.height)
+        .frame(width: size.width, height: size.height)
         .saturation(behind ? 0.88 : 1)
         .colorMultiply(Color(white: behind ? 0.97 : 1))
         .clipShape(shape)
