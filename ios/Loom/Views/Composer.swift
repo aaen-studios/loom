@@ -1,3 +1,4 @@
+import Photos
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -14,6 +15,9 @@ struct Composer: View {
     @State private var photos: [PhotosPickerItem] = []
     @State private var choosingPhotos = false
     @State private var choosingFiles = false
+    /// Whether the + sheet is up, and whether it opened with its search, from a /.
+    @State private var plusOpen = false
+    @State private var plusSearch = false
     @FocusState private var focused: Bool
 
     var body: some View {
@@ -34,6 +38,13 @@ struct Composer: View {
         }
         .background(P.bg)
         .onChange(of: text) { _, now in
+            // A / alone opens the + sheet with its search.
+            if now == "/" {
+                text = ""
+                plusSearch = true
+                plusOpen = true
+                return
+            }
             // Follows the @ being typed, and asks for the files that match it.
             if let q = mentionQuery(now) { session.send(model.findFiles(q.query)) }
             if now.isEmpty { mentions = [] }
@@ -56,17 +67,9 @@ struct Composer: View {
                 }
             }
             HStack(alignment: .bottom, spacing: Tokens.Space.s) {
-                Menu {
-                    Button {
-                        choosingPhotos = true
-                    } label: {
-                        Label("Photos", systemImage: "photo.on.rectangle")
-                    }
-                    Button {
-                        choosingFiles = true
-                    } label: {
-                        Label("Files", systemImage: "folder")
-                    }
+                Button {
+                    plusSearch = false
+                    plusOpen = true
                 } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 17, weight: .medium))
@@ -74,7 +77,7 @@ struct Composer: View {
                         .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
                         .contentShape(Circle())
                 }
-                .accessibilityLabel("Add photos or files")
+                .accessibilityLabel("Attach, skills and routines")
 
                 TextField("Reply to \(agentName)", text: $text, axis: .vertical)
                     .font(Fonts.ui(Tokens.PhoneSize.composer))
@@ -126,6 +129,42 @@ struct Composer: View {
                 for url in urls { attachFile(url) }
             }
         }
+        .sheet(isPresented: $plusOpen) {
+            PlusSheet(take: take, searchFirst: plusSearch)
+        }
+        // `-plus` at launch opens the sheet, for screenshots (ios/README.md).
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("-plus") { plusOpen = true }
+        }
+    }
+
+    /// Does what the + sheet picked, and shuts it.
+    private func take(_ what: PlusTake) {
+        let model = session.model
+        plusOpen = false
+        switch what {
+        case .photos:
+            choosingPhotos = true
+        case .files:
+            choosingFiles = true
+        case .photo(let asset):
+            let options = PHImageRequestOptions()
+            options.isNetworkAccessAllowed = true
+            options.version = .current
+            PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, _ in
+                guard let data else { return }
+                Task { @MainActor in await attachPhoto(data: data) }
+            }
+        case .sent(let f):
+            _ = model.attachSent(f)
+        case .skill(let name):
+            // Where the person was writing, as the @ picker puts a mention.
+            let mention = skillMention(name)
+            let gap = text.isEmpty || text.hasSuffix(" ") ? "" : " "
+            text += gap + mention.words + " "
+            mentions.append(mention)
+            focused = true
+        }
     }
 
     private var canSend: Bool {
@@ -142,6 +181,11 @@ struct Composer: View {
             session.model.notice = "That photo couldn't be read."
             return
         }
+        await attachPhoto(data: data)
+    }
+
+    /// A photo's bytes, from the picker or the + sheet's row of newest photos.
+    private func attachPhoto(data: Data) async {
         // The core names the file by its path, so each photo gets a folder of its own.
         let stamp = Date.now.formatted(.verbatim("\(year: .defaultDigits)\(month: .twoDigits)\(day: .twoDigits)-\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased))\(minute: .twoDigits)\(second: .twoDigits)", timeZone: .current, calendar: .current))
         let name = "Photo \(stamp).jpg"

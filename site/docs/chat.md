@@ -46,6 +46,18 @@ In the chat, an agent you mention shows as its thread and its name in its colour
 
 A message one agent sends another sits on your side of the chat, tinted with the sender's colour, with its thread and name over it.
 
+## The + menu
+
+The **+** before the message box, or `/` in an empty one, opens a menu with a search at the top:
+
+- **Attach files** (Ctrl+U, or Cmd+U on a Mac), **Paste image** when you've copied one, and **Recent files**, the files sent or received lately in any of your chats, which go again without uploading.
+- **Skills**: pick one and it sits in your message, as a mention does. The agent reads it before it answers.
+- **Routines**: pick one to run it now, after **Run**.
+
+Type to find a file, skill or routine in any of them. The arrows move, → opens a list and ← goes back, Enter takes a row, and Esc shuts the menu. Each list ends with a link to its settings page.
+
+On an iPhone, **+** opens a sheet with the same lists, and your newest photos in a row at the top.
+
 ## How an agent uses its tools
 
 Agents use their tools by writing small scripts, in Code Mode. Instead of being given every tool up front, an agent looks up the tools it needs and writes a script that calls them, so its context stays small. Only what the script gives back reaches the agent: it can read a whole document and pass on three lines.
