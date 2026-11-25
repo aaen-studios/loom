@@ -11,8 +11,6 @@ import UniformTypeIdentifiers
 struct Composer: View {
     @Environment(Session.self) private var session
     var agentName: String
-    /// Bumped to put the cursor in the field, as Continue in your own chat does.
-    var write = 0
     var sent: () -> Void
     @State private var box = ComposerBox()
     @State private var photos: [PhotosPickerItem] = []
@@ -59,14 +57,27 @@ struct Composer: View {
         .onChange(of: model.replying) { _, now in
             if now != nil { box.view?.becomeFirstResponder() }
         }
-        .onChange(of: write) { _, _ in box.view?.becomeFirstResponder() }
+        // Continue in your own chat, from a thread: the cursor too, once the thread has
+        // slid away, since the field takes none while it moves.
+        .onChange(of: model.writeNow) { _, now in
+            if now { takeCursor() }
+        }
         .onAppear {
+            if model.writeNow { takeCursor() }
             box.opened = { piece in open(piece) }
             box.pasted = { url in session.send(model.previewLink(url)) }
             #if DEBUG
             // Once the chat has selected its agent and the field is made.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { fromLaunch() }
             #endif
+        }
+    }
+
+    /// Puts the cursor in the field after the screen's move, for `Model.writeNow`.
+    private func takeCursor() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) {
+            box.view?.becomeFirstResponder()
+            session.model.writeNow = false
         }
     }
 

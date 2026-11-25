@@ -22,10 +22,6 @@ struct ChatView: View {
     @State private var reading: Reading?
     /// Another agent's thread with it, opened from the menu.
     @State private var threadOpen: Ask?
-    /// Back from a thread by Continue in your own chat: the composer takes the cursor.
-    @State private var writeOnReturn = false
-    /// Bumped to put the cursor in the composer.
-    @State private var write = 0
     /// The message a quote went to, lit for a moment.
     @State private var lit: String?
 
@@ -123,7 +119,7 @@ struct ChatView: View {
                 // The composer writes to the agent's chat, so a thread is only read here,
                 // with the way back to that chat in the composer's place.
                 if thread == nil {
-                    Composer(agentName: agent?.name ?? "the agent", write: write) {
+                    Composer(agentName: agent?.name ?? "the agent") {
                         withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                     }
                 } else {
@@ -185,7 +181,7 @@ struct ChatView: View {
         }
         .navigationDestination(item: $threadOpen) { k in
             ChatView(agentId: agentId, thread: k) {
-                writeOnReturn = true
+                session.model.writeNow = true
                 threadOpen = nil
             }
         }
@@ -216,11 +212,6 @@ struct ChatView: View {
             // Back from a thread, the chat is the agent's own again.
             model.open(thread: thread?.id)
             session.flush()
-            // Once the thread has slid away: the field takes no cursor while it moves.
-            if writeOnReturn {
-                writeOnReturn = false
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { write += 1 }
-            }
             openFromLaunch()
         }
     }
