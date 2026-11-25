@@ -244,6 +244,11 @@ struct Card: Equatable, Sendable {
     /// and its reply is finished.
     var takesAnswers: Bool { !passed && !live }
 
+    /// Whether they will once its reply is finished: the chat hasn't gone on, and it's
+    /// still being written. A form placed `here` waits then, rather than reading as
+    /// passed by.
+    var answersLater: Bool { !passed && live }
+
     /// Whether it signs in to its server: a sign-in card, or a proposed server that
     /// waits on one.
     var signsIn: Bool {

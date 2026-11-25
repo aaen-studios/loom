@@ -2297,12 +2297,44 @@ pub struct Message {
     pub status: String,
 }
 
+/// How a form card in a reply stands, as its card draws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormStands {
+    /// Its fields and Send, while its questions answer (`Message::takes_answers`).
+    Open,
+    /// Its reply is still being written: it answers once that's finished, so it waits
+    /// rather than reading as passed by (`Message::answers_later`).
+    Waiting,
+    Sent,
+    /// The chat went on without it.
+    NotSent,
+}
+
+impl FormStands {
+    /// How a form stands: whether it's `answered`, whether its reply `takes` answers now,
+    /// and whether it will `later`, once the reply is finished.
+    pub fn of(answered: bool, takes: bool, later: bool) -> Self {
+        match (answered, takes, later) {
+            (true, _, _) => Self::Sent,
+            (false, true, _) => Self::Open,
+            (false, false, true) => Self::Waiting,
+            (false, false, false) => Self::NotSent,
+        }
+    }
+}
+
 impl Message {
     /// Whether its questions (choices and forms) answer now, and their keys pick: it's the
     /// chat's newest message (`newest`), and it's finished, so the person has read it all
     /// before answering.
     pub fn takes_answers(&self, newest: bool) -> bool {
         newest && !self.live
+    }
+
+    /// Whether its questions will answer once it's finished: it's the chat's newest
+    /// message, still being written. A form placed `here` shows then, waiting.
+    pub fn answers_later(&self, newest: bool) -> bool {
+        newest && self.live
     }
 
     /// Whether one of its cards waits for the person, so its thread moves: choices, or a
@@ -9613,6 +9645,53 @@ mod tests {
         );
         assert_eq!(picks, vec![json!(""), json!(""), json!(false)]);
         assert!(answers.is_none());
+    }
+
+    #[test]
+    fn a_form_waits_while_its_reply_is_written() {
+        let mut m = in_chat();
+        m.runs = vec![Run {
+            id: "run_1".into(),
+            conversation: "c_1".into(),
+            agent: "a_1".into(),
+            message: "msg_1".into(),
+            quiet: false,
+        }];
+        // A form placed here, in a reply still being written.
+        let card = json!({"id": "card_1", "type": "form", "title": "Your order", "fields": [
+            {"label": "Name", "kind": "text", "required": true, "value": ""}]});
+        m.take(&json!({"t": "card", "run": "run_1", "message": "msg_1", "block": 0, "card": card}));
+        m.take(&json!({"t": "delta", "run": "run_1", "message": "msg_1", "block": 1, "kind": "text", "pos": 0, "text": "While you fill that in"}));
+        let stands = |m: &Model, newest: bool| {
+            let shown = m.shown();
+            let r = &shown[0];
+            let form = r
+                .blocks
+                .iter()
+                .find_map(|b| match b.card.as_ref().map(|c| &c.body) {
+                    Some(CardBody::Form { answers, .. }) => Some(answers.is_some()),
+                    _ => None,
+                });
+            let answered = form.expect("no form");
+            FormStands::of(answered, r.takes_answers(newest), r.answers_later(newest))
+        };
+        assert!(m.shown()[0].live);
+        // It waits, rather than reading as passed by, and its thread isn't asking yet.
+        assert_eq!(stands(&m, true), FormStands::Waiting);
+        assert!(!m.shown()[0].card_waits(true));
+        // Finished, it opens.
+        let kept = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 2, "status": "done", "blocks": [
+            {"kind": "card", "card": card},
+            {"kind": "text", "text": "While you fill that in"}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": kept}));
+        m.runs.clear();
+        assert!(!m.shown()[0].live);
+        assert_eq!(stands(&m, true), FormStands::Open);
+        // Once the chat has gone on without it, it wasn't sent.
+        assert_eq!(stands(&m, false), FormStands::NotSent);
+        // And sent is sent, whatever else.
+        assert_eq!(FormStands::of(true, false, true), FormStands::Sent);
+        assert_eq!(FormStands::of(true, false, false), FormStands::Sent);
     }
 
     #[test]

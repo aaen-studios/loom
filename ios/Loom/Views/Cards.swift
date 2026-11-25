@@ -1045,7 +1045,8 @@ struct SecretAskCard: View {
 /// `form_card`: each field under its label, text and numbers in a box, a choice as its
 /// options side by side, a toggle as a switch beside its label, then Send, which sends
 /// them as one answer. Sent, it's one quiet line, as it is once the chat has gone on
-/// without it.
+/// without it, and while its reply is still being written, when it says it opens once
+/// that's done.
 struct FormCard: View {
     @Environment(Session.self) private var session
     var card: Card
@@ -1056,6 +1057,8 @@ struct FormCard: View {
     var body: some View {
         if !card.answers.isNull {
             CardDone(icon: "checkmark", how: "Sent", what: card.title)
+        } else if card.answersLater {
+            CardDone(icon: "clock", how: "Opens once the reply is done", what: card.title)
         } else if !card.takesAnswers {
             CardDone(icon: "xmark", how: "Not sent", what: card.title)
         } else {
