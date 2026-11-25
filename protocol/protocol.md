@@ -644,7 +644,7 @@ A reply whose words end in a Sources list (a line such as `Sources:`, `**Sources
 
 A message that links to pages, in its words or its `sources`, has `links` for those the instance has looked up: by each address, `{title, site, icon?, image?}`, `title` the page's own (maybe empty), `icon` the site's icon, a PNG kept as the person's file, to fetch with `file.get`, and `image` the page's preview picture (its `og:image`, a JPEG or a PNG at most 480 pixels a side, kept the same way), only for a page looked up with `link.preview`. Only https pages of public hosts are looked up, twelve a message at most. One looked up after the message was kept comes with `message.updated`.
 
-In a person's message, a bare address is a link they pasted as a preview, which the apps show as its card over the words, and `<https://…>` one they wrote or pasted as plain text, which they show as written ([PLAN.md](../PLAN.md#links-in-the-composer)). An attached file is its name in brackets, `[image.png]`, where it was attached.
+In a person's message, a bare address is a link they pasted as a preview, which the apps show as its card over the words, and `<https://…>` one they wrote or pasted as plain text, which they show as the address itself, untitled ([PLAN.md](../PLAN.md#links-in-the-composer)). An attached file is its name in brackets, `[image.png]`, where it was attached.
 
 ```json
 "sources": [ { "url": "https://9to5google.com/2026/11/18/neon/", "title": "Gemini 4 Neon", "site": "9to5google.com" } ],

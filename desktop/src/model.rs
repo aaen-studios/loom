@@ -2363,10 +2363,11 @@ fn line_links(line: &str, inline: &Inline) -> String {
                 continue;
             }
         }
-        // An address the person sent as plain text stays as written.
+        // An address the person sent as plain text: itself, linking to it, with no title.
         if rest.starts_with("<http://") || rest.starts_with("<https://") {
             if let Some(len) = skipped_span(rest) {
-                out.push_str(&rest[..len]);
+                let url = &rest[1..len - 1];
+                out.push_str(&format!("[{url}]({url})"));
                 rest = &rest[len..];
                 continue;
             }
@@ -2408,7 +2409,7 @@ fn is_picture(name: &str) -> bool {
 }
 
 /// A page's title as a bare address shows it: at most 60 characters, cut at a word.
-fn short_title(title: &str) -> String {
+pub fn short_title(title: &str) -> String {
     const MOST: usize = 60;
     if title.chars().count() <= MOST {
         return title.to_string();
@@ -8081,7 +8082,7 @@ mod tests {
         // An address sent as plain text stays as written.
         assert_eq!(
             with_link_icons("see <https://a.example/x> [@Old](loom:agent/zz)", &inline),
-            "see <https://a.example/x> @Old"
+            "see [https://a.example/x](https://a.example/x) @Old"
         );
     }
 

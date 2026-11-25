@@ -623,7 +623,7 @@ What another agent app keeps on the instance's computer comes over in one go, fr
 
 - **A pasted link is its preview.** A link pasted on its own (Ctrl+V, ⌘V, or a paste on the iPhone) becomes one piece in the composer, as the chat shows it: its site's icon and its page's title in the words, and over them its card, the page's preview picture (its `og:image`), or else its site's icon, on the left, and its title and its site. While it's looked up the card is a place of its size, so nothing jumps; with no title, or when it couldn't be looked up, it's a pill of its site's icon and its site. The sent message shows the same card over its words.
 - **Or plain text.** Ctrl+Shift+V (⌘⇧V, or Edit → Paste as Plain Text on a Mac) pastes it as plain text, which stays plain in the composer and in the sent message. Ctrl+Z right after the paste, or the × on its card, turns a preview back into its address as plain text. A link typed by hand stays plain too.
-- **The agent gets the address.** A preview goes in the message as its bare address, and a plain one as `<https://…>`, which the chat shows as written. The agent reads the address either way.
+- **The agent gets the address.** A preview goes in the message as its bare address, and a plain one as `<https://…>`, which the chat shows as the address itself, with no title or card. The agent reads the address either way.
 - **Looked up by the instance** (`link.preview`), as a message's links are, with its preview picture too: an https address of a public host that the page names, read with a cap on size, made at most 480 pixels a side and kept as the person's file.
 
 ## Mentions

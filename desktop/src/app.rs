@@ -15705,10 +15705,11 @@ fn link_card(
                         }),
                 )
                 .child(
+                    // Its own width, which the title wraps in.
                     div()
-                        .flex_1()
-                        .min_w_0()
+                        .w(px(LINK_CARD_W - LINK_CARD_H - 2.0))
                         .h_full()
+                        .overflow_hidden()
                         .flex()
                         .flex_col()
                         .justify_center()
@@ -15716,6 +15717,7 @@ fn link_card(
                         .px(px(space::M))
                         .child(
                             div()
+                                .w_full()
                                 .text_size(px(size::SMALL))
                                 .text_color(p.ink)
                                 .line_clamp(2)
@@ -17754,7 +17756,7 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
             _ => (None, None),
         };
         let shown = title
-            .map(|t| model::middle_cut(&t, 40))
+            .map(|t| model::short_title(&t))
             .unwrap_or_else(|| model::site_of(url));
         return row(url.to_string(), p.ink)
             .child(match icon {

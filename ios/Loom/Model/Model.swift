@@ -397,9 +397,10 @@ private func titledLine(_ line: String, _ links: [String: PageLink]) -> String {
     var out = ""
     var rest = Substring(line)
     while let c = rest.first {
-        // An address the person sent as plain text stays as written.
+        // An address the person sent as plain text: itself, linking to it, with no title.
         if rest.hasPrefix("<http://") || rest.hasPrefix("<https://"), let end = rest.firstIndex(of: ">") {
-            out += rest[...end]
+            let url = rest[rest.index(after: rest.startIndex)..<end]
+            out += "[\(url)](\(url))"
             rest = rest[rest.index(after: end)...]
             continue
         }
