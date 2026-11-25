@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 mod rooms;
-pub use rooms::{Room, Routed};
+pub use rooms::{Room, RoomUsage, Routed};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -5253,6 +5253,8 @@ pub struct Model {
     making_room: Option<String>,
     /// Why the last group chat couldn't be made.
     pub room_error: Option<String>,
+    /// What the open group chat used, as `room.summary` gives it, for its settings.
+    pub room_usage: Option<RoomUsage>,
     /// How each reply still being written in a group chat came to its agent, by its
     /// message.
     routed_live: HashMap<String, Routed>,
@@ -6856,6 +6858,10 @@ impl Model {
                 self.making_room = None;
                 self.room_error = Some(e.to_string());
             }
+            return;
+        }
+        if id.starts_with("app.room_summary") {
+            self.room_usage_came(f);
             return;
         }
         // A folder made: the agent it was made for goes in, and the app has it named.

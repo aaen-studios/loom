@@ -51,6 +51,18 @@ pub struct Routed {
     pub from: String,
 }
 
+/// What a group chat used (`room.summary`): its members' turns there and the router's
+/// picks for it, in tokens.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoomUsage {
+    /// Its conversation.
+    pub room: String,
+    pub tokens_today: i64,
+    pub tokens_month: i64,
+    pub router_today: i64,
+    pub router_month: i64,
+}
+
 impl Room {
     pub fn of(id: &str, r: &Value) -> Room {
         Room {
@@ -231,6 +243,43 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "room.forget", "args": {"conversation": room, "correction": correction}})
     }
 
+    /// Asks what the group chat `room` used, for its settings.
+    pub fn ask_room_usage(&mut self, room: &str) -> Value {
+        if self.room_usage.as_ref().is_some_and(|u| u.room != room) {
+            self.room_usage = None;
+        }
+        let id = self.id(&format!("app.room_summary:{room}"));
+        json!({"t": "cmd", "id": id, "name": "room.summary", "args": {"conversation": room}})
+    }
+
+    /// What a group chat used, as room.summary answered.
+    pub(super) fn room_usage_came(&mut self, f: &Value) {
+        let id = s(f, "id");
+        let Some(v) = f.get("value") else {
+            return;
+        };
+        // The id is app.room_summary:ROOM_N, N the model's own count.
+        let room = id
+            .strip_prefix("app.room_summary:")
+            .and_then(|rest| rest.rsplit_once('_').map(|(r, _)| r))
+            .unwrap_or_default()
+            .to_string();
+        let n = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+        self.room_usage = Some(RoomUsage {
+            room,
+            tokens_today: n("tokens_today"),
+            tokens_month: n("tokens_month"),
+            router_today: n("router_today"),
+            router_month: n("router_month"),
+        });
+    }
+
+    /// The open group chat's usage, once it has come.
+    pub fn open_room_usage(&self) -> Option<&RoomUsage> {
+        let open = self.open_room.as_deref()?;
+        self.room_usage.as_ref().filter(|u| u.room == open)
+    }
+
     /// Changes what an agent is for, the line the router reads.
     pub fn save_for(&mut self, agent: &str, line: &str) -> Value {
         let id = self.id("app.agent_for");
@@ -314,6 +363,34 @@ mod tests {
         }}}));
         assert_eq!(m.open_room.as_deref(), Some("c_12"));
         assert_eq!(m.room_open().map(|r| r.color.as_str()), Some("mint"));
+    }
+
+    #[test]
+    fn a_group_chat_s_usage_has_the_router_s_beside_its_members() {
+        let mut m = Model::new();
+        with_room(&mut m);
+        m.show_room("c_9");
+        let f = m.ask_room_usage("c_9");
+        assert_eq!(f["name"], "room.summary");
+        assert_eq!(f["args"]["conversation"], "c_9");
+        assert_eq!(m.open_room_usage(), None);
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {
+            "tokens_today": 850, "tokens_month": 12400, "router_today": 60, "router_month": 900
+        }}));
+        let u = m.open_room_usage().unwrap();
+        assert_eq!(
+            (
+                u.tokens_today,
+                u.tokens_month,
+                u.router_today,
+                u.router_month
+            ),
+            (850, 12400, 60, 900)
+        );
+        // Another group chat's isn't this one's.
+        m.room_usage.as_mut().unwrap().room = "c_1".into();
+        assert_eq!(m.open_room_usage(), None);
     }
 
     #[test]
