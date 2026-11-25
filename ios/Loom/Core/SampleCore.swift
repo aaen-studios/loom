@@ -308,6 +308,9 @@ enum Sample {
     ]
 
     static let conversations: [JSON] = [
+        // Builder's thread with Gardener (`message_agent`), newer than the person's chat
+        // with Gardener and never in its place.
+        ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000],
         ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000],
         ["id": "c_2", "agent": "a_2", "title": "", "at": 1795187131000],
         ["id": "c_3", "agent": "a_3", "title": "", "at": 1795187131000],
@@ -389,6 +392,12 @@ enum Sample {
                         ["kind": "file", "file": "sample-sprout", "name": "friday.png", "mime": "image/png", "size": 361_000],
                         ["kind": "file", "file": "sample-leaf", "name": "saturday.png", "mime": "image/png", "size": 351_000],
                         ["kind": "file", "file": "sample-tall", "name": "sunday.png", "mime": "image/png", "size": 412_000]]],
+        ],
+        "c_5": [
+            ["id": "msg_50", "conversation": "c_5", "role": "person", "from": "a_1", "at": 1795187300000,
+             "blocks": [["kind": "text", "text": "Which pots need a bigger saucer before the rain?"]]],
+            ["id": "msg_51", "conversation": "c_5", "role": "agent", "agent": "a_4", "run": "run_51", "at": 1795187330000,
+             "blocks": [["kind": "text", "text": "The two tomato pots by the railing. The basil is fine as it is."]]],
         ],
     ]
 
