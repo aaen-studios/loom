@@ -1,0 +1,95 @@
+module tests.protocol.limits
+
+// The limits of a person's plan with an agent program (PLAN.md, "Usage limits"):
+// what Claude's adapter reports, its plan's name and how much of the session and
+// the week is used with when each resets, is kept as the person's, told to their
+// apps with limits.updated, and given with the program in acp.list.
+//
+//     calx tests/protocol/limits.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    _ = try app.until("event", "run.finished")
+}
+
+// The program `name`'s limits, as acp.list gives them.
+fn listed(app: mut Session, id: str, name: str) -> Json ! Error {
+    let r = try app.cmd(id, "acp.list", Obj.new().done())
+    if let Json.Array(programs) = at(at(r, "value"), "programs") {
+        for p in programs {
+            if str_at(p.copy(), "name") == some(String(name)) { return at(p, "limits") }
+        }
+    }
+    return Json.Null
+}
+
+// The newest limits.updated among the frames read.
+fn told(app: Session) -> Json {
+    var out = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("limits.updated")) { out = f.copy() }
+    }
+    return out
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    try check(try listed(mut app, "q_3", "fake") == Json.Null, "a program that hasn't reported limits has none")
+
+    try say(mut app, chat.copy(), "m_1", String("/account Claude Max\n/limits 42 1795620600 78 1795900000\nok"))
+    let event = told(app)
+    try check(str_at(event.copy(), "program") == some(String("fake")), "the apps are told of the limits, by program")
+    let limits = at(event, "limits")
+    try check(str_at(limits.copy(), "plan") == some(String("Claude Max")), "with the plan's name")
+    try check(int_at(at(limits.copy(), "session"), "used") == some(42i64) and int_at(at(limits.copy(), "session"), "resets") == some(1795620600000i64), "the session's, in percent, and when it resets, in ms")
+    try check(int_at(at(limits, "week"), "used") == some(78i64), "and the week's")
+    let kept = try listed(mut app, "q_4", "fake")
+    try check(str_at(kept.copy(), "plan") == some(String("Claude Max")) and int_at(at(kept, "week"), "resets") == some(1795900000000i64), "acp.list gives them with the program")
+
+    // Later turns keep them fresh; the same numbers tell nobody again.
+    try say(mut app, chat.copy(), "m_2", String("/limits 45 1795620600 79 1795900000\nok"))
+    try check(int_at(at(at(told(app), "limits"), "session"), "used") == some(45i64), "a turn's report changes them")
+    let before = app.frames.len()
+    try say(mut app, chat.copy(), "m_3", String("/limits 45 1795620600 79 1795900000\nok"))
+    var again = false
+    var k = before
+    while k < app.frames.len() {
+        if str_at(app.frames[k].copy(), "kind") == some(String("limits.updated")) { again = true }
+        k += 1
+    }
+    try check(not again, "the same limits aren't told again")
+
+    // A login that isn't a plan's, as an API key's, has none of its limits.
+    try say(mut app, chat.copy(), "m_4", String("/account\nok"))
+    try check("{at(told(app), "limits")}" == "\{\}", "an API key's login has no plan limits")
+    app.close()
+
+    // Another device has them from acp.list.
+    var later = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    try check("{try listed(mut later, "q_5", "fake")}" == "\{\}", "a device that connects later has them as they are")
+    later.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nlimits: all good")
+}
