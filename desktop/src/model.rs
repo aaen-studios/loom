@@ -2500,6 +2500,90 @@ pub struct Hit {
     pub at: i64,
 }
 
+/// Finding in the open chat (PLAN.md, "Finding in a chat").
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Find {
+    /// What's typed in the find box.
+    pub query: String,
+    /// Each match in the chat, in its order: its message, the piece of the message's
+    /// words it's in (`find_pieces`), and which match in that piece it is.
+    pub matches: Vec<Found>,
+    /// The match it's on.
+    pub at: usize,
+    /// The search for `query` is on its way.
+    pub asking: bool,
+    id: String,
+}
+
+/// One match of a find in the chat.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Found {
+    pub message: String,
+    pub piece: usize,
+    pub nth: usize,
+}
+
+/// The pieces of a message's words that finding marks, as the chat draws them: the
+/// person's words as one, by 0, and each bubble of a reply's answer by its block.
+pub fn find_pieces(m: &Message, tools: &Tools) -> Vec<(usize, String)> {
+    if m.role == "person" {
+        let text = m
+            .blocks
+            .iter()
+            .filter(|b| b.kind == "text")
+            .map(|b| b.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return vec![(0, spoken(&text))];
+    }
+    let shows = Shows {
+        tools: false,
+        thoughts: false,
+    };
+    parts(m, tools, shows)
+        .iter()
+        .filter_map(|part| match part {
+            Part::Bubbles(run) => Some(run),
+            _ => None,
+        })
+        .flatten()
+        .map(|&i| (i, spoken(&m.blocks[i].text)))
+        .collect()
+}
+
+/// Where `query` comes in `text`, as a browser's find has it: the whole of it, any case,
+/// each place on from the end of the last.
+pub fn find_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let want: Vec<char> = query.trim().chars().flat_map(char::to_lowercase).collect();
+    if want.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        // Compared a character at a time, lowercased, so the ranges are the text's own.
+        let mut k = 0;
+        let mut j = i;
+        while j < chars.len() && k < want.len() {
+            let lower: Vec<char> = chars[j].1.to_lowercase().collect();
+            if want.len() - k < lower.len() || want[k..k + lower.len()] != lower[..] {
+                break;
+            }
+            k += lower.len();
+            j += 1;
+        }
+        if k == want.len() {
+            let end = chars.get(j).map_or(text.len(), |c| c.0);
+            out.push(chars[i].0..end);
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// A snippet without the instance's marks (U+0002 before a matched word, U+0003 after),
 /// and the byte ranges of the matched words in what's left.
 pub fn unmark(snippet: &str) -> (String, Vec<std::ops::Range<usize>>) {
@@ -4588,6 +4672,8 @@ pub struct Model {
     /// The message the open chat's "3 new" line is above, and how many came, while that
     /// chat stays open.
     pub new_line: Option<(String, usize)>,
+    /// Finding in the open chat, while the find box is open (Ctrl+F).
+    pub find: Option<Find>,
     /// Replies being written, by message id: their blocks so far.
     live: HashMap<String, Vec<Block>>,
     last_delta: HashMap<String, Instant>,
@@ -5411,6 +5497,7 @@ impl Model {
         }
         if self.selected != agent {
             self.selected = agent;
+            self.find = None;
             self.open_task = None;
             self.open_branch = None;
             self.messages.clear();
@@ -6595,6 +6682,15 @@ impl Model {
             if let Some(e) = f.get("error") {
                 self.notices.push(s(e, "message"));
             }
+            return;
+        }
+        if id.starts_with("app.find") {
+            let results = f
+                .pointer("/value/results")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            self.take_found(&id, &results);
             return;
         }
         if id.starts_with("app.search") {
@@ -8389,6 +8485,79 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "messages.search", "args": {"query": query.trim(), "limit": 30}}),
         )
+    }
+
+    /// Finds `query` in the open chat, the whole of it on the instance: the messages that
+    /// have its words come back in the chat's order (`take_found`). None when there's
+    /// nothing to find, or no chat.
+    pub fn find(&mut self, query: &str) -> Option<Value> {
+        let id = self.id("app.find");
+        let conversation = self.conversation();
+        let find = self.find.get_or_insert_with(Find::default);
+        find.query = query.to_string();
+        if query.trim().is_empty() || conversation.is_none() {
+            *find = Find {
+                query: query.to_string(),
+                ..Find::default()
+            };
+            return None;
+        }
+        find.id = id.clone();
+        find.asking = true;
+        Some(
+            json!({"t": "cmd", "id": id, "name": "messages.search", "args": {"query": query.trim(), "conversation": conversation}}),
+        )
+    }
+
+    /// The matches in the messages a find's search gave, `results` in the chat's order:
+    /// each place its words come in what a message shows. It starts on the newest.
+    fn take_found(&mut self, id: &str, results: &[Value]) {
+        let Some(query) = self
+            .find
+            .as_ref()
+            .filter(|f| f.id == id)
+            .map(|f| f.query.clone())
+        else {
+            return;
+        };
+        let mut matches = Vec::new();
+        for r in results {
+            let Some(m) = r.get("message") else { continue };
+            // As the chat shows it.
+            let message = self.message_of(m);
+            for (piece, words) in find_pieces(&message, &self.tools) {
+                for nth in 0..find_ranges(&words, &query).len() {
+                    matches.push(Found {
+                        message: message.id.clone(),
+                        piece,
+                        nth,
+                    });
+                }
+            }
+        }
+        if let Some(f) = self.find.as_mut() {
+            f.at = matches.len().saturating_sub(1);
+            f.matches = matches;
+            f.asking = false;
+        }
+    }
+
+    /// Steps `by` matches on (1) or back (-1), round from the last to the first. The
+    /// match it's on now, to scroll to.
+    pub fn find_step(&mut self, by: i32) -> Option<Found> {
+        let f = self.find.as_mut()?;
+        let n = f.matches.len();
+        if n == 0 {
+            return None;
+        }
+        f.at = (f.at as i64 + by as i64).rem_euclid(n as i64) as usize;
+        f.matches.get(f.at).cloned()
+    }
+
+    /// The match the find is on.
+    pub fn found(&self) -> Option<&Found> {
+        let f = self.find.as_ref()?;
+        f.matches.get(f.at)
     }
 
     pub fn login(&mut self, server: &str, username: &str, password: &str, code: &str) -> Value {
@@ -12498,6 +12667,63 @@ mod tests {
             .last()
             .unwrap()
             .contains("Only the instance's owner"));
+    }
+
+    #[test]
+    fn find_marks_the_whole_query_in_any_case() {
+        assert_eq!(
+            find_ranges("Build the build, BUILD!", "build"),
+            vec![0..5, 10..15, 17..22]
+        );
+        assert_eq!(find_ranges("main passed", "  main pa "), vec![0..7]);
+        assert_eq!(find_ranges("aaa", "aa"), vec![0..2]);
+        assert_eq!(find_ranges("Café", "CAFÉ"), vec![0..5]);
+        assert!(find_ranges("anything", "   ").is_empty());
+    }
+
+    #[test]
+    fn finding_in_a_chat_steps_through_each_match_from_the_newest() {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            program: None,
+            asked_by: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        let frame = m.find("build").expect("asks the instance");
+        assert_eq!(frame["args"]["conversation"], "c_1");
+        let id = frame["id"].as_str().unwrap().to_string();
+        let msg = |id: &str, role: &str, text: &str| json!({"message": {"id": id, "conversation": "c_1", "role": role, "blocks": [{"kind": "text", "text": text}]}, "snippet": ""});
+        m.take(&json!({"t": "result", "id": id, "value": {"results": [
+            msg("msg_1", "person", "Did the build pass? The **build** on main."),
+            msg("msg_2", "agent", "No build words here, only buil"),
+        ]}}));
+        let f = m.find.clone().unwrap();
+        // The person's words are one piece; the answer's bubble is its block.
+        assert_eq!(f.matches.len(), 3);
+        assert_eq!(
+            f.matches[2],
+            Found {
+                message: "msg_2".into(),
+                piece: 0,
+                nth: 0
+            }
+        );
+        assert_eq!(m.found(), Some(&f.matches[2]));
+        assert_eq!(m.find_step(-1).unwrap().nth, 1);
+        m.find_step(-1);
+        // Round from the oldest to the newest.
+        assert_eq!(m.find_step(-1).unwrap().message, "msg_2");
+        // Another chat closes it.
+        m.select(Some("a_2".into()));
+        assert!(m.find.is_none());
     }
 
     #[test]
