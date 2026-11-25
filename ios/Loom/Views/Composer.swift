@@ -132,6 +132,10 @@ struct Composer: View {
         .sheet(isPresented: $plusOpen) {
             PlusSheet(take: take, searchFirst: plusSearch)
         }
+        // `-plus` at launch opens the sheet, for screenshots (ios/README.md).
+        .onAppear {
+            if ProcessInfo.processInfo.arguments.contains("-plus") { plusOpen = true }
+        }
     }
 
     /// Does what the + sheet picked, and shuts it.

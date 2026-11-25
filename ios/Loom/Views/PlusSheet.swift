@@ -57,6 +57,11 @@ struct PlusSheet: View {
         .onAppear {
             for f in model.loadPlus() { session.send(f) }
             if searchFirst { searching = true }
+            // `-plus skills` or `-plus routines` at launch opens that list, for screenshots.
+            let args = ProcessInfo.processInfo.arguments
+            if let i = args.firstIndex(of: "-plus"), i + 1 < args.count {
+                open = ["skills": .skills, "routines": .routines, "recent": .recent][args[i + 1]]
+            }
         }
     }
 
