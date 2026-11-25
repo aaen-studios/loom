@@ -13,7 +13,7 @@ module tests.protocol.routines
 // way to the next, and is skipped after 10 minutes (a second here).
 //
 //     calx tests/protocol/routines.calx
-import std.json.{Json}
+import std.json.{Json, parse}
 import std.process.{exit}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
@@ -54,6 +54,15 @@ fn finished(app: mut Session, run_id: String) ! Error {
     }
 }
 
+// The numbers in a JSON list.
+fn ints(j: Json) -> List<i64> {
+    var out = List<i64>()
+    if let Json.Array(xs) = j {
+        for x in xs { out.push(x.as_i64() ?? 0) }
+    }
+    return out
+}
+
 // Run `run` of routine `id`, as routine.runs gives it.
 fn run_of(app: mut Session, q: str, id: String, which: String) -> Json ! Error {
     if let Json.Array(runs) = at(at(try app.cmd(q, "routine.runs", Obj.new().s("id", id).done()), "value"), "runs") {
@@ -82,6 +91,42 @@ fn run(i: Instance) -> i64 ! Error {
     let no_zone = try app.cmd("q_d3", "routine.put", Obj.new().s("name", String("X")).s("agent", String("Main")).s("prompt", String("x")).s("tz", String("Mars/Base")).j("schedule", Obj.new().s("daily", String("08:00")).done()).done())
     let no_time = try app.cmd("q_d4", "routine.put", Obj.new().s("name", String("X")).s("agent", String("Main")).s("prompt", String("x")).j("schedule", Obj.new().s("daily", String("25:00")).done()).done())
     try check(bool_at(no_zone, "ok") == some(false) and bool_at(no_time, "ok") == some(false), "a time zone loom doesn't know, or a time that isn't one, is refused")
+
+    // Chosen days at several times, kept in order, with its next three runs.
+    let chosen = at(at(try app.cmd("q_t1", "routine.put", Obj.new().s("name", String("Checks")).s("agent", String("Main")).s("prompt", String("check")).s("tz", String("Europe/Oslo")).j("schedule", parse(#"{"times":["17:00","08:00"],"days":["fri","mon","wed"]}"#)!).done()), "value"), "routine")
+    let soon = ints(at(chosen.copy(), "upcoming"))
+    try check("{at(chosen.copy(), "schedule")}" == #"{"times":["08:00","17:00"],"days":["mon","wed","fri"]}"# and str_at(chosen.copy(), "when") == some(String("on Mon, Wed and Fri at 08:00 and 17:00")), "chosen days at several times are kept in order, and said in words")
+    try check(soon.len() == 3 and soon[0] == (int_at(chosen.copy(), "next") ?? 0) and soon[0] < soon[1] and soon[1] < soon[2] and soon[2] - soon[0] <= 5 * 86400000, "with its next three runs, the first its next")
+    let windowed = at(at(try app.cmd("q_t2", "routine.put", Obj.new().s("name", String("Prices")).s("agent", String("Main")).s("prompt", String("prices")).j("schedule", parse(#"{"every":120,"from":"08:00","to":"20:00","days":["sat","sun"]}"#)!).done()), "value"), "routine")
+    try check(str_at(windowed.copy(), "when") == some(String("every 2 hours from 08:00 to 20:00 on weekends")) and ints(at(windowed.copy(), "upcoming")).len() == 3, "every few hours within a window, on chosen days")
+    let backwards = try app.cmd("q_t3", "routine.put", Obj.new().s("name", String("X")).s("agent", String("Main")).s("prompt", String("x")).j("schedule", parse(#"{"every":120,"from":"20:00","to":"08:00"}"#)!).done())
+    let no_days = try app.cmd("q_t4", "routine.put", Obj.new().s("name", String("X")).s("agent", String("Main")).s("prompt", String("x")).j("schedule", parse(#"{"times":["08:00"],"days":[]}"#)!).done())
+    try check(str_at(at(backwards, "error"), "code") == some(String("bad_request")) and str_at(at(no_days, "error"), "code") == some(String("bad_request")), "a window that ends before it starts, or no days, is refused")
+    // What a schedule would do, before it's kept.
+    let would = at(try app.cmd("q_t5", "routine.next", Obj.new().j("schedule", parse(#"{"times":["09:00"],"days":["sun"]}"#)!).s("tz", String("Asia/Tokyo")).done()), "value")
+    let would_times = ints(at(would.copy(), "next"))
+    try check(would_times.len() == 3 and would_times[1] - would_times[0] == 7 * 86400000 and str_at(would.copy(), "when") == some(String("on Sun at 09:00")) and str_at(would, "tz") == some(String("Asia/Tokyo")), "routine.next says when a schedule would run, and how it reads")
+    let not_one = try app.cmd("q_t6", "routine.next", Obj.new().j("schedule", parse(#"{"times":["noon"]}"#)!).done())
+    try check(str_at(at(not_one, "error"), "code") == some(String("bad_request")), "and refuses one that isn't a schedule")
+    // A week of them, for the calendar.
+    let week_from = (int_at(chosen.copy(), "at") ?? 0)
+    let week_to = week_from + 7 * 86400000
+    let week = at(at(try app.cmd("q_t7", "routine.calendar", Obj.new().i("from", week_from).i("to", week_to).done()), "value"), "routines")
+    var checks_week = List<i64>()
+    if let Json.Array(all) = week {
+        for x in all {
+            if str_at(x.copy(), "id") == str_at(chosen.copy(), "id") { checks_week = ints(at(x, "times")) }
+        }
+    }
+    var inside = true
+    for t in checks_week {
+        if t < week_from or t >= week_to { inside = false }
+    }
+    try check(checks_week.len() >= 5 and checks_week.len() <= 7 and inside and checks_week[0] == soon[0], "routine.calendar gives each routine's times in the week")
+    let too_long = try app.cmd("q_t8", "routine.calendar", Obj.new().i("from", week_from).i("to", week_from + 30 * 86400000).done())
+    try check(str_at(at(too_long, "error"), "code") == some(String("bad_request")), "and no more than 8 days at once")
+    _ = try app.cmd("q_t9", "routine.delete", Obj.new().s("id", str_at(chosen, "id") ?? String()).done())
+    _ = try app.cmd("q_t10", "routine.delete", Obj.new().s("id", str_at(windowed, "id") ?? String()).done())
     _ = try app.cmd("q_d5", "routine.delete", Obj.new().s("id", str_at(daily, "id") ?? String()).done())
     _ = try app.cmd("q_d6", "routine.delete", Obj.new().s("id", str_at(weekly, "id") ?? String()).done())
 
@@ -107,6 +152,7 @@ fn run(i: Instance) -> i64 ! Error {
     let first_run = str_at(at(running, "last"), "run") ?? String()
     let ran = try run_of(mut app, "q_r1", id.copy(), first_run)
     let said = str_at(ran.copy(), "said") ?? String()
+    try check((int_at(ran.copy(), "started") ?? 0) >= (int_at(ran.copy(), "at") ?? 0) and (int_at(ran.copy(), "ended") ?? 0) >= (int_at(ran.copy(), "started") ?? 1) and at(ran.copy(), "hint") == Json.Null, "a run keeps when it started and ended, and one that went well has no hint")
     try check(str_at(ran.copy(), "status") == some(String("done")) and str_at(ran.copy(), "by") == some(String("schedule")) and at(ran, "posted") == Json.Array([Json.Str(String("pulse"))]) and said.contains("routine \"Pulse\", run every 5 minutes") and said.contains("Your person sees nothing of this turn"), "its runs say how it went and what its agent answered, which knew a routine sent it, quietly")
     let again = try last_is(mut app, id.copy(), "running")
     try check(str_at(again.copy(), "conversation") == some(conversation.copy()), "and it runs again, in the same conversation")
@@ -126,13 +172,17 @@ fn run(i: Instance) -> i64 ! Error {
     let chat = str_at(at(c, "value"), "conversation") ?? String()
     let scheduled = try say(mut app, chat.copy(), "m_1", String(#"/mcp schedule {"name":"Hourly","prompt":"hi","schedule":{"every":60}}"#))
     try check(scheduled.starts_with("schedule: Scheduled: Hourly, every hour, as routine "), "an agent makes a routine with schedule")
+    let twice = try say(mut app, chat.copy(), "m_1b", String(#"/mcp schedule {"name":"Twice","prompt":"hi","on":false,"schedule":{"times":["17:00","08:00"],"days":["mon","tue","wed","thu","fri"]}}"#))
+    try check(twice.starts_with("schedule: Scheduled: Twice, on weekdays at 08:00 and 17:00 (Europe/Oslo time), as routine "), "and on chosen days at several times")
     let listed = try say(mut app, chat.copy(), "m_2", String("/mcp list_routines"))
-    try check(listed.contains("Hourly") and listed.contains("Pulse"), "and lists them")
+    try check(listed.contains("Hourly") and listed.contains("Pulse") and listed.contains("Twice"), "and lists them")
     let routines = at(at(try app.cmd("q_7", "routine.list", Obj.new().done()), "value"), "routines")
     var hourly_id = String()
+    var twice_id = String()
     if let Json.Array(all) = routines {
         for x in all {
-            if str_at(x.copy(), "name") == some(String("Hourly")) { hourly_id = str_at(x, "id") ?? String() }
+            if str_at(x.copy(), "name") == some(String("Hourly")) { hourly_id = str_at(x.copy(), "id") ?? String() }
+            if str_at(x.copy(), "name") == some(String("Twice")) { twice_id = str_at(x, "id") ?? String() }
         }
     }
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_3")).s("conversation", chat.copy()).s("text", "/mcp delete_routine \{\"id\":\"{hourly_id}\"\}").done())
@@ -147,6 +197,7 @@ fn run(i: Instance) -> i64 ! Error {
     try check((try reply_in(mut app, chat.copy())).contains("pulse"), "a routine posts into its agent's chat, the conversation the person last used")
 
     _ = try app.cmd("q_8", "routine.delete", Obj.new().s("id", id).done())
+    _ = try app.cmd("q_8b", "routine.delete", Obj.new().s("id", twice_id).done())
     let left = "{at(at(try app.cmd("q_9", "routine.list", Obj.new().done()), "value"), "routines")}"
     try check(left == "[]", "the person deletes one")
     let logged = "{at(try app.cmd("q_10", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
@@ -161,7 +212,8 @@ fn run(i: Instance) -> i64 ! Error {
     let second_wait = at(try app.cmd("q_w3", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
     try check(bool_at(first_wait.copy(), "waiting") == some(true) and bool_at(second_wait.copy(), "waiting") == some(true), "run while the person's turn goes on, it waits")
     let gave_way = try run_of(mut app, "q_w4", later.copy(), str_at(first_wait, "run") ?? String())
-    try check(str_at(gave_way.copy(), "status") == some(String("skipped")) and str_at(gave_way, "error") == some(String("It was run again before its chat was free.")), "a run that waited gives way to the next")
+    try check(str_at(gave_way.copy(), "status") == some(String("skipped")) and str_at(gave_way.copy(), "error") == some(String("It was run again before its chat was free.")), "a run that waited gives way to the next")
+    try check((str_at(gave_way, "hint") ?? String()).contains("thread of its own"), "and a skipped run says what to do about it")
     let gave_up = try last_is(mut app, later.copy(), "skipped")
     try check(str_at(at(gave_up, "last"), "error") == some(String("Its chat was busy for 10 minutes.")), "and one that waits too long is skipped")
     let kept = try run_of(mut app, "q_w5", later.copy(), str_at(second_wait, "run") ?? String())

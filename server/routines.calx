@@ -1,30 +1,55 @@
 module server.routines
 
 // When routines run (PLAN.md, "Routines"). A schedule is JSON, as the
-// protocol has it: {"every": 30}, in minutes, {"daily": "08:00"}, or
-// {"weekdays": "09:30"}, Monday to Friday, at a time on the routine's own
-// clock, in its time zone, summer time included.
+// protocol has it, on the routine's own clock, in its time zone, summer time
+// included:
+//
+// - {"every": 30}: every 30 minutes, from when it was made or changed;
+// - {"times": ["08:00", "17:00"], "days": ["mon", "fri"]}: at those times
+//   of day, on those days, or every day with no "days";
+// - {"every": 120, "from": "08:00", "to": "20:00", "days": [...]}: every 2
+//   hours from 08:00 up to 20:00, on the clock, on those days;
+// - {"daily": "08:00"} and {"weekdays": "09:30"}, as routines had them
+//   first: one time, every day or Monday to Friday.
 import std.json.{Json, parse}
 import std.time.{TimeZone, Timestamp}
-import shared.obj.{int_at, str_at}
+import shared.obj.{Obj, at, int_at, merge, str_at}
 
 // The shortest and longest gap between runs, in minutes.
 pub const EVERY_LEAST: i64 = 5
 pub const EVERY_MOST: i64 = 10080
 
-// How late a daily or weekday run can start and still count as on time: the
+// The longest gap within a window of the day, in minutes: a day.
+pub const WINDOW_MOST: i64 = 1440
+
+// The most times of day one routine can have.
+pub const TIMES_MOST: usize = 24
+
+// Every day of the week, Monday to Sunday, as a schedule's `days` keeps them:
+// bit 0 is Monday and bit 6 Sunday.
+pub const EVERY_DAY: i64 = 127
+pub const WEEKDAYS: i64 = 31
+pub const WEEKENDS: i64 = 96
+
+// How late a run at a time of day can start and still count as on time: the
 // instance looks once a second, so later than this, it was off.
 const LATE_MOST: i64 = 120000
 
 pub enum Schedule {
-    Every(i64),       // minutes
-    Daily(i64),       // the minute of the day
-    Weekdays(i64),    // the minute of the day, Monday to Friday
+    // Minutes apart, from when it was made.
+    Every(i64)
+    // Minutes of the day, in order, on the days in `days`.
+    Times { days: i64, times: List<i64> }
+    // Every `gap` minutes from minute `from` of the day up to minute `to`, on the days in `days`.
+    Window { gap: i64, from: i64, to: i64, days: i64 }
 }
 
+const DAY_KEYS: str = "mon tue wed thu fri sat sun"
+const DAY_NAMES: str = "Mon Tue Wed Thu Fri Sat Sun"
+const DAY_FULL: str = "monday tuesday wednesday thursday friday saturday sunday"
+
 // "HH:MM", a time of day on a 24-hour clock, as its minute of the day.
-fn clock(j: Json, key: str) -> i64? {
-    let t = str_at(j, key) else return none
+fn minute_of(t: String) -> i64? {
     if t.len() != 5 or t.byte_at(2) != 58 { return none }
     var digits = List<i64>()
     let spots: List<usize> = [0, 1, 3, 4]
@@ -39,20 +64,111 @@ fn clock(j: Json, key: str) -> i64? {
     return some(h * 60 + m)
 }
 
+fn clock(j: Json, key: str) -> i64? {
+    let t = str_at(j, key) else return none
+    return minute_of(t)
+}
+
+// The days `j` names, as bits: "mon" to "sun", or "monday" to "sunday", in any
+// case. Every day when it's left out, and none for a list that's empty or
+// names something that isn't a day.
+fn days_of(j: Json) -> i64? {
+    let v = j.get(String("days")) else return some(EVERY_DAY)
+    let Json.Array(names) = v else return none
+    if names.len() == 0 { return none }
+    let keys = DAY_KEYS.split(" ")
+    var days: i64 = 0
+    for n in names {
+        let name = (n.as_str() ?? String()).to_lower_root()
+        if name.len() < 3 { return none }
+        let short = name[0..3].copy()
+        let k = keys.position(|key| key == short) else return none
+        // Spelled out, it's the whole name: "mon" or "monday", not "monkey".
+        if name.len() > 3 and not DAY_FULL.split(" ").any(|full| full == name) { return none }
+        days = days | (1 << i64.wrap(k))
+    }
+    return some(days)
+}
+
 // The schedule `j` says, or none when it isn't one.
 pub fn read(j: Json) -> Schedule? {
     // One kind of schedule, said rightly: an "every" that isn't a number isn't read as another.
     if j.get(String("every")) != none {
-        let m = int_at(j, "every") else return none
-        if m < EVERY_LEAST or m > EVERY_MOST { return none }
-        return some(Schedule.Every(m))
+        let m = int_at(j.copy(), "every") else return none
+        let windowed = j.get(String("from")) != none or j.get(String("to")) != none or j.get(String("days")) != none
+        if not windowed {
+            if m < EVERY_LEAST or m > EVERY_MOST { return none }
+            return some(Schedule.Every(m))
+        }
+        if m < EVERY_LEAST or m > WINDOW_MOST { return none }
+        var from: i64 = 0
+        var to: i64 = 1439
+        if j.get(String("from")) != none {
+            let f = clock(j.copy(), "from") else return none
+            from = f
+        }
+        if j.get(String("to")) != none {
+            let e = clock(j.copy(), "to") else return none
+            to = e
+        }
+        if to < from { return none }
+        let days = days_of(j) else return none
+        return some(Schedule.Window { gap: m, from: from, to: to, days: days })
     }
-    if let m = clock(j.copy(), "daily") { return some(Schedule.Daily(m)) }
-    if let m = clock(j, "weekdays") { return some(Schedule.Weekdays(m)) }
+    if let v = j.get(String("times")) {
+        let Json.Array(given) = v else return none
+        if given.len() == 0 or given.len() > TIMES_MOST { return none }
+        var times = List<i64>()
+        for t in given {
+            let m = minute_of(t.as_str() ?? String()) else return none
+            if not times.contains(m) { times.push(m) }
+        }
+        times.sort()
+        let days = days_of(j) else return none
+        return some(Schedule.Times { days: days, times: times })
+    }
+    if let m = clock(j.copy(), "daily") { return some(Schedule.Times { days: EVERY_DAY, times: [m] }) }
+    if let m = clock(j, "weekdays") { return some(Schedule.Times { days: WEEKDAYS, times: [m] }) }
     return none
 }
 
-// Whether schedule `j` runs at a time of day, which its time zone decides.
+// Schedule `j` as it's kept: a new kind in order, its times sorted and its
+// days Monday first, and `daily` and `weekdays` as they were given.
+pub fn normal(j: Json) -> Json {
+    if j.get(String("daily")) != none or j.get(String("weekdays")) != none { return j.copy() }
+    let s = read(j.copy()) else return j.copy()
+    return to_json(s)
+}
+
+fn days_json(days: i64) -> Json {
+    var out = List<Json>()
+    let keys = DAY_KEYS.split(" ")
+    for k in 0usize..7 {
+        if days & (1 << i64.wrap(k)) != 0 { out.push(Json.Str(keys[k].copy())) }
+    }
+    return Json.Array(out)
+}
+
+// A schedule as the protocol has it.
+pub fn to_json(s: Schedule) -> Json {
+    match s {
+        Schedule.Every(m) => return Obj.new().i("every", m).done(),
+        Schedule.Times { days, times } => {
+            var ts = List<Json>()
+            for t in times { ts.push(Json.Str(hh_mm(t))) }
+            var o = Obj.new().j("times", Json.Array(ts))
+            if days != EVERY_DAY { o = o.j("days", days_json(days)) }
+            return o.done()
+        },
+        Schedule.Window { gap, from, to, days } => {
+            var o = Obj.new().i("every", gap).s("from", hh_mm(from)).s("to", hh_mm(to))
+            if days != EVERY_DAY { o = o.j("days", days_json(days)) }
+            return o.done()
+        },
+    }
+}
+
+// Whether schedule `j` runs at times of day, which its time zone decides.
 pub fn by_clock(j: Json) -> bool {
     match read(j) {
         some(Schedule.Every(_)) => return false,
@@ -63,7 +179,7 @@ pub fn by_clock(j: Json) -> bool {
 
 // What's wrong with a schedule, said for whoever sent it.
 pub fn shape() -> String {
-    return "A schedule is \{\"every\": minutes\}, from {EVERY_LEAST} to {EVERY_MOST} minutes, \{\"daily\": \"HH:MM\"\} or \{\"weekdays\": \"HH:MM\"\}, on a 24-hour clock."
+    return "A schedule is \{\"every\": minutes\}, from {EVERY_LEAST} to {EVERY_MOST} minutes; \{\"times\": [\"08:00\", \"17:00\"], \"days\": [\"mon\", \"wed\"]\}, up to {TIMES_MOST} times on a 24-hour clock, every day without days; or \{\"every\": minutes, \"from\": \"08:00\", \"to\": \"20:00\", \"days\": [...]\}, every {EVERY_LEAST} to {WINDOW_MOST} minutes within the day's window, from coming before to. Days are mon to sun."
 }
 
 fn hh_mm(m: i64) -> String {
@@ -72,12 +188,45 @@ fn hh_mm(m: i64) -> String {
     return "{if h < 10 { "0" } else { "" }}{h}:{if mm < 10 { "0" } else { "" }}{mm}"
 }
 
-// The schedule in words: "every 30 minutes", "daily at 08:00".
+// Words in a list: "a", "a and b", "a, b and c".
+fn and_list(words: List<String>) -> String {
+    if words.len() < 2 { return words.join(", ") }
+    return "{words[0..words.len() - 1].join(", ")} and {words[words.len() - 1]}"
+}
+
+// The days in words, after "on": "weekdays", "Mon, Wed and Fri".
+fn days_words(days: i64) -> String {
+    if days == WEEKDAYS { return String("weekdays") }
+    if days == WEEKENDS { return String("weekends") }
+    let names = DAY_NAMES.split(" ")
+    var out = List<String>()
+    for k in 0usize..7 {
+        if days & (1 << i64.wrap(k)) != 0 { out.push(names[k].copy()) }
+    }
+    return and_list(out)
+}
+
+fn gap_words(m: i64) -> String {
+    if m == 60 { return String("every hour") }
+    if m % 60 == 0 { return "every {m / 60} hours" }
+    return "every {m} minutes"
+}
+
+// The schedule in words: "every 30 minutes", "daily at 08:00 and 17:00",
+// "every 2 hours from 08:00 to 20:00 on weekdays".
 pub fn describe(s: Schedule) -> String {
     match s {
-        Schedule.Every(m) => return if m % 60 == 0 { if m == 60 { String("every hour") } else { "every {m / 60} hours" } } else { "every {m} minutes" },
-        Schedule.Daily(m) => return "daily at {hh_mm(m)}",
-        Schedule.Weekdays(m) => return "on weekdays at {hh_mm(m)}",
+        Schedule.Every(m) => return gap_words(m),
+        Schedule.Times { days, times } => {
+            var said = List<String>()
+            for t in times { said.push(hh_mm(t)) }
+            let when = if days == EVERY_DAY { String("daily") } else { "on {days_words(days)}" }
+            return "{when} at {and_list(said)}"
+        },
+        Schedule.Window { gap, from, to, days } => {
+            let on = if days == EVERY_DAY { String() } else { " on {days_words(days)}" }
+            return "{gap_words(gap)} from {hh_mm(from)} to {hh_mm(to)}{on}"
+        },
     }
 }
 
@@ -86,19 +235,44 @@ pub fn known_zone(tz: String) -> bool {
     return TimeZone.named(tz) != none
 }
 
-// The first moment after `after` that the zone's clock shows minute `m` of
-// the day, on a weekday only when `weekdays` says so.
-fn at_clock(zone: TimeZone, m: i64, weekdays: bool, after: i64) -> i64 {
-    var day = zone.date_time(Timestamp { unix_ms: after })
-    day.hour = i32.wrap(m / 60)
-    day.minute = i32.wrap(m % 60)
-    day.second = 0
-    day.milli = 0
-    // A week and a day always holds the next weekday at that time.
-    for _ in 0..9 {
-        let t = zone.timestamp(day).unix_ms
-        if t > after and (not weekdays or day.weekday() < 5) { return t }
-        day = day.add_days(1)
+// The minutes of the day a schedule runs at, in order, and on which days, or
+// none for one every N minutes from when it was made.
+fn clock_times(s: Schedule) -> (i64, List<i64>)? {
+    match s {
+        Schedule.Every(_) => return none,
+        Schedule.Times { days, times } => return some((days, times.copy())),
+        Schedule.Window { gap, from, to, days } => {
+            var times = List<i64>()
+            var m = from
+            while m <= to {
+                times.push(m)
+                m += gap
+            }
+            return some((days, times))
+        },
+    }
+}
+
+// The first moment after `after` that the zone's clock shows one of `times`
+// (minutes of the day), on one of `days`. A time summer time skips runs when
+// the clock jumps past it, and one it shows twice runs the first time.
+fn at_clock(zone: TimeZone, days: i64, times: List<i64>, after: i64) -> i64 {
+    let start = zone.date_time(Timestamp { unix_ms: after })
+    var best: i64 = 0
+    // A week and a day always holds the next of them.
+    for d in 0i64..9 {
+        var day = start.add_days(d)
+        if days & (1 << i64(day.weekday())) == 0 { continue }
+        for m in times {
+            day.hour = i32.wrap(m / 60)
+            day.minute = i32.wrap(m % 60)
+            day.second = 0
+            day.milli = 0
+            let t = zone.timestamp(day).unix_ms
+            if t > after and (best == 0 or t < best) { best = t }
+        }
+        // A later day's times come later, so the first day with one holds the next.
+        if best > 0 { return best }
     }
     return after + 86400000
 }
@@ -108,11 +282,62 @@ fn at_clock(zone: TimeZone, m: i64, weekdays: bool, after: i64) -> i64 {
 // but less in tests. A time of day is always on the real clock.
 pub fn next(s: Schedule, tz: String, after: i64, minute_ms: i64) -> i64 {
     let zone = TimeZone.named(tz) ?? TimeZone.utc()
-    match s {
-        Schedule.Every(m) => return after + m * minute_ms,
-        Schedule.Daily(m) => return at_clock(zone, m, false, after),
-        Schedule.Weekdays(m) => return at_clock(zone, m, true, after),
+    if let (days, times) = clock_times(s.copy()) { return at_clock(zone, days, times, after) }
+    if let Schedule.Every(m) = s { return after + m * minute_ms }
+    return after + 86400000
+}
+
+// Its next runs, at most `most`, from `first`, when it runs next: none while
+// it's off (`first` is 0).
+pub fn upcoming(s: Schedule, tz: String, first: i64, minute_ms: i64, most: usize) -> List<i64> {
+    var out = List<i64>()
+    if first <= 0 { return out }
+    var t = first
+    while out.len() < most {
+        out.push(t)
+        t = next(s.copy(), tz.copy(), t, minute_ms)
     }
+    return out
+}
+
+// When it runs from `from` up to `to` (Unix ms), at most `most` times, and
+// whether there were more. One every N minutes counts on and back from when it
+// runs next, `first`; one that's off (`first` is 0) runs at none.
+pub fn between(s: Schedule, tz: String, first: i64, from: i64, to: i64, minute_ms: i64, most: usize) -> (List<i64>, bool) {
+    var out = List<i64>()
+    if first <= 0 or to <= from { return (out, false) }
+    var t: i64 = 0
+    if let Schedule.Every(m) = s {
+        let gap = m * minute_ms
+        // The first of first + k × gap at or after `from`, k a whole number either side of 0.
+        let behind = from - first
+        var k = behind / gap
+        if k * gap < behind { k += 1 }
+        t = first + k * gap
+    } else {
+        t = next(s.copy(), tz.copy(), from - 1, minute_ms)
+    }
+    while t < to {
+        if out.len() == most { return (out, true) }
+        out.push(t)
+        t = next(s.copy(), tz.copy(), t, minute_ms)
+    }
+    return (out, false)
+}
+
+// How many of its next runs a routine shows, as `upcoming`.
+pub const UPCOMING: usize = 3
+
+// Routine `r` as routine.list and routine.updated give it, with `upcoming`:
+// when it runs the next three times, or none while it's off.
+pub fn shown(r: Json, minute_ms: i64) -> Json {
+    var times = List<Json>()
+    if let s = read(at(r.copy(), "schedule")) {
+        for t in upcoming(s, str_at(r.copy(), "tz") ?? String("UTC"), int_at(r.copy(), "next") ?? 0, minute_ms, UPCOMING) {
+            times.push(Json.Int(t))
+        }
+    }
+    return merge(r, Obj.new().j("upcoming", Json.Array(times)).done())
 }
 
 // Whether a run due at `due` and starting at `now` was missed, while the
@@ -120,7 +345,7 @@ pub fn next(s: Schedule, tz: String, after: i64, minute_ms: i64) -> i64 {
 // for one every N minutes, and by more than two minutes for a time of day.
 pub fn missed(s: Schedule, tz: String, due: i64, now: i64, minute_ms: i64) -> bool {
     match s {
-        Schedule.Every(_) => return next(s, tz, due, minute_ms) <= now,
+        Schedule.Every(_) => return next(s.copy(), tz, due, minute_ms) <= now,
         _ => return now - due > LATE_MOST,
     }
 }
@@ -129,9 +354,29 @@ pub fn missed(s: Schedule, tz: String, due: i64, now: i64, minute_ms: i64) -> bo
 // time after that, or, when the instance was off for longer than a gap, the
 // next time after `now`, so missed runs come as one.
 pub fn after_run(s: Schedule, tz: String, due: i64, now: i64, minute_ms: i64) -> i64 {
-    let t = next(s, tz.copy(), due, minute_ms)
+    let t = next(s.copy(), tz.copy(), due, minute_ms)
     if t > now { return t }
     return next(s, tz, now, minute_ms)
+}
+
+// What the person can do about a run that failed or was skipped, from how it
+// ended and why, for the Routines page to say under it. "" for one that went
+// well, or still goes.
+pub fn hint(status: String, error: String) -> String {
+    if status == "skipped" {
+        if error == STILL_RUNNING { return String("Its runs take longer than the time between them. Run it less often, or ask for less each time.") }
+        if error == MISSED { return String("Turn on Catch up, and a run missed while the instance is off happens once it starts again.") }
+        if error == RESTARTED_WAITING { return String("Nothing to do: it runs again at its next time.") }
+        return String("Its chat was busy then. Give it a thread of its own, or a time its chat is free.")
+    }
+    if status == "failed" {
+        if error == "The instance restarted." { return String("The instance stopped while it ran. Run it again, or wait for its next time.") }
+        if error == "Its agent was deleted." { return String("Pick another agent for it, or delete it.") }
+        return String("Read what its agent said above. If the prompt asks for something it can't do, change the prompt; if it was a passing problem, run it again.")
+    }
+    if status == "limit" { return String("Its agent ran out of what it can use. Add your own key in the agent's settings, or wait for it to reset.") }
+    if status == "cancelled" { return String("It was stopped before it finished. Run it again to finish it.") }
+    return String()
 }
 
 // What a routine's agent is told with each run's prompt, and each step's of
@@ -256,47 +501,168 @@ fn reads_a_time_of_day() {
 }
 
 @test
+fn reads_days_and_times() {
+    assert("{normal(parse(#"{"times":["17:00","08:00","08:00"],"days":["fri","Monday"]}"#)!)}" == #"{"times":["08:00","17:00"],"days":["mon","fri"]}"#)
+    // Every day, said or not, keeps no days.
+    assert("{normal(parse(#"{"times":["08:00"],"days":["mon","tue","wed","thu","fri","sat","sun"]}"#)!)}" == #"{"times":["08:00"]}"#)
+    assert(read(parse(#"{"times":[]}"#)!) == none and read(parse(#"{"times":["8:00"]}"#)!) == none and read(parse(#"{"times":"08:00"}"#)!) == none)
+    assert(read(parse(#"{"times":["08:00"],"days":[]}"#)!) == none and read(parse(#"{"times":["08:00"],"days":["monkey"]}"#)!) == none and read(parse(#"{"times":["08:00"],"days":["xyz"]}"#)!) == none)
+    var many = List<Json>()
+    for h in 0..25 { many.push(Json.Str("{if h < 10 { "0" } else { "" }}{h % 24}:30")) }
+    assert(read(Obj.new().j("times", Json.Array(many)).done()) == none)
+    // Those kept as they came first stay so.
+    assert("{normal(parse(#"{"daily":"08:00"}"#)!)}" == #"{"daily":"08:00"}"#)
+}
+
+@test
+fn reads_every_few_hours_within_a_window() {
+    assert("{normal(parse(#"{"every":120,"from":"08:00","to":"20:00","days":["sat","sun"]}"#)!)}" == #"{"every":120,"from":"08:00","to":"20:00","days":["sat","sun"]}"#)
+    // Days alone make it on the clock, from midnight.
+    assert("{normal(parse(#"{"every":60,"days":["mon"]}"#)!)}" == #"{"every":60,"from":"00:00","to":"23:59","days":["mon"]}"#)
+    assert(read(parse(#"{"every":120,"from":"20:00","to":"08:00"}"#)!) == none and read(parse(#"{"every":2880,"from":"08:00"}"#)!) == none and read(parse(#"{"every":120,"from":"8"}"#)!) == none)
+    // Without a window it's every N minutes from when it was made, as before.
+    assert("{normal(parse(#"{"every":30}"#)!)}" == #"{"every":30}"#)
+}
+
+@test
 fn says_it_in_words() {
     assert(describe(Schedule.Every(30)) == "every 30 minutes" and describe(Schedule.Every(60)) == "every hour" and describe(Schedule.Every(180)) == "every 3 hours")
-    assert(describe(Schedule.Daily(480)) == "daily at 08:00" and describe(Schedule.Weekdays(570)) == "on weekdays at 09:30")
+    assert(describe(read(parse(#"{"daily":"08:00"}"#)!)!) == "daily at 08:00" and describe(read(parse(#"{"weekdays":"09:30"}"#)!)!) == "on weekdays at 09:30")
+    assert(describe(read(parse(#"{"times":["08:00","12:00","17:00"]}"#)!)!) == "daily at 08:00, 12:00 and 17:00")
+    assert(describe(read(parse(#"{"times":["10:00"],"days":["sat","sun"]}"#)!)!) == "on weekends at 10:00")
+    assert(describe(read(parse(#"{"times":["08:00","17:00"],"days":["mon","wed","fri"]}"#)!)!) == "on Mon, Wed and Fri at 08:00 and 17:00")
+    assert(describe(read(parse(#"{"every":120,"from":"08:00","to":"20:00"}"#)!)!) == "every 2 hours from 08:00 to 20:00")
+    assert(describe(read(parse(#"{"every":90,"from":"09:00","to":"17:00","days":["mon","tue","wed","thu","fri"]}"#)!)!) == "every 90 minutes from 09:00 to 17:00 on weekdays")
 }
 
 @test
 fn missed_runs_come_as_one() {
     let s = Schedule.Every(30)
     let m: i64 = 60000
-    assert(after_run(s, String("UTC"), 0, 1000, m) == 30 * m)
+    assert(after_run(s.copy(), String("UTC"), 0, 1000, m) == 30 * m)
     // Off for two hours: the next is half an hour from now, not four catching up.
     assert(after_run(s, String("UTC"), 0, 120 * m, m) == 150 * m)
 }
+
+const HOUR: i64 = 3600000
+const DAY: i64 = 86400000
 
 @test
 fn daily_keeps_to_the_clock_across_summer_time() {
     // Noon on Saturday the 28th of March 2026, UTC. Oslo moves to summer time that night.
     let sat: i64 = 1774699200000
-    let first = next(Schedule.Daily(480), String("Europe/Oslo"), sat, 60000)
+    let daily = read(parse(#"{"daily":"08:00"}"#)!)!
+    let first = next(daily.copy(), String("Europe/Oslo"), sat, 60000)
     // 08:00 in Oslo on Sunday the 29th is 06:00 UTC, in summer time.
     assert(first == 1774764000000)
     // And on Monday too, a whole day later.
-    assert(next(Schedule.Daily(480), String("Europe/Oslo"), first, 60000) == first + 86400000)
+    assert(next(daily.copy(), String("Europe/Oslo"), first, 60000) == first + DAY)
     // An unknown zone counts as UTC.
-    assert(next(Schedule.Daily(480), String("Mars/Base"), sat, 60000) == 1774771200000)
+    assert(next(daily, String("Mars/Base"), sat, 60000) == 1774771200000)
 }
 
 @test
 fn weekdays_skip_the_weekend() {
     // Noon on Saturday the 28th of March 2026, UTC: the next weekday is Monday the 30th.
     let sat: i64 = 1774699200000
-    let monday = next(Schedule.Weekdays(570), String("UTC"), sat, 60000)
+    let weekdays = read(parse(#"{"weekdays":"09:30"}"#)!)!
+    let monday = next(weekdays.copy(), String("UTC"), sat, 60000)
     assert(monday == 1774863000000)
     // Friday at 09:30, then Monday at 09:30.
     let friday: i64 = 1775208600000
-    assert(next(Schedule.Weekdays(570), String("UTC"), friday, 60000) == friday + 3 * 86400000)
+    assert(next(weekdays, String("UTC"), friday, 60000) == friday + 3 * DAY)
+}
+
+@test
+fn several_times_a_day_on_chosen_days() {
+    // Noon on Saturday the 28th of March 2026, UTC: Monday the 30th at 08:00
+    // in New York, already on summer time (EDT, UTC-4), is 12:00 UTC.
+    let sat: i64 = 1774699200000
+    let s = read(parse(#"{"times":["08:00","17:00"],"days":["mon","fri"]}"#)!)!
+    let runs = upcoming(s.copy(), String("America/New_York"), next(s.copy(), String("America/New_York"), sat, 60000), 60000, 3)
+    let monday_8: i64 = 1774872000000
+    // Monday 08:00 and 17:00, then Friday the 3rd of April at 08:00.
+    assert(runs == [monday_8, monday_8 + 9 * HOUR, monday_8 + 4 * DAY])
+}
+
+@test
+fn chosen_times_keep_to_the_clock_as_summer_time_starts() {
+    // Saturday the 7th of March 2026, 20:30 in New York (01:30 UTC on Sunday),
+    // just past its 20:00. Its clocks go from 02:00 to 03:00 that night, so
+    // 08:00 and 20:00 come an hour sooner in UTC from then on.
+    let sat: i64 = 1772933400000
+    let s = read(parse(#"{"times":["08:00","20:00"]}"#)!)!
+    let runs = upcoming(s.copy(), String("America/New_York"), next(s.copy(), String("America/New_York"), sat, 60000), 60000, 3)
+    // Sunday 08:00 EDT is 12:00 UTC, and 20:00 EDT is 00:00 UTC on Monday.
+    let sunday_8: i64 = 1772971200000
+    assert(runs == [sunday_8, sunday_8 + 12 * HOUR, sunday_8 + DAY])
+    // A time the jump skips runs once, when the clock comes to it: 02:30 is 03:30 that day.
+    let skipped = read(parse(#"{"times":["02:30","03:30"]}"#)!)!
+    let after: i64 = 1772938800000 // Sunday 03:00 UTC, Saturday 22:00 in New York
+    let first = next(skipped.copy(), String("America/New_York"), after, 60000)
+    assert(first == 1772955000000) // 03:30 EDT, 07:30 UTC
+    assert(next(skipped, String("America/New_York"), first, 60000) == first + DAY - HOUR)
+}
+
+@test
+fn chosen_times_keep_to_the_clock_as_summer_time_ends() {
+    // Sydney leaves summer time on Sunday the 5th of April 2026: 03:00 AEDT
+    // becomes 02:00 AEST, so its day is 25 hours long.
+    let s = read(parse(#"{"times":["09:00"]}"#)!)!
+    // Saturday the 4th, 09:00 AEDT (UTC+11), is 22:00 UTC on the 3rd.
+    let saturday: i64 = 1775253600000
+    // Sunday 09:00 AEST (UTC+10) is 23:00 UTC: 25 hours on.
+    assert(next(s.copy(), String("Australia/Sydney"), saturday, 60000) == saturday + 25 * HOUR)
+    // A time the clock shows twice runs once, the first time.
+    let twice = read(parse(#"{"times":["02:30"]}"#)!)!
+    let before: i64 = 1775230200000 // Saturday the 4th, 02:30 AEDT, 15:30 UTC on the 3rd
+    let first = next(twice.copy(), String("Australia/Sydney"), before, 60000)
+    assert(first == before + DAY) // Sunday 02:30 AEDT, the first of the two
+    assert(next(twice, String("Australia/Sydney"), first, 60000) == first + DAY + HOUR)
+}
+
+@test
+fn every_few_hours_within_a_window_across_summer_time() {
+    // Every 4 hours from 08:00 to 20:00 in Oslo on weekdays: 08:00, 12:00, 16:00, 20:00.
+    let s = read(parse(#"{"every":240,"from":"08:00","to":"20:00","days":["mon","tue","wed","thu","fri"]}"#)!)!
+    // Friday the 27th of March 2026 at 19:30 UTC is 20:30 in Oslo, on winter time.
+    let friday: i64 = 1774639800000
+    let first = next(s.copy(), String("Europe/Oslo"), friday, 60000)
+    // Past Friday's window, over the weekend and its change to summer time: Monday 08:00 CEST, 06:00 UTC.
+    let monday_8: i64 = 1774850400000
+    assert(first == monday_8)
+    assert(upcoming(s.copy(), String("Europe/Oslo"), first, 60000, 5) == [monday_8, monday_8 + 4 * HOUR, monday_8 + 8 * HOUR, monday_8 + 12 * HOUR, monday_8 + DAY])
+    // Monday's week holds 5 days of 4.
+    let (week, more) = between(s.copy(), String("Europe/Oslo"), first, monday_8 - 6 * HOUR, monday_8 - 6 * HOUR + 7 * DAY, 60000, 100)
+    assert(week.len() == 20 and not more and week[0] == monday_8)
+    let (few, more_left) = between(s, String("Europe/Oslo"), first, monday_8 - 6 * HOUR, monday_8 - 6 * HOUR + 7 * DAY, 60000, 3)
+    assert(few.len() == 3 and more_left)
+}
+
+@test
+fn every_n_minutes_between_counts_both_ways() {
+    let s = Schedule.Every(60)
+    let m: i64 = 60000
+    // Next at 10:00 (in hours from 0), a week from 0: back to 0, 1, ..., forward to 167.
+    let (all, more) = between(s.copy(), String("UTC"), 10 * HOUR, 0, 7 * DAY, m, 500)
+    assert(all.len() == 168 and all[0] == 0 and all[167] == 167 * HOUR and not more)
+    let (part, _) = between(s.copy(), String("UTC"), 10 * HOUR, 30 * 60000, 3 * HOUR, m, 500)
+    assert(part == [HOUR, 2 * HOUR])
+    // Off, it runs at none.
+    assert(between(s.copy(), String("UTC"), 0, 0, DAY, m, 10).0.len() == 0 and upcoming(s, String("UTC"), 0, m, 3).len() == 0)
 }
 
 @test
 fn a_time_of_day_missed_only_when_well_late() {
-    let s = Schedule.Daily(480)
-    assert(not missed(s, String("UTC"), 0, 5000, 60000) and missed(s, String("UTC"), 0, 3600000, 60000))
+    let s = read(parse(#"{"daily":"08:00"}"#)!)!
+    assert(not missed(s.copy(), String("UTC"), 0, 5000, 60000) and missed(s, String("UTC"), 0, 3600000, 60000))
     assert(not missed(Schedule.Every(5), String("UTC"), 0, 300, 100) and missed(Schedule.Every(5), String("UTC"), 0, 600, 100))
+}
+
+@test
+fn a_failed_or_skipped_run_says_what_to_do() {
+    assert(hint(String("done"), String()) == "" and hint(String("quiet"), String()) == "" and hint(String("running"), String()) == "")
+    assert(hint(String("skipped"), String(MISSED)).contains("Catch up") and hint(String("skipped"), String(STILL_RUNNING)).contains("less often"))
+    assert(hint(String("skipped"), busy_for(10)).contains("thread of its own") and hint(String("skipped"), String(BUSY_AT_NEXT)).contains("thread of its own"))
+    assert(hint(String("failed"), String("the shop was down")).contains("run it again") and hint(String("failed"), String("Its agent was deleted.")).contains("another agent"))
 }

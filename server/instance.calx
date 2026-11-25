@@ -633,6 +633,8 @@ const TASKS_PAGE: i64 = 50
 const TASKS_PAGE_MOST: i64 = 200
 const FIRES_A_PASS: i64 = 5    // routines fired in one pass of the loop, at most
 const ROUTINE_WAIT_MINUTES: i64 = 10    // how long a routine's run waits for its busy chat
+const CALENDAR_MOST_MS: i64 = 691200000    // the longest routine.calendar asks for: 8 days
+const CALENDAR_TIMES_MOST: usize = 500    // the most times routine.calendar gives for one routine
 const IDLE_PROC_MS: i64 = 1800000    // an agent program unused this long, 30 minutes, is stopped
 const SIDE_TRANSCRIPT_MOST: usize = 24000
 
@@ -980,7 +982,7 @@ fn starter_of(by: String) -> str {
 fn tool_reads(name: String, args: Json) -> bool {
     if name == "run_command" {
         let command = str_at(args, "name") ?? String()
-        return command.ends_with(".list") or command.ends_with(".get") or command.ends_with(".search") or command.ends_with(".revisions") or command == "routine.runs"
+        return command.ends_with(".list") or command.ends_with(".get") or command.ends_with(".search") or command.ends_with(".revisions") or command == "routine.runs" or command == "routine.next" or command == "routine.calendar"
     }
     let reads = ["list_agents", "list_acp_agents", "search_messages", "list_skills", "read_skill", "list_devices", "recall", "list_routines", "list_plugins", "read_plugin", "browser_snapshot", "browser_screenshot", "html_preview", "list_tables", "query_rows", "list_commands"]
     for r in reads {
@@ -1818,7 +1820,7 @@ impl Instance {
                 let last = merge(at(r.copy(), "last"), if was == "running" { Obj.new().s("status", String("failed")).s("error", String("The instance restarted.")).done() } else { Obj.new().s("status", String("skipped")).s("error", String(routines.RESTARTED_WAITING)).done() })
                 let after = merge(r.copy(), Obj.new().j("last", last).done())
                 try store.put_routine(user.copy(), after.copy())
-                _ = try store.append(user.copy(), "routine.updated", Obj.new().j("routine", after).done())
+                _ = try store.append(user.copy(), "routine.updated", Obj.new().j("routine", routines.shown(after, config.minute_ms)).done())
             }
         }
         // Agents' threads with agents kept before they were marked as theirs: from now
@@ -6889,7 +6891,7 @@ impl Instance {
             let s = routines.read(at(r.copy(), "schedule")) else { continue }
             let tz = str_at(r.copy(), "tz") ?? String("UTC")
             let was = int_at(r.copy(), "next") ?? t
-            let when = routines.after_run(s, tz.copy(), was, t, i.minute_ms)
+            let when = routines.after_run(s.copy(), tz.copy(), was, t, i.minute_ms)
             let timed = merge(r.copy(), Obj.new().i("next", when).done())
             // Missed by a whole gap, while the instance was off: it runs once
             // now, or waits for its next time, as the routine says.
@@ -7054,7 +7056,7 @@ impl Instance {
         let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else if by == "webhook" { String("by its webhook, with what it sent below the prompt") } else { String("now, as the person asked") }
         i.log(user.copy(), agent_id, "routine", "Ran the routine {name}", by.copy())
         let has_flow = if let Json.Array(steps) = at(r.copy(), "flow") { steps.len() > 0 } else { false }
-        try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).s("status", String("running")).done())
+        try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).done())
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
         try i.start_run(user, conversation, run_id.copy(), String(), prompt, List<Json>(), from, routines.quiet_note(has_flow), if by == "webhook" { "webhook" } else { "routine" })
@@ -7064,7 +7066,7 @@ impl Instance {
     // Keeps routine `r` as it is now, and tells the person's devices.
     fn routine_ran(i: Instance, user: String, r: Json) ! Error {
         try i.store.put_routine(user.copy(), r.copy())
-        try i.event(user, "routine.updated", Obj.new().j("routine", r).done())
+        try i.event(user, "routine.updated", Obj.new().j("routine", routines.shown(r, i.minute_ms)).done())
     }
 
     // A routine's run `run_id` ended, as its turn did (`status`, with `error`):
@@ -7303,7 +7305,8 @@ impl Instance {
             flow = if steps.len() == 0 { Json.Null } else { flows.to_json(steps) }
         }
         // A schedule, a webhook, or both.
-        let schedule = at(m.copy(), "schedule")
+        // Kept as routines.normal has it, so the same schedule said another way is the same.
+        let schedule = routines.normal(at(m.copy(), "schedule"))
         let s = routines.read(schedule.copy())
         if schedule != Json.Null and s == none { return Answer.Refused(String("bad_request"), routines.shape()) }
         let webhook = bool_at(m.copy(), "webhook") ?? (str_at(old.copy(), "hook") != none)
@@ -7315,7 +7318,7 @@ impl Instance {
             secret = str_at(old.copy(), "secret") ?? bytes.hex(random_bytes(32))
         }
         var when = String()
-        if let sc = s { when = routines.describe(sc) }
+        if let sc = s.copy() { when = routines.describe(sc) }
         if webhook { when = if when.len() > 0 { "{when}, and by webhook" } else { String("by webhook") } }
         var tz = str_at(m.copy(), "tz") ?? String()
         if tz.len() == 0 { tz = try i.store.device_tz(by.copy()) }
@@ -7342,7 +7345,7 @@ impl Instance {
         let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
         try i.routine_ran(user, r.copy())
-        return Answer.Value(Obj.new().j("routine", r).done())
+        return Answer.Value(Obj.new().j("routine", routines.shown(r, i.minute_ms)).done())
     }
 
     // POST /hooks/<id>: runs a routine from outside, such as GitHub Actions
@@ -12297,7 +12300,9 @@ impl Instance {
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
         if name == "routine.list" {
-            return Answer.Value(Obj.new().j("routines", Json.Array(try i.store.routines(user))).done())
+            var shown = List<Json>()
+            for r in try i.store.routines(user) { shown.push(routines.shown(r, i.minute_ms)) }
+            return Answer.Value(Obj.new().j("routines", Json.Array(shown)).done())
         }
         if name == "routine.put" {
             return try i.put_routine(user, device, args)
@@ -12309,7 +12314,46 @@ impl Instance {
             if try i.store.routine(user.copy(), id.copy()) == none { return Answer.Refused(String("not_found"), "There's no routine {id}.") }
             let limit = int_at(args.copy(), "limit") ?? 20
             if limit < 1 or limit > 100 { return Answer.Refused(String("bad_request"), String("limit is 1 to 100.")) }
-            return Answer.Value(Obj.new().j("runs", Json.Array(try i.store.routine_runs(user, id, str_at(args, "before"), limit))).done())
+            // Each that failed or was skipped with what the person can do about it.
+            var runs = List<Json>()
+            for run in try i.store.routine_runs(user, id, str_at(args, "before"), limit) {
+                let hint = routines.hint(str_at(run.copy(), "status") ?? String(), str_at(run.copy(), "error") ?? String())
+                runs.push(if hint.len() > 0 { merge(run, Obj.new().s("hint", hint).done()) } else { run.copy() })
+            }
+            return Answer.Value(Obj.new().j("runs", Json.Array(runs)).done())
+        }
+        // When a schedule would run, for the routine form's "Next": in the
+        // time zone given, or the device's, as routine.put takes it.
+        if name == "routine.next" {
+            let schedule = at(args.copy(), "schedule")
+            let s = routines.read(schedule) else return Answer.Refused(String("bad_request"), routines.shape())
+            var tz = str_at(args, "tz") ?? String()
+            if tz.len() > 0 and not routines.known_zone(tz.copy()) { return Answer.Refused(String("bad_request"), "There's no time zone {tz}. Name one as the IANA tz database does, such as Europe/Oslo.") }
+            if tz.len() == 0 { tz = try i.store.device_tz(device.copy()) }
+            if tz.len() == 0 { tz = try i.store.user_tz(user.copy()) }
+            if not routines.known_zone(tz.copy()) { tz = String("UTC") }
+            let first = routines.next(s.copy(), tz.copy(), now(), i.minute_ms)
+            var times = List<Json>()
+            for t in routines.upcoming(s.copy(), tz.copy(), first, i.minute_ms, routines.UPCOMING) { times.push(Json.Int(t)) }
+            return Answer.Value(Obj.new().j("next", Json.Array(times)).s("when", routines.describe(s)).s("tz", tz).done())
+        }
+        // When each routine that's on runs between two times, for the week
+        // on the Routines page.
+        if name == "routine.calendar" {
+            let from = int_at(args.copy(), "from") ?? 0
+            let to = int_at(args, "to") ?? 0
+            if from <= 0 or to <= from or to - from > CALENDAR_MOST_MS { return Answer.Refused(String("bad_request"), String("from and to are Unix ms, to after from, up to 8 days apart.")) }
+            var out = List<Json>()
+            for r in try i.store.routines(user) {
+                if bool_at(r.copy(), "on") == some(false) { continue }
+                let s = routines.read(at(r.copy(), "schedule")) else { continue }
+                let (times, more) = routines.between(s, str_at(r.copy(), "tz") ?? String("UTC"), int_at(r.copy(), "next") ?? 0, from, to, i.minute_ms, CALENDAR_TIMES_MOST)
+                if times.len() == 0 { continue }
+                var ts = List<Json>()
+                for t in times { ts.push(Json.Int(t)) }
+                out.push(Obj.new().s("id", str_at(r, "id") ?? String()).j("times", Json.Array(ts)).b("more", more).done())
+            }
+            return Answer.Value(Obj.new().j("routines", Json.Array(out)).done())
         }
         if name == "routine.delete" or name == "routine.run" {
             let id = str_at(args, "id") ?? String()

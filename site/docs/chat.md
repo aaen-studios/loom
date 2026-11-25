@@ -119,7 +119,7 @@ A routine runs out of sight: its prompt and the agent's answer stay out of the c
 
 A routine due while the agent is answering you waits until it's done, and until the messages you queued have gone. If the chat is still busy after 10 minutes, or the routine's next time comes first, that run is skipped.
 
-Each routine's **Runs**, on its page under **Routines**, say how every run ended (posted, nothing new, failed, or skipped and why) and what the agent posted or answered.
+Each routine's **History**, on its page under **Routines**, says how every run ended (posted, quiet, failed, or skipped and why) and what the agent posted or answered ([Settings](settings.md#routines)).
 
 ## A backup program
 
