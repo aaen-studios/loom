@@ -11,6 +11,8 @@ import UniformTypeIdentifiers
 struct Composer: View {
     @Environment(Session.self) private var session
     var agentName: String
+    /// Bumped to put the cursor in the field, as Continue in your own chat does.
+    var write = 0
     var sent: () -> Void
     @State private var box = ComposerBox()
     @State private var photos: [PhotosPickerItem] = []
@@ -57,6 +59,7 @@ struct Composer: View {
         .onChange(of: model.replying) { _, now in
             if now != nil { box.view?.becomeFirstResponder() }
         }
+        .onChange(of: write) { _, _ in box.view?.becomeFirstResponder() }
         .onAppear {
             box.opened = { piece in open(piece) }
             box.pasted = { url in session.send(model.previewLink(url)) }

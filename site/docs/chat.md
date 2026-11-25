@@ -14,7 +14,7 @@ The sidebar lists your agents in groups:
 
 Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
 
-When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads.
+When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads. The thread is only read: where you'd write, **Continue in your own chat** opens your chat with the agent, ready to write.
 
 ## Replying to a message
 
