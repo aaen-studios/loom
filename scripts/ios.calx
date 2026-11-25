@@ -12,9 +12,11 @@
 // 3. puts the libraries in build/ios/LoomCore.xcframework, which the app links;
 // 4. puts the app icon scripts/icons.calx makes, design/logo/ios/AppIcon.appiconset,
 //    in build/ios/Icons.xcassets, since Xcode's asset compiler doesn't follow links;
-// 5. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
+// 5. puts Twemoji's pictures, design/twemoji/svg, in build/ios/Twemoji.xcassets, each
+//    keeping its vectors;
+// 6. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
 //
-// --sample does only the last two.
+// --sample does only the last three.
 //
 // CALX names the compiler to build with, `calx` otherwise.
 import std.env
@@ -61,6 +63,28 @@ fn icons() ! Error {
     try fs.copy_dir_all(String("design/logo/ios/AppIcon.appiconset"), "{catalog}/AppIcon.appiconset")
 }
 
+/// Twemoji's pictures (PLAN.md, "Emoji") as build/ios/Twemoji.xcassets: each SVG in
+/// design/twemoji/svg an image set named as its file is, which keeps its vectors, so UIKit
+/// draws an emoji sharp at any size. Made again each time, from the pictures as they are.
+fn twemoji() ! Error {
+    let catalog = "{OUT}/Twemoji.xcassets"
+    if fs.exists(catalog.copy()) {
+        try fs.remove_dir_all(catalog.copy())
+    }
+    try fs.make_dir_all(catalog.copy())
+    try fs.write_text("{catalog}/Contents.json", String("\{\n  \"info\" : \{\n    \"author\" : \"xcode\",\n    \"version\" : 1\n  \}\n\}\n"))
+    var n = 0
+    for file in try fs.list(String("design/twemoji/svg")) {
+        if not file.ends_with(".svg") { continue }
+        let set = "{catalog}/{file.trim_suffix(".svg")}.imageset"
+        try fs.make_dir_all(set.copy())
+        try fs.copy("design/twemoji/svg/{file}", "{set}/{file}")
+        try fs.write_text("{set}/Contents.json", "\{\n  \"images\" : [\n    \{\n      \"filename\" : \"{file}\",\n      \"idiom\" : \"universal\"\n    \}\n  ],\n  \"info\" : \{\n    \"author\" : \"xcode\",\n    \"version\" : 1\n  \},\n  \"properties\" : \{\n    \"preserves-vector-representation\" : true\n  \}\n\}\n")
+        n += 1
+    }
+    println("put {n} emoji in {catalog}")
+}
+
 fn main() ! Error {
     if not fs.is_file(String("core/lib.calx")) or not fs.is_file(String("ios/project.yml")) {
         eprintln("run it from loom's root: calx scripts/ios.calx")
@@ -88,6 +112,7 @@ fn main() ! Error {
         println("made {OUT}/LoomCore.xcframework")
     }
     try icons()
+    try twemoji()
     var gen = Command.new(String("xcodegen")).arg(String("--quiet")).dir(String("ios"))
     gen = gen.env(String("LOOM_CORE"), String(if sample { "NO" } else { "YES" }))
     try gen.run()

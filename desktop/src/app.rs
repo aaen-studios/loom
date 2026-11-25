@@ -41,6 +41,9 @@ mod rules;
 #[path = "room_view.rs"]
 mod room_view;
 use room_view::RoomForm;
+#[path = "learned.rs"]
+mod learned;
+
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
 use emoji_ui::RowKey;
@@ -13473,9 +13476,10 @@ ACTA_KEY=secret:ACTA_KEY",
             .into_any_element()
     }
 
-    /// What agents propose from past chats, and skills written from a task the person
-    /// recorded in an agent's browser: each kept or dropped here, and nothing applied
-    /// without the person's yes. One opens to be read, and changed, before it's kept.
+    /// What waits for the person: notes and fixes to skills agents propose from their
+    /// chats, when their permission mode asks, and skills written from a task the
+    /// person recorded in an agent's browser. Each is kept or dropped here, and one
+    /// opens to be read, and changed, before it's kept.
     fn proposals_page(&mut self, cx: &mut Context<Self>) -> Div {
         if let Some(open) = self.proposal_open.clone() {
             let skill = open.kind == "skill";
@@ -13497,6 +13501,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             cx.notify();
                             return;
                         }
+                    } else if p.kind == "fix" {
+                        p.body = this.skill_body_in.read(cx).value().to_string();
                     } else {
                         p.text = this.note_in.read(cx).value().to_string();
                     }
@@ -13548,6 +13554,26 @@ ACTA_KEY=secret:ACTA_KEY",
                         .collect();
                     groups.push(self.group(Some("What you did"), steps));
                 }
+            } else if open.kind == "fix" {
+                let mut rows = Vec::new();
+                let failed = open.failed_line();
+                if !failed.is_empty() {
+                    rows.push(self.note_row(failed, p.ink_2));
+                }
+                if !open.lines.is_empty() {
+                    rows.push(
+                        div()
+                            .p(px(space::L))
+                            .child(learned::change_view(p, &open.lines, 1.0))
+                            .into_any_element(),
+                    );
+                }
+                rows.push(self.text_row(
+                    "The skill, fixed",
+                    None,
+                    Textarea::new(&self.skill_body_in),
+                ));
+                groups.push(self.group(None, rows));
             } else {
                 let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
                 if !open.site.is_empty() || open.shared {
@@ -13565,6 +13591,8 @@ ACTA_KEY=secret:ACTA_KEY",
             groups.push(self.form_actions(Some(drop), cancel, keep));
             let title = if skill {
                 "Proposed skill"
+            } else if open.kind == "fix" {
+                "Proposed fix"
             } else {
                 "Proposed note"
             };
@@ -13590,7 +13618,11 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         let mut rows = Vec::new();
         for k in self.model.proposals.clone() {
-            let kind = if k.kind == "skill" { "Skill" } else { "Note" };
+            let kind = match k.kind.as_str() {
+                "skill" => "Skill",
+                "fix" => "Fix",
+                _ => "Note",
+            };
             let sub = format!("{kind} from {}", self.who(&k.agent));
             let (keep_id, drop_id) = (k.clone(), k.id.clone());
             let controls = div()
@@ -13615,7 +13647,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 )
                 .into_any_element();
-            let icon = if k.kind == "skill" {
+            let icon = if k.kind == "skill" || k.kind == "fix" {
                 Ico::BookOpen
             } else {
                 Ico::Lightbulb
@@ -13631,6 +13663,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .update(cx, |s, cx| s.set_value(name, window, cx));
                             this.skill_desc_in
                                 .update(cx, |s, cx| s.set_value(description, window, cx));
+                            this.skill_body_in
+                                .update(cx, |s, cx| s.set_value(body, window, cx));
+                        } else if k.kind == "fix" {
+                            let body = k.body.clone();
                             this.skill_body_in
                                 .update(cx, |s, cx| s.set_value(body, window, cx));
                         } else {
@@ -16617,7 +16653,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .into_any_element();
                 }
                 let line = this.activity_lines.1.get(ix - 1).cloned();
-                this.activity_line(line)
+                this.activity_line(line, cx.weak_entity())
             },
             cx,
         )
@@ -16625,7 +16661,7 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// A line of the activity page: a day's name over its entries, an entry, or, with
     /// nothing to show, a word that there's nothing yet.
-    fn activity_line(&self, line: Option<ActivityLine>) -> AnyElement {
+    fn activity_line(&self, line: Option<ActivityLine>, weak: WeakEntity<Loom>) -> AnyElement {
         let p = self.p;
         let e = match line {
             None => {
@@ -16729,6 +16765,16 @@ ACTA_KEY=secret:ACTA_KEY",
                         .text_size(px(size::CAPTION))
                         .text_color(p.ink_3)
                         .child(who),
+                )
+            })
+            // A note or a fix that was kept, which can still be undone from here.
+            .when(e.undo, |d| {
+                let id = e.proposal.clone();
+                d.child(
+                    self.small_button(SharedString::from(format!("undo-act-{id}")), "Undo", false)
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |loom, cx| loom.undo_learned(&id, cx));
+                        }),
                 )
             })
             .into_any_element()
@@ -21998,6 +22044,12 @@ fn reply(
         }
         body = body.child(chips);
     }
+    // What its agent kept or proposed from it: a quiet line, or a card that asks.
+    if let Some(under) =
+        learned::learned_under(p, m, name, tint, open, show.text_scale, this.clone())
+    {
+        body = body.child(under);
+    }
     // Its thread beside the name, or else level with the first line of words, plain or
     // in a bubble.
     let first_line = (size::REPLY * show.text_scale * line::REPLY - 10.0) / 2.0;
@@ -24265,6 +24317,7 @@ mod row_tests {
             reply: None,
             mentions: Vec::new(),
             sources: Vec::new(),
+            learned: Vec::new(),
             links: HashMap::new(),
             status: "done".into(),
         }

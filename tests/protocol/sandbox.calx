@@ -119,7 +119,7 @@ fn code_mode(runtime: String, ann: mut Session, owner: mut Session, ann_id: Stri
     let chat = str_at(at(try ann.cmd("q_13", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
 
     try ann.send(Obj.new().s("t", String("send")).s("cid", String("c_1")).s("conversation", chat.copy()).s("text", String("/mcp list")).done())
-    try check(reply_text(try ann.reply()) == "tools: search_tools, run_code, search_messages, list_devices, use_device, show_card, add_server, install_server, add_mcp_server", "in Code Mode, her agent's loom mcp offers search_tools and run_code, and the app's tools beside them")
+    try check(reply_text(try ann.reply()) == "tools: search_tools, run_code, search_messages, propose_note, skill_failed, fix_skill, list_devices, use_device, show_card, add_server, install_server, add_mcp_server", "in Code Mode, her agent's loom mcp offers search_tools and run_code, and the app's tools beside them")
 
     // A server her agent proposes goes in her own list once she says Add on its
     // card, never the owner's, and runs in her sandbox, where her session finds

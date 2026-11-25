@@ -908,6 +908,8 @@ struct Inline: Equatable, Sendable {
     var icons: [String: String] = [:]
     /// The agents it mentions that are still there, by id.
     var agents: [String: Agent] = [:]
+    /// The pictures of the person's own emoji it has, by id, once fetched (PLAN.md, "Emoji").
+    var emoji: [String: String] = [:]
 }
 
 struct Tool: Equatable, Sendable {
@@ -1386,6 +1388,8 @@ enum PlusSub: Sendable {
 /// One row of the composer's + menu.
 enum PlusRow: Equatable, Sendable {
     case attach
+    /// The emoji picker (PLAN.md, "Emoji").
+    case emoji
     case open(PlusSub)
     case file(RecentFile)
     case skill(PlusSkill)
@@ -1521,6 +1525,8 @@ final class Model {
     var skills: [PlusSkill] = []
     var routines: [PlusRoutine] = []
     var recentFiles: [RecentFile] = []
+    /// The person's own emoji, the suggestion row and the picker (PLAN.md, "Emoji").
+    let emoji = Emojis()
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     var files: [String: String] = [:]
     /// A file fetched to be opened, for the screen to show.
@@ -1749,6 +1755,7 @@ final class Model {
 
     /// Takes a frame from the core.
     func take(_ f: JSON) {
+        if emoji.take(f) { return }
         switch f["t"].text {
         case "core.conn":
             let state = f["state"].text
@@ -2074,7 +2081,7 @@ final class Model {
             if conversation != before { dirty.insert(.messages) }
         case .runs:
             runs = items.map {
-                Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text, quiet: !$0["routine"].text.isEmpty)
+                Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text, quiet: !$0["routine"].text.isEmpty || ($0["quiet"].bool ?? false))
             }
             routedLive = Dictionary(items.compactMap { r in Routed.of(r).map { (r["message"].text, $0) } }, uniquingKeysWith: { a, _ in a })
         case .tools:
@@ -2270,6 +2277,9 @@ final class Model {
             getting[id] = (key, false)
             out.append(["t": "file.get", "id": JSON(id), "file": JSON(sha), "thumb": true])
         }
+        // The pictures of the person's own emoji, and anyone's in the chat.
+        let words = shown.flatMap(\.blocks).map(\.text)
+        out += emoji.fetches(wanted: words.flatMap { Emoji.tokens($0).map(\.id) })
         return out
     }
 
@@ -2391,6 +2401,9 @@ final class Model {
         }
         // A reply names agents as @Name, which become links only as it's shown.
         let words = m.role == "agent" ? m.blocks.map { replyWords(m, $0.text) } : m.blocks.map(\.text)
+        for w in words {
+            for t in Emoji.tokens(w) { out.emoji[t.id] = emoji.paths[t.id] }
+        }
         if words.contains(where: { $0.contains("loom:agent/") }) {
             for a in agents where words.contains(where: { $0.contains("loom:agent/\(a.id))") }) {
                 out.agents[a.id] = a
@@ -2463,7 +2476,7 @@ final class Model {
     func plusGroups(_ query: String) -> [[PlusRow]] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if q.isEmpty {
-            return [[.attach, .open(.recent)], [.open(.skills), .open(.routines)]]
+            return [[.attach, .open(.recent), .emoji], [.open(.skills), .open(.routines)]]
         }
         func found<T>(_ rows: [T], _ name: (T) -> (String, String), _ row: (T) -> PlusRow) -> [PlusRow] {
             let hits = rows.compactMap { r -> (Bool, T)? in
@@ -2474,6 +2487,7 @@ final class Model {
             return (hits.filter(\.0) + hits.filter { !$0.0 }).map { row($0.1) }
         }
         var add: [PlusRow] = "attach files".contains(q) ? [.attach] : []
+        if "emoji".contains(q) { add.append(.emoji) }
         add += found(recentFiles, { ($0.file.name, "") }, PlusRow.file)
         let act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
             + found(plusRoutines, { ($0.name, "") }, PlusRow.routine)

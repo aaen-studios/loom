@@ -30,6 +30,14 @@ targets:
       - path: ../build/ios/Icons.xcassets
         group: Loom/Resources
         optional: true
+      # Twemoji's pictures from design/twemoji/svg, which scripts/ios.calx puts in a
+      # catalog that keeps their vectors, and which emoji each is (PLAN.md, "Emoji").
+      - path: ../build/ios/Twemoji.xcassets
+        group: Loom/Resources
+        optional: true
+      - path: ../design/twemoji/sequences.txt
+        group: Loom/Resources
+        buildPhase: resources
       - path: ../desktop/assets/fonts/Geist-Regular.ttf
         group: Loom/Resources/Fonts
       - path: ../desktop/assets/fonts/Geist-Medium.ttf
