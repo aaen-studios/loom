@@ -10134,6 +10134,26 @@ impl Instance {
             note = if note.len() > 0 { "{handoff}\n\n{note}" } else { handoff }
             try i.store.branch_handed(conversation_id.copy())
         }
+        // Messages the person deleted from the chat since its last turn: gone for it too.
+        // In a group chat each member is told on its own, of its replies and the others'.
+        let deleted = try i.store.deleted_to_tell(user.copy(), conversation_id.copy(), agent_id.copy())
+        if deleted.len() > 0 {
+            let names = if in_room { try i.names_of_agents(user.copy()) } else { List<(String, String)>() }
+            var said = List<String>()
+            for (id, role, said_by, words) in deleted {
+                var whose = if role == "person" { String("their message") } else { String("your reply") }
+                if role != "person" and said_by.len() > 0 and said_by != agent_id {
+                    whose = String("another agent's reply")
+                    for (k, n) in names.copy() {
+                        if k == said_by { whose = "{n}'s reply" }
+                    }
+                }
+                said.push(if words.len() > 0 { "{id}, {whose} that began \"{words}\"" } else { "{id}, {whose}" })
+            }
+            let gone = "[loom: Your person deleted these messages from this chat: {said.join("; ")}. They're gone: don't use, repeat or bring up what they said.]"
+            note = if note.len() > 0 { "{gone}\n\n{note}" } else { gone }
+            try i.store.deleted_told(user.copy(), conversation_id.copy(), agent_id.copy())
+        }
         // A run in a task's conversation is the task's, running again.
         if let task = try i.store.task_in(user.copy(), conversation_id.copy()) {
             try i.task_changed(user.copy(), merge(without(task, "error"), Obj.new().s("status", String("running")).s("run", run_id.copy()).i("updated", now()).done()))
@@ -13184,6 +13204,8 @@ impl Instance {
             let m = try i.store.message(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no message {id}.")
             let conversation = str_at(m.copy(), "conversation") ?? String()
             let pin = bool_at(args.copy(), "pinned") ?? true
+            // A deleted message's mark isn't pinned: deleting took its pin.
+            if pin and at(m.copy(), "deleted") != Json.Null { return Answer.Refused(String("bad_request"), String("That message was deleted.")) }
             // An undo puts a pin back with the time it had, so it goes back to its place.
             let asked = int_at(args, "at") ?? now()
             let when = if asked > 0 and asked <= now() { asked } else { now() }
@@ -13192,6 +13214,22 @@ impl Instance {
             try i.event(user.copy(), "message.updated", Obj.new().s("conversation", conversation).j("message", changed.copy()).done())
             if device.starts_with("a_") { i.log(user, device.copy(), "agent", if pin { "Pinned a message" } else { "Unpinned a message" }, device) }
             return Answer.Value(Obj.new().j("message", changed).done())
+        }
+        // A message deleted from its chat (PLAN.md, "Deleting a message"): a mark stays
+        // where it was, every device hears, and its agent is told with its next prompt.
+        if name == "message.delete" {
+            let id = str_at(args, "message") ?? String()
+            for (_, r) in i.runs {
+                if r.user == user and r.message == id { return Answer.Refused(String("busy"), String("That reply is still being written.")) }
+            }
+            let (gone, answering) = try i.store.delete_message(user.copy(), id.copy(), device.copy()) else return Answer.Refused(String("not_found"), "There's no message {id}.")
+            let conversation = str_at(gone.copy(), "conversation") ?? String()
+            try i.event(user.copy(), "message.updated", Obj.new().s("conversation", conversation.copy()).j("message", gone.copy()).done())
+            for r in answering {
+                try i.event(user.copy(), "message.updated", Obj.new().s("conversation", conversation.copy()).j("message", r).done())
+            }
+            if device.starts_with("a_") { i.log(user, device.copy(), "agent", "Deleted a message", device) }
+            return Answer.Value(Obj.new().j("message", gone).done())
         }
         if name == "messages.pinned" {
             let id = str_at(args, "conversation") ?? String()

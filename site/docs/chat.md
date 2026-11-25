@@ -69,6 +69,16 @@ Two or more pictures in one message, yours or an agent's, are one fan: the first
 
 In the viewer, the wheel zooms toward the pointer and dragging moves the picture around. Double-click to go between fitting the window and the picture's own size; + and − zoom, and 0 fits it again. On a trackpad, pinch to zoom, and once zoomed in, swipe with two fingers to move it. On the iPhone, pinch to zoom, drag to move it, and double-tap to zoom in or out; zoomed in, a swipe moves the picture rather than going to the next one.
 
+## Deleting a message
+
+Point at a message, yours or an agent's, and choose **Delete** from the **⋯** by its corner, or right-click it and choose **Delete**. On the iPhone, long-press it and choose **Delete**. It goes at once, for every device, and leaves a quiet line where it was: "You deleted a message", or "Juniper's message was deleted", so replies to it still make sense. A reply that quoted it says the original was deleted. With your next message, the agent is told the message is gone, and doesn't see it again.
+
+## Long messages and tables
+
+A message longer than about ten lines is cut, with **Show more** under it to read the rest in place and **Show less** to fold it again.
+
+Under a table in an agent's reply, a quiet line says how many rows it has, with **Copy**, which copies it as CSV for a spreadsheet. Its arrow has **Copy as CSV**, **Copy as Markdown** and **Copy as text**.
+
 ## Files in the message box
 
 What you attach shows in the message box as it will in the chat: over your words, a picture as itself, two or more as their fan, any other file as its name and size, each with an ×; in your words, each file where you put it, as its tiny picture and its name, or only the tiny picture when it's next to another file. Backspace takes a file out whole, and Ctrl+Z (⌘Z) brings it back. A long name is cut in the middle, keeping its start and its type; point at it to see all of it.

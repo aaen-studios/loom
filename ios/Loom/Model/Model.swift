@@ -444,6 +444,8 @@ struct Message: Identifiable, Equatable, Sendable {
     var reply: ReplyTo?
     /// Pinned in its conversation (PLAN.md, "Pinned messages").
     var pinned = false
+    /// Deleted (PLAN.md, "Deleting a message"): a mark in its place, with no blocks.
+    var deleted = false
 
     var isPerson: Bool { role == "person" }
 
@@ -489,11 +491,13 @@ struct ReplyTo: Equatable, Sendable {
     var part = false
     var ask = false
     var files: [FileRef] = []
+    /// The original was deleted since: who said it is kept, and its words are gone.
+    var deleted = false
 
     static func of(_ m: JSON) -> ReplyTo? {
         let r = m["reply"]
         guard !r["message"].text.isEmpty else { return nil }
-        return ReplyTo(message: r["message"].text, role: r["role"].text, agent: r["agent"].text, from: r["from"].text, text: r["text"].text, part: r["part"].bool ?? false, ask: r["ask"].bool ?? false, files: r["files"].array.map(FileRef.init))
+        return ReplyTo(message: r["message"].text, role: r["role"].text, agent: r["agent"].text, from: r["from"].text, text: r["text"].text, part: r["part"].bool ?? false, ask: r["ask"].bool ?? false, files: r["files"].array.map(FileRef.init), deleted: r["deleted"].bool ?? false)
     }
 
     /// A reply to `m` in `agent`'s chat: to the part `quote` when one was selected, asking
@@ -2139,7 +2143,7 @@ final class Model {
 
     /// A stored message, as the instance keeps it.
     private func messageOf(_ m: JSON) -> Message {
-        Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull)
+        Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull, deleted: !m["deleted"].isNull)
     }
 
     /// Takes the answer to one of the MCP commands the model sent, if it is one: the
@@ -2594,6 +2598,12 @@ final class Model {
         if attachments.contains(where: { $0.file?.file == f.file }) { return false }
         attachments.append(Attachment(id: id("app.sent"), name: f.name, path: "", file: f))
         return true
+    }
+
+    /// Deletes a message for every device, leaving a mark in its place (PLAN.md,
+    /// "Deleting a message"). The mark comes back with `message.updated`.
+    func deleteMessage(_ message: String) -> JSON {
+        ["t": "cmd", "id": JSON(id("app.unsay")), "name": "message.delete", "args": ["message": JSON(message)]]
     }
 
     /// Runs a routine now, from the + menu.
