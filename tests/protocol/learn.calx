@@ -1,0 +1,263 @@
+module tests.protocol.learn
+
+// What an agent learns from a chat (PLAN.md, "Memory" and "Sharing and
+// learning"). With a permission mode that doesn't ask about everyday changes,
+// a note the agent proposes is kept at once, under its reply and in the
+// activity log, and Undo there forgets it; a note for every agent waits. Once
+// the chat pauses, the agent looks back over it in a quiet turn, and what it
+// keeps goes under the chat's last reply; a message the person sends then
+// stops that turn and goes at once. A skill it said failed is fixed: the fix
+// is put in, with the lines it removes and adds, and undone. With a mode that
+// asks, the same wait on a card under the reply: put off, they wait on the
+// Proposals page, and a fix the person changed is kept as they changed it. In
+// a group chat, each member that answered looks back over its own part, one
+// after the other, and what it keeps goes under its own reply.
+//
+//     calx tests/protocol/learn.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+// A minute lasts this many ms here, so a chat pauses after 4 of them.
+const MINUTE_MS: str = "150"
+
+const SKILL: str = "# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Publish.\n4. Share the link.\n"
+const FIXED: str = "# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release, at the top.\n4. Share the link.\n"
+
+// The agent's reply in `conversation`, the next to come.
+fn reply_in(app: mut Session, conversation: String, wait_ms: u32 = 30000) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", wait_ms)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> Json ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn see(passed: bool, what: str, got: String) ! Error {
+    if not passed { fail "failed: {what}, from:\n{got}" }
+    println("ok    {what}")
+}
+
+// What's under reply `m`, each as learn.shown gives it.
+fn learned(m: Json) -> List<Json> {
+    let Json.Array(list) = at(m, "learned") else return List<Json>()
+    return list
+}
+
+// The reply `id` once what's under it says `want`, as its message.updated does,
+// read already or still to come.
+fn under(app: mut Session, id: String, want: str) -> Json ! Error {
+    var looked: usize = 0
+    loop {
+        while looked < app.frames.len() {
+            let f = app.frames[looked].copy()
+            looked += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "id") == some(id.copy()) and "{at(m.copy(), "learned")}".contains(want) { return m }
+        }
+        _ = try app.until("event", "message.updated", 30000)
+    }
+}
+
+fn agent_cmd(app: mut Session, id: str, agent: String, permission: str) ! Error {
+    let r = try app.cmd(id, "agent.update", Obj.new().s("agent", agent).s("permission", String(permission)).done())
+    if bool_at(r.copy(), "ok") != some(true) { fail "agent.update: {r}" }
+}
+
+fn memories(app: mut Session, id: str) -> String ! Error {
+    return "{try app.cmd(id, "memory.list", Obj.new().done())}"
+}
+
+fn skill_body(app: mut Session, id: str) -> String ! Error {
+    let got = try app.cmd(id, "skill.get", Obj.new().s("name", String("post-release-notes")).done())
+    return str_at(at(at(got, "value"), "skill"), "body") ?? String()
+}
+
+fn activity(app: mut Session, id: str) -> String ! Error {
+    return "{try app.cmd(id, "activity.list", Obj.new().done())}"
+}
+
+// Keeping it on its own, with a mode that doesn't ask about everyday changes.
+fn kept_part(app: mut Session, agent: String, chat: String) ! Error {
+    try agent_cmd(mut app, "q_k0", agent.copy(), "allow")
+    let m = try say(mut app, chat.copy(), "m_k1", String(#"/mcp propose_note {"text":"Ann buys wool socks.","why":"She said so today."}"#))
+    try see(reply_text(m.copy()).starts_with("propose_note: Kept:"), "a note an agent proposes in allow is kept at once", reply_text(m.copy()))
+    let items = learned(m.copy())
+    try see(items.len() == 1 and str_at(items[0].copy(), "status") == some(String("kept")) and str_at(items[0].copy(), "by") == some(String("auto")) and str_at(at(items[0].copy(), "note"), "text") == some(String("Ann buys wool socks.")), "and its reply has it under it, kept by the permission mode", "{m}")
+    let id = str_at(items[0].copy(), "id") ?? String()
+    try check((try memories(mut app, "q_k1")).contains("Ann buys wool socks."), "as one of the agent's notes")
+    let log = try activity(mut app, "q_k2")
+    try see(log.contains("Remembered: Ann buys wool socks.") and log.contains("\"proposal\":\"{id}\",\"undo\":true"), "and in the activity log, which can undo it", log.copy())
+
+    let undone = try app.cmd("q_k3", "proposal.undo", Obj.new().s("id", id.copy()).done())
+    try see(str_at(at(at(undone.copy(), "value"), "proposal"), "status") == some(String("undone")), "proposal.undo undoes it", "{undone}")
+    try check(not (try memories(mut app, "q_k4")).contains("Ann buys wool socks."), "and the note is forgotten")
+    let after = try under(mut app, str_at(m, "id") ?? String(), "\"status\":\"undone\"")
+    try check(learned(after).len() == 1, "the reply says so, for every device")
+    let log2 = try activity(mut app, "q_k5")
+    try see(log2.contains("Forgot what was remembered: Ann buys wool socks.") and log2.contains("\"proposal\":\"{id}\",\"undo\":false"), "and the log, where it can't be undone again", log2)
+    let twice = try app.cmd("q_k6", "proposal.undo", Obj.new().s("id", id).done())
+    try check(str_at(at(twice, "error"), "code") == some(String("not_now")), "a note is undone once")
+
+    let shared = try say(mut app, chat.copy(), "m_k2", String(#"/mcp propose_note {"text":"Ann's team is Platform.","shared":true}"#))
+    let s_items = learned(shared.copy())
+    try see(s_items.len() == 1 and str_at(s_items[0].copy(), "status") == some(String("waiting")) and reply_text(shared).contains("on a card under your reply"), "a note for every agent waits for the person, whatever the mode", "{s_items}")
+    _ = try app.cmd("q_k7", "proposal.drop", Obj.new().s("id", str_at(s_items[0].copy(), "id") ?? String()).done())
+
+    let self_undo = try say(mut app, chat.copy(), "m_k3", "/mcp run_command {Obj.new().s("name", String("proposal.undo")).j("args", Obj.new().s("id", String("prop_1")).done()).done()}")
+    try see(reply_text(self_undo.copy()).starts_with("run_command failed"), "an agent can't undo one itself", reply_text(self_undo))
+}
+
+// Looking back once the chat pauses, and a skill that fixes itself.
+fn look_back_part(app: mut Session, chat: String) ! Error {
+    let m = try say(mut app, chat.copy(), "m_l1", String("/next /mcp propose_note \{\"text\":\"Ann's sister is Bea.\"\}\nok"))
+    try check(reply_text(m.copy()) == "ok", "the person's turn ends")
+    let reply = str_at(m, "id") ?? String()
+    let looked = try app.until("event", "run.started", 30000)
+    try see(bool_at(looked.copy(), "quiet") == some(true) and str_at(looked.copy(), "conversation") == some(chat.copy()), "once the chat pauses, its agent looks back over it in a quiet turn", "{looked}")
+    let kept = try under(mut app, reply.copy(), "Ann's sister is Bea.")
+    try see("{at(kept.copy(), "learned")}".contains("\"status\":\"kept\""), "and what it keeps goes under the chat's last reply", "{kept}")
+    try check((try memories(mut app, "q_l1")).contains("Ann's sister is Bea."), "as a note")
+
+    _ = try app.cmd("q_l2", "skill.put", Obj.new().s("name", String("post-release-notes")).s("description", String("Posting the release notes.")).s("body", String(SKILL)).done())
+    let early = try say(mut app, chat.copy(), "m_l2", "/mcp fix_skill {Obj.new().s("name", String("post-release-notes")).s("body", String(FIXED)).done()}")
+    try see(reply_text(early.copy()).contains("You haven't said post-release-notes failed"), "fix_skill is only for a skill its agent said failed", reply_text(early))
+    let failed = try say(mut app, chat.copy(), "m_l3", String(#"/mcp skill_failed {"name":"post-release-notes","step":"Press Publish","why":"There's no Publish button any more."}"#))
+    try see(reply_text(failed.copy()).starts_with("skill_failed: Noted."), "skill_failed says a skill failed at a step", reply_text(failed))
+    let fix = Obj.new().s("name", String("post-release-notes")).s("body", String(FIXED)).s("why", String("The button is called Release now.")).done()
+    let asked = try say(mut app, chat.copy(), "m_l4", "/next /mcp fix_skill {fix}\nok")
+    let fixed = try under(mut app, str_at(asked, "id") ?? String(), "post-release-notes")
+    let items = learned(fixed.copy())
+    let f = items[items.len() - 1].copy()
+    try see(str_at(f.copy(), "kind") == some(String("fix")) and str_at(f.copy(), "status") == some(String("kept")) and "{at(f.copy(), "fix")}".contains("\"step\":\"Press Publish\""), "looking back, the agent fixes the skill, which is put in at once, saying why it failed", "{f}")
+    try see("{at(at(f.copy(), "fix"), "lines")}".contains(#"{"op":"-","text":"3. Press Publish."},{"op":"+","text":"3. Press Release, at the top."}"#), "with the lines it removes and adds", "{f}")
+    try check((try skill_body(mut app, "q_l3")) == FIXED, "the skill is the fix now")
+    let again = try say(mut app, chat.copy(), "m_l5", "/mcp fix_skill {fix}")
+    try check(reply_text(again).contains("You haven't said"), "and one failure is fixed once")
+    let undone = try app.cmd("q_l4", "proposal.undo", Obj.new().s("id", str_at(f, "id") ?? String()).done())
+    try see(str_at(at(at(undone.copy(), "value"), "proposal"), "status") == some(String("undone")), "the fix is undone", "{undone}")
+    try check((try skill_body(mut app, "q_l5")) == SKILL, "and the skill is as it was")
+    try check((try activity(mut app, "q_l6")).contains("Undid the fix to the skill post-release-notes"), "which the activity log says")
+
+    // A message while it looks back stops that turn, and goes at once.
+    _ = try say(mut app, chat.copy(), "m_l6", String("/next /sleep 20000\nok"))
+    let slow = try app.until("event", "run.started", 30000)
+    try check(bool_at(slow.copy(), "quiet") == some(true), "the agent looks back again after the next pause")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_l7")).s("conversation", chat.copy()).s("text", String("straight away")).done())
+    let answer = try reply_in(mut app, chat.copy(), 10000)
+    try check(reply_text(answer) == "straight away", "a message then is answered at once")
+    var stopped = false
+    for fr in app.frames {
+        if str_at(fr.copy(), "kind") == some(String("run.finished")) and str_at(fr.copy(), "run") == str_at(slow.copy(), "run") { stopped = str_at(fr, "status") == some(String("cancelled")) }
+    }
+    try check(stopped, "the turn it looked back in stopped for it")
+}
+
+// A mode that asks: a card under the reply.
+fn card_part(app: mut Session, agent: String, chat: String) ! Error {
+    try agent_cmd(mut app, "q_c0", agent.copy(), "ask")
+    let m = try say(mut app, chat.copy(), "m_c1", String(#"/mcp propose_note {"text":"Ann works at NTNU."}"#))
+    let items = learned(m.copy())
+    try see(items.len() == 1 and str_at(items[0].copy(), "status") == some(String("waiting")) and reply_text(m.copy()).contains("on a card under your reply"), "in ask, a note waits on a card under the reply", "{m}")
+    try check(not (try memories(mut app, "q_c1")).contains("NTNU"), "and isn't a note yet")
+    let note_id = str_at(items[0].copy(), "id") ?? String()
+    let later = try app.cmd("q_c2", "proposal.later", Obj.new().j("ids", Json.Array([Json.Str(note_id.copy())])).done())
+    try see("{later}".contains("\"later\":true"), "Not now puts it off", "{later}")
+    _ = try under(mut app, str_at(m, "id") ?? String(), "\"later\":true")
+    let waiting = try app.cmd("q_c3", "proposal.list", Obj.new().done())
+    try check("{waiting}".contains(note_id.copy()), "to wait on the Proposals page")
+    let kept = try app.cmd("q_c4", "proposal.keep", Obj.new().s("id", note_id.copy()).done())
+    try check(str_at(at(at(kept, "value"), "proposal"), "status") == some(String("kept")), "kept from there, it's a note")
+    try check((try activity(mut app, "q_c5")).contains("\"proposal\":\"{note_id}\",\"undo\":true"), "which the activity log can undo too")
+
+    _ = try say(mut app, chat.copy(), "m_c2", String(#"/mcp skill_failed {"name":"post-release-notes","step":"Press Publish","why":"There's no Publish button any more."}"#))
+    let asked = try say(mut app, chat.copy(), "m_c3", "/next /mcp fix_skill {Obj.new().s("name", String("post-release-notes")).s("body", String(FIXED)).done()}\nok")
+    let card = try under(mut app, str_at(asked, "id") ?? String(), "post-release-notes")
+    let list = learned(card.copy())
+    let f = list[list.len() - 1].copy()
+    try see(str_at(f.copy(), "status") == some(String("waiting")), "in ask, a fix waits on a card too", "{f}")
+    try check((try skill_body(mut app, "q_c6")) == SKILL, "and the skill stays as it was")
+    let changed = String("# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release.\n4. Share the link.\n")
+    let keep = try app.cmd("q_c7", "proposal.keep", Obj.new().s("id", str_at(f.copy(), "id") ?? String()).j("fix", Obj.new().s("body", changed.copy()).done()).done())
+    try see(str_at(at(at(keep.copy(), "value"), "proposal"), "status") == some(String("kept")), "Change it keeps the fix as the person changed it", "{keep}")
+    try check((try skill_body(mut app, "q_c8")) == changed, "and the skill is that")
+    _ = try app.cmd("q_c9", "skill.put", Obj.new().s("name", String("post-release-notes")).s("description", String("Posting the release notes.")).s("body", String("Something else.")).done())
+    let late = try app.cmd("q_c10", "proposal.undo", Obj.new().s("id", str_at(f, "id") ?? String()).done())
+    try check(str_at(at(late, "error"), "code") == some(String("changed")), "a fix isn't undone once the skill has changed since")
+}
+
+// A group chat: each member that answered looks back over its own part once it
+// pauses, one after the other, and what each keeps goes under its own reply.
+fn room_part(app: mut Session, juniper: String) ! Error {
+    try agent_cmd(mut app, "q_g0", juniper.copy(), "allow")
+    let made = try app.cmd("q_g1", "agent.create", Obj.new().s("name", String("Moss")).s("acp_agent", String("fake")).s("instructions", String("You are a test too.")).done())
+    let moss = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    try agent_cmd(mut app, "q_g2", moss.copy(), "allow")
+    let room = try app.cmd("q_g3", "room.create", Obj.new().s("name", String("Pair")).j("members", Json.Array([Json.Str(juniper.copy()), Json.Str(moss.copy())])).done())
+    let pair = str_at(at(at(room, "value"), "conversation"), "id") ?? String()
+    let first = try say(mut app, pair.copy(), "m_g1", "[@Juniper](loom:agent/{juniper})\n/next /mcp propose_note \{\"text\":\"Ann plays chess.\"\}\nok")
+    let second = try say(mut app, pair.copy(), "m_g2", "[@Moss](loom:agent/{moss})\n/next /mcp propose_note \{\"text\":\"Ann runs on Sundays.\"\}\nok")
+    try check(str_at(first.copy(), "agent") == some(juniper.copy()) and str_at(second.copy(), "agent") == some(moss.copy()), "two members answer in a group chat")
+    var quiet = List<Json>()
+    var overlapped = false
+    var running = String()
+    var looked: usize = 0
+    while quiet.len() < 2 or running.len() > 0 {
+        while looked < app.frames.len() {
+            let f = app.frames[looked].copy()
+            looked += 1
+            let kind = str_at(f.copy(), "kind") ?? String()
+            if kind == "run.started" and bool_at(f.copy(), "quiet") == some(true) and str_at(f.copy(), "conversation") == some(pair.copy()) {
+                if running.len() > 0 { overlapped = true }
+                running = str_at(f.copy(), "run") ?? String()
+                quiet.push(f)
+            } else if kind == "run.finished" and running.len() > 0 and str_at(f.copy(), "run") == some(running.copy()) {
+                running = String()
+            }
+        }
+        if quiet.len() < 2 or running.len() > 0 { _ = try app.until("event", "", 30000) }
+    }
+    try see(str_at(quiet[0].copy(), "agent") == some(juniper.copy()) and str_at(quiet[1].copy(), "agent") == some(moss.copy()) and not overlapped, "once it pauses, each member looks back over its part, one after the other", "{quiet}")
+    let j = try under(mut app, str_at(first, "id") ?? String(), "Ann plays chess.")
+    let m = try under(mut app, str_at(second, "id") ?? String(), "Ann runs on Sundays.")
+    let j_items = learned(j)
+    let m_items = learned(m)
+    try see(j_items.len() == 1 and str_at(j_items[0].copy(), "agent") == some(juniper.copy()) and m_items.len() == 1 and str_at(m_items[0].copy(), "agent") == some(moss.copy()), "and what each keeps goes under its own reply, as its own note", "{j_items} {m_items}")
+    _ = try app.cmd("q_g4", "agent.delete", Obj.new().s("agent", moss).done())
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_a", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_c", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    try kept_part(mut app, agent.copy(), chat.copy())
+    try look_back_part(mut app, chat.copy())
+    try card_part(mut app, agent.copy(), chat)
+    try room_part(mut app, agent.copy())
+    _ = try app.cmd("q_d", "agent.delete", Obj.new().s("agent", agent).done())
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start_with([String("--test-minute-ms"), String(MINUTE_MS)])
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nlearn: all good")
+}

@@ -2099,7 +2099,7 @@ final class Model {
             if conversation != before { dirty.insert(.messages) }
         case .runs:
             runs = items.map {
-                Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text, quiet: !$0["routine"].text.isEmpty)
+                Run(id: $0["run"].text, conversation: $0["conversation"].text, agent: $0["agent"].text, message: $0["message"].text, quiet: !$0["routine"].text.isEmpty || ($0["quiet"].bool ?? false))
             }
         case .tools:
             tools = items.map {

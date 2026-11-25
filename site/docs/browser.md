@@ -37,10 +37,18 @@ When you stop, the agent gets a task, beside its chat, to write the steps up as 
 
 ## Proposals
 
-Agents propose skills and notes from your past chats, on their own, or when you ask. Each waits on the **Proposals** page, under Agents in Settings, until you keep or drop it. Nothing an agent proposes is used until you say yes, and an agent can't keep its own.
+Four minutes after your last message gets its answer, the chat has paused, and the agent looks back over it for what's worth remembering. You don't see it working. A message from you stops it. A skill the agent said failed partway is fixed in the same look back.
 
-- Open a proposed skill to read it, with what you did beside it when it came from a recording. Change its name, what it's for and how to do it, then **Keep** or **Drop**.
-- **Ask**, with the agent's name, asks the agent on screen to look over its chats for more.
+What happens next depends on the agent's [permission mode](permissions.md#permission-modes):
+
+- **Doesn't ask**: the agent keeps its notes and fixes on its own. A line under its reply says so, such as "Remembered 2 things" or "Fixed the skill post-release-notes". Open it to see each one, with **Forget** or **Undo**.
+- **Asks first** or **Asks when it's risky**: a card under the reply asks. For notes it says what the agent would remember and who each is for: untick any you don't want, then **Keep** or **Not now**. A fix says why the skill failed and shows the lines it removes and adds, with **Keep the fix**, **Change it** and **Drop**.
+
+A note for all your agents always asks, whatever the mode.
+
+What you don't answer, or put off with **Not now**, waits on the **Proposals** page, under Agents in Settings, with skills written from a recording. Open one to read and change it before you **Keep** or **Drop** it. **Ask**, with the agent's name, asks the agent on screen to look over its chats for more.
+
+Every note and fix that was kept is in the agent's activity log, with **Undo**. An agent can't keep, drop or undo its own.
 
 ### Notes tied to a site
 

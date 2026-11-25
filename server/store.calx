@@ -240,7 +240,11 @@ CREATE TABLE IF NOT EXISTS proposals (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
     kind TEXT NOT NULL, data TEXT NOT NULL, why TEXT NOT NULL, recording TEXT NOT NULL,
     status TEXT NOT NULL, at INTEGER NOT NULL, decided INTEGER NOT NULL DEFAULT 0,
-    by TEXT NOT NULL DEFAULT '');
+    by TEXT NOT NULL DEFAULT '', message TEXT NOT NULL DEFAULT '', later INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS skill_failures (
+    user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL, skill TEXT NOT NULL,
+    step TEXT NOT NULL, why TEXT NOT NULL, conversation TEXT NOT NULL, at INTEGER NOT NULL,
+    PRIMARY KEY (user, agent, skill));
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5 (
     text, user UNINDEXED, agent UNINDEXED,
     tokenize = 'unicode61 remove_diacritics 2');
@@ -515,6 +519,21 @@ impl Store {
             try s.db.execute_script(String("ALTER TABLE sent ADD COLUMN at INTEGER NOT NULL DEFAULT 0;"))
             _ = try s.db.execute(String("UPDATE sent SET at = ?"), [Value.Int(now())])
         }
+        // Proposals from before one went under the reply it came from get the
+        // columns, empty for under none (PLAN.md, "Sharing and learning").
+        var placed = false
+        for r in try s.db.query(String("PRAGMA table_info(proposals)")) {
+            if text(r[1].copy()) == "message" { placed = true }
+        }
+        if not placed { try s.db.execute_script(String("ALTER TABLE proposals ADD COLUMN message TEXT NOT NULL DEFAULT ''; ALTER TABLE proposals ADD COLUMN later INTEGER NOT NULL DEFAULT 0;")) }
+        // An activity log from before a kept note or fix could be undone from it
+        // gets the proposal each entry undoes, empty for none.
+        var undoable = false
+        for r in try s.db.query(String("PRAGMA table_info(activity)")) {
+            if text(r[1].copy()) == "proposal" { undoable = true }
+        }
+        if not undoable { try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN proposal TEXT NOT NULL DEFAULT '';")) }
+        try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS proposals_by_message ON proposals (user, message) WHERE message != '';"))
         // What prune_rows looks for, by age.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_at ON runs (at); CREATE INDEX IF NOT EXISTS sent_by_at ON sent (at); CREATE INDEX IF NOT EXISTS usage_by_at ON usage (at);"))
         // Settings kept before they were sealed are sealed once.
@@ -1912,27 +1931,30 @@ impl Store {
         _ = try self.db.execute(String("UPDATE recordings SET proposal = ? WHERE user = ? AND id = ?"), [t(proposal), t(user), t(id)])
     }
 
-    // Keeps an agent's proposal, waiting for the person: `kind` is skill or
-    // note, and `data` its skill (name, description, body) or note (text,
-    // site, shared). Gives it as proposal() does.
-    pub fn add_proposal(self, user: String, agent: String, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
+    // Keeps an agent's proposal, waiting for the person: `kind` is skill, note
+    // or fix, and `data` its skill (name, description, body), note (text,
+    // site, shared) or fix (name, body, description, failed, lines). `message`
+    // is the reply it goes under, or "". Gives it as proposal() does.
+    pub fn add_proposal(self, user: String, agent: String, kind: str, data: Json, why: String, recording: String, message: String) -> Json ! Error {
         let id = try self.new_id("prop")
-        _ = try self.db.execute(String("INSERT INTO proposals (id, user, agent, kind, data, why, recording, status, at) VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', ?)"), [t(id.copy()), t(user.copy()), t(agent), t(String(kind)), t("{data}"), t(why), t(recording), Value.Int(now())])
+        _ = try self.db.execute(String("INSERT INTO proposals (id, user, agent, kind, data, why, recording, status, at, message) VALUES (?, ?, ?, ?, ?, ?, ?, 'waiting', ?, ?)"), [t(id.copy()), t(user.copy()), t(agent), t(String(kind)), t("{data}"), t(why), t(recording), Value.Int(now()), t(message)])
         return try self.proposal(user, id) ?? Json.Null
     }
 
-    // A proposal: `id`, `agent`, `kind`, `skill` or `note`, `why`, `status`
-    // (waiting, kept or dropped), `at`, and once decided, `decided` and `by`;
+    // A proposal: `id`, `agent`, `kind`, `skill`, `note` or `fix`, `why`,
+    // `status` (waiting, kept, dropped or undone), `at`, the reply it's under as
+    // `message` when it's under one, `later` once the person put it off there,
+    // and once decided, `decided` and `by` ("auto" for the permission mode);
     // and for a skill written from a recording, `recording` and its `steps`.
     pub fn proposal(self, user: String, id: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, '') FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ? AND p.id = ?"), [t(user), t(id)]) else return none
+        let r = try self.db.query_one("SELECT {PROPOSAL_COLUMNS} FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ? AND p.id = ?", [t(user), t(id)]) else return none
         return some(proposal_of(r))
     }
 
     // The person's proposals with `status`, or every one with "", newest first.
     pub fn proposals(self, user: String, status: String, limit: usize) -> List<Json> ! Error {
         var out = List<Json>()
-        var sql = String("SELECT p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, '') FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ?")
+        var sql = "SELECT {PROPOSAL_COLUMNS} FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ?"
         var args: List<Value> = [t(user)]
         if status.len() > 0 {
             sql.push_str(" AND p.status = ?")
@@ -1944,10 +1966,53 @@ impl Store {
         return out
     }
 
+    // The proposals under the reply `message`, oldest first.
+    pub fn proposals_under(self, user: String, message: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query("SELECT {PROPOSAL_COLUMNS} FROM proposals p LEFT JOIN recordings r ON r.id = p.recording AND r.user = p.user WHERE p.user = ? AND p.message = ? ORDER BY p.at, p.rowid LIMIT 50", [t(user), t(message)]) { out.push(proposal_of(r)) }
+        return out
+    }
+
     // Keeps or drops a waiting proposal, as `by` said, with what was kept in
     // place of what was proposed. False when it isn't waiting.
     pub fn decide_proposal(self, user: String, id: String, status: str, data: Json, by: String) -> bool ! Error {
         return try self.db.execute(String("UPDATE proposals SET status = ?, data = ?, decided = ?, by = ? WHERE user = ? AND id = ? AND status = 'waiting'"), [t(String(status)), t("{data}"), Value.Int(now()), t(by), t(user), t(id)]) > 0
+    }
+
+    // A kept proposal undone, as `by` said. False when it isn't kept.
+    pub fn undo_proposal(self, user: String, id: String, by: String) -> bool ! Error {
+        return try self.db.execute(String("UPDATE proposals SET status = 'undone', decided = ?, by = ? WHERE user = ? AND id = ? AND status = 'kept'"), [Value.Int(now()), t(by), t(user), t(id)]) > 0
+    }
+
+    // Waiting proposals the person put off on the card under their reply, to
+    // decide on the Proposals page.
+    pub fn later_proposal(self, user: String, id: String) -> bool ! Error {
+        return try self.db.execute(String("UPDATE proposals SET later = 1 WHERE user = ? AND id = ? AND status = 'waiting'"), [t(user), t(id)]) > 0
+    }
+
+    // `agent` said following skill `skill` failed at `step`, in `conversation`:
+    // kept until a fix of it is proposed, the newest failure of each skill.
+    pub fn skill_failed(self, user: String, agent: String, skill: String, step: String, why: String, conversation: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO skill_failures (user, agent, skill, step, why, conversation, at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (user, agent, skill) DO UPDATE SET step = excluded.step, why = excluded.why, conversation = excluded.conversation, at = excluded.at"), [t(user), t(agent), t(skill), t(step), t(why), t(conversation), Value.Int(now())])
+    }
+
+    // The failure `agent` said of skill `skill` that no fix was proposed for:
+    // `skill`, `step`, `why`, `conversation` and `at`.
+    pub fn skill_failure(self, user: String, agent: String, skill: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT skill, step, why, conversation, at FROM skill_failures WHERE user = ? AND agent = ? AND skill = ?"), [t(user), t(agent), t(skill)]) else return none
+        return some(failure_of(r))
+    }
+
+    // The failures `agent` said in `conversation` that no fix was proposed for, oldest first.
+    pub fn skill_failures(self, user: String, agent: String, conversation: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT skill, step, why, conversation, at FROM skill_failures WHERE user = ? AND agent = ? AND conversation = ? ORDER BY at LIMIT 20"), [t(user), t(agent), t(conversation)]) { out.push(failure_of(r)) }
+        return out
+    }
+
+    // A failure a fix was proposed for, which the next fix of the skill waits on.
+    pub fn skill_fixed(self, user: String, agent: String, skill: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM skill_failures WHERE user = ? AND agent = ? AND skill = ?"), [t(user), t(agent), t(skill)])
     }
 
     // Forgets note `id` of the person's, if `agent` (when given) may: its
@@ -2411,7 +2476,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "emoji", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2425,6 +2490,11 @@ impl Store {
     // did it ("" for the agent itself, "auto" for its permission mode).
     pub fn log(self, user: String, agent: String, kind: str, what: String, by: String) ! Error {
         _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(user), t(agent), t(String(kind)), t(what), t(by), Value.Int(now())])
+    }
+
+    // The same, for a note or a fix that was kept, which the entry can undo.
+    pub fn log_kept(self, user: String, agent: String, what: String, by: String, proposal: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO activity (user, agent, kind, text, by, at, proposal) VALUES (?, ?, 'memory', ?, ?, ?, ?)"), [t(user), t(agent), t(what), t(by), Value.Int(now()), t(proposal)])
     }
 
     // Notes an action before it happens (PLAN.md, "Every action is recorded
@@ -2452,9 +2522,11 @@ impl Store {
     pub fn activity(self, user: String, agent: String?, before: i64?, limit: usize) -> List<Json> ! Error {
         var out = List<Json>()
         let below = before ?? i64.MAX
+        // A kept note's or fix's entry says which, and whether it can still be undone.
+        let columns = "a.id, a.agent, a.kind, a.text, a.by, a.at, a.status, a.input, a.why, a.ended, a.proposal, coalesce(p.status, '') FROM activity a LEFT JOIN proposals p ON p.id = a.proposal AND p.user = a.user AND a.proposal != ''"
         let rows = match agent {
-            some(a) => try self.db.query(String("SELECT id, agent, kind, text, by, at, status, input, why, ended FROM activity WHERE user = ? AND agent = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
-            none => try self.db.query(String("SELECT id, agent, kind, text, by, at, status, input, why, ended FROM activity WHERE user = ? AND id < ? ORDER BY id DESC LIMIT ?"), [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            some(a) => try self.db.query("SELECT {columns} WHERE a.user = ? AND a.agent = ? AND a.id < ? ORDER BY a.id DESC LIMIT ?", [t(user), t(a), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
+            none => try self.db.query("SELECT {columns} WHERE a.user = ? AND a.id < ? ORDER BY a.id DESC LIMIT ?", [t(user), Value.Int(below), Value.Int(i64.wrap(u64(limit)))]),
         }
         for r in rows {
             var e = Obj.new().i("id", int(r[0].copy())).s("agent", text(r[1].copy())).s("kind", text(r[2].copy())).s("text", text(r[3].copy())).s("by", text(r[4].copy())).i("at", int(r[5].copy()))
@@ -2464,6 +2536,8 @@ impl Store {
                 let ended = int(r[9].copy())
                 if ended > 0 { e = e.i("ended", ended) }
             }
+            let proposal = text(r[10].copy())
+            if proposal.len() > 0 { e = e.s("proposal", proposal).b("undo", text(r[11].copy()) == "kept") }
             out.push(e.done())
         }
         return out
@@ -2857,15 +2931,26 @@ fn recording_of(r: List<Value>) -> Json {
     return Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).j("steps", steps).s("proposal", text(r[3].copy())).i("at", int(r[4].copy())).done()
 }
 
-// A proposal from id, agent, kind, data, why, recording, status, at, decided,
-// by and its recording's steps.
+// What a proposal is read with, for proposal_of.
+const PROPOSAL_COLUMNS: str = "p.id, p.agent, p.kind, p.data, p.why, p.recording, p.status, p.at, p.decided, p.by, coalesce(r.steps, ''), p.message, p.later"
+
+// A failure an agent said of a skill, from skill, step, why, conversation and at.
+fn failure_of(r: List<Value>) -> Json {
+    return Obj.new().s("skill", text(r[0].copy())).s("step", text(r[1].copy())).s("why", text(r[2].copy())).s("conversation", text(r[3].copy())).i("at", int(r[4].copy())).done()
+}
+
+// A proposal from PROPOSAL_COLUMNS: id, agent, kind, data, why, recording,
+// status, at, decided, by, its recording's steps, message and later.
 fn proposal_of(r: List<Value>) -> Json {
     let kind = text(r[2].copy())
     let data = match parse(text(r[3].copy())) {
         ok(j) => j,
         err(_) => Obj.new().done(),
     }
-    var o = Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("kind", kind.copy()).j(if kind == "skill" { "skill" } else { "note" }, data).s("why", text(r[4].copy())).s("status", text(r[6].copy())).i("at", int(r[7].copy()))
+    var o = Obj.new().s("id", text(r[0].copy())).s("agent", text(r[1].copy())).s("kind", kind.copy()).j(if kind == "skill" { "skill" } else if kind == "fix" { "fix" } else { "note" }, data).s("why", text(r[4].copy())).s("status", text(r[6].copy())).i("at", int(r[7].copy()))
+    let message = text(r[11].copy())
+    if message.len() > 0 { o = o.s("message", message) }
+    if int(r[12].copy()) != 0 { o = o.b("later", true) }
     let decided = int(r[8].copy())
     if decided > 0 { o = o.i("decided", decided).s("by", text(r[9].copy())) }
     let recording = text(r[5].copy())
@@ -3618,17 +3703,36 @@ fn proposals_wait_for_the_person() {
     let rec = s.add_recording(a.id.copy(), String("a_1"), steps)!
     assert(s.unwritten_recording(a.id.copy(), String("a_1"))! == some(rec.copy()))
     let skill = Obj.new().s("name", String("order-socks")).s("description", String("Ordering socks.")).s("body", String("1. Open the shop.")).done()
-    let p = s.add_proposal(a.id.copy(), String("a_1"), "skill", skill.copy(), String("You showed me."), rec.copy())!
+    let p = s.add_proposal(a.id.copy(), String("a_1"), "skill", skill.copy(), String("You showed me."), rec.copy(), String())!
     let id = field(p.copy(), "id")
     s.recording_written(a.id.copy(), rec.copy(), id.copy())!
     assert(s.unwritten_recording(a.id.copy(), String("a_1"))! == none)
     assert(field(p.copy(), "status") == "waiting" and "{p}".contains(#""steps":[{"kind":"page""#))
-    _ = s.add_proposal(a.id.copy(), String("a_1"), "note", Obj.new().s("text", String("Ann likes wool.")).done(), String("From Tuesday's chat."), String())!
+    let note = s.add_proposal(a.id.copy(), String("a_1"), "note", Obj.new().s("text", String("Ann likes wool.")).done(), String("From Tuesday's chat."), String(), String("msg_4"))!
+    let note_id = field(note.copy(), "id")
+    assert(field(note, "message") == "msg_4")
     assert(s.proposals(a.id.copy(), String("waiting"), 50)!.len() == 2)
     assert(s.decide_proposal(a.id.copy(), id.copy(), "kept", skill.copy(), String("d_1"))!)
     assert(not s.decide_proposal(a.id.copy(), id.copy(), "dropped", skill, String("d_1"))!)
     assert(s.proposals(a.id.copy(), String("waiting"), 50)!.len() == 1)
-    assert(field(s.proposal(a.id.copy(), id)! ?? Json.Null, "by") == "d_1")
+    assert(field(s.proposal(a.id.copy(), id.copy())! ?? Json.Null, "by") == "d_1")
+    // Under its reply, put off there, then kept on its own and undone, once.
+    assert(s.proposals_under(a.id.copy(), String("msg_4"))!.len() == 1)
+    assert(s.later_proposal(a.id.copy(), note_id.copy())!)
+    assert("{s.proposal(a.id.copy(), note_id.copy())!}".contains(#""later":true"#))
+    assert(s.decide_proposal(a.id.copy(), note_id.copy(), "kept", Obj.new().s("text", String("Ann likes wool.")).i("memory", 3).done(), String("auto"))!)
+    s.log_kept(a.id.copy(), String("a_1"), String("Remembered: Ann likes wool."), String("auto"), note_id.copy())!
+    assert("{s.activity(a.id.copy(), none, none, 5)!}".contains(#""proposal":"prop_2","undo":true"#))
+    assert(s.undo_proposal(a.id.copy(), note_id.copy(), String("d_1"))!)
+    assert(not s.undo_proposal(a.id.copy(), note_id.copy(), String("d_1"))!)
+    assert("{s.activity(a.id.copy(), none, none, 5)!}".contains(#""proposal":"prop_2","undo":false"#))
+    // A skill's failure waits for its fix, the newest of each.
+    s.skill_failed(a.id.copy(), String("a_1"), String("order-socks"), String("Open the shop"), String("It moved."), String("c_1"))!
+    s.skill_failed(a.id.copy(), String("a_1"), String("order-socks"), String("Pay"), String("No card."), String("c_1"))!
+    assert(s.skill_failures(a.id.copy(), String("a_1"), String("c_1"))!.len() == 1)
+    assert(field(s.skill_failure(a.id.copy(), String("a_1"), String("order-socks"))! ?? Json.Null, "step") == "Pay")
+    s.skill_fixed(a.id.copy(), String("a_1"), String("order-socks"))!
+    assert(s.skill_failure(a.id.copy(), String("a_1"), String("order-socks"))! == none)
 }
 
 @test
