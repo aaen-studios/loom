@@ -1,20 +1,14 @@
 // The Calx loom builds with, pinned in .calx-version: its version, then the
 // SHA-256 of its release for each system. CI, the release and the Docker image
-// install exactly that one (.github/actions/calx), from loom's own copy of
-// Calx's releases, github.com/aaen-studios/loom-calx, which keeps every build
-// loom has pinned. Calx's own nightly release keeps only the newest two.
+// install exactly that one (.github/actions/calx), from Calx's release of that
+// version, vVERSION, which Calx keeps for every build.
 //
 //     calx scripts/calx_pin.calx          says whether the Calx here is the pinned one
-//     calx scripts/calx_pin.calx bump     pins the Calx here: copies its release, and the
-//                                         toolchains it builds with, to loom-calx, and
-//                                         writes .calx-version
+//     calx scripts/calx_pin.calx bump     pins the Calx here: checks its release has it,
+//                                         and the toolchain it builds with, for every
+//                                         system, and writes .calx-version
 //
-// With the pin, any Calx loom has pinned installs again with
-//
-//     CALX_RELEASES=https://github.com/aaen-studios/loom-calx/releases calx update --to VERSION
-//
-// Run it from the repository's root. bump needs gh signed in with the right to
-// upload to aaen-studios/loom-calx.
+// Run it from the repository's root. bump needs gh signed in.
 import std.bytes.{hex}
 import std.env.{args, variable}
 import std.fs
@@ -25,9 +19,7 @@ import std.tar.{Tar}
 import std.zip.{Zip}
 
 const PIN: str = ".calx-version"
-const MIRROR: str = "aaen-studios/loom-calx"
 const UPSTREAM: str = "ellipog/calx"
-const MIRROR_RELEASES: str = "https://github.com/aaen-studios/loom-calx/releases"
 // Each system a Calx release is built for, and its archive's extension.
 const PLATFORMS: str = "linux-x64.tar.gz linux-arm64.tar.gz macos-arm64.tar.gz windows-x64.zip windows-arm64.zip"
 
@@ -61,11 +53,6 @@ fn pinned() -> String {
         return line.trim().copy()
     }
     return String()
-}
-
-/// The release a version is in, as Calx names them: `nightly` for a nightly.
-fn tag_of(version: String) -> String {
-    return if version.contains("-nightly.") { String("nightly") } else { "v{version}" }
 }
 
 fn sha_of(bytes: List<u8>) -> String {
@@ -109,81 +96,51 @@ fn check() {
         return
     }
     eprintln("loom is pinned to Calx {want} ({PIN}), which CI builds with, and Calx {have} is installed here.")
-    eprintln("To build with the pinned one:  CALX_RELEASES={MIRROR_RELEASES} calx update --to {want}")
+    eprintln("To build with the pinned one:  calx update --to {want}")
     eprintln("To pin this one:               calx scripts/calx_pin.calx bump")
     exit(1)
 }
 
 fn bump() ! Error {
     let version = installed()
-    let tag = tag_of(version.copy())
+    let tag = "v{version}"
     let dir = try fs.temp_dir()
     println("pinning Calx {version}")
 
-    // The mirror's release, and what it holds already. Nothing there is replaced.
-    var have = Set<String>()
-    let seen = Command.new(String("gh")).args([String("release"), String("view"), tag.copy(), String("-R"), String(MIRROR), String("--json"), String("assets")]).output()!
-    if seen.status.success() {
-        if let Json.Array(assets) = (try parse(seen.text())).get(String("assets")) ?? Json.Null {
-            for a in assets {
-                if let name = (a.get(String("name")) ?? Json.Null).as_str() {
-                    have.insert(name.copy())
-                }
+    // What Calx's release of the version holds, with each file's SHA-256 as GitHub has it.
+    let seen = try gh([String("release"), String("view"), tag.copy(), String("-R"), String(UPSTREAM), String("--json"), String("assets")])
+    var digests = Map<String, String>()
+    if let Json.Array(assets) = (try parse(seen)).get(String("assets")) ?? Json.Null {
+        for a in assets {
+            if let name = (a.get(String("name")) ?? Json.Null).as_str() {
+                let digest = (a.get(String("digest")) ?? Json.Null).as_str() ?? ""
+                digests.insert(name.copy(), digest.trim_prefix("sha256:"))
             }
         }
-    } else {
-        _ = try gh([String("release"), String("create"), tag.copy(), String("-R"), String(MIRROR), String("--title"), tag.copy(),
-            String("--notes"), "The Calx builds loom has pinned, as Calx's {tag} release had them."])
-        println("made the release {tag} on {MIRROR}")
     }
 
     var pin = "{version}\n"
-    var uploads: List<String> = []
     var toolchains = Map<String, String>()
     for platform in PLATFORMS.split(" ") {
         let file = "calx-{version}-{platform}"
         let path = "{dir}/{file}"
-        // From Calx's release, or from the mirror for a version Calx no longer has.
-        var from = String(UPSTREAM)
         if not (download(UPSTREAM, tag.copy(), file.copy(), dir.copy()) and download(UPSTREAM, tag.copy(), "{file}.sha256", dir.copy())) {
-            if not (download(MIRROR, tag.copy(), file.copy(), dir.copy()) and download(MIRROR, tag.copy(), "{file}.sha256", dir.copy())) {
-                fail "neither {UPSTREAM} nor {MIRROR} has {file} in its {tag} release"
-            }
-            from = String(MIRROR)
+            fail "{UPSTREAM} has no {file} in its {tag} release"
         }
         let bytes = try fs.read(path.copy())
         let got = sha_of(bytes.copy())
         let said = (try fs.read_text("{path}.sha256") ?? String()).split_whitespace()
-        if said.len() == 0 or said[0] != got { fail "{file} from {from} has SHA-256 {got}, not what its .sha256 says" }
+        if said.len() == 0 or said[0] != got { fail "{file} has SHA-256 {got}, not what its .sha256 says" }
         pin = "{pin}{got}  {file}\n"
         let (tc_file, tc_sum) = try toolchain_of(file.copy(), bytes)
         toolchains.insert(tc_file.copy(), tc_sum.copy())
-        if not have.contains(file) {
-            uploads.push(path.copy())
-            uploads.push("{path}.sha256")
-        }
         println("  {file}  {got}")
     }
+    // Each toolchain the archives name has to be in the release too, with that SHA-256.
     for (tc_file, tc_sum) in toolchains {
-        if have.contains(tc_file) and have.contains("{tc_file}.sha256") {
-            println("  {tc_file}  on {MIRROR} already")
-            continue
-        }
-        let path = "{dir}/{tc_file}"
-        if not (download(UPSTREAM, tag.copy(), tc_file.copy(), dir.copy()) and download(UPSTREAM, tag.copy(), "{tc_file}.sha256", dir.copy())) {
-            fail "{UPSTREAM} has no {tc_file} in its {tag} release"
-        }
-        let got = sha_of(try fs.read(path.copy()))
-        if got != tc_sum { fail "{tc_file} has SHA-256 {got}, not the {tc_sum} its release names" }
-        uploads.push(path.copy())
-        uploads.push("{path}.sha256")
-        println("  {tc_file}  {got}")
-    }
-    if uploads.len() > 0 {
-        var a: List<String> = [String("release"), String("upload"), tag.copy(), String("-R"), String(MIRROR)]
-        a.extend(uploads.copy())
-        _ = try gh(a)
-        println("uploaded {uploads.len()} files to {MIRROR}'s {tag} release")
+        let has = if let d = digests.find(tc_file) { d.copy() } else { fail "{UPSTREAM}'s {tag} release has no {tc_file}" }
+        if has != "" and has != tc_sum { fail "{tc_file} in {tag} has SHA-256 {has}, not the {tc_sum} the archives name" }
+        println("  {tc_file}  in {tag}")
     }
     try fs.write_text(String(PIN), pin)
     println("wrote {PIN}: loom builds with Calx {version}")

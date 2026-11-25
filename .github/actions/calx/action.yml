@@ -8,7 +8,7 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.calx
-        key: calx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version') }}
+        key: calx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version', '.github/actions/calx/install.*') }}
 
     - if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
       shell: bash

@@ -5,11 +5,12 @@
 #     sh .github/actions/calx/install.sh .calx-version
 #
 # The pin's first line is the version, and its other lines the SHA-256 of each
-# system's archive. The archive comes from loom's copy of Calx's releases
-# (aaen-studios/loom-calx), or else from Calx's own while it still has it, and
-# is installed only if its SHA-256 is the pin's. The toolchain it builds with
-# comes the same way, through `calx update --toolchain`, which checks it against
-# the SHA-256 the archive names. CI (action.yml) and the Dockerfile run it.
+# system's archive. The archive comes from Calx's release of that version,
+# vVERSION, which Calx keeps for every build, or else from its rolling nightly
+# release, which had nightlies from before those, and is installed only if its
+# SHA-256 is the pin's. The toolchain it builds with comes from the same
+# releases and is installed only if its SHA-256 is the one the archive's
+# toolchain.txt names. CI (action.yml) and the Dockerfile run it.
 set -eu
 
 pin=${1:-.calx-version}
@@ -24,9 +25,10 @@ esac
 file="calx-$version-$platform.tar.gz"
 want=$(awk -v f="$file" '$2 == f { print $1 }' "$pin")
 [ -n "$want" ] || { echo "calx install: $pin has no SHA-256 for $file" >&2; exit 1; }
+releases=https://github.com/ellipog/calx/releases
 case "$version" in
-    *-nightly.*) tag=nightly ;;
-    *) tag="v$version" ;;
+    *-nightly.*) tags="v$version nightly" ;;
+    *) tags="v$version" ;;
 esac
 if command -v sha256sum > /dev/null 2>&1; then
     sha256() { sha256sum "$1" | cut -d' ' -f1; }
@@ -41,34 +43,43 @@ fi
 
 temp=$(mktemp -d)
 trap 'rm -rf "$temp"' EXIT
-from=""
-for releases in https://github.com/aaen-studios/loom-calx/releases https://github.com/ellipog/calx/releases; do
-    if curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -A loom-ci -o "$temp/$file" "$releases/download/$tag/$file"; then
-        got=$(sha256 "$temp/$file")
-        if [ "$got" = "$want" ]; then
-            from=$releases
-            break
-        fi
-        echo "calx install: $releases/download/$tag/$file has SHA-256 $got, not the pin's $want" >&2
-    else
-        echo "calx install: $releases has no $tag/$file" >&2
-    fi
-done
-[ -n "$from" ] || { echo "calx install: can't download $file with SHA-256 $want" >&2; exit 1; }
-echo "Calx $version from $from, SHA-256 checked"
 
+# fetch NAME SHA256: downloads NAME from the first of the releases that has it
+# with that SHA-256, into $temp.
+fetch() {
+    for tag in $tags; do
+        url="$releases/download/$tag/$1"
+        if curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -A loom-ci -o "$temp/$1" "$url"; then
+            got=$(sha256 "$temp/$1")
+            if [ "$got" = "$2" ]; then
+                echo "$1 from $url, SHA-256 checked"
+                return 0
+            fi
+            echo "calx install: $url has SHA-256 $got, not $2" >&2
+        else
+            echo "calx install: no $url" >&2
+        fi
+    done
+    echo "calx install: can't download $1 with SHA-256 $2" >&2
+    exit 1
+}
+
+fetch "$file" "$want"
 mkdir -p "$temp/unpacked" "$(dirname "$root")"
 tar -xzf "$temp/$file" -C "$temp/unpacked"
 [ -x "$temp/unpacked/calx/bin/calx" ] || { echo "calx install: $file has no calx/bin/calx" >&2; exit 1; }
-mv "$temp/unpacked/calx" "$root"
 
-# The toolchain, from the same place, checked against the SHA-256 in toolchain.txt.
-tries=0
-until CALX_RELEASES="$from" CALX_NO_UPDATE_CHECK=1 "$root/bin/calx" update --toolchain; do
-    tries=$((tries + 1))
-    [ "$tries" -lt 4 ] || { echo "calx install: can't install the toolchain" >&2; exit 1; }
-    sleep $((tries * 5))
-done
+# The toolchain, which the archive's toolchain.txt names: its file, then its SHA-256.
+note="$temp/unpacked/calx/toolchain.txt"
+if [ -f "$note" ]; then
+    tc_file=$(sed -n 1p "$note" | tr -d '\r')
+    tc_sum=$(sed -n 2p "$note" | tr -d '\r')
+    fetch "$tc_file" "$tc_sum"
+    tar -xJf "$temp/$tc_file" -C "$temp/unpacked/calx"
+    rm -f -- "$temp/$tc_file"
+    [ -x "$temp/unpacked/calx/toolchain/bin/clang" ] || { echo "calx install: $tc_file has no toolchain/bin/clang" >&2; exit 1; }
+fi
+mv "$temp/unpacked/calx" "$root"
 
 "$root/bin/calx" version | grep -qF " $version " || { echo "calx install: $root/bin/calx isn't Calx $version" >&2; exit 1; }
 "$root/bin/calx" version
