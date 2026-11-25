@@ -996,6 +996,9 @@ mod tests {
 
     #[test]
     fn a_file_names_its_emoji() {
+        assert_eq!(name_from_file("/x/Party Cat!.png"), "party_cat");
+        // A backslash parts a path only on Windows.
+        #[cfg(windows)]
         assert_eq!(name_from_file("C:\\x\\Party Cat!.png"), "party_cat");
         assert_eq!(name_from_file("/x/a.png"), "a_1");
         assert_eq!(name_from_file("/x/ø.png"), "emoji");
