@@ -37,6 +37,10 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
+#[path = "emoji_ui.rs"]
+mod emoji_ui;
+use emoji_ui::RowKey;
+
 /// What dropping a dragged agent on a row does.
 type DropAgent = Box<dyn Fn(&AgentDrag, &mut Window, &mut App) + 'static>;
 
@@ -182,6 +186,7 @@ enum Screen {
     Appearance,
     ChatPrefs,
     AppPrefs,
+    Emoji,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -204,6 +209,8 @@ enum Ctx {
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
+    /// The composer's smiley.
+    EmojiButton,
 }
 
 /// Words selected in a message, and where the selection ended: a small bar there has
@@ -368,6 +375,13 @@ pub struct Loom {
     mention: Option<(usize, String)>,
     /// Which of the @ picker's choices is lit.
     mention_lit: usize,
+    /// The suggestion row and the picker (PLAN.md, "Emoji"), the picker's search, and
+    /// the name of one of the person's own being renamed in Settings → Emoji.
+    emoji_ui: emoji_ui::EmojiUi,
+    emoji_search: Entity<InputState>,
+    emoji_rename: Entity<InputState>,
+    /// One of the person's own emoji a right-click on a message was on, for Copy name.
+    ctx_emoji: Option<String>,
     /// What's written and attached but not sent in each chat the person left, by
     /// `draft_key`, and the chat the composer holds now.
     drafts: HashMap<String, (InputContent, Vec<String>)>,
@@ -758,6 +772,8 @@ impl Loom {
             .unwrap_or_else(|| Core::start(&core_config("", None)));
         let (device_tx, device_rx) = std::sync::mpsc::channel();
 
+        // Twemoji's pictures are drawn with GPUI's own SVG renderer (src/emoji.rs).
+        crate::emoji::set_renderer(cx);
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -785,6 +801,7 @@ impl Loom {
                     // the @ picker follows what's typed after an @.
                     InputEvent::Change => {
                         this.track_mention(cx);
+                        this.track_emoji(window, cx);
                         // A file whose piece was taken out goes with it, and comes back
                         // with an undo.
                         this.sync_attachments(cx);
@@ -806,6 +823,19 @@ impl Loom {
                     .masked(masked)
             })
         };
+        // The emoji picker's search: the core finds what's typed.
+        let emoji_search = input(window, cx, "Find an emoji", false);
+        cx.subscribe_in(
+            &emoji_search,
+            window,
+            |this: &mut Loom, _, event: &InputEvent, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.find_emoji(cx);
+                }
+            },
+        )
+        .detach();
+        let emoji_rename = input(window, cx, "name", false);
         // The + menu's search: what's typed finds rows in every group.
         let plus_search = input(window, cx, "Find a file, skill or routine…", false);
         cx.subscribe_in(
@@ -1414,6 +1444,10 @@ ACTA_KEY=secret:ACTA_KEY",
             composer_edits: Vec::new(),
             mention: None,
             mention_lit: 0,
+            emoji_ui: emoji_ui::EmojiUi::default(),
+            emoji_search,
+            emoji_rename,
+            ctx_emoji: None,
             drafts: HashMap::new(),
             draft_for: String::new(),
             server_in,
@@ -3533,6 +3567,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Appearance => self.appearance_page(cx),
             Screen::ChatPrefs => self.chat_prefs_page(cx),
             Screen::AppPrefs => self.app_prefs_page(cx),
+            Screen::Emoji => self.emoji_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -8434,6 +8469,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 self.shut_plus(window, cx);
                 self.paste_files(cx);
             }
+            PlusRow::Emoji => {
+                self.shut_plus(window, cx);
+                self.open_emoji_picker(window, cx);
+            }
             PlusRow::Open(s) => {
                 if let Some(menu) = self.plus.as_mut() {
                     menu.sub = Some(s);
@@ -8519,6 +8558,7 @@ ACTA_KEY=secret:ACTA_KEY",
         match row {
             PlusRow::Attach => (Ico::Paperclip, "Attach files".into(), None),
             PlusRow::PasteImage => (Ico::ClipboardPaste, "Paste image".into(), None),
+            PlusRow::Emoji => (Ico::FaceSlightlySmiling, "Emoji".into(), None),
             PlusRow::Open(PlusSub::Recent) => (Ico::FileClock, "Recent files".into(), None),
             PlusRow::Open(PlusSub::Skills) => (Ico::BookOpen, "Skills".into(), None),
             PlusRow::Open(PlusSub::Routines) => (Ico::Clock, "Routines".into(), None),
@@ -9107,6 +9147,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn open_ctx(&mut self, at: Point<Pixels>, on: Ctx, cx: &mut Context<Self>) {
         self.menu = None;
         self.plus = None;
+        // The emoji under the pointer, its card showing, as the menu opens.
+        self.ctx_emoji = crate::emoji::hovered()
+            .and_then(|l| l.strip_prefix(crate::emoji::OWN_LINK).map(String::from));
         self.ctx = Some((at, on));
         cx.notify();
     }
@@ -9161,6 +9204,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     }
                     panel = panel.child(div().my(px(space::XS)).h(px(1.0)).bg(p.line));
                 }
+                // One of the person's own the right-click was on: its name.
+                let own = self
+                    .ctx_emoji
+                    .as_deref()
+                    .and_then(crate::emoji::own_one)
+                    .map(|(name, _, _)| name);
+                if let Some(name) = own {
+                    panel = panel
+                        .child(
+                            self.menu_item("ctx-emoji-name", Ico::Copy, "Copy name", false)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                                        ":{name}:"
+                                    )));
+                                    this.notice = Some(("Copied.".into(), Instant::now(), true));
+                                    close(this, cx);
+                                })),
+                        )
+                        .child(div().my(px(space::XS)).h(px(1.0)).bg(p.line));
+                }
                 let reply_id = m.id.clone();
                 panel = panel.child(
                     self.menu_item("ctx-reply", Ico::Reply, "Reply", false)
@@ -9169,7 +9232,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.start_reply(&reply_id, None, false, window, cx);
                         })),
                 );
-                let text = model::copy_text(&m, &self.model.tools);
+                // The person's own emoji copy as their names.
+                let text = crate::emoji::as_names(&model::copy_text(&m, &self.model.tools));
                 if !text.is_empty() {
                     panel = panel.child(
                         self.menu_item("ctx-copy", Ico::Copy, "Copy", false)
@@ -9253,6 +9317,16 @@ ACTA_KEY=secret:ACTA_KEY",
                                 close(this, cx);
                             })),
                     );
+            }
+            Ctx::EmojiButton => {
+                panel = panel.child(
+                    self.menu_item("ctx-hide-emoji", Ico::EyeOff, "Hide emoji button", false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            close(this, cx);
+                            this.emoji_ui.picker = None;
+                            this.set_prefs(|p| p.emoji_button = false, window, cx);
+                        })),
+                );
             }
             Ctx::Agents => {
                 panel = panel
@@ -10177,6 +10251,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let plus_menu = self.plus.clone().map(|menu| self.plus_menu(&menu, cx));
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
+        let emoji_row = self.emoji_row().map(|row| self.emoji_row_view(&row, cx));
+        let emoji_picker = self.emoji_picker_view(cx);
+        let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
+            .then(|| self.emoji_button(cx));
         let mut composer = Some(
             div()
                 .w_full()
@@ -10197,10 +10275,21 @@ ACTA_KEY=secret:ACTA_KEY",
                         anchored().anchor(Anchor::BottomLeft).child(menu),
                     )))
                 })
-                // And the @ picker, the same.
+                // And the @ picker, the same, and the emoji row.
                 .when_some(mention_menu, |d, menu| {
                     d.child(div().absolute().top_0().left_0().child(deferred(
                         anchored().anchor(Anchor::BottomLeft).child(menu),
+                    )))
+                })
+                .when_some(emoji_row, |d, row| {
+                    d.child(div().absolute().top_0().left_0().child(deferred(
+                        anchored().anchor(Anchor::BottomLeft).child(row),
+                    )))
+                })
+                // The emoji picker opens above it from its right edge, by the smiley.
+                .when_some(emoji_picker, |d, picker| {
+                    d.child(div().absolute().top_0().right_0().child(deferred(
+                        anchored().anchor(Anchor::BottomRight).child(picker),
                     )))
                 })
                 .when_some(reply_bar, |d, bar| d.child(bar))
@@ -10287,26 +10376,44 @@ ACTA_KEY=secret:ACTA_KEY",
                                         this.composer
                                             .update(cx, |c, cx| c.replace(text, window, cx));
                                         this.track_mention(cx);
+                                        this.track_emoji(window, cx);
                                         cx.notify();
                                     }
                                 }))
-                                // The @ picker's keys, before the textarea's own.
+                                // The @ picker's keys and the emoji row's, before the
+                                // textarea's own.
                                 .capture_action(cx.listener(|this, e: &Enter, window, cx| {
-                                    if !e.shift {
+                                    if !e.shift && !this.emoji_row_key(RowKey::Take, window, cx) {
                                         this.mention_key(MentionKey::Take, window, cx)
                                     }
                                 }))
                                 .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                                    this.mention_key(MentionKey::Take, window, cx)
+                                    if !this.emoji_row_key(RowKey::Take, window, cx) {
+                                        this.mention_key(MentionKey::Take, window, cx)
+                                    }
+                                }))
+                                .capture_action(cx.listener(|this, _: &MoveLeft, window, cx| {
+                                    this.emoji_row_key(RowKey::Back, window, cx);
+                                }))
+                                .capture_action(cx.listener(|this, _: &MoveRight, window, cx| {
+                                    this.emoji_row_key(RowKey::On, window, cx);
                                 }))
                                 .capture_action(cx.listener(|this, _: &MoveUp, window, cx| {
+                                    if this.emoji_row_key(RowKey::Back, window, cx) {
+                                        return;
+                                    }
                                     this.mention_key(MentionKey::Up, window, cx);
                                     this.composer_up(window, cx)
                                 }))
                                 .capture_action(cx.listener(|this, _: &MoveDown, window, cx| {
-                                    this.mention_key(MentionKey::Down, window, cx)
+                                    if !this.emoji_row_key(RowKey::On, window, cx) {
+                                        this.mention_key(MentionKey::Down, window, cx)
+                                    }
                                 }))
                                 .capture_action(cx.listener(|this, _: &Escape, window, cx| {
+                                    if this.emoji_row_key(RowKey::Shut, window, cx) {
+                                        return;
+                                    }
                                     let open = this.mention.is_some();
                                     this.mention_key(MentionKey::Shut, window, cx);
                                     if !open {
@@ -10315,6 +10422,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 }))
                                 .child(self.composer_textarea(cx)),
                         )
+                        .when_some(emoji_button, |d, b| d.child(b))
                         // Dictation: the system's own voice typing, into the composer.
                         .when(cfg!(any(windows, target_os = "macos")), |d| {
                             let (name, didnt) = if cfg!(target_os = "macos") {
@@ -16895,12 +17003,14 @@ ACTA_KEY=secret:ACTA_KEY",
                                     })),
                             ),
                     )
-                    .child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink)
-                            .child(words),
-                    ),
+                    // Its emoji as the chat draws them, with Twemoji and the person's own.
+                    .child(div().text_size(px(size::SMALL)).text_color(p.ink).child(
+                        KeptText::new(
+                            SharedString::from(format!("pin-words-{}", m.id)),
+                            crate::emoji::pictured(&model::literal_html(&words), size::SMALL),
+                            with_links,
+                        ),
+                    )),
             );
         }
         let page = div()
@@ -17228,7 +17338,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_size(px(size::SMALL))
                                 .text_color(p.ink_2)
                                 .truncate()
-                                .child(shown),
+                                .child(emoji_ui::inline_words(
+                                    &shown,
+                                    (size::SMALL * crate::emoji::IN_TEXT).round(),
+                                )),
                         ),
                 )
                 .child(
@@ -17593,7 +17706,16 @@ fn quote_view(
         )
         .children(lead)
         .when(!shown.is_empty(), |d| {
-            d.child(div().min_w_0().truncate().text_color(p.ink_2).child(shown))
+            d.child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(p.ink_2)
+                    .child(emoji_ui::inline_words(
+                        &shown,
+                        (size::SMALL * crate::emoji::IN_TEXT).round(),
+                    )),
+            )
         })
         .on_click(move |_, _, cx| {
             let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
@@ -17746,10 +17868,13 @@ fn person(
             }
         }
     });
-    let words = linked_words(
-        p,
-        &model::link_files(&model::literal_html(&text), &attached),
-        m,
+    let words = crate::emoji::pictured(
+        &linked_words(
+            p,
+            &model::link_files(&model::literal_html(&text), &attached),
+            m,
+        ),
+        size::BODY * scale,
     );
     let opener = this.clone();
     let on_link = move |url: &SharedString, _: &ClickEvent, _: &mut Window, cx: &mut App| match url
@@ -17780,6 +17905,8 @@ fn person(
             let agent = url["loom:agent/".len()..].to_string();
             let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
         }
+        // A right-click on one of the person's own emoji: Copy name in its menu.
+        None if url.starts_with(crate::emoji::OWN_LINK) => emoji_ui::own_clicked(&opener, url, cx),
         None if url.starts_with("loom:") => {}
         None => cx.open_url(url),
     };
@@ -20688,6 +20815,9 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
             .size(px(14.0))
             .flex_none()
     };
+    if id.starts_with(emoji_ui::PIECE) {
+        return emoji_ui::composer_piece(words);
+    }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {
             return div()
@@ -20926,11 +21056,23 @@ fn mention_file_icon(name: &str, color: &str) -> Option<String> {
 /// Draws the site icons `linked_words` put in, and a link's full address when the pointer
 /// is on it.
 fn with_links(v: TextView) -> TextView {
-    v.image_source(|uri| match uri.strip_prefix(SITE_ICON) {
-        Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
-        None => uri.clone().into(),
+    v.image_source(|uri| {
+        // An emoji: a built-in one drawn at its size, one of the person's own its picture.
+        if let Some(drawn) = crate::emoji::from_source(uri) {
+            return ImageSource::Render(drawn);
+        }
+        match uri
+            .strip_prefix(SITE_ICON)
+            .or_else(|| uri.strip_prefix(crate::emoji::OWN_SOURCE))
+        {
+            Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
+            None => uri.clone().into(),
+        }
     })
     .link_tooltip(|url, window, cx| {
+        if url.starts_with(crate::emoji::LINK) {
+            return emoji_ui::EmojiCard::view(url, window, cx);
+        }
         // A file's whole name, which its link shows cut in the middle.
         let file = model::mention_path(url).or_else(|| {
             let sha = url.strip_prefix("loom-file:")?;
@@ -21195,7 +21337,10 @@ impl ReplyDraw<'_> {
                 .text_color(p.ink)
                 .child(KeptText::new(
                     SharedString::from(format!("r-{}-{}", self.key(i), show.room)),
-                    linked_words(p, &said, self.m),
+                    crate::emoji::pictured(
+                        &linked_words(p, &said, self.m),
+                        size::REPLY * show.text_scale,
+                    ),
                     move |v| {
                         let opener = opener.clone();
                         with_links(v.selectable(true).on_link_click(
@@ -21213,6 +21358,8 @@ impl ReplyDraw<'_> {
                                     // An agent it mentions opens its chat (LOO-301).
                                     let agent = agent.to_string();
                                     let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
+                                } else if url.starts_with(crate::emoji::OWN_LINK) {
+                                    emoji_ui::own_clicked(&opener, url, cx);
                                 } else if !url.starts_with("loom:") {
                                     cx.open_url(url);
                                 }
@@ -22850,6 +22997,10 @@ impl Render for Loom {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::perf::frame_start();
         self.frames += 1;
+        // The emoji the core said of what was typed, and what the chat draws them from.
+        crate::emoji::set_play(!self.prefs.emoji_hover, cx.reduce_motion());
+        self.take_emoji(window, cx);
+        self.sync_emoji_cards();
         // Set again as the chat's list is drawn, if it is.
         self.list_at.set(None);
         let p = self.p;
@@ -25154,7 +25305,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             } else {
                 name.as_str()
             };
-            let words = model::spoken(&model::copy_text(m, tools));
+            let words = model::spoken(&crate::emoji::as_names(&model::copy_text(m, tools)));
             (format!("msg-{}", m.id), Some(format!("{who}: {words}")))
         }
         Row::Approval(_) => (format!("row-{ix}"), None),

@@ -26,6 +26,12 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                 ),
                 ("pop-chat", Ico::MessageSquare, "Chat", Screen::ChatPrefs),
                 (
+                    "pop-emoji",
+                    Ico::FaceSlightlySmiling,
+                    "Emoji",
+                    Screen::Emoji,
+                ),
+                (
                     "pop-app",
                     Ico::Bell,
                     "App & notifications",
@@ -93,6 +99,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Mcp => "mcp servers tools connectors",
         Screen::Secrets => "secrets keys passwords sites bank sealed",
         Screen::Plugins => "plugins panels",
+        Screen::Emoji => "emoji emojis custom upload skin tone animated gif emoticons smiley twemoji",
         Screen::Routines => "routines schedule every day cron webhook",
         Screen::Tasks => "tasks jobs long work",
         Screen::Import => "import openbot grok bring over",
@@ -191,7 +198,7 @@ impl Loom {
     }
 
     /// A choice of a few for the prefs, side by side.
-    fn pref_choice<T: Copy + PartialEq + 'static>(
+    pub(super) fn pref_choice<T: Copy + PartialEq + 'static>(
         &self,
         id: &'static str,
         now: T,
@@ -212,7 +219,7 @@ impl Loom {
     }
 
     /// A row with a switch for one of the prefs.
-    fn pref_switch(
+    pub(super) fn pref_switch(
         &self,
         id: &'static str,
         title: &str,
@@ -482,10 +489,25 @@ impl Loom {
             cx,
         ));
         let _ = p;
+        // Twemoji's licence asks for its name, the licence and a link (design/twemoji).
+        let twemoji = self
+            .button("credit-twemoji", "Licence", false)
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.open_url("https://creativecommons.org/licenses/by/4.0/");
+            }));
+        let credits = vec![self
+            .row(
+                None,
+                "Emoji by Twemoji",
+                Some("© Twitter, Jason Sofonia and Justine De Caires, CC-BY 4.0, github.com/jdecked/twemoji".into()),
+                Some(twemoji.into_any_element()),
+            )
+            .into_any_element()];
         let groups = vec![
             self.group(Some("This computer"), computer),
             self.group(Some("Notifications"), notify),
             self.group(Some("Updates"), updates),
+            self.group(Some("Credits"), credits),
         ];
         self.settings_page("app-prefs-page", "App & notifications", None, groups)
     }

@@ -5,7 +5,9 @@
 // that comes over them (Copy, Quote, Ask about this), does the same by hand. A message is typed,
 // with a link pasted and a file attached among its words, each a piece in them, the file with its
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
-// asks before it deploys and waits for the yes, then finishes. While the turn runs, one quiet
+// asks before it deploys and waits for the yes, then finishes. Once it's shipped, `:tada` typed
+// opens the emoji row over the composer, which puts 🎉 in the words as Twemoji's picture, and a
+// message of only it is big (emoji_ui.rs, emoji_row_view; PLAN.md, "Emoji"). While the turn runs, one quiet
 // line under the reply says the step it's on; once it's done, its last words are the answer and
 // the steps before them fold under one line that opens (desktop/src/model.rs, parts), and a
 // subagent's call in the earlier reply opens to show what its subagent did inside it (model.rs,
@@ -104,6 +106,17 @@ export function play(app: HTMLElement) {
 	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
+	const composer = app.querySelector<HTMLElement>('.composer')!;
+
+	/** A message of only 🎉, which the chat shows big (PLAN.md, "Emoji"). */
+	function cheer(fresh: boolean) {
+		const you = tpl('demo-you');
+		you.classList.toggle('fresh', fresh);
+		const tada = tpl('demo-tada');
+		tada.classList.add('jumbo');
+		you.querySelector('.bubble')!.append(tada);
+		return you;
+	}
 
 	// Replying (PLAN.md, "Replying to a message"): a message's Reply, or words selected in it,
 	// put a bar over the composer's words; the message goes with a quote over its bubble, which
@@ -493,6 +506,22 @@ export function play(app: HTMLElement) {
 		await wait(200, id);
 		mood('idle', replyThread);
 		preview('Juniper', '', 'idle');
+
+		// A name typed after a colon opens the row of emoji over the composer; Tab takes the
+		// lit one, which goes in the words as its picture, and a message of only it is big.
+		if (answer === 'allow') {
+			await wait(1200, id);
+			await type(':tada', id);
+			const row = tpl('demo-emoji-row');
+			composer.append(row);
+			await wait(1100, id);
+			row.remove();
+			typed.lastChild?.remove();
+			typed.append(tpl('demo-tada'));
+			await wait(700, id);
+			cleared();
+			msgs.append(cheer(true));
+		}
 		await wait(6000, id);
 
 		// Back to the start, quietly, and again.
@@ -525,7 +554,7 @@ export function play(app: HTMLElement) {
 		words(steps, ANSWER);
 		tool(steps, ASK)('done');
 		finish(reply, say, steps, SHIPPED);
-		msgs.append(you, reply);
+		msgs.append(you, reply, cheer(false));
 		threadsIn(reply);
 		mood('idle');
 		for (const a of byAgent.keys()) preview(a, '', 'idle');

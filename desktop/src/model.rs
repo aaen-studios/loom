@@ -843,6 +843,8 @@ pub enum PlusSub {
 pub enum PlusRow {
     Attach,
     PasteImage,
+    /// Opens the emoji picker.
+    Emoji,
     /// Opens a list beside the menu.
     Open(PlusSub),
     File(RecentFile),
@@ -909,6 +911,7 @@ impl Model {
                 add.push(PlusRow::PasteImage);
             }
             add.push(PlusRow::Open(PlusSub::Recent));
+            add.push(PlusRow::Emoji);
             return vec![
                 add,
                 vec![
@@ -920,6 +923,7 @@ impl Model {
         let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
             .into_iter()
             .chain(paste.then_some((PlusRow::PasteImage, "Paste image")))
+            .chain([(PlusRow::Emoji, "Emoji")])
             .filter(|(_, title)| title.to_lowercase().contains(&q))
             .map(|(r, _)| r)
             .collect();
@@ -2390,7 +2394,7 @@ impl ReplyTo {
     /// What a quote shows of its words: its first line with something in it, links and
     /// mentions as their words.
     pub fn line(&self) -> String {
-        spoken(&self.text)
+        spoken(&crate::emoji::as_names(&self.text))
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
@@ -2741,6 +2745,9 @@ pub fn link_token(url: &str) -> (String, String) {
 pub const ATTACH: &str = "loom-attach:";
 /// How the id of a link preview's token starts, then its address.
 pub const LINK: &str = "loom-link:";
+/// How the id of an emoji's token starts, then the emoji: the character, or the person's
+/// own token (PLAN.md, "Emoji").
+pub const EMOJI: &str = "loom:emoji/";
 
 /// The address a whole paste is, when it's one http or https address and nothing
 /// else: what a paste turns into a preview.
@@ -2991,6 +2998,9 @@ pub fn with_mention_links(
         out.push_str(&plain_links(&text[at..range.start]));
         if link.starts_with(ATTACH) {
             out.push_str(&file_mark(words));
+        } else if link.starts_with(EMOJI) {
+            // An emoji goes as itself: the character, or the person's own token.
+            out.push_str(words);
         } else if let Some(url) = link.strip_prefix(LINK) {
             out.push_str(url);
         } else {
@@ -3284,7 +3294,7 @@ pub const QUOTE_MOST: usize = 240;
 /// `QUOTE_MOST` characters with "…".
 pub fn one_line(md: &str) -> String {
     let mut out = String::new();
-    for line in spoken(md).lines() {
+    for line in spoken(&crate::emoji::as_names(md)).lines() {
         let line = line.trim();
         // A rule, or a table's divider, says nothing.
         if line
@@ -4136,6 +4146,8 @@ pub struct LinkAsk {
 
 #[derive(Default)]
 pub struct Model {
+    /// The person's own emoji, the suggestion row and the picker (src/emoji.rs).
+    pub emoji: crate::emoji::Emojis,
     /// The files the composer's @ picker last found: for which agent and query, and
     /// the files (`agent.files`).
     pub found_files: (String, String, Vec<FoundFile>),
@@ -4737,6 +4749,7 @@ impl Model {
                 );
             }
         }
+        out.extend(self.emoji.fetches());
         out
     }
 
@@ -5170,6 +5183,10 @@ impl Model {
     /// Takes a frame from the core. Gives whether the screen should redraw.
     pub fn take(&mut self, f: &Value) -> bool {
         let t = s(f, "t");
+        // The emoji frames are the emoji module's alone; `synced` is everyone's.
+        if self.emoji.take(f) {
+            return true;
+        }
         match t.as_str() {
             "core.conn" => {
                 if let Some(server) = f.get("server").and_then(Value::as_str) {
@@ -12313,7 +12330,11 @@ mod tests {
         assert_eq!(
             m.plus_groups("", false),
             vec![
-                vec![PlusRow::Attach, PlusRow::Open(PlusSub::Recent)],
+                vec![
+                    PlusRow::Attach,
+                    PlusRow::Open(PlusSub::Recent),
+                    PlusRow::Emoji
+                ],
                 vec![
                     PlusRow::Open(PlusSub::Skills),
                     PlusRow::Open(PlusSub::Routines)

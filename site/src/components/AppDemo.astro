@@ -9,6 +9,8 @@
 // collapses to the rail, as the app's do.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
+// Twemoji's picture of 🎉, as the app draws built-in emoji (design/twemoji, PLAN.md, "Emoji").
+import TADA from '../../../design/twemoji/svg/1f389.svg?url';
 
 const agents = [
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
@@ -255,6 +257,12 @@ const GITHUB =
 				<div class="composer-row">
 					<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
 					<span class="field"><span class="typed"></span><span class="placeholder">Reply to Juniper</span></span>
+					<!-- The smiley, which opens the emoji picker (app.rs, emoji_button). -->
+					<span class="icon-btn c"
+						><svg class="i" viewBox="0 0 24 24"
+							><path d="M15 10V9M16.472 15a6 6 0 0 1-8.943 0M9 10V9"></path><circle cx="12" cy="12" r="10"></circle></svg
+						></span
+					>
 					<span class="icon-btn c"
 						><svg class="i" viewBox="0 0 24 24"
 							><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg
@@ -272,6 +280,18 @@ const GITHUB =
 
 <template id="demo-you">
 	<div class="row you fresh"><div class="bubble"></div></div>
+</template>
+<!-- An emoji as the app draws it, with Twemoji's picture (emoji_ui.rs, picture): a piece in
+     the composer's words, and in a message of only one to three, big. -->
+<template id="demo-tada">
+	<img class="emoji" src={TADA} alt="🎉" draggable="false" />
+</template>
+<!-- The row over the composer while a name is typed after a colon (emoji_ui.rs,
+     emoji_row_view): the matches, the lit one on a light background, and its name in mono. -->
+<template id="demo-emoji-row">
+	<div class="emoji-row">
+		<span class="er-tile lit"><img src={TADA} alt="🎉" draggable="false" /></span><span class="er-name">:tada:</span>
+	</div>
 </template>
 <!-- What a message replies to, over its bubble, on one line (app.rs, quote_view): the agent's
      thread, who said it and what, with a spine down onto the bubble. A click goes to the original. -->
@@ -1941,6 +1961,7 @@ const GITHUB =
 		flex: none;
 	}
 	.composer {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		gap: 8px;
@@ -1950,6 +1971,55 @@ const GITHUB =
 		background: var(--raised);
 		border: 1px solid var(--line);
 		border-radius: var(--radius-composer);
+	}
+	/* An emoji: in the words at 1.25 times the text, and big, 48 px, in a message of only a
+	   few (emoji.rs, IN_TEXT and JUMBO). */
+	.emoji {
+		display: inline-block;
+		width: 1.25em;
+		height: 1.25em;
+		vertical-align: -0.25em;
+		margin: 0 1px;
+	}
+	.bubble .emoji.jumbo {
+		width: 48px;
+		height: 48px;
+		vertical-align: middle;
+	}
+	/* The emoji row, just over the composer from its left edge. */
+	.emoji-row {
+		position: absolute;
+		left: 0;
+		bottom: calc(100% + 8px);
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 4px;
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 30px rgb(0 0 0 / 0.12);
+		animation: rise 0.16s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	.er-tile {
+		display: grid;
+		place-items: center;
+		width: 34px;
+		height: 34px;
+		border-radius: var(--radius-row);
+	}
+	.er-tile.lit {
+		background: var(--hover);
+	}
+	.er-tile img {
+		width: 22px;
+		height: 22px;
+	}
+	.er-name {
+		padding-right: 8px;
+		font-family: var(--mono);
+		font-size: 12px;
+		color: var(--ink-3);
 	}
 	.composer-row {
 		display: flex;
