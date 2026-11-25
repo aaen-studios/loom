@@ -1509,6 +1509,8 @@ final class Model {
     var roomOrder: [String] = []
     /// The room.create sent last, to show the group chat once it's made.
     var makingRoom: String?
+    /// What a group chat used, as `room.summary` gives it, for its settings.
+    var roomUsage: RoomUsage?
     /// How each reply still being written in a group chat came to its agent, by its message.
     var routedLive: [String: Routed] = [:]
     /// This device's id and the account's, from `welcome`.
@@ -1968,6 +1970,8 @@ final class Model {
         switch f["id"].text {
         case let id where id.hasPrefix("app.room_create"):
             if let error { notice = error; makingRoom = nil } else { roomMade(f) }
+        case let id where id.hasPrefix("app.room_summary:"):
+            if error == nil { roomUsageCame(f) }
         case let id where id.hasPrefix("app.preview:"):
             // A link pasted in the composer, looked up: its preview, or its site when
             // the lookup failed.

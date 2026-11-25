@@ -202,6 +202,13 @@ struct RoomSettingsSheet: View {
                             }
                         }
                     }
+                    if let u = model.roomUsage, u.room == r.id {
+                        Section("Usage") {
+                            LabeledContent("Agents", value: usageLine(u.tokensToday, u.tokensMonth))
+                            LabeledContent("Router", value: usageLine(u.routerToday, u.routerMonth))
+                        }
+                        .font(Fonts.small)
+                    }
                 }
             }
             .scrollContentBackground(.hidden)
@@ -216,7 +223,10 @@ struct RoomSettingsSheet: View {
                     }
                 }
             }
-            .onAppear { name = model.roomNamed(roomId)?.name ?? "" }
+            .onAppear {
+                name = model.roomNamed(roomId)?.name ?? ""
+                session.send(model.askRoomUsage(roomId))
+            }
         }
     }
 
