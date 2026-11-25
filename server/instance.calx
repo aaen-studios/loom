@@ -401,6 +401,8 @@ pub struct Instance {
     link_pages: Map<String, Json>    // each page looked up since the instance started -> {title, site}
     site_icons: Map<String, List<u8>>    // each site's icon, as a PNG, or empty when it has none
     link_waiting: Map<String, List<(String, String)>>    // a page being looked up -> each (user, message) to give it to
+    link_pictures: Map<String, List<u8>>    // each page's preview picture, made small, or empty when it has none: only for a page pasted in the composer
+    link_previews: Map<String, List<(String, Waiter)>>    // a page pasted in the composer being looked up -> each (user, link.preview) waiting on it
     oauth_to: Sender<oauth.Job>    // the thread that signs in to MCP servers and renews their tokens
     oauth_done: Receiver<oauth.Done>
     oauth_jobs: Map<i64, OauthJob>
@@ -1793,7 +1795,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -5263,10 +5265,44 @@ impl Instance {
         if let p = i.site_icons.find(site.copy()) { png = p.copy() }
         if png.len() > 0 {
             let sha = bytes.hex(sha256(png.copy()))
-            _ = try i.keep_file(user, sha.copy(), "{site}.png", String("image/png"), png)
+            _ = try i.keep_file(user.copy(), sha.copy(), "{site}.png", String("image/png"), png)
             o = o.s("icon", sha)
         }
+        // Its preview picture, when it was pasted in the composer and has one.
+        var picture = List<u8>()
+        if let p = i.link_pictures.find(page_url.copy()) { picture = p.copy() }
+        if picture.len() > 0 {
+            let sha = bytes.hex(sha256(picture.copy()))
+            let mime = files.sniff(picture.copy()) ?? String("image/jpeg")
+            let ext = if mime == "image/png" { "png" } else { "jpg" }
+            _ = try i.keep_file(user, sha.copy(), "{site}.{ext}", mime, picture)
+            o = o.s("image", sha)
+        }
         return o.done()
+    }
+
+    // A link pasted in the composer (`link.preview`): answered with its page's
+    // title, its site, its icon and its preview picture, at once when they're
+    // known, or once they're looked up. A page that isn't looked up is its site.
+    fn preview_link(i: mut Instance, w: own Waiter, user: own String, args: Json) ! Error {
+        let page = (str_at(args, "url") ?? String()).trim().copy()
+        if not page.starts_with("https://") and not page.starts_with("http://") {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("That isn't a web address.")))
+            return
+        }
+        if not links.lookable(page.copy()) {
+            i.answer_cmd(w, Answer.Value(Obj.new().j("link", Obj.new().s("title", String()).s("site", links.site_of(page)).done()).done()))
+            return
+        }
+        if i.link_pages.contains(page.copy()) and i.link_pictures.contains(page.copy()) {
+            let link = try i.link_of(user, page)
+            i.answer_cmd(w, Answer.Value(Obj.new().j("link", link).done()))
+            return
+        }
+        var waiting = i.link_previews.remove(page.copy()) ?? List<(String, Waiter)>()
+        if waiting.len() == 0 { i.link_to.send(links.Job { url: page.copy(), icon: not i.site_icons.contains(links.site_of(page.copy())), picture: true }) }
+        waiting.push((user, w))
+        i.link_previews.insert(page, waiting)
     }
 
     // `message` with `links` for each page in it the instance has looked up.
@@ -5287,7 +5323,7 @@ impl Instance {
             if asked >= links.MOST { continue }
             asked += 1
             var waiting = i.link_waiting.remove(u.copy()) ?? List<(String, String)>()
-            if waiting.len() == 0 { i.link_to.send(links.Job { url: u.copy(), icon: not i.site_icons.contains(links.site_of(u.copy())) }) }
+            if waiting.len() == 0 { i.link_to.send(links.Job { url: u.copy(), icon: not i.site_icons.contains(links.site_of(u.copy())), picture: false }) }
             waiting.push((user.copy(), id.copy()))
             i.link_waiting.insert(u.copy(), waiting)
         }
@@ -5311,6 +5347,14 @@ impl Instance {
                 }
             }
             i.site_icons.insert(site.copy(), png)
+        }
+        if d.picture_asked {
+            i.link_pictures.insert(d.url.copy(), d.picture.copy())
+            let previews = i.link_previews.remove(d.url.copy()) ?? List<(String, Waiter)>()
+            for (user, w) in previews {
+                let link = try i.link_of(user, d.url.copy())
+                i.answer_cmd(w, Answer.Value(Obj.new().j("link", link).done()))
+            }
         }
         let waiting = i.link_waiting.remove(d.url.copy()) ?? List<(String, String)>()
         for (user, id) in waiting {
@@ -11306,6 +11350,10 @@ impl Instance {
         }
         if name == "messages.search" {
             i.search(Waiter { socket: some(s), id: id }, user.copy(), args)
+            return
+        }
+        if name == "link.preview" {
+            try i.preview_link(Waiter { socket: some(s), id: id }, user.copy(), args)
             return
         }
         let result = try i.command(user, device, name.copy(), args)

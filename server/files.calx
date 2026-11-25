@@ -330,6 +330,27 @@ pub fn site_icon_png(data: List<u8>) -> List<u8> ! Error {
     return images[best].thumbnail(SITE_ICON, SITE_ICON).encode_png()
 }
 
+/// The longest side of a page's preview picture as loom keeps it, in pixels.
+pub const PAGE_PICTURE: usize = 480
+/// The most pixels a side of a page's picture may have before it's read.
+const PAGE_PICTURE_MOST: u32 = 8192
+
+/// A page's preview picture (its `og:image`, PLAN.md "Links and sources"), made
+/// at most `PAGE_PICTURE` pixels a side: a JPEG, or a PNG when it has alpha. A
+/// PNG or a JPEG whose header says it's too big isn't read.
+pub fn page_picture(data: List<u8>) -> List<u8> ! Error {
+    if let (w, h) = header_size(data.copy()) {
+        if w == 0 or h == 0 or w > PAGE_PICTURE_MOST or h > PAGE_PICTURE_MOST { fail "it's {w} by {h} pixels" }
+    }
+    let im = match Image.decode(data) {
+        ok(i) => i,
+        err(why) => fail "it isn't a picture loom can read: {why}",
+    }
+    let small = im.thumbnail(PAGE_PICTURE, PAGE_PICTURE)
+    if small.kind().has_alpha() { return small.encode_png() }
+    return small.to(Kind.Rgb).encode_jpeg(82)
+}
+
 /// Whether loom makes thumbnails of this type.
 pub fn thumbable(mime: String) -> bool {
     return mime == "image/png" or mime == "image/jpeg"

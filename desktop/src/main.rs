@@ -152,6 +152,7 @@ fn main() {
     application.run(|cx| {
         gpui_kit::init(cx);
         app::bind_page_keys(cx);
+        app::bind_composer_keys(cx);
         // A loom started while this one stops runs as soon as this one has let go.
         cx.on_app_quit(|_| {
             single::let_go();
@@ -275,6 +276,7 @@ mod menus {
                 MenuItem::os_action("Cut", Cut, OsAction::Cut),
                 MenuItem::os_action("Copy", Copy, OsAction::Copy),
                 MenuItem::os_action("Paste", Paste, OsAction::Paste),
+                MenuItem::action("Paste as Plain Text", crate::app::PastePlain),
                 MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
             ]),
             Menu::new("Window").items([

@@ -1768,8 +1768,7 @@ impl Paragraph {
                 if let Some(link_mark) = style.link.clone() {
                     let link = node_cx.link(&link_mark, cx);
                     if link.is_some() {
-                        highlight.style.color = Some(node_cx.style.link());
-                        highlight.style.underline = Some(link_underline(&node_cx.style));
+                        decorate_link(&mut highlight.style, style.color, &node_cx.style);
                     }
                     links.push((inner_range.clone(), link_mark));
                     replaced.push(link);
@@ -3168,8 +3167,7 @@ impl Paragraph {
                     if let Some(link_mark) = style.link.as_ref()
                         && let Some(link) = node_cx.link(link_mark, cx)
                     {
-                        highlight.style.color = Some(node_cx.style.link());
-                        highlight.style.underline = Some(link_underline(&node_cx.style));
+                        decorate_link(&mut highlight.style, style.color, &node_cx.style);
                         links.push((inner_range.clone(), link));
                     }
 
@@ -3305,8 +3303,7 @@ impl Paragraph {
                     object_style = object_style.highlight(mark_highlight(mark, node_cx, cx).style);
                     if let Some(link) = mark.link.as_ref().and_then(|link| node_cx.link(link, cx)) {
                         object_link = Some(link);
-                        object_style.color = Some(node_cx.style.link());
-                        object_style.underline = Some(link_underline(&node_cx.style));
+                        decorate_link(&mut object_style, mark.color, &node_cx.style);
                     }
                 }
                 let rendered_node = node.clone();
@@ -3373,8 +3370,7 @@ impl Paragraph {
                     if let Some(link_mark) = style.link.as_ref()
                         && let Some(link) = node_cx.link(link_mark, cx)
                     {
-                        highlight.style.color = Some(node_cx.style.link());
-                        highlight.style.underline = Some(link_underline(&node_cx.style));
+                        decorate_link(&mut highlight.style, style.color, &node_cx.style);
                         links.push((inner_range.clone(), link));
                     }
 
@@ -3447,6 +3443,23 @@ impl Paragraph {
 /// their siblings: unique among them, though not across nesting levels.
 fn block_element_id(kind: &'static str, span: Option<Span>, ix: usize) -> ElementId {
     (kind, span.map_or(ix, |span| span.start)).into()
+}
+
+/// loom: a link's colour and underline: the link colour with its hairline, or, for
+/// a link whose text has its own colour (an agent where a message mentions it), that
+/// colour and no underline, with a light background of it under the pointer
+/// (`Inline::paint_link_hover`).
+fn decorate_link(style: &mut HighlightStyle, own: Option<Hsla>, view: &TextViewStyle) {
+    match own {
+        Some(color) => {
+            style.color = Some(color);
+            style.underline = None;
+        }
+        None => {
+            style.color = Some(view.link());
+            style.underline = Some(link_underline(view));
+        }
+    }
 }
 
 /// A link's underline: a hairline in a translucent link color, so a run of

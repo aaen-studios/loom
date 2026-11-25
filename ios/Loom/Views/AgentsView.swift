@@ -121,6 +121,12 @@ struct AgentsView: View {
             Warmup(agent: model.synced && path.isEmpty ? model.shownAgents.first?.id : nil)
         }
         .onAppear(perform: openFromLaunch)
+        // A tap on an agent a message mentions opens its chat, in place of this one.
+        .onChange(of: model.openAgent) { _, id in
+            guard let id else { return }
+            model.openAgent = nil
+            path = [id]
+        }
     }
 
     /// Each agent's row, which opens its chat, with a long press for its folder and

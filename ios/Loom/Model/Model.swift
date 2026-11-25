@@ -477,13 +477,28 @@ struct PageLink: Equatable, Sendable {
     var site: String
     /// Its site's icon, a file to fetch.
     var icon: String?
+    /// Its preview picture (its `og:image`), a file to fetch: only for a page pasted in
+    /// the composer.
+    var image: String? = nil
 
     static func all(_ j: JSON) -> [String: PageLink] {
         guard case .object(let o) = j else { return [:] }
-        return o.mapValues { v in
-            PageLink(title: v["title"].text, site: v["site"].text, icon: v["icon"].string.flatMap { $0.isEmpty ? nil : $0 })
-        }
+        return o.mapValues(PageLink.of)
     }
+
+    /// A page as the instance looked it up: `{title, site, icon?, image?}`.
+    static func of(_ v: JSON) -> PageLink {
+        let file = { (key: String) in v[key].string.flatMap { $0.isEmpty ? nil : $0 } }
+        return PageLink(title: v["title"].text, site: v["site"].text, icon: file("icon"), image: file("image"))
+    }
+}
+
+/// A link pasted in the composer, as it's looked up (`Model.previewLink`).
+enum Preview: Equatable, Sendable {
+    case loading
+    case ready(PageLink)
+    /// It couldn't be looked up: it shows as its site.
+    case failed
 }
 
 /// A message's words with each bare address that was looked up as its page's title,
@@ -519,6 +534,13 @@ private func titledLine(_ line: String, _ links: [String: PageLink]) -> String {
     var out = ""
     var rest = Substring(line)
     while let c = rest.first {
+        // An address the person sent as plain text: itself, linking to it, with no title.
+        if rest.hasPrefix("<http://") || rest.hasPrefix("<https://"), let end = rest.firstIndex(of: ">") {
+            let url = rest[rest.index(after: rest.startIndex)..<end]
+            out += "[\(url)](\(url))"
+            rest = rest[rest.index(after: end)...]
+            continue
+        }
         // Inline code and Markdown links stay as written.
         if c == "`" {
             let after = rest.dropFirst()
@@ -1377,6 +1399,13 @@ final class Model {
     var notice: String?
     /// Files for the next message.
     var attachments: [Attachment] = []
+    /// Files whose piece in the composer was taken out, kept until the message goes in
+    /// case an undo puts the piece back (`syncAttachments`).
+    var dropped: [Attachment] = []
+    /// The links pasted in the composer, by address, as they're looked up.
+    var linkPreviews: [String: Preview] = [:]
+    /// An agent whose chat a tap on its mention asked for, for the list to open.
+    var openAgent: String?
     /// What the composer's + menu lists: the person's skills, their routines, and the
     /// files sent or received lately in their chats, newest first.
     var skills: [PlusSkill] = []
@@ -1811,6 +1840,12 @@ final class Model {
         }
         let error = f["error"].isNull ? nil : f["error"]["message"].string
         switch f["id"].text {
+        case let id where id.hasPrefix("app.preview:"):
+            // A link pasted in the composer, looked up: its preview, or its site when
+            // the lookup failed.
+            guard let hash = id.firstIndex(of: "#") else { break }
+            let url = String(id[id.index(after: hash)...])
+            linkPreviews[url] = error == nil && !f["value"]["link"].isNull ? .ready(PageLink.of(f["value"]["link"])) : .failed
         case let id where id.hasPrefix("app.folder_new"):
             // A folder made for an agent: the agent goes in.
             let agent = folderFor
@@ -2096,8 +2131,10 @@ final class Model {
         let cardBadges = shown.flatMap(\.blocks).compactMap { $0.card?.badge }
         let askBadges = approvals.flatMap { $0.shown.badges + $0.shown.steps.compactMap(\.badge) }
         wanted += (cardBadges + askBadges).flatMap(\.icons)
-        // The icons of the sites its messages link to.
-        wanted += shown.flatMap { $0.links.values.compactMap(\.icon) }
+        // The icons of the sites its messages link to, and their pages' pictures.
+        wanted += shown.flatMap { $0.links.values.flatMap { [$0.icon, $0.image].compactMap { $0 } } }
+        // And the links pasted in the composer.
+        for case .ready(let l) in linkPreviews.values { wanted += [l.icon, l.image].compactMap { $0 } }
         // The thumbnails of the pictures its replies name.
         wanted += shown.flatMap { $0.named.compactMap(\.thumb) }
         for sha in Set(wanted) {
@@ -2120,6 +2157,7 @@ final class Model {
         let files = attachments.compactMap { $0.file?.file }
         if text.isEmpty && files.isEmpty { return nil }
         attachments = []
+        dropped = []
         var frame: [String: JSON] = ["t": "send", "agent": JSON(agent), "text": JSON(text)]
         if !files.isEmpty { frame["files"] = JSON(files) }
         return .object(frame)
@@ -2132,8 +2170,26 @@ final class Model {
         return ["t": "file.upload", "id": JSON(id), "path": JSON(path)]
     }
 
-    func unattach(_ id: String) {
-        attachments.removeAll { $0.id == id }
+    /// Keeps the files for the next message in step with their pieces in the composer,
+    /// `shown` (the attachments' ids, in the order they're written), as
+    /// desktop/src/model.rs's `sync_attachments`: a file whose piece was taken out is
+    /// dropped, and comes back when an undo puts it back.
+    func syncAttachments(_ shown: [String]) {
+        let all = attachments + dropped
+        let kept = shown.compactMap { id in all.first { $0.id == id } }
+        let gone = all.filter { a in !shown.contains(a.id) }
+        if kept.map(\.id) != attachments.map(\.id) { attachments = kept }
+        if gone.map(\.id) != dropped.map(\.id) { dropped = gone }
+    }
+
+    /// Looks up a link pasted in the composer (`link.preview`), unless it has been.
+    func previewLink(_ url: String) -> JSON? {
+        switch linkPreviews[url] {
+        case .loading, .ready: return nil
+        default: break
+        }
+        linkPreviews[url] = .loading
+        return ["t": "cmd", "id": JSON(id("app.preview:") + "#" + url), "name": "link.preview", "args": ["url": JSON(url)]]
     }
 
     /// Opens a file: at once if it's here, or once it's fetched.

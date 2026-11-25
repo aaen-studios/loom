@@ -150,7 +150,11 @@ struct MarkdownView: View {
                 if first {
                     out = Text("\(out)\(Text(Image(uiImage: MentionGlyph.thread(agent.outline)).renderingMode(.template)).foregroundStyle(ink).baselineOffset(-1))\u{00A0}")
                 }
-                out = Text("\(out)\(Text(verbatim: name).foregroundStyle(ink).fontWeight(.medium))")
+                // A link to its chat (LOO-301), in its colour with nothing under it.
+                var linked = AttributedString(name)
+                linked.link = url
+                linked.foregroundColor = ink
+                out = Text("\(out)\(Text(linked).fontWeight(.medium))")
                 continue
             case .skill:
                 // A skill from the + menu: its name, a little weathered, not a link.

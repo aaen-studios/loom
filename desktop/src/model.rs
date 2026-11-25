@@ -2412,6 +2412,9 @@ pub struct Link {
     pub site: String,
     /// Its site's icon, a file to fetch.
     pub icon: Option<String>,
+    /// Its preview picture (its `og:image`), a file to fetch: only for a page pasted in
+    /// the composer.
+    pub image: Option<String>,
 }
 
 impl Message {
@@ -2431,9 +2434,11 @@ impl Message {
         (title, s.site.clone(), link.and_then(|l| l.icon.clone()))
     }
 
-    /// The site icons its sources and links need.
+    /// The site icons and preview pictures its sources and links need.
     pub fn link_icons(&self) -> impl Iterator<Item = &String> {
-        self.links.values().filter_map(|l| l.icon.as_ref())
+        self.links
+            .values()
+            .flat_map(|l| l.icon.iter().chain(l.image.iter()))
     }
 }
 
@@ -2456,20 +2461,203 @@ fn sources_of(m: &Value) -> Vec<Source> {
 fn links_of(m: &Value) -> HashMap<String, Link> {
     m.get("links")
         .and_then(Value::as_object)
-        .map(|o| {
-            o.iter()
-                .map(|(url, v)| {
-                    let icon = s(v, "icon");
-                    let link = Link {
-                        title: s(v, "title"),
-                        site: s(v, "site"),
-                        icon: (!icon.is_empty()).then_some(icon),
-                    };
-                    (url.clone(), link)
-                })
-                .collect()
-        })
+        .map(|o| o.iter().map(|(url, v)| (url.clone(), link_of(v))).collect())
         .unwrap_or_default()
+}
+
+/// A page as the instance looked it up: `{title, site, icon?, image?}`.
+fn link_of(v: &Value) -> Link {
+    let file = |key: &str| Some(s(v, key)).filter(|f| !f.is_empty());
+    Link {
+        title: s(v, "title"),
+        site: s(v, "site"),
+        icon: file("icon"),
+        image: file("image"),
+    }
+}
+
+/// A link pasted in the composer, as it's looked up (`Model::preview_link`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Preview {
+    Loading,
+    Ready(Link),
+    /// It couldn't be looked up: it shows as its site.
+    Failed,
+}
+
+/// The pages a person's message shows a preview of, over its words: each bare
+/// address in it, in order, once, and at most `LINK_CARDS_MOST`. One the person sent
+/// as plain text (`<https://…>`), one in a Markdown link and one in code aren't.
+pub fn previewed_links(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for_bare_links(text, |url| {
+        if !out.iter().any(|u| u == url) && out.len() < LINK_CARDS_MOST {
+            out.push(url.to_string());
+        }
+    });
+    out
+}
+
+/// The most link previews a message shows.
+pub const LINK_CARDS_MOST: usize = 3;
+
+/// Calls `f` with each bare http or https address in `text`, outside code, Markdown
+/// links and `<…>`, without what usually ends a sentence after it.
+fn for_bare_links(text: &str, mut f: impl FnMut(&str)) {
+    let mut fenced = false;
+    for line in text.split('\n') {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        let mut rest = line;
+        while let Some(c) = rest.chars().next() {
+            if let Some(len) = skipped_span(rest) {
+                rest = &rest[len..];
+                continue;
+            }
+            if let Some(url) = bare_link(rest) {
+                f(url);
+                rest = &rest[url.len()..];
+                continue;
+            }
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+}
+
+/// How long the code, Markdown link or `<…>` at the start of `s` is, which a bare
+/// address isn't looked for in.
+fn skipped_span(s: &str) -> Option<usize> {
+    if let Some(after) = s.strip_prefix('`') {
+        return Some(after.find('`').map_or(s.len(), |e| e + 2));
+    }
+    if s.starts_with('[') {
+        return md_link(s).map(|(len, _, _)| len);
+    }
+    if s.starts_with("<http://") || s.starts_with("<https://") {
+        return s.find('>').map(|e| e + 1);
+    }
+    None
+}
+
+/// The bare address at the start of `s`, without what usually ends a sentence after
+/// it, or None.
+fn bare_link(s: &str) -> Option<&str> {
+    if !(s.starts_with("https://") || s.starts_with("http://")) {
+        return None;
+    }
+    let end = s
+        .find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`'))
+        .unwrap_or(s.len());
+    let url = s[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'']);
+    Some(if url.len() > "https://".len() {
+        url
+    } else {
+        &s[..end]
+    })
+}
+
+/// What the person wrote with each bare address as plain text, `<https://…>`, so it
+/// shows as written in the chat (PLAN.md, "Links in the composer"): only a link pasted
+/// as a preview goes bare. Code, Markdown links and `<…>` stay as they are.
+pub fn plain_links(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut fenced = false;
+    for (n, line) in text.split('\n').enumerate() {
+        if n > 0 {
+            out.push('\n');
+        }
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+            out.push_str(line);
+            continue;
+        }
+        if fenced {
+            out.push_str(line);
+            continue;
+        }
+        let mut rest = line;
+        while let Some(c) = rest.chars().next() {
+            if let Some(len) = skipped_span(rest) {
+                out.push_str(&rest[..len]);
+                rest = &rest[len..];
+                continue;
+            }
+            if let Some(url) = bare_link(rest) {
+                out.push('<');
+                out.push_str(url);
+                out.push('>');
+                rest = &rest[url.len()..];
+                continue;
+            }
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// The site an address is on, as it's shown: its host without `www.`.
+pub fn site_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    let host = host.split(':').next().unwrap_or(host);
+    host.strip_prefix("www.").unwrap_or(host).to_lowercase()
+}
+
+/// A file's name cut in the middle to at most `most` characters, keeping its start
+/// and its end with its type: `__ayanami_rei_neon_gen…6102b.jpg`.
+pub fn middle_cut(name: &str, most: usize) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    if chars.len() <= most || most < 5 {
+        return name.to_string();
+    }
+    // Its type, and a few characters before it, stay whole.
+    let ext = name
+        .rfind('.')
+        .map(|at| name[at..].chars().count())
+        .filter(|&n| n > 1 && n <= 8)
+        .unwrap_or(0);
+    let tail = (ext + 5).min(most / 2);
+    let head = most - 1 - tail;
+    let start: String = chars[..head].iter().collect();
+    let end: String = chars[chars.len() - tail..].iter().collect();
+    format!("{}…{}", start.trim_end(), end.trim_start())
+}
+
+/// How long a file's name is shown in a pill, in characters (`middle_cut`).
+pub const PILL_NAME: usize = 28;
+
+// --- What the composer holds (PLAN.md, "Mentions" and "Links in the composer") ---
+
+/// An attached file as the composer holds it, an inline token: its id and its text,
+/// the file's whole name.
+pub fn attach_token(a: &Attachment) -> (String, String) {
+    (format!("{ATTACH}{}", a.id), a.name.clone())
+}
+
+/// A link pasted as a preview, as the composer holds it: its id and its text, the
+/// address.
+pub fn link_token(url: &str) -> (String, String) {
+    (format!("{LINK}{url}"), url.to_string())
+}
+
+/// How the id of an attached file's token starts, then the attachment's id.
+pub const ATTACH: &str = "loom-attach:";
+/// How the id of a link preview's token starts, then its address.
+pub const LINK: &str = "loom-link:";
+
+/// The address a whole paste is, when it's one http or https address and nothing
+/// else: what a paste turns into a preview.
+pub fn pasted_link(text: &str) -> Option<&str> {
+    let t = text.trim();
+    let url = bare_link(t)?;
+    (url.len() == t.len() && !t.contains(char::is_whitespace)).then_some(url)
 }
 
 /// What a message's words need to show their links and mentions (`with_link_icons`).
@@ -2563,11 +2751,12 @@ fn line_links(line: &str, inline: &Inline) -> String {
                     out.push_str(whole);
                 } else if let Some(id) = url.strip_prefix("loom:agent/") {
                     let name = words.trim().trim_start_matches('@').replace(['<', '>'], "");
+                    // A link, which opens its chat (LOO-301), its thread and its name in it.
                     match (inline.agent)(id) {
                         Some((color, thread)) => {
-                            out.push_str(&img(&thread, 14, 14));
                             out.push_str(&format!(
-                                "<span style=\"color: {color}; font-weight: 500\">{name}</span>"
+                                "[{}<span style=\"color: {color}; font-weight: 500\">{name}</span>]({url})",
+                                img(&thread, 14, 14)
                             ));
                         }
                         None => out.push_str(&format!("@{name}")),
@@ -2578,16 +2767,25 @@ fn line_links(line: &str, inline: &Inline) -> String {
                 } else if url.starts_with("loom:file/") {
                     let src = (inline.file_thumb)(url).unwrap_or_else(|| (inline.file_icon)(words));
                     out.push_str(&img(&src, 14, 14));
-                    out.push_str(whole);
+                    out.push_str(&format!("[{}]({url})", middle_cut(words, PILL_NAME)));
                 } else if let Some(sha) = url.strip_prefix("loom-file:") {
                     let src = (inline.icon_src)(sha)
                         .filter(|_| is_picture(words))
                         .unwrap_or_else(|| (inline.file_icon)(words));
                     out.push_str(&img(&src, 14, 14));
-                    out.push_str(whole);
+                    out.push_str(&format!("[{}]({url})", middle_cut(words, PILL_NAME)));
                 } else {
                     out.push_str(whole);
                 }
+                rest = &rest[len..];
+                continue;
+            }
+        }
+        // An address the person sent as plain text: itself, linking to it, with no title.
+        if rest.starts_with("<http://") || rest.starts_with("<https://") {
+            if let Some(len) = skipped_span(rest) {
+                let url = &rest[1..len - 1];
+                out.push_str(&format!("[{url}]({url})"));
                 rest = &rest[len..];
                 continue;
             }
@@ -2629,7 +2827,7 @@ fn is_picture(name: &str) -> bool {
 }
 
 /// A page's title as a bare address shows it: at most 60 characters, cut at a word.
-fn short_title(title: &str) -> String {
+pub fn short_title(title: &str) -> String {
     const MOST: usize = 60;
     if title.chars().count() <= MOST {
         return title.to_string();
@@ -2680,8 +2878,14 @@ pub fn file_mention(agent: &str, path: &str, name: &str) -> (String, String) {
     (format!("loom:file/{agent}/{escaped}"), name.to_string())
 }
 
-/// What the person typed with each mention (an inline token: its range, its link and
-/// its text) as the Markdown link it's sent as.
+/// What the person wrote, with each piece the composer holds (an inline token: its
+/// range, its id and its text) as it's sent:
+/// - a mention as its Markdown link;
+/// - an attached file as its name in brackets, `[image.png]`, which the chat makes a
+///   link to it (`link_files`);
+/// - a link pasted as a preview as its bare address.
+///
+/// An address typed or pasted as plain text goes as `<https://…>` (`plain_links`).
 pub fn with_mention_links(
     text: &str,
     tokens: &[(std::ops::Range<usize>, String, String)],
@@ -2694,11 +2898,17 @@ pub fn with_mention_links(
         if range.start < at || range.end > text.len() {
             continue;
         }
-        out.push_str(&text[at..range.start]);
-        out.push_str(&format!("[{}]({link})", words.replace(['[', ']'], "")));
+        out.push_str(&plain_links(&text[at..range.start]));
+        if link.starts_with(ATTACH) {
+            out.push_str(&file_mark(words));
+        } else if let Some(url) = link.strip_prefix(LINK) {
+            out.push_str(url);
+        } else {
+            out.push_str(&format!("[{}]({link})", words.replace(['[', ']'], "")));
+        }
         at = range.end;
     }
-    out.push_str(&text[at..]);
+    out.push_str(&plain_links(&text[at..]));
     out
 }
 
@@ -2803,6 +3013,13 @@ pub fn mention_query(text: &str, cursor: usize) -> Option<(usize, String)> {
         .next_back()
         .is_none_or(|c| c.is_whitespace() || c == '(');
     starts.then(|| (at, query.to_string()))
+}
+
+/// The path a file mention's `loom:file/AGENT/PATH` link names, as written.
+pub fn mention_path(link: &str) -> Option<String> {
+    let rest = link.strip_prefix("loom:file/")?;
+    let (_, path) = rest.split_once('/')?;
+    Some(unescape(path))
 }
 
 /// `%2F` and the like as the characters they stand for.
@@ -3883,6 +4100,11 @@ pub struct Model {
     /// Files for chats the person left with them unsent (the app's drafts), which
     /// may still be going up.
     pub parked: Vec<Attachment>,
+    /// Files whose piece in the composer was taken out, kept until the message goes
+    /// in case an undo puts the piece back (`sync_attachments`).
+    pub dropped: Vec<Attachment>,
+    /// The links pasted in the composer, by address, as they're looked up.
+    pub link_previews: HashMap<String, Preview>,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     pub files: Rc<HashMap<String, String>>,
     /// file.get requests on their way: what they fetch, and whether to open it.
@@ -5550,6 +5772,17 @@ impl Model {
             }
             return;
         }
+        // A link pasted in the composer, looked up: its preview, or its site when the
+        // lookup failed.
+        if let Some(url) = id.strip_prefix("app.preview:") {
+            let url = url.rsplit_once('#').map_or(url, |(u, _)| u).to_string();
+            let preview = match f.pointer("/value/link") {
+                Some(v) if f.get("error").is_none() => Preview::Ready(link_of(v)),
+                _ => Preview::Failed,
+            };
+            self.link_previews.insert(url, preview);
+            return;
+        }
         // The files the @ picker asked for, unless it has asked for others since.
         if id.starts_with("app.agent_files") {
             if let Some((asked, agent, query)) = self.files_asking.take() {
@@ -7123,6 +7356,7 @@ impl Model {
             return None;
         }
         self.attachments.clear();
+        self.dropped.clear();
         // So the message shows its files while it waits to be sent, not just how many.
         for f in refs {
             self.sent_files.insert(f.file.clone(), f);
@@ -7171,8 +7405,35 @@ impl Model {
         json!({"t": "file.upload", "id": id, "path": path})
     }
 
-    pub fn unattach(&mut self, id: &str) {
-        self.attachments.retain(|a| a.id != id);
+    /// Keeps the files for the next message in step with their pieces in the composer,
+    /// `shown` (the attachments' ids, in the order they're written): a file whose piece
+    /// was taken out is dropped, and comes back when an undo puts it back. Gives whether
+    /// anything changed.
+    pub fn sync_attachments(&mut self, shown: &[String]) -> bool {
+        let had: Vec<String> = self.attachments.iter().map(|a| a.id.clone()).collect();
+        let mut all = std::mem::take(&mut self.attachments);
+        all.append(&mut self.dropped);
+        let (mut kept, dropped): (Vec<_>, Vec<_>) =
+            all.into_iter().partition(|a| shown.contains(&a.id));
+        kept.sort_by_key(|a| shown.iter().position(|id| id == &a.id));
+        self.attachments = kept;
+        self.dropped = dropped;
+        had.len() != self.attachments.len()
+            || had.iter().zip(&self.attachments).any(|(id, a)| id != &a.id)
+    }
+
+    /// Looks up a link pasted in the composer (`link.preview`), unless it has been.
+    pub fn preview_link(&mut self, url: &str) -> Option<Value> {
+        if matches!(
+            self.link_previews.get(url),
+            Some(Preview::Loading | Preview::Ready(_))
+        ) {
+            return None;
+        }
+        self.link_previews.insert(url.to_string(), Preview::Loading);
+        let id = format!("app.preview:{url}#{}", self.next_id);
+        self.next_id += 1;
+        Some(json!({"t": "cmd", "id": id, "name": "link.preview", "args": {"url": url}}))
     }
 
     /// Whether an attachment is still going up.
@@ -7237,6 +7498,11 @@ impl Model {
                 .chain(a.shown.steps.iter().filter_map(|s| s.badge.as_ref()))
         });
         let sites = self.messages.iter().flat_map(Message::link_icons);
+        let previews = self.link_previews.values().flat_map(|p| match p {
+            Preview::Ready(l) => l.icon.iter().chain(l.image.iter()).collect(),
+            _ => Vec::new(),
+        });
+        let sites = sites.chain(previews);
         for icon in cards.chain(asks).flat_map(Badge::icons).chain(sites) {
             if !wanted.contains(icon) {
                 wanted.push(icon.clone());
@@ -7357,6 +7623,7 @@ impl Model {
     /// Puts the files for the next message aside, for a chat the person leaves, and
     /// gives their ids.
     pub fn park_attachments(&mut self) -> Vec<String> {
+        self.dropped.clear();
         let ids = self.attachments.iter().map(|a| a.id.clone()).collect();
         self.parked.append(&mut self.attachments);
         ids
@@ -7378,6 +7645,7 @@ impl Model {
             .attachments
             .iter_mut()
             .chain(self.parked.iter_mut())
+            .chain(self.dropped.iter_mut())
             .find(|a| a.id == id)
         {
             match f.get("file") {
@@ -8742,6 +9010,7 @@ mod tests {
             title: title.into(),
             site: "a.example".into(),
             icon: icon.map(Into::into),
+            image: None,
         };
         links.insert(
             "https://a.example/x".to_string(),
@@ -8813,12 +9082,13 @@ mod tests {
             file_icon: &file,
             file_thumb: &thumb,
         };
+        // A link to its chat, its thread and its name in it (LOO-301).
         assert_eq!(
             with_link_icons("Ask [@Casper](loom:agent/a1) now", &inline),
-            "Ask <img src=\"/thread/a1\" width=\"14\" height=\"14\" /> \
-             <span style=\"color: #9c8636; font-weight: 500\">Casper</span> now"
+            "Ask [<img src=\"/thread/a1\" width=\"14\" height=\"14\" /> \
+             <span style=\"color: #9c8636; font-weight: 500\">Casper</span>](loom:agent/a1) now"
         );
-        // An agent that's gone is its name.
+        // An agent that's gone is its name, which opens nothing.
         assert_eq!(with_link_icons("[@Old](loom:agent/zz)", &inline), "@Old");
         // A skill from the + menu is its name.
         assert_eq!(
@@ -8836,11 +9106,128 @@ mod tests {
             "<img src=\"/thumbs/pic\" width=\"14\" height=\"14\" /> [cat.png](loom-file:pic) \
              <img src=\"/icons/a.pdf\" width=\"14\" height=\"14\" /> [a.pdf](loom-file:pdf)"
         );
+        // A long name is cut in the middle, its type kept.
+        let long = "__ayanami_rei_neon_genesis_evangelion_drawn_by_dino__3c5bf84e6656cd005691551e17c6102b.jpg";
+        assert_eq!(
+            with_link_icons(&format!("[{long}](loom-file:pic)"), &inline),
+            "<img src=\"/thumbs/pic\" width=\"14\" height=\"14\" /> \
+             [__ayanami_rei_neon…6102b.jpg](loom-file:pic)"
+        );
         // So does a picture a reply names, once its thumbnail is here.
         assert_eq!(
             with_link_icons("[chart.png](loom:file/a1/chart.png)", &inline),
             "<img src=\"/thumbs/chart\" width=\"14\" height=\"14\" /> [chart.png](loom:file/a1/chart.png)"
         );
+        // An address sent as plain text stays as written.
+        assert_eq!(
+            with_link_icons("see <https://a.example/x> [@Old](loom:agent/zz)", &inline),
+            "see [https://a.example/x](https://a.example/x) @Old"
+        );
+    }
+
+    #[test]
+    fn a_long_file_name_is_cut_in_the_middle() {
+        let long = "__ayanami_rei_neon_genesis_evangelion_drawn_by_dino_dinoartforame__3c5bf84e6656cd005691551e17c6102b.jpg";
+        let cut = middle_cut(long, 32);
+        assert_eq!(cut, "__ayanami_rei_neon_gen…6102b.jpg");
+        assert_eq!(cut.chars().count(), 32);
+        assert_eq!(middle_cut("notes.md", 28), "notes.md");
+        // No type: its last few characters.
+        assert_eq!(
+            middle_cut("abcdefghijklmnopqrstuvwxyz0123", 12),
+            "abcdef…z0123"
+        );
+        assert_eq!(
+            middle_cut("a very long title for a page", 12),
+            "a very…page"
+        );
+    }
+
+    #[test]
+    fn the_composer_sends_its_files_links_and_plain_addresses() {
+        let text = "Look image.png https://a.example/x and https://b.example/y.";
+        let tokens = vec![
+            (5..14, format!("{ATTACH}app.up_1"), "image.png".to_string()),
+            (
+                15..34,
+                format!("{LINK}https://a.example/x"),
+                "https://a.example/x".to_string(),
+            ),
+        ];
+        assert_eq!(
+            with_mention_links(text, &tokens),
+            "Look [image.png] https://a.example/x and <https://b.example/y>."
+        );
+        // Code, Markdown links and what's already plain stay as they are.
+        assert_eq!(
+            plain_links("`https://a.example` [x](https://b.example) <https://c.example>\n```\nhttps://d.example\n```"),
+            "`https://a.example` [x](https://b.example) <https://c.example>\n```\nhttps://d.example\n```"
+        );
+        // Only a bare address in a sent message has a card; each once.
+        assert_eq!(
+            previewed_links(
+                "https://a.example/x, <https://b.example> `https://c.example` https://a.example/x"
+            ),
+            vec!["https://a.example/x".to_string()]
+        );
+        assert_eq!(
+            pasted_link(" https://a.example/x?y=1 "),
+            Some("https://a.example/x?y=1")
+        );
+        assert_eq!(pasted_link("see https://a.example/x"), None);
+        assert_eq!(pasted_link("ftp://a.example"), None);
+        assert_eq!(site_of("https://www.Example.com:8443/a?b"), "example.com");
+    }
+
+    #[test]
+    fn a_file_whose_piece_is_taken_out_comes_back_with_an_undo() {
+        let mut m = Model::new();
+        m.selected = Some("a1".into());
+        let up = |m: &mut Model, path: &str| s(&m.attach(path), "id");
+        let (a, b) = (up(&mut m, "C:/x/a.png"), up(&mut m, "C:/x/b.pdf"));
+        // Both pieces in the composer, b first.
+        assert!(m.sync_attachments(&[b.clone(), a.clone()]));
+        assert_eq!(m.attachments[0].id, b);
+        // Backspace takes a's piece: a is off the message, but kept.
+        assert!(m.sync_attachments(std::slice::from_ref(&b)));
+        assert_eq!(m.attachments.len(), 1);
+        assert_eq!(m.dropped[0].id, a);
+        // An undo puts it back, where it's written.
+        assert!(m.sync_attachments(&[a.clone(), b.clone()]));
+        assert_eq!(m.attachments[0].id, a);
+        assert!(m.dropped.is_empty());
+        assert!(!m.sync_attachments(&[a.clone(), b.clone()]));
+        // A dropped one isn't sent, and goes once the message does.
+        m.sync_attachments(std::slice::from_ref(&a));
+        m.file_came(&json!({"id": a, "file": {"file": "sha_a", "name": "a.png", "mime": "image/png", "size": 3}}));
+        let sent = m.send("look [a.png]").unwrap();
+        assert_eq!(sent["files"], json!(["sha_a"]));
+        assert!(m.dropped.is_empty() && m.attachments.is_empty());
+    }
+
+    #[test]
+    fn a_link_pasted_in_the_composer_is_looked_up_once() {
+        let mut m = Model::new();
+        let f = m.preview_link("https://a.example/x").unwrap();
+        assert_eq!(f["name"], "link.preview");
+        assert_eq!(m.link_previews["https://a.example/x"], Preview::Loading);
+        assert!(m.preview_link("https://a.example/x").is_none());
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {"link": {"title": "A page", "site": "a.example", "icon": "ic", "image": "im"}}}));
+        let Preview::Ready(l) = &m.link_previews["https://a.example/x"] else {
+            panic!("not ready");
+        };
+        assert_eq!(
+            (l.title.as_str(), l.image.as_deref()),
+            ("A page", Some("im"))
+        );
+        // Its icon and picture are fetched as a message's are.
+        let gets: Vec<String> = m.file_fetches().iter().map(|g| s(g, "file")).collect();
+        assert!(gets.contains(&"ic".to_string()) && gets.contains(&"im".to_string()));
+        // One that failed shows as its site.
+        let f = m.preview_link("https://b.example/").unwrap();
+        m.take(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"code": "x", "message": "no"}}));
+        assert_eq!(m.link_previews["https://b.example/"], Preview::Failed);
     }
 
     #[test]

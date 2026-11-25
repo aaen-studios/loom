@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineToken, Input, InputEvent, InputState, MoveDown, MoveLeft,
-    MoveRight, MoveUp, Paste, Textarea, TextareaState,
+    Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState,
+    MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{TextView, TextViewState};
@@ -342,10 +342,9 @@ pub struct Loom {
     /// What was over the chat when it was last drawn (the popup, whether a menu was
     /// open, the page beside it), to see one close.
     focus_over: (Option<Screen>, bool, Option<Screen>),
-    /// Text to put in the composer at its cursor (true), or take out of it (false), on
-    /// the next draw, which has the window: a file's `[name]` as it's attached and
-    /// taken off.
-    composer_edits: Vec<(bool, String)>,
+    /// What to do to the composer on the next draw, which has the window: put in a
+    /// file's piece as it's attached, or take one out.
+    composer_edits: Vec<ComposerEdit>,
     /// The @ being typed in the composer, for its picker: where it is and what follows
     /// it (PLAN.md, "Mentions").
     mention: Option<(usize, String)>,
@@ -353,7 +352,7 @@ pub struct Loom {
     mention_lit: usize,
     /// What's written and attached but not sent in each chat the person left, by
     /// `draft_key`, and the chat the composer holds now.
-    drafts: HashMap<String, (String, Vec<String>)>,
+    drafts: HashMap<String, (InputContent, Vec<String>)>,
     draft_for: String,
     server_in: Entity<InputState>,
     user_in: Entity<InputState>,
@@ -528,7 +527,7 @@ pub struct Loom {
     /// Each attached picture's preview for the composer, small, by the attachment's id:
     /// none while it's made. One that couldn't be made isn't here, and the picture
     /// itself is shown.
-    previews: HashMap<String, Option<Arc<RenderImage>>>,
+    previews: HashMap<String, Option<Thumb>>,
     page_decoding: bool,
     /// The newest frame a decode was started for.
     page_tried: u64,
@@ -762,6 +761,9 @@ impl Loom {
                     // the @ picker follows what's typed after an @.
                     InputEvent::Change => {
                         this.track_mention(cx);
+                        // A file whose piece was taken out goes with it, and comes back
+                        // with an undo.
+                        this.sync_attachments(cx);
                         cx.notify()
                     }
                     _ => {}
@@ -2529,11 +2531,11 @@ ACTA_KEY=secret:ACTA_KEY",
                     let (id, path) = (a.id.clone(), a.path.clone());
                     self.make_preview(id, path, cx);
                 }
-                // Its name goes in the words where the cursor is, as a link to it once
-                // it's sent (`model::link_files`).
+                // It goes in the words where the cursor is, as one piece, which is sent
+                // as its name and becomes a link to it (`model::link_files`).
                 if let Some(a) = self.model.attachments.last() {
-                    self.composer_edits
-                        .push((true, format!("{} ", model::file_mark(&a.name))));
+                    let (id, name) = model::attach_token(a);
+                    self.composer_edits.push(ComposerEdit::Put(id, name));
                 }
             }
         }
@@ -2544,12 +2546,28 @@ ACTA_KEY=secret:ACTA_KEY",
     /// as itself there took about 48 MB of memory, and as much on the GPU, at 64 pixels.
     fn make_preview(&mut self, id: String, path: String, cx: &mut Context<Self>) {
         self.previews.insert(id.clone(), None);
+        // And a file of it, for the fan of two or more (`CardLoader` crops the file it's
+        // given as it is).
+        let file = format!("{}/cache/composer/{id}.png", data_dir());
         let task = cx.background_executor().spawn(async move {
             let full = picture_pixels(&std::fs::read(&path).ok()?)?;
-            let small = image::DynamicImage::ImageRgba8(full)
-                .thumbnail(128, 128)
-                .into_rgba8();
-            Some(Arc::new(RenderImage::new(vec![image::Frame::new(small)])))
+            let (w, h) = (full.width(), full.height());
+            let card = image::DynamicImage::ImageRgba8(full).thumbnail(512, 512);
+            let small = card.thumbnail(256, 256).into_rgba8();
+            // Kept as the picture's own colours: `picture_pixels` gives BGRA.
+            let mut rgba = card.into_rgba8();
+            for px in rgba.pixels_mut() {
+                px.0.swap(0, 2);
+            }
+            let kept = std::path::Path::new(&file)
+                .parent()
+                .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
+                && rgba.save(&file).is_ok();
+            Some(Thumb {
+                small: Arc::new(RenderImage::new(vec![image::Frame::new(small)])),
+                file: kept.then_some(file),
+                size: (w, h),
+            })
         });
         cx.spawn(async move |this, cx| {
             let made = task.await;
@@ -2568,12 +2586,26 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
     }
 
+    /// Takes a file off the next message by its ×: its piece goes out of the words, as
+    /// Backspace would take it, so an undo brings both back (`sync_attachments`).
     pub fn unattach(&mut self, id: &str, cx: &mut Context<Self>) {
-        if let Some(a) = self.model.attachments.iter().find(|a| a.id == id) {
-            self.composer_edits.push((false, model::file_mark(&a.name)));
-        }
-        self.model.unattach(id);
+        self.composer_edits
+            .push(ComposerEdit::Take(format!("{}{id}", model::ATTACH)));
         cx.notify();
+    }
+
+    /// Keeps the files for the next message in step with their pieces in the composer.
+    fn sync_attachments(&mut self, cx: &mut Context<Self>) {
+        let shown: Vec<String> = self
+            .composer
+            .read(cx)
+            .tokens()
+            .iter()
+            .filter_map(|t| t.token().id().strip_prefix(model::ATTACH).map(String::from))
+            .collect();
+        if self.model.sync_attachments(&shown) {
+            cx.notify();
+        }
     }
 
     /// Which chat the composer writes in: the agent's, or a task or branch of it, on
@@ -2594,43 +2626,39 @@ ACTA_KEY=secret:ACTA_KEY",
         if key == self.draft_for {
             return;
         }
-        let text = self.composer.read(cx).value().to_string();
+        // What's written, with its pieces: its files, mentions and links.
+        let content = self.composer.read(cx).content();
         let files = self.model.park_attachments();
         let left = std::mem::replace(&mut self.draft_for, key.clone());
-        if !text.trim().is_empty() || !files.is_empty() {
-            self.drafts.insert(left, (text, files));
+        if !content.text().trim().is_empty() || !files.is_empty() {
+            self.drafts.insert(left, (content, files));
         }
-        let (text, files) = self.drafts.remove(&key).unwrap_or_default();
+        let (content, files) = self
+            .drafts
+            .remove(&key)
+            .unwrap_or_else(|| (InputContent::new(""), Vec::new()));
         self.model.unpark_attachments(&files);
         // The caret after the draft, to carry on typing it.
         self.composer.update(cx, |c, cx| {
-            c.set_value(text, window, cx);
+            c.set_value(content, window, cx);
             let end = c.value().len();
             c.set_selected_range(end..end, cx);
         });
+        self.sync_attachments(cx);
         cx.notify();
     }
 
-    /// Puts in and takes out the composer's file names, now that there's a window.
+    /// Puts in and takes out the composer's pieces, now that there's a window.
     fn edit_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        for (put, words) in std::mem::take(&mut self.composer_edits) {
-            self.composer.update(cx, |c, cx| {
-                if put {
-                    c.insert(words, window, cx);
-                } else {
-                    let text = c.value().to_string();
-                    let next = text.replacen(&format!("{words} "), "", 1);
-                    let next = if next == text {
-                        text.replacen(&words, "", 1)
-                    } else {
-                        next
-                    };
-                    if next != text {
-                        c.set_value(next, window, cx);
-                    }
-                }
-            });
+        let edits = std::mem::take(&mut self.composer_edits);
+        if edits.is_empty() {
+            return;
         }
+        for edit in edits {
+            self.composer
+                .update(cx, |c, cx| composer_edit(c, edit, window, cx));
+        }
+        self.sync_attachments(cx);
     }
 
     /// Asks the system for files to attach.
@@ -7650,6 +7678,346 @@ ACTA_KEY=secret:ACTA_KEY",
             .child(div().flex_1().child(title.to_string()))
     }
 
+    /// What's attached to the next message, over the composer's words, as the sent
+    /// message shows it (PLAN.md, "Files and images" and "Links in the composer"): a
+    /// picture as itself, two or more as a fan, any other file as its pill, and each link
+    /// pasted as a preview as its card. One row, however many there are. None with
+    /// nothing attached.
+    fn attached_row(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let p = self.p;
+        // Previews of pictures that aren't attached any more leave the GPU: not those an
+        // undo could bring back.
+        let gone: Vec<String> = self
+            .previews
+            .keys()
+            .filter(|k| {
+                !self
+                    .model
+                    .attachments
+                    .iter()
+                    .chain(&self.model.dropped)
+                    .any(|a| &a.id == *k)
+            })
+            .cloned()
+            .collect();
+        for k in gone {
+            if let Some(Some(t)) = self.previews.remove(&k) {
+                let _ = window.drop_image(t.small);
+            }
+        }
+        let links: Vec<String> = self
+            .composer
+            .read(cx)
+            .tokens()
+            .iter()
+            .filter_map(|t| t.token().id().strip_prefix(model::LINK).map(String::from))
+            .collect();
+        if self.model.attachments.is_empty() && links.is_empty() {
+            return None;
+        }
+        let x = |id: SharedString, name: String, take: Vec<String>, cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .absolute()
+                .top(px(3.0))
+                .right(px(3.0))
+                .size(px(18.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(black().opacity(0.6))
+                .text_color(white())
+                .cursor_pointer()
+                .tooltip(tip_text(name))
+                .child(Icon::new(IconName::Close).xsmall())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    for id in &take {
+                        this.unattach(id, cx);
+                    }
+                }))
+        };
+        let mut row = div()
+            .id("attached")
+            .w_full()
+            .flex()
+            .items_end()
+            .gap(px(space::S))
+            .overflow_x_scroll();
+        let attachments = self.model.attachments.clone();
+        let (pictures, others): (Vec<_>, Vec<_>) = attachments
+            .iter()
+            .partition(|a| a.image() && a.error.is_none());
+        let this = cx.entity().downgrade();
+        match pictures.as_slice() {
+            [] => {}
+            [a] => {
+                let (w, h) = match self.previews.get(&a.id) {
+                    Some(Some(t)) => {
+                        fit(t.size.0, t.size.1, COMPOSER_PICTURE_W, COMPOSER_PICTURE_H)
+                    }
+                    _ => (COMPOSER_PICTURE_H, COMPOSER_PICTURE_H),
+                };
+                let opened = a.file.clone();
+                row = row.child(
+                    div()
+                        .id(SharedString::from(format!("attached-{}", a.id)))
+                        .relative()
+                        .flex_none()
+                        .w(px(w))
+                        .h(px(h))
+                        .rounded(px(radius::BUBBLE))
+                        .overflow_hidden()
+                        .bg(p.bubble)
+                        .when(a.file.is_none(), |d| d.opacity(0.6))
+                        .when(opened.is_some(), |d| d.cursor_pointer())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(f) = &opened {
+                                this.view(f, cx);
+                            }
+                        }))
+                        .child(match self.previews.get(&a.id) {
+                            Some(Some(t)) => img(ImageSource::Render(t.small.clone()))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                            Some(None) => div().into_any_element(),
+                            None => img(std::path::PathBuf::from(&a.path))
+                                .image_cache(&kept_images(cx).0)
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                        })
+                        .child(x(
+                            SharedString::from(format!("unattach-{}", a.id)),
+                            format!("Remove {}", a.name),
+                            vec![a.id.clone()],
+                            cx,
+                        )),
+                );
+            }
+            many => {
+                // The fan the sent message has, at its smallest, from the pictures'
+                // small files.
+                let mut files = HashMap::new();
+                let stack: Vec<model::FileRef> = many
+                    .iter()
+                    .map(|a| {
+                        let f = a.file.clone().unwrap_or_else(|| model::FileRef {
+                            file: a.id.clone(),
+                            name: a.name.clone(),
+                            mime: String::new(),
+                            size: 0,
+                            width: 0,
+                            height: 0,
+                        });
+                        let small = match self.previews.get(&a.id) {
+                            Some(Some(Thumb {
+                                file: Some(file), ..
+                            })) => Some(file.clone()),
+                            Some(Some(_)) | None => Some(a.path.clone()),
+                            Some(None) => None,
+                        };
+                        if let Some(path) = small {
+                            files.insert(format!("{}.thumb", f.file), path);
+                        }
+                        f
+                    })
+                    .collect();
+                let going_up = many.iter().any(|a| a.file.is_none());
+                row = row.child(
+                    div()
+                        .relative()
+                        .flex_none()
+                        .when(going_up, |d| d.opacity(0.6))
+                        .child(picture_stack(
+                            p,
+                            &stack,
+                            &files,
+                            "composer".into(),
+                            0,
+                            this.clone(),
+                            &[],
+                        ))
+                        .child(x(
+                            "unattach-pictures".into(),
+                            format!("Remove {} pictures", many.len()),
+                            many.iter().map(|a| a.id.clone()).collect(),
+                            cx,
+                        )),
+                );
+            }
+        }
+        for a in others {
+            let id = a.id.clone();
+            let (note, color) = match (&a.file, &a.error) {
+                (_, Some(e)) => (e.clone(), p.bad),
+                (Some(f), None) => (model::size_of(f.size), p.ink_3),
+                (None, None) => ("Sending…".to_string(), p.ink_3),
+            };
+            row = row.child(
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .pl(px(space::M))
+                    .pr(px(space::XS))
+                    .py(px(space::XS))
+                    .rounded(px(radius::ROW))
+                    .border_1()
+                    .border_color(p.line)
+                    .text_size(px(size::SMALL))
+                    .child(Icon::new(Ico::FileText).small().text_color(p.ink_3))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("attached-name-{}", a.id)))
+                            .text_color(p.ink)
+                            .whitespace_nowrap()
+                            .tooltip(tip_text(a.name.clone()))
+                            .child(model::middle_cut(&a.name, model::PILL_NAME)),
+                    )
+                    .child(div().text_color(color).whitespace_nowrap().child(note))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("unattach-{}", a.id)))
+                            .size(px(22.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(radius::ROW))
+                            .text_color(p.ink_3)
+                            .cursor_pointer()
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+                            .tooltip(tip_text(format!("Remove {}", a.name)))
+                            .child(Icon::new(IconName::Close).xsmall())
+                            .on_click(cx.listener(move |this, _, _, cx| this.unattach(&id, cx))),
+                    ),
+            );
+        }
+        for url in links {
+            let preview = self
+                .model
+                .link_previews
+                .get(&url)
+                .cloned()
+                .unwrap_or(model::Preview::Loading);
+            let token = format!("{}{url}", model::LINK);
+            let unpreview = cx.listener(move |this, _: &ClickEvent, _, cx| {
+                this.composer_edits
+                    .push(ComposerEdit::Unpreview(token.clone()));
+                cx.notify();
+            });
+            row = row.child(
+                div()
+                    .relative()
+                    .flex_none()
+                    .child(link_card(p, &url, &preview, &self.model.files))
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("unpreview-{url}")))
+                            .absolute()
+                            .top(px(3.0))
+                            .right(px(3.0))
+                            .size(px(18.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(black().opacity(0.6))
+                            .text_color(white())
+                            .cursor_pointer()
+                            .tooltip(tip("As plain text"))
+                            .child(Icon::new(IconName::Close).xsmall())
+                            .on_click(unpreview),
+                    ),
+            );
+        }
+        Some(row.into_any_element())
+    }
+
+    /// The composer's words, with its pieces drawn as the sent message draws them: a
+    /// mention as its agent or its file, an attached file as its tiny picture or icon and
+    /// its name cut in the middle, and a link pasted as a preview as its site's icon and
+    /// its page's title. Two or more files side by side are only their tiny pictures, so
+    /// they take one line. A click opens what a piece is.
+    fn composer_textarea(&self, cx: &mut Context<Self>) -> Textarea {
+        let p = self.p;
+        let c = self.composer.read(cx);
+        let content = c.content();
+        // The files that stand together, with only spaces between them.
+        let spans: Vec<(std::ops::Range<usize>, String)> = content
+            .tokens()
+            .iter()
+            .filter(|t| t.token().id().starts_with(model::ATTACH))
+            .map(|t| (t.range(), t.token().id().to_string()))
+            .collect();
+        let text = content.text().to_string();
+        let mut together: HashSet<String> = HashSet::new();
+        for pair in spans.windows(2) {
+            if text[pair[0].0.end..pair[1].0.start].trim().is_empty() {
+                together.insert(pair[0].1.clone());
+                together.insert(pair[1].1.clone());
+            }
+        }
+        let pieces = Rc::new(ComposerPieces {
+            agents: self.model.agents.clone(),
+            files: self
+                .model
+                .attachments
+                .iter()
+                .chain(&self.model.dropped)
+                .map(|a| {
+                    let small = self
+                        .previews
+                        .get(&a.id)
+                        .and_then(|t| t.as_ref())
+                        .map(|t| t.small.clone());
+                    (a.id.clone(), (a.clone(), small))
+                })
+                .collect(),
+            together,
+            previews: self.model.link_previews.clone(),
+            thumbs: self.model.files.clone(),
+        });
+        let this = cx.entity().downgrade();
+        let drawn = pieces.clone();
+        Textarea::new(&self.composer)
+            .appearance(false)
+            .token(move |t, _, _| composer_token(p, &drawn, t.token().id(), t.token().text()))
+            .on_token_click(move |e, _, cx| {
+                let id = e.token().id().to_string();
+                let _ = this.update(cx, |loom, cx| loom.open_piece(&id, cx));
+            })
+    }
+
+    /// Opens what a piece in the composer is: an agent's chat, a file, a picture big
+    /// over the window, or a page.
+    fn open_piece(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(agent) = id.strip_prefix("loom:agent/") {
+            if self.model.agents.iter().any(|a| a.id == agent) {
+                self.select(agent.to_string(), cx);
+            }
+        } else if id.starts_with("loom:file/") {
+            if let Some(frame) = self.model.open_file_mention(id) {
+                self.send(frame);
+            }
+        } else if let Some(att) = id.strip_prefix(model::ATTACH) {
+            let Some(a) = self.model.attachments.iter().find(|a| a.id == att).cloned() else {
+                return;
+            };
+            match &a.file {
+                Some(f) if a.image() => self.view(f, cx),
+                _ => {
+                    self.model.to_open.push(a.path.clone());
+                    self.open_fetched(cx);
+                }
+            }
+        } else if let Some(url) = id.strip_prefix(model::LINK) {
+            cx.open_url(url);
+        }
+    }
+
     /// The agent menu's Move to folder: each folder, the one it's in checked, out of
     /// them when it's in one, and a new folder with it in.
     fn folder_menu(&self, panel: Div, group: Option<String>, cx: &mut Context<Self>) -> Div {
@@ -8048,10 +8416,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }
             PlusRow::File(f) => {
-                // Its name goes in the words where the cursor is, as an attachment's does.
+                // It goes in the words where the cursor is, as one piece, as an attachment does.
                 if self.model.attach_sent(&f.file) {
-                    self.composer_edits
-                        .push((true, format!("{} ", model::file_mark(&f.file.name))));
+                    if let Some(a) = self.model.attachments.last() {
+                        let (id, name) = model::attach_token(a);
+                        self.composer_edits.push(ComposerEdit::Put(id, name));
+                    }
                 }
                 self.shut_plus(window, cx);
             }
@@ -9024,11 +9394,14 @@ ACTA_KEY=secret:ACTA_KEY",
             Some(i) if all.len() > 1 => Some(format!("{} / {}", i + 1, all.len())),
             _ => None,
         };
+        // A long name cut in the middle, its type kept, and whole on hover.
         let name = div()
+            .id("viewer-name")
             .min_w_0()
             .truncate()
             .text_color(white().opacity(0.75))
-            .child(f.name.clone());
+            .tooltip(tip_text(f.name.clone()))
+            .child(model::middle_cut(&f.name, 64));
         // With a count, the name ends just left of the middle and the count starts just
         // right of it, so the count stays put from one picture to the next.
         let caption = div()
@@ -9706,112 +10079,7 @@ ACTA_KEY=secret:ACTA_KEY",
             self.composer
                 .update(cx, |s, cx| s.set_placeholder(placeholder, window, cx));
         }
-        // Previews of pictures that aren't attached any more leave the GPU.
-        let gone: Vec<String> = self
-            .previews
-            .keys()
-            .filter(|k| !self.model.attachments.iter().any(|a| &a.id == *k))
-            .cloned()
-            .collect();
-        for k in gone {
-            if let Some(Some(r)) = self.previews.remove(&k) {
-                let _ = window.drop_image(r);
-            }
-        }
-        let mut attached = div().flex().flex_wrap().gap(px(space::S));
-        for a in self.model.attachments.clone() {
-            let id = a.id.clone();
-            let (note, color) = match (&a.file, &a.error) {
-                (_, Some(e)) => (e.clone(), p.bad),
-                (Some(f), None) => (model::size_of(f.size), p.ink_3),
-                (None, None) => ("Sending…".to_string(), p.ink_3),
-            };
-            // A picture as itself, its × in its corner, faint while it goes up.
-            if a.image() && a.error.is_none() {
-                let going_up = a.file.is_none();
-                attached = attached.child(
-                    div()
-                        .relative()
-                        .size(px(64.0))
-                        .flex_none()
-                        .rounded(px(radius::ROW))
-                        .overflow_hidden()
-                        .border_1()
-                        .border_color(p.line)
-                        .bg(p.bubble)
-                        .when(going_up, |d| d.opacity(0.6))
-                        .child(match self.previews.get(&a.id) {
-                            Some(Some(small)) => img(ImageSource::Render(small.clone()))
-                                .size_full()
-                                .object_fit(ObjectFit::Cover)
-                                .into_any_element(),
-                            Some(None) => div().into_any_element(),
-                            None => img(std::path::PathBuf::from(&a.path))
-                                .image_cache(&kept_images(cx).0)
-                                .size_full()
-                                .object_fit(ObjectFit::Cover)
-                                .into_any_element(),
-                        })
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("unattach-{}", a.id)))
-                                .absolute()
-                                .top(px(3.0))
-                                .right(px(3.0))
-                                .size(px(18.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_full()
-                                .bg(black().opacity(0.6))
-                                .text_color(white())
-                                .cursor_pointer()
-                                .tooltip(tip_text(a.name.clone()))
-                                .child(Icon::new(IconName::Close).xsmall())
-                                .on_click(
-                                    cx.listener(move |this, _, _, cx| this.unattach(&id, cx)),
-                                ),
-                        ),
-                );
-                continue;
-            }
-            attached = attached.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .pl(px(space::M))
-                    .pr(px(space::XS))
-                    .py(px(space::XS))
-                    .rounded(px(radius::ROW))
-                    .bg(p.bubble)
-                    .text_size(px(size::SMALL))
-                    .child(Icon::new(Ico::FileText).small().text_color(p.ink_3))
-                    .child(
-                        div()
-                            .max_w(px(220.0))
-                            .truncate()
-                            .text_color(p.ink)
-                            .child(a.name.clone()),
-                    )
-                    .child(div().text_color(color).truncate().child(note))
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("unattach-{}", a.id)))
-                            .size(px(22.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(radius::ROW))
-                            .text_color(p.ink_3)
-                            .cursor_pointer()
-                            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
-                            .child(Icon::new(IconName::Close).xsmall())
-                            .on_click(cx.listener(move |this, _, _, cx| this.unattach(&id, cx))),
-                    ),
-            );
-        }
-        let has_attachments = !self.model.attachments.is_empty();
+        let attached = self.attached_row(window, cx);
         let plus_open = self.plus.is_some();
         let plus_menu = self.plus.clone().map(|menu| self.plus_menu(&menu, cx));
         let picks = self.mention_picks();
@@ -9842,7 +10110,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         anchored().anchor(Anchor::BottomLeft).child(menu),
                     )))
                 })
-                .when(has_attachments, |d| d.child(attached))
+                .when_some(attached, |d, row| d.child(row))
                 .child(
                     div()
                         .w_full()
@@ -9893,9 +10161,39 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_size(px(size::COMPOSER))
                                 // Before the textarea's own Paste, which would
                                 // paste a copied file as its path.
-                                .capture_action(cx.listener(|this, _: &Paste, _, cx| {
+                                .capture_action(cx.listener(|this, _: &Paste, window, cx| {
                                     if this.paste_files(cx) {
                                         cx.stop_propagation();
+                                        return;
+                                    }
+                                    // A link alone pastes as its preview.
+                                    let text = cx
+                                        .read_from_clipboard()
+                                        .and_then(|item| item.text())
+                                        .unwrap_or_default();
+                                    if let Some(url) = model::pasted_link(&text) {
+                                        cx.stop_propagation();
+                                        let url = url.to_string();
+                                        this.composer
+                                            .update(cx, |c, cx| paste_link(c, &url, window, cx));
+                                        if let Some(f) = this.model.preview_link(&url) {
+                                            this.send(f);
+                                        }
+                                        cx.notify();
+                                    }
+                                }))
+                                // Ctrl+Shift+V (⌘⇧V): what's copied as plain text, a
+                                // link too.
+                                .on_action(cx.listener(|this, _: &PastePlain, window, cx| {
+                                    let text = cx
+                                        .read_from_clipboard()
+                                        .and_then(|item| item.text())
+                                        .unwrap_or_default();
+                                    if !text.is_empty() {
+                                        this.composer
+                                            .update(cx, |c, cx| c.replace(text, window, cx));
+                                        this.track_mention(cx);
+                                        cx.notify();
                                     }
                                 }))
                                 // The @ picker's keys, before the textarea's own.
@@ -9916,19 +10214,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .capture_action(cx.listener(|this, _: &Escape, window, cx| {
                                     this.mention_key(MentionKey::Shut, window, cx)
                                 }))
-                                .child({
-                                    let agents = self.model.agents.clone();
-                                    Textarea::new(&self.composer).appearance(false).token(
-                                        move |t, _, _| {
-                                            mention_token(
-                                                p,
-                                                &agents,
-                                                t.token().id(),
-                                                t.token().text(),
-                                            )
-                                        },
-                                    )
-                                }),
+                                .child(self.composer_textarea(cx)),
                         )
                         // Dictation: the system's own voice typing, into the composer.
                         .when(cfg!(any(windows, target_os = "macos")), |d| {
@@ -16865,8 +17151,24 @@ fn person(
     // the window, anything else in its own program. A stack's pictures only listed by
     // name are left out, since the stack shows them and the viewer their names.
     // What a person typed keeps its line breaks, which Markdown would join.
+    // Each link it sent as a preview, as its card, as the composer showed it.
+    for url in model::previewed_links(&text) {
+        let preview = match m.links.get(&url) {
+            Some(l) => model::Preview::Ready(l.clone()),
+            None => model::Preview::Failed,
+        };
+        out = out.child(link_card(p, &url, &preview, files));
+    }
     let text = model::unmark_stacked(&text, &stacked).replace('\n', "  \n");
     let attached: Vec<model::FileRef> = m.blocks.iter().filter_map(|b| b.file.clone()).collect();
+    FILE_NAMES.with(|n| {
+        let mut n = n.borrow_mut();
+        for f in &attached {
+            if !n.contains_key(&f.file) {
+                n.insert(f.file.clone(), f.name.clone());
+            }
+        }
+    });
     let words = linked_words(
         p,
         &model::link_files(&model::literal_html(&text), &attached),
@@ -16895,6 +17197,11 @@ fn person(
                     loom.send(frame);
                 }
             });
+        }
+        // An agent it mentions opens its chat (LOO-301).
+        None if url.starts_with("loom:agent/") => {
+            let agent = url["loom:agent/".len()..].to_string();
+            let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
         }
         None if url.starts_with("loom:") => {}
         None => cx.open_url(url),
@@ -17054,6 +17361,7 @@ fn file_view(
         .border_color(p.line)
         .cursor_pointer()
         .soft_hover(transparent_black(), p.hover, None)
+        .tooltip(tip_text(f.name.clone()))
         .on_click(open)
         .child(Icon::new(Ico::FileText).small().text_color(p.ink_3))
         .child(
@@ -17066,7 +17374,7 @@ fn file_view(
                         .text_size(px(size::SMALL))
                         .text_color(p.ink)
                         .truncate()
-                        .child(f.name.clone()),
+                        .child(model::middle_cut(&f.name, model::PILL_NAME)),
                 )
                 .child(
                     div()
@@ -17371,6 +17679,152 @@ fn tilted_card(path: String, dx: f32, deg: f32, scale: f32) -> impl IntoElement 
 
 /// How a tilted card's picture is named for `CardLoader`: this, then the picture's path.
 const TILTED: &str = "loom-tilted:";
+
+/// The place a picture attached in the composer takes, at most.
+const COMPOSER_PICTURE_W: f32 = 200.0;
+const COMPOSER_PICTURE_H: f32 = 96.0;
+/// A link preview's card, in the composer and over a sent message.
+const LINK_CARD_W: f32 = 300.0;
+const LINK_CARD_H: f32 = 72.0;
+
+/// A link pasted as a preview (PLAN.md, "Links in the composer"), the same in the
+/// composer and over the sent message: its page's picture, or else its site's icon, on
+/// the left, and its title and its site. While it's looked up, a place of the card's
+/// size; with no title, or when the lookup failed, a pill of its icon and its site.
+/// Clicking it opens the page.
+fn link_card(
+    p: Palette,
+    url: &str,
+    preview: &model::Preview,
+    files: &HashMap<String, String>,
+) -> AnyElement {
+    let thumb = |sha: &Option<String>| {
+        sha.as_ref()
+            .and_then(|s| files.get(&format!("{s}.thumb")))
+            .cloned()
+    };
+    let open = {
+        let url = url.to_string();
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| cx.open_url(&url)
+    };
+    let id = SharedString::from(format!("link-card-{url}"));
+    let tip_url = url.to_string();
+    let base = div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded(px(radius::ROW))
+        .border_1()
+        .border_color(p.line)
+        .overflow_hidden()
+        .cursor_pointer()
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip_url.clone()).build(window, cx)
+        })
+        .on_click(open);
+    let site_row = |icon: Option<String>, site: String| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::XS))
+            .min_w_0()
+            .text_size(px(size::CAPTION))
+            .text_color(p.ink_3)
+            .when_some(icon, |d, path| {
+                d.child(
+                    img(std::path::PathBuf::from(path))
+                        .size(px(14.0))
+                        .flex_none()
+                        .rounded(px(3.0)),
+                )
+            })
+            .child(div().truncate().child(site))
+    };
+    match preview {
+        model::Preview::Ready(l) if !l.title.trim().is_empty() => {
+            let site = if l.site.is_empty() {
+                model::site_of(url)
+            } else {
+                l.site.clone()
+            };
+            let icon = thumb(&l.icon);
+            base.w(px(LINK_CARD_W))
+                .h(px(LINK_CARD_H))
+                .soft_hover(transparent_black(), p.hover, None)
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(LINK_CARD_H))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .bg(p.bubble)
+                        .child(match (thumb(&l.image), &icon) {
+                            (Some(path), _) => img(std::path::PathBuf::from(path))
+                                .size_full()
+                                .object_fit(ObjectFit::Cover)
+                                .into_any_element(),
+                            (None, Some(path)) => img(std::path::PathBuf::from(path.clone()))
+                                .size(px(24.0))
+                                .rounded(px(4.0))
+                                .into_any_element(),
+                            (None, None) => {
+                                Icon::new(Ico::Globe).text_color(p.ink_3).into_any_element()
+                            }
+                        }),
+                )
+                .child(
+                    // Its own width, which the title wraps in.
+                    div()
+                        .w(px(LINK_CARD_W - LINK_CARD_H - 2.0))
+                        .h_full()
+                        .overflow_hidden()
+                        .flex()
+                        .flex_col()
+                        .justify_center()
+                        .gap(px(2.0))
+                        .px(px(space::M))
+                        .child(
+                            div()
+                                .w_full()
+                                .text_size(px(size::SMALL))
+                                .text_color(p.ink)
+                                .line_clamp(2)
+                                .child(l.title.trim().to_string()),
+                        )
+                        .child(site_row(icon, site)),
+                )
+                .into_any_element()
+        }
+        model::Preview::Loading => base
+            .w(px(LINK_CARD_W))
+            .h(px(LINK_CARD_H))
+            .child(div().flex_none().size(px(LINK_CARD_H)).bg(p.bubble))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(space::S))
+                    .px(px(space::M))
+                    .child(div().w(px(160.0)).h(px(10.0)).rounded_full().bg(p.bubble))
+                    .child(div().w(px(90.0)).h(px(8.0)).rounded_full().bg(p.bubble)),
+            )
+            .into_any_element(),
+        _ => {
+            let icon = match preview {
+                model::Preview::Ready(l) => thumb(&l.icon),
+                _ => None,
+            };
+            base.px(px(space::M))
+                .py(px(space::XS + 2.0))
+                .soft_hover(transparent_black(), p.hover, None)
+                .child(site_row(icon, model::site_of(url)))
+                .into_any_element()
+        }
+    }
+}
 
 /// A stack's place, wide and tall, at most.
 const STACK_W: f32 = 240.0;
@@ -19534,9 +19988,89 @@ enum MentionKey {
     Shut,
 }
 
+/// A change the app makes to the composer (`Loom::composer_edits`), as the person's own
+/// edits are: an undo takes it back.
+#[derive(Clone, Debug, PartialEq)]
+enum ComposerEdit {
+    /// Puts a piece, a token's id and its text, in at the cursor, with a space after it.
+    Put(String, String),
+    /// Takes out the piece with this id, and the space after it.
+    Take(String),
+    /// Turns the link preview with this id back into its address, as plain text.
+    Unpreview(String),
+}
+
+/// Makes a `ComposerEdit` to the composer's words.
+fn composer_edit(
+    c: &mut TextareaState,
+    edit: ComposerEdit,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let find = |c: &TextareaState, id: &str| {
+        c.tokens()
+            .iter()
+            .find(|t| t.token().id().as_ref() == id)
+            .map(|t| t.range())
+    };
+    match edit {
+        ComposerEdit::Put(id, text) => {
+            if c.replace_with_token(InlineToken::new(id, text), window, cx)
+                .is_ok()
+            {
+                c.insert(" ", window, cx);
+            }
+        }
+        ComposerEdit::Take(id) => {
+            let Some(range) = find(c, &id) else {
+                return;
+            };
+            let end = if c.value()[range.end..].starts_with(' ') {
+                range.end + 1
+            } else {
+                range.end
+            };
+            c.set_selected_range(range.start..end, cx);
+            c.replace("", window, cx);
+        }
+        ComposerEdit::Unpreview(id) => {
+            let (Some(range), Some(url)) = (find(c, &id), id.strip_prefix(model::LINK)) else {
+                return;
+            };
+            c.set_selected_range(range, cx);
+            c.replace(url.to_string(), window, cx);
+        }
+    }
+}
+
+/// Pastes a link as its preview (PLAN.md, "Links in the composer"): first as the
+/// address, then as one piece, so Ctrl+Z right after takes it back to the address.
+fn paste_link(
+    c: &mut TextareaState,
+    url: &str,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let at = c.selected_range().start;
+    c.replace(url.to_string(), window, cx);
+    let (id, text) = model::link_token(url);
+    let _ = c.replace_range_with_token(at..at + url.len(), InlineToken::new(id, text), window, cx);
+}
+
+/// A picture attached in the composer, made small (`Loom::make_preview`): drawn as its
+/// own when it's alone, from `file` in a fan of two or more, and how big it is.
+#[derive(Clone)]
+struct Thumb {
+    small: Arc<RenderImage>,
+    file: Option<String>,
+    size: (u32, u32),
+}
+
 /// What's in the composer as it's sent: each mention in it as its link (PLAN.md,
 /// "Mentions"), and an agent's name typed after @ without the picker as one too, so the
-/// person sees what they meant and the agent is told who it is.
+/// person sees what they meant and the agent is told who it is. A file goes as its
+/// name, a link pasted as a preview as its address, and one written or pasted as plain
+/// text as `<https://…>`.
 fn composer_text(c: &TextareaState) -> String {
     model::with_reply_mentions(&picked_text(c), &mention_agents(), &[])
 }
@@ -19568,8 +20102,120 @@ fn picked_text(c: &TextareaState) -> String {
     model::with_mention_links(content.text(), &tokens)
 }
 
+/// What the composer's pieces are drawn from (`composer_token`).
+struct ComposerPieces {
+    agents: Rc<Vec<model::Agent>>,
+    /// The attached files, taken out ones too, with each picture's tiny copy.
+    files: HashMap<String, (model::Attachment, Option<Arc<RenderImage>>)>,
+    /// The files that stand side by side with another, by their token's id.
+    together: HashSet<String>,
+    previews: HashMap<String, model::Preview>,
+    thumbs: Rc<HashMap<String, String>>,
+}
+
+/// A piece in the composer, as the sent message shows it, with the hand over it and a
+/// light background of its colour: a mention (`mention_token`), an attached file as its
+/// tiny picture or icon and its name cut in the middle (only the tiny picture when it
+/// stands with others), or a link pasted as a preview as its site's icon and its page's
+/// title, or its site until that's known. The whole name or address shows on hover.
+fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
+    let row = |tip: String, tint: Hsla| {
+        div()
+            .id(SharedString::from(format!("piece-{id}")))
+            .flex()
+            .items_center()
+            .gap(px(3.0))
+            .px(px(2.0))
+            .rounded(px(4.0))
+            .cursor_pointer()
+            .hover(move |s| s.bg(tint.opacity(0.14)))
+            .tooltip(tip_text(tip))
+    };
+    let icon_img = |path: String| {
+        img(std::path::PathBuf::from(path))
+            .size(px(14.0))
+            .flex_none()
+    };
+    if let Some(att) = id.strip_prefix(model::ATTACH) {
+        let Some((a, small)) = pieces.files.get(att) else {
+            return div()
+                .child(model::middle_cut(words, model::PILL_NAME))
+                .into_any_element();
+        };
+        let picture = match small {
+            Some(small) if a.image() => img(ImageSource::Render(small.clone()))
+                .size(px(16.0))
+                .flex_none()
+                .rounded(px(3.0))
+                .object_fit(ObjectFit::Cover)
+                .into_any_element(),
+            _ => match mention_file_icon(&a.name, &hex_of(p.ink_3)) {
+                Some(path) => icon_img(path).into_any_element(),
+                None => div().into_any_element(),
+            },
+        };
+        let alone = !pieces.together.contains(id);
+        return row(a.name.clone(), p.ink)
+            .child(picture)
+            .when(alone, |d| {
+                d.child(
+                    div()
+                        .underline()
+                        .whitespace_nowrap()
+                        .child(model::middle_cut(&a.name, model::PILL_NAME)),
+                )
+            })
+            .into_any_element();
+    }
+    if let Some(url) = id.strip_prefix(model::LINK) {
+        let (title, icon) = match pieces.previews.get(url) {
+            Some(model::Preview::Ready(l)) => (
+                Some(l.title.trim().to_string()).filter(|t| !t.is_empty()),
+                l.icon
+                    .as_ref()
+                    .and_then(|s| pieces.thumbs.get(&format!("{s}.thumb")))
+                    .cloned(),
+            ),
+            _ => (None, None),
+        };
+        let shown = title
+            .map(|t| model::short_title(&t))
+            .unwrap_or_else(|| model::site_of(url));
+        return row(url.to_string(), p.ink)
+            .child(match icon {
+                Some(path) => icon_img(path).rounded(px(3.0)).into_any_element(),
+                None => Icon::new(Ico::Globe)
+                    .xsmall()
+                    .text_color(p.ink_3)
+                    .into_any_element(),
+            })
+            .child(div().underline().whitespace_nowrap().child(shown))
+            .into_any_element();
+    }
+    let tint = id
+        .strip_prefix("loom:agent/")
+        .and_then(|a| pieces.agents.iter().find(|x| x.id == a))
+        .and_then(|a| hex_color(&mention_color(p, &a.color)))
+        .unwrap_or(p.ink);
+    let gone = id
+        .strip_prefix("loom:agent/")
+        .is_some_and(|a| !pieces.agents.iter().any(|x| x.id == a));
+    if gone {
+        return mention_token(p, &pieces.agents, id, words);
+    }
+    let tip = if id.starts_with("loom:file/") {
+        model::mention_path(id).unwrap_or_else(|| words.to_string())
+    } else {
+        words.trim_start_matches('@').to_string()
+    };
+    row(tip, tint)
+        .child(mention_token(p, &pieces.agents, id, words))
+        .into_any_element()
+}
+
 /// A mention in the composer: an agent as its thread and its name in its colour, a file
-/// as its icon and its name, and a skill from the + menu as its book and its name.
+/// as its icon and its name, cut in the middle when it's long, and a skill from the + menu
+/// as its book and its name.
 fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -> AnyElement {
     let row = div().flex().items_center().gap(px(3.0)).px(px(1.0));
     // A skill picked from the + menu: its book and its name.
@@ -19604,7 +20250,12 @@ fn mention_token(p: Palette, agents: &[model::Agent], link: &str, words: &str) -
     row.when_some(mention_file_icon(words, &hex_of(p.ink_3)), |d, path| {
         d.child(img(std::path::PathBuf::from(path)).size(px(14.0)))
     })
-    .child(div().underline().child(words.to_string()))
+    .child(
+        div()
+            .underline()
+            .whitespace_nowrap()
+            .child(model::middle_cut(words, model::PILL_NAME)),
+    )
     .into_any_element()
 }
 
@@ -19720,12 +20371,25 @@ fn with_links(v: TextView) -> TextView {
         None => uri.clone().into(),
     })
     .link_tooltip(|url, window, cx| {
+        // A file's whole name, which its link shows cut in the middle.
+        let file = model::mention_path(url).or_else(|| {
+            let sha = url.strip_prefix("loom-file:")?;
+            FILE_NAMES.with(|n| n.borrow().get(sha).cloned())
+        });
         if url.starts_with("https://") || url.starts_with("http://") {
             gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+        } else if let Some(name) = file {
+            gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
         } else {
             cx.new(|_| EmptyView).into()
         }
     })
+}
+
+thread_local! {
+    /// The names of the files sent with the messages drawn, by their SHA-256, for the
+    /// whole name over a link that shows it cut (`with_links`).
+    static FILE_NAMES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Pictures kept decoded: the `most` drawn last. GPUI's own cache keeps every picture
@@ -19981,6 +20645,10 @@ impl ReplyDraw<'_> {
                                             loom.send(frame);
                                         }
                                     });
+                                } else if let Some(agent) = url.strip_prefix("loom:agent/") {
+                                    // An agent it mentions opens its chat (LOO-301).
+                                    let agent = agent.to_string();
+                                    let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
                                 } else if !url.starts_with("loom:") {
                                     cx.open_url(url);
                                 }
@@ -22630,6 +23298,19 @@ fn page_input(k: &Keystroke, prefer_character_input: bool) -> PageKey {
     }
 }
 
+gpui_kit::actions!(loom_composer, [PastePlain]);
+
+/// Ctrl+Shift+V in the composer and every field (⌘⇧V on a Mac): what's copied, as plain
+/// text, so a link stays a link's words rather than its preview (PLAN.md, "Links in the
+/// composer").
+pub fn bind_composer_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("ctrl-shift-v", PastePlain, Some("Input")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-v", PastePlain, Some("Input")),
+    ]);
+}
+
 /// The page's own keys: Tab and Shift+Tab move the window's focus everywhere else
 /// (GPUI Kit's root binds them), and here they're the page's, so they reach its key
 /// handler. Bound for its key context, `BrowserPage`.
@@ -23898,4 +24579,154 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                     )
                 }),
         )
+}
+
+// LOO-302: the composer's pieces, in its real editor. A file's piece goes out whole with
+// Backspace and with its ×, an undo brings it back with its file, and a link pasted as a
+// preview goes back to its address with one undo.
+#[cfg(test)]
+mod composer_tests {
+    // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
+    use super::{composer_edit, composer_text, paste_link, ComposerEdit};
+    use gpui::{
+        div, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
+        Styled as _, TestAppContext, VisualTestContext, Window,
+    };
+    use gpui_kit::component::input::{Textarea, TextareaState};
+
+    struct Host {
+        composer: Entity<TextareaState>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(Textarea::new(&self.composer))
+        }
+    }
+
+    fn open(cx: &mut TestAppContext) -> (Entity<TextareaState>, &mut VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let (host, cx) = cx.add_window_view(|window, cx| Host {
+            composer: cx.new(|cx| TextareaState::new(window, cx)),
+        });
+        let composer = host.read_with(cx, |h, _| h.composer.clone());
+        cx.update(|window, cx| composer.update(cx, |c, cx| c.focus(window, cx)));
+        (composer, cx)
+    }
+
+    /// The composer's words and the ids of its pieces.
+    fn shown(c: &Entity<TextareaState>, cx: &mut VisualTestContext) -> (String, Vec<String>) {
+        c.read_with(cx, |c, _| {
+            (
+                c.value().to_string(),
+                c.tokens()
+                    .iter()
+                    .map(|t| t.token().id().to_string())
+                    .collect(),
+            )
+        })
+    }
+
+    fn edit(c: &Entity<TextareaState>, e: ComposerEdit, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| c.update(cx, |c, cx| composer_edit(c, e, window, cx)));
+    }
+
+    #[gpui::test]
+    fn backspace_takes_a_files_piece_out_whole_and_an_undo_puts_it_back(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        cx.simulate_input("Look ");
+        edit(
+            &c,
+            ComposerEdit::Put("loom-attach:up_1".into(), "cat.png".into()),
+            cx,
+        );
+        assert_eq!(
+            shown(&c, cx),
+            ("Look cat.png ".into(), vec!["loom-attach:up_1".into()])
+        );
+        // The caret can't land inside it: Left from after the space stops before it.
+        cx.simulate_keystrokes("left left");
+        let at = c.read_with(cx, |c, _| c.cursor());
+        assert_eq!(at, "Look ".len());
+        cx.simulate_keystrokes("right backspace");
+        assert_eq!(shown(&c, cx), ("Look  ".into(), vec![]));
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(
+            shown(&c, cx),
+            ("Look cat.png ".into(), vec!["loom-attach:up_1".into()])
+        );
+    }
+
+    #[gpui::test]
+    fn the_x_takes_a_files_piece_out_and_an_undo_puts_it_back(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        edit(
+            &c,
+            ComposerEdit::Put("loom-attach:up_1".into(), "a.png".into()),
+            cx,
+        );
+        edit(
+            &c,
+            ComposerEdit::Put("loom-attach:up_2".into(), "b.pdf".into()),
+            cx,
+        );
+        cx.simulate_input("hi");
+        edit(&c, ComposerEdit::Take("loom-attach:up_1".into()), cx);
+        assert_eq!(
+            shown(&c, cx),
+            ("b.pdf hi".into(), vec!["loom-attach:up_2".into()])
+        );
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(
+            shown(&c, cx),
+            (
+                "a.png b.pdf hi".into(),
+                vec!["loom-attach:up_1".into(), "loom-attach:up_2".into()]
+            )
+        );
+        // What's sent: each file as its name in brackets, which the chat links.
+        let sent = c.read_with(cx, |c, _| composer_text(c));
+        assert_eq!(sent, "[a.png] [b.pdf] hi");
+    }
+
+    #[gpui::test]
+    fn a_pasted_link_is_one_piece_and_an_undo_makes_it_plain(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        cx.simulate_input("See ");
+        cx.update(|window, cx| {
+            c.update(cx, |c, cx| paste_link(c, "https://a.example/x", window, cx))
+        });
+        assert_eq!(
+            shown(&c, cx),
+            (
+                "See https://a.example/x".into(),
+                vec!["loom-link:https://a.example/x".into()]
+            )
+        );
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            "See https://a.example/x"
+        );
+        // Backspace takes it out whole.
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(shown(&c, cx), ("See ".into(), vec![]));
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(shown(&c, cx).1.len(), 1);
+        // Ctrl+Z right after the paste: the address, as plain text, sent as such.
+        cx.simulate_keystrokes("secondary-z");
+        assert_eq!(shown(&c, cx), ("See https://a.example/x".into(), vec![]));
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            "See <https://a.example/x>"
+        );
+        // Its × does the same.
+        cx.simulate_keystrokes("secondary-a backspace");
+        cx.update(|window, cx| {
+            c.update(cx, |c, cx| paste_link(c, "https://a.example/x", window, cx))
+        });
+        let id = "loom-link:https://a.example/x".to_string();
+        assert_eq!(shown(&c, cx).1, vec![id.clone()]);
+        edit(&c, ComposerEdit::Unpreview(id), cx);
+        assert_eq!(shown(&c, cx), ("https://a.example/x".into(), vec![]));
+    }
 }

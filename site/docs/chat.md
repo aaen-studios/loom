@@ -27,6 +27,10 @@ Two or more pictures in one message, yours or an agent's, are one fan: the first
 
 In the viewer, the wheel zooms toward the pointer and dragging moves the picture around. Double-click to go between fitting the window and the picture's own size; + and − zoom, and 0 fits it again. On a trackpad, pinch to zoom, and once zoomed in, swipe with two fingers to move it. On the iPhone, pinch to zoom, drag to move it, and double-tap to zoom in or out; zoomed in, a swipe moves the picture rather than going to the next one.
 
+## Files in the message box
+
+What you attach shows in the message box as it will in the chat: over your words, a picture as itself, two or more as their fan, any other file as its name and size, each with an ×; in your words, each file where you put it, as its tiny picture and its name, or only the tiny picture when it's next to another file. Backspace takes a file out whole, and Ctrl+Z (⌘Z) brings it back. A long name is cut in the middle, keeping its start and its type; point at it to see all of it.
+
 ## Files from agents
 
 An agent puts the files it makes in its reply: pictures, PDFs, documents, spreadsheets, sound, video and zips, and screenshots it took in its browser or on your computer. A file it made in that reply and names by its path goes in by itself. Each is kept as your file, and counts toward your space.
@@ -39,13 +43,15 @@ A link in any message, yours or an agent's, has its site's icon before it, and a
 
 When an agent ends a reply with a list of its sources, the list comes off the reply and onto a tab under it, with the sites' icons and how many there are. Click the tab for the list, a line each with the page's title and its site, and click a line to open the page. On the iPhone, the list opens as a sheet.
 
-Loom looks the pages up itself, for their titles and icons. It looks up only https pages on the internet, never one on your own network, and at most twelve a message.
+Paste a link on its own into the message box and it shows as it will in the chat: its site's icon and its page's title in your words, and over them a card with the page's picture. Ctrl+Z right after, or the × on the card, makes it plain text again, and Ctrl+Shift+V (⌘⇧V on a Mac) pastes it as plain text to begin with. A plain link, or one you type, stays as you wrote it. The agent gets the address either way.
+
+Loom looks the pages up itself, for their titles and icons, and a pasted link's picture. It looks up only https pages on the internet, never one on your own network, and at most twelve a message.
 
 ## Mentions
 
 Type `@` in the message box to pick another of your agents, or a file in this agent's folder or the shared one. Keep typing to narrow the list, use the arrows and Enter or Tab to take one, or click it. Esc shuts the list.
 
-In the chat, an agent you mention shows as its thread and its name in its colour, and a file as its icon and its name, which opens it. The agent knows who and what you mean, so you can ask it to message another agent for you, hand over a file, or read one. A file you send shows the same way, with a tiny copy of itself when it's a picture.
+In the chat and in the message box, an agent you mention shows as its thread and its name in its colour, which opens its chat, and a file as its icon and its name, which opens it. The agent knows who and what you mean, so you can ask it to message another agent for you, hand over a file, or read one. A file you send shows the same way, with a tiny copy of itself when it's a picture.
 
 A message one agent sends another sits on your side of the chat, tinted with the sender's colour, with its thread and name over it.
 

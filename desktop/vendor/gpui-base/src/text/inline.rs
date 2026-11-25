@@ -1133,6 +1133,40 @@ impl Inline {
     }
 
     /// Paint each range highlight behind the text of its range.
+    /// loom: under the pointer, a link whose text has its own colour (`decorate_link`,
+    /// which gives it no underline) has a light background of that colour, its corners
+    /// rounded.
+    fn paint_link_hover(&self, link: &Range<usize>, text_layout: &TextLayout, window: &mut Window) {
+        let Some(color) = self
+            .highlights
+            .iter()
+            .find(|(r, h)| r.start <= link.start && link.start < r.end && h.style.underline.is_none())
+            .and_then(|(_, h)| h.style.color)
+        else {
+            return;
+        };
+        let glyphs = glyph_boxes(
+            text_layout,
+            window.text_style().text_align,
+            text_layout.bounds().size.width,
+        );
+        let origin = text_layout.bounds().origin;
+        let line_height = text_layout.line_height();
+        for (row, left, right) in range_boxes(&glyphs, link.clone()) {
+            let top = origin.y + line_height * row as f32;
+            window.paint_quad(
+                gpui::fill(
+                    Bounds::from_corners(
+                        point(origin.x + left - px(2.), top),
+                        point(origin.x + right + px(2.), top + line_height),
+                    ),
+                    color.opacity(0.14),
+                )
+                .corner_radii(px(4.)),
+            );
+        }
+    }
+
     fn paint_range_highlights(&self, text_layout: &TextLayout, window: &mut Window) {
         let glyphs = glyph_boxes(
             text_layout,
@@ -1314,6 +1348,11 @@ impl Element for Inline {
             .flatten();
         if hovered_link.is_some() {
             window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+        }
+        // loom: a link with its own colour shows a light background of it under the
+        // pointer.
+        if let Some(range) = &hovered_link {
+            self.paint_link_hover(range, &text_layout, window);
         }
 
         if self.link_tooltip
