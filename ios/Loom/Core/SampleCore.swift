@@ -615,6 +615,11 @@ enum Sample {
             ["id": "msg_3", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187100000,
              "blocks": [["kind": "text", "text": "That's good. Did the build on main pass?"]],
              "reply": ["message": "msg_2", "role": "agent", "agent": "a_1", "text": "I kept them short. Want the full list too?", "part": true]],
+            // Emoji, drawn with Twemoji (PLAN.md, "Emoji"): two alone show big.
+            ["id": "msg_4", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_2", "at": 1795187110000,
+             "blocks": [["kind": "text", "text": "It did 👍 All green on main. <:knot:e_1> In code it stays as written: `:sob:`."]]],
+            ["id": "msg_5", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187120000,
+             "blocks": [["kind": "text", "text": "🎉🎉"]]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,
@@ -622,11 +627,6 @@ enum Sample {
             ["id": "msg_11", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_10", "at": 1795100030000,
              "blocks": [["kind": "text", "text": "In Swift:\n\n```swift\nfunc size(_ bytes: Int) -> String {\n    switch bytes {\n    case ..<1000: return \"\\(bytes) B\"\n    case ..<1_000_000: return \"\\(bytes / 1000) KB\"\n    default: return String(format: \"%.1f MB\", Double(bytes) / 1e6)\n    }\n}\n```\n\nIt counts in thousands, as Finder does."]],
              "sources": [["url": "https://support.apple.com/en-us/102119", "title": "How iOS and macOS report storage capacity", "site": "support.apple.com"]]],
-            // Emoji, drawn with Twemoji (PLAN.md, "Emoji"): two alone show big.
-            ["id": "msg_12", "conversation": "c_2", "role": "person", "from": "d_4", "at": 1795100060000,
-             "blocks": [["kind": "text", "text": "🎉🎉"]]],
-            ["id": "msg_13", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_11", "at": 1795100070000,
-             "blocks": [["kind": "text", "text": "Glad it helps 😄 <:knot:e_1> In code it stays as written: `:sob:`."]]],
         ],
         "c_3": [
             // A routine's prompt kept from before routines ran quietly: not shown.

@@ -121,6 +121,9 @@ struct Composer: View {
         Task {
             for path in values("-attach") { await attach(path: path, name: (path as NSString).lastPathComponent) }
             for url in values("-paste") { box.view?.pasteLink(url) }
+            // What's typed, as the keyboard types it, and the emoji picker.
+            for text in values("-type") { box.view?.insertText(text) }
+            if args.contains("-emoji") { openEmoji() }
         }
     }
     #endif
