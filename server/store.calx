@@ -2390,6 +2390,18 @@ impl Store {
         _ = try self.db.execute(String("UPDATE acp_sessions SET tools = 'stale' WHERE user = ? AND conversation = ?"), [t(user), t(conversation)])
     }
 
+    // When `session` was last used: a turn in it ended, or it was started or
+    // picked up for one. 0 when it isn't `conversation`'s.
+    pub fn acp_session_at(self, user: String, conversation: String, session: String) -> i64 ! Error {
+        let r = try self.db.query_one(String("SELECT at FROM acp_sessions WHERE user = ? AND conversation = ? AND session = ?"), [t(user), t(conversation), t(session)]) else return 0
+        return int(r[0].copy())
+    }
+
+    // A turn in `session` ended now.
+    pub fn used_acp_session(self, user: String, conversation: String, session: String) ! Error {
+        _ = try self.db.execute(String("UPDATE acp_sessions SET at = ? WHERE user = ? AND conversation = ? AND session = ?"), [Value.Int(now()), t(user), t(conversation), t(session)])
+    }
+
     pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String, tools: str) ! Error {
         _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at, tools) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, session = excluded.session, at = excluded.at, tools = excluded.tools"), [t(user), t(conversation), t(program), t(session), Value.Int(now()), t(String(tools))])
     }
@@ -3328,6 +3340,12 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
     assert(s.acp_session_tools(a.id.copy(), String("c_1"), String("s_2"))! == "plain")
     assert(s.acp_session(a.id.copy(), String("c_1"), String("claude"))! == none)
     assert(s.acp_session(a.id.copy(), String("c_1"), String("codex"))! == some(String("s_2")))
+    // It keeps when it was last used, for closing it once it's been idle long.
+    _ = s.db.execute(String("UPDATE acp_sessions SET at = 5 WHERE session = 's_2'"), [])!
+    assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_2"))! == 5)
+    s.used_acp_session(a.id.copy(), String("c_1"), String("s_2"))!
+    assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_2"))! > 5)
+    assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_1"))! == 0)
 }
 
 @test

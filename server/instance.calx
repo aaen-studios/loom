@@ -338,6 +338,8 @@ struct Proc {
     key: String    // its key in `procs`: proc_key(agent, program)
     stopped: bool    // whether it was told to stop, so it's let go of
     used: i64    // when it last said something, for stopping it once it has been idle a while
+    compacts: bool    // whether it offers /compact, as Claude's adapter does, which compacts idle sessions itself
+    turned: Map<String, i64>    // ACP session -> when its last turn ended
 }
 
 impl Proc {
@@ -348,6 +350,7 @@ impl Proc {
         _ = self.told.remove("{session}#shared")
         _ = self.told.remove("{session}#every")
         _ = self.profiled.remove(session.copy())
+        _ = self.turned.remove(session.copy())
         _ = self.configs.remove(session)
     }
 }
@@ -634,6 +637,64 @@ const SIDE_TRANSCRIPT_MOST: usize = 24000
 // next prompt goes to a fresh session that carries on from the newest of the
 // chat (PLAN.md, "One endless chat").
 const CONTEXT_RENEW_PERCENT: i64 = 80
+
+// Idle sessions (PLAN.md, "Idle sessions"). Claude's adapter compacts a session
+// itself shortly before its one-hour prompt cache runs out, 54 minutes after its
+// last model call, when its context is 200,000 tokens or more. An idle program
+// with such a session is kept past IDLE_PROC_MS until IDLE_COMPACT_HOLD_MS after
+// that session's last turn, which leaves the compaction a few minutes to finish.
+const IDLE_COMPACT_TOKENS: i64 = 200000
+const IDLE_COMPACT_HOLD_MS: i64 = 3900000    // 65 minutes
+// A session whose last turn ended this long ago, 12 hours, isn't picked up
+// again: the chat's next message carries on in a fresh session.
+const SESSION_IDLE_CLOSE_MS: i64 = 43200000
+
+// Why a chat goes on in a fresh session.
+enum Renew {
+    Full    // its context was nearly full
+    Tools    // its agent's tools changed, and a session keeps its tools
+    Idle    // nothing was said in it for SESSION_IDLE_CLOSE_MS
+}
+
+// Whether an idle program is kept for its adapter to compact a session whose
+// last turn ended at `turned`, with `tokens` in its context, at `t`.
+fn waits_to_compact(t: i64, turned: i64, tokens: i64) -> bool {
+    return tokens >= IDLE_COMPACT_TOKENS and t - turned < IDLE_COMPACT_HOLD_MS
+}
+
+// Whether a session last used at `last` has been idle long enough at `t` to be
+// closed. One with no time kept (0) is taken as it is.
+fn idle_too_long(t: i64, last: i64) -> bool {
+    return last > 0 and t - last >= SESSION_IDLE_CLOSE_MS
+}
+
+@test
+fn an_idle_program_waits_for_a_big_session_s_compaction_and_no_longer() {
+    let turned: i64 = 1000000000
+    let minute: i64 = 60000
+    // 54 minutes on, when Claude's adapter compacts it, a big session holds its program.
+    assert(waits_to_compact(turned + 54 * minute, turned, 250000))
+    assert(waits_to_compact(turned + 64 * minute, turned, 200000))
+    // A small one doesn't, nor a big one once it's compacted, small again.
+    assert(not waits_to_compact(turned + 40 * minute, turned, 199999))
+    assert(not waits_to_compact(turned + 56 * minute, turned, 30000))
+    // Nor once the cache would have run out.
+    assert(not waits_to_compact(turned + 65 * minute, turned, 250000))
+    // The hold ends after the compaction's moment, and before the cache's hour is long past.
+    assert(IDLE_COMPACT_HOLD_MS > 54 * minute and IDLE_COMPACT_HOLD_MS < 70 * minute)
+    assert(IDLE_COMPACT_HOLD_MS > IDLE_PROC_MS)
+}
+
+@test
+fn a_session_idle_for_12_hours_is_closed() {
+    let last: i64 = 1000000000
+    let hour: i64 = 3600000
+    assert(not idle_too_long(last + hour, last))
+    assert(not idle_too_long(last + 11 * hour, last))
+    assert(idle_too_long(last + 12 * hour, last))
+    assert(idle_too_long(last + 30 * hour, last))
+    assert(not idle_too_long(last + 30 * hour, 0))
+}
 
 // Tasks (PLAN.md, "Work that waits its turn"): how many an agent may have
 // running that it started itself, and what it's told when one carries on.
@@ -9344,7 +9405,7 @@ impl Instance {
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -9379,10 +9440,20 @@ impl Instance {
         return kept.len() > 0 and kept != i.tools_of(user, agent)
     }
 
-    // A run that goes into a fresh session in place of a full one, or one whose
-    // tools changed (`full` false): it's given the newest of the chat before its
-    // message, and told where the rest is.
-    fn carry_over(i: mut Instance, user: String, agent: String, run_id: String, full: bool) ! Error {
+    // Whether `conversation`'s session `session` has been idle too long to be
+    // picked up again (PLAN.md, "Long-idle sessions are closed").
+    fn left_idle(i: Instance, user: String, conversation: String, session: String) -> bool {
+        let last = match i.store.acp_session_at(user, conversation, session) {
+            ok(a) => a,
+            err(_) => 0,
+        }
+        return idle_too_long(now(), last)
+    }
+
+    // A run that goes into a fresh session in place of a full one, one whose
+    // tools changed, or one left idle: it's given the newest of the chat before
+    // its message, and told where the rest is.
+    fn carry_over(i: mut Instance, user: String, agent: String, run_id: String, renew: Renew) ! Error {
         var conversation = String()
         var answering = String()
         if let r = i.runs.find(run_id.copy()) {
@@ -9398,12 +9469,20 @@ impl Instance {
             let last = str_at(before[before.len() - 1].copy(), "id") ?? String()
             said = try i.transcript(user.copy(), conversation, some(last))
         }
-        let why = if full { "which grew too long, so this one starts fresh." } else { "which had other tools, since your person changed them, so this one starts fresh. Use the tools you have now, whatever the chat below used." }
+        let why = match renew {
+            Renew.Full => "which grew too long, so this one starts fresh.",
+            Renew.Tools => "which had other tools, since your person changed them, so this one starts fresh. Use the tools you have now, whatever the chat below used.",
+            Renew.Idle => "which had been idle for hours, so this one starts fresh. Files and pages you looked at then may have changed: look again before relying on them.",
+        }
         let carried = "[loom: Your chat with your person goes on from an earlier session, {why} To them it's one conversation: carry on as if nothing changed, and don't mention it. The newest of it, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing said yet.)") }}\n\nFor anything older, search_messages finds it.]"
         if let r = mut i.runs.find(run_id) {
             r.note = if r.note.len() > 0 { "{carried}\n\n{r.note}" } else { carried }
         }
-        let logged = if full { "Carried the chat on in a fresh session: the last one's context was nearly full" } else { "Carried the chat on in a fresh session: the agent's tools changed, and a session keeps its tools" }
+        let logged = match renew {
+            Renew.Full => "Carried the chat on in a fresh session: the last one's context was nearly full",
+            Renew.Tools => "Carried the chat on in a fresh session: the agent's tools changed, and a session keeps its tools",
+            Renew.Idle => "Carried the chat on in a fresh session: nothing had been said in the last one for 12 hours",
+        }
         i.log(user, agent.copy(), "session", String(logged), agent)
     }
 
@@ -9450,14 +9529,22 @@ impl Instance {
         // gives way to a fresh one, which carries on from the newest of the
         // chat, so the conversation never overflows or resends all of itself.
         // So does one whose tools aren't the ones its agent's sessions start
-        // with now: an agent's tools never change inside a session.
+        // with now: an agent's tools never change inside a session. And one
+        // left idle for hours, as when a routine keeps the program going.
         if known.len() > 0 {
-            let full = i.nearly_full(known.copy())
-            if full or i.tools_changed(user.copy(), agent.copy(), conversation.copy(), known.copy()) {
+            var renew: Renew? = none
+            if i.nearly_full(known.copy()) {
+                renew = some(Renew.Full)
+            } else if i.tools_changed(user.copy(), agent.copy(), conversation.copy(), known.copy()) {
+                renew = some(Renew.Tools)
+            } else if i.left_idle(user.copy(), conversation.copy(), known.copy()) {
+                renew = some(Renew.Idle)
+            }
+            if let why = renew {
                 _ = i.context.remove(known.copy())
                 _ = p.sessions.remove(conversation.copy())
                 p.forget(known.copy())
-                if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), full) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
+                if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), why) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
                 i.new_session(mut p, run_id)
                 return
             }
@@ -9481,9 +9568,10 @@ impl Instance {
             }
             if let session = kept {
                 // Picked up with the tools it started with, or, since they
-                // changed, carried on in a fresh session.
-                if i.tools_changed(user.copy(), agent.copy(), conversation.copy(), session.copy()) {
-                    if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), false) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
+                // changed or it's been idle for hours, carried on in a fresh session.
+                let changed = i.tools_changed(user.copy(), agent.copy(), conversation.copy(), session.copy())
+                if changed or i.left_idle(user.copy(), conversation.copy(), session.copy()) {
+                    if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), if changed { Renew.Tools } else { Renew.Idle }) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
                     i.new_session(mut p, run_id)
                     return
                 }
@@ -9568,8 +9656,8 @@ impl Instance {
 
     // Readies `conversation`'s session in its program, as its next run would
     // start it, before that run: picked up again, or a new one. A session that
-    // a run would carry over to a fresh one (nearly full, or its tools
-    // changed) is left for the run.
+    // a run would carry over to a fresh one (nearly full, its tools changed,
+    // or idle for hours) is left for the run.
     fn warm_session(i: mut Instance, p: mut Proc, conversation: String) {
         let kept = match i.store.acp_session(p.user.copy(), conversation.copy(), p.program.copy()) {
             ok(s) => s,
@@ -9577,7 +9665,7 @@ impl Instance {
         }
         var picked = String()
         if let session = kept {
-            if i.nearly_full(session.copy()) or i.tools_changed(p.user.copy(), p.agent.copy(), conversation.copy(), session.copy()) { return }
+            if i.nearly_full(session.copy()) or i.tools_changed(p.user.copy(), p.agent.copy(), conversation.copy(), session.copy()) or i.left_idle(p.user.copy(), conversation.copy(), session.copy()) { return }
             if p.resume or p.load { picked = session }
         }
         let folder = match fs.absolute(i.folder_of(p.user.copy(), p.agent.copy())) {
@@ -9818,20 +9906,25 @@ impl Instance {
             }
             return
         }
-        p.used = now()
         let m = match parse(text.copy()) {
             ok(j) => j,
             err(_) => {
+                p.used = now()
                 eprintln("loom: agent {line.agent} wrote a line that isn't JSON: {text}")
                 i.procs.insert(line.agent.copy(), p)
                 return
             },
         }
+        // What a session says with no run of loom's going, as when its adapter
+        // compacts it while idle, isn't use: the program stops as it would have.
+        let notice = str_at(m.copy(), "method") == some(String("session/update"))
+        if not notice or i.run_for_session(str_at(at(m.copy(), "params"), "sessionId") ?? String()) != none { p.used = now() }
         let method = str_at(m, "method")
         let id = m.get(String("id"))
         match method {
             some(name) => {
                 if name == "session/update" {
+                    i.note_session(mut p, at(m.copy(), "params"))
                     try i.update(at(m, "params"))
                 } else if name == "session/request_permission" {
                     let rpc = id ?? Json.Null
@@ -9966,6 +10059,14 @@ impl Instance {
                 if took { i.configure(mut p, run, sid) } else { i.prompt(mut p, run, sid) }
             },
             Pending.Prompt(run) => {
+                // When the session's last turn ended, for compacting it and
+                // closing it once idle (PLAN.md, "Idle sessions").
+                if let r = i.runs.find(run.copy()) {
+                    if r.session.len() > 0 {
+                        p.turned.insert(r.session.copy(), now())
+                        if let err(e) = i.store.used_acp_session(r.user.copy(), r.conversation.copy(), r.session.copy()) { eprintln("loom: keeping when a session was used: {e}") }
+                    }
+                }
                 if let e = error {
                     let message = str_at(e, "message") ?? String("The agent failed.")
                     // Its usage or rate limit ran out: the agent's backup takes the turn.
@@ -10114,6 +10215,27 @@ impl Instance {
         return String()
     }
 
+    // What a session says of itself, whether a run is going or not: how full
+    // its context is, to start a fresh one before it overflows (PLAN.md, "One
+    // endless chat"), which a compaction while idle changes with no run, and
+    // whether its program offers /compact (PLAN.md, "Idle sessions").
+    fn note_session(i: mut Instance, p: mut Proc, params: Json) {
+        let session = str_at(params.copy(), "sessionId") ?? String()
+        let u = at(params, "update")
+        let kind = str_at(u.copy(), "sessionUpdate") ?? String()
+        if kind == "usage_update" {
+            let used = int_at(u.copy(), "used") ?? 0
+            let size = int_at(u, "size") ?? 0
+            if size > 0 and session.len() > 0 { i.context.insert(session, (used, size)) }
+        } else if kind == "available_commands_update" {
+            if let Json.Array(offered) = at(u, "availableCommands") {
+                for c in offered {
+                    if str_at(c, "name") == some(String("compact")) { p.compacts = true }
+                }
+            }
+        }
+    }
+
     fn run_for_session(i: Instance, session: String) -> String? {
         for (id, r) in i.runs {
             if r.session == session { return some(id.copy()) }
@@ -10171,12 +10293,6 @@ impl Instance {
                     r.blocks.push(b)
                 }
             }
-        } else if kind == "usage_update" {
-            // How full the session's context is, to start a fresh one before
-            // it overflows (PLAN.md, "One endless chat").
-            let used = int_at(u.copy(), "used") ?? 0
-            let size = int_at(u, "size") ?? 0
-            if size > 0 { i.context.insert(r.session.copy(), (used, size)) }
         } else if kind == "tool_call" {
             // Its block, where it came in the reply: a new one, or the one its
             // permission request made first.
@@ -11617,7 +11733,10 @@ impl Instance {
     // Stops the agent programs that have had no run and said nothing for IDLE_PROC_MS,
     // as the browser closes when unused (PLAN.md, "It runs only while it's used"): each
     // holds a program, and for a Node agent 60-200 MB, for as long as loom runs. The
-    // next message starts it again and picks its session up.
+    // next message starts it again and picks its session up. One whose adapter may
+    // still compact a big session before its cache runs out is kept until then
+    // (PLAN.md, "Idle sessions"), unless it runs on settings the owner shared, whose
+    // budget counts only the turns loom sees.
     fn stop_idle_procs(i: mut Instance) {
         let t = now()
         i.next_proc_sweep = t + 60000
@@ -11627,6 +11746,12 @@ impl Instance {
             var busy = false
             for (_, r) in i.runs {
                 if r.proc == key { busy = true }
+            }
+            if p.compacts and not p.shared {
+                for (session, turned) in p.turned {
+                    let (tokens, _): (i64, i64) = i.context.get(session.copy()) ?? (i64(0), i64(0))
+                    if waits_to_compact(t, turned, tokens) { busy = true }
+                }
             }
             if not busy { idle.push(key.copy()) }
         }
