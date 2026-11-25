@@ -349,6 +349,9 @@ gpui_kit::assets::icon_assets!(
         Lightbulb,
         ArrowUpRight,
         Lock,
+        Image,
+        ClipboardPaste,
+        FileClock,
         FolderInput,
         FolderOutput,
         FolderPlus

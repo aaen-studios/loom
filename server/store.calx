@@ -111,6 +111,8 @@ CREATE TABLE IF NOT EXISTS messages (
     json TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (user, conversation, at);
 CREATE INDEX IF NOT EXISTS conversations_by_agent ON conversations (user, agent);
+-- The newest messages in any chat, for the files sent lately (recent_files).
+CREATE INDEX IF NOT EXISTS messages_newest ON messages (user, at);
 -- A page of a chat goes by rowid, which this index ends in, so it needs no sort.
 CREATE INDEX IF NOT EXISTS messages_in_order ON messages (user, conversation);
 -- Only the pinned messages, so the pins of a long chat are found without reading it.
@@ -250,6 +252,9 @@ pub const MARK_END: str = "\u{3}"
 
 // How many of each routine's runs are kept, the newest.
 const ROUTINE_RUNS_KEPT: i64 = 100
+
+// How many of the newest messages recent_files looks through for files.
+const RECENT_LOOKED: i64 = 2000
 
 pub fn now() -> i64 {
     return unsafe { Timestamp.now() }.unix_ms
@@ -2388,6 +2393,24 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO files (sha, user, name, mime, size, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (sha, user) DO NOTHING"), [t(sha), t(user), t(name), t(mime), Value.Int(size), Value.Int(now())])
     }
 
+    // The files sent or received in `user`'s chats, newest first, each once by
+    // its `file`: as its file block has it, with `at` and `conversation`. The
+    // newest RECENT_LOOKED messages are looked through, in chats not deleted.
+    pub fn recent_files(self, user: String, most: usize) -> List<Json> ! Error {
+        var out = List<Json>()
+        var seen = List<String>()
+        let rows = try self.db.query(String("SELECT b.value, m.conversation, m.at FROM (SELECT rowid AS r, json, conversation, at FROM messages WHERE user = ? AND conversation NOT IN (SELECT id FROM conversations WHERE user = ? AND deleted = 1) ORDER BY at DESC, rowid DESC LIMIT ?) m, json_each(m.json, '$.blocks') b WHERE json_extract(b.value, '$.kind') = 'file' ORDER BY m.at DESC, m.r DESC, b.key"), [t(user.copy()), t(user), Value.Int(RECENT_LOOKED)])
+        for r in rows {
+            if out.len() >= most { break }
+            let block = try parse(text(r[0].copy()))
+            let sha = str_at(block.copy(), "file") ?? String()
+            if sha.len() == 0 or seen.contains(sha.copy()) { continue }
+            seen.push(sha.copy())
+            out.push(Obj.new().s("file", sha).s("name", str_at(block.copy(), "name") ?? String()).s("mime", str_at(block.copy(), "mime") ?? String()).i("size", int_at(block, "size") ?? 0).i("at", int(r[2].copy())).s("conversation", text(r[1].copy())).done())
+        }
+        return out
+    }
+
     // The file `sha`, if `user` has it: `file`, `name`, `mime` and `size`, as a file block has them.
     pub fn file(self, user: String, sha: String) -> Json? ! Error {
         let r = try self.db.query_one(String("SELECT sha, name, mime, size FROM files WHERE sha = ? AND user = ?"), [t(sha), t(user)]) else return none
@@ -3175,6 +3198,41 @@ fn a_routines_runs_are_kept_newest_first_and_go_with_it() {
     assert(str_at(waited.copy(), "status") == some(String("skipped")) and str_at(waited, "error") == some(String(RESTARTED_WAITING)))
     s.put_routine(a.id.copy(), Obj.new().s("id", String("rt_1")).done())!
     assert(s.delete_routine(a.id.copy(), String("rt_1"))! and s.routine_runs(a.id.copy(), String("rt_1"), none, 10)!.len() == 0)
+}
+
+fn file_message(id: str, conversation: String, names: List<str>, at: i64) -> Json {
+    var blocks = List<Json>()
+    for n in names {
+        blocks.push(Obj.new().s("kind", String("file")).s("file", "sha-{n}").s("name", String(n)).s("mime", String("text/plain")).i("size", 3).done())
+    }
+    return Obj.new().s("id", String(id)).s("conversation", conversation).i("at", at).j("blocks", Json.Array(blocks)).done()
+}
+
+@test
+fn recent_files_are_the_newest_sent_each_once() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let b = s.add_user(String("b"), String("password2"), "member")!
+    let c1 = s.add_conversation(a.id.copy(), String("a_1"), String("One"))!
+    let c2 = s.add_conversation(a.id.copy(), String("a_2"), String("Two"))!
+    let cb = s.add_conversation(b.id.copy(), String("a_3"), String("Theirs"))!
+    let id1 = str_at(c1, "id") ?? String()
+    let id2 = str_at(c2, "id") ?? String()
+    let idb = str_at(cb, "id") ?? String()
+    s.put_message(a.id.copy(), file_message("msg_1", id1.copy(), ["old.md", "hours.md"], 100))!
+    s.put_message(a.id.copy(), text_message("msg_2", id1.copy(), "a_1", "No files here.", 200))!
+    s.put_message(a.id.copy(), file_message("msg_3", id2.copy(), ["shot.png", "hours.md"], 300))!
+    s.put_message(b.id.copy(), file_message("msg_4", idb, ["theirs.pdf"], 400))!
+    let found = s.recent_files(a.id.copy(), 10)!
+    assert(found.len() == 3)
+    assert(str_at(found[0].copy(), "name") == some(String("shot.png")) and str_at(found[0].copy(), "conversation") == some(id2.copy()))
+    assert(str_at(found[1].copy(), "name") == some(String("hours.md")) and int_at(found[1].copy(), "at") == some(300))
+    assert(str_at(found[2].copy(), "name") == some(String("old.md")))
+    assert(s.recent_files(a.id.copy(), 1)!.len() == 1)
+    // A deleted chat's files don't show.
+    s.delete_conversation(a.id.copy(), id2)!
+    let left = s.recent_files(a.id.copy(), 10)!
+    assert(left.len() == 2 and str_at(left[0].copy(), "name") == some(String("old.md")))
 }
 
 fn text_message(id: str, conversation: String, agent: str, words: str, at: i64) -> Json {

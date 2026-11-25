@@ -207,6 +207,16 @@ struct Card: Equatable, Sendable {
     var error = ""
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
+    /// For a form: its fields, the reply it's in (for Send), what's picked on each
+    /// choice and toggle so far, and the answers, by label, once they're sent. `sending`
+    /// and `error` say while they're on their way, and what the instance said to them.
+    var formFields: [FormField] = []
+    var message = ""
+    var picks: [JSON] = []
+    var answers: JSON = .null
+    /// That its reply is still being written: its questions don't answer yet, so the
+    /// person reads it all first.
+    var live = false
     /// That the chat has gone on past its reply: choices no longer answer then, and a
     /// sign-in only waits quietly.
     var passed = false
@@ -217,6 +227,10 @@ struct Card: Equatable, Sendable {
     var signing = false
     var signInError: String?
 
+    /// Whether its questions (choices and forms) answer now: the chat hasn't gone on,
+    /// and its reply is finished.
+    var takesAnswers: Bool { !passed && !live }
+
     /// Whether it signs in to its server: a sign-in card, or a proposed server that
     /// waits on one.
     var signsIn: Bool {
@@ -225,10 +239,17 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask"].contains(type) else { return nil }
+        if type == "form" {
+            formFields = c["fields"].array.map {
+                FormField(label: $0["label"].text, kind: $0["kind"].text, required: $0["required"].bool ?? false, options: $0["options"].array.map(\.text), placeholder: $0["placeholder"].text, value: $0["value"])
+            }
+            picks = formFields.map(\.value)
+            answers = c["answers"]
+        }
         agent = c["agent"].text
         site = c["site"].text
-        fields = c["fields"].array.map {
+        fields = type == "form" ? [] : c["fields"].array.map {
             CardField(label: $0["label"].text, kind: $0["kind"].text, masked: $0["masked"].bool ?? false, save: $0["save"].text)
         }
         saved = c["saved"].array.map(\.text)
@@ -306,6 +327,61 @@ struct CardField: Equatable, Sendable {
     var masked: Bool
     var save: String
 }
+
+/// A field of an agent's form: what it asks, its kind (`text`, `choice`, `toggle` or
+/// `number`), whether it must be answered, a choice's options, what a text or a number
+/// says while it's empty, and what it starts as.
+struct FormField: Equatable, Sendable {
+    var label: String
+    var kind: String
+    var required: Bool
+    var options: [String]
+    var placeholder: String
+    var value: JSON
+
+    /// What it starts as, as text in its box: a number as it's written, nothing for null.
+    var startText: String {
+        switch value {
+        case .string(let s): return s
+        case .number(let n): return Int(exactly: n).map(String.init) ?? String(n)
+        default: return ""
+        }
+    }
+}
+
+/// A form's answers, by label, as desktop/src/model.rs's `form_answers`: from what's
+/// typed in its text and number fields (`typed`, one for each field) and what's picked on
+/// its choices and toggles (`picks`); or the label of the first required field with
+/// nothing in it. An optional field left empty is left out.
+func formAnswers(_ fields: [FormField], typed: [String], picks: [JSON]) -> Result<JSON, FormMissing> {
+    var out: [String: JSON] = [:]
+    for (k, f) in fields.enumerated() {
+        let pick = k < picks.count ? picks[k] : .null
+        var answer = JSON.null
+        switch f.kind {
+        case "toggle": answer = .bool(pick.bool ?? false)
+        case "choice": if let o = pick.string, !o.isEmpty { answer = .string(o) }
+        default:
+            let t = k < typed.count ? typed[k].trimmingCharacters(in: .whitespacesAndNewlines) : ""
+            if !t.isEmpty { answer = .string(t) }
+        }
+        if answer.isNull {
+            if f.required { return .failure(FormMissing(label: f.label)) }
+            continue
+        }
+        out[f.label] = answer
+    }
+    return .success(.object(out))
+}
+
+/// The required field a form's Send waits on.
+struct FormMissing: Error, Equatable {
+    var label: String
+}
+
+/// How long Allow on a risky question is held before it allows (PLAN.md, "Permissions"),
+/// as the desktop's `HOLD`.
+let holdTime: TimeInterval = 1.2
 
 /// One of the person's secrets, by name, and the sites it may be filled in on in their
 /// agents' browsers ("" for a file on the instance's computer).
@@ -477,6 +553,8 @@ enum LinkTo: Equatable, Sendable {
     case file(agent: String, path: String)
     /// A file sent with the message, by its SHA-256.
     case attached(String)
+    /// A skill picked from the + menu, by its name.
+    case skill(String)
     case other
 
     init(_ link: String) {
@@ -494,6 +572,8 @@ enum LinkTo: Equatable, Sendable {
             self = .file(agent: String(rest[..<cut]), path: path.removingPercentEncoding ?? path)
         } else if link.hasPrefix("loom-file:") {
             self = .attached(String(link.dropFirst("loom-file:".count)))
+        } else if link.hasPrefix("loom:skill/") {
+            self = .skill(String(link.dropFirst("loom:skill/".count)))
         } else {
             self = .other
         }
@@ -1093,6 +1173,8 @@ struct Approval: Identifiable, Equatable, Sendable {
     var title: String
     var shown: Shown
     var canAlways: Bool
+    /// Loom counts it risky: Allow is held, not tapped (`holdTime`).
+    var risky = false
     /// How the person answered it here, while the instance hasn't said yet.
     var answered: Answer?
     var id: String { call }
@@ -1139,6 +1221,60 @@ struct LinkAsk: Identifiable, Equatable, Sendable {
     var kind: String
     var check: String
     var expires: Int
+}
+
+/// One of the person's skills, as the + menu lists it.
+struct PlusSkill: Equatable, Sendable {
+    var name: String
+    var description: String
+}
+
+/// One of the person's routines, as the + menu lists it: how its last run went
+/// (`done`, `quiet`, `failed`, ..., or empty before the first) and when.
+struct PlusRoutine: Equatable, Sendable {
+    var id: String
+    var name: String
+    var agent: String
+    var status: String
+    var at: Int
+
+    /// How its last run went, in words, and whether it went wrong: "Ran 14:05 ✓".
+    var went: (String, Bool) {
+        let when = When.time(at)
+        switch status {
+        case "": return ("Not run yet", false)
+        case "running": return ("Running now", false)
+        case "waiting": return ("Waiting for its chat", false)
+        case "done", "quiet": return ("Ran \(when) ✓", false)
+        case "skipped": return ("Skipped \(when)", false)
+        default: return ("Failed \(when)", true)
+        }
+    }
+}
+
+/// A file sent or received lately in one of the person's chats (`files.recent`).
+struct RecentFile: Equatable, Sendable {
+    var file: FileRef
+    var at: Int
+}
+
+/// What a row of the + menu opens.
+enum PlusSub: Sendable {
+    case recent, skills, routines
+}
+
+/// One row of the composer's + menu.
+enum PlusRow: Equatable, Sendable {
+    case attach
+    case open(PlusSub)
+    case file(RecentFile)
+    case skill(PlusSkill)
+    case routine(PlusRoutine)
+}
+
+/// A skill picked from the + menu as a mention: its name, going as `loom:skill/<name>`.
+func skillMention(_ name: String) -> Mention {
+    Mention(words: name, link: "loom:skill/\(name)")
 }
 
 /// A file picked to go with the next message.
@@ -1231,6 +1367,11 @@ final class Model {
     var notice: String?
     /// Files for the next message.
     var attachments: [Attachment] = []
+    /// What the composer's + menu lists: the person's skills, their routines, and the
+    /// files sent or received lately in their chats, newest first.
+    var skills: [PlusSkill] = []
+    var routines: [PlusRoutine] = []
+    var recentFiles: [RecentFile] = []
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     var files: [String: String] = [:]
     /// A file fetched to be opened, for the screen to show.
@@ -1248,6 +1389,13 @@ final class Model {
     /// one it refused, by call.
     private var secretSending: Set<String> = []
     private var secretErrors: [String: String] = [:]
+    /// What's picked on the choices and toggles of forms not sent yet, by
+    /// `message/card/field`; the forms whose answers went and haven't come back, by their
+    /// send's cid, with their `message/card`; and what the instance said to ones it
+    /// refused, by `message/card`.
+    private var formPicks: [String: JSON] = [:]
+    private var formSending: [String: String] = [:]
+    private var formErrors: [String: String] = [:]
     /// When an agent's reply last grew, and when its last run finished or failed.
     var lastDelta: [String: Date] = [:]
     var finished: [String: Date] = [:]
@@ -1349,7 +1497,15 @@ final class Model {
                     c.sending = secretSending.contains(c.call)
                     c.error = secretErrors[c.call] ?? ""
                 }
+                if c.type == "form" {
+                    let key = "\(out[i].id)/\(c.id)"
+                    c.message = out[i].id
+                    for k in c.picks.indices { if let p = formPicks["\(key)/\(k)"] { c.picks[k] = p } }
+                    c.sending = formSending.values.contains(key)
+                    c.error = formErrors[key] ?? ""
+                }
                 c.passed = next != nil
+                c.live = out[i].live
                 out[i].blocks[j].card = c
             }
         }
@@ -1486,6 +1642,8 @@ final class Model {
             // Older messages of a conversation came: the shown one is read again.
             if f["conversation"].text == conversation { dirty.insert(.messages) }
         case "core.queued":
+            // A form's answers wait on their card, not as a message in the queue.
+            if formSending[f["cid"].text] != nil { break }
             queued.append(Queued(f))
             placeQueued()
         case "core.file":
@@ -1493,6 +1651,7 @@ final class Model {
         case "ack":
             // One that waits in the instance's queue stays shown until its message is stored.
             let cid = f["cid"].text
+            formSending[cid] = nil
             if f["queued"].bool == true, let i = queued.firstIndex(where: { $0.cid == cid }) {
                 queued[i].message = f["message"].string
             } else {
@@ -1528,6 +1687,12 @@ final class Model {
         case "result":
             result(f)
         case "error":
+            // A form's answers the instance refused: its card says why.
+            if let key = formSending.removeValue(forKey: f["ref"].text) {
+                formErrors[key] = f["message"].text
+                dirty.insert(.messages)
+                break
+            }
             // A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) says why
             // here too, and the app stays where it is.
             let code = f["code"].text
@@ -1651,6 +1816,14 @@ final class Model {
             filesAsking = nil
             let files = f["value"]["files"].array.map { FoundFile(path: $0["path"].text, name: $0["name"].text, place: $0["where"].text) }
             foundFiles = (asking.agent, asking.query, files)
+        case let id where id.hasPrefix("app.plus_skills"):
+            skills = f["value"]["skills"].array.map { PlusSkill(name: $0["name"].text, description: $0["description"].text) }
+        case let id where id.hasPrefix("app.plus_routines"):
+            routines = f["value"]["routines"].array.map {
+                PlusRoutine(id: $0["id"].text, name: $0["name"].text, agent: $0["agent"].text, status: $0["last"]["status"].text, at: $0["last"]["at"].int ?? 0)
+            }
+        case let id where id.hasPrefix("app.recent_files"):
+            recentFiles = f["value"]["files"].array.map { RecentFile(file: FileRef($0), at: $0["at"].int ?? 0) }
         case let id where id.hasPrefix("app.agent_file.pictures"):
             // One of the pictures a reply names, for the viewer: it opens on them once
             // they're all kept, without those that couldn't be.
@@ -1745,7 +1918,7 @@ final class Model {
             }
         case .approvals:
             approvals = items.map { a in
-                Approval(call: a["call"].text, run: a["run"].text, kind: a["tool"].text, title: a["title"].text, shown: Shown(a), canAlways: a["can_always"].bool ?? false)
+                Approval(call: a["call"].text, run: a["run"].text, kind: a["tool"].text, title: a["title"].text, shown: Shown(a), canAlways: a["can_always"].bool ?? false, risky: a["risky"].bool ?? false)
             }
             // An answer given here is for a question that's still open.
             let open = Set(approvals.map(\.call))
@@ -2040,6 +2213,70 @@ final class Model {
         return (String(text.prefix(at)) + mention.words + " ", mention)
     }
 
+    // MARK: The composer's + menu (PLAN.md, "The composer's + menu")
+
+    /// Asks for what the + menu lists: the person's skills, their routines, and the files
+    /// sent lately in their chats.
+    func loadPlus() -> [JSON] {
+        [
+            ["t": "cmd", "id": JSON(id("app.plus_skills")), "name": "skill.list", "args": [:]],
+            ["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]],
+            ["t": "cmd", "id": JSON(id("app.recent_files")), "name": "files.recent", "args": ["limit": 50]],
+        ]
+    }
+
+    /// The + menu's groups, in order: what adds to the message and what it does. With
+    /// something typed in its search, every group's rows that match it instead, the lists
+    /// beside the menu among them, names that start with it first, as
+    /// desktop/src/model.rs's `plus_groups`.
+    func plusGroups(_ query: String) -> [[PlusRow]] {
+        let q = query.trimmingCharacters(in: .whitespaces).lowercased()
+        if q.isEmpty {
+            return [[.attach, .open(.recent)], [.open(.skills), .open(.routines)]]
+        }
+        func found<T>(_ rows: [T], _ name: (T) -> (String, String), _ row: (T) -> PlusRow) -> [PlusRow] {
+            let hits = rows.compactMap { r -> (Bool, T)? in
+                let (n, also) = name(r)
+                if n.lowercased().contains(q) { return (n.lowercased().hasPrefix(q), r) }
+                return also.lowercased().contains(q) ? (false, r) : nil
+            }
+            return (hits.filter(\.0) + hits.filter { !$0.0 }).map { row($0.1) }
+        }
+        var add: [PlusRow] = "attach files".contains(q) ? [.attach] : []
+        add += found(recentFiles, { ($0.file.name, "") }, PlusRow.file)
+        let act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
+            + found(plusRoutines, { ($0.name, "") }, PlusRow.routine)
+        return [add, act].filter { !$0.isEmpty }
+    }
+
+    /// The list a row of the + menu opens.
+    func plusSub(_ which: PlusSub) -> [PlusRow] {
+        switch which {
+        case .recent: recentFiles.map(PlusRow.file)
+        case .skills: skills.map(PlusRow.skill)
+        case .routines: plusRoutines.map(PlusRow.routine)
+        }
+    }
+
+    /// The person's routines as the + menu lists them, this agent's first.
+    var plusRoutines: [PlusRoutine] {
+        routines.filter { $0.agent == selected } + routines.filter { $0.agent != selected }
+    }
+
+    /// A file from the + menu's recent files, for the next message: it's on the instance
+    /// already, so nothing goes up. Whether it was added, which it isn't when it waits
+    /// already.
+    func attachSent(_ f: FileRef) -> Bool {
+        if attachments.contains(where: { $0.file?.file == f.file }) { return false }
+        attachments.append(Attachment(id: id("app.sent"), name: f.name, path: "", file: f))
+        return true
+    }
+
+    /// Runs a routine now, from the + menu.
+    func runRoutine(_ id: String) -> JSON {
+        ["t": "cmd", "id": JSON(self.id("app.routine_run")), "name": "routine.run", "args": ["id": JSON(id)]]
+    }
+
     /// Opens a file a message mentions, from its `loom:file/AGENT/PATH` link: the
     /// instance keeps it as the person's first, then it's fetched and shown.
     func openFileMention(_ link: String) -> JSON? {
@@ -2160,6 +2397,35 @@ final class Model {
     func choose(_ answer: String) -> JSON? {
         guard let agent = selected else { return nil }
         return ["t": "send", "agent": JSON(agent), "text": JSON(answer)]
+    }
+
+    /// Picks `value` on field `field` of the form `card` in reply `message`: an option of
+    /// a choice, or a toggle on or off.
+    func pickForm(message: String, card: String, field: Int, value: JSON) {
+        formPicks["\(message)/\(card)/\(field)"] = value
+        formErrors["\(message)/\(card)"] = nil
+    }
+
+    /// Send on the form `card` in reply `message`, with what's typed in its text and
+    /// number fields: its answers go as the person's next message. Nil, saying which on
+    /// the card, while a required field has nothing in it.
+    func sendForm(message: String, card: String, typed: [String]) -> JSON? {
+        let key = "\(message)/\(card)"
+        guard let agent = selected,
+              let found = messages.first(where: { $0.id == message })?.blocks.compactMap(\.card).first(where: { $0.id == card && $0.type == "form" })
+        else { return nil }
+        let picks = found.formFields.indices.map { formPicks["\(key)/\($0)"] ?? found.formFields[$0].value }
+        switch formAnswers(found.formFields, typed: typed, picks: picks) {
+        case .failure(let missing):
+            formErrors[key] = "\(missing.label) needs an answer."
+            return nil
+        case .success(let answers):
+            let cid = id("m_form")
+            formErrors[key] = nil
+            formSending[cid] = key
+            return ["t": "send", "cid": JSON(cid), "agent": JSON(agent), "text": "",
+                    "form": ["message": JSON(message), "card": JSON(card), "answers": answers]]
+        }
     }
 
     /// The person's answer to the MCP server an agent proposed on card `call`: `add`, with

@@ -810,25 +810,197 @@ pub fn tokens_text(n: i64) -> String {
 }
 
 /// One of the person's skills.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Skill {
     pub name: String,
     pub description: String,
     pub body: String,
 }
 
-/// The composer's text with a skill picked from the + menu: the message
-/// starts by asking for it, before what was written already.
-pub fn with_skill(name: &str, text: &str) -> String {
-    let ask = format!("Use the {name} skill.");
-    let rest = text.trim_start();
-    if rest.starts_with(&ask) {
-        return text.to_string();
+/// A skill picked from the + menu, as the composer holds it: its link and its words
+/// (PLAN.md, "The composer's + menu").
+pub fn skill_mention(name: &str) -> (String, String) {
+    (format!("loom:skill/{name}"), name.to_string())
+}
+
+/// A file sent or received lately in one of the person's chats (`files.recent`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecentFile {
+    pub file: FileRef,
+    pub at: i64,
+}
+
+/// What a row of the + menu opens beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlusSub {
+    Recent,
+    Skills,
+    Routines,
+}
+
+/// One row of the composer's + menu.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlusRow {
+    Attach,
+    PasteImage,
+    /// Opens a list beside the menu.
+    Open(PlusSub),
+    File(RecentFile),
+    Skill(Skill),
+    Routine(Box<Routine>),
+    /// The end of a list beside the menu: its settings page.
+    Manage(PlusSub),
+}
+
+impl PlusRow {
+    /// The list it opens beside the menu, for a row that opens one.
+    pub fn opens(&self) -> Option<PlusSub> {
+        match self {
+            PlusRow::Open(s) => Some(*s),
+            _ => None,
+        }
     }
-    if rest.is_empty() {
-        format!("{ask} ")
-    } else {
-        format!("{ask} {rest}")
+}
+
+/// Whether `name` (or `also`) has `q` in it, and whether it starts with it.
+fn plus_match(q: &str, name: &str, also: &str) -> Option<bool> {
+    let name = name.to_lowercase();
+    if name.contains(q) {
+        return Some(name.starts_with(q));
+    }
+    also.to_lowercase().contains(q).then_some(false)
+}
+
+/// Those of `rows` that match `q`, by `name_of`, those whose names start with it first.
+fn plus_found<T: Clone>(
+    q: &str,
+    rows: &[T],
+    name_of: impl Fn(&T) -> (&str, &str),
+    row: impl Fn(T) -> PlusRow,
+) -> Vec<PlusRow> {
+    let mut found: Vec<(bool, &T)> = rows
+        .iter()
+        .filter_map(|r| {
+            let (name, also) = name_of(r);
+            plus_match(q, name, also).map(|first| (!first, r))
+        })
+        .collect();
+    found.sort_by_key(|(later, _)| *later);
+    found.into_iter().map(|(_, r)| row(r.clone())).collect()
+}
+
+/// A routine's own agent's first: the routines the + menu lists for `agent`.
+fn routines_for(routines: &[Routine], agent: &str) -> Vec<Routine> {
+    let mut out: Vec<Routine> = routines.to_vec();
+    out.sort_by_key(|r| r.agent != agent);
+    out
+}
+
+impl Model {
+    /// The + menu's groups, in order: what adds to the message, and what it does. With
+    /// something typed in its search, every group's rows that match it instead, the
+    /// lists beside the menu among them. `paste` is whether the clipboard holds a picture.
+    pub fn plus_groups(&self, query: &str, paste: bool) -> Vec<Vec<PlusRow>> {
+        let q = query.trim().to_lowercase();
+        let agent = self.selected.clone().unwrap_or_default();
+        if q.is_empty() {
+            let mut add = vec![PlusRow::Attach];
+            if paste {
+                add.push(PlusRow::PasteImage);
+            }
+            add.push(PlusRow::Open(PlusSub::Recent));
+            return vec![
+                add,
+                vec![
+                    PlusRow::Open(PlusSub::Skills),
+                    PlusRow::Open(PlusSub::Routines),
+                ],
+            ];
+        }
+        let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
+            .into_iter()
+            .chain(paste.then_some((PlusRow::PasteImage, "Paste image")))
+            .filter(|(_, title)| title.to_lowercase().contains(&q))
+            .map(|(r, _)| r)
+            .collect();
+        add.extend(plus_found(
+            &q,
+            &self.recent_files,
+            |f| (f.file.name.as_str(), ""),
+            PlusRow::File,
+        ));
+        let mut act = plus_found(
+            &q,
+            &self.skills,
+            |k| (k.name.as_str(), k.description.as_str()),
+            PlusRow::Skill,
+        );
+        act.extend(plus_found(
+            &q,
+            &routines_for(&self.routines, &agent),
+            |r| (r.name.as_str(), ""),
+            |r| PlusRow::Routine(Box::new(r)),
+        ));
+        vec![add, act]
+            .into_iter()
+            .filter(|g| !g.is_empty())
+            .collect()
+    }
+
+    /// The list a row of the + menu opens beside it, ending in its settings page. Empty
+    /// but for that, the menu says there's nothing yet.
+    pub fn plus_sub(&self, which: PlusSub) -> Vec<PlusRow> {
+        let agent = self.selected.clone().unwrap_or_default();
+        let mut out: Vec<PlusRow> = match which {
+            PlusSub::Recent => self
+                .recent_files
+                .iter()
+                .cloned()
+                .map(PlusRow::File)
+                .collect(),
+            PlusSub::Skills => self.skills.iter().cloned().map(PlusRow::Skill).collect(),
+            PlusSub::Routines => routines_for(&self.routines, &agent)
+                .into_iter()
+                .map(|r| PlusRow::Routine(Box::new(r)))
+                .collect(),
+        };
+        if which != PlusSub::Recent {
+            out.push(PlusRow::Manage(which));
+        }
+        out
+    }
+
+    /// Asks for what the + menu lists: the person's skills, their routines, and the files
+    /// sent lately in their chats.
+    pub fn load_plus(&mut self) -> Vec<Value> {
+        let id = self.id("app.recent_files");
+        vec![
+            self.load_skills(),
+            self.load_routines(),
+            json!({"t": "cmd", "id": id, "name": "files.recent", "args": {"limit": 50}}),
+        ]
+    }
+
+    /// A file from the + menu's recent files, for the next message: it's on the
+    /// instance already, so nothing goes up. Gives whether it was added, which it isn't
+    /// when it's waiting already.
+    pub fn attach_sent(&mut self, f: &FileRef) -> bool {
+        if self
+            .attachments
+            .iter()
+            .any(|a| a.file.as_ref().is_some_and(|x| x.file == f.file))
+        {
+            return false;
+        }
+        let id = self.id("app.sent");
+        self.attachments.push(Attachment {
+            id,
+            name: f.name.clone(),
+            path: String::new(),
+            file: Some(f.clone()),
+            error: None,
+        });
+        true
     }
 }
 
@@ -932,7 +1104,7 @@ pub fn asking(asks: &[String]) -> String {
 }
 
 /// One of the person's routines: a prompt an agent is sent on a schedule.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Routine {
     pub id: String,
     pub name: String,
@@ -1499,6 +1671,18 @@ pub enum CardBody {
         /// Once it's ready, the tools it offers.
         tools: Vec<String>,
     },
+    /// Several questions an agent asks at once (show_card's `form`): its fields, the
+    /// reply it's in, for Send; what's picked on each choice and toggle so far; the
+    /// answers, by label, once they're sent; whether they're on their way; and what the
+    /// instance said to ones it refused.
+    Form {
+        message: String,
+        fields: Vec<FormField>,
+        picks: Vec<Value>,
+        answers: Option<Value>,
+        sending: bool,
+        error: String,
+    },
     /// Something an agent's page wants that only the person knows, asked for with
     /// browser_ask_secret (loom's own card): which agent and call, the site, the
     /// fields, how it stands (`asking`, `filled`, `declined` or `closed`), the names
@@ -1526,6 +1710,88 @@ pub struct Field {
     pub masked: bool,
     pub save: String,
     pub keep: bool,
+}
+
+/// A field of an agent's form: what it asks, its kind (`text`, `choice`, `toggle` or
+/// `number`), whether it must be answered, a choice's options, what a text or a number
+/// says while it's empty, and what it starts as.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FormField {
+    pub label: String,
+    pub kind: String,
+    pub required: bool,
+    pub options: Vec<String>,
+    pub placeholder: String,
+    pub value: Value,
+}
+
+impl FormField {
+    /// What it starts as, as text in its box: a number as it's written, nothing for null.
+    pub fn start_text(&self) -> String {
+        match &self.value {
+            Value::String(t) => t.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// A form's answers, by label, from what's typed in its text and number fields
+/// (`typed`, one for each field, "" for a choice or a toggle) and what's picked on its
+/// choices and toggles (`picks`); or the label of the first required field with nothing
+/// in it, so Send waits. An optional field left empty is left out.
+pub fn form_answers(
+    fields: &[FormField],
+    typed: &[String],
+    picks: &[Value],
+) -> Result<Value, String> {
+    let mut out = serde_json::Map::new();
+    for (k, f) in fields.iter().enumerate() {
+        let pick = picks.get(k).cloned().unwrap_or(Value::Null);
+        let answer = match f.kind.as_str() {
+            "toggle" => Value::Bool(pick.as_bool().unwrap_or(false)),
+            "choice" => match pick.as_str() {
+                Some(o) if !o.is_empty() => Value::String(o.to_string()),
+                _ => Value::Null,
+            },
+            _ => match typed.get(k).map(|t| t.trim()) {
+                Some(t) if !t.is_empty() => Value::String(t.to_string()),
+                _ => Value::Null,
+            },
+        };
+        if answer.is_null() {
+            if f.required {
+                return Err(f.label.clone());
+            }
+            continue;
+        }
+        out.insert(f.label.clone(), answer);
+    }
+    Ok(Value::Object(out))
+}
+
+/// How long Allow on a risky question is held before it allows (PLAN.md, "Permissions").
+pub const HOLD: Duration = Duration::from_millis(1200);
+/// How long the hint to hold stays after a plain click.
+pub const HOLD_HINT: Duration = Duration::from_millis(2400);
+
+/// Allow on a risky question, held down: which question, and since when. It allows once
+/// it's been held for `HOLD`; let go sooner, it only says to hold.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hold {
+    pub call: String,
+    pub since: Instant,
+}
+
+impl Hold {
+    /// How far along it is, from 0 to 1.
+    pub fn progress(&self, now: Instant) -> f32 {
+        (now.saturating_duration_since(self.since).as_secs_f32() / HOLD.as_secs_f32()).min(1.0)
+    }
+
+    pub fn done(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.since) >= HOLD
+    }
 }
 
 /// One of the person's secrets, by name, and the sites it may be filled in on in their
@@ -1632,6 +1898,32 @@ impl Card {
                 sending: false,
                 error: String::new(),
             },
+            "form" => {
+                let fields: Vec<FormField> = v
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .map(|xs| {
+                        xs.iter()
+                            .map(|x| FormField {
+                                label: s(x, "label"),
+                                kind: s(x, "kind"),
+                                required: x.get("required") == Some(&Value::Bool(true)),
+                                options: strings(x.get("options")),
+                                placeholder: s(x, "placeholder"),
+                                value: x.get("value").cloned().unwrap_or(Value::Null),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                CardBody::Form {
+                    message: String::new(),
+                    picks: fields.iter().map(|f| f.value.clone()).collect(),
+                    fields,
+                    answers: v.get("answers").filter(|a| a.is_object()).cloned(),
+                    sending: false,
+                    error: String::new(),
+                }
+            }
             "facts" => CardBody::Facts(
                 items?
                     .iter()
@@ -1988,14 +2280,25 @@ pub struct Message {
 }
 
 impl Message {
-    /// Whether one of its cards waits for the person, so its thread moves: choices in the
-    /// chat's newest message (`newest`), a sign-in not done while the chat hasn't gone on,
-    /// or an MCP server an agent proposed that's asking, being added or wants a sign-in.
+    /// Whether its questions (choices and forms) answer now, and their keys pick: it's the
+    /// chat's newest message (`newest`), and it's finished, so the person has read it all
+    /// before answering.
+    pub fn takes_answers(&self, newest: bool) -> bool {
+        newest && !self.live
+    }
+
+    /// Whether one of its cards waits for the person, so its thread moves: choices, or a
+    /// form not sent, while it takes answers (`takes_answers`), a sign-in not done while
+    /// the chat hasn't gone on, or an MCP server an agent proposed that's asking, being
+    /// added or wants a sign-in.
     pub fn card_waits(&self, newest: bool) -> bool {
         self.blocks
             .iter()
             .any(|b| match b.card.as_ref().map(|c| &c.body) {
-                Some(CardBody::Choices { .. }) => newest,
+                Some(CardBody::Choices { .. }) => self.takes_answers(newest),
+                Some(CardBody::Form { answers, .. }) => {
+                    answers.is_none() && self.takes_answers(newest)
+                }
                 Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
                 Some(CardBody::McpAdd { state, .. }) => {
                     matches!(state.as_str(), "asking" | "adding" | "sign_in")
@@ -2171,7 +2474,8 @@ pub struct Inline<'a> {
 /// - an agent it mentions as its thread and its name in its colour, a little
 ///   weathered;
 /// - a file it mentions, or one sent with it, with a tiny picture of it or its type's
-///   icon before its name.
+///   icon before its name;
+/// - a skill picked from the + menu as its name, a little weathered.
 ///
 /// Code stays as it is.
 pub fn with_link_icons(text: &str, inline: &Inline) -> String {
@@ -2247,6 +2551,9 @@ fn line_links(line: &str, inline: &Inline) -> String {
                         }
                         None => out.push_str(&format!("@{name}")),
                     }
+                } else if url.starts_with("loom:skill/") {
+                    let name = words.trim().replace(['<', '>'], "");
+                    out.push_str(&format!("<span style=\"font-weight: 500\">{name}</span>"));
                 } else if url.starts_with("loom:file/") {
                     let src = (inline.file_thumb)(url).unwrap_or_else(|| (inline.file_icon)(words));
                     out.push_str(&img(&src, 14, 14));
@@ -3123,6 +3430,8 @@ pub struct Approval {
     /// What the card shows of the call, as the core shaped it (`core/asks.calx`).
     pub shown: Shown,
     pub can_always: bool,
+    /// Loom counts it risky: Allow is held, not clicked (`Hold`).
+    pub risky: bool,
     /// How the person answered it here, while the instance hasn't said yet: allowed,
     /// and always.
     pub answered: Option<(bool, bool)>,
@@ -3622,6 +3931,9 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The files sent or received lately in the person's chats, newest first, for the
+    /// composer's + menu.
+    pub recent_files: Vec<RecentFile>,
     /// The open routine's runs, newest first, and which routine they're for.
     pub routine_runs: Vec<RoutineRun>,
     routine_runs_for: Option<String>,
@@ -3742,6 +4054,17 @@ pub struct Model {
     secret_unkept: HashSet<String>,
     secret_sending: HashSet<String>,
     secret_errors: HashMap<String, String>,
+    /// What's picked on the choices and toggles of forms not sent yet, by
+    /// `message/card/field`; the forms whose answers went and haven't come back, by
+    /// their send's cid, with their `message/card`; and what the instance said to ones
+    /// it refused, by `message/card`.
+    form_picks: HashMap<String, Value>,
+    form_sending: HashMap<String, String>,
+    form_errors: HashMap<String, String>,
+    /// Allow on a risky question, held down now (`Hold`), and the question a plain click
+    /// on it said to hold for, and when.
+    hold: Option<Hold>,
+    hold_hint: Option<(String, Instant)>,
     /// The last test of each MCP server, by its name.
     pub mcp_tests: HashMap<String, McpTest>,
     /// MCP servers whose sign-in is under way, while the person's browser is away.
@@ -4540,6 +4863,8 @@ impl Model {
                     self.dirty.insert(List::Messages);
                 }
             }
+            // A form's answers wait on their card, not as a message in the queue.
+            "core.queued" if self.form_sending.contains_key(&s(f, "cid")) => {}
             "core.queued" => {
                 let mut q = Queued::of(f);
                 for file in &mut q.files {
@@ -4599,6 +4924,7 @@ impl Model {
             "ack" => {
                 let cid = s(f, "cid");
                 self.queued.retain(|q| q.cid != cid);
+                self.form_sending.remove(&cid);
                 self.dirty.insert(List::Messages);
             }
             "delta" => self.delta(f),
@@ -4618,6 +4944,13 @@ impl Model {
                     self.take_page(f, jpeg);
                 }
                 return false;
+            }
+            // A form's answers the instance refused: its card says why.
+            "error" if self.form_sending.contains_key(&s(f, "ref")) => {
+                if let Some(key) = self.form_sending.remove(&s(f, "ref")) {
+                    self.form_errors.insert(key, s(f, "message"));
+                }
+                self.dirty.insert(List::Messages);
             }
             "error" => {
                 let code = s(f, "code");
@@ -5820,6 +6153,19 @@ impl Model {
                 .map(|rs| rs.iter().map(Routine::of).collect())
                 .unwrap_or_default();
             self.dirty.insert(List::Messages);
+        } else if id.starts_with("app.recent_files") {
+            self.recent_files = f
+                .pointer("/value/files")
+                .and_then(Value::as_array)
+                .map(|fs| {
+                    fs.iter()
+                        .map(|v| RecentFile {
+                            file: FileRef::of(v),
+                            at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
         } else if id.starts_with("app.runs_of_routine") {
             self.routine_runs = f
                 .pointer("/value/runs")
@@ -6298,6 +6644,7 @@ impl Model {
                             .get("can_always")
                             .and_then(Value::as_bool)
                             .unwrap_or(false),
+                        risky: a.get("risky") == Some(&Value::Bool(true)),
                         answered: None,
                     })
                     .collect();
@@ -6445,7 +6792,9 @@ impl Model {
             })
             .collect();
         for (i, (m, sent)) in out.iter_mut().zip(sent).enumerate() {
+            let reply = m.id.clone();
             for b in m.blocks.iter_mut() {
+                let card_id = b.card.as_ref().map(|c| c.id.clone()).unwrap_or_default();
                 match b.card.as_mut().map(|c| &mut c.body) {
                     Some(CardBody::SignIn {
                         server,
@@ -6461,6 +6810,25 @@ impl Model {
                         *chosen = sent
                             .as_deref()
                             .and_then(|t| options.iter().position(|o| o.trim() == t));
+                    }
+                    // A form keeps what's picked on it, and says while its answers are
+                    // on the way, or what the instance said to them.
+                    Some(CardBody::Form {
+                        message,
+                        picks,
+                        sending,
+                        error,
+                        ..
+                    }) => {
+                        let key = format!("{reply}/{card_id}");
+                        *message = reply.clone();
+                        for (k, pick) in picks.iter_mut().enumerate() {
+                            if let Some(v) = self.form_picks.get(&format!("{key}/{k}")) {
+                                *pick = v.clone();
+                            }
+                        }
+                        *sending = self.form_sending.values().any(|v| *v == key);
+                        *error = self.form_errors.get(&key).cloned().unwrap_or_default();
                     }
                     // A proposed server's card left waiting for a sign-in says Signed in
                     // once the person has, too.
@@ -6522,6 +6890,122 @@ impl Model {
     pub fn answer(&mut self, call: &str, allow: bool, always: bool) -> Value {
         self.answering.insert(call.to_string(), (allow, always));
         approve(call, allow, always)
+    }
+
+    /// Allow on question `call` pressed down. A risky one starts being held; any other
+    /// is answered at once, as a click.
+    pub fn press_allow(&mut self, call: &str, now: Instant) -> Option<Value> {
+        let risky = self.approvals.iter().any(|a| a.call == call && a.risky);
+        if !risky {
+            return Some(self.answer(call, true, false));
+        }
+        self.hold = Some(Hold {
+            call: call.to_string(),
+            since: now,
+        });
+        self.hold_hint = None;
+        None
+    }
+
+    /// Allow let go, or the pointer gone off it: held long enough, the question is
+    /// allowed; let go sooner, its card says to hold.
+    pub fn release_allow(&mut self, now: Instant) -> Option<Value> {
+        let hold = self.hold.take()?;
+        if hold.done(now) {
+            return Some(self.answer(&hold.call, true, false));
+        }
+        self.hold_hint = Some((hold.call, now));
+        None
+    }
+
+    /// Allow held for long enough while it's still down: the question is allowed then,
+    /// without waiting for the pointer to let go.
+    pub fn hold_tick(&mut self, now: Instant) -> Option<Value> {
+        if !self.hold.as_ref().is_some_and(|h| h.done(now)) {
+            return None;
+        }
+        self.release_allow(now)
+    }
+
+    /// The Allow held now, and how far along it is; and the question a plain click
+    /// just said to hold for.
+    pub fn hold_shown(&self, now: Instant) -> (Option<(String, f32)>, Option<String>) {
+        let held = self
+            .hold
+            .as_ref()
+            .map(|h| (h.call.clone(), h.progress(now)));
+        let hint = self
+            .hold_hint
+            .as_ref()
+            .filter(|(_, at)| now.saturating_duration_since(*at) < HOLD_HINT)
+            .map(|(call, _)| call.clone());
+        (held, hint)
+    }
+
+    /// Whether Allow is held down now.
+    pub fn is_held(&self) -> bool {
+        self.hold.is_some()
+    }
+
+    /// Whether anything about holding still moves: a hold, or a hint that hasn't gone.
+    pub fn holding(&self, now: Instant) -> bool {
+        let (held, hint) = self.hold_shown(now);
+        held.is_some() || hint.is_some()
+    }
+
+    /// Picks `value` on field `field` of the form `card` in reply `message`: an option of
+    /// a choice, or a toggle on or off.
+    pub fn pick_form(&mut self, message: &str, card: &str, field: usize, value: Value) {
+        self.form_picks
+            .insert(format!("{message}/{card}/{field}"), value);
+        self.form_errors.remove(&format!("{message}/{card}"));
+    }
+
+    /// Send on the form `card` in reply `message`, with what's typed in its text and
+    /// number fields: its answers go as the person's next message. None, saying which on
+    /// the card, while a required field has nothing in it.
+    pub fn send_form(&mut self, message: &str, card: &str, typed: &[String]) -> Option<Value> {
+        let key = format!("{message}/{card}");
+        let fields = self
+            .messages
+            .iter()
+            .find(|m| m.id == message)
+            .and_then(|m| {
+                m.blocks.iter().find_map(|b| match b.card.as_ref() {
+                    Some(Card {
+                        id,
+                        body: CardBody::Form { fields, .. },
+                        ..
+                    }) if id == card => Some(fields.clone()),
+                    _ => None,
+                })
+            })?;
+        let picks: Vec<Value> = fields
+            .iter()
+            .enumerate()
+            .map(|(k, f)| {
+                self.form_picks
+                    .get(&format!("{key}/{k}"))
+                    .cloned()
+                    .unwrap_or_else(|| f.value.clone())
+            })
+            .collect();
+        let answers = match form_answers(&fields, typed, &picks) {
+            Ok(a) => a,
+            Err(label) => {
+                self.form_errors
+                    .insert(key, format!("{label} needs an answer."));
+                return None;
+            }
+        };
+        let agent = self.selected.clone()?;
+        let cid = self.id("m_form");
+        let mut frame = self.send_frame(agent, "");
+        frame["cid"] = json!(cid);
+        frame["form"] = json!({"message": message, "card": card, "answers": answers});
+        self.form_errors.remove(&key);
+        self.form_sending.insert(cid, key);
+        Some(frame)
     }
 
     /// What an agent's thread shows now.
@@ -8313,6 +8797,11 @@ mod tests {
         );
         // An agent that's gone is its name.
         assert_eq!(with_link_icons("[@Old](loom:agent/zz)", &inline), "@Old");
+        // A skill from the + menu is its name.
+        assert_eq!(
+            with_link_icons("[review](loom:skill/review) this", &inline),
+            "<span style=\"font-weight: 500\">review</span> this"
+        );
         assert_eq!(
             with_link_icons("[hours.md](loom:file/a1/notes%2Fhours.md)", &inline),
             "<img src=\"/icons/hours.md\" width=\"14\" height=\"14\" /> \
@@ -8642,6 +9131,223 @@ mod tests {
             cards(&m),
             vec![sign_in(Some("ada@example.com"), true), choices(Some(1))]
         );
+    }
+
+    /// A model showing agent a_1's chat c_1.
+    fn in_chat() -> Model {
+        let mut m = Model::new();
+        m.conversations = vec![Conversation {
+            id: "c_1".into(),
+            agent: "a_1".into(),
+            task: None,
+            side: false,
+            branch_of: None,
+            branch_at: None,
+            routine: None,
+            asked_by: None,
+            program: None,
+            title: String::new(),
+        }];
+        m.select(Some("a_1".into()));
+        m
+    }
+
+    #[test]
+    fn questions_answer_once_the_reply_is_finished() {
+        let mut m = in_chat();
+        let reply = |live: bool| Message {
+            id: "msg_1".into(),
+            role: "agent".into(),
+            at: 1,
+            blocks: Vec::new(),
+            live,
+            queued: false,
+            from_agent: None,
+            routine: String::new(),
+            routine_name: String::new(),
+            mentions: Vec::new(),
+            sources: Vec::new(),
+            links: HashMap::new(),
+            status: String::new(),
+            pinned: false,
+        };
+        // While it's written, its choices don't answer and their keys don't pick.
+        assert!(!reply(true).takes_answers(true));
+        assert!(reply(false).takes_answers(true));
+        assert!(!reply(false).takes_answers(false));
+        // A form waits while it takes answers and isn't sent.
+        let form = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 1, "status": "done", "blocks": [
+            {"kind": "text", "text": "A few things."},
+            {"kind": "card", "card": {"id": "card_1", "type": "form", "title": "Your order", "fields": [
+                {"label": "Name", "kind": "text", "required": true, "value": "", "placeholder": "Your name"},
+                {"label": "Size", "kind": "choice", "required": true, "options": ["Small", "Large"], "value": "", "placeholder": ""},
+                {"label": "Gift wrap", "kind": "toggle", "required": false, "value": false}]}}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": form}));
+        let shown = m.shown();
+        assert!(shown[0].card_waits(true) && !shown[0].card_waits(false));
+        let Some(CardBody::Form {
+            message,
+            fields,
+            picks,
+            answers,
+            ..
+        }) = shown[0].blocks[1].card.clone().map(|c| c.body)
+        else {
+            panic!("no form");
+        };
+        assert_eq!(message, "msg_1");
+        assert_eq!(fields[0].placeholder, "Your name");
+        assert_eq!(
+            fields[1].options,
+            vec!["Small".to_string(), "Large".to_string()]
+        );
+        assert_eq!(picks, vec![json!(""), json!(""), json!(false)]);
+        assert!(answers.is_none());
+    }
+
+    #[test]
+    fn a_form_sends_its_answers_as_one() {
+        let fields = vec![
+            FormField {
+                label: "Name".into(),
+                kind: "text".into(),
+                required: true,
+                options: Vec::new(),
+                placeholder: String::new(),
+                value: json!(""),
+            },
+            FormField {
+                label: "Size".into(),
+                kind: "choice".into(),
+                required: true,
+                options: vec!["Small".into(), "Large".into()],
+                placeholder: String::new(),
+                value: json!(""),
+            },
+            FormField {
+                label: "Gift wrap".into(),
+                kind: "toggle".into(),
+                required: false,
+                options: Vec::new(),
+                placeholder: String::new(),
+                value: json!(false),
+            },
+            FormField {
+                label: "Note".into(),
+                kind: "text".into(),
+                required: false,
+                options: Vec::new(),
+                placeholder: String::new(),
+                value: json!(""),
+            },
+        ];
+        let typed = |name: &str| {
+            vec![
+                name.to_string(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ]
+        };
+        // A required field with nothing in it holds Send, naming it.
+        assert_eq!(
+            form_answers(
+                &fields,
+                &typed(" "),
+                &[json!(""), json!("Large"), json!(true), Value::Null]
+            ),
+            Err("Name".into())
+        );
+        assert_eq!(
+            form_answers(
+                &fields,
+                &typed("Ada"),
+                &[json!(""), json!(""), json!(true), Value::Null]
+            ),
+            Err("Size".into())
+        );
+        // An optional one left empty is left out, and a toggle is on or off.
+        assert_eq!(
+            form_answers(
+                &fields,
+                &typed(" Ada "),
+                &[json!(""), json!("Large"), json!(false), Value::Null]
+            ),
+            Ok(json!({"Name": "Ada", "Size": "Large", "Gift wrap": false}))
+        );
+
+        let mut m = in_chat();
+        let form = json!({"id": "msg_1", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_1", "at": 1, "status": "done", "blocks": [
+            {"kind": "card", "card": {"id": "card_1", "type": "form", "title": "Your order", "fields": [
+                {"label": "Name", "kind": "text", "required": true, "value": ""},
+                {"label": "Size", "kind": "choice", "required": true, "options": ["Small", "Large"], "value": ""}]}}]});
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_1", "message": form}));
+        let error = |m: &Model| match m.shown()[0].blocks[0].card.clone().map(|c| c.body) {
+            Some(CardBody::Form { error, sending, .. }) => (error, sending),
+            _ => panic!("no form"),
+        };
+        // Send with nothing picked says which needs an answer, and sends nothing.
+        assert!(m
+            .send_form("msg_1", "card_1", &["Ada".into(), String::new()])
+            .is_none());
+        assert_eq!(error(&m), ("Size needs an answer.".to_string(), false));
+        // Picked, it goes as one answer, the card saying so until the instance has it.
+        m.pick_form("msg_1", "card_1", 1, json!("Small"));
+        assert_eq!(error(&m).0, "");
+        let f = m
+            .send_form("msg_1", "card_1", &["Ada".into(), String::new()])
+            .unwrap();
+        assert_eq!(f["t"], "send");
+        assert_eq!(
+            f["form"],
+            json!({"message": "msg_1", "card": "card_1", "answers": {"Name": "Ada", "Size": "Small"}})
+        );
+        assert_eq!(error(&m), (String::new(), true));
+        let cid = f["cid"].as_str().unwrap().to_string();
+        // It isn't a message waiting in the queue.
+        m.take(&json!({"t": "core.queued", "cid": cid, "agent": "a_1", "text": ""}));
+        assert!(m.queued.is_empty());
+        // Refused, the card says why.
+        m.take(&json!({"t": "error", "code": "bad_form", "message": "That form was sent already.", "ref": cid}));
+        assert_eq!(
+            error(&m),
+            ("That form was sent already.".to_string(), false)
+        );
+        assert!(m.notices.is_empty());
+    }
+
+    #[test]
+    fn a_risky_allow_is_held() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "approvals", "items": [
+            {"call": "tc_1", "run": "run_1", "tool": "delete", "title": "Delete the agent Pip", "detail": null, "risky": true},
+            {"call": "tc_2", "run": "run_1", "tool": "read", "title": "Read a file", "detail": null}]}));
+        assert!(m.approvals[0].risky && !m.approvals[1].risky);
+        let t0 = Instant::now();
+        // A plain click on a question that isn't risky answers it.
+        assert_eq!(m.press_allow("tc_2", t0).unwrap()["call"], "tc_2");
+        // On a risky one, pressing only starts the hold, which fills as it's held.
+        assert!(m.press_allow("tc_1", t0).is_none());
+        let (held, hint) = m.hold_shown(t0 + HOLD / 2);
+        assert_eq!(held.as_ref().map(|(c, _)| c.as_str()), Some("tc_1"));
+        assert!((held.unwrap().1 - 0.5).abs() < 0.01 && hint.is_none());
+        // Let go too soon: nothing's answered, and the card says to hold.
+        assert!(m.release_allow(t0 + HOLD / 2).is_none());
+        assert_eq!(m.hold_shown(t0 + HOLD / 2), (None, Some("tc_1".into())));
+        assert!(!m.answering.contains_key("tc_1"));
+        // The hint goes after a moment.
+        assert_eq!(m.hold_shown(t0 + HOLD / 2 + HOLD_HINT), (None, None));
+        // Held all the way, it's allowed then, without waiting to be let go.
+        let t1 = t0 + Duration::from_secs(10);
+        assert!(m.press_allow("tc_1", t1).is_none());
+        assert!(m.hold_tick(t1 + HOLD / 3).is_none());
+        let allowed = m.hold_tick(t1 + HOLD).unwrap();
+        assert_eq!(
+            (allowed["call"].clone(), allowed["allow"].clone()),
+            (json!("tc_1"), json!(true))
+        );
+        assert_eq!(m.answering.get("tc_1"), Some(&(true, false)));
+        assert!(m.release_allow(t1 + HOLD * 2).is_none() && !m.holding(t1 + HOLD * 2));
     }
 
     #[test]
@@ -10687,16 +11393,99 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_from_the_plus_menu_starts_the_message() {
-        assert_eq!(with_skill("review", ""), "Use the review skill. ");
+    fn the_plus_menu_has_its_groups_and_search_finds_every_row() {
+        let mut m = Model::new();
+        m.selected = Some("a1".into());
+        let skill = |name: &str, about: &str| Skill {
+            name: name.into(),
+            description: about.into(),
+            body: String::new(),
+        };
+        m.skills = vec![
+            skill("release-notes", "When a version ships"),
+            skill("review", "Before a pull request merges"),
+        ];
+        let routine = |id: &str, name: &str, agent: &str| Routine {
+            id: id.into(),
+            name: name.into(),
+            agent: agent.into(),
+            ..Routine::default()
+        };
+        m.routines = vec![
+            routine("r1", "Morning news", "a2"),
+            routine("r2", "Review inbox", "a1"),
+        ];
+        let file = |name: &str| RecentFile {
+            file: FileRef {
+                file: format!("sha-{name}"),
+                name: name.into(),
+                mime: "text/plain".into(),
+                size: 3,
+            },
+            at: 1,
+        };
+        m.recent_files = vec![file("notes.md"), file("preview.png")];
+        // Shut, it's two groups, Paste image only when there's a picture to paste.
         assert_eq!(
-            with_skill("review", "  the login page"),
-            "Use the review skill. the login page"
+            m.plus_groups("", false),
+            vec![
+                vec![PlusRow::Attach, PlusRow::Open(PlusSub::Recent)],
+                vec![
+                    PlusRow::Open(PlusSub::Skills),
+                    PlusRow::Open(PlusSub::Routines)
+                ],
+            ]
         );
+        assert!(m.plus_groups("", true)[0].contains(&PlusRow::PasteImage));
+        // Typed, each group's rows that match: names that start with it first, then a
+        // skill's when-to-use, and this agent's routines before another's.
+        let found = m.plus_groups("rev", false);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0], vec![PlusRow::File(file("preview.png"))]);
         assert_eq!(
-            with_skill("review", "Use the review skill. again"),
-            "Use the review skill. again"
+            found[1],
+            vec![
+                PlusRow::Skill(m.skills[1].clone()),
+                PlusRow::Routine(Box::new(m.routines[1].clone()))
+            ]
         );
+        let by_use = m.plus_groups("ships", false);
+        assert_eq!(by_use, vec![vec![PlusRow::Skill(m.skills[0].clone())]]);
+        assert_eq!(m.plus_groups("attach", false), vec![vec![PlusRow::Attach]]);
+        assert!(m.plus_groups("nothing like it", true).is_empty());
+        // The lists beside it end in their settings page; recent files has none.
+        let routines = m.plus_sub(PlusSub::Routines);
+        assert_eq!(
+            routines[0],
+            PlusRow::Routine(Box::new(m.routines[1].clone()))
+        );
+        assert_eq!(routines.last(), Some(&PlusRow::Manage(PlusSub::Routines)));
+        assert_eq!(m.plus_sub(PlusSub::Recent).len(), 2);
+        m.skills.clear();
+        assert_eq!(
+            m.plus_sub(PlusSub::Skills),
+            vec![PlusRow::Manage(PlusSub::Skills)]
+        );
+        // Many, they're all there to scroll and find.
+        m.skills = (0..40).map(|n| skill(&format!("skill-{n}"), "x")).collect();
+        assert_eq!(m.plus_sub(PlusSub::Skills).len(), 41);
+        assert_eq!(m.plus_groups("skill-39", false)[0].len(), 1);
+    }
+
+    #[test]
+    fn a_recent_file_goes_with_the_message_without_going_up_again() {
+        let mut m = Model::new();
+        let f = FileRef {
+            file: "abc".into(),
+            name: "notes.md".into(),
+            mime: "text/markdown".into(),
+            size: 9,
+        };
+        assert!(m.attach_sent(&f));
+        assert!(!m.attach_sent(&f));
+        assert_eq!(m.attachments.len(), 1);
+        assert!(!m.uploading());
+        assert_eq!(skill_mention("review").0, "loom:skill/review");
     }
 
     #[test]

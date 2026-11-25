@@ -742,8 +742,10 @@ impl Conn {
         } else if t == "error" {
             // A command that failed gets no result, so its id goes.
             if let id = str_at(f, "id") { self.forget_command(id) }
-            // A send the instance can't take, ever: it leaves the outbox.
-            if (str_at(f, "code") ?? String()) == "unknown_conversation" {
+            // A send the instance can't take, ever: it leaves the outbox. So does
+            // a form's answer it refused, which the card says why of.
+            let code = str_at(f.copy(), "code") ?? String()
+            if code == "unknown_conversation" or code == "bad_form" {
                 if let cid = str_at(f, "ref") {
                     match self.cache.sent(cid) {
                         ok => {},
