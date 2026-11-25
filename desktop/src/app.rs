@@ -15357,7 +15357,10 @@ fn file_view(
             .max(PICTURE_LEAST);
         // Its size is the one the instance said, else its thumbnail's.
         let thumb = files.get(&format!("{}.thumb", f.file));
-        let (w, h) = match f.shown_size().or_else(|| thumb.and_then(|t| picture_size(t))) {
+        let (w, h) = match f
+            .shown_size()
+            .or_else(|| thumb.and_then(|t| picture_size(t)))
+        {
             Some((w, h)) => fit(w, h, most_w, PICTURE_H),
             None => PICTURE_UNKNOWN,
         };
@@ -19191,7 +19194,10 @@ mod picture_tests {
         // An old one: its whole, once that's here.
         (f.width, f.height) = (0, 0);
         let whole = png("whole", 1920, 1080);
-        assert_eq!(viewer_size(&f, Some(&thumb), Some(&whole)), Some((1920, 1080)));
+        assert_eq!(
+            viewer_size(&f, Some(&thumb), Some(&whole)),
+            Some((1920, 1080))
+        );
         // Else its thumbnail: of a bigger picture at the thumbnail's most, its shape kept.
         let (w, h) = viewer_size(&f, Some(&thumb), None).unwrap();
         assert!(w >= 4000 && (w as f32 / h as f32 - 512.0 / 288.0).abs() < 0.01);

@@ -1628,8 +1628,14 @@ impl FileRef {
             name: s(v, "name"),
             mime: s(v, "mime"),
             size: v.get("size").and_then(Value::as_u64).unwrap_or(0),
-            width: v.get("width").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
-            height: v.get("height").and_then(Value::as_u64).map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
+            width: v
+                .get("width")
+                .and_then(Value::as_u64)
+                .map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
+            height: v
+                .get("height")
+                .and_then(Value::as_u64)
+                .map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
         }
     }
 
@@ -8895,9 +8901,12 @@ mod tests {
 
     #[test]
     fn a_pictures_size_comes_with_it() {
-        let f = FileRef::of(&json!({"file": "aa", "name": "a.png", "mime": "image/png", "size": 9, "width": 4000, "height": 3000}));
+        let f = FileRef::of(
+            &json!({"file": "aa", "name": "a.png", "mime": "image/png", "size": 9, "width": 4000, "height": 3000}),
+        );
         assert_eq!(f.shown_size(), Some((4000, 3000)));
-        let old = FileRef::of(&json!({"file": "aa", "name": "a.png", "mime": "image/png", "size": 9}));
+        let old =
+            FileRef::of(&json!({"file": "aa", "name": "a.png", "mime": "image/png", "size": 9}));
         assert_eq!(old.shown_size(), None);
     }
 
