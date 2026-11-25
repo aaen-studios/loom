@@ -14,7 +14,7 @@ The sidebar lists your agents in groups:
 
 Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
 
-When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads.
+When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads. The thread is only read: where you'd write, **Continue in your own chat** opens your chat with the agent, ready to write.
 
 ## Replying to a message
 
@@ -127,7 +127,7 @@ A routine runs out of sight: its prompt and the agent's answer stay out of the c
 
 A routine due while the agent is answering you waits until it's done, and until the messages you queued have gone. If the chat is still busy after 10 minutes, or the routine's next time comes first, that run is skipped.
 
-Each routine's **Runs**, on its page under **Routines**, say how every run ended (posted, nothing new, failed, or skipped and why) and what the agent posted or answered.
+Each routine's **History**, on its page under **Routines**, says how every run ended (posted, quiet, failed, or skipped and why) and what the agent posted or answered ([Settings](settings.md#routines)).
 
 ## A backup program
 

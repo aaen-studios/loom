@@ -10,6 +10,7 @@ mod autoscroll;
 mod core;
 #[cfg(target_os = "macos")]
 mod mac;
+mod meter;
 mod model;
 mod motion;
 mod panel;
