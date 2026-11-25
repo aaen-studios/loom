@@ -16,6 +16,12 @@ Your folders and hidden agents are kept on the server, so every device shows the
 
 When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads.
 
+## Back to the newest
+
+When you scroll up in a chat, a round button with a down arrow shows at the bottom of the chat, over the message box. Click it to go down to the newest message. If messages came while you were up there, its corner says how many.
+
+A chat you open with replies you haven't seen has a line over the first of them, "3 new". It stays until you leave the chat.
+
 ## Replying to a message
 
 Point at a message, yours or an agent's, and choose **Reply** by its corner, or right-click it and choose **Reply**. With the message box empty, ↑ replies to the newest message. On the iPhone, swipe right on a message, or long-press it and choose **Reply**.
