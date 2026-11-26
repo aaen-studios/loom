@@ -58,6 +58,8 @@ mod form_drafts;
 mod list_page;
 #[path = "routines.rs"]
 mod routines;
+#[path = "watch_view.rs"]
+mod watch_view;
 use crate::model::drafts::Page as DraftPage;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
@@ -2175,6 +2177,10 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Routines => {
                 let f = self.model.load_routines();
                 self.send(f);
+                // Its T3 servers, for "On an event".
+                for f in self.model.load_mcp() {
+                    self.send(f);
+                }
                 self.routine_open = None;
                 _ = self.model.load_routine_runs(None);
             }
@@ -2856,6 +2862,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.core.send(&f.to_string());
         }
         for f in self.model.t3_fetches() {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.watch_fetches() {
             self.core.send(&f.to_string());
         }
     }
@@ -12938,6 +12947,9 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             list = list.child(row);
         }
+        // What it follows outside loom, to take away (watch_view.rs).
+        let editing = self.model.editing.clone().unwrap_or_default();
+        let following = self.following_list(model::watch::Follower::Agent(&editing), cx);
         // The person's MCP servers, each on or off for this agent.
         let has: Vec<String> = self
             .model
@@ -13410,6 +13422,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
                     .child(rows(vec![activity, routines, usage]))
+                    .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
@@ -22392,6 +22405,7 @@ fn card_pill(
     let pill = div()
         .id(SharedString::from(format!("{key}-pill")))
         .h(px(control::PILL))
+        .min_w_0()
         .max_w(px(layout::PILL_TITLE + 110.0))
         .pl(px(4.0))
         .pr(px(7.0))
@@ -22427,7 +22441,9 @@ fn card_pill(
                 .bg(card_ink(p, &card)),
         )
         .on_click(move |_, _, cx| cx.open_url(&url));
+    // In a row (a watch's line, Following), it gives way, its title cut shorter.
     gpui_kit::base::HoverCard::new(key)
+        .min_w_0()
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
         .close_delay(Duration::from_millis(150))
@@ -26697,6 +26713,7 @@ mod row_tests {
             file: None,
             card: None,
             parent: None,
+            update: None,
         };
         let mut blocks = vec![block("text", text, None)];
         if let Some(c) = call {
@@ -27746,6 +27763,13 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .text_color(p.ink_3)
             .child(line)
     });
+    // A watch's line, quiet and left-aligned (watch_view.rs).
+    if let Some(line) = match &row {
+        Row::Message(m) => model::watch::line_of(m).map(|l| (m, l)),
+        _ => None,
+    } {
+        return watch_view::update_line(p, line.0, line.1, joined, column, time_line);
+    }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.
     if let Row::Message(m) = &row {

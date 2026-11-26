@@ -496,6 +496,10 @@ impl Loom {
             page = page
                 .child(self.field("When it can't pick", self.default_chips(&r, cx)))
                 .child(self.field("Corrections", self.corrections(&r, cx)));
+            // What it follows outside loom, to take away (watch_view.rs).
+            if let Some(list) = self.following_list(model::watch::Follower::Room(&r.id), cx) {
+                page = page.child(self.field("Following", list));
+            }
             if let Some(u) = self.model.open_room_usage().cloned() {
                 page = page.child(self.field("Usage", self.room_usage(&u)));
             }
