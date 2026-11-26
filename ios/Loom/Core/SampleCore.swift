@@ -706,6 +706,19 @@ enum Sample {
              "blocks": [["kind": "text", "text": "It did 👍 All green on main. <:knot:e_1> In code it stays as written: `:sob:`."]]],
             ["id": "msg_5", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187120000,
              "blocks": [["kind": "text", "text": "🎉🎉"]]],
+            // A watch's lines (PLAN.md, "Watching outside events"), and the reply of the
+            // agent the last one woke.
+            ["id": "msg_6", "conversation": "c_1", "role": "loom", "at": 1795187121000,
+             "blocks": [["kind": "update", "integration": "acta", "watch": "w_1", "board": "aaen-studios/loom", "board_name": "loom", "card": "LOO-206", "title": "Show agents' usage limits in the sidebar",
+                         "event": "moved", "to": "review", "said": "moved to In review", "by": "Ola", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "text": "LOO-206 moved to In review · Ola"]]],
+            ["id": "msg_7", "conversation": "c_1", "role": "loom", "at": 1795187122000,
+             "blocks": [["kind": "update", "integration": "acta", "watch": "w_1", "board": "aaen-studios/loom", "board_name": "loom", "card": "LOO-206", "title": "Show agents' usage limits in the sidebar",
+                         "event": "moved", "to": "done", "said": "moved to Done", "by": "Elliot", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "text": "LOO-206 moved to Done · Elliot"]]],
+            ["id": "msg_8", "conversation": "c_1", "role": "loom", "at": 1795187124000,
+             "blocks": [["kind": "update", "integration": "t3", "watch": "w_2", "server": "t3", "thread": "th_9", "title": "Fix the build", "run": "run_1",
+                         "event": "finished", "state": "completed", "said": "Thread finished", "text": "Thread finished · Fix the build"]]],
+            ["id": "msg_9", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_3", "at": 1795187128000,
+             "blocks": [["kind": "text", "text": "The build fix landed and LOO-206 shipped. Both are in the release notes."]]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,
@@ -713,19 +726,6 @@ enum Sample {
             ["id": "msg_11", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_10", "at": 1795100030000,
              "blocks": [["kind": "text", "text": "In Swift:\n\n```swift\nfunc size(_ bytes: Int) -> String {\n    switch bytes {\n    case ..<1000: return \"\\(bytes) B\"\n    case ..<1_000_000: return \"\\(bytes / 1000) KB\"\n    default: return String(format: \"%.1f MB\", Double(bytes) / 1e6)\n    }\n}\n```\n\nIt counts in thousands, as Finder does."]],
              "sources": [["url": "https://support.apple.com/en-us/102119", "title": "How iOS and macOS report storage capacity", "site": "support.apple.com"]]],
-            // A watch's lines (PLAN.md, "Watching outside events"), and the reply of the
-            // agent the second woke.
-            ["id": "msg_12", "conversation": "c_2", "role": "loom", "at": 1795100600000,
-             "blocks": [["kind": "update", "integration": "acta", "watch": "w_1", "board": "aaen-studios/loom", "board_name": "loom", "card": "LOO-206", "title": "Show agents' usage limits in the sidebar",
-                         "event": "moved", "to": "review", "said": "moved to In review", "by": "Ola", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "text": "LOO-206 moved to In review · Ola"]]],
-            ["id": "msg_13", "conversation": "c_2", "role": "loom", "at": 1795100660000,
-             "blocks": [["kind": "update", "integration": "acta", "watch": "w_1", "board": "aaen-studios/loom", "board_name": "loom", "card": "LOO-206", "title": "Show agents' usage limits in the sidebar",
-                         "event": "moved", "to": "done", "said": "moved to Done", "by": "Elliot", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "text": "LOO-206 moved to Done · Elliot"]]],
-            ["id": "msg_14", "conversation": "c_2", "role": "loom", "at": 1795100700000,
-             "blocks": [["kind": "update", "integration": "t3", "watch": "w_2", "server": "t3", "thread": "th_9", "title": "Fix the build", "run": "run_1",
-                         "event": "finished", "state": "completed", "said": "Thread finished", "text": "Thread finished · Fix the build"]]],
-            ["id": "msg_15", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_11", "at": 1795100730000,
-             "blocks": [["kind": "text", "text": "The build is green again, and LOO-206 shipped. I've noted both in today's log."]]],
         ],
         "c_3": [
             // A routine's prompt kept from before routines ran quietly: not shown.
