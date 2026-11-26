@@ -107,6 +107,13 @@ fn run(i: Instance) ! Error {
     try check(notified.len() == 1 and str_at(notified[0].copy(), "conversation") == some(conversation.copy()), "its one notification opens that chat")
     let listed = "{try app.cmd("q_2", "messages.list", Obj.new().s("conversation", conversation.copy()).done())}"
     try check(listed.contains("routine_off"), "the card is kept in the chat")
+    var replies = 0
+    if let Json.Array(ms) = at(at(try app.cmd("q_2b", "messages.list", Obj.new().s("conversation", conversation.copy()).done()), "value"), "messages") {
+        for m in ms {
+            if str_at(m, "role") == some(String("agent")) { replies += 1 }
+        }
+    }
+    try check(replies == 0, "and none of the failed runs' replies is: a run reaches the chat only through its posts")
 
     // Turn on: routine.put with on, from its next time, failures cleared, and the card says so.
     let since = app.frames.len()

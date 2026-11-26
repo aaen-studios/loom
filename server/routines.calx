@@ -576,8 +576,8 @@ pub fn cost(runs: i64, quiet: i64, tokens: i64, oldest: i64, now: i64) -> Json {
 }
 
 // Why a routine's time was skipped, as its runs keep it (PLAN.md, "Routines").
-// A run that finds its chat busy waits for the turn there to end, and is
-// skipped only when that takes too long, or when the routine runs again.
+// A run goes on beside a busy chat now, so the reasons about a busy chat are
+// only in runs kept from before, which still read them.
 pub const STILL_RUNNING: str = "It was still running from the time before."
 pub const MISSED: str = "It was missed while the instance was off."
 pub const BUSY_AT_NEXT: str = "Its chat was still busy at its next time."

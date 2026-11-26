@@ -232,7 +232,11 @@ fn run(i: Instance) ! Error {
     let (_, asked_lines) = try kept_lines(mut app, "q_19", money.copy())
     try check(asked_made.len() == 4 and asked_lines.len() == 4 and asked_lines[3].contains(#""mark":"fresh""#) and asked_lines[3].contains(whose), "with a line in the group chat at once, naming the member")
     let (_, afresh) = try say(mut app, money.copy(), "m_13", String("ROUTE:Ledger and now?\n/context"))
-    try check(str_at(afresh.copy(), "agent") == some(ledger.copy()) and reply_text(afresh).contains("which your person chose to start afresh"), "and its next turn there goes to a fresh session of its own")
+    try check(str_at(afresh.copy(), "agent") == some(ledger.copy()) and reply_text(afresh.copy()).contains("which your person chose to start afresh"), "and its next turn there goes to a fresh session of its own")
+    try check(reply_text(afresh).contains("[loom: You're answering in the group chat"), "which is told where it is and who's there")
+    let (_, after_that) = try say(mut app, money.copy(), "m_15", String("ROUTE:Ledger and then?\n/context"))
+    let then_told = reply_text(after_that)
+    try check(not then_told.contains("You're answering in the group chat") and then_told.contains("[loom: This message in the group chat is yours. What was said there since you last answered"), "once a session: the turn after is told only that the message is its, and what was said since")
     let (after_fresh, astray_now) = lines_in(app, money.copy())
     try check(after_fresh.len() == 4 and astray_now == 0, "with no second line, and nothing under its seat")
 

@@ -78,6 +78,21 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_STRICT_CONCURRENCY: complete
+  # The app driven as a person drives it, with taps and swipes, on sample frames, in its
+  # own scheme (ios/README.md, "Driving it").
+  LoomUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: LoomUITests
+    dependencies:
+      - target: Loom
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.aaenz.loom.uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
 schemes:
   Loom:
     build:
@@ -90,3 +105,12 @@ schemes:
       config: Debug
       targets:
         - LoomTests
+  LoomUI:
+    build:
+      targets:
+        Loom: all
+        LoomUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - LoomUITests
