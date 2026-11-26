@@ -191,6 +191,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 }
             case "agent.group", "agent.hide", "group.create", "group.update", "group.delete":
                 folders(f)
+            case "room.create":
+                makeRoom(f)
             case "agent.files":
                 let query = f["args"]["query"].text.lowercased()
                 let found = Sample.folder.filter { query.isEmpty || $0["path"].text.lowercased().contains(query) }
@@ -363,7 +365,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         }
         let part = { (kind: String, ids: [String]) -> JSON in ["kind": JSON(kind), "agents": JSON(ids)] }
         // The group chats first, Everyone at the top (core/sidebar.calx).
-        let rooms = conversations.filter { !$0["room"].isNull }.map { c -> JSON in ["id": c["id"], "name": c["room"]["name"], "color": c["room"]["color"], "everyone": JSON(c["room"]["everyone"].bool ?? false)] }
+        let all = conversations.filter { !$0["room"].isNull }.map { c -> JSON in ["id": c["id"], "name": c["room"]["name"], "color": c["room"]["color"], "everyone": JSON(c["room"]["everyone"].bool ?? false)] }
+        let rooms = all.filter { $0["everyone"].bool == true } + all.filter { $0["everyone"].bool != true }
         var out: [JSON] = rooms.isEmpty ? [] : [["kind": "rooms", "rooms": .array(rooms), "agents": []]]
         out += [part("waiting", asking), part("pinned", pinned), part("agents", loose)]
         for g in groups {
@@ -391,6 +394,30 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             return
         }
         tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": JSON("There's no message \(id.text).")]])
+    }
+
+    /// A group chat made, as the instance makes one (server/rooms.calx, `room_made`): its
+    /// name and members checked, kept as a conversation with no messages yet, told as
+    /// conversation.created, and given back.
+    private func makeRoom(_ f: JSON) {
+        let args = f["args"]
+        let name = args["name"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let members = args["members"].array.map(\.text)
+        let known = Set(agents.map { $0["id"].text })
+        func refuse(_ code: String, _ message: String) {
+            tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": JSON(code), "message": JSON(message)]])
+        }
+        if name.isEmpty { return refuse("bad_request", "A group chat needs a name.") }
+        if let stranger = members.first(where: { !known.contains($0) }) { return refuse("not_found", "There's no agent \(stranger).") }
+        if members.count < 2 { return refuse("bad_request", "A group chat has two members or more.") }
+        next += 1
+        let id = "c_s\(next)"
+        let c: JSON = ["id": JSON(id), "agent": "", "title": JSON(name), "at": JSON(Sample.now()),
+                       "room": ["name": JSON(name), "members": JSON(members), "color": JSON(args["color"].text.trimmingCharacters(in: .whitespaces)), "default": "", "corrections": []]]
+        conversations.insert(c, at: 0)
+        messages[id] = []
+        event("conversation.created", ["conversation": c])
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["conversation": c]])
     }
 
     /// The folder commands, as the instance answers them.
