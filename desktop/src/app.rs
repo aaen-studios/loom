@@ -38,11 +38,10 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
-#[path = "room_view.rs"]
-mod room_view;
-use room_view::RoomForm;
 #[path = "learned.rs"]
 mod learned;
+#[path = "room_view.rs"]
+mod room_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
@@ -380,9 +379,8 @@ pub struct Loom {
     /// and when a click outside last closed it.
     custom_color: bool,
     color_closed_at: Option<Instant>,
-    /// The group chats' panel: the one being made, its name field, and the open one's
-    /// name to put in that field when the panel next draws.
-    room_form: RoomForm,
+    /// The group chats' panel: its name field, and the open one's name to put in that
+    /// field when the panel next draws. The form itself is the model's.
     room_name_in: Entity<InputState>,
     room_name_fill: Option<String>,
     /// An agent's what-I'm-for line, on its edit panel.
@@ -1535,7 +1533,6 @@ ACTA_KEY=secret:ACTA_KEY",
             fresh_armed: false,
             custom_color: false,
             color_closed_at: None,
-            room_form: RoomForm::default(),
             room_name_in,
             room_name_fill: None,
             for_in,
@@ -3363,10 +3360,9 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
             Screen::Room => (
                 Ico::Users,
-                match self.model.room_open() {
-                    Some(r) if !self.room_form.making => r.name.clone(),
-                    _ => "New group chat".to_string(),
-                },
+                self.model
+                    .room_changing()
+                    .map_or_else(|| "New group chat".to_string(), |r| r.name.clone()),
             ),
             Screen::Tables => (Ico::Sheet, format!("{name}'s tables")),
             Screen::Aside => (
