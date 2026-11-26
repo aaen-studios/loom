@@ -1,0 +1,56 @@
+name: Calx
+description: Installs the Calx loom is pinned to in .calx-version (scripts/calx_pin.calx), from the cache when it's there.
+
+runs:
+  using: composite
+  steps:
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.calx
+        key: calx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version', '.github/actions/calx/install.*') }}
+
+    - if: steps.cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
+      shell: bash
+      run: sh "$GITHUB_ACTION_PATH/install.sh" .calx-version
+
+    - if: steps.cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
+      shell: pwsh
+      run: '& "$env:GITHUB_ACTION_PATH\install.ps1" .calx-version'
+
+    - if: runner.os != 'Windows'
+      shell: bash
+      run: echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+
+    - if: runner.os == 'Windows'
+      shell: pwsh
+      run: '"$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+
+    # Calx's object cache, so what didn't change since main's last run isn't compiled
+    # again. Saved from main only, a new one each run; a pull request reads main's newest.
+    - shell: bash
+      run: |
+        echo "CALX_CACHE=$RUNNER_TEMP/calx-cache" >> "$GITHUB_ENV"
+        echo "CALX_CACHE_MB=3000" >> "$GITHUB_ENV"
+
+    - if: github.ref == 'refs/heads/main'
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/calx-cache
+        key: calx-objects-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version') }}-${{ github.run_id }}
+        restore-keys: calx-objects-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version') }}-
+
+    - if: github.ref != 'refs/heads/main'
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}/calx-cache
+        key: calx-objects-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version') }}-${{ github.run_id }}
+        restore-keys: calx-objects-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.calx-version') }}-
+
+    # The Calx on PATH is the pinned one, from the cache too.
+    - shell: bash
+      run: |
+        want="$(sed -n 1p .calx-version | tr -d '\r')"
+        said="$(calx version)"
+        echo "$said"
+        case "$said" in *" $want "*) ;; *) echo "::error::loom is pinned to Calx $want, and this is $said"; exit 1 ;; esac

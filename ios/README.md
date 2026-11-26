@@ -21,7 +21,7 @@ The app icon is the one [`scripts/icons.calx`](../scripts/icons.calx) makes, [`d
 
 Emoji are drawn with [Twemoji](https://github.com/jdecked/twemoji), not the system's emoji font ([PLAN.md, "Emoji"](../PLAN.md#emoji)). The script puts each SVG in [`design/twemoji/svg`](../design/twemoji/svg) in `build/ios/Twemoji.xcassets` as an image set that keeps its vectors, named as its file is (`1f62d`), and the project takes it from there with [`design/twemoji/sequences.txt`](../design/twemoji/sequences.txt), which says which emoji each picture is. Settings credits Twemoji, under its CC-BY 4.0 licence.
 
-The core builds for iOS with Calx's iOS targets ([CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408), [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410)): nightly 202611231257 or newer.
+The core builds for iOS with Calx's iOS targets ([CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408), [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410)): nightly 202611231257 or newer, so the Calx loom is pinned to in [`.calx-version`](../.calx-version).
 
 A build without the core (`--sample`, or `xcodegen` run by hand) runs on [`SampleCore`](Loom/Core/SampleCore.swift): sample agents and chats, a reply that streams, and a question to answer, in the frames the core sends. SwiftUI previews use it too. With the core linked, `-sample` at launch runs on it as well.
 

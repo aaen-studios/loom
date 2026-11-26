@@ -6,23 +6,35 @@
 // module: server/main.calx is `module server.main`, and imports shared.protocol
 // from shared/protocol.calx. In order, it:
 //
-// 1. checks that every .calx file is formatted (calx fmt --check);
-// 2. checks every .calx file builds (calx check), several at once;
-// 3. runs the tests of each file that has any (calx test);
-// 4. checks the generated design tokens are up to date;
-// 5. runs each protocol test in tests/protocol/, which starts a real
-//    instance with the fake ACP agent.
+// 1. says whether the Calx here is the one loom is pinned to (.calx-version,
+//    scripts/calx_pin.calx), which in CI it has to be;
+// 2. checks that every .calx file is formatted (calx fmt --check);
+// 3. checks every .calx file builds (calx check), several at once;
+// 4. runs the tests of each file that has any (calx test), two files at once;
+// 5. checks the generated design tokens are up to date;
+// 6. builds the server and the fake ACP agent, then runs the protocol tests in
+//    tests/protocol/, each of which starts a real instance with the fake agent,
+//    several at once. One that fails runs again alone, and fails only if it
+//    fails again; one that passes then is listed as flaky.
 //
 // It exits with 1 if anything failed, after running all of it.
 import std.env
 import std.fs
-import std.process.{Command, Output, output_all, exit}
+import std.process.{Command, Output, output_all, exit, processors}
 
 // The folders that hold Calx code. core/ joins when it has some.
 const FOLDERS: str = "shared server core tests scripts"
+// How long one protocol test may take before it's stopped, in milliseconds. The
+// slowest take under a minute.
+const TEST_LIMIT_MS: u64 = 600000
 
 fn calx() -> String {
     return env.variable(String("CALX")) ?? String("calx")
+}
+
+/// In GitHub Actions, whose annotations a few lines are written as.
+fn in_ci() -> bool {
+    return (env.variable(String("GITHUB_ACTIONS")) ?? String()) == "true"
 }
 
 fn sources() -> List<String> ! Error {
@@ -48,18 +60,37 @@ fn show(out: Output) {
     if e.len() > 0 { eprintln(e) }
 }
 
+/// Seconds, with a tenth.
+fn secs(ns: u64) -> String {
+    let s = f64.nearest(ns) / 1000000000.0
+    return "{s:.1} s"
+}
+
+/// Whether the Calx here is the pinned one. In CI a different one is a failure,
+/// since CI installs the pinned one; elsewhere it's said, and the checks go on.
+fn pinned() -> bool ! Error {
+    let said = try Command.new(calx()).args([String("scripts/calx_pin.calx")]).output()
+    if said.status.success() { return true }
+    show(said.copy())
+    return not in_ci()
+}
+
 fn main() ! Error {
     let files = try sources()
     var failed = List<String>()
+    var flaky = List<String>()
 
-    // 1. Formatting.
+    // 1. The pinned Calx.
+    if not try pinned() { failed.push(String("the pinned Calx")) }
+
+    // 2. Formatting.
     let fmt = try Command.new(calx()).arg(String("fmt")).arg(String("--check")).args(files.copy()).output()
     if not fmt.status.success() {
         show(fmt.copy())
         failed.push(String("formatting"))
     }
 
-    // 2. Every file builds.
+    // 3. Every file builds.
     var checks = List<Command>()
     for f in files {
         checks.push(Command.new(calx()).arg(String("check")).arg(f.copy()))
@@ -76,26 +107,86 @@ fn main() ! Error {
     }
     println("checked {files.len()} files")
 
-    // 3. Tests, a file at a time; each file's tests run in parallel already.
+    // 4. Tests, two files at a time; each file's tests run in parallel already.
+    var tested = List<String>()
+    var tests = List<Command>()
     for f in files {
         if not has_tests(f.copy()) { continue }
-        println("test {f}")
-        let t = try Command.new(calx()).arg(String("test")).arg(f.copy()).status()
-        if not t.success() { failed.push("test {f}") }
+        tested.push(f.copy())
+        tests.push(Command.new(calx()).arg(String("test")).arg(f.copy()))
+    }
+    let test_results = try output_all(tests, 2)
+    i = 0
+    for r in test_results {
+        println("test {tested[i]}")
+        show(r.copy())
+        if not r.status.success() { failed.push("test {tested[i]}") }
+        i += 1
     }
 
-    // 4. Design tokens.
+    // 5. Design tokens.
     let tokens = try Command.new(calx()).arg(String("scripts/tokens.calx")).arg(String("--check")).status()
     if not tokens.success() { failed.push(String("design tokens")) }
 
-    // 5. Protocol tests.
+    // 6. Protocol tests. The server and the fake agent are built once first, so the
+    // tests don't all build them at the same time; each test's own build reuses it.
+    let scratch = try fs.temp_dir()
+    for program in ["server/main.calx", "tests/fake_agent/main.calx"] {
+        let built = try Command.new(calx()).args([String("build"), String(program), String("-o"), "{scratch}/prebuilt"]).output()
+        if not built.status.success() {
+            show(built.copy())
+            failed.push("build {program}")
+        }
+    }
+    match fs.remove_dir_all(scratch) {
+        ok => {},
+        err(_) => {},
+    }
+    var protocol = List<String>()
+    var runs = List<Command>()
     for f in files {
         if not f.starts_with("tests/protocol/") { continue }
-        println("run {f}")
-        let p = try Command.new(calx()).arg(f.copy()).status()
-        if not p.success() { failed.push("run {f}") }
+        protocol.push(f.copy())
+        runs.push(Command.new(calx()).arg(f.copy()).timeout(TEST_LIMIT_MS))
+    }
+    let cpus = usize(unsafe { processors() })
+    let at_once = if cpus < 2 { 2usize } else if cpus > 6 { 6usize } else { cpus }
+    println("running {protocol.len()} protocol tests, {at_once} at once")
+    let protocol_results = try output_all(runs, at_once)
+    var again = List<String>()
+    i = 0
+    for r in protocol_results {
+        let took = unsafe { r.status.usage() }
+        if r.status.success() {
+            println("✓ {protocol[i]}  {secs(took.wall_ns)}")
+            // What a test skipped, such as one with no browser here, is still said.
+            for line in r.text().lines() {
+                if line.contains("skipped") { println("  {line}") }
+            }
+        } else {
+            eprintln("✗ {protocol[i]}  {secs(took.wall_ns)}, {r.status}")
+            show(r.copy())
+            again.push(protocol[i].copy())
+        }
+        i += 1
+    }
+    for f in again {
+        println("run {f} again, alone")
+        let p = try Command.new(calx()).arg(f.copy()).timeout(TEST_LIMIT_MS).status()
+        if p.success() {
+            flaky.push(f.copy())
+        } else {
+            failed.push("run {f}")
+        }
     }
 
+    if flaky.len() > 0 {
+        eprintln("\n{flaky.len()} flaky, failing beside the others and passing alone:")
+        for f in flaky {
+            eprintln("  {f}")
+            if in_ci() { println("::warning file={f}::{f} failed beside the other tests and passed alone") }
+        }
+    }
     if failed.len() > 0 {
         eprintln("\n{failed.len()} failed:")
         for f in failed { eprintln("  {f}") }

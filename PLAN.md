@@ -804,7 +804,7 @@ To try another way from some point without losing the chat, branch it there: by 
 - **Protocol tests** drive a real instance through the WebSocket, as Phase 1's test script does, and grow into the main suite.
 - **End-to-end tests** run the real app against an instance with the fake ACP agent.
 - **Benchmarks** (`tests/bench/`) time the server and the core with the fake agent: a long reply, short turns, catching up, and what comes before an agent's first word (a program starting, a new session, Code Mode's scripts and `loom mcp` itself). The desktop app built with `--features perf` times its own frames, so a change that should make loom faster is measured before and after.
-- **CI** builds and tests the server, the library and the app on Linux, Windows and macOS on every push.
+- **CI** builds and tests the server, the library and the app on Linux, Windows and macOS. A pull request runs only the jobs its files can affect, and the Calx checks on macOS run on main; main runs everything on every push. Every job builds with the Calx pinned in `.calx-version`, the protocol tests run several at once, and the desktop builds keep the vendored GPUI between runs.
 
 ## Storage
 

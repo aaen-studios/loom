@@ -1,0 +1,164 @@
+// The Calx loom builds with, pinned in .calx-version: its version, then the
+// SHA-256 of its release for each system. CI, the release and the Docker image
+// install exactly that one (.github/actions/calx), from Calx's release of that
+// version, vVERSION, which Calx keeps for every build.
+//
+//     calx scripts/calx_pin.calx          says whether the Calx here is the pinned one
+//     calx scripts/calx_pin.calx bump     pins the Calx here: checks its release has it,
+//                                         and the toolchain it builds with, for every
+//                                         system, and writes .calx-version
+//
+// Run it from the repository's root. bump needs gh signed in.
+import std.bytes.{hex}
+import std.env.{args, variable}
+import std.fs
+import std.hash.{sha256}
+import std.json.{Json, parse}
+import std.process.{Command, exit}
+import std.tar.{Tar}
+import std.zip.{Zip}
+
+const PIN: str = ".calx-version"
+const UPSTREAM: str = "ellipog/calx"
+// Each system a Calx release is built for, and its archive's extension.
+const PLATFORMS: str = "linux-x64.tar.gz linux-arm64.tar.gz macos-arm64.tar.gz windows-x64.zip windows-arm64.zip"
+
+fn calx() -> String {
+    return variable(String("CALX")) ?? String("calx")
+}
+
+fn stop(why: String) -> never {
+    eprintln("calx_pin: {why}")
+    exit(1)
+}
+
+/// The version of the Calx on PATH, as `calx version` says it.
+fn installed() -> String {
+    let said = match Command.new(calx()).arg(String("version")).read() {
+        ok(t) => t,
+        err(e) => stop("can't run calx version: {e}"),
+    }
+    let words = said.split_whitespace()
+    if words.len() < 2 { stop("calx version said {said}") }
+    return words[1].copy()
+}
+
+/// The pinned version, the first line of .calx-version.
+fn pinned() -> String {
+    let text = match fs.read_text(String(PIN)) {
+        ok(t) => t ?? String(),
+        err(e) => stop("can't read {PIN}: {e}"),
+    }
+    for line in text.lines() {
+        return line.trim().copy()
+    }
+    return String()
+}
+
+fn sha_of(bytes: List<u8>) -> String {
+    return hex(sha256(bytes))
+}
+
+fn gh(a: List<String>) -> String ! Error {
+    let out = try Command.new(String("gh")).args(a.copy()).output()
+    if not out.status.success() { fail "gh {a.join(" ")}: {out.error_text().trim()}" }
+    return out.text()
+}
+
+/// Downloads `name` from the release `tag` of `repo` into `dir`. Whether it was there.
+fn download(repo: str, tag: String, name: String, dir: String) -> bool {
+    let out = match Command.new(String("gh")).args([String("release"), String("download"), tag.copy(), String("-R"), String(repo), String("-p"), name.copy(), String("-D"), dir.copy(), String("--clobber")]).output() {
+        ok(o) => o,
+        err(_) => return false,
+    }
+    return out.status.success()
+}
+
+/// The first two lines of the archive's calx/toolchain.txt: the toolchain's file and SHA-256.
+fn toolchain_of(file: String, bytes: own List<u8>) -> (String, String) ! Error {
+    let text = if file.ends_with(".zip") {
+        let z = try Zip.open(bytes)
+        String.from_utf8(try z.read_named(String("calx/toolchain.txt"))) ?? String()
+    } else {
+        let t = try Tar.open(bytes)
+        String.from_utf8(try t.read_named(String("calx/toolchain.txt"))) ?? String()
+    }
+    let lines = text.lines()
+    if lines.len() < 2 { fail "{file} has no toolchain.txt" }
+    return (lines[0].trim().copy(), lines[1].trim().copy())
+}
+
+fn check() {
+    let want = pinned()
+    let have = installed()
+    if want == have {
+        println("Calx {have}, as loom is pinned to")
+        return
+    }
+    eprintln("loom is pinned to Calx {want} ({PIN}), which CI builds with, and Calx {have} is installed here.")
+    eprintln("To build with the pinned one:  calx update --to {want}")
+    eprintln("To pin this one:               calx scripts/calx_pin.calx bump")
+    exit(1)
+}
+
+fn bump() ! Error {
+    let version = installed()
+    let tag = "v{version}"
+    let dir = try fs.temp_dir()
+    println("pinning Calx {version}")
+
+    // What Calx's release of the version holds, with each file's SHA-256 as GitHub has it.
+    let seen = try gh([String("release"), String("view"), tag.copy(), String("-R"), String(UPSTREAM), String("--json"), String("assets")])
+    var digests = Map<String, String>()
+    if let Json.Array(assets) = (try parse(seen)).get(String("assets")) ?? Json.Null {
+        for a in assets {
+            if let name = (a.get(String("name")) ?? Json.Null).as_str() {
+                let digest = (a.get(String("digest")) ?? Json.Null).as_str() ?? ""
+                digests.insert(name.copy(), digest.trim_prefix("sha256:"))
+            }
+        }
+    }
+
+    var pin = "{version}\n"
+    var toolchains = Map<String, String>()
+    for platform in PLATFORMS.split(" ") {
+        let file = "calx-{version}-{platform}"
+        let path = "{dir}/{file}"
+        if not (download(UPSTREAM, tag.copy(), file.copy(), dir.copy()) and download(UPSTREAM, tag.copy(), "{file}.sha256", dir.copy())) {
+            fail "{UPSTREAM} has no {file} in its {tag} release"
+        }
+        let bytes = try fs.read(path.copy())
+        let got = sha_of(bytes.copy())
+        let said = (try fs.read_text("{path}.sha256") ?? String()).split_whitespace()
+        if said.len() == 0 or said[0] != got { fail "{file} has SHA-256 {got}, not what its .sha256 says" }
+        pin = "{pin}{got}  {file}\n"
+        let (tc_file, tc_sum) = try toolchain_of(file.copy(), bytes)
+        toolchains.insert(tc_file.copy(), tc_sum.copy())
+        println("  {file}  {got}")
+    }
+    // Each toolchain the archives name has to be in the release too, with that SHA-256.
+    for (tc_file, tc_sum) in toolchains {
+        let has = if let d = digests.find(tc_file) { d.copy() } else { fail "{UPSTREAM}'s {tag} release has no {tc_file}" }
+        if has != "" and has != tc_sum { fail "{tc_file} in {tag} has SHA-256 {has}, not the {tc_sum} the archives name" }
+        println("  {tc_file}  in {tag}")
+    }
+    try fs.write_text(String(PIN), pin)
+    println("wrote {PIN}: loom builds with Calx {version}")
+    match fs.remove_dir_all(dir) {
+        ok => {},
+        err(_) => {},
+    }
+}
+
+fn main() ! Error {
+    let a = args()
+    if a.len() == 0 or a[0] == "check" {
+        check()
+        return
+    }
+    if a[0] == "bump" {
+        try bump()
+        return
+    }
+    stop("usage: calx scripts/calx_pin.calx [check | bump]")
+}

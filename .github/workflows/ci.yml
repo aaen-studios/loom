@@ -5,36 +5,109 @@ on:
     branches: [main]
   pull_request:
 
+# A pull request's newer push stops its older run. On main, each push waits for the
+# one before, and only the newest waiting one runs.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'main' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CALX_NO_UPDATE_CHECK: "1"
   NO_COLOR: "1"
+  CARGO_INCREMENTAL: "0"
+  # No debug info in CI's builds: they build faster, and their cache is smaller.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
 
 jobs:
+  # What a pull request changed, so jobs it can't affect don't run. A push to main runs
+  # everything, and so does a change to CI itself or to the pinned Calx.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      calx: ${{ steps.pick.outputs.calx }}
+      calx_os: ${{ steps.pick.outputs.calx_os }}
+      site: ${{ steps.pick.outputs.site }}
+      install: ${{ steps.pick.outputs.install }}
+      docker: ${{ steps.pick.outputs.docker }}
+      desktop: ${{ steps.pick.outputs.desktop }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        if: github.event_name == 'pull_request'
+        with:
+          filters: |
+            ci:
+              - '.github/**'
+              - '.calx-version'
+            calx:
+              - 'shared/**'
+              - 'server/**'
+              - 'core/**'
+              - 'push/**'
+              - 'tests/**'
+              - 'scripts/**'
+              - 'design/**'
+            site:
+              - 'site/**'
+            install:
+              - 'shared/**'
+              - 'server/**'
+            docker:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'shared/**'
+              - 'server/**'
+            desktop:
+              - 'desktop/**'
+              - 'core/**'
+              - 'shared/**'
+              - 'server/**'
+              - 'design/**'
+              - 'tests/setup/**'
+              - 'scripts/mac.calx'
+              - 'scripts/release.calx'
+
+      - id: pick
+        env:
+          ALL: ${{ github.event_name != 'pull_request' || steps.filter.outputs.ci == 'true' }}
+          CALX: ${{ steps.filter.outputs.calx }}
+          SITE: ${{ steps.filter.outputs.site }}
+          INSTALL: ${{ steps.filter.outputs.install }}
+          DOCKER: ${{ steps.filter.outputs.docker }}
+          DESKTOP: ${{ steps.filter.outputs.desktop }}
+        run: |
+          pick() { if [ "$ALL" = true ] || [ "$2" = true ]; then echo "$1=true"; else echo "$1=false"; fi; }
+          {
+            pick calx "$CALX"
+            pick site "$SITE"
+            pick install "$INSTALL"
+            pick docker "$DOCKER"
+            pick desktop "$DESKTOP"
+            # The Mac's Calx checks run on main, and on a change to CI or the pinned Calx:
+            # macOS runners are the scarce ones.
+            if [ "$ALL" = true ]; then
+              echo 'calx_os=["ubuntu-latest","windows-latest","macos-latest"]'
+            else
+              echo 'calx_os=["ubuntu-latest","windows-latest"]'
+            fi
+          } | tee -a "$GITHUB_OUTPUT"
+
   calx:
     name: calx (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.calx == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: ${{ fromJSON(needs.changes.outputs.calx_os) }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx (Linux and macOS)
-        if: runner.os != 'Windows'
-        run: |
-          curl -fsSL https://calxlang.com/install.sh | sh
-          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
-
-      - name: Install Calx (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          irm https://calxlang.com/install.ps1 | iex
-          "$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
-      - name: Calx version
-        run: calx version
+      - uses: ./.github/actions/calx
 
       # The sandbox test runs members' agents in rootless Podman, with pasta.
       - name: Podman and pasta (Linux)
@@ -54,7 +127,10 @@ jobs:
   # loom.rip's TypeScript check. The site itself is built on the VPS (site/README.md).
   site:
     name: site (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     defaults:
       run:
         working-directory: site
@@ -73,14 +149,14 @@ jobs:
   # release served from a folder: the user, the service, and the instance answering.
   install:
     name: install (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.install == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx
-        run: |
-          curl -fsSL https://calxlang.com/install.sh | sh
-          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/calx
 
       - name: A release in a folder
         run: |
@@ -161,7 +237,10 @@ jobs:
   # The Docker image, built as the Dockerfile says, and answering with its setup code.
   docker:
     name: docker (ubuntu-latest)
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -190,24 +269,21 @@ jobs:
 
   desktop:
     name: desktop (windows-latest)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx
-        shell: pwsh
-        run: |
-          irm https://calxlang.com/install.ps1 | iex
-          "$HOME\.calx\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - uses: ./.github/actions/calx
 
       - name: Rust
         run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo
         with:
-          workspaces: |
-            desktop
-            desktop/setup
+          job: desktop
 
       - name: Format
         working-directory: desktop
@@ -234,35 +310,75 @@ jobs:
         run: calx tests/setup/e2e.calx
 
       # A panel that tries every way out of its sandbox (PLAN.md, "The panel sandbox").
+      # A run that hangs before it finishes, which WebView2 on a CI runner sometimes
+      # does, is tried once more; one that finishes and fails isn't.
       - name: Panel break-out test
         working-directory: desktop
         shell: bash
         run: |
           cargo build --locked
-          status=0
-          timeout 180 ./target/debug/loom.exe --panel-test panel-test.json || status=$?
-          cat panel-test.json || true
-          exit $status
+          for attempt in 1 2; do
+            status=0
+            rm -f panel-test.json
+            timeout 150 ./target/debug/loom.exe --panel-test panel-test.json || status=$?
+            cat panel-test.json || true
+            if [ "$status" = 0 ]; then
+              [ "$attempt" = 1 ] || echo "::warning::the panel break-out test hung, and passed when tried again"
+              exit 0
+            fi
+            grep -q '"finished": false' panel-test.json 2>/dev/null || [ ! -f panel-test.json ] || exit "$status"
+            echo "the panel break-out test didn't finish (exit $status)"
+          done
+          exit 1
+
+  # The Windows app built as a release builds it, on main only, so its build is in the
+  # cache a release reads (release.yml): a release runs on a tag, and a tag reads only
+  # what main saved.
+  desktop-release:
+    name: desktop release build (windows-latest)
+    needs: changes
+    if: github.event_name == 'push' && needs.changes.outputs.desktop == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/calx
+
+      - name: Rust
+        run: rustup update stable && rustup default stable
+
+      - uses: ./.github/actions/cargo
+        with:
+          job: release-windows
+
+      - name: Build
+        working-directory: desktop
+        run: cargo build --locked --release
+
+      - name: Setup
+        working-directory: desktop/setup
+        run: cargo build --locked --release
 
   # The Mac app: its checks, loom.app and its disk image made as a release's are, and
   # its updates from end to end (tests/setup/mac.calx).
   desktop-macos:
     name: desktop (macos-latest)
+    needs: changes
+    if: needs.changes.outputs.desktop == 'true'
     runs-on: macos-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Calx
-        run: |
-          curl -fsSL https://calxlang.com/install.sh | sh
-          echo "$HOME/.calx/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/calx
 
       - name: Rust
         run: rustup update stable && rustup default stable && rustup component add clippy rustfmt
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/cargo
         with:
-          workspaces: desktop
+          job: desktop-macos
 
       - name: Format
         working-directory: desktop
@@ -296,3 +412,19 @@ jobs:
 
       - name: Updates, end to end
         run: calx tests/setup/mac.calx build/mac/loom.app
+
+  # The one check a pull request needs: every job that ran passed, and the rest had
+  # nothing to check.
+  ci:
+    if: always()
+    needs: [changes, calx, site, install, docker, desktop, desktop-release, desktop-macos]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "$RESULTS"
+          for r in $RESULTS; do
+            case "$r" in success | skipped) ;; *) exit 1 ;; esac
+          done

@@ -1,0 +1,97 @@
+// How long CI takes: the last runs of the ci workflow, from when each was queued to
+// when it finished, at the middle and the 95th percentile, for pull requests and for
+// main, and each job's wait for a runner and its own time, the same way.
+//
+//     calx scripts/ci_times.calx          the last 30 runs
+//     calx scripts/ci_times.calx 100      the last 100
+//
+// It reads them with gh, which has to be signed in.
+import std.env.{args}
+import std.json.{Json, parse}
+import std.process.{Command}
+
+fn text(v: Json, key: str) -> String {
+    if let s = (v.get(String(key)) ?? Json.Null).as_str() {
+        return s.copy()
+    }
+    return String()
+}
+
+/// Seconds since the start of 2000 of a stamp like 2026-11-25T22:26:54Z, or -1.
+fn seconds(stamp: String) -> i64 {
+    if stamp.len() < 19 or stamp.starts_with("0001") { return -1 }
+    let y = i64.parse(stamp[0..4]) ?? 0
+    let mo = i64.parse(stamp[5..7]) ?? 0
+    let d = i64.parse(stamp[8..10]) ?? 0
+    let h = i64.parse(stamp[11..13]) ?? 0
+    let mi = i64.parse(stamp[14..16]) ?? 0
+    let s = i64.parse(stamp[17..19]) ?? 0
+    // Days from 2000-03-01, by the usual shift of the year to start in March.
+    let yy = if mo <= 2 { y - 2001 } else { y - 2000 }
+    let mm = if mo <= 2 { mo + 9 } else { mo - 3 }
+    let days = yy * 365 + yy / 4 - yy / 100 + yy / 400 + (153 * mm + 2) / 5 + d - 1
+    return ((days * 24 + h) * 60 + mi) * 60 + s
+}
+
+fn minutes(s: i64) -> String {
+    let m = f64.nearest(s) / 60.0
+    return "{m:.1}"
+}
+
+/// The middle and 95th percentile of `xs`, in minutes, with how many there are.
+fn spread(xs: List<i64>) -> String {
+    if xs.len() == 0 { return String("none") }
+    var sorted = xs.copy()
+    sorted.sort()
+    let mid = sorted[sorted.len() / 2]
+    let p95 = sorted[(sorted.len() * 95 + 99) / 100 - 1]
+    return "p50 {minutes(mid)} min, p95 {minutes(p95)} min, of {sorted.len()}"
+}
+
+fn add(m: mut Map<String, List<i64>>, key: String, x: i64) {
+    if m.contains(key) {
+        m[key].push(x)
+    } else {
+        m.insert(key.copy(), [x])
+    }
+}
+
+fn main() ! Error {
+    let a = args()
+    let limit = if a.len() > 0 { a[0].copy() } else { String("30") }
+    let listed = try Command.new(String("gh")).args([String("run"), String("list"), String("--workflow"), String("ci"), String("--limit"), limit, String("--json"), String("databaseId,status,event,createdAt,updatedAt")]).read()
+    var runs = Map<String, List<i64>>()
+    var waits = Map<String, List<i64>>()
+    var takes = Map<String, List<i64>>()
+    var names: List<String> = []
+    if let Json.Array(all) = try parse(listed) {
+        for run in all {
+            if text(run, "status") != "completed" { continue }
+            let event = text(run, "event")
+            let created = seconds(text(run, "createdAt"))
+            add(mut runs, event.copy(), seconds(text(run, "updatedAt")) - created)
+            let id = "{(run.get(String("databaseId")) ?? Json.Null).as_i64() ?? 0}"
+            let seen = try Command.new(String("gh")).args([String("run"), String("view"), id, String("--json"), String("jobs")]).read()
+            if let Json.Array(jobs) = (try parse(seen)).get(String("jobs")) ?? Json.Null {
+                for job in jobs {
+                    let started = seconds(text(job, "startedAt"))
+                    let completed = seconds(text(job, "completedAt"))
+                    if started < 0 or completed < started or text(job, "conclusion") == "skipped" { continue }
+                    let name = text(job, "name")
+                    if not names.contains(name) { names.push(name.copy()) }
+                    add(mut waits, name.copy(), started - created)
+                    add(mut takes, name.copy(), completed - started)
+                }
+            }
+        }
+    }
+    for (event, xs) in runs {
+        println("{event}: {spread(xs.copy())}, queued to finished")
+    }
+    names.sort()
+    for name in names {
+        let w = if let x = waits.find(name) { x.copy() } else { List<i64>() }
+        let t = if let x = takes.find(name) { x.copy() } else { List<i64>() }
+        println("  {name}: waits {spread(w)}; runs {spread(t)}")
+    }
+}
