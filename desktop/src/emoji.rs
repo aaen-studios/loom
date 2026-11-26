@@ -1295,13 +1295,15 @@ mod tests {
 
     #[test]
     fn the_persons_own_are_drawn_once_fetched() {
-        let mut e = Emojis::default();
-        e.own = vec![Custom {
-            id: "e_3".into(),
-            name: "party_cat".into(),
-            file: "ab".into(),
-            animated: false,
-        }];
+        let mut e = Emojis {
+            own: vec![Custom {
+                id: "e_3".into(),
+                name: "party_cat".into(),
+                file: "ab".into(),
+                animated: false,
+            }],
+            ..Default::default()
+        };
         sync_own(&e);
         // Not fetched: it stays its token, and is wanted.
         assert_eq!(pictured("hi <:party_cat:e_3>", 14.0), "hi <:party_cat:e_3>");
