@@ -426,8 +426,9 @@ private struct SelectableText: UIViewRepresentable {
         var parent: SelectableText
         /// What it shows, piece by piece, to copy and quote from.
         var shown: [Emoji.Piece] = []
-        /// What it was drawn from, so it's drawn again only when that changes.
-        var drawn: (text: String, paths: [String: String])?
+        /// What it was drawn from, so it's drawn again only when that changes: the words,
+        /// the pictures of the person's own, and the text size.
+        var drawn: (text: String, paths: [String: String], size: DynamicTypeSize)?
         init(_ parent: SelectableText) { self.parent = parent }
 
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
@@ -467,9 +468,10 @@ private struct SelectableText: UIViewRepresentable {
     func updateUIView(_ v: Words, context: Context) {
         let c = context.coordinator
         c.parent = self
-        guard c.drawn?.text != text || c.drawn?.paths != paths else { return }
+        let size = context.environment.dynamicTypeSize
+        guard c.drawn?.text != text || c.drawn?.paths != paths || c.drawn?.size != size else { return }
         let first = c.drawn == nil
-        c.drawn = (text, paths)
+        c.drawn = (text, paths, size)
         let font = UIFont.preferredFont(forTextStyle: .body)
         let words: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(P.ink)]
         let side = (font.pointSize * Emoji.inText).rounded()
@@ -498,7 +500,12 @@ private struct SelectableText: UIViewRepresentable {
                 c.shown.append(p)
             }
         }
+        // Drawn again, as a picture came or the text size changed, it keeps what the person
+        // selected while it's still the same length.
+        let kept = v.selectedRange
+        let same = v.textStorage.length == made.length
         v.attributedText = made
+        if !first && same && kept.length > 0 { v.selectedRange = kept }
         if first && selectAll {
             DispatchQueue.main.async {
                 v.becomeFirstResponder()

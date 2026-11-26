@@ -188,12 +188,33 @@ pub fn as_names(text: &str) -> String {
     out
 }
 
+/// `text` with each of the person's own outside code as `:name:`; in code it stays as
+/// written, as the chat shows and copies it.
+fn names_outside_code(text: &str) -> String {
+    let code = code_ranges(text);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for t in tokens(text) {
+        if code
+            .iter()
+            .any(|c| c.start <= t.range.start && t.range.start < c.end)
+        {
+            continue;
+        }
+        out.push_str(&text[at..t.range.start]);
+        out.push_str(&format!(":{}:", t.name));
+        at = t.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// What copying `selected` from the composer gives (LOO-347): its words with each of the
-/// person's own as `:name:`, as copying from the chat gives them, and the words as they
-/// are when that's different, kept with them, so a paste into the composer takes the
-/// emoji back (`pasted`). A built-in emoji is its character in both.
+/// person's own outside code as `:name:`, as copying from the chat gives them, and the
+/// words as they are when that's different, kept with them, so a paste into the composer
+/// takes the emoji back (`pasted`). A built-in emoji is its character in both.
 pub fn copied(selected: &str) -> (String, Option<String>) {
-    let shown = as_names(selected);
+    let shown = names_outside_code(selected);
     let kept = (shown != selected).then(|| selected.to_string());
     (shown, kept)
 }
@@ -202,7 +223,8 @@ pub fn copied(selected: &str) -> (String, Option<String>) {
 /// emoji tokens and all, when `kept` is what `copied` kept with them; nothing otherwise,
 /// for the paste to go on as it does.
 pub fn pasted(text: &str, kept: Option<&str>) -> Option<String> {
-    kept.filter(|k| as_names(k) == text).map(String::from)
+    kept.filter(|k| names_outside_code(k) == text)
+        .map(String::from)
 }
 
 /// Whether a message's words are only one to three emoji, built-in or the person's
@@ -388,6 +410,25 @@ pub fn sync_own(e: &Emojis) {
 /// The pictures the chat wanted and doesn't have, to fetch.
 pub fn wanted() -> Vec<String> {
     WANTED.with(|w| std::mem::take(&mut *w.borrow_mut()))
+}
+
+/// A message's words as copying them from the chat gives them (LOO-347): each emoji the
+/// chat draws as what it copies as (`drawn`), and the rest as written, code and the
+/// person's own it has no picture of yet too.
+pub fn as_copied(text: &str) -> String {
+    let marks = drawn(text, 1, |id| {
+        let (name, _, path) = OWN.with(|o| o.borrow().get(id).cloned())?;
+        path.map(|_| (name, String::new()))
+    });
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for d in marks {
+        out.push_str(&text[at..d.range.start]);
+        out.push_str(&d.copies);
+        at = d.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
 }
 
 /// One of the person's own, as the chat knows it: its name, whether it moves, and its
@@ -1221,6 +1262,15 @@ mod tests {
         // Anything else pastes as it is: what was kept is for other words.
         assert_eq!(pasted("other words", kept.as_deref()), None);
         assert_eq!(pasted(&text, None), None);
+        // In code a token is copied as written, as the chat copies it.
+        let code = "see `<:party_cat:e_3>` and <:party_cat:e_3>";
+        let (text, kept) = copied(code);
+        assert_eq!(text, "see `<:party_cat:e_3>` and :party_cat:");
+        assert_eq!(pasted(&text, kept.as_deref()).as_deref(), Some(code));
+        assert_eq!(
+            copied("`<:party_cat:e_3>`"),
+            ("`<:party_cat:e_3>`".into(), None)
+        );
     }
 
     #[test]
