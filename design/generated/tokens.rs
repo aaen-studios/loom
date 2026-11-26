@@ -96,6 +96,7 @@ pub mod control {
     pub const GRIP: f32 = 14.0;
     pub const ROW_TALL: f32 = 68.0;
     pub const PILL: f32 = 22.0;
+    pub const TILE: f32 = 76.0;
 }
 
 pub mod phone_size {

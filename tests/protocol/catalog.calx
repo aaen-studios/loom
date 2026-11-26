@@ -132,7 +132,7 @@ fn run(i: Instance, fake: String) ! Error {
     try check(str_at(github.copy(), "sign_in") == some(String("secret")) and "{at(github.copy(), "secrets")}" == #"[{"name":"GITHUB_TOKEN","label":"Personal access token","placeholder":"github_pat_…","have":false}]"# and str_at(github.copy(), "runs") == some(String("remote")), "GitHub takes a personal access token as a secret, and runs remotely")
     try check(github_tools.contains(#"{"name":"get_me","kind":"read"}"#) and github_tools.contains(#"{"name":"merge_pull_request","kind":"change"}"#) and bool_at(github.copy(), "tools_checked") == some(true), "its tools are marked as reading or changing")
     let t3 = entry_in(listed.copy(), "t3")
-    try check("{at(t3.copy(), "fields")}" == #"[{"name":"address","label":"Address","placeholder":"https://pc.tail1234.ts.net"}]"# and str_at(t3.copy(), "note") != none and str_at(t3.copy(), "sign_in") == some(String("oauth")) and bool_at(t3, "connected") == some(false), "T3 Code asks for its address, signs in, and isn't connected yet")
+    try check("{at(t3.copy(), "fields")}" == #"[{"name":"address","label":"Address","placeholder":"https://host.tailnet.ts.net"}]"# and str_at(t3.copy(), "note") != none and str_at(t3.copy(), "sign_in") == some(String("oauth")) and bool_at(t3, "connected") == some(false), "T3 Code asks for its address, signs in, and isn't connected yet")
     let playwright = entry_in(listed, "playwright")
     try check(str_at(playwright.copy(), "runs") == some(String("instance")) and str_at(playwright, "command") == some(String("npx")), "Playwright runs on the instance")
 

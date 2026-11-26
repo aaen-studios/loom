@@ -57,6 +57,7 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                     "Proposals",
                     Screen::Proposals,
                 ),
+                ("pop-spools", Ico::Spool, "Spools", Screen::Spools),
                 ("pop-mcp", Ico::Plug, "MCP servers", Screen::Mcp),
                 ("pop-secrets", Ico::KeyRound, "Secrets", Screen::Secrets),
                 ("pop-plugins", Ico::Puzzle, "Plugins", Screen::Plugins),
@@ -77,15 +78,18 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
 }
 
 /// How a page lays out in the popup (PLAN.md, "The settings popup"): the pages of things
-/// to pick from as a list beside the one picked, Emoji's tiles across the whole width,
-/// and every other page as a column of rows.
+/// to pick from as a list beside the one picked, Emoji's tiles and Spools' Find across
+/// the whole width, and every other page as a column of rows.
 pub(super) fn page_kind(screen: Screen) -> crate::model::popup::Kind {
     use crate::model::popup::Kind;
     match screen {
-        Screen::Mcp | Screen::Programs | Screen::Skills | Screen::Proposals | Screen::Routines => {
-            Kind::List
-        }
-        Screen::Emoji => Kind::Grid,
+        Screen::Mcp
+        | Screen::Programs
+        | Screen::Skills
+        | Screen::Proposals
+        | Screen::Routines
+        | Screen::Installed => Kind::List,
+        Screen::Emoji | Screen::Spools => Kind::Grid,
         _ => Kind::Column,
     }
 }
@@ -111,6 +115,9 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Skills => "skills how to",
         Screen::Proposals => "proposals proposed suggestions suggested keep drop notes skills learn teach recorded",
         Screen::Mcp => "mcp servers tools connectors",
+        Screen::Spools => {
+            "spools integrations catalog connect installed mcp servers acta t3 github notion linear vercel cloudflare playwright home assistant"
+        }
         Screen::Secrets => "secrets keys passwords sites bank sealed",
         Screen::Plugins => "plugins panels",
         Screen::Emoji => "emoji emojis custom upload skin tone animated gif emoticons smiley twemoji",
@@ -570,9 +577,11 @@ mod tests {
             kinds(Kind::List),
             ["Brains", "Skills", "Proposals", "MCP servers", "Routines"]
         );
-        assert_eq!(kinds(Kind::Grid), ["Emoji"]);
+        assert_eq!(kinds(Kind::Grid), ["Emoji", "Spools"]);
         assert!(kinds(Kind::Column).contains(&"Appearance"));
         assert_eq!(page_kind(Screen::Server), Kind::Column);
+        // Spools' Installed tab is a list.
+        assert_eq!(page_kind(Screen::Installed), Kind::List);
     }
 
     #[test]
@@ -591,6 +600,8 @@ mod tests {
         assert!(screens("webhook deny") == vec![Screen::Rules]);
         assert!(screens("Group chats") == vec![Screen::Defaults]);
         assert!(screens("router model") == vec![Screen::Defaults]);
+        assert!(screens("integrations") == vec![Screen::Spools]);
+        assert!(screens("github") == vec![Screen::Spools]);
         assert!(screens("zzz").is_empty());
     }
 }

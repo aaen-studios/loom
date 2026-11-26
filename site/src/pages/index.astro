@@ -33,6 +33,22 @@ const STARTERS = ['You', 'An agent', 'Routine', 'Webhook', 'Script'];
 // Each server's yarn is drawn from its name, as the app draws it.
 const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
 
+// Spools' Find tab as the app draws it (desktop/src/spools.rs): Acta and T3 Code as wide cards,
+// each with loom's knot tied to its logo, the category pills, and the rest as tiles four to a row,
+// in the catalog's own words, each with its badge's colour (server/catalog.calx, shared/badge.calx).
+// When the panel comes into view, T3 Code connects: its tie pulls taut and Installed counts it.
+const featured = [
+	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', color: 'mint', connected: true },
+	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', color: 'mint', connected: false },
+];
+const PILLS = ['All', 'Work', 'Code', 'Mail & calendar', 'Files', 'Home', 'Fun'];
+const tiles = [
+	{ name: 'GitHub', color: 'pink' },
+	{ name: 'Notion', color: 'pink' },
+	{ name: 'Linear', color: 'mint' },
+	{ name: 'Vercel', color: 'sky' },
+];
+
 // Each with an agent's thread, which works while the item is hovered.
 const more = [
 	{ title: 'Routines and webhooks', color: 'periwinkle', mood: 'thinking', text: 'An agent works on a schedule, or when a webhook comes in, out of the chat, and posts there only when it has something to say.' },
@@ -259,6 +275,71 @@ const faq = {
 					}
 				</div>
 				<Command text={INSTALL} class="server-cmd" />
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-spools">
+		<div class="wrap split flip">
+			<div class="copy" data-reveal>
+				<h2 id="f-spools">Spools connect agents to your apps</h2>
+				<p>
+					Acta, T3 Code, GitHub, Notion, Linear and more, each connected from its card: fill in what it needs, sign in, and pick the agents that get it. Every tool says whether it reads or changes something, and any other MCP server can be added by hand.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="page spools" aria-label="Spools in loom's settings">
+					<div class="spools-head">
+						<span class="page-title">Spools</span>
+						<span class="tabs">
+							<span class="tab on">Find</span>
+							<span class="tab" data-installed="1">Installed · 1</span>
+						</span>
+					</div>
+					<div class="find">
+						<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+						<span>Search Spools</span>
+					</div>
+					<div class="spool-cards">
+						{
+							featured.map((e) => (
+								<div class="spool-card" data-spool={e.id} style={`--tint: var(--thread-${e.color})`}>
+									<div class="tie">
+										<span class="knot-box">
+											<Knot size={20} />
+										</span>
+										<svg data-tie data-color={e.color} data-taut={e.connected ? '' : undefined} height="28" aria-hidden="true" />
+										<span class="badge">{e.name[0]}</span>
+									</div>
+									<span class="card-text">
+										<span class="spool-name">{e.name}</span>
+										<span class="spool-sub">{e.text}</span>
+									</span>
+									<div class="spool-foot">
+										<span class="spool-state" hidden={!e.connected}>
+											<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>
+											Connected
+										</span>
+										<span class="spool-actions">{e.connected ? <span class="btn-small">Manage</span> : <span class="btn-small primary">Connect</span>}</span>
+									</div>
+								</div>
+							))
+						}
+					</div>
+					<div class="pills">{PILLS.map((p, i) => <span class:list={['pill', { on: i === 0 }]}>{p}</span>)}</div>
+					<div class="spool-tiles">
+						{
+							tiles.map((t) => (
+								<div class="spool-tile">
+									<span class="badge small" style={`--tint: var(--thread-${t.color})`}>
+										{t.name[0]}
+									</span>
+									<span class="spool-tile-name">{t.name}</span>
+								</div>
+							))
+						}
+					</div>
+				</div>
 			</div>
 		</div>
 	</section>
@@ -835,6 +916,205 @@ const faq = {
 		background: var(--bg);
 	}
 
+	/* Spools' Find tab, as the app draws it (desktop/src/spools.rs): Find and Installed beside the
+	   title, the search, Acta and T3 Code as wide cards in a soft tint of their colour, the pills, and
+	   the rest as tiles four to a row. */
+	.spools {
+		gap: var(--space-l);
+	}
+	.spools-head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		min-height: var(--control-button);
+	}
+	.tabs {
+		display: flex;
+		gap: var(--space-xs);
+	}
+	.tab {
+		display: flex;
+		align-items: center;
+		height: var(--control-segment);
+		padding: 0 var(--space-m);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.tab.on {
+		background: var(--active);
+		color: var(--ink);
+		font-weight: var(--weight-medium);
+	}
+	.spool-cards {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-m);
+	}
+	.spool-card {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-m);
+		padding: var(--space-l);
+		border: 1px solid color-mix(in srgb, var(--tint) 30%, var(--line));
+		border-radius: var(--radius-card);
+		background: color-mix(in srgb, var(--tint) 7%, var(--card));
+	}
+	/* loom's knot, the tie, and the logo. */
+	.tie {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+	}
+	.tie svg {
+		flex: 1;
+		min-width: 0;
+		height: 28px;
+	}
+	.knot-box {
+		flex: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--control-icon-large);
+		height: var(--control-icon-large);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		background: var(--bg);
+		color: var(--ink);
+	}
+	.knot-box :global(svg) {
+		flex: none;
+	}
+	/* A server's badge: its initial on its colour (app.rs, badge_view). */
+	.badge {
+		--size: var(--control-icon-large);
+		flex: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--size);
+		height: var(--size);
+		border-radius: var(--radius-card);
+		background: var(--tint);
+		font-size: 15px;
+		font-weight: var(--weight-semibold);
+		color: var(--button-ink);
+	}
+	.badge.small {
+		--size: 26px;
+		border-radius: var(--radius-row);
+		font-size: 11px;
+	}
+	.spool-card .card-text {
+		min-width: 0;
+	}
+	.spool-name,
+	.spool-sub,
+	.spool-tile-name {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.spool-name {
+		font-size: var(--size-body);
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
+	}
+	.spool-sub {
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.spool-foot {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-s);
+		min-height: var(--control-button-small);
+	}
+	.spool-state {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ok);
+	}
+	.spool-state[hidden] {
+		display: none;
+	}
+	.spool-state.arrived {
+		animation: arrive 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	.spool-actions {
+		margin-left: auto;
+		display: flex;
+		gap: var(--space-s);
+	}
+	.spools .i {
+		width: 14px;
+		height: 14px;
+		flex: none;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.pills {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.pill {
+		display: flex;
+		align-items: center;
+		height: var(--control-segment);
+		padding: 0 var(--space-m);
+		border: 1px solid var(--line);
+		border-radius: 999px;
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.pill.on {
+		border-color: transparent;
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.spool-tiles {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: var(--space-s);
+	}
+	.spool-tile {
+		min-width: 0;
+		height: var(--control-tile);
+		display: flex;
+		flex-direction: column;
+		justify-content: space-between;
+		padding: var(--space-m);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--card);
+	}
+	.spool-tile-name {
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+	}
+	/* Where it's narrow, the cards go one under the other and the tiles two to a row. */
+	@media (max-width: 560px) {
+		.spool-cards {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.spool-tiles {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+	}
+
 	.more {
 		margin-top: 140px;
 	}
@@ -991,7 +1271,7 @@ const faq = {
 <script>
 	// The panels' little scenes, each played once when it comes into view, and the grid's threads,
 	// which work while their item is hovered.
-	import { threadOf, threadsIn, yarnsIn, type Mood } from '../scripts/thread';
+	import { threadOf, threadsIn, tieOf, tiesIn, yarnsIn, type Mood } from '../scripts/thread';
 
 	const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
 	const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1123,6 +1403,41 @@ const faq = {
 
 	// Servers: each with its ball of yarn, at rest while it's connected.
 	yarnsIn(document.querySelector('.servers') ?? undefined);
+
+	// Spools: Acta's tie is taut and T3 Code's slack. T3 Code's Connect is pressed, and once it's
+	// connected its tie pulls straight with a twang, the card says so with Connect another and Manage,
+	// as the app's does for one there can be several of, and Installed counts it.
+	const spools = document.querySelector<HTMLElement>('.spools');
+	tiesIn(spools ?? undefined);
+	whenShown(spools?.closest('[data-reveal]') ?? null, async () => {
+		const card = spools?.querySelector<HTMLElement>('[data-spool="t3"]');
+		const tie = tieOf(card?.querySelector('svg[data-tie]') ?? null);
+		const state = card?.querySelector<HTMLElement>('.spool-state');
+		const button = card?.querySelector<HTMLElement>('.spool-actions .btn-small');
+		const installed = spools?.querySelector<HTMLElement>('[data-installed]');
+		if (!tie || !state || !button || still) return;
+		await pause(1400);
+		button.classList.add('pressed');
+		await pause(160);
+		button.classList.remove('pressed');
+		await pause(1100);
+		tie.pull();
+		await pause(250);
+		state.hidden = false;
+		state.classList.add('arrived');
+		// Clones, so they keep the page's scoped styles.
+		const another = button.cloneNode(true) as HTMLElement;
+		another.classList.remove('primary');
+		another.textContent = 'Connect another';
+		const manage = another.cloneNode(true) as HTMLElement;
+		manage.textContent = 'Manage';
+		button.replaceWith(another, manage);
+		if (installed) {
+			const n = Number(installed.dataset.installed) + 1;
+			installed.dataset.installed = String(n);
+			installed.textContent = `Installed · ${n}`;
+		}
+	});
 
 	// The grid: each item's thread works while it's hovered, and they all twang as the grid arrives.
 	const items = [...document.querySelectorAll<HTMLElement>('.grid li')];

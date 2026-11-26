@@ -57,7 +57,7 @@ const DATA: str = #"
         "website": "https://github.com/pingdotgg/t3code",
         "server": "t3",
         "url": "{address}/mcp",
-        "fields": [{"name": "address", "label": "Address", "placeholder": "https://pc.tail1234.ts.net", "kind": "address"}],
+        "fields": [{"name": "address", "label": "Address", "placeholder": "https://host.tailnet.ts.net", "kind": "address"}],
         "sign_in": "oauth",
         "note": "Use an address your browser reaches too, such as Tailscale HTTPS: you sign in to T3 there.",
         "reads": ["t3_project_list", "t3_project_read", "t3_thread_list", "t3_thread_read", "t3_thread_search", "t3_thread_wait"],

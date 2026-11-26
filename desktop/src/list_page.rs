@@ -79,6 +79,7 @@ fn find_words(screen: Screen) -> &'static str {
         Screen::Skills => "Find a skill",
         Screen::Proposals => "Find a proposal",
         Screen::Routines => "Find a routine",
+        Screen::Installed => "Find a server",
         _ => "Find",
     }
 }
@@ -174,6 +175,7 @@ impl Loom {
             Some(Screen::Proposals) => self.proposal_open = None,
             Some(Screen::Programs) => self.program_open = None,
             Some(Screen::Routines) => self.routine_open = None,
+            Some(Screen::Installed) => self.model.spools.picked = None,
             _ => {}
         }
         self.list_ui.filled = None;
@@ -184,18 +186,29 @@ impl Loom {
     /// box with the list down its left and the one picked beside it; or, without room
     /// for both, the list until one is picked, and then the one picked with the way back.
     pub(super) fn list_detail(&mut self, page: ListPage, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let split = self.list_split();
-        let list_w = self.list_ui.shape.and_then(|s| s.list);
-        let pane_shown = !matches!(page.shows.pane, Pane::Nothing);
         let title = div()
             .min_h(px(control::BUTTON))
             .flex()
             .items_center()
             .text_size(px(size::HEADING - 2.0))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(p.ink)
-            .child(page.title);
+            .text_color(self.p.ink)
+            .child(page.title)
+            .into_any_element();
+        self.list_layout(title, page, cx)
+    }
+
+    /// A list page under a head of its own, such as Spools' title with its tabs.
+    pub(super) fn list_layout(
+        &mut self,
+        title: AnyElement,
+        page: ListPage,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let split = self.list_split();
+        let list_w = self.list_ui.shape.and_then(|s| s.list);
+        let pane_shown = !matches!(page.shows.pane, Pane::Nothing);
         let find = page.shows.list.then(|| {
             div()
                 .min_h(px(control::BUTTON_SMALL))

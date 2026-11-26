@@ -53,6 +53,8 @@ use emoji_ui::RowKey;
 mod list_page;
 #[path = "routines.rs"]
 mod routines;
+#[path = "spools.rs"]
+mod spools;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
 
@@ -208,6 +210,9 @@ enum Screen {
     ChatPrefs,
     AppPrefs,
     Emoji,
+    /// Spools, the integrations catalog: its Find tab, and its Installed tab.
+    Spools,
+    Installed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -455,6 +460,8 @@ pub struct Loom {
     /// The popup's shape as it's drawn, its corner while it's dragged, and its list
     /// pages' find field (list_page.rs).
     list_ui: list_page::ListUi,
+    /// Spools' search and the boxes of the form in its pane (spools.rs).
+    spools_ui: spools::SpoolsUi,
     /// The update icon's popup: the pointer is on the icon, or on the popup, and when it
     /// last left both, so the popup stays a moment for the pointer to cross the gap.
     update_over: (bool, bool),
@@ -1186,6 +1193,7 @@ impl Loom {
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_ui = routines::RoutineUi::new(window, cx);
         let list_ui = list_page::ListUi::new(window, cx);
+        let spools_ui = spools::SpoolsUi::new(window, cx);
         let task_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 14)
@@ -1605,6 +1613,7 @@ ACTA_KEY=secret:ACTA_KEY",
             side: None,
             settings_last: Screen::Profile,
             list_ui,
+            spools_ui,
             update_over: (false, false),
             update_left: None,
             rows: Rc::new(Vec::new()),
@@ -2162,6 +2171,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.send(f);
                 }
                 self.mcp_open = None;
+            }
+            Screen::Spools | Screen::Installed => {
+                for f in self.model.open_spools(None) {
+                    self.send(f);
+                }
+                self.model.spools.picked = None;
             }
             Screen::ThisDevice => {
                 let f = self.model.device_get();
@@ -3730,6 +3745,9 @@ ACTA_KEY=secret:ACTA_KEY",
         if settings::page_kind(open) == crate::model::popup::Kind::List {
             self.ready_list_page(open, window, cx);
         }
+        if open == Screen::Spools {
+            self.ready_spools(window, cx);
+        }
         let mut nav = div()
             .w(px(layout::NAV))
             .flex_none()
@@ -3812,9 +3830,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 list = list.child(div().h(px(space::S)));
             }
             for (id, icon, label, screen) in pages {
+                // Spools is lit on either of its tabs.
+                let lit = screen == open || (screen == Screen::Spools && open == Screen::Installed);
                 list = list.child(
                     self.menu_item(id, icon, label, false)
-                        .when(screen == open, |d| d.bg(p.active))
+                        .when(lit, |d| d.bg(p.active))
                         .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
                 );
             }
@@ -3909,6 +3929,8 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::ChatPrefs => self.chat_prefs_page(cx),
             Screen::AppPrefs => self.app_prefs_page(cx),
             Screen::Emoji => self.emoji_page(cx),
+            Screen::Spools => self.spools_page(cx),
+            Screen::Installed => self.installed_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -9067,6 +9089,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 cx.notify();
             }
+            PlusRow::Spools => {
+                self.shut_plus(window, cx);
+                let agent = self.model.selected.clone();
+                self.open_spools_for(agent, cx);
+            }
             PlusRow::Manage(s) => {
                 self.shut_plus(window, cx);
                 self.open(
@@ -9143,6 +9170,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     Some((line, if bad { p.bad } else { p.ink_3 })),
                 )
             }
+            PlusRow::Spools => (Ico::Spool, "Spools…".into(), None),
             PlusRow::Manage(s) => {
                 let none = self.model.plus_sub(*s).len() == 1;
                 let title = match (s, none) {
@@ -12679,19 +12707,12 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.model.mcp_servers.is_empty() {
             servers = servers.child(
                 div()
+                    .h(px(control::BUTTON_SMALL))
                     .flex()
                     .items_center()
-                    .gap(px(space::M))
-                    .child(
-                        div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child("None yet"),
-                    )
-                    .child(
-                        self.small_button("edit-mcp-setup", "Set up", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Mcp, cx))),
-                    ),
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("None yet"),
             );
         }
         for m in self.model.mcp_servers.clone() {
@@ -13135,7 +13156,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     })
                     .child(group("Knows"))
                     .child(rows(vec![memories, skills, tables, files]))
-                    .child(self.field("MCP servers", servers))
+                    .child(self.field("MCP servers", self.add_from_spools(servers, cx)))
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
                     .child(rows(vec![activity, routines, usage]))
