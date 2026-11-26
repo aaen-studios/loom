@@ -5012,6 +5012,25 @@ impl Instance {
         for state in gone { _ = i.sign_ins.remove(state) }
     }
 
+    // The scopes a server of the person's answered 403 for (step-up), kept
+    // with any it asked for before, so each sign-in to it from now on asks
+    // for them as well as those it names itself.
+    fn want_scopes(i: Instance, user: String, server: String, scopes: String) ! Error {
+        let had = try i.store.meta("mcp_scopes/{user}/{server}") ?? String()
+        try i.store.set_meta("mcp_scopes/{user}/{server}", oauth.scopes_with(had, scopes))
+    }
+
+    // A grant about to be signed in with, asking for the scopes its server
+    // answered 403 for as well (want_scopes).
+    fn with_wanted_scopes(i: Instance, user: String, server: String, grant: Json) -> Json {
+        let wanted = match i.store.meta("mcp_scopes/{user}/{server}") {
+            ok(some(w)) => w,
+            _ => return grant.copy(),
+        }
+        let scope = oauth.scopes_with(str_at(grant.copy(), "scope") ?? String(), wanted)
+        return merge(grant, Obj.new().s("scope", scope).done())
+    }
+
     // What the sign-in thread did.
     fn oauth_finished(i: mut Instance, d: oauth.Done) ! Error {
         let job = i.oauth_jobs.remove(d.id) else return
@@ -5026,10 +5045,11 @@ impl Instance {
             // Its client is kept now, so the next sign-in uses it again.
             let had = i.grant_of(job.user.copy(), job.server.copy())
             if not oauth.signed_in(had) { try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy()) }
+            let grant = i.with_wanted_scopes(job.user.copy(), job.server.copy(), d.grant.copy())
             let pkce = oauth.new_verifier()
             let state = oauth.new_state()
-            let address = oauth.authorize_url(d.grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
-            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: d.grant.copy(), verifier: pkce, at: now() })
+            let address = oauth.authorize_url(grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
+            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: grant, verifier: pkce, at: now() })
             i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).s("url", address).done()))
             return
         }
@@ -5418,7 +5438,7 @@ impl Instance {
             if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
             return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
-        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon"] {
+        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon", "/api/mcp/listed"] {
             if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
@@ -5495,11 +5515,20 @@ impl Instance {
             // What the icons kept of each are known by, so loom mcp fetches
             // them only when the server gives others.
             var known = LinkedMap<String, Json>()
+            // And the names each had before a rename, so a session from before
+            // it keeps the server under the name it knows it by (LOO-408).
+            var renamed = LinkedMap<String, Json>()
             for s in servers {
                 let name = str_at(s, "name") ?? String()
+                let old = i.old_names(g.user.copy(), name.copy())
+                if old.len() > 0 {
+                    var names = List<Json>()
+                    for o in old { names.push(Json.Str(o.copy())) }
+                    renamed.insert(name.copy(), Json.Array(names))
+                }
                 if let ok(some(had)) = i.store.mcp_icon(g.user.copy(), name.copy()) { known.insert(name, Json.Str(had.0.copy())) }
             }
-            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).done()))
+            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).j("renamed", Json.Object(renamed)).done()))
         }
         if req.path == "/api/mcp/deno" and req.method == "GET" {
             return try i.deno_for(req)
@@ -5513,7 +5542,7 @@ impl Instance {
         // sandbox, for a member's) once the server gave others than the ones
         // kept: each checked here, as anything from a sandbox is.
         if req.path == "/api/mcp/icon" {
-            let name = str_at(body.copy(), "server") ?? String()
+            let name = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
             if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
             var got = icons.Got { key: str_at(body.copy(), "key") ?? String(), fresh: true, light: List<u8>(), dark: List<u8>() }
             for (field, light) in [("icon", true), ("icon_dark", false)] {
@@ -5522,6 +5551,18 @@ impl Instance {
                 if light { got.light = data } else { got.dark = data }
             }
             try i.took_icons(g.user, name, got)
+            return some(json_response(200, Obj.new().done()))
+        }
+        // A server's tools as loom mcp listed them again, once the server said
+        // they changed: kept as what its last test found, for Spools.
+        if req.path == "/api/mcp/listed" {
+            let name = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
+            if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
+            var found = List<String>()
+            for t in catalog.list(at(body, "tools")) {
+                if let n = t.as_str() { found.push(n) }
+            }
+            try i.keep_tested(g.user, name, found, String(), false)
             return some(json_response(200, Obj.new().done()))
         }
         if req.path == "/api/mcp/done" {
@@ -5543,10 +5584,21 @@ impl Instance {
         // says they must sign in; `sign_in` shows them a card for it in the
         // agent's reply.
         if req.path == "/api/mcp/token" or req.path == "/api/mcp/sign_in" {
-            let name = str_at(body, "server") ?? String()
+            let name = i.server_now(g.user.copy(), str_at(body, "server") ?? String())
             let server = try i.store.mcp_server(g.user.copy(), name.copy()) else return some(http_error(404, "not_found", "There's no MCP server {name}."))
             if str_at(server.copy(), "url") == none or own_auth(server) { return some(http_error(400, "bad_request", "{name} doesn't sign in.")) }
             if req.path == "/api/mcp/sign_in" {
+                // A server that answered 403 for want of scopes (step-up): the
+                // person signs in again, and their next sign-in asks for those
+                // too. The one they have stays, for the tools it reaches.
+                if let challenge = str_at(body.copy(), "challenge") {
+                    let said = oauth.challenge_params(challenge)
+                    let wanted = oauth.param(said.copy(), "scope") ?? String()
+                    if oauth.param(said, "error") != some(String("insufficient_scope")) or wanted.trim().len() == 0 { return some(http_error(400, "bad_request", String("challenge is a 403's WWW-Authenticate for insufficient_scope, with the scopes it wants."))) }
+                    try i.want_scopes(g.user.copy(), name.copy(), wanted)
+                    i.sign_in_card(g, name)
+                    return some(json_response(200, Obj.new().done()))
+                }
                 // A sign-in that can be renewed was, before loom mcp says this,
                 // so only one that can't is dropped: an agent can't sign its
                 // person out of one that's good.
@@ -5560,7 +5612,7 @@ impl Instance {
             i.renew(g.user, name, some(req.copy()))
             return none
         }
-        let server = str_at(body.copy(), "server") ?? String()
+        let server = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
         let tool = str_at(body.copy(), "tool") ?? String()
         let read_only = bool_at(body.copy(), "read_only") ?? false
         let args = at(body, "arguments")
@@ -10175,6 +10227,8 @@ impl Instance {
                 servers.push(name.copy())
                 if own_icons.0.len() == 0 { own_icons = i.icon_of(user.copy(), name) }
             }
+            // Else the icon the MCP Registry gave a server of its (registry_icons).
+            if own_icons.0.len() == 0 { own_icons = (str_at(e.copy(), "icon") ?? String(), str_at(e.copy(), "icon_dark") ?? String()) }
             var connecting = Json.Null
             for (_, c) in i.connects {
                 if c.user == user and c.entry == id { connecting = c.json() }
@@ -10343,6 +10397,21 @@ impl Instance {
         }
     }
 
+    // A search's entries with the PNG icons fetched with the answer
+    // (mcpregistry's `icon_png`, LOO-379) kept as the person's files, as a
+    // server's own are (`keep_icon`), each entry's as `icon` and `icon_dark`,
+    // the SHA-256s its badge has.
+    fn registry_icons(i: mut Instance, user: String, entries: List<Json>) -> List<Json> ! Error {
+        var out = List<Json>()
+        for e in entries {
+            let server = str_at(e.copy(), "server") ?? String()
+            let light = try i.keep_icon(user.copy(), server.copy(), bytes.from_base64(str_at(e.copy(), "icon_png") ?? String()) ?? List<u8>())
+            let dark = try i.keep_icon(user.copy(), server, bytes.from_base64(str_at(e.copy(), "icon_png_dark") ?? String()) ?? List<u8>())
+            out.push(if light.len() > 0 { merge(e.copy(), Obj.new().s("icon", light).s("icon_dark", dark).done()) } else { e.copy() })
+        }
+        return out
+    }
+
     // One ask's answer: a search's entries, or a connect that goes on.
     fn registry_answer(i: mut Instance, ask: RegistryAsk, d: mcpregistry.Done) ! Error {
         let failed = if d.error.len() > 0 { d.error.copy() } else if d.status != 200 and d.status != 404 { "it answered {d.status}" } else { String() }
@@ -10355,7 +10424,7 @@ impl Instance {
                 return
             }
             let (entries, curated) = mcpregistry.found(d.value, query)
-            let listed = try i.listed_entries(ask.user.copy(), entries)
+            let listed = try i.listed_entries(ask.user.copy(), try i.registry_icons(ask.user.copy(), entries))
             i.answer_cmd(ask.waiter, Answer.Value(Obj.new().j("entries", Json.Array(listed)).j("curated", strings_json(curated)).done()))
             return
         }
@@ -10495,11 +10564,15 @@ impl Instance {
         if g != Json.Null { try i.keep_grant(user.copy(), name.copy(), g) }
         _ = try i.store.delete_mcp_auth(user.copy(), was.copy())
         try i.store.rename_mcp_icon(user.copy(), was.copy(), name.copy())
-        for kept in ["mcp_tested", "mcp_catalog"] {
+        for kept in ["mcp_tested", "mcp_catalog", "mcp_scopes"] {
             if let value = try i.store.meta("{kept}/{user}/{was}") { try i.store.set_meta("{kept}/{user}/{name}", value) }
             try i.store.delete_meta("{kept}/{user}/{was}")
         }
         _ = try i.store.delete_mcp_server(user.copy(), was.copy())
+        // A chat already running knows it by `was` until its next session
+        // (LOO-378): `server_now` takes that name to this one.
+        try i.store.delete_meta("mcp_renamed/{user}/{name}")
+        try i.store.set_meta("mcp_renamed/{user}/{was}", name.copy())
         if let c = i.connects.remove("{user}/{was}") {
             var moved = c
             moved.server = name.copy()
@@ -10516,6 +10589,44 @@ impl Instance {
             if test.user == user and test.server == was { test.server = name.copy() }
         }
         return Answer.Value(Json.Null)
+    }
+
+    // The name `user`'s MCP server `name` has now: its own, or, for one
+    // renamed since (rename_server), the name it has now, so a chat already
+    // running reaches it by the name its session started with. A name that's
+    // neither is given back as it is.
+    fn server_now(i: Instance, user: String, name: String) -> String {
+        var current = name.copy()
+        for _ in 0..8 {
+            if let ok(some(_)) = i.store.mcp_server(user.copy(), current.copy()) { return current }
+            current = match i.store.meta("mcp_renamed/{user}/{current}") {
+                ok(some(next)) => next,
+                _ => return name.copy(),
+            }
+        }
+        return name.copy()
+    }
+
+    // The names `user`'s MCP server `name` had before it was renamed, which
+    // server_now takes to it, nearest first: a chat running from before a
+    // rename knows it by one of them.
+    fn old_names(i: Instance, user: String, name: String) -> List<String> {
+        let renames = match i.store.mcp_renames(user) {
+            ok(r) => r,
+            _ => return List<String>(),
+        }
+        var out = List<String>()
+        var to_find = [name.copy()].to_list()
+        while to_find.len() > 0 {
+            let now_named = to_find.remove(0)
+            for (was, to) in renames.copy() {
+                if to == now_named and was != name and not out.contains(was.copy()) {
+                    out.push(was.copy())
+                    to_find.push(was.copy())
+                }
+            }
+        }
+        return out
     }
 
     // What a test of `user`'s server `server` found, kept for mcp.list's
@@ -17342,9 +17453,12 @@ impl Instance {
                     let g = i.grant_of(user.copy(), saved.copy())
                     _ = try i.store.delete_mcp_auth(user.copy(), saved.copy())
                     i.revoke_sign_in(user.copy(), saved.copy(), g)
+                    try i.store.delete_meta("mcp_scopes/{user}/{saved}")
                 }
             }
             try i.store.put_mcp_server(user.copy(), done.copy())
+            // A server by this name is this one now, not one renamed from it.
+            try i.store.delete_meta("mcp_renamed/{user}/{server_name}")
             if renamed {
                 if let Answer.Refused(code, message) = try i.rename_server(user.copy(), device.copy(), was, server_name.copy()) { return Answer.Refused(code, message) }
             }
@@ -17354,9 +17468,13 @@ impl Instance {
         }
         if name == "mcp.delete" {
             let server_name = str_at(args, "name") ?? String()
+            // The names it had before a rename lead nowhere now.
+            let old = i.old_names(user.copy(), server_name.copy())
             if not try i.store.delete_mcp_server(user.copy(), server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
+            for was in old { try i.store.delete_meta("mcp_renamed/{user}/{was}") }
             try i.store.delete_meta("mcp_catalog/{user}/{server_name}")
             try i.store.delete_meta("mcp_tested/{user}/{server_name}")
+            try i.store.delete_meta("mcp_scopes/{user}/{server_name}")
             _ = i.connects.remove("{user}/{server_name}")
             let g = i.grant_of(user.copy(), server_name.copy())
             _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())

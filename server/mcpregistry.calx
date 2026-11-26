@@ -18,6 +18,7 @@ module server.mcpregistry
 //
 // A community entry's secrets are named after its server, `NAME.KEY`, so a
 // server from the registry never gets a secret the person keeps for another.
+import std.bytes
 import std.fs
 import std.http.{Header, Request, get}
 import std.json.{Json, parse}
@@ -25,6 +26,8 @@ import std.thread.{Task}
 import std.url
 import shared.obj.{Obj, at, bool_at, merge, str_at}
 import server.catalog
+import server.files
+import server.icons
 
 pub const REGISTRY: str = "https://registry.modelcontextprotocol.io"
 // How long the instance uses an answer again before asking the registry again.
@@ -118,32 +121,89 @@ pub fn icon_src(s: Json) -> String? {
     return none
 }
 
-// A search's answer with each server's icon on its item as `icon_svg`, fetched
-// here with the answer, all at once, so it's kept with it and a search typed
-// again fetches nothing. One that can't be fetched in time, is over
-// ICON_LIMIT or isn't an SVG is left out, and the entry has its initial.
+// A search's answer with each server's icon on its item, fetched here with the
+// answer, all at once, so it's kept with it and a search typed again fetches
+// nothing: an SVG as `icon_svg`, or else (LOO-379) the PNG or JPEG a badge
+// draws best, chosen and made small as an MCP server's own icon is
+// (server/icons.calx, `files.icon_png`), in base64 as `icon_png`, with
+// `icon_png_dark` for a dark background. One that can't be fetched in time,
+// is too big or isn't a picture is left out, and the entry has its initial.
 fn with_icons(answer: own Json) -> Json {
     let servers = catalog.list(at(answer.copy(), "servers"))
     if servers.is_empty() { return answer }
-    var asked = List<Request?>()
-    for item in servers.copy() {
-        asked.push(match icon_src(at(item, "server")) {
+    var pending = List<Pending>()
+    for item in servers {
+        let s = at(item.copy(), "server")
+        let svg = icon_src(s.copy())
+        let (light, dark) = if svg == none { icons.pick(at(s, "icons")) } else { (String(), String()) }
+        let req = match svg {
             some(src) => some(get(src, [Header { name: String("User-Agent"), value: String("loom") }], ICON_WAIT_MS, ICON_LIMIT)),
             none => none,
-        })
+        }
+        pending.push(Pending { item: item.copy(), svg: req, light: picture_ask(light), dark: picture_ask(dark) })
     }
     var out = List<Json>()
-    var n: usize = 0
-    for item in servers {
-        var with = item.copy()
-        if let given = asked[n] {
+    for p in pending {
+        var with = p.item.copy()
+        if let given = p.svg {
             var req = given
             if let svg = svg_of(mut req) { with = merge(with, Obj.new().s("icon_svg", svg).done()) }
         }
+        let icon = picture_of(p.light.copy())
+        let icon_dark = picture_of(p.dark.copy())
+        // With only the dark one had, it's the one, as with a server's own (`took_icons`).
+        let (first, second) = if icon.len() > 0 { (icon, icon_dark) } else { (icon_dark, String()) }
+        if first.len() > 0 {
+            var o = Obj.new().s("icon_png", first)
+            if second.len() > 0 { o = o.s("icon_png_dark", second) }
+            with = merge(with, o.done())
+        }
         out.push(with)
-        n += 1
     }
     return merge(answer, Obj.new().j("servers", Json.Array(out)).done())
+}
+
+// A server of a search's answer, with its icons on the way.
+struct Pending {
+    item: Json
+    svg: Request?
+    light: Picture
+    dark: Picture
+}
+
+// A picture icon being fetched: a data: URI's bytes, had at once, or the
+// request for an address's.
+struct Picture {
+    data: List<u8>
+    req: Request?
+}
+
+fn picture_ask(src: String) -> Picture {
+    var p = Picture { data: List<u8>(), req: none }
+    if src.len() == 0 { return p }
+    if src.to_lower_root().starts_with("data:") {
+        if let ok(d) = icons.data_of(src) { p.data = d }
+        return p
+    }
+    if let ok(r) = icons.ask(src) { p.req = some(r) }
+    return p
+}
+
+// The picture it brought, made small, in base64, or "".
+fn picture_of(p: own Picture) -> String {
+    var data = p.data.copy()
+    if let given = p.req {
+        var req = given
+        data = match icons.answered(mut req) {
+            ok(d) => d,
+            err(_) => return String(),
+        }
+    }
+    if data.is_empty() { return String() }
+    return match files.icon_png(data) {
+        ok(png) => bytes.base64(png),
+        err(_) => String(),
+    }
 }
 
 // The SVG a request brought, if it brought one.
@@ -536,6 +596,8 @@ pub fn found(answer: Json, query: String) -> (List<Json>, List<String>) {
     for item in catalog.list(at(answer, "servers")) {
         let s = at(item.copy(), "server")
         let icon = str_at(item.copy(), "icon_svg")
+        let png = str_at(item.copy(), "icon_png")
+        let png_dark = str_at(item.copy(), "icon_png_dark")
         let meta = at(at(item, "_meta"), META)
         if str_at(meta.copy(), "status") == some(String("deleted")) { continue }
         let w = ways(s.copy())
@@ -549,8 +611,10 @@ pub fn found(answer: Json, query: String) -> (List<Json>, List<String>) {
         }
         if is_curated { continue }
         var e = entry_of(s, str_at(meta, "updatedAt") ?? String())
-        // Its icon, fetched with the answer (with_icons).
+        // Its icon, fetched with the answer (with_icons): the instance keeps a
+        // picture as the person's file, for its badge.
         if let svg = icon { e = merge(e, Obj.new().s("icon_svg", svg).done()) }
+        if let p = png { e = merge(e, Obj.new().s("icon_png", p).maybe("icon_png_dark", png_dark).done()) }
         var twin = kept.len()
         var k: usize = 0
         while k < kept.len() {
@@ -637,7 +701,7 @@ fn finds_a_servers_svg_icon() {
     // The SVG, before its PNG.
     assert(icon_src(sample_server("notion.json", "com.foreverworks/notion")) == some(String("https://raw.githubusercontent.com/foreverworks/mcps/main/servers/notion/icons/icon.svg")))
     // An .svg address without its type, but not a PNG, a data: URI or none.
-    let only = |icons: str| icon_src(parse(String(icons))!)
+    let only = |given: str| icon_src(parse(String(given))!)
     assert(only(#"{"icons":[{"src":"https://x.example/a.SVG?v=2"}]}"#) == some(String("https://x.example/a.SVG?v=2")))
     assert(only(#"{"icons":[{"src":"https://x.example/a.png","mimeType":"image/png"}]}"#) == none)
     assert(only(#"{"icons":[{"src":"data:image/svg+xml;base64,PHN2Zy8+","mimeType":"image/svg+xml"}]}"#) == none)
