@@ -18,7 +18,7 @@ import shared.obj.{str_at}
 import server.icons
 import server.mcpclient
 import server.oauth
-import server.oauth.{Refreshed}
+import server.mcpcall.{renewed, with_token}
 import server.store.{now}
 
 pub struct Job {
@@ -62,36 +62,6 @@ pub fn start() -> (Sender<Job>, Receiver<Done>) {
     let done = Receiver<Done>()
     _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
     return (to, done)
-}
-
-// The job's spec with `token` as its bearer token.
-fn with_token(spec: Json, token: String) -> Json {
-    var headers = List<Json>()
-    if let Json.Array(given) = spec.get(String("headers")) ?? Json.Null {
-        for h in given {
-            if (str_at(h.copy(), "name") ?? String()).to_lower_root() != "authorization" { headers.push(h.copy()) }
-        }
-    }
-    var m = LinkedMap<String, Json>()
-    if let Json.Object(o) = spec {
-        for (k, v) in o {
-            m.insert(k.copy(), v.copy())
-        }
-    }
-    var auth = LinkedMap<String, Json>()
-    auth.insert(String("name"), Json.Str(String("Authorization")))
-    auth.insert(String("value"), Json.Str("Bearer {token}"))
-    headers.push(Json.Object(auth))
-    m.insert(String("headers"), Json.Array(headers))
-    return Json.Object(m)
-}
-
-fn renewed(grant: Json) -> (Json, String, bool) {
-    return match oauth.refresh(grant) {
-        Refreshed.Fresh(g) => (g, String(), false),
-        Refreshed.Ended(why) => (Json.Null, why, true),
-        Refreshed.Failed(why) => (Json.Null, why, false),
-    }
 }
 
 fn test(job: Job) -> Done {

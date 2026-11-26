@@ -197,6 +197,11 @@ fn spawn(name: String, spec: Json) -> Child ! Error {
 // {name, command, args, env} or {name, url, headers}, and finds the version
 // of MCP to speak to it in.
 pub fn start(spec: Json) -> Server ! Error {
+    return try start_within(spec, START_MS)
+}
+
+// The same, waiting at most `ms` for each answer as it starts.
+pub fn start_within(spec: Json, ms: u64) -> Server ! Error {
     let name = str_at(spec.copy(), "name") ?? String()
     var s = Server { name: name.copy(), child: none, spec: spec.copy(), url: String(), headers: List<Header>(), session: String(), version: String(), info: Json.Null, params: Map<String, List<Param>>(), next: 0 }
     if let address = str_at(spec.copy(), "url") {
@@ -207,7 +212,7 @@ pub fn start(spec: Json) -> Server ! Error {
     } else {
         s.child = some(try spawn(name, spec))
     }
-    if let err(e) = s.begin() {
+    if let err(e) = s.begin(ms) {
         s.stop()
         fail "{e}"
     }
@@ -334,24 +339,24 @@ impl Server {
 
     // Finds the version to speak to it in: it's asked server/discover in
     // MODERN, and one that doesn't answer as a server of the modern era is
-    // initialized.
-    fn begin(self: mut Server) ! Error {
+    // initialized. It waits at most `ms` for each answer.
+    fn begin(self: mut Server, ms: u64) ! Error {
         self.version = String(MODERN)
         self.next += 1
         let probe = self.next
         let asked = message(probe, "server/discover", with_meta(Obj.new().done()))
         var answer = Json.Null
         if self.url.len() > 0 {
-            let (_, got, _) = try self.over_http(asked, probe, START_MS)
+            let (_, got, _) = try self.over_http(asked, probe, ms)
             answer = got
         } else {
             try self.send_line(asked)
-            match self.answer_to([probe], PROBE_MS) {
+            match self.answer_to([probe], if ms < PROBE_MS { ms } else { PROBE_MS }) {
                 ok(got) => {
                     if let a = got {
                         answer = a
                     } else {
-                        try self.initialize_late(probe)
+                        try self.initialize_late(probe, ms)
                         return
                     }
                 },
@@ -360,7 +365,7 @@ impl Server {
                     // initialize: it's started again and initialized.
                     if not self.ended() { fail "{e}" }
                     try self.restart()
-                    try self.initialize(String(LEGACY[0]))
+                    try self.initialize(String(LEGACY[0]), ms)
                     return
                 },
             }
@@ -370,7 +375,7 @@ impl Server {
             self.info = server_info(answer)
             return
         }
-        try self.initialize(if version.len() > 0 { version } else { String(LEGACY[0]) })
+        try self.initialize(if version.len() > 0 { version } else { String(LEGACY[0]) }, ms)
     }
 
     // A server over stdio that hasn't answered server/discover in PROBE_MS
@@ -378,17 +383,17 @@ impl Server {
     // decides: initialize's, from one of the legacy era that says nothing
     // before it, or server/discover's, from one of the modern era that was
     // slow to start (a package fetched first).
-    fn initialize_late(self: mut Server, probe: i64) ! Error {
+    fn initialize_late(self: mut Server, probe: i64, ms: u64) ! Error {
         self.next += 1
         let init = self.next
         try self.send_line(initialize_message(init, String(LEGACY[0])))
         let began = unsafe { Instant.now() }
         loop {
             let spent = millis_since(began)
-            let left = if spent < START_MS { START_MS - spent } else { 0 }
-            let got = (try self.answer_to([probe, init], left)) ?? { fail "{self.name} didn't answer in {START_MS / 1000} seconds" }
+            let left = if spent < ms { ms - spent } else { 0 }
+            let got = (try self.answer_to([probe, init], left)) ?? { fail "{self.name} didn't answer in {ms / 1000} seconds" }
             if int_at(got.copy(), "id") == some(init) {
-                try self.initialized(got)
+                try self.initialized(got, ms)
                 return
             }
             if try version_from(self.name.copy(), got.copy()) == MODERN {
@@ -400,17 +405,17 @@ impl Server {
     }
 
     // Says initialize, asking for `version`.
-    fn initialize(self: mut Server, version: String) ! Error {
+    fn initialize(self: mut Server, version: String, ms: u64) ! Error {
         self.version = version.copy()
         self.next += 1
         let id = self.next
-        let answer = try self.exchange(initialize_message(id, version), id, START_MS, "initialize")
-        try self.initialized(answer)
+        let answer = try self.exchange(initialize_message(id, version), id, ms, "initialize")
+        try self.initialized(answer, ms)
     }
 
     // What initialize's answer settles: the version the server takes, which
     // must be one loom speaks, and its serverInfo.
-    fn initialized(self: mut Server, answer: Json) ! Error {
+    fn initialized(self: mut Server, answer: Json, ms: u64) ! Error {
         if let e = answer.get(String("error")) {
             fail "{self.name} answered initialize with an error: {str_at(e, "message") ?? String("no message")}"
         }
@@ -419,7 +424,7 @@ impl Server {
         if not legacy(version.copy()) { fail "{self.name} speaks MCP {version}, which loom doesn't ({spoken()})" }
         self.version = version
         self.info = at(result, "serverInfo")
-        try self.notify("notifications/initialized")
+        try self.notify_within("notifications/initialized", ms)
     }
 
     // Every tool the server offers, a page at a time. Over HTTP in the modern
@@ -458,11 +463,16 @@ impl Server {
     // listed again, for their parameters as they are now, and the call is
     // made once more.
     pub fn call(self: mut Server, name: String, arguments: Json) -> Json ! Error {
+        return try self.call_within(name, arguments, CALL_MS)
+    }
+
+    // The same, waiting at most `ms` for its answer.
+    pub fn call_within(self: mut Server, name: String, arguments: Json, ms: u64) -> Json ! Error {
         let params = Obj.new().s("name", name).j("arguments", arguments).done()
-        let answer = try self.ask("tools/call", params.copy(), CALL_MS)
+        let answer = try self.ask("tools/call", params.copy(), ms)
         if self.headed() and int_at(at(answer.copy(), "error"), "code") == some(HEADER_MISMATCH) {
             _ = try self.tools()
-            return try self.result_of("tools/call", try self.ask("tools/call", params, CALL_MS))
+            return try self.result_of("tools/call", try self.ask("tools/call", params, ms))
         }
         return try self.result_of("tools/call", answer)
     }
@@ -535,10 +545,10 @@ impl Server {
         fail "{self.name} answered {status}: {text.trim()}"
     }
 
-    fn notify(self: mut Server, method: str) ! Error {
+    fn notify_within(self: mut Server, method: str, ms: u64) ! Error {
         let m = Obj.new().s("jsonrpc", String("2.0")).s("method", String(method)).done()
         if self.url.len() > 0 {
-            _ = try self.over_http(m, -1, START_MS)
+            _ = try self.over_http(m, -1, ms)
             return
         }
         try self.send_line(m)

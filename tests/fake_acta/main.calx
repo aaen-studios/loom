@@ -1,0 +1,172 @@
+module tests.fake_acta.main
+
+// A fake Acta, for testing the cards in messages (PLAN.md, "Cards in
+// messages") without the real one: an MCP server over HTTP at /api/mcp that
+// answers 401 to a request without `Authorization: Bearer acta-key`, with two
+// of Acta's tools, as Acta answers them:
+//
+//     list_boards   two boards, aaen-studios/loom (LOO) and aaen-studios/calcite (CAL)
+//     get_task      LOO-206, LOO-351 and CAL-338; any other is the tool's error
+//
+// It listens on 127.0.0.1 and prints `fake acta: http://127.0.0.1:PORT` once it
+// does. For tests: GET /test/calls gives how many times each tool was called,
+// and get_task for each card; /test/status?task=ID&status=S moves a card.
+//
+//     calx tests/fake_acta/main.calx
+import std.http.server.{Request, Response, Server}
+import std.io
+import std.json.{Json, parse}
+import std.url
+
+struct Fake {
+    tasks: LinkedMap<String, Json>
+    calls: LinkedMap<String, i64>
+}
+
+fn text(s: str) -> Json {
+    return Json.Str(String(s))
+}
+
+fn object(pairs: List<(str, Json)>) -> Json {
+    var m = LinkedMap<String, Json>()
+    for (k, v) in pairs {
+        m.insert(String(k), v.copy())
+    }
+    return Json.Object(m)
+}
+
+fn strings(xs: List<str>) -> Json {
+    var out = List<Json>()
+    for x in xs {
+        out.push(text(x))
+    }
+    return Json.Array(out)
+}
+
+fn str_of(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+fn json(status: u16, body: Json) -> Response {
+    return Response.new(status, String("application/json"), "{body}".to_bytes())
+}
+
+fn subtasks(done: List<bool>) -> Json {
+    var out = List<Json>()
+    var n = 0
+    for d in done {
+        n += 1
+        out.push(object([("id", Json.Str("s{n}")), ("title", Json.Str("Step {n}")), ("done", Json.Bool(d))]))
+    }
+    return Json.Array(out)
+}
+
+fn task(id: str, board: str, title: str, status: str, size: str, labels: List<str>, description: str, done: List<bool>) -> Json {
+    return object([("id", text(id)), ("title", text(title)), ("status", text(status)), ("priority", text("medium")), ("assignee", text("Elliot")), ("labels", strings(labels)), ("size", text(size)), ("url", Json.Str("https://acta.aaenz.no/{board}#{id}")), ("description", text(description)), ("subtasks", subtasks(done))])
+}
+
+// A tool's answer as Acta gives it: its JSON as text.
+fn answer(j: Json) -> Json {
+    return object([("content", Json.Array([object([("type", text("text")), ("text", Json.Str("{j}"))])]))])
+}
+
+fn tool_error(why: own String) -> Json {
+    return object([("content", Json.Array([object([("type", text("text")), ("text", Json.Str(why))])])), ("isError", Json.Bool(true))])
+}
+
+impl Fake {
+    fn count(self: mut Fake, key: own String) {
+        if let n = mut self.calls.find(key.copy()) {
+            n += 1
+            return
+        }
+        self.calls.insert(key, 1)
+    }
+
+    fn call(self: mut Fake, name: String, args: Json) -> Json {
+        self.count(name.copy())
+        if name == "list_boards" {
+            let boards = Json.Array([object([("board", text("aaen-studios/loom")), ("name", text("loom")), ("task_prefix", text("LOO")), ("open_tasks", Json.Int(3))]), object([("board", text("aaen-studios/calcite")), ("name", text("calcite")), ("task_prefix", text("CAL")), ("open_tasks", Json.Int(1))])])
+            return answer(object([("you", text("Elliot")), ("workspaces", Json.Array([object([("workspace", text("aaen-studios")), ("boards", boards)])]))]))
+        }
+        if name == "get_task" {
+            let id = str_of(args.copy(), "task")
+            self.count("get_task {id}")
+            if let t = self.tasks.find(id.copy()) {
+                if (str_of(t.copy(), "url")).contains("/{str_of(args, "board")}#") { return answer(t.copy()) }
+            }
+            return tool_error("There's no task {id} on that board.")
+        }
+        return tool_error("No tool {name}.")
+    }
+
+    fn mcp(self: mut Fake, req: Request) -> Response {
+        if (req.header(String("Authorization")) ?? String()) != "Bearer acta-key" {
+            return json(401, object([("error", text("invalid_token"))])).with_header(String("WWW-Authenticate"), String("Bearer realm=\"acta\""))
+        }
+        let m = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return Response.error(400),
+        }
+        let method = str_of(m.copy(), "method")
+        let id = m.get(String("id")) ?? Json.Null
+        if id == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
+        var result = object(List<(str, Json)>())
+        if method == "initialize" {
+            result = object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("acta")), ("version", text("1"))]))])
+        } else if method == "tools/list" {
+            result = object([("tools", Json.Array([object([("name", text("list_boards"))]), object([("name", text("get_task"))])]))])
+        } else if method == "tools/call" {
+            let params = m.get(String("params")) ?? Json.Null
+            result = self.call(str_of(params.copy(), "name"), params.get(String("arguments")) ?? Json.Null)
+        }
+        return json(200, object([("jsonrpc", text("2.0")), ("id", id), ("result", result)]))
+    }
+
+    fn handle(self: mut Fake, req: Request) -> Response {
+        if req.method == "POST" and req.path == "/api/mcp" { return self.mcp(req) }
+        if req.path == "/test/calls" {
+            var m = LinkedMap<String, Json>()
+            for (k, n) in self.calls {
+                m.insert(k.copy(), Json.Int(n))
+            }
+            return json(200, Json.Object(m))
+        }
+        if req.path == "/test/status" {
+            var id = String()
+            var status = String()
+            for (k, v) in url.form_decode(req.query.copy()) {
+                if k == "task" { id = v.copy() }
+                if k == "status" { status = v.copy() }
+            }
+            if let t = mut self.tasks.find(id) {
+                if let Json.Object(o) = t.copy() {
+                    var changed = o.copy()
+                    changed.insert(String("status"), Json.Str(status))
+                    t = Json.Object(changed)
+                }
+            }
+            return json(200, object(List<(str, Json)>()))
+        }
+        return Response.error(404)
+    }
+}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    let base = server.url().trim_suffix("/").copy()
+    var tasks = LinkedMap<String, Json>()
+    tasks.insert(String("LOO-206"), task("LOO-206", "aaen-studios/loom", "Show agents' usage limits in the sidebar", "in_progress", "m", ["desktop"], "The plan's usage limits that Claude reports, as small rings under the agents, with when each resets.\n\nHover shows the numbers.", [true, true, true, false, false]))
+    tasks.insert(String("LOO-351"), task("LOO-351", "aaen-studios/loom", "Leaving a group chat takes two clicks", "done", "s", List<str>(), "", List<bool>()))
+    tasks.insert(String("CAL-338"), task("CAL-338", "aaen-studios/calcite", "Smooth chunk loading", "review", "l", ["engine", "perf"], "Chunks load without a hitch.", [true]))
+    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>() }
+    println("fake acta: {base}")
+    io.flush()
+    loop {
+        if let req = server.next() {
+            let res = fake.handle(req.copy())
+            server.respond(req, res)
+        }
+    }
+}
