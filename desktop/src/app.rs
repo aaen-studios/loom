@@ -1234,7 +1234,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let mcp_client_in = input(window, cx, "Only if its sign-in asks for one", false);
         let mcp_client_secret_in = input(window, cx, "secret:KEY, or the secret", true);
         let set_value_in = input(window, cx, "Its value", true);
-        let setting_key_in = input(window, cx, "ntnu-password", false);
+        let setting_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
         let setting_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
@@ -13380,6 +13380,7 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Vec<AnyElement> {
         let open = m.map(|m| m.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-mcp", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13401,11 +13402,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     &client,
                     &secret,
                 ));
-                // Its draft stays until the instance says it's saved.
-                this.form_saving(DraftPage::Mcp, Some(name.clone()), &f, now);
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Mcp, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.mcp_open = split.then_some(Some(name));
+                this.mcp_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
@@ -13670,6 +13672,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn skill_pane(&mut self, k: Option<&model::Skill>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let open = k.map(|k| k.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-skill", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13685,11 +13688,12 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let now = this.form_now(DraftPage::Skills, cx);
                 let f = this.model.save_skill(&name, &description, &text);
-                // Its draft stays until the instance says it's saved.
-                this.form_saving(DraftPage::Skills, Some(name.clone()), &f, now);
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Skills, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.skill_open = split.then_some(Some(name));
+                this.skill_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();

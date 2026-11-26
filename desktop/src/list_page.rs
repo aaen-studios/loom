@@ -134,6 +134,12 @@ impl Loom {
             Screen::Mcp => {
                 let servers = self.model.mcp_servers.clone();
                 let keys: Vec<&str> = servers.iter().map(|m| m.name.as_str()).collect();
+                // One saved under a new name: the page follows it there.
+                for (was, now) in self.model.drafts.moved_in(DraftPage::Mcp, &keys) {
+                    if self.mcp_open.as_ref() == Some(&was) {
+                        self.mcp_open = Some(Some(now));
+                    }
+                }
                 let open_at = self.mcp_open.as_ref().map(|o| o.as_deref());
                 if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
                     if !filled(self, &servers[i].name) {
@@ -144,6 +150,11 @@ impl Loom {
             Screen::Skills => {
                 let skills = self.model.skills.clone();
                 let keys: Vec<&str> = skills.iter().map(|k| k.name.as_str()).collect();
+                for (was, now) in self.model.drafts.moved_in(DraftPage::Skills, &keys) {
+                    if self.skill_open.as_ref() == Some(&was) {
+                        self.skill_open = Some(Some(now));
+                    }
+                }
                 let open_at = self.skill_open.as_ref().map(|o| o.as_deref());
                 if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
                     if !filled(self, &skills[i].name) {

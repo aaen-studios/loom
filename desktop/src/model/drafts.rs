@@ -156,12 +156,14 @@ impl RoutineDraft {
 
 /// A server's list pages' forms: the item the form is filled in for now, with what it
 /// was filled in with, each item's form as the person left it, changed and not saved,
-/// and the saves the instance hasn't answered yet, by their command's id.
+/// the saves the instance hasn't answered yet, by their command's id, and the items
+/// saved under a new name, by their old key and their new one, for the page to follow.
 #[derive(Default)]
 pub struct Drafts {
     open: Option<(Key, Form)>,
     kept: HashMap<Key, Form>,
     saving: HashMap<String, Saving>,
+    moved: Vec<(Key, Key)>,
 }
 
 /// A save on its way: the item's key it was filled in for, the key it's saved as (a
@@ -254,11 +256,12 @@ impl Drafts {
                 self.kept.remove(key);
             }
         }
-        // Changed again since, and renamed: the change is the new name's.
+        // Renamed: a change since is the new name's, and the page follows it there.
         if s.was != s.now {
             if let Some(form) = self.kept.remove(&s.was) {
                 self.kept.insert(s.now.clone(), form);
             }
+            self.moved.push((s.was.clone(), s.now.clone()));
         }
         if let Some((key, own)) = self.open.as_mut() {
             if *key == s.was || *key == s.now {
@@ -267,6 +270,22 @@ impl Drafts {
             }
         }
         true
+    }
+
+    /// The items of `page` saved under a new name that its list, `keys`, has now: each
+    /// one's old name, or none for a new one, and its new name, taken, so the page can
+    /// keep the one picked on it. One whose new name isn't in the list yet waits for
+    /// it, so the page doesn't go to another while the list is read again.
+    pub fn moved_in(&mut self, page: Page, keys: &[&str]) -> Vec<(Option<String>, String)> {
+        let mut out = Vec::new();
+        self.moved.retain(|(was, now)| {
+            let here = now.0 == page && now.1.as_deref().is_some_and(|name| keys.contains(&name));
+            if here {
+                out.push((was.1.clone(), now.1.clone().unwrap_or_default()));
+            }
+            !here
+        });
+        out
     }
 
     /// The form's changes are thrown away (Cancel), or its item went (deleted, kept or
@@ -343,6 +362,78 @@ mod tests {
         assert!(d.answered("app.mcp_put_7", true));
         assert!(!d.has(Page::Mcp, Some("github")));
         assert!(d.is_open(Page::Mcp, Some("github")));
+    }
+
+    #[test]
+    fn a_rename_stays_on_its_item_and_follows_it_once_saved() {
+        let github = server("github", "https://api.github.com/mcp");
+        let mut d = Drafts::default();
+        d.open(key(Page::Mcp, "github"), mcp_form(Some(&github)));
+        let mut renamed = fields(&mcp_form(Some(&github)));
+        renamed[0] = "gh".into();
+        let form = Form::Fields(renamed);
+        d.edit(form.clone());
+        d.saving("app.mcp_put_2".into(), key(Page::Mcp, "gh"), form);
+        // Meanwhile: on the old name, with its draft, and nothing to follow.
+        assert!(d.is_open(Page::Mcp, Some("github")));
+        assert!(d.has(Page::Mcp, Some("github")));
+        assert!(d.moved_in(Page::Mcp, &["github", "acta"]).is_empty());
+        d.answered("app.mcp_put_2", true);
+        // Saved: the form is the new name's, and the page follows once its list has it.
+        assert!(d.is_open(Page::Mcp, Some("gh")));
+        assert!(d.moved_in(Page::Mcp, &["github", "acta"]).is_empty());
+        assert!(d.moved_in(Page::Skills, &["gh"]).is_empty());
+        assert_eq!(
+            d.moved_in(Page::Mcp, &["acta", "gh", "github"]),
+            vec![(Some("github".to_string()), "gh".to_string())]
+        );
+        assert!(d.moved_in(Page::Mcp, &["acta", "gh", "github"]).is_empty());
+    }
+
+    #[test]
+    fn a_rename_refused_stays_on_its_item_with_its_draft() {
+        let github = server("github", "https://api.github.com/mcp");
+        let mut d = Drafts::default();
+        d.open(key(Page::Mcp, "github"), mcp_form(Some(&github)));
+        let mut renamed = fields(&mcp_form(Some(&github)));
+        renamed[0] = "GitHub!".into();
+        let form = Form::Fields(renamed);
+        d.edit(form.clone());
+        d.saving(
+            "app.mcp_put_4".into(),
+            key(Page::Mcp, "GitHub!"),
+            form.clone(),
+        );
+        d.answered("app.mcp_put_4", false);
+        assert!(d.is_open(Page::Mcp, Some("github")));
+        assert!(d.has(Page::Mcp, Some("github")));
+        assert!(!d.has(Page::Mcp, Some("GitHub!")));
+        assert!(d.moved_in(Page::Mcp, &["github", "GitHub!"]).is_empty());
+        // Picked again later, it's the draft.
+        d.leave();
+        assert_eq!(
+            d.open(key(Page::Mcp, "github"), mcp_form(Some(&github))),
+            form
+        );
+    }
+
+    #[test]
+    fn a_new_one_saved_is_followed_to_its_name() {
+        let mut d = Drafts::default();
+        d.open((Page::Skills, None), skill_form(None));
+        let typed = Form::Fields(vec![
+            "triage".into(),
+            "Sorting issues".into(),
+            String::new(),
+        ]);
+        d.edit(typed.clone());
+        d.saving("app.skill_put_1".into(), key(Page::Skills, "triage"), typed);
+        assert!(d.is_open(Page::Skills, None));
+        d.answered("app.skill_put_1", true);
+        assert_eq!(
+            d.moved_in(Page::Skills, &["triage"]),
+            vec![(None, "triage".to_string())]
+        );
     }
 
     #[test]
