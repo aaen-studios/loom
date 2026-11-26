@@ -3,9 +3,25 @@
 //! them as the instance has them and sends what the person changes; the picking is the
 //! instance's.
 
+use std::time::{Duration, Instant};
+
 use serde_json::{json, Value};
 
 use super::{s, List, Model};
+
+/// How long a room.create from the form waits for its answer before Make turns on
+/// again.
+pub const MAKE_WAIT: Duration = Duration::from_secs(15);
+
+/// A room.create sent from here, until its answer comes or can't.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Making {
+    /// Its command id.
+    id: String,
+    /// When it went, while Make waits on it; None once it has waited MAKE_WAIT. Make is
+    /// on again then, and an answer that comes later still shows the group chat.
+    since: Option<Instant>,
+}
 
 /// A group chat, as its conversation's `room` has it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -90,6 +106,9 @@ pub struct RoomPanel {
     /// The count after the Members label while one is made, or None for the open
     /// one's settings.
     pub members_count: Option<MembersCount>,
+    /// A room.create from the form is waiting on the instance: Make does nothing, and
+    /// looks as it does while off.
+    pub waiting: bool,
 }
 
 /// The count after Members while a group chat is made: how many are picked of the two
@@ -134,9 +153,9 @@ impl RoomPanel {
         self.room.is_none()
     }
 
-    /// Make is on: a name and two members at least.
+    /// Make is on: a name and two members at least, and no room.create waiting.
     pub fn can_make(&self) -> bool {
-        self.making() && self.needs.is_none()
+        self.making() && self.needs.is_none() && !self.waiting
     }
 }
 
@@ -296,6 +315,7 @@ impl Model {
                 color: r.color.clone(),
                 needs: None,
                 members_count: None,
+                waiting: false,
             };
         }
         let f = &self.room_form;
@@ -313,7 +333,28 @@ impl Model {
             color: f.color.clone(),
             needs,
             members_count: Some(MembersCount::of(f.members.len())),
+            waiting: self.make_waiting(),
         }
+    }
+
+    /// A room.create from here is waiting on its answer, so Make does nothing.
+    pub fn make_waiting(&self) -> bool {
+        self.making_room.as_ref().is_some_and(|m| m.since.is_some())
+    }
+
+    /// Make turns on again once a room.create has waited MAKE_WAIT with no answer, so
+    /// the person can try again. Gives whether it turned on.
+    pub fn make_timed_out(&mut self, now: Instant) -> bool {
+        let Some(m) = self.making_room.as_mut() else {
+            return false;
+        };
+        let waited = m
+            .since
+            .is_some_and(|at| now.saturating_duration_since(at) >= MAKE_WAIT);
+        if waited {
+            m.since = None;
+        }
+        waited
     }
 
     /// Puts `agent` in the group chat the panel shows, or takes it out: in the form
@@ -350,8 +391,9 @@ impl Model {
         Some(self.update_room(&room, json!({"color": color})))
     }
 
-    /// Makes the group chat in the form, named `name`, once Make is on. The form stays
-    /// until it's made, so a refusal shows under it.
+    /// Makes the group chat in the form, named `name`, once Make is on: never twice for
+    /// one click and the next while the first waits. The form stays until it's made, so
+    /// a refusal shows under it.
     pub fn make_form_room(&mut self, name: &str) -> Option<Value> {
         if !self.room_panel(name).can_make() {
             return None;
@@ -364,14 +406,45 @@ impl Model {
     pub fn make_room(&mut self, name: &str, members: &[String], color: &str) -> Value {
         self.room_error = None;
         let id = self.id("app.room_create");
-        self.making_room = Some(id.clone());
+        self.making_room = Some(Making {
+            id: id.clone(),
+            since: Some(Instant::now()),
+        });
         json!({"t": "cmd", "id": id, "name": "room.create", "args": {"name": name.trim(), "members": members, "color": color}})
+    }
+
+    /// The room.create sent last, by its id.
+    fn making(&self, id: &str) -> bool {
+        self.making_room.as_ref().is_some_and(|m| m.id == id)
+    }
+
+    /// room.create's answer: the group chat made, or why it wasn't, under the form. An
+    /// answer to one sent before the last is the last's no more.
+    pub(super) fn room_create_answered(&mut self, id: &str, f: &Value) {
+        if let Some(v) = f.get("value") {
+            self.room_made(id, v);
+        }
+        if let Some(e) = f.pointer("/error/message").and_then(Value::as_str) {
+            if self.making(id) {
+                self.making_room = None;
+                self.room_error = Some(e.to_string());
+            }
+        }
+    }
+
+    /// A room.create that will never be answered: `id`'s, which didn't go for want of
+    /// a connection, or with None whatever was sent on a connection that went. Make is
+    /// on again.
+    pub(super) fn room_create_lost(&mut self, id: Option<&str>) {
+        if id.is_none_or(|id| self.making(id)) {
+            self.making_room = None;
+        }
     }
 
     /// A group chat made from here: the chat shows it, and the panel its settings, with
     /// its usage asked for so the Usage row is there without opening them again.
     pub(super) fn room_made(&mut self, id: &str, value: &Value) {
-        if self.making_room.as_deref() != Some(id) {
+        if !self.making(id) {
             return;
         }
         self.making_room = None;
@@ -768,6 +841,109 @@ mod tests {
         m.start_room_form();
         assert_eq!(m.room_error, None);
         assert_fresh_form(&m);
+    }
+
+    /// The form ready to make Code, with Ledger and Hermes, from Everyone.
+    fn ready_to_make(m: &mut Model) {
+        with_everyone(m);
+        m.show_room("c_0");
+        m.start_room_form();
+        m.toggle_room_member("a_1");
+        m.toggle_room_member("a_2");
+    }
+
+    fn made(id: &str) -> Value {
+        json!({"t": "result", "id": id, "ok": true, "value": {"conversation": {
+            "id": "c_12", "agent": "", "title": "Code",
+            "room": {"name": "Code", "members": ["a_1", "a_2"], "color": "", "default": "", "corrections": []}
+        }}})
+    }
+
+    // LOO-354: a quick second click on Make, or Enter after it, made a second group
+    // chat with the same name.
+    #[test]
+    fn make_clicked_twice_makes_one_group_chat() {
+        let mut m = Model::new();
+        ready_to_make(&mut m);
+        let f = m.make_form_room("Code").unwrap();
+        let p = m.room_panel("Code");
+        assert!(p.waiting);
+        assert_eq!(p.needs, None);
+        assert!(!p.can_make());
+        assert_eq!(m.make_form_room("Code"), None);
+        // Not yet waited long enough.
+        assert!(!m.make_timed_out(Instant::now()));
+        assert_eq!(m.make_form_room("Code"), None);
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&made(&id));
+        assert_eq!(m.open_room.as_deref(), Some("c_12"));
+        assert!(!m.make_waiting());
+        // A refusal turns Make on again, with why under the form.
+        m.start_room_form();
+        m.toggle_room_member("a_1");
+        m.toggle_room_member("a_3");
+        let f = m.make_form_room("Code").unwrap();
+        assert_eq!(m.make_form_room("Code"), None);
+        m.take(&json!({"t": "result", "id": f["id"], "ok": false, "error": {"message": "That name is taken"}}));
+        assert_eq!(m.room_error.as_deref(), Some("That name is taken"));
+        assert!(m.room_panel("Code").can_make());
+    }
+
+    #[test]
+    fn make_turns_on_again_when_no_answer_comes() {
+        let mut m = Model::new();
+        ready_to_make(&mut m);
+        let first = m.make_form_room("Code").unwrap();
+        assert!(m.make_timed_out(Instant::now() + MAKE_WAIT));
+        assert!(!m.make_timed_out(Instant::now() + MAKE_WAIT));
+        let p = m.room_panel("Code");
+        assert!(!p.waiting);
+        assert!(p.can_make());
+        // Tried again, the first's late answer is the second's no more.
+        let second = m.make_form_room("Code").unwrap();
+        assert_ne!(first["id"], second["id"]);
+        assert_eq!(m.make_form_room("Code"), None);
+        m.take(&json!({"t": "result", "id": first["id"], "ok": false, "error": {"message": "That name is taken"}}));
+        assert_eq!(m.room_error, None);
+        assert!(m.make_waiting());
+        m.take(&made(first["id"].as_str().unwrap()));
+        assert_eq!(m.open_room.as_deref(), Some("c_0"));
+        m.take(&made(second["id"].as_str().unwrap()));
+        assert_eq!(m.open_room.as_deref(), Some("c_12"));
+    }
+
+    #[test]
+    fn a_late_answer_after_the_wait_still_shows_the_group_chat() {
+        let mut m = Model::new();
+        ready_to_make(&mut m);
+        let f = m.make_form_room("Code").unwrap();
+        assert!(m.make_timed_out(Instant::now() + MAKE_WAIT));
+        m.take(&made(f["id"].as_str().unwrap()));
+        assert_eq!(m.open_room.as_deref(), Some("c_12"));
+        assert!(!m.room_panel("Code").making());
+    }
+
+    #[test]
+    fn make_turns_on_again_when_the_connection_goes() {
+        let mut m = Model::new();
+        ready_to_make(&mut m);
+        let f = m.make_form_room("Code").unwrap();
+        // Reconnecting: what was sent on the old connection is never answered.
+        m.take(&json!({"t": "core.conn", "state": "offline", "retry_ms": 500}));
+        assert!(!m.make_waiting());
+        assert!(m.room_panel("Code").can_make());
+        m.take(&json!({"t": "core.conn", "state": "live"}));
+        // Sent while offline, it didn't go.
+        let f2 = m.make_form_room("Code").unwrap();
+        assert_ne!(f["id"], f2["id"]);
+        assert!(m.make_waiting());
+        // Another command's didn't-go isn't this one's.
+        m.take(&json!({"t": "error", "code": "offline", "for": "app.room_update_9"}));
+        assert!(m.make_waiting());
+        m.take(&json!({"t": "error", "code": "offline", "for": f2["id"]}));
+        assert!(!m.make_waiting());
+        assert!(m.room_panel("Code").can_make());
+        assert!(m.notices.is_empty());
     }
 
     #[test]
