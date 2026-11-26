@@ -337,6 +337,7 @@ struct Run {
     routed: Json    // in a group chat, how its agent was picked (PLAN.md, "Group chats"), or null
     seat: String    // what its ACP sessions are kept under: its conversation, or in a group chat CONVERSATION/AGENT
     handed: List<String>    // in a group chat, the agents that had its message before, handed on with hand_off
+    room_intro: String    // in a group chat, where its agent is and who's there, said once a session (prompt), or ""
 }
 
 // A person's message in a group chat, waiting for the router's pick.
@@ -11692,12 +11693,11 @@ impl Instance {
         try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id).j("room", room).done()).done())
     }
 
-    // What the member `agent` is told as it answers in a group chat: where it
-    // is, who's there, and what was said since it last answered there.
-    fn room_note(i: Instance, user: String, conversation: Json, agent: String, answering: String) -> String ! Error {
-        let id = str_at(conversation.copy(), "id") ?? String()
+    // What the member `agent` is told once a session in a group chat (prompt),
+    // and again when it changes: where it is, who's there, and hand_off.
+    fn room_intro(i: Instance, user: String, conversation: Json, agent: String) -> String ! Error {
         let room = at(conversation, "room")
-        let names = try i.names_of_agents(user.copy())
+        let names = try i.names_of_agents(user)
         var others = List<String>()
         for m in rooms.ids_in(at(room.copy(), "members")) {
             if m == agent { continue }
@@ -11705,10 +11705,18 @@ impl Instance {
                 if k == m { others.push(n.copy()) }
             }
         }
+        let name = str_at(room, "name") ?? String("the group chat")
+        return "[loom: You're answering in the group chat \"{name}\", where your person talks with several of their agents at once: {if others.len() > 0 { others.join(", ") } else { String("no one else") }}, and you. Each message there goes to one of you. If one that comes to you is clearly for another of them, call hand_off with its name and why, then end your turn with one short line.]"
+    }
+
+    // What the member `agent` is told with each message it answers in a group
+    // chat: that it's its, and what was said since it last answered there.
+    fn room_note(i: Instance, user: String, conversation: Json, agent: String, answering: String) -> String ! Error {
+        let id = str_at(conversation, "id") ?? String()
+        let names = try i.names_of_agents(user.copy())
         let (newest, _) = try i.store.messages(user, id, none, 100)
         let said = rooms.said_since(newest, agent, answering, names)
-        let name = str_at(room, "name") ?? String("the group chat")
-        return "[loom: You're answering in the group chat \"{name}\", where your person talks with several of their agents at once: {if others.len() > 0 { others.join(", ") } else { String("no one else") }}, and you. Each message there goes to one of you, and this one is yours. What was said there since you last answered, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing since.)") }}\n\nIf this message is clearly for another of them, call hand_off with its name and why, then end your turn with one short line.]"
+        return "[loom: This message in the group chat is yours. What was said there since you last answered, newest last:\n\n{if said.len() > 0 { said } else { String("(Nothing since.)") }}]"
     }
 
     // A person's message in a group chat goes to one member (PLAN.md, "Group
@@ -12378,8 +12386,11 @@ impl Instance {
         let looks_back = i.looking_back.contains(run_id.copy())
         // In a group chat: what was said there since it last answered, by who
         // said it. A member looking back over its part of the chat isn't answering.
+        // Where it is and who's there is said once a session (prompt).
         var given_note = first_note.copy()
+        var room_intro = String()
         if in_room and not looks_back {
+            room_intro = try i.room_intro(user.copy(), conversation.copy(), agent_id.copy())
             let told = try i.room_note(user.copy(), conversation.copy(), agent_id.copy(), answering.copy())
             given_note = if given_note.len() > 0 { "{told}\n\n{given_note}" } else { told }
         }
@@ -12464,7 +12475,7 @@ impl Instance {
         if routed != Json.Null { started = started.j("routed", routed.copy()) }
         if looks_back { started = started.b("quiet", true) }
         try i.event(user.copy(), "run.started", started.maybe("routine", quiet_for).done())
-        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: starter.copy(), since: since, started: now(), routed: routed.copy(), seat: seat, handed: handed.copy() })
+        i.runs.insert(run_id.copy(), Run { id: run_id.copy(), user: user.copy(), conversation: conversation_id, agent: agent_id.copy(), message: reply, answering: answering.copy(), prompt: text.copy(), files: sent_files.copy(), session: String(), blocks: List<Block>(), ending: List<Block>(), tools: LinkedMap<String, String>(), denied: List<String>(), from: from.copy(), usage: Json.Null, note: note.copy(), program: program.copy(), proc: proc_key(agent_id.copy(), program.copy()), tried: List<String>(), starter: starter.copy(), since: since, started: now(), routed: routed.copy(), seat: seat, handed: handed.copy(), room_intro: room_intro })
         if notice.len() > 0 { i.notice(run_id.copy(), notice) }
         let a = agent else {
             try i.finish(run_id, String("failed"), some(String("The conversation's agent was deleted.")))
@@ -13176,6 +13187,7 @@ impl Instance {
         var from = String()
         var note = String()
         var seat = String()
+        var room_intro = String()
         if let r = i.runs.find(run_id.copy()) {
             text = r.prompt.copy()
             sent = r.files.copy()
@@ -13184,6 +13196,7 @@ impl Instance {
             from = r.from.copy()
             note = r.note.copy()
             seat = r.seat.copy()
+            room_intro = r.room_intro.copy()
         } else {
             return
         }
@@ -13262,6 +13275,12 @@ impl Instance {
         if revision > 0 and str_at(told.copy(), "profile") != some("{revision}") {
             prompt.push(Obj.new().s("type", String("text")).s("text", "[loom: About the person, as they and their agents keep it. update_profile changes it.\n{str_at(profile, "text") ?? String()}]").done())
             told = merge(told, Obj.new().s("profile", "{revision}").done())
+        }
+        // In a group chat, where it is and who's there (room_intro), when the
+        // session hasn't been told it as it is now.
+        if room_intro.len() > 0 and str_at(told.copy(), "room") != some(room_intro.copy()) {
+            prompt.push(Obj.new().s("type", String("text")).s("text", room_intro.copy()).done())
+            told = merge(told, Obj.new().s("room", room_intro).done())
         }
         if told != had {
             if let err(e) = i.store.put_acp_session_told(user.copy(), seat.copy(), session.copy(), told) { eprintln("loom: keeping what a session was told: {e}") }
