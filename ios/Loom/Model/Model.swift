@@ -287,6 +287,12 @@ struct Card: Equatable, Sendable {
     var saved: [String] = []
     var sending = false
     var error = ""
+    /// For `routine_off` (RoutineOff.swift): the routine, why it's off, and how many
+    /// failures turned it off, or none when its agent (`agent`) paused it. Its `state` is
+    /// `off`, `on` or `deleted`, and `sending` and `error` are its Turn on's.
+    var routine = ""
+    var why = ""
+    var failures = 0
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// For a form: its fields, the reply it's in (for Send), what's picked on each
@@ -326,7 +332,10 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off"].contains(type) else { return nil }
+        routine = c["routine"].text
+        why = c["why"].text
+        failures = c["failures"].int ?? 0
         if type == "form" {
             formFields = c["fields"].array.map {
                 FormField(label: $0["label"].text, kind: $0["kind"].text, required: $0["required"].bool ?? false, options: $0["options"].array.map(\.text), placeholder: $0["placeholder"].text, value: $0["value"])
@@ -1682,6 +1691,11 @@ final class Model {
     /// one it refused, by call.
     private var secretSending: Set<String> = []
     private var secretErrors: [String: String] = [:]
+    /// Turn on, on the cards routines leave when they turn off on their own: the ones on
+    /// their way, by routine, and what the instance said to ones it refused
+    /// (RoutineOff.swift).
+    var routineOnSending: Set<String> = []
+    var routineOnErrors: [String: String] = [:]
     /// What's picked on the choices and toggles of forms not sent yet, by
     /// `message/card/field`; the forms whose answers went and haven't come back, by their
     /// send's cid, with their `message/card`; and what the instance said to ones it
@@ -1830,6 +1844,10 @@ final class Model {
                 if c.type == "secret_ask" {
                     c.sending = secretSending.contains(c.call)
                     c.error = secretErrors[c.call] ?? ""
+                }
+                if c.type == "routine_off" {
+                    c.sending = routineOnSending.contains(c.routine)
+                    c.error = routineOnErrors[c.routine] ?? ""
                 }
                 if c.type == "form" {
                     let key = "\(out[i].id)/\(c.id)"
@@ -2263,6 +2281,12 @@ final class Model {
                     pending.append(frame)
                 }
             }
+        case let id where id.hasPrefix(routineOnAnswer):
+            // The card's own message.updated says it's on; a refusal shows on the card,
+            // which still has Turn on.
+            let routine = String(id.dropFirst(routineOnAnswer.count))
+            routineOnSending.remove(routine)
+            if let error { routineOnErrors[routine] = error }
         case let id where id.hasPrefix("app.secret_fill:"):
             // The card's own frame says how it went; a refusal shows on the card, which
             // still asks.
@@ -2351,9 +2375,10 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             // Loom's own lines across the chat (a compaction, a fresh session) are the
-            // desktop's; a watch's lines show here too, as quiet rows, and the line a T3 thread
-            // started from loom lands in shows as its card.
-            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0) || !threadsOf($0).isEmpty) }.map(messageOf)
+            // desktop's; a watch's lines show here too, as quiet rows, the line a T3 thread
+            // started from loom lands in shows as its card, and so does a routine's that
+            // turned off on its own.
+            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0) || !threadsOf($0).isEmpty || isRoutineOffLine($0)) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.
