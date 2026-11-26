@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod acta;
 pub mod drafts;
 pub mod header;
 mod popover;
@@ -993,6 +994,8 @@ pub enum PlusRow {
     Spools,
     /// Opens the form that starts a T3 thread (PLAN.md, "T3 threads").
     StartT3,
+    /// Opens a board of the person's Acta beside the chat, with Acta connected.
+    Boards,
 }
 
 impl PlusRow {
@@ -1061,6 +1064,9 @@ impl Model {
             if !self.t3.servers.is_empty() {
                 act.push(PlusRow::StartT3);
             }
+            if self.has_acta() {
+                act.push(PlusRow::Boards);
+            }
             return vec![add, act];
         }
         let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
@@ -1093,6 +1099,9 @@ impl Model {
         }
         if !self.t3.servers.is_empty() && "start a t3 thread".contains(&q) {
             act.push(PlusRow::StartT3);
+        }
+        if self.has_acta() && "boards".contains(&q) {
+            act.push(PlusRow::Boards);
         }
         vec![add, act]
             .into_iter()
@@ -3811,6 +3820,9 @@ pub struct ActaCard {
     pub missing: bool,
     /// When it was looked up, in Unix ms.
     pub at: i64,
+    /// Made from the message (its `made_cards`): its place among those, whose pills show
+    /// under it (PLAN.md, "Acta beside the chat").
+    pub made: Option<usize>,
 }
 
 /// The colour a card's status is drawn in: its dot, and its chip in the preview.
@@ -3853,6 +3865,7 @@ impl ActaCard {
             subtasks_done: n("subtasks_done"),
             missing: v.get("missing").and_then(Value::as_bool).unwrap_or(false),
             at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+            made: None,
         }
     }
 
@@ -3888,17 +3901,17 @@ impl ActaCard {
         }
     }
 
-    /// The preview's top line: its board and its id, `loom · LOO-206`.
-    pub fn place(&self) -> String {
-        let board = if self.board_name.is_empty() {
-            self.board.rsplit('/').next().unwrap_or_default()
+    /// Its board's name, as the preview's top line has it before the id, `loom`, which
+    /// opens the board: as Acta names it, or the board's part after its workspace.
+    pub fn board_label(&self) -> String {
+        if self.board_name.is_empty() {
+            self.board
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string()
         } else {
-            &self.board_name
-        };
-        if board.is_empty() {
-            self.id.clone()
-        } else {
-            format!("{board} · {}", self.id)
+            self.board_name.clone()
         }
     }
 
@@ -3943,12 +3956,22 @@ impl ActaCard {
 }
 
 fn cards_of(m: &Value) -> std::sync::Arc<HashMap<String, ActaCard>> {
+    // Those made from it, in the order they were.
+    let made: Vec<String> = m
+        .get("made_cards")
+        .and_then(Value::as_array)
+        .map(|l| l.iter().map(|c| s(c, "id")).collect())
+        .unwrap_or_default();
     let cards: HashMap<String, ActaCard> = m
         .get("cards")
         .and_then(Value::as_object)
         .map(|o| {
             o.iter()
-                .map(|(id, v)| (id.clone(), ActaCard::of(v)))
+                .map(|(id, v)| {
+                    let mut card = ActaCard::of(v);
+                    card.made = made.iter().position(|x| x == id);
+                    (id.clone(), card)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -4134,6 +4157,12 @@ impl Model {
                 stale.push(m.id.clone());
             }
         }
+        // And those whose pills a panel beside the chat redrew, for the instance to keep.
+        for id in std::mem::take(&mut self.acta.again) {
+            if !stale.contains(&id) {
+                stale.push(id);
+            }
+        }
         for ids in stale.chunks(100) {
             let id = self.id("app.cards_refresh");
             out.push(
@@ -4154,6 +4183,8 @@ impl Model {
                     .map(|b| (s(b, "prefix"), s(b, "board")))
                     .filter(|(p, _)| !p.is_empty())
                     .collect();
+                // Their names, for Acta's panels beside the chat.
+                self.acta.names = list.iter().map(|b| (s(b, "board"), s(b, "name"))).collect();
             }
             return true;
         }
@@ -4196,7 +4227,7 @@ mod card_tests {
         assert_eq!(c.ink(), CardInk::Sky);
         assert!(!c.struck());
         assert_eq!(c.status_words(), "In progress");
-        assert_eq!(c.place(), "loom · LOO-206");
+        assert_eq!(c.board_label(), "loom");
         assert_eq!(c.chips(), vec!["Elliot", "M", "desktop"]);
         assert_eq!(c.subtasks_line().as_deref(), Some("Subtasks 3 of 5"));
         assert!((c.subtasks_part() - 0.6).abs() < 1e-6);
@@ -4210,7 +4241,7 @@ mod card_tests {
         let canceled = card(json!({"id": "X-1", "board": "w/b", "status": "canceled"}));
         assert!(canceled.struck());
         assert_eq!(canceled.status_words(), "Canceled");
-        assert_eq!(canceled.place(), "b · X-1");
+        assert_eq!(canceled.board_label(), "b");
         assert_eq!(canceled.subtasks_line(), None);
         assert_eq!(canceled.link(), "https://acta.aaenz.no/w/b#X-1");
         let gone = card(json!({"id": "LOO-9", "board": "aaen-studios/loom", "missing": true}));
@@ -5982,6 +6013,8 @@ pub struct Model {
     pub acta_boards: Vec<(String, String)>,
     boards_at: Option<i64>,
     boards_asking: bool,
+    /// Acta beside the chat: a card's side preview, making a card, a board (model/acta.rs).
+    pub acta: acta::Acta,
     /// The messages of the shown chat whose cards were looked at since it showed
     /// (`card_fetches`).
     cards_looked: HashSet<String>,
@@ -7913,6 +7946,10 @@ impl Model {
         }
         // A T3 thread's answer, the start form's, or the threads followed (src/model/t3.rs).
         if self.take_t3_answer(&id, f) {
+            return;
+        }
+        // What Acta's panels beside the chat asked.
+        if self.take_panel_answer(&id, f) {
             return;
         }
         // A link pasted in the composer, looked up: its preview, or its site when the

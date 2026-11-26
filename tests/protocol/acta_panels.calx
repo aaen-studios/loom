@@ -1,0 +1,204 @@
+module tests.protocol.acta_panels
+
+// Acta beside the chat (PLAN.md, "Acta beside the chat"), against a fake Acta
+// (tests/fake_acta) that the instance takes for Acta (`--test-acta`). With no
+// Acta connected, the commands are refused. Once the person has it, acta.board
+// gives a board's labels and people, and acta.tasks its tasks: the open ones,
+// or those of the statuses asked for, by label. card.get gives a card's side
+// preview: its whole description, its subtasks and its last three comments.
+// card.update moves it and ticks its subtasks, as the person, and answers with
+// the card as it is now. card.create makes a card from a message: the message
+// keeps it in `made_cards` and `cards`, which comes with message.updated, and
+// it's looked up again as the message's other cards are. A card just moved is
+// kept so on a message that names it, by cards.refresh, without asking Acta
+// again. What Acta refuses comes back in its words.
+//
+//     calx tests/protocol/acta_panels.calx
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, calx, check}
+
+const LOOM: str = "aaen-studios/loom"
+
+fn fetch_json(address: String) -> Json ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return try parse(String.from_utf8(r.body) ?? String())
+}
+
+fn calls(fake: String, key: str) -> i64 ! Error {
+    return int_at(try fetch_json("{fake}/test/calls"), key) ?? 0
+}
+
+fn code(answer: Json) -> String {
+    return str_at(at(answer, "error"), "code") ?? String()
+}
+
+fn ids(tasks: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(ts) = tasks {
+        for t in ts {
+            out.push(str_at(t, "id") ?? String())
+        }
+    }
+    return out.join(" ")
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Planner")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+
+    // --- No Acta connected ---
+    let refused = try app.cmd("q_3", "card.get", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).done())
+    try check(code(refused) == "not_found", "with no Acta connected, card.get is refused")
+    _ = try app.cmd("q_4", "mcp.put", Obj.new().s("name", String("acta")).s("url", "{fake}/api/mcp").j("headers", Obj.new().s("Authorization", String("Bearer acta-key")).done()).done())
+
+    // --- A board ---
+    let board = at(at(try app.cmd("q_5", "acta.board", Obj.new().s("board", String(LOOM)).done()), "value"), "board")
+    try check("{board}" == #"{"board":"aaen-studios/loom","name":"loom","prefix":"LOO","labels":["Feature","Bug","desktop","server"],"people":["Elliot"]}"#, "acta.board gives a board's labels and people")
+    let open = at(at(try app.cmd("q_6", "acta.tasks", Obj.new().s("board", String(LOOM)).done()), "value"), "tasks")
+    try check(ids(open.copy()) == "LOO-206 LOO-207", "acta.tasks gives its open tasks")
+    let first = match open {
+        Json.Array(ts) => ts[0].copy(),
+        _ => Json.Null,
+    }
+    try check(str_at(first.copy(), "status") == some(String("in_progress")) and int_at(first.copy(), "subtasks") == some(5) and int_at(first, "subtasks_done") == some(3), "each with its status and subtasks done")
+    let done = at(at(try app.cmd("q_7", "acta.tasks", Obj.new().s("board", String(LOOM)).j("status", Json.Array([Json.Str(String("done"))])).done()), "value"), "tasks")
+    try check(ids(done) == "LOO-351", "or those of the statuses asked for")
+    let labelled = at(at(try app.cmd("q_8", "acta.tasks", Obj.new().s("board", String(LOOM)).s("label", String("Feature")).done()), "value"), "tasks")
+    try check(ids(labelled) == "LOO-207", "or with a label")
+    let bad = try app.cmd("q_9", "acta.tasks", Obj.new().s("board", String(LOOM)).j("status", Json.Array([Json.Str(String("later"))])).done())
+    let no_board = try app.cmd("q_10", "acta.tasks", Obj.new().s("board", String("loom")).done())
+    try check(code(bad) == "bad_request" and code(no_board) == "bad_request", "a status that isn't one, or a board that isn't a ref, is refused")
+
+    // --- A card's side preview ---
+    let card = at(at(try app.cmd("q_11", "card.get", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).done()), "value"), "card")
+    try check(str_at(card.copy(), "description") == some(String("The plan's usage limits that Claude reports, as small rings under the agents, with when each resets.\n\nHover shows the numbers.")) and str_at(card.copy(), "board_name") == some(String("loom")), "card.get gives a card's whole description")
+    try check("{at(card.copy(), "checklist")}" == #"[{"id":"s1","title":"Step 1","done":true},{"id":"s2","title":"Step 2","done":true},{"id":"s3","title":"Step 3","done":true},{"id":"s4","title":"Step 4","done":false},{"id":"s5","title":"Step 5","done":false}]"#, "its subtasks")
+    try check("{at(card.copy(), "comments")}" == #"[{"by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Rings drawn, numbers next."},{"by":"Claude Code","at":"2026-11-25T10:00:00Z","body":"Numbers show on hover."},{"by":"Elliot","at":"2026-11-25T10:00:00Z","body":"Looks right. The 90% colour is next."}]"#, "and its last three comments, oldest first")
+    let gone = try app.cmd("q_12", "card.get", Obj.new().s("board", String(LOOM)).s("id", String("LOO-999")).done())
+    try check(code(gone.copy()) == "mcp_failed" and str_at(at(gone, "error"), "message") == some(String("There's no task LOO-999 on that board.")), "a card that isn't there is refused in Acta's words")
+
+    // --- Moving it, and ticking a subtask ---
+    let moved = at(at(try app.cmd("q_13", "card.update", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("status", String("review")).done()), "value"), "card")
+    try check(str_at(moved, "status") == some(String("review")), "card.update moves it, and answers with the card as it is now")
+    let ticked = at(at(try app.cmd("q_14", "card.update", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("subtask", String("s4")).b("done", true).done()), "value"), "card")
+    try check(int_at(ticked.copy(), "subtasks_done") == some(4) and "{at(at(ticked, "checklist"), "3")}" != "", "and ticks a subtask")
+    let untick = at(at(try app.cmd("q_15", "card.update", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("subtask", String("s1")).b("done", false).done()), "value"), "card")
+    try check(int_at(untick, "subtasks_done") == some(3), "or unticks one")
+    let wrong = try app.cmd("q_16", "card.update", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("status", String("later")).done())
+    try check(code(wrong) == "bad_request", "a status that isn't one is refused")
+
+    // --- Making a card from a message ---
+    var seen = app.frames.len()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("The pills need a side preview, as LOO-206 says.\nWith the whole description.")).done())
+    var message = String()
+    while message.len() == 0 {
+        while seen < app.frames.len() {
+            let f = app.frames[seen].copy()
+            seen += 1
+            if str_at(f.copy(), "kind") != some(String("message.created")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "role") == some(String("person")) { message = str_at(m, "id") ?? String() }
+        }
+        if message.len() == 0 { _ = try app.until("event", "message.created") }
+    }
+    let args = Obj.new().s("board", String(LOOM)).s("title", String("The pills need a side preview.")).s("description", String("The pills need a side preview.\nWith the whole description.")).j("labels", Json.Array([Json.Str(String("desktop"))])).s("size", String("s")).s("priority", String("high")).s("message", message.copy()).done()
+    let new_card = at(at(try app.cmd("q_17", "card.create", args), "value"), "card")
+    try check(str_at(new_card.copy(), "id") == some(String("LOO-400")) and str_at(new_card.copy(), "status") == some(String("todo")) and str_at(new_card, "size") == some(String("s")), "card.create makes the card as the person, and gives it")
+    // Its message.updated comes before the answer, among the frames read already.
+    var updated = Json.Null
+    while updated == Json.Null {
+        while seen < app.frames.len() {
+            let f = app.frames[seen].copy()
+            seen += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "id") == some(message.copy()) and at(m.copy(), "made_cards") != Json.Null { updated = m }
+        }
+        if updated == Json.Null { _ = try app.until("event", "message.updated") }
+    }
+    try check("{at(updated.copy(), "made_cards")}" == #"[{"id":"LOO-400","board":"aaen-studios/loom"}]"#, "the message keeps the card made from it")
+    try check(str_at(at(at(updated, "cards"), "LOO-400"), "title") == some(String("The pills need a side preview.")), "with the card, for its pill, and every device hears of it")
+    let got = at(at(try app.cmd("q_18", "card.get", Obj.new().s("board", String(LOOM)).s("id", String("LOO-400")).done()), "value"), "card")
+    try check("{at(got, "labels")}" == #"["desktop"]"#, "it's on the board with its labels")
+    let unknown = try app.cmd("q_19", "card.create", Obj.new().s("board", String(LOOM)).s("title", String("x")).j("labels", Json.Array([Json.Str(String("nope"))])).done())
+    try check(code(unknown.copy()) == "mcp_failed" and str_at(at(unknown, "error"), "message") == some(String("nope isn't one of the board's labels.")), "a label that isn't the board's is refused in Acta's words")
+    let untitled = try app.cmd("q_20", "card.create", Obj.new().s("board", String(LOOM)).s("title", String("  ")).done())
+    try check(code(untitled) == "bad_request", "and a card with no title before Acta is asked")
+
+    // --- The made card is looked up again as the message's other cards are ---
+    let before = try calls(fake.copy(), "get_task LOO-400")
+    unsafe { sleep(5300000000) }
+    _ = try app.cmd("q_21", "cards.refresh", Obj.new().j("messages", Json.Array([Json.Str(message.copy())])).done())
+    var asked = before
+    var tries = 0
+    while asked == before and tries < 50 {
+        unsafe { sleep(100000000) }
+        asked = try calls(fake.copy(), "get_task LOO-400")
+        tries += 1
+    }
+    try check(asked == before + 1, "once it's 5 minutes old, cards.refresh looks the made card up again")
+
+    // --- A card moved here is kept so on a message that names it ---
+    let asks = try calls(fake.copy(), "get_task LOO-206")
+    _ = try app.cmd("q_22", "card.update", Obj.new().s("board", String(LOOM)).s("id", String("LOO-206")).s("status", String("in_progress")).done())
+    seen = app.frames.len()
+    _ = try app.cmd("q_23", "cards.refresh", Obj.new().j("messages", Json.Array([Json.Str(message.copy())])).done())
+    var kept = Json.Null
+    while kept == Json.Null {
+        while seen < app.frames.len() {
+            let f = app.frames[seen].copy()
+            seen += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "id") == some(message.copy()) { kept = m }
+        }
+        if kept == Json.Null { _ = try app.until("event", "message.updated") }
+    }
+    let asks_after = try calls(fake.copy(), "get_task LOO-206")
+    try check(str_at(at(at(kept, "cards"), "LOO-206"), "status") == some(String("in_progress")) and asks_after == asks + 1, "a card moved here is kept so on a message that names it, without asking Acta again")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_acta/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake acta: "), 120000) else {
+        child.kill()
+        fail "the fake Acta didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start_with([String("--test-acta"), "{fake}/api/mcp", String("--test-minute-ms"), String("1000")]) {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nacta_panels: all good")
+}

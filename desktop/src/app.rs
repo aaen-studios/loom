@@ -42,6 +42,8 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
+#[path = "acta_ui.rs"]
+mod acta_ui;
 #[path = "learned.rs"]
 mod learned;
 #[path = "room_view.rs"]
@@ -289,6 +291,8 @@ enum Screen {
     AddServer,
     /// A group chat's settings, or the form that makes one.
     Room,
+    /// Acta beside the chat: a card's side preview, making a card, or a board.
+    Acta,
     Aside,
     Page,
     Tables,
@@ -3638,6 +3642,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The panel beside the chat on the right: an agent's page, or a plugin's panel,
     /// whose web view sits over the space left for it under the head.
     fn side_panel(&mut self, side: Screen, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if side == Screen::Acta {
+            return self.acta_side(window, cx);
+        }
         let p = self.p;
         let width = side_width(
             side == Screen::Plugins || side == Screen::Page,
@@ -9599,6 +9606,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx,
                 );
             }
+            PlusRow::Boards => {
+                self.shut_plus(window, cx);
+                self.open_board_panel(None, cx);
+            }
         }
     }
 
@@ -9675,6 +9686,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 (Ico::Settings, title.into(), None)
             }
             PlusRow::StartT3 => (Ico::SquareTerminal, "Start a T3 thread".into(), None),
+            PlusRow::Boards => (Ico::Layers, "Boards".into(), None),
         }
     }
 
@@ -10364,6 +10376,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let pinned = m.pinned;
                 let pin_id = m.id.clone();
+                let (card_from, card_live) = (m.id.clone(), m.live);
                 let (gone_id, can_delete) = (m.id.clone(), !m.live && !m.queued);
                 panel = panel
                     .child(
@@ -10387,6 +10400,16 @@ ACTA_KEY=secret:ACTA_KEY",
                                 close(this, cx);
                             })),
                     );
+                // With Acta connected: a card made from it, in the panel beside the chat.
+                if self.model.has_acta() && !card_live {
+                    panel = panel.child(
+                        self.menu_item("ctx-card", Ico::LayersPlus, "Make a card…", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                close(this, cx);
+                                this.start_card_panel(&card_from, window, cx);
+                            })),
+                    );
+                }
                 // Delete, in red after a line: at once, leaving a mark (LOO-208).
                 if can_delete {
                     panel = panel
@@ -11124,7 +11147,9 @@ ACTA_KEY=secret:ACTA_KEY",
         let w = window.viewport_size().width.as_f32();
         let side = match self.side {
             Some(side) => side_width(
-                side == Screen::Plugins || side == Screen::Page,
+                side == Screen::Plugins
+                    || side == Screen::Page
+                    || (side == Screen::Acta && self.acta_wide()),
                 w,
                 self.bar_width(w),
                 self.side_w,
@@ -22721,7 +22746,7 @@ fn card_pill(
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
     };
-    let url = card.link();
+    let to_open = card.clone();
     let title = div()
         .min_w_0()
         .max_w(px(layout::PILL_TITLE))
@@ -22739,7 +22764,8 @@ fn card_pill(
                 .rounded_full()
                 .bg(card_ink(p, &card)),
         )
-        .on_click(move |_, _, cx| cx.open_url(&url));
+        // Its side preview, beside the chat.
+        .on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx));
     gpui_kit::base::HoverCard::new(key)
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
@@ -22776,7 +22802,7 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
     for c in card.chips() {
         chips = chips.child(chip(c, p.ink_2, p.line_strong));
     }
-    let button = |name: &'static str, url: String| {
+    let button = |name: &'static str| {
         div()
             .id(name)
             .h(px(28.0))
@@ -22792,10 +22818,10 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
             .cursor_pointer()
             .soft_hover(transparent_black(), p.hover, None)
             .child(name)
-            .on_click(move |_, _, cx| cx.open_url(&url))
     };
-    // Both open it in Acta, until it has a preview beside the chat.
+    // Open shows its side preview beside the chat, and its board's name the board.
     let url = card.link();
+    let (to_open, board, board_name) = (card.clone(), card.board.clone(), card.board_label());
     div().id("card-preview").pt(px(space::XS)).child(
         div()
             .w(px(layout::CARD_PREVIEW))
@@ -22816,7 +22842,16 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
                     .child(board_icon(14.0))
-                    .child(card.place()),
+                    .child(
+                        div()
+                            .id("card-preview-board")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .soft_ink(p.ink_3, p.ink)
+                            .child(board_name)
+                            .on_click(move |_, _, cx| acta_ui::open_board(&board, cx)),
+                    )
+                    .child(format!("· {}", card.id)),
             )
             .child(
                 div()
@@ -22862,8 +22897,10 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .pt(px(2.0))
                     .flex()
                     .gap(px(space::S))
-                    .child(button("Open", url.clone()))
-                    .child(button("Open in Acta", url)),
+                    .child(
+                        button("Open").on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx)),
+                    )
+                    .child(button("Open in Acta").on_click(move |_, _, cx| cx.open_url(&url))),
             ),
     )
 }
@@ -22917,8 +22954,8 @@ fn card_extensions() -> MarkdownExtensions {
     EXT.with(|e| e.clone())
 }
 
-/// Opens a card a message's words link to (`model::CARD_LINK`), in Acta. Gives whether
-/// `url` was one.
+/// Opens a card a message's words link to (`model::CARD_LINK`) in its side preview.
+/// Gives whether `url` was one.
 fn open_card_link(url: &str, cx: &mut App) -> bool {
     // A T3 thread's link opens its page in T3's app, once its card is known.
     if let Some(page) = t3_view::page_of(url) {
@@ -22929,7 +22966,7 @@ fn open_card_link(url: &str, cx: &mut App) -> bool {
         return false;
     };
     if let Some((_, card)) = CARD_TIPS.with(|t| t.borrow().get(id).cloned()) {
-        cx.open_url(&card.link());
+        acta_ui::open_card(&card, cx);
     }
     true
 }
@@ -25722,6 +25759,7 @@ impl Render for Loom {
         self.settle_server(cx);
         sync_badge_files(&self.model.files);
         sync_mention_agents(&self.model.agents);
+        acta_ui::keep_opener(cx.entity().downgrade());
         self.finish_weaving(window, cx);
         if std::mem::take(&mut self.rows_dirty) {
             self.refresh_rows(cx);
@@ -28268,6 +28306,11 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     let more_at = branch_at.clone();
     let to_more = this.clone();
     let lit = i.lit;
+    // Under it, the pills of the cards made from it (LOO-342).
+    let made = match &row {
+        Row::Message(m) if !m.deleted => acta_ui::made_pills(p, m),
+        _ => None,
+    };
     // To a screen reader, a message is an item in the chat, named by who said
     // what.
     let (row_id, said) = match row {
@@ -28313,6 +28356,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 .rounded(px(radius::BUBBLE))
                 .when(lit, |d| d.bg(tint.opacity(if p.dark { 0.16 } else { 0.1 })))
                 .child(inner)
+                .children(made)
                 .child(links)
                 // Over the message, where it's in the corner.
                 .children(when)

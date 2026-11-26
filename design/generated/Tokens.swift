@@ -81,6 +81,7 @@ enum Tokens {
         static let contextCard: CGFloat = 300
         static let pillTitle: CGFloat = 260
         static let cardPreview: CGFloat = 330
+        static let boardColumn: CGFloat = 140
         static let fieldLabel: CGFloat = 120
     }
 
