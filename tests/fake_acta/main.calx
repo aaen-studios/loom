@@ -1,26 +1,53 @@
 module tests.fake_acta.main
 
 // A fake Acta, for testing the cards in messages (PLAN.md, "Cards in
-// messages") without the real one: an MCP server over HTTP at /api/mcp that
-// answers 401 to a request without `Authorization: Bearer acta-key`, with two
-// of Acta's tools, as Acta answers them:
+// messages") and the watches (PLAN.md, "Watching outside events") without the
+// real one: an MCP server over HTTP at /api/mcp that answers 401 to a request
+// without `Authorization: Bearer acta-key`, with three of Acta's tools, as
+// Acta answers them:
 //
-//     list_boards   two boards, aaen-studios/loom (LOO) and aaen-studios/calcite (CAL)
-//     get_task      LOO-206, LOO-351 and CAL-338; any other is the tool's error
+//     list_boards     two boards, aaen-studios/loom (LOO) and aaen-studios/calcite (CAL)
+//     get_task        LOO-206, LOO-351 and CAL-338; any other is the tool's error
+//     list_activity   a board's activity since a time, newest first, in Acta's words
+//
+// Beside it, a fake T3 at /t3/mcp, which wants `Bearer t3-key`, with three of
+// T3's tools: t3_thread_launch starts a thread, running; t3_thread_wait
+// answers at once, timed out while its run goes on and with the run once it
+// ended; and t3_thread_read gives a thread's title, status, runs and what it
+// said.
 //
 // It listens on 127.0.0.1 and prints `fake acta: http://127.0.0.1:PORT` once it
 // does. For tests: GET /test/calls gives how many times each tool was called,
-// and get_task for each card; /test/status?task=ID&status=S moves a card.
+// and get_task and t3_thread_wait for each card and thread;
+// /test/status?task=ID&status=S&by=NAME moves a card, which its activity says;
+// /test/activity?task=ID&text=TEXT&by=NAME adds other activity;
+// /test/t3/start?thread=ID&title=T starts a run on a thread, making it if
+// there's none; and /test/t3/finish?thread=ID&status=S&text=T ends its run.
 //
 //     calx tests/fake_acta/main.calx
 import std.http.server.{Request, Response, Server}
 import std.io
 import std.json.{Json, parse}
+import std.time.{Timestamp}
 import std.url
+
+struct T3Thread {
+    title: String
+    status: String    // running or idle
+    run: String
+    run_status: String    // running, completed, failed, ...
+    started: String
+    ended: String
+    said: String
+    runs: i64
+}
 
 struct Fake {
     tasks: LinkedMap<String, Json>
     calls: LinkedMap<String, i64>
+    activity: List<Json>    // oldest first, each with its board
+    last_ms: i64
+    threads: LinkedMap<String, T3Thread>
 }
 
 fn text(s: str) -> Json {
@@ -74,6 +101,39 @@ fn tool_error(why: own String) -> Json {
     return object([("content", Json.Array([object([("type", text("text")), ("text", Json.Str(why))])])), ("isError", Json.Bool(true))])
 }
 
+// A status as Acta's activity names it.
+fn label(status: own String) -> String {
+    if status == "todo" { return String("To do") }
+    if status == "in_progress" { return String("In progress") }
+    if status == "review" { return String("Review") }
+    if status == "done" { return String("Done") }
+    if status == "canceled" { return String("Canceled") }
+    return status
+}
+
+fn query(req: Request) -> LinkedMap<String, String> {
+    var m = LinkedMap<String, String>()
+    for (k, v) in url.form_decode(req.query.copy()) {
+        m.insert(k.copy(), v.copy())
+    }
+    return m
+}
+
+fn param(q: LinkedMap<String, String>, key: str, otherwise: str) -> String {
+    if let v = q.find(String(key)) {
+        if v.len() > 0 { return v.copy() }
+    }
+    return String(otherwise)
+}
+
+fn mcp_result(m: Json, result: own Json) -> Response {
+    return json(200, object([("jsonrpc", text("2.0")), ("id", m.get(String("id")) ?? Json.Null), ("result", result)]))
+}
+
+fn tool(name: str) -> Json {
+    return object([("name", text(name)), ("inputSchema", object([("type", text("object"))]))])
+}
+
 impl Fake {
     fn count(self: mut Fake, key: own String) {
         if let n = mut self.calls.find(key.copy()) {
@@ -81,6 +141,25 @@ impl Fake {
             return
         }
         self.calls.insert(key, 1)
+    }
+
+    // Now, as Acta writes a time, a millisecond past the last it wrote at least.
+    fn stamp(self: mut Fake) -> String {
+        var t = unsafe { Timestamp.now() }.unix_ms
+        if t <= self.last_ms { t = self.last_ms + 1 }
+        self.last_ms = t
+        return Timestamp { unix_ms: t }.iso(0)
+    }
+
+    fn happened(self: mut Fake, id: own String, said: own String, by: own String) {
+        var t = Json.Null
+        if let found = self.tasks.find(id.copy()) { t = found.copy() }
+        if t == Json.Null { return }
+        let address = str_of(t.copy(), "url")
+        let board = address[address.find("aaenz.no/") ?? 0..].trim_prefix("aaenz.no/").copy()
+        let on = board[0..board.find("#") ?? board.len()].copy()
+        let at = self.stamp()
+        self.activity.push(object([("board", Json.Str(on)), ("task", Json.Str(id)), ("title", Json.Str(str_of(t.copy(), "title"))), ("by", Json.Str(by)), ("via", text("web")), ("at", Json.Str(at)), ("text", Json.Str(said))]))
     }
 
     fn call(self: mut Fake, name: String, args: Json) -> Json {
@@ -97,11 +176,79 @@ impl Fake {
             }
             return tool_error("There's no task {id} on that board.")
         }
+        if name == "list_activity" {
+            let board = str_of(args.copy(), "board")
+            let since = str_of(args.copy(), "since")
+            let from = if since.len() > 0 { (Timestamp.parse_iso(since.copy()) ?? Timestamp { unix_ms: 0 }).unix_ms } else { 0 }
+            var out = List<Json>()
+            var k = self.activity.len()
+            while k > 0 {
+                k -= 1
+                let a = self.activity[k].copy()
+                if str_of(a.copy(), "board") != board { continue }
+                if (Timestamp.parse_iso(str_of(a.copy(), "at")) ?? Timestamp { unix_ms: 0 }).unix_ms < from { continue }
+                var m = LinkedMap<String, Json>()
+                if let Json.Object(o) = a {
+                    for (key, v) in o {
+                        if key != "board" { m.insert(key.copy(), v.copy()) }
+                    }
+                }
+                out.push(Json.Object(m))
+            }
+            return answer(object([("board", Json.Str(board)), ("activity", Json.Array(out))]))
+        }
         return tool_error("No tool {name}.")
     }
 
-    fn mcp(self: mut Fake, req: Request) -> Response {
-        if (req.header(String("Authorization")) ?? String()) != "Bearer acta-key" {
+    fn thread_json(self: Fake, id: own String) -> Json {
+        let t = self.threads.find(id.copy()) else return Json.Null
+        var run = object([("runId", Json.Str(t.run.copy())), ("status", Json.Str(t.run_status.copy())), ("startedAt", Json.Str(t.started.copy()))])
+        if t.ended.len() > 0 { run = object([("runId", Json.Str(t.run.copy())), ("status", Json.Str(t.run_status.copy())), ("startedAt", Json.Str(t.started.copy())), ("completedAt", Json.Str(t.ended.copy()))]) }
+        var items: List<Json> = [object([("type", text("user_message")), ("text", text("Do the work.")), ("updatedAt", Json.Str(t.started.copy()))])]
+        if t.said.len() > 0 { items.push(object([("type", text("assistant_message")), ("text", Json.Str(t.said.copy())), ("updatedAt", Json.Str(t.ended.copy()))])) }
+        return object([("thread", object([("id", Json.Str(id)), ("title", Json.Str(t.title.copy())), ("status", Json.Str(t.status.copy()))])), ("recentRuns", Json.Array([run])), ("items", Json.Array(items))])
+    }
+
+    fn start_thread(self: mut Fake, id: own String, title: own String) {
+        let at = self.stamp()
+        if let t = mut self.threads.find(id.copy()) {
+            t.runs += 1
+            t.run = "run_{t.runs}"
+            t.status = String("running")
+            t.run_status = String("running")
+            t.started = at
+            t.ended = String()
+            t.said = String()
+            return
+        }
+        self.threads.insert(id, T3Thread { title: title, status: String("running"), run: String("run_1"), run_status: String("running"), started: at, ended: String(), said: String(), runs: 1 })
+    }
+
+    fn t3_call(self: mut Fake, name: String, args: Json) -> Json {
+        self.count(name.copy())
+        let id = str_of(args.copy(), "threadId")
+        if name == "t3_thread_launch" {
+            let made = "th_{self.threads.len() + 1}"
+            let title = str_of(args, "title")
+            self.start_thread(made.copy(), title.copy())
+            return answer(object([("threadId", Json.Str(made)), ("title", Json.Str(title)), ("runId", text("run_1")), ("status", text("running"))]))
+        }
+        if name == "t3_thread_wait" {
+            self.count("t3_thread_wait {id}")
+            let t = self.threads.find(id.copy()) else return tool_error("There's no thread {id}.")
+            let running = t.run_status == "running"
+            return answer(object([("threadId", Json.Str(id)), ("runId", Json.Str(t.run.copy())), ("status", Json.Str(t.run_status.copy())), ("timedOut", Json.Bool(running))]))
+        }
+        if name == "t3_thread_read" {
+            let j = self.thread_json(id.copy())
+            if j == Json.Null { return tool_error("There's no thread {id}.") }
+            return answer(j)
+        }
+        return tool_error("No tool {name}.")
+    }
+
+    fn mcp(self: mut Fake, req: Request, key: str, t3: bool) -> Response {
+        if (req.header(String("Authorization")) ?? String()) != "Bearer {key}" {
             return json(401, object([("error", text("invalid_token"))])).with_header(String("WWW-Authenticate"), String("Bearer realm=\"acta\""))
         }
         let m = match parse(req.text() ?? String()) {
@@ -109,22 +256,26 @@ impl Fake {
             err(_) => return Response.error(400),
         }
         let method = str_of(m.copy(), "method")
-        let id = m.get(String("id")) ?? Json.Null
-        if id == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
-        var result = object(List<(str, Json)>())
-        if method == "initialize" {
-            result = object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("acta")), ("version", text("1"))]))])
-        } else if method == "tools/list" {
-            result = object([("tools", Json.Array([object([("name", text("list_boards"))]), object([("name", text("get_task"))])]))])
-        } else if method == "tools/call" {
-            let params = m.get(String("params")) ?? Json.Null
-            result = self.call(str_of(params.copy(), "name"), params.get(String("arguments")) ?? Json.Null)
+        if (m.get(String("id")) ?? Json.Null) == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
+        if method == "initialize" { return mcp_result(m, object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text(if t3 { "t3" } else { "acta" })), ("version", text("1"))]))])) }
+        if method == "tools/list" {
+            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("list_activity")]) }
+            return mcp_result(m, object([("tools", tools)]))
         }
-        return json(200, object([("jsonrpc", text("2.0")), ("id", id), ("result", result)]))
+        if method == "tools/call" {
+            let params = m.get(String("params")) ?? Json.Null
+            let name = str_of(params.copy(), "name")
+            let args = params.get(String("arguments")) ?? Json.Null
+            let result = if t3 { self.t3_call(name, args) } else { self.call(name, args) }
+            return mcp_result(m, result)
+        }
+        return mcp_result(m, object(List<(str, Json)>()))
     }
 
     fn handle(self: mut Fake, req: Request) -> Response {
-        if req.method == "POST" and req.path == "/api/mcp" { return self.mcp(req) }
+        if req.method == "POST" and req.path == "/api/mcp" { return self.mcp(req, "acta-key", false) }
+        if req.method == "POST" and req.path == "/t3/mcp" { return self.mcp(req, "t3-key", true) }
+        let q = query(req.copy())
         if req.path == "/test/calls" {
             var m = LinkedMap<String, Json>()
             for (k, n) in self.calls {
@@ -133,18 +284,35 @@ impl Fake {
             return json(200, Json.Object(m))
         }
         if req.path == "/test/status" {
-            var id = String()
-            var status = String()
-            for (k, v) in url.form_decode(req.query.copy()) {
-                if k == "task" { id = v.copy() }
-                if k == "status" { status = v.copy() }
-            }
-            if let t = mut self.tasks.find(id) {
+            let id = param(q.copy(), "task", "")
+            let status = param(q.copy(), "status", "")
+            var moved = false
+            if let t = mut self.tasks.find(id.copy()) {
                 if let Json.Object(o) = t.copy() {
                     var changed = o.copy()
-                    changed.insert(String("status"), Json.Str(status))
+                    changed.insert(String("status"), Json.Str(status.copy()))
                     t = Json.Object(changed)
+                    moved = true
                 }
+            }
+            if moved { self.happened(id, "moved it to {label(status)}", param(q, "by", "Elliot")) }
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/activity" {
+            self.happened(param(q.copy(), "task", ""), param(q.copy(), "text", ""), param(q, "by", "Elliot"))
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/t3/start" {
+            self.start_thread(param(q.copy(), "thread", "th_1"), param(q, "title", "A thread"))
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/t3/finish" {
+            let at = self.stamp()
+            if let t = mut self.threads.find(param(q.copy(), "thread", "th_1")) {
+                t.status = String("idle")
+                t.run_status = param(q.copy(), "status", "completed")
+                t.ended = at
+                t.said = param(q, "text", "")
             }
             return json(200, object(List<(str, Json)>()))
         }
@@ -160,7 +328,7 @@ fn main() ! Error {
     tasks.insert(String("LOO-206"), task("LOO-206", "aaen-studios/loom", "Show agents' usage limits in the sidebar", "in_progress", "m", ["desktop"], "The plan's usage limits that Claude reports, as small rings under the agents, with when each resets.\n\nHover shows the numbers.", [true, true, true, false, false]))
     tasks.insert(String("LOO-351"), task("LOO-351", "aaen-studios/loom", "Leaving a group chat takes two clicks", "done", "s", List<str>(), "", List<bool>()))
     tasks.insert(String("CAL-338"), task("CAL-338", "aaen-studios/calcite", "Smooth chunk loading", "review", "l", ["engine", "perf"], "Chunks load without a hitch.", [true]))
-    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>() }
+    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>(), activity: List<Json>(), last_ms: 0, threads: LinkedMap<String, T3Thread>() }
     println("fake acta: {base}")
     io.flush()
     loop {

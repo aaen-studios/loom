@@ -58,10 +58,30 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_PREVIEWS: YES
+  # The app's unit tests, of what it works out without the core, run in the app in the
+  # simulator (ios/README.md, "Testing it").
+  LoomTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LoomTests
+    dependencies:
+      - target: Loom
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.aaenz.loom.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
 schemes:
   Loom:
     build:
       targets:
         Loom: all
+        LoomTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - LoomTests

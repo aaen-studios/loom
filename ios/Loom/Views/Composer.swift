@@ -492,18 +492,8 @@ final class ComposerBox {
 
     /// The field's words and pieces, in order.
     func parts() -> [Either] {
-        guard let s = view?.textStorage else { return [] }
-        var out: [Either] = []
-        let all = NSRange(location: 0, length: s.length)
-        s.enumerateAttribute(.attachment, in: all) { value, range, _ in
-            if let a = value as? PieceAttachment {
-                out.append(.piece(a.piece))
-            } else {
-                let words = (s.string as NSString).substring(with: range).replacingOccurrences(of: "\u{FFFC}", with: "")
-                if !words.isEmpty { out.append(.words(words)) }
-            }
-        }
-        return out
+        guard let v = view else { return [] }
+        return v.parts(in: NSRange(location: 0, length: v.textStorage.length))
     }
 
     /// Puts a piece in at the caret, or in place of what's typed from character `from`
@@ -566,13 +556,61 @@ final class PieceAttachment: NSTextAttachment {
 }
 
 /// The composer's field: a text view whose pieces are attachments, which pastes a link
-/// on its own as its preview.
+/// on its own as its preview. What's copied from it is its words, each piece as words
+/// (`copiedText`), with its emoji and mentions kept beside them (`keptParts`), so a paste
+/// here puts them back.
 final class PieceTextView: UITextView {
     weak var box: ComposerBox?
     var art = PieceArt()
 
+    /// The pasteboard type the pieces copied from the field are kept in, as JSON.
+    static let piecesType = "no.aaenz.loom.pieces"
+
+    /// The words and pieces in `range`, in order.
+    func parts(in range: NSRange) -> [Either] {
+        var out: [Either] = []
+        let s = textStorage.string as NSString
+        textStorage.enumerateAttribute(.attachment, in: range) { value, range, _ in
+            if let a = value as? PieceAttachment {
+                out.append(.piece(a.piece))
+            } else {
+                let words = s.substring(with: range).replacingOccurrences(of: "\u{FFFC}", with: "")
+                if !words.isEmpty { out.append(.words(words)) }
+            }
+        }
+        return out
+    }
+
+    override func copy(_ sender: Any?) {
+        guard selectedRange.length > 0 else { return super.copy(sender) }
+        let parts = parts(in: selectedRange)
+        var item: [String: Any] = [UTType.utf8PlainText.identifier: copiedText(parts)]
+        if let kept = keptParts(parts).flatMap({ try? JSONEncoder().encode($0) }) {
+            item[Self.piecesType] = kept
+        }
+        UIPasteboard.general.setItems([item])
+    }
+
+    override func cut(_ sender: Any?) {
+        guard selectedRange.length > 0 else { return super.cut(sender) }
+        copy(sender)
+        edit(selectedRange, NSAttributedString())
+    }
+
     override func paste(_ sender: Any?) {
-        if let text = UIPasteboard.general.string, let url = pastedLink(text) {
+        let board = UIPasteboard.general
+        if let parts = pastedParts(board.string, kept: board.data(forPasteboardType: Self.piecesType)) {
+            let made = NSMutableAttributedString()
+            for part in parts {
+                switch part {
+                case .words(let w): made.append(NSAttributedString(string: w, attributes: typingAttributes))
+                case .piece(let p): made.append(piece(p))
+                }
+            }
+            edit(selectedRange, made)
+            return
+        }
+        if let text = board.string, let url = pastedLink(text) {
             pasteLink(url)
             return
         }
