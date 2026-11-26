@@ -488,7 +488,30 @@ export function play(app: HTMLElement) {
 		lit?.classList.add('lit');
 		lit?.scrollIntoView({ block: 'nearest' });
 	};
+	/** Where the popover goes across the window, as the app works it out (model::pop_under):
+	 * centred under the pin, 12px inside the window's edges and no wider than the window less
+	 * those, with its nub on the pin but clear of its rounded corners. */
+	const placePins = () => {
+		const frame = app.getBoundingClientRect();
+		const pin = pinsBtn.getBoundingClientRect();
+		const room = app.clientWidth;
+		const margin = 12;
+		const inset = 12 + 11 / Math.SQRT2;
+		const middle = (pin.left + pin.right) / 2 - frame.left - app.clientLeft;
+		const width = Math.max(0, Math.min(460, room - 2 * margin));
+		const left = Math.min(Math.max(middle - width / 2, margin), Math.max(margin, room - margin - width));
+		const nub = width > 2 * inset ? Math.min(Math.max(middle - left, inset), width - inset) : width / 2;
+		const at = pop.parentElement!.style;
+		at.setProperty('--pop-left', `${left}px`);
+		at.setProperty('--pop-width', `${width}px`);
+		at.setProperty('--nub-in', `${nub}px`);
+		at.setProperty('--nub-at', `${left + nub}px`);
+	};
+	addEventListener('resize', () => {
+		if (!pop.hidden) placePins();
+	});
 	const showPins = (open: boolean) => {
+		if (open) placePins();
 		pop.hidden = !open;
 		pinsBtn.setAttribute('aria-expanded', String(open));
 		lit = null;
