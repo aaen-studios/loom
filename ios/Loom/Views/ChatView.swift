@@ -30,6 +30,7 @@ struct ChatView: View {
     @State private var pinsOpen = false
     /// The context's card, open in a sheet from the header's ring.
     @State private var contextOpen = false
+    @AppStorage(Prefs.showContext) private var showContext = false
     /// The group chat's settings, open in a sheet.
     @State private var roomSettings = false
     /// What the agent follows, open in a sheet from the menu.
@@ -214,7 +215,7 @@ struct ChatView: View {
             }
             // How full the agent's session context is, in a group chat the member's that
             // answered last, with its card in a sheet.
-            if thread == nil, here, let fill = model.context {
+            if thread == nil, here, showContext, let fill = model.context {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         contextOpen = true
@@ -333,7 +334,7 @@ struct ChatView: View {
         .sheet(isPresented: warming ? .constant(false) : $pinsOpen) {
             PinsSheet(agent: agent)
         }
-        .sheet(isPresented: warming ? .constant(false) : $contextOpen) {
+        .sheet(isPresented: warming || !showContext ? .constant(false) : $contextOpen) {
             ContextSheet()
         }
         .sheet(item: $reading) { r in
