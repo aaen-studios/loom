@@ -422,9 +422,11 @@ pub fn last_note(run: Json) -> String {
     return "[loom: The last time this routine ran, {when} UTC, {what}]"
 }
 
-// What a chat's own session is told of what routines put in the chat since its
-// last turn there, which they did in sessions of their own: each message as the
-// chat keeps it, oldest first.
+// What a chat's own session is told of what sessions of their own put in the
+// chat since its last turn there: routines' posts, and its answers to watches
+// that woke it while the chat was quiet. Each message as the chat keeps it,
+// oldest first, with `untold` from the store saying what put it there (a
+// routine's when it's left out).
 pub fn posts_note(messages: List<Json>) -> String {
     var lines = List<String>()
     for m in messages {
@@ -436,6 +438,11 @@ pub fn posts_note(messages: List<Json>) -> String {
         }
         if said.trim().len() == 0 { continue }
         let when = Timestamp { unix_ms: int_at(m.copy(), "at") ?? 0 }.date_time(0).format("%Y-%m-%d %H:%M")
+        let untold = at(m.copy(), "untold")
+        if untold != Json.Null and str_at(untold.copy(), "routine") == some(String()) {
+            lines.push("When a watch woke you, {when} UTC, with this:\n{cut(str_at(untold, "came") ?? String(), LAST_MOST)}\nYou answered:\n{cut(said, LAST_MOST)}")
+            continue
+        }
         let whose = match str_at(m, "routine_name") {
             some(n) => "the routine \"{n}\"",
             none => String("a routine that failed"),
@@ -443,7 +450,7 @@ pub fn posts_note(messages: List<Json>) -> String {
         lines.push("From {whose}, {when} UTC:\n{cut(said, LAST_MOST)}")
     }
     if lines.len() == 0 { return String() }
-    return "[loom: Since your last turn here, your routines put these in this chat as your messages, from sessions of their own. Your person has seen them, and may be answering one:\n\n{lines.join("\n\n")}]"
+    return "[loom: Since your last turn here, these went in this chat as your messages, from sessions of their own: what your routines posted, and what you answered when a watch woke you while the chat was quiet. Your person has seen them, and may be answering one:\n\n{lines.join("\n\n")}]"
 }
 
 // --- A routine's gate (PLAN.md, "Routines") ---
@@ -713,6 +720,11 @@ fn the_chat_is_told_what_routines_posted() {
     let told = posts_note([post, failed])
     assert(told.starts_with("[loom: Since your last turn here") and told.contains("From the routine \"Version check\", 1970-01-01 00:00 UTC:\n1.21.5 is out.") and told.ends_with("From a routine that failed, 1970-01-01 00:01 UTC:\nThe shop was down.]"))
     assert(posts_note(List<Json>()) == "")
+    // An answer to a watch's wake in a session of its own says what woke it.
+    let woken = parse(#"{"at":120000,"blocks":[{"kind":"text","text":"Nice, SHOP-31 shipped."}],"untold":{"routine":"","came":"SHOP-31 moved to Done, by Ola"}}"#)!
+    assert(posts_note([woken]).ends_with("When a watch woke you, 1970-01-01 00:02 UTC, with this:\nSHOP-31 moved to Done, by Ola\nYou answered:\nNice, SHOP-31 shipped.]"))
+    let routine_post = parse(#"{"at":0,"routine_name":"Version check","blocks":[{"kind":"text","text":"Out."}],"untold":{"routine":"rt_1","came":""}}"#)!
+    assert(posts_note([routine_post]).contains("From the routine \"Version check\""))
 }
 
 @test

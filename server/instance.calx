@@ -809,6 +809,7 @@ struct Watches {
     t3: Map<String, Sender<mcpcall.Job>>    // a thread of its own for each T3 watch, since a wait waits
     t3_done: Receiver<mcpcall.Done>    // what those threads did
     wakes: List<Wake>    // agents a watch woke, oldest first, waiting for their chat
+    alone: List<String>    // the runs a watch woke whose chat's session had gone cold, each in a session of its own
     since: Map<String, SinceAsk>    // status.since asks under way, by key
     next_since: i64
     loaded: bool    // whether the store's watches have been read since the instance started
@@ -848,12 +849,32 @@ struct SinceAsk {
 }
 
 fn new_watches() -> Watches {
-    return Watches { polls: Map<String, Poll>(), t3: Map<String, Sender<mcpcall.Job>>(), t3_done: Receiver<mcpcall.Done>(), wakes: List<Wake>(), since: Map<String, SinceAsk>(), next_since: 0, loaded: false }
+    return Watches { polls: Map<String, Poll>(), t3: Map<String, Sender<mcpcall.Job>>(), t3_done: Receiver<mcpcall.Done>(), wakes: List<Wake>(), alone: List<String>(), since: Map<String, SinceAsk>(), next_since: 0, loaded: false }
 }
 
 // What a turn a watch woke an agent for says it comes from, and what it's told.
 const WOKEN_FROM: str = "an event outside loom that your person follows (a watch they set up, or one you set up by starting a T3 thread); your person isn't writing this"
 const WOKEN_NOTE: str = "[loom: Your person sees your answer in this chat, under a line that says what came. Say what matters about it, or do what it calls for; with nothing to say, say so in a few words.]"
+
+// How recently a chat's session must have ended a turn for a watch's wake to go
+// on in it, in minutes: inside the five minutes a prompt cache lasts, so the
+// turn reads the chat from the cache. After that, the chat would be sent again
+// whole, so the wake goes to a session of its own (PLAN.md, "Watching outside
+// events").
+const WAKE_WARM_MINUTES: i64 = 4
+
+// How much of the chat a wake in a session of its own is given: its newest
+// messages, each cut to WAKE_CHAT_EACH bytes, and all of them to WAKE_CHAT_MOST.
+const WAKE_CHAT_MESSAGES: usize = 6
+const WAKE_CHAT_EACH: usize = 600
+const WAKE_CHAT_MOST: usize = 3000
+
+// What a wake in a session of its own is told of where it is, with the chat's
+// newest messages, `said`.
+fn wake_alone_note(said: String) -> String {
+    let newest = if said.len() > 0 { said.copy() } else { String("(Nothing said yet.)") }
+    return "[loom: A watch woke you while your chat with your person was quiet, so this turn runs in a session of its own, apart from that chat; your answer goes in the chat all the same, under the watch's line. The newest of the chat, newest last:\n\n{newest}\n\nFor anything older, search_messages finds it, and recall finds what you remember.]"
+}
 
 // A call to Acta for its panels beside the chat (card.get, card.update, card.create,
 // acta.board, acta.tasks): who waits, the message a card is made from, and what was
@@ -934,14 +955,16 @@ struct RoutineWork {
     closing: List<(String, String)>    // a program's key in `procs`, and the session
 }
 
-// The seat (Run.seat) a routine's run, or a step of its flow, keeps its ACP
-// session under: its own, never a chat's, so no chat's session carries it.
-fn routine_seat(run: String) -> String {
-    return "routine:{run}"
+// The seat (Run.seat) a run in a session of its own keeps its ACP session
+// under, never a chat's, so no chat's session carries it: a routine's run, a
+// step of its flow, or a turn a watch woke an agent for once its chat's session
+// had gone cold. The session is closed when the run ends.
+fn own_seat(run: String) -> String {
+    return "own:{run}"
 }
 
-fn routine_seat_of(seat: String) -> bool {
-    return seat.starts_with("routine:")
+fn own_seat_of(seat: String) -> bool {
+    return seat.starts_with("own:")
 }
 
 // A routine's run, or a step of its flow, which the person doesn't see
@@ -5812,7 +5835,7 @@ impl Instance {
             try i.store.put_message(g.user.copy(), message.copy())
             try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation.copy()).j("message", message).done())
             // The chat's own session hears of it with its next turn (start_run_as).
-            try i.store.post_untold(g.user.copy(), conversation.copy(), message_id.copy(), routine_id.copy())
+            try i.store.post_untold(g.user.copy(), conversation.copy(), message_id.copy(), routine_id.copy(), String())
             if let q = mut i.quiet_turns.find(run_id.copy()) { q.posted.push(text.copy()) }
             i.log(g.user.copy(), g.agent.copy(), "routine", "Posted for the routine {rname}", g.agent.copy())
             if bool_at(r, "notify") == some(true) {
@@ -6977,20 +7000,26 @@ impl Instance {
     // group chat another member's reply is by its name. The oldest go first
     // when it's long.
     fn transcript(i: Instance, user: String, conversation: String, upto: String?, me: String) -> String ! Error {
+        return try i.transcript_cut(user, conversation, upto, me, SIDE_MESSAGES, 1500, SIDE_TRANSCRIPT_MOST)
+    }
+
+    // The same, of the last `count` messages, each cut to `each` bytes, and all
+    // of them to `most`.
+    fn transcript_cut(i: Instance, user: String, conversation: String, upto: String?, me: String, count: usize, each: usize, most: usize) -> String ! Error {
         let names = try i.names_of_agents(user.copy())
-        // Only the last SIDE_MESSAGES are used: up to `upto` and it, or the newest.
+        // Only the last `count` are used: up to `upto` and it, or the newest.
         let last = if let u = upto { try i.store.message(user.copy(), u) } else { none }
         var messages = List<Json>()
         if let m = last {
-            let (before, _) = try i.store.messages(user, conversation, str_at(m, "id"), SIDE_MESSAGES - 1)
+            let (before, _) = try i.store.messages(user, conversation, str_at(m, "id"), count - 1)
             messages = before
             messages.push(m)
         } else {
-            let (newest, _) = try i.store.messages(user, conversation, none, SIDE_MESSAGES)
+            let (newest, _) = try i.store.messages(user, conversation, none, count)
             messages = newest
         }
         var lines = List<String>()
-        var skip = if messages.len() > SIDE_MESSAGES { messages.len() - SIDE_MESSAGES } else { 0 }
+        var skip = if messages.len() > count { messages.len() - count } else { 0 }
         for m in messages {
             if skip > 0 {
                 skip -= 1
@@ -7003,10 +7032,10 @@ impl Instance {
                 }
             }
             if said.trim().len() == 0 { continue }
-            lines.push("{rooms.speaker(m, me.copy(), names.copy())}: {cut_short(said.trim().copy(), 1500)}")
+            lines.push("{rooms.speaker(m, me.copy(), names.copy())}: {cut_short(said.trim().copy(), each)}")
         }
         var transcript = lines.join("\n\n")
-        while transcript.len() > SIDE_TRANSCRIPT_MOST and lines.len() > 1 {
+        while transcript.len() > most and lines.len() > 1 {
             _ = lines.remove(0)
             transcript = lines.join("\n\n")
         }
@@ -9094,11 +9123,36 @@ impl Instance {
                 continue
             }
             let woken = i.watch.wakes.remove(k)
-            let conversation = try i.store.conversation(user.copy(), conversation_id) else continue
-            i.log(user.copy(), woken.agent.copy(), "routine", "Woken by a watch: {cut_short(woken.came.copy(), 120)}", String("watch"))
+            let conversation = try i.store.conversation(user.copy(), conversation_id.copy()) else continue
             let run_id = try i.store.new_id("run")
-            try i.start_run(user, conversation, run_id, String(), woken.came, List<Json>(), String(WOKEN_FROM), String(WOKEN_NOTE), "webhook")
+            // In the chat's session while its prompt cache is warm; otherwise in
+            // a session of its own, given the chat's newest messages, so the
+            // whole chat isn't sent again for one event.
+            var note = String(WOKEN_NOTE)
+            var where = String("in its chat's session")
+            if not try i.chat_warm(user.copy(), conversation.copy()) {
+                i.watch.alone.push(run_id.copy())
+                let said = try i.transcript_cut(user.copy(), conversation_id, none, woken.agent.copy(), WAKE_CHAT_MESSAGES, WAKE_CHAT_EACH, WAKE_CHAT_MOST)
+                note = "{wake_alone_note(said)}\n\n{WOKEN_NOTE}"
+                where = String("in a session of its own, its chat's having gone quiet")
+            }
+            i.log(user.copy(), woken.agent.copy(), "routine", "Woken by a watch, {where}: {cut_short(woken.came.copy(), 120)}", String("watch"))
+            try i.start_run(user, conversation, run_id, String(), woken.came, List<Json>(), String(WOKEN_FROM), note, "webhook")
         }
+    }
+
+    // Whether a watch's wake goes on in `conversation`'s own session: it ended a
+    // turn within the last WAKE_WARM_MINUTES, so its program's prompt cache still
+    // holds it, or it has none yet, so starting it costs no more than one of the
+    // wake's own. A group chat's members' sessions go on as they do.
+    fn chat_warm(i: Instance, user: String, conversation: Json) -> bool ! Error {
+        if at(conversation.copy(), "room") != Json.Null { return true }
+        let id = str_at(conversation.copy(), "id") ?? String()
+        let agent = try i.store.agent(user.copy(), str_at(conversation, "agent") ?? String()) else return true
+        let program = try i.store.conversation_program(user.copy(), id.copy()) ?? (str_at(agent, "acp_agent") ?? String())
+        let session = try i.store.acp_session(user.copy(), id.copy(), program) else return true
+        let last = try i.store.acp_session_at(user, id, session)
+        return last > 0 and now() - last < WAKE_WARM_MINUTES * i.minute_ms
     }
 
     // Takes watch `id` away, and tells the person's devices.
@@ -12227,9 +12281,11 @@ impl Instance {
         let in_room = at(conversation.copy(), "room") != Json.Null
         // A routine's run, or a step of its flow, is a session of its own, never
         // its chat's (PLAN.md, "Routines"): what was said in the chat isn't
-        // carried with it, and what it does isn't carried with the chat.
-        let own_session = i.quiet_turns.contains(run_id.copy())
-        let seat = if own_session { routine_seat(run_id.copy()) } else if in_room { "{conversation_id}/{agent_id}" } else { conversation_id.copy() }
+        // carried with it, and what it does isn't carried with the chat. So is a
+        // watch's wake once the chat's session has gone cold (PLAN.md, "Watching
+        // outside events").
+        let own_session = i.quiet_turns.contains(run_id.copy()) or i.watch.alone.contains(run_id.copy())
+        let seat = if own_session { own_seat(run_id.copy()) } else if in_room { "{conversation_id}/{agent_id}" } else { conversation_id.copy() }
         let looks_back = i.looking_back.contains(run_id.copy())
         // In a group chat: what was said there since it last answered, by who
         // said it. A member looking back over its part of the chat isn't answering.
@@ -13415,9 +13471,9 @@ impl Instance {
         }
         // Kept with the tools it has, which are its agent's now: a new one's,
         // and one picked up again with the same tools (or kept before sessions
-        // kept theirs, which has them from now on). A routine run's is never
-        // picked up again, so it isn't kept.
-        if not routine_seat_of(conversation.copy()) { try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy(), i.tools_of(user.copy(), agent)) }
+        // kept theirs, which has them from now on). A run in a session of its own
+        // is never picked up again, so it isn't kept.
+        if not own_seat_of(conversation.copy()) { try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy(), i.tools_of(user.copy(), agent)) }
         p.sessions.insert(conversation, sid.copy())
         if let Json.Array(_) = config {
             p.configs.insert(sid.copy(), config.copy())
@@ -13602,8 +13658,8 @@ impl Instance {
     // person asked to start afresh is done with: what it says now isn't kept.
     fn keep_context(i: Instance, p: Proc, session: String, used: i64, size: i64) ! Error {
         let conversation = i.session_chat(p, session) else return
-        // A routine run's session is no chat's, and ends with its run.
-        if routine_seat_of(conversation.copy()) { return }
+        // A run's session of its own is no chat's, and ends with its run.
+        if own_seat_of(conversation.copy()) { return }
         if try i.store.fresh_asked(p.user.copy(), conversation.copy()) { return }
         let (was, window): (i64, i64) = try i.store.context(p.user.copy(), conversation.copy()) ?? (i64(0), i64(0))
         let compacts = try i.store.context_compacts(p.user.copy(), conversation.copy())
@@ -13687,8 +13743,8 @@ impl Instance {
         let line: String? = if let v = p.compactions.find(call.copy()) { some(v.copy()) } else { none }
         if line == none and status != "completed" and before == 0 { return }
         let seat = i.session_chat(p, session.copy()) else return
-        // A routine run's session compacting is no line in its chat.
-        if routine_seat_of(seat.copy()) { return }
+        // A run's session of its own compacting is no line in its chat.
+        if own_seat_of(seat.copy()) { return }
         let (conversation, member) = seat_parts(seat.copy())
         if line == none and before == 0 {
             let (used, _): (i64, i64) = i.context.get(session) ?? (i64(0), i64(0))
@@ -14733,9 +14789,9 @@ impl Instance {
         // A server its agent proposed: its card says how it stands in the kept reply.
         if let err(e) = i.close_mcp_adds(run_id.copy()) { eprintln("loom: ending run {run_id}: {e}") }
         let r = i.runs.remove(run_id.copy()) else return
-        // A routine run's session ends with it: closed in its program from the
+        // A run's session of its own ends with it: closed in its program from the
         // loop, where the program may be in the middle of being handled here.
-        if routine_seat_of(r.seat.copy()) and r.session.len() > 0 { i.routine_work.closing.push((r.proc.copy(), r.session.copy())) }
+        if own_seat_of(r.seat.copy()) and r.session.len() > 0 { i.routine_work.closing.push((r.proc.copy(), r.session.copy())) }
         let looked_back = i.looking_back.contains(run_id.copy())
         if let k = i.compacting.position(|x| x == run_id) { _ = i.compacting.remove(k) }
         match i.wind_up(r, status.copy(), error.copy()) {
@@ -14854,6 +14910,13 @@ impl Instance {
         // Looking back over a paused chat leaves nothing in it but what the agent
         // kept or proposed, which went under the reply it looked back from.
         if let _ = i.looking_back.remove(r.id.copy()) { keep = false }
+        // A watch's wake in a session of its own: its reply is the chat's, which
+        // the chat's own session hears of with its next turn.
+        var woke_alone = false
+        if let k = i.watch.alone.position(|x| x == r.id) {
+            _ = i.watch.alone.remove(k)
+            woke_alone = true
+        }
         if keep {
             // How the turn ended goes with it, so an app reads a stopped one as it was.
             // The Sources list at the end of its words comes out of them, and goes
@@ -14895,8 +14958,10 @@ impl Instance {
             let message = i.with_threads(r.user.copy(), carded, r.id.copy())
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
-            // A routine's failed run, which the chat's own session hears of with its next turn.
-            if quiet_for.len() > 0 { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), quiet_for.copy()) }
+            // A routine's failed run, or a watch's wake in a session of its own,
+            // which the chat's own session hears of with its next turn.
+            if quiet_for.len() > 0 { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), quiet_for.copy(), String()) }
+            if woke_alone { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), String(), r.prompt.copy()) }
             for (named, path, key) in pictures { i.picture_to.send(files.Picture { user: r.user.copy(), message: r.message.copy(), named: named.copy(), path: path.copy(), key: key.copy() }) }
         }
         // A run an update stopped to restart keeps its reply so far, and the restart

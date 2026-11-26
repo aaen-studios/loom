@@ -132,11 +132,13 @@ CREATE TABLE IF NOT EXISTS deleted_untold (
     message TEXT NOT NULL, agent TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id),
     conversation TEXT NOT NULL, role TEXT NOT NULL, said_by TEXT NOT NULL, words TEXT NOT NULL,
     at INTEGER NOT NULL, PRIMARY KEY (message, agent));
--- What a routine put in a chat (its posts, and a failed run's answer) that the chat's own
--- session hasn't been told of yet: a routine runs in a session of its own.
+-- What a session of its own put in a chat that the chat's own session hasn't been told of
+-- yet: a routine's posts and a failed run's answer (routine is its id), and an agent's
+-- answer to a watch that woke it once the chat's session had gone cold (routine is '',
+-- and came what woke it).
 CREATE TABLE IF NOT EXISTS posts_untold (
     message TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
-    routine TEXT NOT NULL, at INTEGER NOT NULL);
+    routine TEXT NOT NULL, came TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_programs (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL,
     summary_from TEXT NOT NULL DEFAULT '');
@@ -2971,18 +2973,22 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE user = ? AND conversation = ? AND agent = ?"), [t(user), t(conversation), t(agent)])
     }
 
-    // Message `message`, which routine `routine` put in `conversation`, for that
+    // Message `message`, which routine `routine` put in `conversation`, or an
+    // answer to a watch's wake (`routine` "", and `came` what woke it), for that
     // chat's own session to be told of with its next turn there.
-    pub fn post_untold(self, user: String, conversation: String, message: String, routine: String) ! Error {
-        _ = try self.db.execute(String("INSERT OR REPLACE INTO posts_untold (message, user, conversation, routine, at) VALUES (?, ?, ?, ?, ?)"), [t(message), t(user), t(conversation), t(routine), Value.Int(now())])
+    pub fn post_untold(self, user: String, conversation: String, message: String, routine: String, came: String) ! Error {
+        _ = try self.db.execute(String("INSERT OR REPLACE INTO posts_untold (message, user, conversation, routine, came, at) VALUES (?, ?, ?, ?, ?, ?)"), [t(message), t(user), t(conversation), t(routine), t(came), Value.Int(now())])
     }
 
-    // What routines put in `conversation` that its own session hasn't been told
-    // of, oldest first: each message, as the chat keeps it. One deleted since is gone.
+    // What sessions of their own put in `conversation` that its own session
+    // hasn't been told of, oldest first: each message, as the chat keeps it, with
+    // `untold`, what put it there: {routine} for a routine's, or {routine: "",
+    // came} for an answer to a watch's wake. One deleted since is gone.
     pub fn posts_to_tell(self, user: String, conversation: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT m.json FROM posts_untold p JOIN messages m ON m.id = p.message AND m.user = p.user WHERE p.user = ? AND p.conversation = ? ORDER BY p.at, p.rowid"), [t(user), t(conversation)]) {
-            out.push(try parse(text(r[0].copy())))
+        for r in try self.db.query(String("SELECT m.json, p.routine, p.came FROM posts_untold p JOIN messages m ON m.id = p.message AND m.user = p.user WHERE p.user = ? AND p.conversation = ? ORDER BY p.at, p.rowid"), [t(user), t(conversation)]) {
+            let untold = Obj.new().s("routine", text(r[1].copy())).s("came", text(r[2].copy())).done()
+            out.push(merge(try parse(text(r[0].copy())), Obj.new().j("untold", untold).done()))
         }
         return out
     }
