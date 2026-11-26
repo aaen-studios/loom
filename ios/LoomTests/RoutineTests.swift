@@ -312,4 +312,95 @@ import Testing
         #expect(m.saveRoutine(none) == nil)
         #expect(m.notice == "Pick the agent it runs.")
     }
+
+    // MARK: Its webhook, its next runs and its history
+
+    @Test func aWebhooksAddressIsOnTheInstancesOrItsPathAlone() {
+        #expect(hookAddress(server: "https://loom.example.com", hook: "h_3") == "https://loom.example.com/hooks/h_3")
+        #expect(hookAddress(server: " loom.example.com/ ", hook: "h_3") == "https://loom.example.com/hooks/h_3")
+        #expect(hookAddress(server: "http://192.168.1.4:8787", hook: "h_3") == "http://192.168.1.4:8787/hooks/h_3")
+        // Signed in with a code: the phone doesn't know the address.
+        #expect(hookAddress(server: "", hook: "h_3") == "/hooks/h_3")
+        let r = Routine(["id": "rt_1", "schedule": .null, "hook": "h_3", "secret": "whsec_1"])
+        #expect(r.hook == "h_3" && r.secret == "whsec_1")
+    }
+
+    @Test func aRunSaysHowItEndedInAWordALineAndHowLongItTook() {
+        let posted = RoutineRun(["run": "rr_1", "at": 1000, "started": 2000, "ended": 14_000, "status": "done", "posted": ["Shipped LOO-383.\nMore."], "said": "Done."])
+        #expect(posted.mark == .posted && posted.pill == "Posted")
+        #expect(posted.line == "Shipped LOO-383.")
+        #expect(posted.took == "12 s")
+        // Its gate found nothing: quiet, and nothing new.
+        let quiet = RoutineRun(["run": "rr_2", "at": 1000, "ended": 4000, "status": "quiet", "woke": false])
+        #expect(quiet.mark == .quiet && quiet.pill == "Quiet" && quiet.line == "Nothing new")
+        // One that failed says why.
+        let failed = RoutineRun(["run": "rr_3", "at": 1000, "started": 1000, "ended": 126_000, "status": "failed", "error": "Acta didn't answer.", "said": "Trying."])
+        #expect(failed.mark == .failed && failed.line == "Acta didn't answer." && failed.took == "2 min 5 s")
+        // Done with nothing posted, its answer handed on.
+        let handed = RoutineRun(["run": "rr_4", "status": "done", "said": "\n  Three cards moved.\n"])
+        #expect(handed.pill == "Done" && handed.line == "Three cards moved." && handed.took.isEmpty)
+        #expect(RoutineRun(["status": "running"]).mark == .going)
+        #expect(RoutineRun(["status": "skipped", "at": 1, "ended": 2]).took.isEmpty)
+        #expect(RoutineRun(["status": "cancelled"]).pill == "Stopped")
+        #expect(RoutineRun(["status": "done", "at": 1, "ended": 3_780_001]).took == "1 h 3 min")
+    }
+
+    @Test func aRoutinesRunsAreAskedForWhileItsPageIsOpen() throws {
+        let m = caughtUp()
+        let ask = try #require(m.loadRoutineRuns("rt_1"))
+        #expect(ask["name"] == "routine.runs" && ask["args"] == ["id": "rt_1", "limit": 100])
+        answer(m, ask, ["value": ["runs": [["run": "rr_2", "status": "quiet"], ["run": "rr_1", "status": "done"]]]])
+        #expect(m.routineRuns.map(\.run) == ["rr_2", "rr_1"])
+        // A routine that changed asks again, while its page is open.
+        m.take(["t": "event", "kind": "routine.updated", "seq": 3, "routine": ["id": "rt_1"]])
+        #expect(m.fetches().contains { $0["name"] == "routine.runs" })
+        // Closed: forgotten, and not asked again.
+        #expect(m.loadRoutineRuns(nil) == nil)
+        #expect(m.routineRuns.isEmpty)
+        m.take(["t": "event", "kind": "routine.updated", "seq": 4, "routine": ["id": "rt_1"]])
+        #expect(!m.fetches().contains { $0["name"] == "routine.runs" })
+        // Another routine's page doesn't show the last one's runs.
+        _ = m.loadRoutineRuns("rt_1")
+        answer(m, ask, ["value": ["runs": [["run": "rr_2"]]]])
+        _ = m.loadRoutineRuns("rt_2")
+        #expect(m.routineRuns.isEmpty)
+    }
+
+    @Test func nextIsTheRoutinesOwnWhileItsScheduleIsAsSavedAndElseTheInstances() throws {
+        let m = caughtUp()
+        let saved = Routine(["id": "rt_1", "schedule": ["every": 30], "on": true, "upcoming": [100, 200, 300]])
+        var d = RoutineDraft(saved)
+        // As saved: its own, which count from its last run.
+        #expect(m.nextRuns(saved, d) == [100, 200, 300])
+        // Changed: the instance is asked, once, and its answer shown.
+        d.schedule.every = 60
+        let ask = try #require(m.askScheduleNext(d.scheduleJSON))
+        #expect(ask["name"] == "routine.next" && ask["args"]["schedule"] == ["every": 60])
+        #expect(m.askScheduleNext(d.scheduleJSON) == nil)
+        #expect(m.nextRuns(saved, d).isEmpty)
+        answer(m, ask, ["value": ["next": [400, 500, 600]]])
+        #expect(m.nextRuns(saved, d) == [400, 500, 600])
+        // An answer to an older ask is left.
+        d.schedule.every = 90
+        _ = m.askScheduleNext(d.scheduleJSON)
+        answer(m, ask, ["value": ["next": [1, 2, 3]]])
+        #expect(m.nextRuns(saved, d).isEmpty)
+        // No schedule: nothing asked.
+        d.pick(repeat: "webhook", fresh: .newActa("x"))
+        #expect(d.scheduleJSON.isNull)
+        #expect(m.askScheduleNext(d.scheduleJSON) == nil)
+    }
+
+    @Test func nextSaysEachDayOnce() throws {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = try #require(TimeZone(identifier: "Europe/Oslo"))
+        let now = try #require(cal.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 10)))
+        func at(_ day: Int, _ hour: Int) -> Int {
+            Int((cal.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour)) ?? now).timeIntervalSince1970 * 1000)
+        }
+        #expect(nextRunsWords([at(26, 16), at(26, 18), at(26, 20)], now: now, calendar: cal) == "Today 16:00, 18:00, 20:00")
+        #expect(nextRunsWords([at(26, 22), at(27, 8), at(29, 8)], now: now, calendar: cal) == "Today 22:00, Tomorrow 08:00, Sun 08:00")
+        #expect(nextRunsWords([at(30, 8) + 7 * 86_400_000], now: now, calendar: cal) == "7 Dec 08:00")
+        #expect(nextRunsWords([], now: now, calendar: cal).isEmpty)
+    }
 }

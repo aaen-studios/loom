@@ -90,6 +90,9 @@ struct Conversation: Equatable, Sendable {
     /// from, as the instance keeps it (protocol.md, "Unread"), once they've read one.
     var last = 0
     var read: Int?
+    /// When its newest agent's message is from, as the core keeps it: unread while it's
+    /// newer than `read`.
+    var replied = 0
 
     /// Whether it's a thread beside its agent's chat: another agent's, or one an agent made.
     var besideChat: Bool { !main && (askedBy != nil || madeBy != nil) }
@@ -117,6 +120,7 @@ struct Conversation: Equatable, Sendable {
         side = c["side"].bool ?? false
         last = c["last"].int ?? 0
         read = c["read"].int
+        replied = c["replied"].int ?? 0
     }
 }
 
@@ -1701,6 +1705,14 @@ final class Model {
     /// The person's default picks for each program's options (`defaults.get`'s `config`),
     /// for a routine's model and effort.
     var defaultPicks: JSON = .null
+    /// The open routine's runs, newest first, and which routine they're for; and when the
+    /// schedule on its page would run next (`routine.next`), for which schedule, and the
+    /// command that asked.
+    var routineRuns: [RoutineRun] = []
+    var routineRunsFor: String?
+    var scheduleNext: [Int] = []
+    var scheduleNextFor: JSON = .null
+    var scheduleNextAsk = ""
     var recentFiles: [RecentFile] = []
     /// The person's own emoji, the suggestion row and the picker (PLAN.md, "Emoji").
     let emoji = Emojis()
@@ -1866,6 +1878,40 @@ final class Model {
             out.append(["t": "cmd", "id": JSON(id("app.read")), "name": "conversation.read", "args": ["conversation": JSON(c.id), "at": JSON(c.last)]])
         }
         return out
+    }
+
+    /// Whether conversation `c` has a reply the person hasn't read (protocol.md, "Unread"):
+    /// its newest agent's message is newer than what's read, on the instance or here. None
+    /// is while the instance keeps no reads, as one from before them, or while it's open.
+    func hasUnread(_ c: Conversation) -> Bool {
+        guard readsKnown, !c.side else { return false }
+        if !away && (c.id == room || c.id == thread || (room == nil && thread == nil && c.agent == selected && !c.besideChat)) { return false }
+        return c.replied > max(c.read ?? 0, conversationRead[c.id] ?? 0)
+    }
+
+    /// Whether the instance keeps what's read: some conversation has `read`.
+    private var readsKnown: Bool { conversations.contains { $0.read != nil } }
+
+    /// Whether an agent has a reply unread in its chat, or its other conversations but the
+    /// threads beside its chat, for its dot in the list.
+    func unread(agent: String) -> Bool {
+        conversations.contains { $0.agent == agent && $0.room == nil && !$0.besideChat && hasUnread($0) }
+    }
+
+    /// Whether a group chat has a reply unread.
+    func unread(room id: String) -> Bool {
+        conversations.first { $0.id == id }.map(hasUnread) ?? false
+    }
+
+    /// The agent that asked in a thread beside `agent`'s chat that has a reply unread, for
+    /// a dot in its colour (or "" for a thread an agent made, or a plugin's): the newest.
+    func askUnread(_ agent: String) -> String? {
+        conversations.first { $0.agent == agent && $0.besideChat && hasUnread($0) }.map { $0.askedBy ?? $0.madeBy ?? "" }
+    }
+
+    /// Whether the thread beside a chat has a reply unread.
+    func askUnread(thread id: String) -> Bool {
+        conversations.first { $0.id == id }.map(hasUnread) ?? false
     }
 
     /// The chat is left for the agents list. Its agent stays selected, so its chat opens
@@ -2615,6 +2661,8 @@ final class Model {
         if routinesStale && synced {
             routinesStale = false
             out.append(["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]])
+            // And the open routine's runs, which a run that ended changed.
+            if let f = loadRoutineRuns(routineRunsFor) { out.append(f) }
         }
         // The shown chat's pins, for the count on its header and the Pinned sheet: as many
         // as are loaded, and at least a page. Never a thread's.

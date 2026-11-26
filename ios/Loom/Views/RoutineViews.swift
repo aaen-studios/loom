@@ -102,6 +102,10 @@ struct RoutinePage: View {
     var routine: String
     @State private var draft: RoutineDraft?
     @State private var confirmDelete = false
+    /// The instance's address the person signed in with, for the webhook's.
+    @AppStorage("loom.server") private var server = ""
+    /// The row whose value was just copied, which says so for a moment.
+    @State private var copied: String?
 
     var body: some View {
         let model = session.model
@@ -133,9 +137,44 @@ struct RoutinePage: View {
                 dismiss()
             }
         }
-        .onAppear { fill() }
+        .onAppear {
+            fill()
+            session.send(model.loadRoutineRuns(routine.isEmpty ? nil : routine))
+        }
+        .onDisappear { _ = model.loadRoutineRuns(nil) }
         // A routine's page opened before the routines came fills once its routine has.
         .onChange(of: saved == nil) { fill() }
+        // Its Next, from the instance, for the schedule as it stands.
+        .onChange(of: draft?.scheduleJSON, initial: true) { _, now in
+            session.send(model.askScheduleNext(now ?? .null))
+        }
+    }
+
+    /// A row that copies its value with a tap: its title, what it shows, and its copy
+    /// glyph, or "Copied" for a moment once it's copied.
+    private func copyRow(_ label: String, _ value: String, shown: String) -> some View {
+        Button {
+            UIPasteboard.general.string = value
+            copied = label
+            Task {
+                try? await Task.sleep(for: .seconds(1.5))
+                if copied == label { copied = nil }
+            }
+        } label: {
+            HStack(spacing: Tokens.Space.s) {
+                Text(label).font(Fonts.body).foregroundStyle(P.ink)
+                Spacer(minLength: Tokens.Space.m)
+                if copied == label {
+                    Text("Copied").font(Fonts.body).foregroundStyle(P.ink3)
+                } else {
+                    Text(shown).font(Fonts.code).foregroundStyle(P.ink3).lineLimit(1).truncationMode(.middle)
+                    Image(systemName: "doc.on.doc").font(.system(size: 13)).foregroundStyle(P.ink3)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Copy the \(label.lowercased())")
     }
 
     /// The page's draft as it opens: the routine's as it was saved, once it's here, or a
@@ -206,6 +245,15 @@ struct RoutinePage: View {
             }
             Section("When") {
                 when(d)
+                // When it runs next, on a schedule.
+                let next = model.nextRuns(saved, d.wrappedValue)
+                if ["hours", "days"].contains(d.wrappedValue.repeatKind), !next.isEmpty {
+                    HStack {
+                        Text("Next").font(Fonts.body).foregroundStyle(P.ink)
+                        Spacer()
+                        Text(nextRunsWords(next)).font(Fonts.body).foregroundStyle(P.ink3).lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                }
             }
             Section("Options") {
                 toggle("On", d.on)
@@ -214,6 +262,16 @@ struct RoutinePage: View {
                 toggle("A thread of its own", d.thread)
                 if !d.wrappedValue.byHookAlone {
                     toggle("Webhook too", d.webhook)
+                }
+                // Where to post, once it has a webhook: to give GitHub or anything else.
+                if let saved, !saved.hook.isEmpty, d.wrappedValue.webhook || d.wrappedValue.byHookAlone {
+                    copyRow("Address", hookAddress(server: server, hook: saved.hook), shown: hookAddress(server: server, hook: saved.hook))
+                    copyRow("Secret", saved.secret, shown: String(repeating: "•", count: 12))
+                }
+            }
+            if let saved, !model.routineRuns.isEmpty, model.routineRunsFor == saved.id {
+                Section("History") {
+                    RunHistory(runs: model.routineRuns)
                 }
             }
             if saved != nil {
@@ -443,6 +501,80 @@ private struct TimesRow: View {
             }
         }
         .padding(.vertical, Tokens.Space.xs)
+    }
+}
+
+/// A routine's runs (PLAN.md, "The routine's page"): a strip of its last 20, each coloured
+/// by how it ended, over the runs, newest first: when, how it ended, its line and how long
+/// it took. A tap opens one to what it posted, why it failed and what to do, or its answer.
+private struct RunHistory: View {
+    var runs: [RoutineRun]
+    @State private var open: String?
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 3) {
+            ForEach(runs.prefix(20).reversed()) { r in
+                RoundedRectangle(cornerRadius: 3).fill(tint(r.mark)).frame(width: 9, height: 22)
+                    .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(open == r.run ? P.ink : Color.clear, lineWidth: 2))
+                    .onTapGesture { open = open == r.run ? nil : r.run }
+            }
+        }
+        .padding(.vertical, Tokens.Space.xs)
+        .accessibilityHidden(true)
+        ForEach(runs) { r in
+            Button {
+                open = open == r.run ? nil : r.run
+            } label: {
+                VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                    HStack(spacing: Tokens.Space.s) {
+                        Text(When.time(r.at)).font(Fonts.caption).foregroundStyle(P.ink3).frame(width: 76, alignment: .leading)
+                        Text(r.pill)
+                            .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                            .foregroundStyle(tint(r.mark))
+                            .padding(.horizontal, 6).padding(.vertical, 1)
+                            .background(tint(r.mark).opacity(0.16), in: RoundedRectangle(cornerRadius: Tokens.Radius.row))
+                        Text(r.line).font(Fonts.small).foregroundStyle(P.ink2).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(r.took).font(Fonts.caption).foregroundStyle(P.ink3)
+                    }
+                    if open == r.run { detail(r).padding(.leading, 76 + Tokens.Space.s) }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    /// An open run: what it posted and what its agent answered, or why it failed or was
+    /// skipped, and what to do.
+    @ViewBuilder
+    private func detail(_ r: RoutineRun) -> some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.m) {
+            ForEach(Array(r.posted.enumerated()), id: \.offset) { _, text in part("Posted", text, P.ink) }
+            if !r.error.isEmpty { part("Why", r.error, r.mark == .failed ? P.bad : P.ink) }
+            if !r.hint.isEmpty { part("What to do", r.hint, P.ink) }
+            let said = r.said.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !said.isEmpty && !r.posted.contains(where: { $0.trimmingCharacters(in: .whitespacesAndNewlines) == said }) {
+                part("Its answer", said, P.ink2)
+            }
+        }
+    }
+
+    private func part(_ label: String, _ text: String, _ ink: Color) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(Fonts.ui(Tokens.PhoneSize.caption, .medium)).foregroundStyle(P.ink3)
+            Text(text).font(Fonts.small).foregroundStyle(ink).textSelection(.enabled)
+        }
+    }
+
+    private func tint(_ mark: RunMark) -> Color {
+        switch mark {
+        case .posted: P.ok
+        case .quiet: P.ink3
+        case .failed: P.bad
+        case .skipped: P.warn
+        case .going: P.button
+        }
     }
 }
 

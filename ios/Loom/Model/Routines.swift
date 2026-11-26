@@ -251,8 +251,11 @@ struct Routine: Equatable, Sendable, Identifiable {
     var notify: Bool
     var on: Bool
     var catchUp: Bool
-    /// Its webhook's id, when it has one.
+    /// Its webhook's id and secret, when it has one.
     var hook: String
+    var secret: String
+    /// When it runs the next three times (Unix ms), the first `next`; empty while it's off.
+    var upcoming: [Int]
     /// When it runs next (Unix ms), or 0 while it's off.
     var next: Int
     /// How its last run went, and when.
@@ -281,6 +284,8 @@ struct Routine: Equatable, Sendable, Identifiable {
         on = r["on"].bool ?? true
         catchUp = r["catch_up"].bool ?? true
         hook = r["hook"].text
+        secret = r["secret"].text
+        upcoming = r["upcoming"].array.compactMap(\.int)
         next = r["next"].int ?? 0
         lastStatus = r["last"]["status"].text
         lastAt = r["last"]["at"].int ?? 0
@@ -473,6 +478,152 @@ struct RoutineDraft: Equatable, Sendable {
     }
 }
 
+extension RoutineDraft {
+    /// Its schedule as `routine.put` would take it now, or null for none: for its page's
+    /// Next.
+    var scheduleJSON: JSON {
+        var s = schedule
+        s.repeatKind = repeatKind == "hours" || repeatKind == "days" ? repeatKind : ""
+        return s.json
+    }
+}
+
+/// Where a routine's webhook is posted to (protocol.md, `POST /hooks/<id>`): on the
+/// instance's address the person signed in with, or the path alone when the phone doesn't
+/// know it (signed in with a code).
+func hookAddress(server: String, hook: String) -> String {
+    var base = server.trimmingCharacters(in: .whitespacesAndNewlines)
+    while base.hasSuffix("/") { base.removeLast() }
+    if base.isEmpty { return "/hooks/\(hook)" }
+    if !base.contains("://") { base = "https://" + base }
+    return "\(base)/hooks/\(hook)"
+}
+
+/// How a run ended, as the history colours it.
+enum RunMark: Equatable, Sendable {
+    case posted, quiet, failed, skipped, going
+}
+
+/// One of a routine's runs, as `routine.runs` gives it: when it ran, how it ended, and
+/// what its agent posted and answered (desktop/src/model.rs's `RoutineRun`).
+struct RoutineRun: Equatable, Sendable, Identifiable {
+    var run: String
+    /// When it was due, when its turn started (0 for one that never did), and when it
+    /// ended (0 while it goes on).
+    var at: Int
+    var started: Int
+    var ended: Int
+    /// waiting (for its chat), running, done, quiet, failed, limit, cancelled or skipped.
+    var status: String
+    var error: String
+    /// For one that failed or was skipped, what the person can do about it.
+    var hint: String
+    var said: String
+    var posted: [String]
+    /// Whether its gate found nothing new, so its agent wasn't woken.
+    var gateQuiet: Bool
+    var id: String { run }
+
+    init(_ v: JSON) {
+        run = v["run"].text
+        at = v["at"].int ?? 0
+        started = v["started"].int ?? 0
+        ended = v["ended"].int ?? 0
+        status = v["status"].text
+        error = v["error"].text
+        hint = v["hint"].text
+        said = v["said"].text
+        posted = v["posted"].array.compactMap(\.string)
+        gateQuiet = v["status"].text == "quiet" && v["woke"].bool == false
+    }
+
+    /// How it ended, for its mark and pill: a run that handed its answer on to its flow
+    /// counts as posted, and one stopped as quiet.
+    var mark: RunMark {
+        switch status {
+        case "done": return .posted
+        case "quiet", "cancelled": return .quiet
+        case "skipped": return .skipped
+        case "running", "waiting": return .going
+        default: return .failed
+        }
+    }
+
+    /// Its status in a word, for its pill.
+    var pill: String {
+        switch status {
+        case "done": return posted.isEmpty ? "Done" : "Posted"
+        case "quiet": return "Quiet"
+        case "skipped": return "Skipped"
+        case "running": return "Running"
+        case "waiting": return "Waiting"
+        case "cancelled": return "Stopped"
+        case "limit": return "Limit"
+        default: return "Failed"
+        }
+    }
+
+    /// Its line in the history: the first line of what it posted, or why it failed or was
+    /// skipped, or else of what its agent answered, or "Nothing new" for one whose gate
+    /// found nothing.
+    var line: String {
+        if gateQuiet && said.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Nothing new" }
+        let text: String
+        if (mark == .failed || mark == .skipped) && !error.isEmpty {
+            text = error
+        } else {
+            text = posted.first ?? said
+        }
+        return text.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty } ?? ""
+    }
+
+    /// How long it took, from when its turn started (or was due) until it ended: "8 s",
+    /// "2 min 5 s", "1 h 3 min". Empty while it goes on, and for one that never ran.
+    var took: String {
+        let from = started > 0 ? started : at
+        if ended <= 0 || from <= 0 || status == "skipped" { return "" }
+        let secs = max(ended - from, 0) / 1000
+        switch secs {
+        case 0...59: return "\(secs) s"
+        case 60...3599 where secs % 60 == 0: return "\(secs / 60) min"
+        case 60...3599: return "\(secs / 60) min \(secs % 60) s"
+        default: return "\(secs / 3600) h \(secs % 3600 / 60) min"
+        }
+    }
+}
+
+/// When a routine runs next, for its page's Next: each time with its day, "Today 16:00",
+/// "Tomorrow 08:00", "Fri 08:00" within the week and "3 Dec 08:00" after, the day said once
+/// for times on the same day: "Today 16:00, 18:00, 20:00".
+func nextRunsWords(_ times: [Int], now: Date = .now, calendar: Calendar = .current) -> String {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = calendar
+    f.timeZone = calendar.timeZone
+    var out: [String] = []
+    var lastDay = ""
+    for ms in times {
+        let date = Date(timeIntervalSince1970: Double(ms) / 1000)
+        let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+        let day: String
+        switch days {
+        case 0: day = "Today"
+        case 1: day = "Tomorrow"
+        case 2...6:
+            f.dateFormat = "EEE"
+            day = f.string(from: date)
+        default:
+            f.dateFormat = "d MMM"
+            day = f.string(from: date)
+        }
+        f.dateFormat = "HH:mm"
+        let time = f.string(from: date)
+        out.append(day == lastDay ? time : "\(day) \(time)")
+        lastDay = day
+    }
+    return out.joined(separator: ", ")
+}
+
 /// What Save on a routine's page comes to: the frame to send, or what's missing.
 enum RoutineSave: Equatable {
     case frame(JSON)
@@ -588,11 +739,50 @@ extension Model {
         }
     }
 
-    /// The answers to `routine.put`, `routine.delete` and `defaults.get`. Gives whether it
-    /// was one.
+    /// Asks for routine `id`'s runs, newest first, for its page's History; nil forgets them,
+    /// as the page closes.
+    func loadRoutineRuns(_ routine: String?) -> JSON? {
+        if routineRunsFor != routine { routineRuns = [] }
+        routineRunsFor = routine
+        guard let routine else { return nil }
+        return ["t": "cmd", "id": JSON(id("app.runs_of_routine")), "name": "routine.runs", "args": ["id": JSON(routine), "limit": 100]]
+    }
+
+    /// Asks when `schedule` (as `routine.put` takes it) would run next, for its page's
+    /// Next, unless that's what it last asked. Null forgets it.
+    func askScheduleNext(_ schedule: JSON) -> JSON? {
+        if schedule == scheduleNextFor { return nil }
+        scheduleNextFor = schedule
+        scheduleNext = []
+        if schedule.isNull {
+            scheduleNextAsk = ""
+            return nil
+        }
+        scheduleNextAsk = id("app.schedule_next")
+        return ["t": "cmd", "id": JSON(scheduleNextAsk), "name": "routine.next", "args": ["schedule": schedule]]
+    }
+
+    /// When the page's schedule runs next: the routine's own while it's as saved, so one
+    /// every N minutes counts from its last run, or else as the instance last said it.
+    func nextRuns(_ saved: Routine?, _ d: RoutineDraft) -> [Int] {
+        if let saved, saved.schedule.json == d.scheduleJSON, !saved.upcoming.isEmpty { return saved.upcoming }
+        return d.scheduleJSON == scheduleNextFor ? scheduleNext : []
+    }
+
+    /// The answers to `routine.put`, `routine.delete`, `routine.runs`, `routine.next` and
+    /// `defaults.get`. Gives whether it was one.
     func routineResult(_ f: JSON) -> Bool {
         let id = f["id"].text
         let error = f["error"].isNull ? nil : f["error"]["message"].string ?? f["error"]["code"].text
+        if id.hasPrefix("app.runs_of_routine") {
+            if error == nil, routineRunsFor != nil { routineRuns = f["value"]["runs"].array.map(RoutineRun.init) }
+            return true
+        }
+        if id.hasPrefix("app.schedule_next") {
+            // Only the last asked; a schedule that isn't one says nothing until it's saved.
+            if id == scheduleNextAsk, error == nil { scheduleNext = f["value"]["next"].array.compactMap(\.int) }
+            return true
+        }
         if id.hasPrefix("app.defaults") {
             if error == nil { defaultPicks = f["value"]["defaults"]["config"] }
             return true
