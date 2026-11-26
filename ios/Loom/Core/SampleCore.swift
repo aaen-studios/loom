@@ -728,9 +728,9 @@ enum Sample {
          "last": ["status": "done", "at": 1795165200000]],
         ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
          "last": ["status": "failed", "at": 1795100000000]],
-        // Off after five failures in a row, with its card in Postmaster's chat.
-        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_3", "prompt": "", "schedule": ["daily": "09:00"], "on": false,
-         "failures": 5, "off_card": "msg_19", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795101000000]],
+        // Off after five failures in a row, with its card in Builder's chat.
+        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_1", "prompt": "", "schedule": ["daily": "09:00"], "on": false,
+         "failures": 5, "off_card": "msg_14", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795187129000]],
     ]
 
     static let recent: [JSON] = [
@@ -802,6 +802,10 @@ enum Sample {
                          "event": "finished", "state": "completed", "said": "Thread finished", "text": "Thread finished · Fix the build"]]],
             ["id": "msg_9", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_3", "at": 1795187128000,
              "blocks": [["kind": "text", "text": "The build fix landed and LOO-206 shipped. Both are in the release notes."]]],
+            // A routine that turned off on its own: its card, to turn it on.
+            ["id": "msg_14", "conversation": "c_1", "role": "loom", "at": 1795187129000,
+             "blocks": [["kind": "card", "card": ["id": "msg_14", "type": "routine_off", "title": "Running shoe prices", "routine": "rt_3",
+                                                  "why": "XXL's product page didn't load (503)", "failures": 5, "state": "off"]]]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,
@@ -811,10 +815,6 @@ enum Sample {
              "sources": [["url": "https://support.apple.com/en-us/102119", "title": "How iOS and macOS report storage capacity", "site": "support.apple.com"]]],
         ],
         "c_3": [
-            // A routine that turned off on its own: its card, to turn it on.
-            ["id": "msg_19", "conversation": "c_3", "role": "loom", "at": 1795101000000,
-             "blocks": [["kind": "card", "card": ["id": "msg_19", "type": "routine_off", "title": "Running shoe prices", "routine": "rt_3",
-                                                  "why": "XXL's product page didn't load (503)", "failures": 5, "state": "off"]]]],
             // A routine's prompt kept from before routines ran quietly: not shown.
             ["id": "msg_20", "conversation": "c_3", "role": "person", "from": "rt_1", "at": 1795170000000,
              "blocks": [["kind": "text", "text": "Read the new mail in every inbox and tell me what needs me."]]],
