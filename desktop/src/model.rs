@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod drafts;
 mod popover;
 pub mod popup;
 mod rooms;
@@ -5465,6 +5466,9 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<Secret>,
     mcp_stale: bool,
+    /// The settings list pages' forms, each item's as the person left it, changed and
+    /// not saved (`drafts`).
+    pub drafts: drafts::Drafts,
     /// The fields of secret cards the person unticked Save as on, as `call/field`; the
     /// cards whose answer went and hasn't come back; and what the instance said to one
     /// it refused.

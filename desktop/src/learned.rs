@@ -498,13 +498,13 @@ impl Loom {
         cx.notify();
     }
 
-    /// Opens a fix on the Proposals page, to change it before keeping it.
+    /// Opens a fix on the Proposals page, to change it before keeping it, as the person
+    /// left it if they changed it before.
     fn change_fix(&mut self, l: &Learned, window: &mut Window, cx: &mut Context<Self>) {
         self.open(Screen::Proposals, cx);
-        let body = l.body.clone();
-        self.skill_body_in
-            .update(cx, |s, cx| s.set_value(body, window, cx));
-        self.proposal_open = Some(l.proposal());
+        let fix = l.proposal();
+        self.proposal_open = Some(fix.clone());
+        self.fill_proposal(&fix, window, cx);
         cx.notify();
     }
 }

@@ -18,15 +18,14 @@ pub(super) struct Shape {
 
 /// The popup's own state: the open page's shape, whether a grid page is being drawn,
 /// its corner while it's dragged (where the pointer and the size were as it went down),
-/// and a list page's find field, with the page it's for and the item whose form is
-/// filled in.
+/// and a list page's find field, with the page it's for. The item whose form is filled
+/// in is the model's (`model::drafts`).
 pub(super) struct ListUi {
     pub shape: Option<Shape>,
     pub wide: bool,
     pub drag: Option<((f32, f32), (f32, f32))>,
     pub find_in: Entity<InputState>,
     pub find_for: Option<Screen>,
-    pub filled: Option<(Screen, String)>,
 }
 
 impl ListUi {
@@ -48,7 +47,6 @@ impl ListUi {
             drag: None,
             find_in,
             find_for: None,
-            filled: None,
         }
     }
 }
@@ -111,9 +109,9 @@ impl Loom {
     }
 
     /// Readies the open list page before it's drawn: an empty find field asking for
-    /// what the page lists, each time a page opens, and the form of what shows beside
-    /// the list without being picked (the first, side by side) filled in as a click
-    /// fills it.
+    /// what the page lists, each time a page opens, what its form holds kept as its
+    /// item's draft while it's changed, and the form of what shows beside the list
+    /// without being picked (the first, side by side) filled in as a click fills it.
     pub(super) fn ready_list_page(
         &mut self,
         open: Screen,
@@ -127,9 +125,11 @@ impl Loom {
                 s.set_placeholder(find_words(open), window, cx);
             });
         }
+        self.keep_draft(cx);
         let split = self.list_split();
-        let filled =
-            |this: &Self, key: &str| this.list_ui.filled.as_ref() == Some(&(open, key.to_string()));
+        let filled = |this: &Self, key: &str| {
+            form_drafts::draft_page(open).is_some_and(|p| this.model.drafts.is_open(p, Some(key)))
+        };
         match open {
             Screen::Mcp => {
                 let servers = self.model.mcp_servers.clone();
@@ -161,13 +161,29 @@ impl Loom {
                     }
                 }
             }
+            Screen::Programs => {
+                let keys: Vec<String> = self
+                    .model
+                    .installed
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                let names: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let open_at = self.program_open.as_ref().map(|o| o.as_deref());
+                if let Pane::Item(i) = popup::shows(split, open_at, &names, false).pane {
+                    if !filled(self, &keys[i]) {
+                        self.fill_brain(&keys[i], window, cx);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     /// Back to the open list page's list, from what was picked, where they show one at
-    /// a time.
+    /// a time. What its form holds stays as its draft.
     fn list_back(&mut self, cx: &mut Context<Self>) {
+        self.leave_form(cx);
         match self.popup {
             Some(Screen::Mcp) => self.mcp_open = None,
             Some(Screen::Skills) => self.skill_open = None,
@@ -176,7 +192,6 @@ impl Loom {
             Some(Screen::Routines) => self.routine_open = None,
             _ => {}
         }
-        self.list_ui.filled = None;
         cx.notify();
     }
 
@@ -364,6 +379,22 @@ impl Loom {
         dot: Option<popup::Dot>,
         picked: bool,
     ) -> Stateful<Div> {
+        self.list_row_unsaved(id, lead, name, line, dot, false, picked)
+    }
+
+    /// A list row, as `list_row` draws it, with a dot in the ink an unread reply's dot
+    /// has before its state's dot while it has changes not saved.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn list_row_unsaved(
+        &self,
+        id: impl Into<SharedString>,
+        lead: AnyElement,
+        name: impl Into<SharedString>,
+        line: String,
+        dot: Option<popup::Dot>,
+        unsaved: bool,
+        picked: bool,
+    ) -> Stateful<Div> {
         let p = self.p;
         let dot = dot.map(|d| match d {
             popup::Dot::Ok => p.ok,
@@ -410,6 +441,9 @@ impl Loom {
                         )
                     }),
             )
+            .when(unsaved, |d| {
+                d.child(div().size(px(6.0)).flex_none().rounded_full().bg(p.ink))
+            })
             .when_some(dot, |d, c| {
                 d.child(div().size(px(6.0)).flex_none().rounded_full().bg(c))
             })

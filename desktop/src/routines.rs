@@ -187,61 +187,21 @@ impl Loom {
         self.routine_schedule_changed(cx);
     }
 
-    /// Fills the routine page's schedule fields from `s`.
-    fn set_routine_schedule(
-        &mut self,
-        s: model::Schedule,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let minutes = s.every % 60 != 0;
-        let every = if minutes { s.every } else { s.every / 60 };
-        let ui = &mut self.routine_ui;
-        ui.every_in
-            .update(cx, |f, cx| f.set_value(every.to_string(), window, cx));
-        ui.from_in
-            .update(cx, |f, cx| f.set_value(s.from.clone(), window, cx));
-        ui.to_in
-            .update(cx, |f, cx| f.set_value(s.to.clone(), window, cx));
-        ui.minutes = minutes;
-        ui.adding_time = false;
-        ui.run_open = None;
-        ui.schedule = s;
-    }
-
-    /// Opens the routine form, empty, for a new one.
+    /// Opens the routine form for a new one: empty, or as the person left it.
     pub(super) fn new_routine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         _ = self.model.load_routine_runs(None);
-        self.routine_name_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.set_routine_schedule(model::Schedule::default(), window, cx);
-        self.routine_prompt_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.routine_agent = self.model.selected.clone();
-        self.routine_notify = true;
-        self.routine_on = true;
-        self.routine_catch_up = true;
-        self.routine_thread = false;
-        self.routine_webhook = false;
-        self.set_routine_flow(&[], window, cx);
+        let own = model::drafts::RoutineDraft::new(self.model.selected.clone());
+        let own = model::drafts::Form::Routine(Box::new(own));
+        self.fill_form(DraftPage::Routines, None, own, window, cx);
         self.routine_open = Some(None);
         self.routine_schedule_changed(cx);
     }
 
-    /// Opens routine `r`'s page, to change it and see its history.
+    /// Opens routine `r`'s page, to change it and see its history: its form as it is,
+    /// or as the person left it.
     fn open_routine(&mut self, r: &model::Routine, window: &mut Window, cx: &mut Context<Self>) {
-        self.routine_name_in
-            .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-        self.set_routine_schedule(r.schedule.clone(), window, cx);
-        self.routine_prompt_in
-            .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
-        self.routine_agent = Some(r.agent.clone());
-        self.routine_notify = r.notify;
-        self.routine_on = r.on;
-        self.routine_catch_up = r.catch_up;
-        self.routine_thread = r.post == "thread";
-        self.routine_webhook = !r.hook.is_empty();
-        self.set_routine_flow(&r.flow, window, cx);
+        let own = model::drafts::Form::Routine(Box::new(model::drafts::RoutineDraft::of(r)));
+        self.fill_form(DraftPage::Routines, Some(r.id.clone()), own, window, cx);
         if let Some(f) = self.model.load_routine_runs(Some(&r.id)) {
             self.send(f);
         }
@@ -303,6 +263,7 @@ impl Loom {
                     lit,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.leave_form(cx);
                     this.routine_open = None;
                     cx.notify();
                 }))
@@ -671,12 +632,13 @@ impl Loom {
             None if !last.is_empty() => last,
             None => next,
         };
-        self.list_row(
+        self.list_row_unsaved(
             format!("routine-{}", r.id),
             self.routine_lead(&r, tint, false),
             r.name.clone(),
             line,
             popup::routine_dot(&r),
+            self.unsaved(DraftPage::Routines, &r.id),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| this.open_routine(&r, window, cx)))
@@ -1344,12 +1306,14 @@ impl Loom {
                 let f = this.model.save_routine(&form);
                 this.send(f);
                 this.routine_open = None;
+                this.model.drafts.discard();
                 cx.notify();
             }));
         let cancel = self
             .small_button("cancel-routine", "Cancel", false)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.routine_open = None;
+                this.model.drafts.discard();
                 cx.notify();
             }));
         let mut left = div().flex().gap(px(space::S));
@@ -1363,6 +1327,7 @@ impl Loom {
                             let f = this.model.delete_routine(&id);
                             this.send(f);
                             this.routine_open = None;
+                            this.model.drafts.discard();
                             cx.notify();
                         })),
                 )
@@ -1371,6 +1336,7 @@ impl Loom {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let f = this.model.run_routine(&run);
                             this.send(f);
+                            this.leave_form(cx);
                             this.routine_open = None;
                             cx.notify();
                         })),
@@ -1388,22 +1354,19 @@ impl Loom {
         groups
     }
 
-    /// Fills the routine form's flow from `flow`: steps it edits when they go one after
-    /// another, or kept as they are when an agent put some side by side.
-    fn set_routine_flow(
+    /// Fills the routine form's flow: the steps it edits, one after another, each its
+    /// agent and prompt, or `kept`, steps an agent put side by side, kept as they are.
+    pub(super) fn set_routine_flow(
         &mut self,
-        flow: &[model::FlowStep],
+        steps: &[(Option<String>, String)],
+        kept: Vec<model::FlowStep>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.routine_flow.clear();
-        self.routine_flow_kept.clear();
-        if !model::flow_is_chain(flow) {
-            self.routine_flow_kept = flow.to_vec();
-            return;
-        }
-        for step in flow {
-            let prompt = step.prompt.clone();
+        self.routine_flow_kept = kept;
+        for (agent, prompt) in steps {
+            let prompt = prompt.clone();
             let input = cx.new(|cx| {
                 let mut t = TextareaState::new(window, cx)
                     .auto_grow(2, 10)
@@ -1411,7 +1374,8 @@ impl Loom {
                 t.set_value(prompt, window, cx);
                 t
             });
-            self.routine_flow.push((Some(step.agent.clone()), input));
+            form_drafts::watch(&input, window, cx);
+            self.routine_flow.push((agent.clone(), input));
         }
     }
 
@@ -1528,6 +1492,7 @@ impl Loom {
                                         "What this agent is asked, with the answer before it.",
                                     )
                                 });
+                                form_drafts::watch(&input, window, cx);
                                 this.routine_flow.push((None, input));
                                 cx.notify();
                             }))
