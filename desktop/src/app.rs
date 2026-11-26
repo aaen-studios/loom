@@ -27700,7 +27700,9 @@ impl ChatList {
 }
 
 /// The button that goes down to the chat's newest message, while it isn't at its bottom:
-/// round, with how many came meanwhile in the agent's colour at its corner.
+/// round, with how many came meanwhile in the agent's colour at its corner. The count
+/// is the circle's sibling, drawn after it, since a div's border is drawn over its
+/// children and would cut through the count.
 fn jump_button(p: Palette, tint: Hsla, came: usize, scroller: Entity<MessageScrollerState>) -> Div {
     const SIZE: f32 = 34.0;
     let black: Hsla = rgb(0x000000).into();
@@ -27713,57 +27715,70 @@ fn jump_button(p: Palette, tint: Hsla, came: usize, scroller: Entity<MessageScro
         .justify_center()
         .child(
             div()
-                .id("jump-to-latest")
-                .role(Role::Button)
-                .aria_label("Jump to latest")
                 .relative()
                 .size(px(SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .border_1()
-                .border_color(p.line)
-                .text_color(p.ink_2)
-                .cursor_pointer()
-                .shadow(vec![BoxShadow {
-                    color: black.opacity(if p.dark { 0.5 } else { 0.14 }),
-                    offset: point(px(0.0), px(4.0)),
-                    blur_radius: px(14.0),
-                    spread_radius: px(-2.0),
-                    inset: false,
-                }])
-                .soft_hover(card_fill(p), p.raised_2, Some((p.ink_2, p.ink)))
-                .child(Icon::new(IconName::ArrowDown).small())
-                .when(came > 0, |d| {
-                    let n = if came > 99 {
-                        "99+".to_string()
-                    } else {
-                        came.to_string()
-                    };
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-5.0))
-                            .left(px(SIZE - 13.0))
-                            .h(px(17.0))
-                            .min_w(px(17.0))
-                            .px(px(4.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(tint)
-                            .text_size(px(size::CAPTION - 1.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(motion::ink_on(tint, p.ink, p.bg))
-                            .child(n),
-                    )
-                })
-                .on_click(move |_, _, cx| {
-                    scroller.update(cx, |s, cx| s.scroll_to_end(cx));
-                }),
+                .child(jump_circle(p, black, SIZE, scroller))
+                .when(came > 0, |d| d.child(jump_count(p, tint, came, SIZE))),
         )
+}
+
+/// The jump button's circle, with its border and the arrow.
+fn jump_circle(
+    p: Palette,
+    black: Hsla,
+    size: f32,
+    scroller: Entity<MessageScrollerState>,
+) -> Stateful<Div> {
+    div()
+        .id("jump-to-latest")
+        .role(Role::Button)
+        .aria_label("Jump to latest")
+        .size(px(size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(p.line)
+        .text_color(p.ink_2)
+        .cursor_pointer()
+        .shadow(vec![BoxShadow {
+            color: black.opacity(if p.dark { 0.5 } else { 0.14 }),
+            offset: point(px(0.0), px(4.0)),
+            blur_radius: px(14.0),
+            spread_radius: px(-2.0),
+            inset: false,
+        }])
+        .soft_hover(card_fill(p), p.raised_2, Some((p.ink_2, p.ink)))
+        .child(Icon::new(IconName::ArrowDown).small())
+        .on_click(move |_, _, cx| {
+            scroller.update(cx, |s, cx| s.scroll_to_end(cx));
+        })
+}
+
+/// How many came while the chat wasn't at its bottom, at the jump button's corner.
+fn jump_count(p: Palette, tint: Hsla, came: usize, size: f32) -> Div {
+    let n = if came > 99 {
+        "99+".to_string()
+    } else {
+        came.to_string()
+    };
+    div()
+        .absolute()
+        .top(px(-5.0))
+        .left(px(size - 13.0))
+        .h(px(17.0))
+        .min_w(px(17.0))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(tint)
+        .text_size(px(size::CAPTION - 1.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(motion::ink_on(tint, p.ink, p.bg))
+        .child(n)
 }
 
 impl Render for ChatList {
