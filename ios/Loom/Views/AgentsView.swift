@@ -124,6 +124,10 @@ struct AgentsView: View {
             Warmup(agent: model.synced && path.isEmpty ? model.shownAgents.first?.id : nil)
         }
         .onAppear(perform: openFromLaunch)
+        // Back at the list, the chat is left, though its agent stays selected.
+        .onChange(of: path) { _, now in
+            if now.isEmpty { model.leaveChat() }
+        }
         // A tap on an agent a message mentions opens its chat, in place of this one.
         .onChange(of: model.openAgent) { _, id in
             guard let id else { return }
@@ -265,7 +269,10 @@ struct AgentsView: View {
 
     @ViewBuilder
     private var newItems: some View {
-        Button("New group chat", systemImage: "person.2") { newRoom = true }
+        Button("New group chat", systemImage: "person.2") {
+            session.model.startRoomForm()
+            newRoom = true
+        }
             .disabled(session.model.agents.count < 2)
         Button("New folder", systemImage: "folder.badge.plus") {
             naming = Naming(folder: nil, agent: nil, name: "")

@@ -70,6 +70,8 @@ pub mod layout {
     pub const PINS: f32 = 460.0;
     pub const CARET: f32 = 11.0;
     pub const CONTEXT_CARD: f32 = 300.0;
+    pub const PILL_TITLE: f32 = 260.0;
+    pub const CARD_PREVIEW: f32 = 330.0;
     pub const FIELD_LABEL: f32 = 120.0;
 }
 
@@ -93,6 +95,7 @@ pub mod control {
     pub const LIST_ROW: f32 = 48.0;
     pub const GRIP: f32 = 14.0;
     pub const ROW_TALL: f32 = 68.0;
+    pub const PILL: f32 = 22.0;
 }
 
 pub mod phone_size {
@@ -130,6 +133,7 @@ pub mod color_dark {
     pub const FIND: u32 = 0x3b3417;
     pub const FIND_CURRENT: u32 = 0x94781a;
     pub const DROP: u32 = 0x9ea8ff;
+    pub const BOARD: u32 = 0x7d5fd6;
 }
 
 pub mod color_light {
@@ -153,6 +157,7 @@ pub mod color_light {
     pub const FIND: u32 = 0xfbefb4;
     pub const FIND_CURRENT: u32 = 0xf2cc3d;
     pub const DROP: u32 = 0x5763e0;
+    pub const BOARD: u32 = 0x7d5fd6;
 }
 
 pub mod thread_color_dark {

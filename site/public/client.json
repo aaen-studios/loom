@@ -1,0 +1,11 @@
+{
+	"client_id": "https://loom.rip/client.json",
+	"client_name": "loom",
+	"client_uri": "https://loom.rip",
+	"logo_uri": "https://loom.rip/apple-touch-icon.png",
+	"redirect_uris": ["http://127.0.0.1:47251/callback", "http://localhost:47251/callback", "loom:/callback"],
+	"grant_types": ["authorization_code", "refresh_token"],
+	"response_types": ["code"],
+	"token_endpoint_auth_method": "none",
+	"application_type": "native"
+}

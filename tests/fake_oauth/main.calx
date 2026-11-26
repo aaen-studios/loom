@@ -13,22 +13,29 @@ module tests.fake_oauth.main
 //               `fixed-secret`, sent with HTTP Basic
 //     /api/mcp  one that signs no one in, and takes only the key `Bearer
 //               fake-key` (KEY), as a server with a token the person made does
+//     /mcp3     one whose authorization server, /as3, takes Client ID Metadata
+//               Documents, and lets apps sign up too: the client whose id is
+//               loom's document's address, for the return addresses it names,
+//               read from site/public/client.json as loom.rip serves it (so run
+//               it from the repository's root)
 //
-// The first two offer one tool, `whoami`, to a request with a live access
-// token for them, and answer 401 to any other; the third offers `lights`. Signing in checks what OAuth 2.1 and MCP
+// /mcp, /mcp2 and /mcp3 offer one tool, `whoami`, to a request with a live access
+// token for them, and answer 401 to any other; /api/mcp offers `lights`. Signing in checks what OAuth 2.1 and MCP
 // ask: a known client and its redirect, a PKCE challenge (S256) that the code's
 // verifier matches, the server as `resource`, a code used once. Its consent
 // page is a link to the redirect, for a test to follow as the person's
 // browser would. Tokens last an hour, or what /test/life?s=N says for those
 // issued after it; a refresh token is used once and replaced.
 //
-// For tests: GET /test/stats gives what happened, with every token issued and
-// the last app that signed up's `grant_types` and `application_type`;
+// For tests: GET /test/stats gives what happened, with every token issued,
+// the last app that signed up's `grant_types` and `application_type`, and how
+// many sign-ins were by the metadata document's client (`by_document`);
 // /test/expire ends every access token there is; /test/life?s=N.
 //
 //     calx tests/fake_oauth/main.calx
 import std.bytes
 import std.crypto.{random_bytes}
+import std.fs
 import std.hash.{sha256}
 import std.http.server.{Request, Response, Server}
 import std.io
@@ -69,6 +76,9 @@ struct Fake {
     unauthorized: i64
     issued: List<String>
     signed_up: Json    // what the last app that signed up asked for
+    document_id: String    // loom's Client ID Metadata Document's address, its client id at /as3
+    document_redirects: List<String>    // the return addresses it names
+    by_document: i64
 }
 
 // The key /api/mcp takes, as its Authorization header.
@@ -152,7 +162,7 @@ impl Fake {
         }
         if not good {
             self.unauthorized += 1
-            let challenge = if req.path == "/mcp" { "Bearer realm=\"fake\", resource_metadata=\"{self.base}/.well-known/oauth-protected-resource/mcp\"" } else { String("Bearer realm=\"fake\"") }
+            let challenge = if req.path == "/mcp" or req.path == "/mcp3" { "Bearer realm=\"fake\", resource_metadata=\"{self.base}/.well-known/oauth-protected-resource{req.path}\"" } else { String("Bearer realm=\"fake\"") }
             return oauth_error(401, "invalid_token", String("Sign in, or send a token.")).with_header(String("WWW-Authenticate"), challenge)
         }
         let m = match parse(req.text() ?? String()) {
@@ -181,8 +191,9 @@ impl Fake {
         return json(200, object([("resource", Json.Str("{self.base}{path}")), ("authorization_servers", Json.Array([Json.Str(server.copy())])), ("scopes_supported", strings(["tools"]))]))
     }
 
-    fn server_metadata(issuer: String, sign_up: bool) -> Response {
+    fn server_metadata(issuer: String, sign_up: bool, documents: bool) -> Response {
         var m = LinkedMap<String, Json>()
+        if documents { m.insert(String("client_id_metadata_document_supported"), Json.Bool(true)) }
         m.insert(String("issuer"), Json.Str(issuer.copy()))
         m.insert(String("authorization_endpoint"), Json.Str("{issuer}/authorize"))
         m.insert(String("token_endpoint"), Json.Str("{issuer}/token"))
@@ -224,13 +235,17 @@ impl Fake {
         return json(201, object([("client_id", Json.Str(id)), ("redirect_uris", Json.Array(uris)), ("token_endpoint_auth_method", text("none"))]))
     }
 
-    fn authorize(self: mut Fake, req: Request, issuer: String, resource: String) -> Response {
+    fn authorize(self: mut Fake, req: Request, issuer: String, resource: String, documents: bool) -> Response {
         let q = query(req)
         let client = field(q.copy(), "client_id")
         let redirect = field(q.copy(), "redirect_uri")
         var known = false
         if let c = self.clients.find(client.copy()) { known = c.redirects.contains(redirect.copy()) or (c.redirects.len() == 0 and redirect.starts_with("http://127.0.0.1:")) }
+        // The document's client, only where documents are taken, and only for the addresses it names.
+        let by_document = documents and self.document_id.len() > 0 and client == self.document_id
+        if by_document { known = self.document_redirects.contains(redirect.copy()) }
         if not known { return Response.error(400, String("unknown client or redirect")) }
+        if by_document { self.by_document += 1 }
         if field(q.copy(), "response_type") != "code" { return Response.error(400, String("response_type isn't code")) }
         if field(q.copy(), "code_challenge_method") != "S256" or field(q.copy(), "code_challenge").len() == 0 { return Response.error(400, String("no S256 challenge")) }
         if field(q.copy(), "resource") != resource { return Response.error(400, "resource isn't {resource}") }
@@ -242,8 +257,10 @@ impl Fake {
         return Response.html("<p>Sign in to fake as ada?</p><a id=\"allow\" href=\"{redirect}?{back}\">Allow</a>")
     }
 
-    // The client the request authenticates as: by HTTP Basic, or its id in the form.
+    // The client the request authenticates as: by HTTP Basic, or its id in the
+    // form, and at /as3, the metadata document's client, which has no secret.
     fn client_of(self, req: Request, f: Map<String, String>) -> String? {
+        if req.path == "/as3/token" and self.document_id.len() > 0 and field(f.copy(), "client_id") == self.document_id and field(f.copy(), "client_secret").len() == 0 { return some(self.document_id.copy()) }
         var id = field(f.copy(), "client_id")
         var secret = field(f.copy(), "client_secret")
         let auth = req.header(String("Authorization")) ?? String()
@@ -341,23 +358,27 @@ impl Fake {
     fn handle(self: mut Fake, req: Request) -> Response {
         let p = req.path.copy()
         let issuer2 = "{self.base}/as2"
-        if req.method == "POST" and (p == "/mcp" or p == "/mcp2" or p == "/api/mcp") { return self.mcp(req) }
+        let issuer3 = "{self.base}/as3"
+        if req.method == "POST" and (p == "/mcp" or p == "/mcp2" or p == "/mcp3" or p == "/api/mcp") { return self.mcp(req) }
         if p == "/.well-known/oauth-protected-resource/mcp" { return self.resource_metadata("/mcp", self.base.copy()) }
         if p == "/.well-known/oauth-protected-resource/mcp2" { return self.resource_metadata("/mcp2", issuer2) }
-        if p == "/.well-known/oauth-authorization-server" { return Fake.server_metadata(self.base.copy(), true) }
-        if p == "/.well-known/oauth-authorization-server/as2" { return Fake.server_metadata(issuer2, false) }
-        if p == "/register" and req.method == "POST" { return self.register(req) }
+        if p == "/.well-known/oauth-protected-resource/mcp3" { return self.resource_metadata("/mcp3", issuer3) }
+        if p == "/.well-known/oauth-authorization-server" { return Fake.server_metadata(self.base.copy(), true, false) }
+        if p == "/.well-known/oauth-authorization-server/as2" { return Fake.server_metadata(issuer2, false, false) }
+        if p == "/.well-known/oauth-authorization-server/as3" { return Fake.server_metadata(issuer3, true, true) }
+        if (p == "/register" or p == "/as3/register") and req.method == "POST" { return self.register(req) }
         let base = self.base.copy()
-        if p == "/authorize" { return self.authorize(req, base.copy(), "{base}/mcp") }
-        if p == "/as2/authorize" { return self.authorize(req, issuer2, "{base}/mcp2") }
-        if (p == "/token" or p == "/as2/token") and req.method == "POST" { return self.token(req) }
+        if p == "/authorize" { return self.authorize(req, base.copy(), "{base}/mcp", false) }
+        if p == "/as2/authorize" { return self.authorize(req, issuer2, "{base}/mcp2", false) }
+        if p == "/as3/authorize" { return self.authorize(req, issuer3, "{base}/mcp3", true) }
+        if (p == "/token" or p == "/as2/token" or p == "/as3/token") and req.method == "POST" { return self.token(req) }
         if p == "/revoke" and req.method == "POST" { return self.revoke(req) }
         if p == "/test/stats" {
             var issued = List<Json>()
             for t in self.issued {
                 issued.push(Json.Str(t.copy()))
             }
-            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued)), ("signed_up", self.signed_up.copy())]))
+            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued)), ("signed_up", self.signed_up.copy()), ("by_document", Json.Int(self.by_document))]))
         }
         if p == "/test/expire" {
             for t in mut self.access.values() {
@@ -379,7 +400,23 @@ fn main() ! Error {
     let base = server.url().trim_suffix("/").copy()
     var clients = Map<String, Client>()
     clients.insert(String("fixed-client"), Client { secret: String("fixed-secret"), redirects: List<String>() })
-    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>(), signed_up: Json.Null }
+    // Loom's Client ID Metadata Document, as loom.rip serves it.
+    var document_id = String()
+    var document_redirects = List<String>()
+    let document = match fs.read_text(String("site/public/client.json")) {
+        ok(t) => t ?? String(),
+        err(_) => String(),
+    }
+    if document.len() > 0 {
+        let doc = try parse(document)
+        document_id = str_of(doc.copy(), "client_id")
+        if let Json.Array(rs) = doc.get(String("redirect_uris")) ?? Json.Null {
+            for r in rs {
+                if let s = r.as_str() { document_redirects.push(s) }
+            }
+        }
+    }
+    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>(), signed_up: Json.Null, document_id: document_id, document_redirects: document_redirects, by_document: 0 }
     println("fake oauth: {base}")
     io.flush()
     loop {

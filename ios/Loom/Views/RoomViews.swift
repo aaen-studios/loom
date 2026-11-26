@@ -100,28 +100,26 @@ struct RouteLine: View {
 }
 
 /// Makes a group chat: its name, two or more members, and a colour if the person wants
-/// one. The chat shows it once it's made.
+/// one. The chat shows it once it's made. What it shows and whether Make is on are the
+/// model's (`Model.newRoom`), with its form started when the sheet opens.
 struct NewRoomSheet: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
     @State private var name = ""
-    @State private var members: [String] = []
-    @State private var color = ""
 
     var body: some View {
         let model = session.model
+        let form = model.newRoom(name: name)
         NavigationStack {
             Form {
                 Section("Name") {
                     TextField("Money", text: $name)
                 }
                 Section("Members") {
-                    MemberToggles(members: members) { id in
-                        if let i = members.firstIndex(of: id) { members.remove(at: i) } else { members.append(id) }
-                    }
+                    MemberToggles(members: form.members) { model.toggleFormMember($0) }
                 }
                 Section("Colour") {
-                    ColorChoices(color: color) { color = $0 }
+                    ColorChoices(color: form.color) { model.setFormColor($0) }
                 }
             }
             .scrollContentBackground(.hidden)
@@ -134,10 +132,10 @@ struct NewRoomSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Make") {
-                        session.send(model.makeRoom(name: name, members: members, color: color))
+                        session.makeRoom(name: name)
                         dismiss()
                     }
-                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || members.count < 2)
+                    .disabled(!form.canMake)
                 }
             }
         }
@@ -164,17 +162,7 @@ struct RoomSettingsSheet: View {
                     }
                     if !r.everyone {
                         Section("Members") {
-                            MemberToggles(members: r.members) { id in
-                                var ms = r.members
-                                if let i = ms.firstIndex(of: id) {
-                                    // Two at least: the instance says so too.
-                                    guard ms.count > 2 else { return }
-                                    ms.remove(at: i)
-                                } else {
-                                    ms.append(id)
-                                }
-                                session.send(model.updateRoom(r.id, ["members": JSON(ms)]))
-                            }
+                            MemberToggles(members: r.members) { session.send(model.toggleMember($0, in: r)) }
                         }
                     }
                     Section("When it can't pick") {

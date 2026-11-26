@@ -68,6 +68,18 @@ final class Session {
         flush()
     }
 
+    /// Makes the group chat in New group chat's form, named `name`, once the model says
+    /// Make is on, and asks the model again once it has waited `Model.makeWait`, which
+    /// turns Make on again if no answer came.
+    func makeRoom(name: String) {
+        guard let f = model.makeFormRoom(name: name) else { return }
+        send(f)
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Model.makeWait))
+            self?.model.makeTimedOut(now: .now)
+        }
+    }
+
     /// Asks the core for whatever the model found out of date.
     func flush() {
         for f in model.fetches() {
