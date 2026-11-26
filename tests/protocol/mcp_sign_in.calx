@@ -15,7 +15,8 @@ module tests.protocol.mcp_sign_in
 // server renamed keeps its sign-in, and its agent's tools, and a chat running
 // from before reaches it by its old name. A call that needs more scopes than
 // the sign-in has (403) gets its person Sign in, whose next sign-in asks for
-// them. No token is in what the app got, the activity log or the database.
+// them. A chat lets go of a server deleted or signed out of. No token is in
+// what the app got, the activity log or the database.
 //
 //     calx tests/protocol/mcp_sign_in.calx
 import std.bytes
@@ -277,8 +278,8 @@ fn run(i: Instance, fake: String) ! Error {
 
     // --- A renamed server deleted (LOO-408) ---
     // A chat that knows a server as lamp, which is renamed lantern and
-    // deleted, and then another server takes the name lantern: lamp no longer
-    // leads to it, so a rule on the new lantern's tool isn't one on lamp's.
+    // deleted, and then another server takes the name lantern: the chat lets
+    // lamp go, and lamp doesn't lead to the new lantern.
     _ = try app.cmd("q_d1", "mcp.put", keyed(fake.copy(), "lamp"))
     let lighter = str_at(at(at(try app.cmd("q_d2", "agent.create", Obj.new().s("name", String("Lighter")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).j("mcp", Json.Array([Json.Str(String("lamp"))])).done()), "value"), "agent"), "id") ?? String()
     let lamp_chat = str_at(at(try app.cmd("q_d3", "conversation.create", Obj.new().s("agent", lighter).done()), "value"), "conversation") ?? String()
@@ -289,8 +290,19 @@ fn run(i: Instance, fake: String) ! Error {
     let deleted = try app.cmd("q_d5", "mcp.delete", Obj.new().s("name", String("lantern")).done())
     _ = try app.cmd("q_d6", "mcp.put", keyed(fake.copy(), "lantern"))
     _ = try app.cmd("q_d7", "rule.put", Obj.new().s("then", String("deny")).s("tool", String("lantern.lights")).done())
-    let still_lit = try say(mut app, lamp_chat, String("m_d2"), lights)
-    try check(ok_of(deleted) and still_lit.contains("ada"), "once a renamed server is deleted, its old name leads nowhere: a chat from before isn't taken to another server that has the name since")
+    let after = try say(mut app, lamp_chat, String("m_d2"), lights)
+    try check(ok_of(deleted) and after.contains("There's no tool mcp.lamp.lights") and not after.contains("ada"), "once a renamed server is deleted, a chat from before lets it go, and its old name leads nowhere: not to another server that has the name since")
+
+    // --- Signed out while a chat has it ---
+    let out_chat = str_at(at(try app.cmd("q_o1", "conversation.create", Obj.new().s("agent", keeper.copy()).done()), "value"), "conversation") ?? String()
+    let search = String(#"/mcpkeep search_tools {"query":"whoami"}"#)
+    let before_out = try say(mut app, out_chat.copy(), String("m_o1"), search.copy())
+    _ = try app.cmd("q_o2", "mcp.sign_out", Obj.new().s("name", String("tracker")).done())
+    let signed_out = try say(mut app, out_chat.copy(), String("m_o2"), search.copy())
+    try check(before_out.contains("mcp.tracker.whoami(") and not signed_out.contains("mcp.tracker.whoami(") and signed_out.contains("tracker needs your person to sign in"), "a chat lets go of a server its person signs out of, which waits for them to sign in again")
+    let back = try sign_in(mut app, "tracker", ("q_o3", "q_o4"))
+    let signed_back = try say(mut app, out_chat, String("m_o3"), search)
+    try check(ok_of(back) and signed_back.contains("mcp.tracker.whoami("), "and has its tools again once they have")
 
     // --- A server that doesn't let apps sign up ---
     _ = try app.cmd("q_23", "mcp.put", Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").done())

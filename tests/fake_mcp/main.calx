@@ -46,9 +46,15 @@ module tests.fake_mcp.main
 // a session at initialize (Mcp-Session-Id) and wants it after; in the modern
 // era it checks a request's headers match its body (MCP-Protocol-Version,
 // Mcp-Method, Mcp-Name, and region's Mcp-Param-Region), answering 400 with
-// HeaderMismatch where they don't. GET /test/stats says how many initialize,
-// server/discover and mismatched requests it had; /test/rename names region's
-// header Zone from then on.
+// HeaderMismatch where they don't. With FAKE_GROW, it answers a
+// subscriptions/listen with an event stream that stays open, acknowledged
+// first, and sends its tool changes on each such stream that's open. GET
+// /test/stats says how many initialize, server/discover, mismatched and
+// subscriptions/listen requests it had, how many of those streams are open,
+// and the Authorization the last of them came with; /test/rename names
+// region's header Zone from then on; /test/grow?name=NAME offers a tool NAME
+// more, and says so; /test/drop ends every stream, as a server that went away
+// would.
 //
 // It ends when its input does. It needs only the standard library, since loom
 // mcp starts it from an agent's folder.
@@ -56,12 +62,13 @@ module tests.fake_mcp.main
 //     calx tests/fake_mcp/main.calx [--http]
 import std.bytes
 import std.env
-import std.http.server.{Request, Response, Server}
+import std.http.server.{EventStream, Request, Response, Server}
 import std.image.{Color, Image, Kind}
 import std.io
 import std.json.{Json, parse}
 import std.process.{exit}
 import std.thread.{sleep}
+import std.url
 
 const MODERN: str = "2026-07-28"
 const LEGACY: [str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
@@ -205,6 +212,10 @@ struct Fake {
     grown: bool    // whether `grow` was called
     listening: Json    // the id of a subscriptions/listen for tool changes, or null
     said: List<Json>    // notifications to write after the answer being made
+    extra: List<String>    // over HTTP, the tools /test/grow added
+    news: bool    // over HTTP, whether its tools changed since its streams were told
+    listens: i64    // over HTTP, the subscriptions/listen it had
+    listen_auth: String    // and the Authorization the last came with
 }
 
 impl Fake {
@@ -247,6 +258,9 @@ impl Fake {
             list.push(tool("grow", "Offers one tool more.", schema(List<(str, Json)>(), List<str>()), false))
             if self.grown { list.push(tool("grown", "Is there once grow was called.", schema(List<(str, Json)>(), List<str>()), true)) }
         }
+        for name in self.extra {
+            list.push(object([("name", Json.Str(name.copy())), ("description", text("Added by a test.")), ("inputSchema", schema(List<(str, Json)>(), List<str>())), ("annotations", object([("readOnlyHint", Json.Bool(true))]))]))
+        }
         return object([("tools", Json.Array(list))])
     }
 
@@ -260,6 +274,7 @@ impl Fake {
     // legacy era, or on the stream a client of the modern era opened.
     fn grew(self: mut Fake, modern_era: bool) {
         self.grown = true
+        self.news = true
         if not modern_era {
             self.said.push(object([("jsonrpc", text("2.0")), ("method", text("notifications/tools/list_changed"))]))
             return
@@ -413,13 +428,50 @@ impl Fake {
         return (if http { 404 } else { 200 }, some(error(id, -32601, String("Method not found"), Json.Null)))
     }
 
-    fn respond(self: mut Fake, req: Request) -> Response {
+    // Over HTTP, a subscriptions/listen for tool changes that's answered with
+    // an event stream: its id, and the acknowledgement it starts with. none
+    // for any other request, which `respond` answers.
+    fn listen_over_http(self: mut Fake, req: Request) -> (Json, Json)? {
+        if req.path != "/mcp" or req.method != "POST" or not self.grows or self.modern_versions().len() == 0 { return none }
+        let m = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return none,
+        }
+        let id = m.get(String("id")) else return none
+        let method = str_of(m.copy(), "method")
+        if method != "subscriptions/listen" { return none }
+        let params = m.get(String("params")) ?? Json.Null
+        let version = str_of((params.get(String("_meta")) ?? Json.Null), "io.modelcontextprotocol/protocolVersion")
+        if not self.modern_versions().contains(version.copy()) { return none }
+        var heard = Map<String, String>()
+        for h in req.headers {
+            heard.insert(h.name.to_lower_root(), h.value.copy())
+        }
+        if self.mismatch(method, params.copy(), version, heard.copy()).len() > 0 { return none }
+        if (params.get(String("notifications")) ?? Json.Null).get(String("toolsListChanged")) != some(Json.Bool(true)) { return none }
+        self.listens += 1
+        self.listen_auth = if let a = heard.find(String("authorization")) { a.copy() } else { String() }
+        let meta = object([("io.modelcontextprotocol/subscriptionId", id.copy())])
+        let ack = object([("jsonrpc", text("2.0")), ("method", text("notifications/subscriptions/acknowledged")), ("params", object([("_meta", meta), ("notifications", object([("toolsListChanged", Json.Bool(true))]))]))])
+        return some((id, ack))
+    }
+
+    fn respond(self: mut Fake, req: Request, open: i64) -> Response {
         if req.path == "/test/stats" {
-            let stats = object([("initialized", Json.Int(self.initialized)), ("discovered", Json.Int(self.discovered)), ("mismatched", Json.Int(self.mismatched))])
+            let stats = object([("initialized", Json.Int(self.initialized)), ("discovered", Json.Int(self.discovered)), ("mismatched", Json.Int(self.mismatched)), ("listens", Json.Int(self.listens)), ("open", Json.Int(open)), ("listen_auth", Json.Str(self.listen_auth.copy()))])
             return Response.new(200, String("application/json"), "{stats}".to_bytes())
         }
         if req.path == "/test/rename" {
             self.zone = true
+            return Response.new(200, String("application/json"), "\{\}".to_bytes())
+        }
+        if req.path == "/test/grow" {
+            for (k, v) in url.form_decode(req.query.copy()) {
+                if k == "name" {
+                    self.extra.push(v.copy())
+                    self.news = true
+                }
+            }
             return Response.new(200, String("application/json"), "\{\}".to_bytes())
         }
         if req.path != "/mcp" { return Response.error(404) }
@@ -446,16 +498,50 @@ fn serve_http(fake: mut Fake) ! Error {
     server.log = false
     println("fake mcp: {server.url().trim_suffix("/")}/mcp")
     io.flush()
+    // The streams of tool changes open, each with its subscription's id.
+    var streams = List<(EventStream, Json)>()
     loop {
-        if let req = server.next() {
-            let res = fake.respond(req.copy())
-            server.respond(req, res)
+        match server.next_event() {
+            some(Request(req)) => {
+                if req.path == "/test/drop" {
+                    for (s, _) in streams {
+                        server.end_stream(s)
+                    }
+                    streams = List<(EventStream, Json)>()
+                    server.respond(req, Response.new(200, String("application/json"), "\{\}".to_bytes()))
+                    continue
+                }
+                if let (id, ack) = fake.listen_over_http(req.copy()) {
+                    let s = server.stream(req)
+                    _ = server.send_event(s, "{ack}")
+                    streams.push((s, id))
+                } else {
+                    let res = fake.respond(req.copy(), i64.wrap(streams.len()))
+                    server.respond(req, res)
+                }
+                fake.said = List<Json>()
+                if fake.news {
+                    fake.news = false
+                    for (s, id) in streams {
+                        let meta = object([("io.modelcontextprotocol/subscriptionId", id.copy())])
+                        _ = server.send_event(s, "{object([("jsonrpc", text("2.0")), ("method", text("notifications/tools/list_changed")), ("params", object([("_meta", meta)]))])}")
+                    }
+                }
+            },
+            some(Ended(gone)) => {
+                var left = List<(EventStream, Json)>()
+                for (s, id) in streams {
+                    if s != gone { left.push((s, id.copy())) }
+                }
+                streams = left
+            },
+            _ => {},
         }
     }
 }
 
 fn main() ! Error {
-    var fake = Fake { era: env.variable(String("FAKE_ERA")) ?? String(), spoken: String(), zone: false, session: String(), minted: false, initialized: 0, discovered: 0, mismatched: 0, grows: env.variable(String("FAKE_GROW")) != none, grown: false, listening: Json.Null, said: List<Json>() }
+    var fake = Fake { era: env.variable(String("FAKE_ERA")) ?? String(), spoken: String(), zone: false, session: String(), minted: false, initialized: 0, discovered: 0, mismatched: 0, grows: env.variable(String("FAKE_GROW")) != none, grown: false, listening: Json.Null, said: List<Json>(), extra: List<String>(), news: false, listens: 0, listen_auth: String() }
     if env.args().contains(String("--http")) {
         try serve_http(mut fake)
         return
