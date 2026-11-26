@@ -277,6 +277,7 @@ impl Code {
                 self.added = false
                 self.take_added(link)
             }
+            self.relist(link)
             return
         }
         self.loaded = true
@@ -412,6 +413,35 @@ impl Code {
                 }
                 self.signing = left
             }
+        }
+    }
+
+    // The servers that said their tools changed since they were listed
+    // (notifications/tools/list_changed) have them listed again, so the
+    // session has them as they are now without a new one, and the instance
+    // keeps them as the server's, for Spools.
+    fn relist(self: mut Code, link: Link) {
+        var names = List<String>()
+        for (name, _) in self.servers { names.push(name.copy()) }
+        for name in names {
+            var server = self.servers.remove(name.copy()) else continue
+            if server.tools_changed() {
+                match server.tools() {
+                    ok(listed) => {
+                        var kept = List<Tool>()
+                        for t in self.tools {
+                            if t.server != name { kept.push(t.copy()) }
+                        }
+                        self.tools = kept
+                        self.tools.extend(codemode.tools_of(name.copy(), listed.copy()))
+                        var found = List<Json>()
+                        for t in listed { found.push(Json.Str(str_at(t, "name") ?? String())) }
+                        if not name.starts_with("plugin-") { _ = link.send("/api/mcp/listed", Obj.new().s("server", name.copy()).j("tools", Json.Array(found)).done()) }
+                    },
+                    err(e) => eprintln("loom mcp: {name}'s tools: {e}"),
+                }
+            }
+            self.servers.insert(name.copy(), server)
         }
     }
 
@@ -616,10 +646,24 @@ impl Code {
         if signing {
             if let header = renewed(link, t.server.copy()) {
                 server.bearer(header[7..].copy())
-                let (again, failed_again) = outcome(mut server, t.name.copy(), args)
+                let (again, failed_again) = outcome(mut server, t.name.copy(), args.copy())
                 result = again
                 failure = failed_again
                 signing = mcpclient.asks_sign_in(failure.copy())
+            }
+        }
+        // A 403 for want of scopes (step-up): the token is renewed, for a
+        // person who has signed in with them since, and the call made again,
+        // once; or they're asked to sign in again with them. Its other tools
+        // go on working meanwhile.
+        var challenge = mcpclient.scope_challenge(failure.copy())
+        if challenge != none {
+            if let header = renewed(link, t.server.copy()) {
+                server.bearer(header[7..].copy())
+                let (again, failed_again) = outcome(mut server, t.name.copy(), args)
+                result = again
+                failure = failed_again
+                challenge = mcpclient.scope_challenge(failure.copy())
             }
         }
         if failure.len() > 0 {
@@ -628,6 +672,10 @@ impl Code {
             why = codemode.error_of(result)
         } else {
             value = codemode.value_of(result)
+        }
+        if let wanted = challenge {
+            why = step_up_text(t.server.copy())
+            _ = link.send("/api/mcp/sign_in", Obj.new().s("server", t.server.copy()).s("challenge", wanted).done())
         }
         if signing {
             why = sign_in_text(t.server.copy())
@@ -673,6 +721,11 @@ impl Code {
 // What an agent is told of a server that waits for its person to sign in.
 fn sign_in_text(name: String) -> String {
     return "{name} needs your person to sign in. Loom has shown them Sign in in the chat: don't sign in yourself, in your browser or any other way. Its tools work once they have."
+}
+
+// What an agent is told of a call its person's sign-in doesn't reach far enough for.
+fn step_up_text(name: String) -> String {
+    return "{name} needs your person to sign in again to let you do that. Loom has shown them Sign in in the chat: don't sign in yourself, in your browser or any other way. Try it again once they have."
 }
 
 // The Authorization header a server's spec gives, or "".

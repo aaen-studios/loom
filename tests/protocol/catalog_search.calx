@@ -2,7 +2,7 @@ module tests.protocol.catalog_search
 
 // Spools' search (PLAN.md, "The integrations catalog"), against a fake MCP
 // Registry that answers with what the real one said (tests/mcp_registry/) and
-// two servers of the test's own. catalog.search gives the registry's servers
+// three servers of the test's own. catalog.search gives the registry's servers
 // as entries marked community, without the official Notion, which is the
 // curated one and listed by its id, and with a server under two names given
 // once; a search typed again is answered from what the instance kept. A

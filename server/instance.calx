@@ -4983,6 +4983,25 @@ impl Instance {
         for state in gone { _ = i.sign_ins.remove(state) }
     }
 
+    // The scopes a server of the person's answered 403 for (step-up), kept
+    // with any it asked for before, so each sign-in to it from now on asks
+    // for them as well as those it names itself.
+    fn want_scopes(i: Instance, user: String, server: String, scopes: String) ! Error {
+        let had = try i.store.meta("mcp_scopes/{user}/{server}") ?? String()
+        try i.store.set_meta("mcp_scopes/{user}/{server}", oauth.scopes_with(had, scopes))
+    }
+
+    // A grant about to be signed in with, asking for the scopes its server
+    // answered 403 for as well (want_scopes).
+    fn with_wanted_scopes(i: Instance, user: String, server: String, grant: Json) -> Json {
+        let wanted = match i.store.meta("mcp_scopes/{user}/{server}") {
+            ok(some(w)) => w,
+            _ => return grant.copy(),
+        }
+        let scope = oauth.scopes_with(str_at(grant.copy(), "scope") ?? String(), wanted)
+        return merge(grant, Obj.new().s("scope", scope).done())
+    }
+
     // What the sign-in thread did.
     fn oauth_finished(i: mut Instance, d: oauth.Done) ! Error {
         let job = i.oauth_jobs.remove(d.id) else return
@@ -4997,10 +5016,11 @@ impl Instance {
             // Its client is kept now, so the next sign-in uses it again.
             let had = i.grant_of(job.user.copy(), job.server.copy())
             if not oauth.signed_in(had) { try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy()) }
+            let grant = i.with_wanted_scopes(job.user.copy(), job.server.copy(), d.grant.copy())
             let pkce = oauth.new_verifier()
             let state = oauth.new_state()
-            let address = oauth.authorize_url(d.grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
-            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: d.grant.copy(), verifier: pkce, at: now() })
+            let address = oauth.authorize_url(grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
+            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: grant, verifier: pkce, at: now() })
             i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).s("url", address).done()))
             return
         }
@@ -5393,7 +5413,7 @@ impl Instance {
             if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
             return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
-        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon"] {
+        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon", "/api/mcp/listed"] {
             if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
@@ -5499,6 +5519,18 @@ impl Instance {
             try i.took_icons(g.user, name, got)
             return some(json_response(200, Obj.new().done()))
         }
+        // A server's tools as loom mcp listed them again, once the server said
+        // they changed: kept as what its last test found, for Spools.
+        if req.path == "/api/mcp/listed" {
+            let name = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
+            if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
+            var found = List<String>()
+            for t in catalog.list(at(body, "tools")) {
+                if let n = t.as_str() { found.push(n) }
+            }
+            try i.keep_tested(g.user, name, found, String(), false)
+            return some(json_response(200, Obj.new().done()))
+        }
         if req.path == "/api/mcp/done" {
             let act = int_at(body.copy(), "act") ?? 0
             var mine = false
@@ -5522,6 +5554,17 @@ impl Instance {
             let server = try i.store.mcp_server(g.user.copy(), name.copy()) else return some(http_error(404, "not_found", "There's no MCP server {name}."))
             if str_at(server.copy(), "url") == none or own_auth(server) { return some(http_error(400, "bad_request", "{name} doesn't sign in.")) }
             if req.path == "/api/mcp/sign_in" {
+                // A server that answered 403 for want of scopes (step-up): the
+                // person signs in again, and their next sign-in asks for those
+                // too. The one they have stays, for the tools it reaches.
+                if let challenge = str_at(body.copy(), "challenge") {
+                    let said = oauth.challenge_params(challenge)
+                    let wanted = oauth.param(said.copy(), "scope") ?? String()
+                    if oauth.param(said, "error") != some(String("insufficient_scope")) or wanted.trim().len() == 0 { return some(http_error(400, "bad_request", String("challenge is a 403's WWW-Authenticate for insufficient_scope, with the scopes it wants."))) }
+                    try i.want_scopes(g.user.copy(), name.copy(), wanted)
+                    i.sign_in_card(g, name)
+                    return some(json_response(200, Obj.new().done()))
+                }
                 // A sign-in that can be renewed was, before loom mcp says this,
                 // so only one that can't is dropped: an agent can't sign its
                 // person out of one that's good.
@@ -10441,7 +10484,7 @@ impl Instance {
         if g != Json.Null { try i.keep_grant(user.copy(), name.copy(), g) }
         _ = try i.store.delete_mcp_auth(user.copy(), was.copy())
         try i.store.rename_mcp_icon(user.copy(), was.copy(), name.copy())
-        for kept in ["mcp_tested", "mcp_catalog"] {
+        for kept in ["mcp_tested", "mcp_catalog", "mcp_scopes"] {
             if let value = try i.store.meta("{kept}/{user}/{was}") { try i.store.set_meta("{kept}/{user}/{name}", value) }
             try i.store.delete_meta("{kept}/{user}/{was}")
         }
@@ -17291,6 +17334,7 @@ impl Instance {
                     let g = i.grant_of(user.copy(), saved.copy())
                     _ = try i.store.delete_mcp_auth(user.copy(), saved.copy())
                     i.revoke_sign_in(user.copy(), saved.copy(), g)
+                    try i.store.delete_meta("mcp_scopes/{user}/{saved}")
                 }
             }
             try i.store.put_mcp_server(user.copy(), done.copy())
@@ -17308,6 +17352,7 @@ impl Instance {
             if not try i.store.delete_mcp_server(user.copy(), server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
             try i.store.delete_meta("mcp_catalog/{user}/{server_name}")
             try i.store.delete_meta("mcp_tested/{user}/{server_name}")
+            try i.store.delete_meta("mcp_scopes/{user}/{server_name}")
             _ = i.connects.remove("{user}/{server_name}")
             let g = i.grant_of(user.copy(), server_name.copy())
             _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())

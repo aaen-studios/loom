@@ -223,6 +223,27 @@ fn run(i: Instance, fake: String) ! Error {
     let rolled = try app.cmd("q_k3", "agent.rollback", Obj.new().s("agent", keeper.copy()).i("revision", 1).done())
     try check(ok_of(rolled.copy()) and "{at(at(at(rolled, "value"), "agent"), "mcp")}" == #"["tracker"]"#, "rolling the agent back to a revision from before keeps the server by its new name")
 
+    // --- A call that needs more scopes (step-up) ---
+    let up_chat = str_at(at(try app.cmd("q_s1", "conversation.create", Obj.new().s("agent", keeper.copy()).done()), "value"), "conversation") ?? String()
+    let as_admin = "/mcpkeep run_code {Obj.new().s("code", String(#"return await mcp.tracker.whoami({as: "admin"});"#)).done()}"
+    let up_mark = app.frames.len()
+    let refused = try say(mut app, up_chat.copy(), String("m_s1"), as_admin.copy())
+    var up_card = Json.Null
+    var k = up_mark
+    while k < app.frames.len() {
+        let f = app.frames[k].copy()
+        if str_at(f.copy(), "t") == some(String("card")) and str_at(at(f.copy(), "card"), "type") == some(String("sign_in")) { up_card = at(f, "card") }
+        k += 1
+    }
+    try check(refused.contains("needs your person to sign in again") and try count(fake.copy(), "insufficient") >= 2 and str_at(up_card, "server") == some(String("tracker")), "a call the sign-in's scopes don't reach is tried again with a renewed token, then the agent is told and its person gets Sign in")
+    let plain_call = try say(mut app, up_chat.copy(), String("m_s2"), "/mcpkeep run_code {Obj.new().s("code", String("return await mcp.tracker.whoami();")).done()}")
+    try check(plain_call.contains("ada"), "and its other tools go on working with the sign-in there is")
+    let stepped = try sign_in(mut app, "tracker", ("q_s2", "q_s3"))
+    let asked_scopes = str_at(try stats(fake.copy()), "last_scope") ?? String()
+    try check(ok_of(stepped) and asked_scopes.split(" ").contains(String("admin")) and asked_scopes.split(" ").contains(String("offline_access")), "signing in again asks for the scopes it wanted too")
+    let admin_call = try say(mut app, up_chat, String("m_s3"), as_admin)
+    try check(admin_call.contains("ada, admin"), "and the call works in the same chat once the person has")
+
     // --- A server that doesn't let apps sign up ---
     _ = try app.cmd("q_23", "mcp.put", Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").done())
     let no_client = try app.cmd("q_24", "mcp.sign_in", Obj.new().s("name", String("fixed")).s("redirect", String(REDIRECT)).done())
