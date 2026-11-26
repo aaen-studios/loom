@@ -601,6 +601,13 @@ impl Model {
             _ => r.when.clone(),
         }
     }
+
+    /// What a routine with no schedule says where a next run would go: what runs it, an
+    /// event or its webhook ("by webhook"), since it has no next run. None for one on a
+    /// schedule.
+    pub fn routine_unscheduled(&self, r: &super::Routine) -> Option<String> {
+        r.schedule.repeat.is_empty().then(|| self.routine_when(r))
+    }
 }
 
 #[cfg(test)]
@@ -1076,5 +1083,32 @@ mod tests {
             "event": {"integration": "acta", "target": {"board": "aaen-studios/loom"}, "kind": "moved", "to": "done"}
         }));
         assert_eq!(m.routine_when(&both), both.when);
+    }
+
+    #[test]
+    fn a_routine_with_no_schedule_says_what_runs_it() {
+        let m = Model {
+            acta_boards: boards(),
+            ..Model::default()
+        };
+        // Run by its webhook alone, it has no next run, and isn't paused.
+        let hook = super::super::Routine::of(&json!({
+            "id": "rt_1", "name": "Version check", "agent": "a_1", "prompt": "x",
+            "schedule": null, "hook": "h_1", "when": "by webhook", "on": true, "next": 0
+        }));
+        assert_eq!(m.routine_unscheduled(&hook).as_deref(), Some("by webhook"));
+        let event = super::super::Routine::of(&json!({
+            "id": "rt_2", "schedule": null, "when": "when a card on aaen-studios/loom moves to Done",
+            "event": {"integration": "acta", "target": {"board": "aaen-studios/loom"}, "kind": "moved", "to": "done"}
+        }));
+        assert_eq!(
+            m.routine_unscheduled(&event).as_deref(),
+            Some("When a LOO card moves to Done")
+        );
+        // On a schedule, its next run says when.
+        let timed = super::super::Routine::of(&json!({
+            "id": "rt_3", "schedule": {"every": 60}, "when": "every hour", "on": true
+        }));
+        assert_eq!(m.routine_unscheduled(&timed), None);
     }
 }

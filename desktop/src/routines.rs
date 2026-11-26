@@ -589,12 +589,11 @@ impl Loom {
             Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
             None => ("a deleted agent".to_string(), p.ink_3),
         };
-        // One on an event alone has no next run: it says its event.
-        let event_alone = r.event.is_some() && r.schedule.repeat.is_empty();
+        // One on an event or its webhook alone has no next run: it says what runs it.
         let next = if !r.on {
             "paused".to_string()
-        } else if event_alone {
-            self.model.routine_when(r)
+        } else if let Some(when) = self.model.routine_unscheduled(r) {
+            when
         } else if r.next == 0 {
             "paused".to_string()
         } else if day_of(r.next) == "Today" {

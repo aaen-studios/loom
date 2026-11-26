@@ -9125,6 +9125,11 @@ impl Instance {
         let (fresh, next) = watches.new_since(watches.entries_of(answer), cursor.copy())
         let after = merge(w.copy(), Obj.new().s("cursor", next.copy()).done())
         if next != cursor { try i.store.put_watch(user.copy(), after.copy()) }
+        // A card that moved isn't as the instance kept it, so the next message that names
+        // it, such as the reply this wakes, looks it up again.
+        for e in fresh.copy() {
+            if e.change.kind == "moved" { _ = i.acta_cards.remove("{user}\n{e.card}") }
+        }
         var news = List<watches.Entry>()
         for e in fresh {
             if watches.wanted(after.copy(), e.copy()) { news.push(e.copy()) }
