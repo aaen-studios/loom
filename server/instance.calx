@@ -2389,6 +2389,14 @@ impl Instance {
         for (user, conversation, by) in try store.mark_old_asks() {
             _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("asked_by", by).done()).done())
         }
+        // Threads agents made with conversation.create before they were marked, then
+        // each agent's chat with the person, fixed from now on: the devices hear both.
+        for (user, conversation, by) in try store.mark_old_made() {
+            _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("made_by", by).b("main", false).done()).done())
+        }
+        for (user, conversation) in try store.pick_main_chats() {
+            _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).b("main", true).done()).done())
+        }
         var server = try Server.listen(config.port, config.host.copy())
         server.log = false
         server.max_message = protocol.MAX_FRAME
@@ -4389,6 +4397,27 @@ impl Instance {
         if pushed != Json.Null { i.push_event(user, kind, pushed) }
     }
 
+    // `agent`'s chat with the person: its marked one, or one made now and marked as its
+    // chat, titled `title`, when it has none. Where a routine, a flow, a watch or a
+    // script posts in the agent's chat.
+    fn agent_chat(i: Instance, user: String, agent: String, title: String) -> Json ! Error {
+        if let c = try i.store.main_chat(user.copy(), agent.copy()) { return c }
+        let made = try i.store.add_conversation(user.copy(), agent.copy(), title)
+        let id = str_at(made.copy(), "id") ?? String()
+        _ = try i.store.set_main_chat(user.copy(), agent, id.copy())
+        let c = try i.store.conversation(user.copy(), id) ?? made
+        try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
+        return c
+    }
+
+    // Each agent left with conversations but no chat marked, as when its chat was
+    // deleted or an import brought some, gets one, and the devices hear which.
+    fn pick_main_chats(i: Instance) ! Error {
+        for (user, conversation) in try i.store.pick_main_chats() {
+            try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).b("main", true).done()).done())
+        }
+    }
+
     // --- Push (PLAN.md, "Notifications and push") ---
 
     // Whether `device` is connected now.
@@ -4983,6 +5012,25 @@ impl Instance {
         for state in gone { _ = i.sign_ins.remove(state) }
     }
 
+    // The scopes a server of the person's answered 403 for (step-up), kept
+    // with any it asked for before, so each sign-in to it from now on asks
+    // for them as well as those it names itself.
+    fn want_scopes(i: Instance, user: String, server: String, scopes: String) ! Error {
+        let had = try i.store.meta("mcp_scopes/{user}/{server}") ?? String()
+        try i.store.set_meta("mcp_scopes/{user}/{server}", oauth.scopes_with(had, scopes))
+    }
+
+    // A grant about to be signed in with, asking for the scopes its server
+    // answered 403 for as well (want_scopes).
+    fn with_wanted_scopes(i: Instance, user: String, server: String, grant: Json) -> Json {
+        let wanted = match i.store.meta("mcp_scopes/{user}/{server}") {
+            ok(some(w)) => w,
+            _ => return grant.copy(),
+        }
+        let scope = oauth.scopes_with(str_at(grant.copy(), "scope") ?? String(), wanted)
+        return merge(grant, Obj.new().s("scope", scope).done())
+    }
+
     // What the sign-in thread did.
     fn oauth_finished(i: mut Instance, d: oauth.Done) ! Error {
         let job = i.oauth_jobs.remove(d.id) else return
@@ -4997,10 +5045,11 @@ impl Instance {
             // Its client is kept now, so the next sign-in uses it again.
             let had = i.grant_of(job.user.copy(), job.server.copy())
             if not oauth.signed_in(had) { try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy()) }
+            let grant = i.with_wanted_scopes(job.user.copy(), job.server.copy(), d.grant.copy())
             let pkce = oauth.new_verifier()
             let state = oauth.new_state()
-            let address = oauth.authorize_url(d.grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
-            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: d.grant.copy(), verifier: pkce, at: now() })
+            let address = oauth.authorize_url(grant.copy(), state.copy(), oauth.challenge_of(pkce.copy()))
+            i.sign_ins.insert(state, SignIn { user: job.user.copy(), server: job.server.copy(), grant: grant, verifier: pkce, at: now() })
             i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).s("url", address).done()))
             return
         }
@@ -5356,11 +5405,7 @@ impl Instance {
             conversation = try i.store.conversation(user.copy(), c.copy()) ?? Json.Null
             if conversation == Json.Null or str_at(conversation.copy(), "agent") != some(agent_id.copy()) { return some(http_error(404, "not_found", "There's no conversation {c} with {key}.")) }
         } else {
-            conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
-            if conversation == Json.Null {
-                conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), String())
-                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-            }
+            conversation = try i.agent_chat(user.copy(), agent_id.copy(), String())
         }
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         for (_, r) in i.runs {
@@ -5393,7 +5438,7 @@ impl Instance {
             if i.tools_body.len() == 0 { i.tools_body = "{Obj.new().j("tools", Json.Array(tools.all())).done()}" }
             return some(Response.new(200, String("application/json"), i.tools_body.to_bytes()))
         }
-        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon"] {
+        for path in ["/api/mcp/servers", "/api/mcp/deno", "/api/mcp/allow", "/api/mcp/done", "/api/mcp/token", "/api/mcp/sign_in", "/api/mcp/icon", "/api/mcp/listed"] {
             if req.path == path { return try i.code_route(req, grant, token) }
         }
         if req.path != "/api/mcp/call" or req.method != "POST" {
@@ -5470,11 +5515,20 @@ impl Instance {
             // What the icons kept of each are known by, so loom mcp fetches
             // them only when the server gives others.
             var known = LinkedMap<String, Json>()
+            // And the names each had before a rename, so a session from before
+            // it keeps the server under the name it knows it by (LOO-408).
+            var renamed = LinkedMap<String, Json>()
             for s in servers {
                 let name = str_at(s, "name") ?? String()
+                let old = i.old_names(g.user.copy(), name.copy())
+                if old.len() > 0 {
+                    var names = List<Json>()
+                    for o in old { names.push(Json.Str(o.copy())) }
+                    renamed.insert(name.copy(), Json.Array(names))
+                }
                 if let ok(some(had)) = i.store.mcp_icon(g.user.copy(), name.copy()) { known.insert(name, Json.Str(had.0.copy())) }
             }
-            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).done()))
+            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).j("renamed", Json.Object(renamed)).done()))
         }
         if req.path == "/api/mcp/deno" and req.method == "GET" {
             return try i.deno_for(req)
@@ -5488,7 +5542,7 @@ impl Instance {
         // sandbox, for a member's) once the server gave others than the ones
         // kept: each checked here, as anything from a sandbox is.
         if req.path == "/api/mcp/icon" {
-            let name = str_at(body.copy(), "server") ?? String()
+            let name = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
             if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
             var got = icons.Got { key: str_at(body.copy(), "key") ?? String(), fresh: true, light: List<u8>(), dark: List<u8>() }
             for (field, light) in [("icon", true), ("icon_dark", false)] {
@@ -5497,6 +5551,18 @@ impl Instance {
                 if light { got.light = data } else { got.dark = data }
             }
             try i.took_icons(g.user, name, got)
+            return some(json_response(200, Obj.new().done()))
+        }
+        // A server's tools as loom mcp listed them again, once the server said
+        // they changed: kept as what its last test found, for Spools.
+        if req.path == "/api/mcp/listed" {
+            let name = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
+            if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
+            var found = List<String>()
+            for t in catalog.list(at(body, "tools")) {
+                if let n = t.as_str() { found.push(n) }
+            }
+            try i.keep_tested(g.user, name, found, String(), false)
             return some(json_response(200, Obj.new().done()))
         }
         if req.path == "/api/mcp/done" {
@@ -5518,10 +5584,21 @@ impl Instance {
         // says they must sign in; `sign_in` shows them a card for it in the
         // agent's reply.
         if req.path == "/api/mcp/token" or req.path == "/api/mcp/sign_in" {
-            let name = str_at(body, "server") ?? String()
+            let name = i.server_now(g.user.copy(), str_at(body, "server") ?? String())
             let server = try i.store.mcp_server(g.user.copy(), name.copy()) else return some(http_error(404, "not_found", "There's no MCP server {name}."))
             if str_at(server.copy(), "url") == none or own_auth(server) { return some(http_error(400, "bad_request", "{name} doesn't sign in.")) }
             if req.path == "/api/mcp/sign_in" {
+                // A server that answered 403 for want of scopes (step-up): the
+                // person signs in again, and their next sign-in asks for those
+                // too. The one they have stays, for the tools it reaches.
+                if let challenge = str_at(body.copy(), "challenge") {
+                    let said = oauth.challenge_params(challenge)
+                    let wanted = oauth.param(said.copy(), "scope") ?? String()
+                    if oauth.param(said, "error") != some(String("insufficient_scope")) or wanted.trim().len() == 0 { return some(http_error(400, "bad_request", String("challenge is a 403's WWW-Authenticate for insufficient_scope, with the scopes it wants."))) }
+                    try i.want_scopes(g.user.copy(), name.copy(), wanted)
+                    i.sign_in_card(g, name)
+                    return some(json_response(200, Obj.new().done()))
+                }
                 // A sign-in that can be renewed was, before loom mcp says this,
                 // so only one that can't is dropped: an agent can't sign its
                 // person out of one that's good.
@@ -5535,7 +5612,7 @@ impl Instance {
             i.renew(g.user, name, some(req.copy()))
             return none
         }
-        let server = str_at(body.copy(), "server") ?? String()
+        let server = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
         let tool = str_at(body.copy(), "tool") ?? String()
         let read_only = bool_at(body.copy(), "read_only") ?? false
         let args = at(body, "arguments")
@@ -5935,13 +6012,16 @@ impl Instance {
                 i.routine_marks.insert(run_id, (String("failed"), why))
                 return some(tool_text(String("This run counts as failed, with why, once you finish. Five in a row turn the routine off.")))
             }
-            let routine_id = i.routine_runs[run_id].routine.copy()
+            let routine_id = i.routine_runs[run_id.copy()].routine.copy()
             let r = try i.store.routine(g.user.copy(), routine_id) else return some(tool_error(String("The routine is gone.")))
             let rname = str_at(r.copy(), "name") ?? String("A routine")
-            try i.routine_ran(g.user.copy(), merge(r, Obj.new().b("on", false).i("next", 0).done()))
+            // A card in the chat where it posts turns it back on (PLAN.md, "Routines").
+            let ran_in = if let run = i.runs.find(run_id) { run.conversation.copy() } else { String() }
+            let (conversation, card) = try i.routine_off_card(g.user.copy(), r.copy(), ran_in, why.copy(), g.agent.copy())
+            try i.routine_ran(g.user.copy(), merge(r, Obj.new().b("on", false).i("next", 0).s("off_card", card).done()))
             let aname = str_at(try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null, "name") ?? String("An agent")
             i.log(g.user.copy(), g.agent.copy(), "routine", "Paused the routine {rname}: {why}", g.agent.copy())
-            try i.event(g.user, "notify", Obj.new().s("agent", g.agent).s("title", "{aname} paused {rname}").s("body", why).done())
+            try i.event(g.user, "notify", Obj.new().s("agent", g.agent).s("conversation", conversation).s("title", "{aname} paused {rname}").s("body", why).done())
             return some(tool_text("Paused {rname}. Your person was told why, and turns it back on when they want it again."))
         }
         if name == "delete_routine" {
@@ -6065,6 +6145,8 @@ impl Instance {
         if name == "plugin.cmd" {
             let wanted = str_at(args.copy(), "name") ?? String()
             if not plugins.allows(p, "cmd:{wanted}") { return Answer.Refused(String("not_allowed"), "{wanted} isn't allowed for the plugin {id}: its plugin.toml asks for it, and the person allows it.") }
+            // A conversation a panel makes is the panel's thread, not the person's new chat.
+            if wanted == "conversation.create" { return try i.command(user, "plugin:{id}", wanted, at(args, "args")) }
             return try i.command(user, device, wanted, at(args, "args"))
         }
         if name == "plugin.revisions" {
@@ -7430,7 +7512,11 @@ impl Instance {
         }
         // Every device hears of the new conversations, and of the newest of
         // each one's messages, as a snapshot gives them; older ones come with messages.list,
-        // and `partial` says there are some.
+        // and `partial` says there are some. An agent that had no chat has the newest
+        // of what came as its chat from now on, which its conversation says.
+        for (u, picked) in try i.store.pick_main_chats() {
+            if not fresh.contains(picked.copy()) { try i.event(u, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", picked).b("main", true).done()).done()) }
+        }
         for id in fresh {
             let more = if let got = newest.find(id.copy()) { got.len() > IMPORT_ANNOUNCED } else { false }
             if let c = try i.store.conversation(user.copy(), id.copy()) {
@@ -8460,8 +8546,8 @@ impl Instance {
     }
 
     // The conversation routine `r` posts into, made when it has none: its
-    // agent's chat, as the apps show it, its newest conversation. Or a thread
-    // of its own, which is never the chat.
+    // agent's chat, as the apps show it (agent_chat). Or a thread of its own,
+    // which is never the chat.
     fn routine_chat(i: Instance, user: String, r: Json) -> Json ! Error {
         let id = str_at(r.copy(), "id") ?? String()
         let name = str_at(r.copy(), "name") ?? String("A routine")
@@ -8480,11 +8566,7 @@ impl Instance {
                 try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
             }
         } else {
-            conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
-            if conversation == Json.Null {
-                conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
-                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-            }
+            conversation = try i.agent_chat(user.copy(), agent_id.copy(), name.copy())
         }
         return conversation
     }
@@ -8586,6 +8668,44 @@ impl Instance {
         try i.event(user, "routine.updated", Obj.new().j("routine", merge(routines.shown(r, i.minute_ms), Obj.new().j("cost", cost).done())).done())
     }
 
+    // Routine `r` was turned off by something other than its person: five
+    // failures in a row, or its agent `by` with pause_routine. A card goes in
+    // the chat where it posts, `conversation` when its run said, or else where
+    // routine_chat has it: a `loom` message with one `routine_off` card, its
+    // name, `why` and Turn on (PLAN.md, "Routines"). Gives that chat and the
+    // card's message, which the routine keeps as `off_card` while it's off.
+    fn routine_off_card(i: Instance, user: String, r: Json, conversation: String, why: String, by: String) -> (String, String) ! Error {
+        var place = conversation.copy()
+        if place.len() == 0 { place = str_at(try i.routine_chat(user.copy(), r.copy()), "id") ?? String() }
+        let id = try i.store.new_id("msg")
+        var card = Obj.new().s("id", id.copy()).s("type", String("routine_off")).s("title", str_at(r.copy(), "name") ?? String("A routine")).s("routine", str_at(r, "id") ?? String()).s("why", routines.cut(why, 300)).s("state", String("off"))
+        card = if by.len() > 0 { card.s("agent", by) } else { card.i("failures", FAILURES_OFF) }
+        let block = Obj.new().s("kind", String("card")).j("card", card.done()).done()
+        let message = Obj.new().s("id", id.copy()).s("conversation", place.copy()).s("role", String("loom")).i("at", now()).j("blocks", Json.Array([block])).done()
+        try i.store.put_message(user.copy(), message.copy())
+        try i.event(user, "message.created", Obj.new().s("conversation", place.copy()).j("message", message).done())
+        return (place, id)
+    }
+
+    // The card routine `r` left when it was turned off, once it's `state`: `on`
+    // again, from the card or anywhere else, or `deleted`. It says so, quietly,
+    // with no button.
+    fn off_card_now(i: Instance, user: String, r: Json, state: str) ! Error {
+        let id = str_at(r, "off_card") ?? String()
+        if id.len() == 0 { return }
+        let kept = try i.store.message(user.copy(), id) else return
+        var blocks = List<Json>()
+        if let Json.Array(bs) = at(kept.copy(), "blocks") {
+            for b in bs {
+                let card = at(b.copy(), "card")
+                blocks.push(if str_at(card.copy(), "type") == some(String("routine_off")) { merge(b.copy(), Obj.new().j("card", merge(card, Obj.new().s("state", String(state)).done())).done()) } else { b.copy() })
+            }
+        }
+        let changed = merge(kept, Obj.new().j("blocks", Json.Array(blocks)).done())
+        try i.store.put_message(user.copy(), changed.copy())
+        try i.event(user, "message.updated", Obj.new().s("conversation", str_at(changed.copy(), "conversation") ?? String()).j("message", changed).done())
+    }
+
     // A routine's run `run_id` ended, as its turn did (`status`, with `error`):
     // keeps how it went, in the routine and its runs, and notifies when it should.
     // `mark` and `why` are what its agent said with routine_quiet or
@@ -8608,11 +8728,18 @@ impl Instance {
         let failures = if status == "failed" { (int_at(r.copy(), "failures") ?? 0) + 1 } else if status == "done" or status == "quiet" { 0 } else { int_at(r.copy(), "failures") ?? 0 }
         var changed = Obj.new().j("last", last).i("failures", failures)
         let off = failures >= FAILURES_OFF and bool_at(r.copy(), "on") != some(false)
-        if off { changed = changed.b("on", false).i("next", 0) }
+        // Turned off, it leaves a card in the chat where it posts that turns it
+        // back on.
+        var told = conversation.copy()
+        if off {
+            let (place, card) = try i.routine_off_card(rr.user.copy(), r.copy(), conversation.copy(), error.copy() ?? String("It stopped."), String())
+            told = place
+            changed = changed.b("on", false).i("next", 0).s("off_card", card)
+        }
         try i.routine_ran(rr.user.copy(), merge(r.copy(), changed.done()))
         if off {
             i.log(rr.user.copy(), agent.copy(), "routine", "Turned the routine {name} off after {FAILURES_OFF} failures in a row", String("schedule"))
-            try i.event(rr.user.copy(), "notify", Obj.new().s("agent", agent.copy()).s("conversation", conversation.copy()).s("title", name.copy()).s("body", "It failed {FAILURES_OFF} times in a row, so it's off now. The last time: {error.copy() ?? String("it stopped")}").done())
+            try i.event(rr.user.copy(), "notify", Obj.new().s("agent", agent.copy()).s("conversation", told).s("title", name.copy()).s("body", "It failed {FAILURES_OFF} times in a row, so it's off now. The last time: {error.copy() ?? String("it stopped")}").done())
         }
         // Nothing new to say: no flow, and no notification.
         if status == "quiet" { return }
@@ -8699,11 +8826,7 @@ impl Instance {
                     again = true
                     continue
                 }
-                var conversation = try i.store.newest_conversation(f.user.copy(), agent_id.copy()) ?? Json.Null
-                if conversation == Json.Null {
-                    conversation = try i.store.add_conversation(f.user.copy(), agent_id.copy(), f.name.copy())
-                    try i.event(f.user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-                }
+                let conversation = try i.agent_chat(f.user.copy(), agent_id.copy(), f.name.copy())
                 let conversation_id = str_at(conversation.copy(), "id") ?? String()
                 // It waits while its agent answers in its chat, and goes when a run ends.
                 var busy = false
@@ -8898,9 +9021,13 @@ impl Instance {
         let posted_before = str_at(old.copy(), "post") ?? String("chat")
         let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) and posted_before == post { str_at(old.copy(), "conversation") ?? String() } else { String() }
         let id = if id_given.len() > 0 { id_given } else { try i.store.new_id("rt") }
-        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).j("event", event).j("gate", gate_kept).maybe("model", if model.len() > 0 { some(model) } else { none }).maybe("effort", if effort.len() > 0 { some(effort) } else { none }).s("by", by.copy()).i("at", t).done()
+        // The card it left when it was turned off stays with it while it's off,
+        // and says once it's on again.
+        let off_card = str_at(old.copy(), "off_card")
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).j("event", event).j("gate", gate_kept).maybe("model", if model.len() > 0 { some(model) } else { none }).maybe("effort", if effort.len() > 0 { some(effort) } else { none }).maybe("off_card", if on { none } else { off_card.copy() }).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
-        try i.routine_ran(user, r.copy())
+        try i.routine_ran(user.copy(), r.copy())
+        if on and off_card != none { try i.off_card_now(user, old, "on") }
         return Answer.Value(Obj.new().j("routine", routines.shown(r, i.minute_ms)).done())
     }
 
@@ -9200,11 +9327,7 @@ impl Instance {
         let agent = str_at(wake, "agent") ?? String()
         if try i.store.agent(user.copy(), agent.copy()) == none { return }
         var conversation = try i.store.conversation(user.copy(), str_at(w, "conversation") ?? String()) ?? Json.Null
-        if str_at(conversation.copy(), "agent") != some(agent.copy()) { conversation = try i.store.newest_conversation(user.copy(), agent.copy()) ?? Json.Null }
-        if conversation == Json.Null {
-            conversation = try i.store.add_conversation(user.copy(), agent.copy(), String())
-            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-        }
+        if str_at(conversation.copy(), "agent") != some(agent.copy()) { conversation = try i.agent_chat(user.copy(), agent.copy(), String()) }
         i.watch.wakes.push(Wake { user: user.copy(), agent: agent, conversation: str_at(conversation, "id") ?? String(), came: came.copy(), until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms })
         try i.wakes_waited()
     }
@@ -10104,6 +10227,8 @@ impl Instance {
                 servers.push(name.copy())
                 if own_icons.0.len() == 0 { own_icons = i.icon_of(user.copy(), name) }
             }
+            // Else the icon the MCP Registry gave a server of its (registry_icons).
+            if own_icons.0.len() == 0 { own_icons = (str_at(e.copy(), "icon") ?? String(), str_at(e.copy(), "icon_dark") ?? String()) }
             var connecting = Json.Null
             for (_, c) in i.connects {
                 if c.user == user and c.entry == id { connecting = c.json() }
@@ -10272,6 +10397,21 @@ impl Instance {
         }
     }
 
+    // A search's entries with the PNG icons fetched with the answer
+    // (mcpregistry's `icon_png`, LOO-379) kept as the person's files, as a
+    // server's own are (`keep_icon`), each entry's as `icon` and `icon_dark`,
+    // the SHA-256s its badge has.
+    fn registry_icons(i: mut Instance, user: String, entries: List<Json>) -> List<Json> ! Error {
+        var out = List<Json>()
+        for e in entries {
+            let server = str_at(e.copy(), "server") ?? String()
+            let light = try i.keep_icon(user.copy(), server.copy(), bytes.from_base64(str_at(e.copy(), "icon_png") ?? String()) ?? List<u8>())
+            let dark = try i.keep_icon(user.copy(), server, bytes.from_base64(str_at(e.copy(), "icon_png_dark") ?? String()) ?? List<u8>())
+            out.push(if light.len() > 0 { merge(e.copy(), Obj.new().s("icon", light).s("icon_dark", dark).done()) } else { e.copy() })
+        }
+        return out
+    }
+
     // One ask's answer: a search's entries, or a connect that goes on.
     fn registry_answer(i: mut Instance, ask: RegistryAsk, d: mcpregistry.Done) ! Error {
         let failed = if d.error.len() > 0 { d.error.copy() } else if d.status != 200 and d.status != 404 { "it answered {d.status}" } else { String() }
@@ -10284,7 +10424,7 @@ impl Instance {
                 return
             }
             let (entries, curated) = mcpregistry.found(d.value, query)
-            let listed = try i.listed_entries(ask.user.copy(), entries)
+            let listed = try i.listed_entries(ask.user.copy(), try i.registry_icons(ask.user.copy(), entries))
             i.answer_cmd(ask.waiter, Answer.Value(Obj.new().j("entries", Json.Array(listed)).j("curated", strings_json(curated)).done()))
             return
         }
@@ -10424,11 +10564,15 @@ impl Instance {
         if g != Json.Null { try i.keep_grant(user.copy(), name.copy(), g) }
         _ = try i.store.delete_mcp_auth(user.copy(), was.copy())
         try i.store.rename_mcp_icon(user.copy(), was.copy(), name.copy())
-        for kept in ["mcp_tested", "mcp_catalog"] {
+        for kept in ["mcp_tested", "mcp_catalog", "mcp_scopes"] {
             if let value = try i.store.meta("{kept}/{user}/{was}") { try i.store.set_meta("{kept}/{user}/{name}", value) }
             try i.store.delete_meta("{kept}/{user}/{was}")
         }
         _ = try i.store.delete_mcp_server(user.copy(), was.copy())
+        // A chat already running knows it by `was` until its next session
+        // (LOO-378): `server_now` takes that name to this one.
+        try i.store.delete_meta("mcp_renamed/{user}/{name}")
+        try i.store.set_meta("mcp_renamed/{user}/{was}", name.copy())
         if let c = i.connects.remove("{user}/{was}") {
             var moved = c
             moved.server = name.copy()
@@ -10445,6 +10589,44 @@ impl Instance {
             if test.user == user and test.server == was { test.server = name.copy() }
         }
         return Answer.Value(Json.Null)
+    }
+
+    // The name `user`'s MCP server `name` has now: its own, or, for one
+    // renamed since (rename_server), the name it has now, so a chat already
+    // running reaches it by the name its session started with. A name that's
+    // neither is given back as it is.
+    fn server_now(i: Instance, user: String, name: String) -> String {
+        var current = name.copy()
+        for _ in 0..8 {
+            if let ok(some(_)) = i.store.mcp_server(user.copy(), current.copy()) { return current }
+            current = match i.store.meta("mcp_renamed/{user}/{current}") {
+                ok(some(next)) => next,
+                _ => return name.copy(),
+            }
+        }
+        return name.copy()
+    }
+
+    // The names `user`'s MCP server `name` had before it was renamed, which
+    // server_now takes to it, nearest first: a chat running from before a
+    // rename knows it by one of them.
+    fn old_names(i: Instance, user: String, name: String) -> List<String> {
+        let renames = match i.store.mcp_renames(user) {
+            ok(r) => r,
+            _ => return List<String>(),
+        }
+        var out = List<String>()
+        var to_find = [name.copy()].to_list()
+        while to_find.len() > 0 {
+            let now_named = to_find.remove(0)
+            for (was, to) in renames.copy() {
+                if to == now_named and was != name and not out.contains(was.copy()) {
+                    out.push(was.copy())
+                    to_find.push(was.copy())
+                }
+            }
+        }
+        return out
     }
 
     // What a test of `user`'s server `server` found, kept for mcp.list's
@@ -16366,7 +16548,7 @@ impl Instance {
             let agent = try i.store.agent(user.copy(), str_at(args, "agent") ?? String()) else return Answer.Refused(String("not_found"), String("There's no such agent."))
             let agent_id = str_at(agent.copy(), "id") ?? String()
             var chat = String()
-            if let c = try i.store.newest_conversation(user.copy(), agent_id.copy()) {
+            if let c = try i.store.main_chat(user.copy(), agent_id.copy()) {
                 let transcript = try i.transcript(user.copy(), str_at(c, "id") ?? String(), none, agent_id.copy())
                 if transcript.len() > 0 { chat = "\n\nYour chat with them, newest last:\n\n{transcript}" }
             }
@@ -16573,9 +16755,23 @@ impl Instance {
         if name == "conversation.create" {
             let agent = str_at(args.copy(), "agent") ?? String()
             if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
-            let c = try i.store.add_conversation(user.copy(), agent, str_at(args, "title") ?? String("New conversation"))
-            try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
-            return Answer.Value(Obj.new().s("conversation", str_at(c, "id") ?? String()).done())
+            let made = try i.store.add_conversation(user.copy(), agent.copy(), str_at(args, "title") ?? String("New conversation"))
+            let id = str_at(made.copy(), "id") ?? String()
+            // The person's new chat, from their app, is the agent's chat from now on.
+            // One an agent, a plugin or a script makes is a thread beside it, and never
+            // takes its place.
+            var before: String? = none
+            if device.starts_with("d_") {
+                before = try i.store.set_main_chat(user.copy(), agent, id.copy())
+            } else {
+                try i.store.mark_made(user.copy(), id.copy(), device.copy())
+            }
+            let c = try i.store.conversation(user.copy(), id.copy()) ?? made
+            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
+            if let was = before {
+                try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", was).b("main", false).done()).done())
+            }
+            return Answer.Value(Obj.new().s("conversation", id).done())
         }
         // A chat moved to another program by hand (PLAN.md, "A backup brain"):
         // its next turn there starts with loom's summary of it.
@@ -16679,6 +16875,8 @@ impl Instance {
                     }
                 }
                 try i.event(user, "conversation.deleted", Obj.new().s("conversation", id).done())
+                // A deleted chat's agent has its newest other conversation as its chat.
+                if bool_at(had, "main") == some(true) { try i.pick_main_chats() }
             }
             return Answer.Value(empty)
         }
@@ -16972,6 +17170,7 @@ impl Instance {
             if name == "routine.run" { return try i.fire(user, r, device, String()) }
             _ = try i.store.delete_routine(user.copy(), id.copy())
             try i.routine_unwatched(user.copy(), id.copy())
+            try i.off_card_now(user.copy(), r.copy(), "deleted")
             i.log(user.copy(), str_at(r.copy(), "agent") ?? String(), "routine", "Deleted the routine {str_at(r, "name") ?? id.copy()}", device)
             try i.event(user, "routine.deleted", Obj.new().s("routine", id).done())
             return Answer.Value(empty)
@@ -17254,9 +17453,12 @@ impl Instance {
                     let g = i.grant_of(user.copy(), saved.copy())
                     _ = try i.store.delete_mcp_auth(user.copy(), saved.copy())
                     i.revoke_sign_in(user.copy(), saved.copy(), g)
+                    try i.store.delete_meta("mcp_scopes/{user}/{saved}")
                 }
             }
             try i.store.put_mcp_server(user.copy(), done.copy())
+            // A server by this name is this one now, not one renamed from it.
+            try i.store.delete_meta("mcp_renamed/{user}/{server_name}")
             if renamed {
                 if let Answer.Refused(code, message) = try i.rename_server(user.copy(), device.copy(), was, server_name.copy()) { return Answer.Refused(code, message) }
             }
@@ -17266,9 +17468,13 @@ impl Instance {
         }
         if name == "mcp.delete" {
             let server_name = str_at(args, "name") ?? String()
+            // The names it had before a rename lead nowhere now.
+            let old = i.old_names(user.copy(), server_name.copy())
             if not try i.store.delete_mcp_server(user.copy(), server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
+            for was in old { try i.store.delete_meta("mcp_renamed/{user}/{was}") }
             try i.store.delete_meta("mcp_catalog/{user}/{server_name}")
             try i.store.delete_meta("mcp_tested/{user}/{server_name}")
+            try i.store.delete_meta("mcp_scopes/{user}/{server_name}")
             _ = i.connects.remove("{user}/{server_name}")
             let g = i.grant_of(user.copy(), server_name.copy())
             _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())

@@ -147,6 +147,28 @@ import Testing
         #expect(m.conversation == "c_5")
     }
 
+    @Test func anAgentsChatIsTheMarkedOneWhateverItMakes() {
+        let m = caughtUp()
+        // Newest first: a conversation the agent made for itself, an older chat from
+        // before the person started a new one, and the chat, marked main.
+        m.take(data("conversations", [
+            ["id": "c_22", "agent": "a_1", "title": "Plenpartner warm-up", "made_by": "a_1"],
+            ["id": "c_4", "agent": "a_1", "title": ""],
+            ["id": "c_1", "agent": "a_1", "title": "", "main": true],
+        ]))
+        #expect(m.conversation(of: "a_1") == "c_1")
+        let threads = m.asks("a_1")
+        #expect(threads.map(\.label) == ["Plenpartner warm-up"])
+        #expect(threads.first?.made == true)
+        m.select("a_1")
+        #expect(m.send("hello")?["conversation"] == "c_1")
+        m.open(thread: "c_22")
+        #expect(m.conversation == "c_22")
+        #expect(m.send("for the thread")?["conversation"] == "c_22")
+        m.open(thread: nil)
+        #expect(m.conversation == "c_1")
+    }
+
     @Test func whatAnAgentsThreadShows() {
         let m = caughtUp()
         #expect(m.mood("a_1") == .idle)
