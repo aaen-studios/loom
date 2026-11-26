@@ -84,7 +84,9 @@ type Chat = 'juniper' | 'shop' | 'moss';
 /** How full each chat's session is, in thousands of tokens of 200k, what its card's title
  * says, and its line: in the Shop group chat, the member that answered last's. */
 type Fill = { used: number; title: string; line: string; who?: string };
+/** Where the context card says a fresh session starts, after when it was compacted or on its own. */
 const FRESH_AT = 'a fresh session starts at 80%';
+const FRESH_ALONE = 'A fresh session starts at 80%';
 /** What the person writes in the Shop group chat, which the router gives Biscuit, and its answer. */
 const ROOM_ASK = 'Did the October invoice go out?';
 const ROOM_ANSWER = 'It did, on 1 November. Northwind paid it on the 14th.';
@@ -204,7 +206,7 @@ export function play(app: HTMLElement) {
 	let chat: Chat = 'juniper';
 	const fills: Record<Chat, Fill> = {
 		juniper: { used: 82, title: 'Context', line: `Compacted 2 h ago · ${FRESH_AT}` },
-		shop: { used: 23, title: "Juniper's context", line: `A ${FRESH_AT}`, who: 'Juniper' },
+		shop: { used: 23, title: "Juniper's context", line: FRESH_ALONE, who: 'Juniper' },
 		moss: { used: 24, title: 'Context', line: `Compacted 15 h ago · ${FRESH_AT}` },
 	};
 	const drawContext = () => {
@@ -272,7 +274,7 @@ export function play(app: HTMLElement) {
 			const before = fills[chat].used;
 			const after = compact ? Math.max(1, Math.round(before / 10)) : 0;
 			const who = fills[chat].who;
-			context(after, chat, compact ? `Compacted just now · ${FRESH_AT}` : `A ${FRESH_AT}`);
+			context(after, chat, compact ? `Compacted just now · ${FRESH_AT}` : FRESH_ALONE);
 			if (compact) loomLine(who ? `${who}'s context compacted · ${before}k → ${after}k` : `Context compacted · ${before}k → ${after}k`);
 			else loomLine(who ? `${who}'s fresh session starts here` : 'A fresh session starts here');
 			showCard(false);
@@ -1507,7 +1509,7 @@ export function play(app: HTMLElement) {
 		thread.set('idle');
 		app.classList.remove('busy');
 		// The header's ring is Biscuit's now, the member that answered last.
-		fills.shop = { used: 61, title: "Biscuit's context", line: `A ${FRESH_AT}`, who: 'Biscuit' };
+		fills.shop = { used: 61, title: "Biscuit's context", line: FRESH_ALONE, who: 'Biscuit' };
 		drawContext();
 		await wait(5000, id);
 	}
@@ -1553,7 +1555,7 @@ export function play(app: HTMLElement) {
 		waitingOn('Juniper', false);
 		cleared();
 		context(82, 'juniper', `Compacted 2 h ago · ${FRESH_AT}`);
-		fills.shop = { used: 23, title: "Juniper's context", line: `A ${FRESH_AT}`, who: 'Juniper' };
+		fills.shop = { used: 23, title: "Juniper's context", line: FRESH_ALONE, who: 'Juniper' };
 		fills.moss = { used: 24, title: 'Context', line: `Compacted 15 h ago · ${FRESH_AT}` };
 		for (const el of [...mossMsgs.children]) if (!mossHistory.includes(el)) el.remove();
 		newLine.hidden = false;
@@ -1658,7 +1660,8 @@ export function play(app: HTMLElement) {
 			await stream(say, HELD, id);
 			finish(reply, say, steps, HELD);
 		}
-		context(92);
+		// The deploy's long log fills the session past 80%, its ring warm (164k of 200k).
+		context(answer === 'allow' ? 164 : 92);
 		await wait(200, id);
 		mood('idle', replyThread);
 		preview('Juniper', '', 'idle');
@@ -1688,7 +1691,7 @@ export function play(app: HTMLElement) {
 			// The session is past 80%, so this message goes to a fresh one, given the newest of
 			// the chat, with loom's line where it starts (PLAN.md, "One endless chat").
 			loomLine('A fresh session starts here', msgs);
-			context(9, 'juniper', `A ${FRESH_AT}`);
+			context(9, 'juniper', FRESH_ALONE);
 			msgs.append(cheer(true));
 		}
 		await wait(4000, id);
@@ -1744,7 +1747,7 @@ export function play(app: HTMLElement) {
 		msgs.append(you, reply, woke.line, woke.reply);
 		loomLine('A fresh session starts here', msgs).classList.remove('fresh-in');
 		msgs.append(cheer(false));
-		context(9, 'juniper', `A ${FRESH_AT}`);
+		context(9, 'juniper', FRESH_ALONE);
 		t3Card(reply, true);
 		reply.querySelector(':scope > .body')!.append(kept().under);
 		threadsIn(woke.reply);
