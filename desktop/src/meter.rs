@@ -33,20 +33,6 @@ impl Level {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Level;
-
-    #[test]
-    fn a_context_warms_before_its_fresh_session_and_a_limit_later() {
-        assert_eq!(Level::of_context(69), Level::Quiet);
-        assert_eq!(Level::of_context(70), Level::Warn);
-        assert_eq!(Level::of_context(90), Level::Bad);
-        assert_eq!(Level::of(70), Level::Quiet);
-        assert_eq!(Level::of(75), Level::Warn);
-    }
-}
-
 /// A ring `size` across: `track` all round, and `ink` over `fraction` of it, clockwise
 /// from the top.
 pub fn ring(size: f32, fraction: f32, ink: Hsla, track: Hsla) -> impl IntoElement {
@@ -84,4 +70,18 @@ pub fn ring(size: f32, fraction: f32, ink: Hsla, track: Hsla) -> impl IntoElemen
     )
     .size(px(size))
     .flex_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Level;
+
+    #[test]
+    fn a_context_warms_before_its_fresh_session_and_a_limit_later() {
+        assert_eq!(Level::of_context(69), Level::Quiet);
+        assert_eq!(Level::of_context(70), Level::Warn);
+        assert_eq!(Level::of_context(90), Level::Bad);
+        assert_eq!(Level::of(70), Level::Quiet);
+        assert_eq!(Level::of(75), Level::Warn);
+    }
 }
