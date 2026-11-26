@@ -181,7 +181,7 @@ const faq = {
 						</div>
 						<div class="pane" data-registry-page>
 							<div class="pane-head">
-								<span class="back" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></span>
+								<button type="button" class="back" data-list-back aria-label="Back to the brains"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></button>
 								<span class="pane-title">ACP Registry</span>
 							</div>
 							<div class="cards">
@@ -204,6 +204,7 @@ const faq = {
 						{
 							claude && (
 								<div class="pane" data-program-page hidden>
+									<button type="button" class="back" data-list-back aria-label="Back to the brains"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></button>
 									<div class="program-head">
 										<span class="tile big" style={`--icon: url(${claude.icon})`} />
 										<span class="row-text">
@@ -794,9 +795,29 @@ const faq = {
 		font-size: calc(var(--size-body) + 2px);
 		font-weight: var(--weight-semibold);
 	}
+	/* The way back to the list, where only one fits (list_page.rs, list-back). */
 	.back {
 		display: none;
+		place-items: center;
+		width: var(--control-icon);
+		height: var(--control-icon);
+		flex: none;
+		padding: 0;
+		border: 0;
+		border-radius: var(--radius-row);
+		background: none;
 		color: var(--ink-2);
+		cursor: pointer;
+		transition:
+			background-color 0.12s,
+			color 0.12s;
+	}
+	.back:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	[data-program-page] .back {
+		margin-bottom: calc(-1 * var(--space-s));
 	}
 	.brains .cards {
 		grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--layout-card-least)), 1fr));
@@ -885,7 +906,14 @@ const faq = {
 			display: none;
 		}
 		.back {
+			display: grid;
+		}
+		.brains.listing .list {
 			display: flex;
+			border-right: 0;
+		}
+		.brains.listing .pane {
+			display: none;
 		}
 	}
 	/* The brain that installed comes into the list, and the cards move up into its place. */
@@ -964,7 +992,8 @@ const faq = {
 	.input.typing .caret {
 		opacity: 1;
 	}
-	/* Where a row's choices don't fit beside its name, they go under it, and scroll if they must. */
+	/* Where a row's choices don't fit beside its name, they go under it, across the row, and
+	   onto a second line when they must, each line filling it, so every choice stays whole. */
 	@media (max-width: 560px) {
 		.row:has(.segments) {
 			flex-wrap: wrap;
@@ -974,9 +1003,12 @@ const faq = {
 			flex-basis: 100%;
 		}
 		.segments {
-			max-width: 100%;
-			overflow-x: auto;
-			scrollbar-width: none;
+			flex-wrap: wrap;
+			width: 100%;
+		}
+		.segment {
+			flex: 1 1 auto;
+			justify-content: center;
 		}
 	}
 	.result .row-title {
@@ -1410,14 +1442,20 @@ const faq = {
 	const brainsPage = document.querySelector<HTMLElement>('.brains');
 	const programPage = brainsPage?.querySelector<HTMLElement>('[data-program-page]');
 	const registryPage = brainsPage?.querySelector<HTMLElement>('[data-registry-page]');
+	// Where only one fits, as on a phone, the page picked shows with the way back, which shows the
+	// list until a row is picked again (list_page.rs, list_back).
 	const pickBrain = (row: Element, program: boolean) => {
 		if (!brainsPage || !programPage || !registryPage) return;
 		programPage.hidden = !program;
 		registryPage.hidden = program;
+		brainsPage.classList.remove('listing');
 		for (const r of brainsPage.querySelectorAll('.list-row')) r.classList.toggle('picked', r === row);
 	};
 	for (const row of brainsPage?.querySelectorAll('[data-program], [data-registry]') ?? []) {
 		row.addEventListener('click', () => pickBrain(row, row.hasAttribute('data-program')));
+	}
+	for (const back of brainsPage?.querySelectorAll('[data-list-back]') ?? []) {
+		back.addEventListener('click', () => brainsPage?.classList.add('listing'));
 	}
 
 	// Brains: the first card installs and joins the brains down the left, as the app lists it once it's
