@@ -1,15 +1,16 @@
 module tests.protocol.learn
 
 // What an agent learns from a chat (PLAN.md, "Memory" and "Sharing and
-// learning"). With a permission mode that doesn't ask about everyday changes,
-// a note the agent proposes is kept at once, under its reply and in the
-// activity log, and Undo there forgets it; a note for every agent waits. Once
-// the chat pauses, the agent looks back over it in a quiet turn, and what it
-// keeps goes under the chat's last reply; a message the person sends then
-// stops that turn and goes at once. A skill it said failed is fixed: the fix
-// is put in, with the lines it removes and adds, and undone. With a mode that
-// asks, the same wait on a card under the reply: put off, they wait on the
-// Proposals page, and a fix the person changed is kept as they changed it, to
+// learning"). A note the agent keeps is kept at once, under its reply and in
+// the activity log, and Undo there forgets it. Once the chat pauses, the agent
+// looks back over it in a quiet turn, and what it keeps goes under the chat's
+// last reply; a message the person sends then stops that turn and goes at
+// once. A skill it said failed is fixed: with a mode that doesn't ask about
+// everyday changes, the fix is put in, with the lines it removes and adds, and
+// undone. With a mode that asks, a note, even one for every agent, is still
+// kept at once, and forgetting it takes it from every agent; a fix waits on a
+// card under the reply: put off, it waits on the Proposals page, and a fix the
+// person changed is kept as they changed it, to
 // the skill by the name it has now when it was renamed while the fix waited. In
 // a group chat, each member that answered looks back over its own part, one
 // after the other, and what it keeps goes under its own reply.
@@ -79,6 +80,10 @@ fn memories(app: mut Session, id: str) -> String ! Error {
     return "{try app.cmd(id, "memory.list", Obj.new().done())}"
 }
 
+fn memories_of(app: mut Session, id: str, agent: String) -> String ! Error {
+    return "{try app.cmd(id, "memory.list", Obj.new().s("agent", agent).done())}"
+}
+
 fn skill_body(app: mut Session, id: str) -> String ! Error {
     return try body_of(mut app, id, "post-release-notes")
 }
@@ -118,11 +123,6 @@ fn kept_part(app: mut Session, agent: String, chat: String) ! Error {
     try see(log2.contains("Forgot what was remembered: Ann buys wool socks.") and log2.contains("\"proposal\":\"{id}\",\"undo\":false"), "and the log, where it can't be undone again", log2)
     let twice = try app.cmd("q_k6", "proposal.undo", Obj.new().s("id", id).done())
     try check(str_at(at(twice, "error"), "code") == some(String("not_now")), "a note is undone once")
-
-    let shared = try say(mut app, chat.copy(), "m_k2", String(#"/mcp propose_note {"text":"Ann's team is Platform.","shared":true}"#))
-    let s_items = learned(shared.copy())
-    try see(s_items.len() == 1 and str_at(s_items[0].copy(), "status") == some(String("waiting")) and reply_text(shared).contains("on a card under your reply"), "a note for every agent waits for the person, whatever the mode", "{s_items}")
-    _ = try app.cmd("q_k7", "proposal.drop", Obj.new().s("id", str_at(s_items[0].copy(), "id") ?? String()).done())
 
     let self_undo = try say(mut app, chat.copy(), "m_k3", "/mcp run_command {Obj.new().s("name", String("proposal.undo")).j("args", Obj.new().s("id", String("prop_1")).done()).done()}")
     try see(reply_text(self_undo.copy()).starts_with("run_command failed"), "an agent can't undo one itself", reply_text(self_undo))
@@ -175,30 +175,36 @@ fn look_back_part(app: mut Session, chat: String) ! Error {
     try check(stopped, "the turn it looked back in stopped for it")
 }
 
-// A mode that asks: a card under the reply.
+// A mode that asks: a note, even one for every agent, is kept at once, and
+// forgetting it takes it from every agent; a fix waits on a card under the reply.
 fn card_part(app: mut Session, agent: String, chat: String) ! Error {
     try agent_cmd(mut app, "q_c0", agent.copy(), "ask")
-    let m = try say(mut app, chat.copy(), "m_c1", String(#"/mcp propose_note {"text":"Ann works at NTNU."}"#))
+    let made = try app.cmd("q_c1", "agent.create", Obj.new().s("name", String("Fern")).s("acp_agent", String("fake")).s("instructions", String("You are a test too.")).done())
+    let fern = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let m = try say(mut app, chat.copy(), "m_c1", String(#"/mcp propose_note {"text":"Ann's team is Platform.","shared":true}"#))
     let items = learned(m.copy())
-    try see(items.len() == 1 and str_at(items[0].copy(), "status") == some(String("waiting")) and reply_text(m.copy()).contains("on a card under your reply"), "in ask, a note waits on a card under the reply", "{m}")
-    try check(not (try memories(mut app, "q_c1")).contains("NTNU"), "and isn't a note yet")
+    try see(items.len() == 1 and str_at(items[0].copy(), "status") == some(String("kept")) and str_at(items[0].copy(), "by") == some(String("auto")) and bool_at(at(items[0].copy(), "note"), "shared") == some(true) and reply_text(m.copy()).starts_with("propose_note: Kept: it's a note every agent of your person's reads now"), "in ask, a note for every agent is kept at once too, under the reply", "{m}")
     let note_id = str_at(items[0].copy(), "id") ?? String()
-    let later = try app.cmd("q_c2", "proposal.later", Obj.new().j("ids", Json.Array([Json.Str(note_id.copy())])).done())
-    try see("{later}".contains("\"later\":true"), "Not now puts it off", "{later}")
-    _ = try under(mut app, str_at(m, "id") ?? String(), "\"later\":true")
-    let waiting = try app.cmd("q_c3", "proposal.list", Obj.new().done())
-    try check("{waiting}".contains(note_id.copy()), "to wait on the Proposals page")
-    let kept = try app.cmd("q_c4", "proposal.keep", Obj.new().s("id", note_id.copy()).done())
-    try check(str_at(at(at(kept, "value"), "proposal"), "status") == some(String("kept")), "kept from there, it's a note")
-    try check((try activity(mut app, "q_c5")).contains("\"proposal\":\"{note_id}\",\"undo\":true"), "which the activity log can undo too")
+    try check((try memories_of(mut app, "q_c2", fern.copy())).contains("Ann's team is Platform."), "and every agent has it")
+    try check((try activity(mut app, "q_c3")).contains("\"proposal\":\"{note_id}\",\"undo\":true"), "which the activity log can undo too")
+    let forgot = try app.cmd("q_c4", "proposal.undo", Obj.new().s("id", note_id).done())
+    try see(str_at(at(at(forgot.copy(), "value"), "proposal"), "status") == some(String("undone")), "Forget under the reply forgets it", "{forgot}")
+    try check(not (try memories_of(mut app, "q_c5", fern.copy())).contains("Platform") and not (try memories_of(mut app, "q_c5b", agent.copy())).contains("Platform"), "out of every agent's notes")
+    _ = try app.cmd("q_c5c", "agent.delete", Obj.new().s("agent", fern).done())
 
     _ = try say(mut app, chat.copy(), "m_c2", String(#"/mcp skill_failed {"name":"post-release-notes","step":"Press Publish","why":"There's no Publish button any more."}"#))
     let asked = try say(mut app, chat.copy(), "m_c3", "/next /mcp fix_skill {Obj.new().s("name", String("post-release-notes")).s("body", String(FIXED)).done()}\nok")
-    let card = try under(mut app, str_at(asked, "id") ?? String(), "post-release-notes")
+    let card = try under(mut app, str_at(asked.copy(), "id") ?? String(), "post-release-notes")
     let list = learned(card.copy())
     let f = list[list.len() - 1].copy()
-    try see(str_at(f.copy(), "status") == some(String("waiting")), "in ask, a fix waits on a card too", "{f}")
+    try see(str_at(f.copy(), "status") == some(String("waiting")), "in ask, a fix waits on a card", "{f}")
     try check((try skill_body(mut app, "q_c6")) == SKILL, "and the skill stays as it was")
+    let fix_id = str_at(f.copy(), "id") ?? String()
+    let later = try app.cmd("q_c6b", "proposal.later", Obj.new().j("ids", Json.Array([Json.Str(fix_id.copy())])).done())
+    try see("{later}".contains("\"later\":true"), "Not now puts it off", "{later}")
+    _ = try under(mut app, str_at(asked, "id") ?? String(), "\"later\":true")
+    let waiting = try app.cmd("q_c6c", "proposal.list", Obj.new().done())
+    try check("{waiting}".contains(fix_id), "to wait on the Proposals page")
     let renamed = try rename_skill(mut app, "q_cr1", "post-release-notes", "post-notes", String(SKILL))
     try see(bool_at(renamed.copy(), "ok") == some(true), "the skill is renamed while its fix waits", "{renamed}")
     let changed = String("# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release.\n4. Share the link.\n")
