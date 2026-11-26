@@ -1,9 +1,9 @@
 module tests.protocol.teach
 
 // Teaching a task, and proposals (PLAN.md, "Sharing and learning"): the fake
-// agent proposes a skill and a note, which wait for the person to keep or drop,
-// and which an agent can't keep itself; a kept note is a note, tied to its
-// site, and a kept skill a skill, with what the person changed. proposal.ask
+// agent keeps a note, which is a note at once, tied to its site, and proposes
+// skills, which wait for the person to keep or drop, and which an agent can't
+// keep itself; a kept skill is a skill, with what the person changed. proposal.ask
 // starts a task of looking over past chats. Then, with a Chrome, Edge or
 // Chromium on the computer: a note tied to a site is shown to the agent when
 // its browser opens a page there, once a visit; the person takes over the
@@ -77,44 +77,43 @@ fn proposals(app: mut Session, id: str) -> List<Json> ! Error {
 
 fn proposals_part(app: mut Session, agent: String, conversation: String) ! Error {
     let note = try say(mut app, conversation.copy(), "m_1", String(#"/mcp propose_note {"text":"Ann buys wool socks.","site":"https://www.Shop.example/socks","why":"From our chat on Tuesday."}"#))
-    try see(note.starts_with("propose_note: Proposed."), "propose_note proposes a note", note.copy())
+    try see(note.starts_with("propose_note: Kept:"), "propose_note keeps a note at once", note.copy())
     let p_note = try proposed(mut app, 1)
-    try see(str_at(p_note.copy(), "status") == some(String("waiting")) and str_at(at(p_note.copy(), "note"), "site") == some(String("shop.example")) and str_at(p_note.copy(), "why") == some(String("From our chat on Tuesday.")), "which waits for the person, tied to its site", "{p_note}")
+    try see(str_at(p_note.copy(), "status") == some(String("kept")) and str_at(at(p_note.copy(), "note"), "site") == some(String("shop.example")) and str_at(p_note.copy(), "why") == some(String("From our chat on Tuesday.")), "without waiting for the person, tied to its site", "{p_note}")
     let note_id = str_at(p_note, "id") ?? String()
+    let notes = try app.cmd("q_4", "memory.list", Obj.new().s("agent", agent.copy()).done())
+    try see("{notes}".contains("Ann buys wool socks.") and "{notes}".contains("\"site\":\"shop.example\""), "as a note of the agent's", "{notes}")
+    let decided = try app.cmd("q_3", "proposal.keep", Obj.new().s("id", note_id).done())
+    try check(str_at(at(decided, "error"), "code") == some(String("not_now")), "which there's nothing to keep of")
 
     let skill = try say(mut app, conversation.copy(), "m_2", String(#"/mcp propose_skill {"name":"order-socks","description":"Ordering socks.","body":"1. Open the shop.","why":"You've asked me three times."}"#))
     try see(skill.starts_with("propose_skill: Proposed the skill order-socks."), "propose_skill proposes a skill", skill.copy())
     let p_skill = try proposed(mut app, 2)
     let skill_id = str_at(p_skill.copy(), "id") ?? String()
-    try check(str_at(at(p_skill, "skill"), "name") == some(String("order-socks")), "with the skill it proposes")
+    try check(str_at(p_skill.copy(), "status") == some(String("waiting")) and str_at(at(p_skill, "skill"), "name") == some(String("order-socks")), "which waits for the person, with the skill it proposes")
     let listed = try app.cmd("q_1", "skill.list", Obj.new().done())
     try check(not "{listed}".contains("order-socks"), "and nothing is saved before the person says so")
     let waiting = try proposals(mut app, "q_2")
-    try check(waiting.len() == 2, "proposal.list gives what waits")
+    try check(waiting.len() == 1, "proposal.list gives what waits")
 
     let self_kept = try say(mut app, conversation.copy(), "m_3", "/mcp run_command {Obj.new().s("name", String("proposal.keep")).j("args", Obj.new().s("id", skill_id.copy()).done()).done()}")
     try see(self_kept.starts_with("run_command failed") and self_kept.contains("Proposals are your person's"), "an agent can't keep its own proposal", self_kept.copy())
 
-    let kept = try app.cmd("q_3", "proposal.keep", Obj.new().s("id", note_id.copy()).done())
-    try see(str_at(at(at(kept.copy(), "value"), "proposal"), "status") == some(String("kept")), "proposal.keep keeps a note", "{kept}")
-    let updated = try heard(mut app, "proposal.updated", note_id.copy())
-    try check(str_at(at(updated, "proposal"), "status") == some(String("kept")), "and every device hears so")
-    let notes = try app.cmd("q_4", "memory.list", Obj.new().s("agent", agent.copy()).done())
-    try see("{notes}".contains("Ann buys wool socks.") and "{notes}".contains("\"site\":\"shop.example\""), "as a note of the agent's, tied to its site", "{notes}")
-
     let changed = try app.cmd("q_5", "proposal.keep", Obj.new().s("id", skill_id.copy()).j("skill", Obj.new().s("description", String("Ordering socks from the usual shop.")).done()).done())
     try check(bool_at(changed, "ok") == some(true), "proposal.keep keeps a skill, with what the person changed")
+    let updated = try heard(mut app, "proposal.updated", skill_id.copy())
+    try check(str_at(at(updated, "proposal"), "status") == some(String("kept")), "and every device hears so")
     let got = try app.cmd("q_6", "skill.get", Obj.new().s("name", String("order-socks")).done())
     try see(str_at(at(at(got.copy(), "value"), "skill"), "description") == some(String("Ordering socks from the usual shop.")), "and it's a skill for every agent", "{got}")
     let again = try app.cmd("q_7", "proposal.keep", Obj.new().s("id", skill_id).done())
     try check(str_at(at(again, "error"), "code") == some(String("not_now")), "a proposal is decided once")
 
-    _ = try say(mut app, conversation.copy(), "m_4", String(#"/mcp propose_note {"text":"Bob is Ann's brother."}"#))
+    _ = try say(mut app, conversation.copy(), "m_4", String(#"/mcp propose_skill {"name":"call-bob","description":"Calling Bob.","body":"1. Call Bob."}"#))
     let p_drop = try proposed(mut app, 3)
     let dropped = try app.cmd("q_8", "proposal.drop", Obj.new().s("id", str_at(p_drop, "id") ?? String()).done())
     try check(str_at(at(at(dropped, "value"), "proposal"), "status") == some(String("dropped")), "proposal.drop drops one")
-    let after = try app.cmd("q_9", "memory.list", Obj.new().done())
-    try check(not "{after}".contains("Bob is"), "and it never becomes a note")
+    let after = try app.cmd("q_9", "skill.list", Obj.new().done())
+    try check(not "{after}".contains("call-bob"), "and it never becomes a skill")
     let left = try proposals(mut app, "q_10")
     try check(left.len() == 0, "leaving nothing waiting")
 

@@ -2,10 +2,11 @@ module server.learn
 
 // What an agent learns from a chat (PLAN.md, "Memory" and "Sharing and
 // learning"): once a chat pauses, the agent looks back over it in a quiet
-// turn, and keeps or proposes notes, and fixes to skills it said failed. A
-// note or a fix follows the agent's permission mode: one that doesn't ask
-// about everyday changes keeps it on its own, and otherwise it waits for the
-// person, on a card under the reply it came from. The instance runs the turn
+// turn, and keeps notes, and fixes to skills it said failed. A note is kept at
+// once, for the person to forget from the line under the reply it came from. A
+// fix follows the agent's permission mode: one that doesn't ask about everyday
+// changes puts it in on its own, and otherwise it waits for the person, on a
+// card under that reply. The instance runs the turn
 // and keeps what came of it; this is what the agent is told, and what a
 // reply shows of it.
 import std.diff
@@ -20,10 +21,13 @@ const AROUND: usize = 2
 const STEP_MOST: usize = 200
 const WHY_MOST: usize = 500
 
-// Whether an agent in permission mode `mode` keeps a note or puts in a fix
-// itself: its mode doesn't ask about everyday changes (edits).
-pub fn keeps_itself(mode: String) -> bool {
-    return acp.allows(mode, String("edit"))
+// Whether what an agent proposes, of `kind`, is kept at once with the agent in
+// permission mode `mode`: a note always, its own or every agent's, for the
+// person to forget after; a fix when its mode doesn't ask about everyday changes
+// (edits). A skill waits for the person.
+pub fn kept_at_once(kind: String, mode: String) -> bool {
+    if kind == "note" { return true }
+    return kind == "fix" and acp.allows(mode, String("edit"))
 }
 
 // The fewest characters the person and the agent said in a chat since its last
@@ -205,9 +209,13 @@ fn ops(made: Json) -> String {
 }
 
 @test
-fn a_mode_that_doesnt_ask_about_edits_keeps_what_it_learns() {
-    assert(keeps_itself(String("allow")) and keeps_itself(String("read,edit")))
-    assert(not keeps_itself(String("ask")) and not keeps_itself(String("auto")) and not keeps_itself(String("read,search")))
+fn a_note_is_kept_at_once_and_a_fix_as_the_mode_says() {
+    for mode in ["allow", "read,edit", "ask", "auto", "read,search"] {
+        assert(kept_at_once(String("note"), String(mode)))
+        assert(not kept_at_once(String("skill"), String(mode)))
+    }
+    assert(kept_at_once(String("fix"), String("allow")) and kept_at_once(String("fix"), String("read,edit")))
+    assert(not kept_at_once(String("fix"), String("ask")) and not kept_at_once(String("fix"), String("auto")) and not kept_at_once(String("fix"), String("read,search")))
 }
 
 @test
@@ -228,7 +236,9 @@ fn a_fix_shows_what_it_removes_and_adds_around_it() {
 @test
 fn looking_back_asks_for_notes_and_fixes() {
     let plain = look_back(List<Json>(), false, String())
-    assert(plain.starts_with("[loom: Your chat with your person has paused. Look back over it, from its start,") and plain.contains("propose_note") and not plain.contains("fix_skill"))
+    assert(plain.starts_with("[loom: Your chat with your person has paused. Look back over it, from its start,") and plain.contains("keep each with propose_note") and not plain.contains("fix_skill"))
+    // Its notes are kept, so it isn't told the person decides first.
+    assert(not plain.contains("keeps or drops") and not plain.contains("decide"))
     let failed = look_back([Obj.new().s("skill", String("post-release-notes")).s("step", String("Press Publish")).s("why", String("There's no Publish button.")).done()], false, String())
     assert(failed.contains("You said a skill failed: post-release-notes, at \"Press Publish\" (There's no Publish button.). Fix it with fix_skill"))
     assert(look_back(List<Json>(), true, String("Can you book\nthe train?")).starts_with("[loom: The group chat you answer in with your person and their other agents has paused. Look back over your part of it, from your person's message \"Can you book the train?\" on, which you haven't looked back over yet,"))

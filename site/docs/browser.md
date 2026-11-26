@@ -39,12 +39,14 @@ When you stop, the agent gets a task, beside its chat, to write the steps up as 
 
 Four minutes after your last message gets its answer, the chat has paused, and the agent looks back over it for what's worth remembering. You don't see it working. A message from you stops it. A skill the agent said failed partway is fixed in the same look back.
 
-What happens next depends on the agent's [permission mode](permissions.md#permission-modes):
+The agent keeps its notes on its own, its own and those for all your agents, whatever its mode. A line under its reply says so, such as "Remembered 2 things". Open it to see each one, with who it's for, and **Forget** to take it back; a note for all your agents is forgotten by all of them.
 
-- **Doesn't ask**: the agent keeps its notes and fixes on its own. A line under its reply says so, such as "Remembered 2 things" or "Fixed the skill post-release-notes". Open it to see each one, with **Forget** or **Undo**.
-- **Asks first** or **Asks when it's risky**: a card under the reply asks. For notes it says what the agent would remember and who each is for: untick any you don't want, then **Keep** (it says how many, "Keep 2", or **Drop them** with none ticked) or **Not now**. A fix says why the skill failed and shows the lines it removes and adds, with **Keep the fix**, **Change it** and **Drop**.
+A fix follows the agent's [permission mode](permissions.md#permission-modes):
 
-A note for all your agents always asks, whatever the mode.
+- **Doesn't ask**: the agent puts it in on its own. A line under its reply says so, such as "Fixed the skill post-release-notes". Open it to see the change, with **Undo**.
+- **Asks first** or **Asks when it's risky**: a card under the reply says why the skill failed and shows the lines it removes and adds, with **Keep the fix**, **Change it** and **Drop**.
+
+Notes that were waiting from before keep their card, with **Keep** and **Not now**.
 
 What you don't answer, or put off with **Not now**, waits on the **Proposals** page, under Agents in Settings, with skills written from a recording. Open one to read and change it before you **Keep** or **Drop** it. **Ask**, with the agent's name, asks the agent on screen to look over its chats for more.
 

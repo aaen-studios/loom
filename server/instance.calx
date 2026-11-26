@@ -4081,13 +4081,13 @@ impl Instance {
 
     // Keeps an agent's proposal of a skill, a note or a fix to a skill that
     // failed, under the reply of the turn that made it, and tells the person's
-    // devices. A note or a fix is kept at once when the agent's permission mode
-    // doesn't ask about everyday changes, unless the note is for every agent;
-    // anything else waits for the person. Gives the proposal as it is now.
+    // devices. A note is kept at once, its agent's or every agent's, whatever
+    // the permission mode, for the person to forget after; a fix is when the
+    // agent's mode doesn't ask about everyday changes; anything else waits for
+    // the person. Gives the proposal as it is now.
     fn propose(i: Instance, g: Grant, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
         let message = i.reply_of_run(g.copy())
-        let for_every = kind == "note" and (bool_at(data.copy(), "shared") ?? false)
-        let itself = kind != "skill" and not for_every and try i.keeps_itself(g.user.copy(), g.agent.copy())
+        let itself = try i.kept_at_once(g.user.copy(), g.agent.copy(), kind)
         if not itself {
             let waiting = try i.store.proposals(g.user.copy(), String("waiting"), PROPOSALS_WAITING_MOST + 1)
             if waiting.len() >= PROPOSALS_WAITING_MOST { fail "Your person has {PROPOSALS_WAITING_MOST} proposals waiting already. Wait until they've gone through them." }
@@ -4109,10 +4109,10 @@ impl Instance {
         return p
     }
 
-    // Whether `agent`'s permission mode keeps what it learns on its own.
-    fn keeps_itself(i: Instance, user: String, agent: String) -> bool ! Error {
+    // Whether what `agent` proposes, of `kind`, is kept at once (learn.kept_at_once).
+    fn kept_at_once(i: Instance, user: String, agent: String, kind: str) -> bool ! Error {
         let a = try i.store.agent(user.copy(), agent) else return false
-        return learn.keeps_itself(defaults.mode_of(a, try i.store.defaults(user)))
+        return learn.kept_at_once(String(kind), defaults.mode_of(a, try i.store.defaults(user)))
     }
 
     // The reply a proposal from the calling run goes under: the run's own, or
@@ -5718,9 +5718,11 @@ impl Instance {
             let site = site_of(str_at(args.copy(), "site") ?? String())
             let note = Obj.new().s("text", what).s("site", site).b("shared", bool_at(args.copy(), "shared") ?? false).done()
             let p = try i.propose(g.copy(), "note", note, (str_at(args, "why") ?? String()).trim().copy(), String())
-            if str_at(p.copy(), "status") == some(String("kept")) { return some(tool_text(String("Kept: it's a note of yours now, and your person can undo it from the line under your reply."))) }
-            if str_at(p, "message") != none { return some(tool_text(String("Proposed. Your person keeps or drops it on a card under your reply; it isn't a note until they keep it."))) }
-            return some(tool_text(String("Proposed. Your person keeps or drops it in their app; it isn't a note until they keep it.")))
+            let whose = if bool_at(at(p.copy(), "note"), "shared") == some(true) { "every agent of your person's reads" } else { "of yours" }
+            let status = str_at(p.copy(), "status") ?? String()
+            if status != "kept" { return some(tool_error("It wasn't kept: it's {status}.")) }
+            let where = if str_at(p, "message") != none { "from the line under your reply" } else { "in their app" }
+            return some(tool_text("Kept: it's a note {whose} now, and your person can forget it {where}."))
         }
         // A skill that failed at a step, which its agent fixes (PLAN.md, "Memory").
         if name == "skill_failed" {
@@ -16363,7 +16365,7 @@ impl Instance {
                 let transcript = try i.transcript(user.copy(), str_at(c, "id") ?? String(), none, agent_id.copy())
                 if transcript.len() > 0 { chat = "\n\nYour chat with them, newest last:\n\n{transcript}" }
             }
-            let prompt = "Your person asks you to look over your past chats with them for what's worth keeping, and propose it: a way of doing a kind of task they'd want done the same way again, with propose_skill, and a lasting fact about them or their work, with propose_note (tied to a site, with site, when it's about one). Look further back with search_messages. Don't propose what's in list_skills or recall already, or what only mattered once; nothing at all is a fine answer. Your person keeps or drops each one, so say in why where it came from. End with a line on what you proposed.{chat}"
+            let prompt = "Your person asks you to look over your past chats with them for what's worth keeping, and keep it: a way of doing a kind of task they'd want done the same way again, proposed with propose_skill, and a lasting fact about them or their work, kept with propose_note (tied to a site, with site, when it's about one). Look further back with search_messages. Don't keep what's in list_skills or recall already, or what only mattered once; nothing at all is a fine answer. Your person keeps or drops each skill, and can forget each note, so say in why where it came from. End with a line on what you proposed and kept.{chat}"
             let from = try i.writing_from(user.copy(), device.copy())
             let task = try i.start_task(user, agent, String("Propose skills and notes from past chats"), prompt, from, device)
             return Answer.Value(Obj.new().j("task", task).done())
