@@ -4,10 +4,12 @@
 // group chats in the person's order, which a drag rearranges, with a folder in it; an agent's chat with a message written with a link and a file
 // in it, and a reply that thinks, uses a tool, writes and asks before it deploys; another
 // agent's thread with it, opened from its row; and a group chat, where the router picks who
-// answers each message and the line over the reply says so. Its sizes, colours and words are the app's
+// answers each message and the line over the reply says so; and Moss's chat, with what came while
+// the person was away. Its sizes, colours and words are the app's
 // (desktop/src/app.rs, design/tokens.toml); the script that plays it is src/scripts/demo.ts. The
 // approval's buttons answer it, a reply's steps open, the thread's row opens it, the jump button
-// goes back down to the newest, and the sidebar collapses to the rail, as the app's do.
+// goes back down to the newest, the + opens its menu, Ctrl+F finds, and the sidebar collapses to
+// the rail, as the app's do.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
 // Twemoji's picture of 🎉, as the app draws built-in emoji (design/twemoji, PLAN.md, "Emoji").
@@ -65,6 +67,53 @@ function wave(k: number, n: number): string {
 	return pts.join(' ');
 }
 const JUNIPER = mentionThread('yarn');
+
+// Moss's chat, opened from its row after the group chat: a long draft it wrote yesterday, cut
+// after ten lines, the person's messages and its three replies since, "3 new" over them, a
+// table with its copy line, and where its program compacted the context.
+const MOSS_TABLE = [
+	['Customer', 'Orders', 'Spent'],
+	['Northwind', '48', '€1,920'],
+	['Fjord & Co', '31', '€1,240'],
+	['Halden Café', '22', '€880'],
+];
+// The + menu (app.rs, plus_menu, plus_face): what adds to the message, then what it does, and
+// the lists Recent files, Skills and Routines open beside it, each ending in its settings page.
+const PLUS_LISTS = {
+	recent: [
+		{ icon: 'file', name: 'notes-2.4.md', line: 'Today 09:12' },
+		{ icon: 'image', name: 'checkout-before.png', line: 'Yesterday 16:40' },
+		{ icon: 'file', name: 'october-orders.csv', line: 'Yesterday 11:05' },
+	],
+	skills: [
+		{ icon: 'book', name: 'deploy-shop', line: 'Ships main to production and checks its health' },
+		{ icon: 'book', name: 'release-notes', line: 'Writes the changelog from merged pull requests' },
+	],
+	routines: [
+		{ icon: 'clock', name: 'Morning brief', line: 'Ran 08:00 ✓' },
+		{ icon: 'clock', name: 'Stock check', line: 'Moss · Ran 09:00 ✓' },
+	],
+};
+// Lucide's icons, as the app draws them (gpui-kit-assets).
+const ICON: Record<string, string> = {
+	paperclip: '<path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551"/>',
+	fileClock: '<path d="M16 22h2a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v2.85"/><path d="M14 2v5a1 1 0 0 0 1 1h5"/><path d="M8 14v2.2l1.6 1"/><circle cx="8" cy="16" r="6"/>',
+	smile: '<path d="M15 10V9"/><path d="M16.472 15a6 6 0 0 1-8.943 0"/><path d="M9 10V9"/><circle cx="12" cy="12" r="10"/>',
+	book: '<path d="M12 5v16"/><path d="M20.001 19A2 2 0 0 0 22 17V5a2 2 0 0 0-1.999-2L16 3.002A5 5 0 0 0 12 5a5 5 0 0 0-4-2H4a2 2 0 0 0-2 2v12a2 2 0 0 0 1.999 2H8a5 5 0 0 1 4 2 5 5 0 0 1 4-2z"/>',
+	clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
+	spool: '<path d="M17 13.44 4.442 17.082A2 2 0 0 0 4.982 21H19a2 2 0 0 0 .558-3.921l-1.115-.32A2 2 0 0 1 17 14.837V7.66"/><path d="m7 10.56 12.558-3.642A2 2 0 0 0 19.018 3H5a2 2 0 0 0-.558 3.921l1.115.32A2 2 0 0 1 7 9.163v7.178"/>',
+	terminal: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
+	search: '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',
+	right: '<path d="m9 18 6-6-6-6"/>',
+	settings: '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>',
+	file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"/>',
+	image: '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+	copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+	down: '<path d="m6 9 6 6 6-6"/>',
+	up: '<path d="m18 15-6-6-6 6"/>',
+	x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+	check: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
+};
 
 // GitHub's mark, as its site icon on the reply's link and sources.
 const GITHUB =
@@ -407,7 +456,12 @@ const BOARD_LAYERS = [
 			<div class="msgs room" aria-live="off">
 				<div class="time-line">Today 09:41</div>
 				<div class="row you"><div class="bubble">Is 2.4.1 out?</div></div>
-				<div class="row reply">
+				<!-- Pinned in the group chat, so its header has the pin too (PLAN.md, "Pinned
+				     messages": each chat has its own pins). -->
+				<div class="row reply" data-msg data-pin="1" data-when="Today 09:41">
+					<button type="button" class="pin-btn" aria-label="Unpin" title="Unpin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
 						<div class="routed" role="button" aria-label="Answered by Juniper, release question"
@@ -429,6 +483,71 @@ const BOARD_LAYERS = [
 					</div>
 				</div>
 			</div>
+			<!-- Moss's chat, opened from its row: the draft it wrote yesterday, long, so it's cut
+			     after ten lines with Show more (app.rs, cut_long); the replies that came after the
+			     person left, under "3 new" (chat_row); a table with how many rows it has and Copy
+			     (table_line); and where the program compacted the context, a line from loom. -->
+			<div class="msgs moss" aria-live="off" style="--tint: var(--thread-mint)">
+				<div class="time-line">Yesterday 17:48</div>
+				<div class="row reply">
+					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread head"></svg>
+					<div class="body">
+						<div class="who">Moss</div>
+						<div class="said" data-cut>
+							<p>Here's the October newsletter, ready to send:</p>
+							<p><b>2.4 is out.</b> Checkout is a step shorter, and a payment that's tried again is never charged twice.</p>
+							<p><b>Gift cards</b> now work in every country we ship to, and they arrive by email within a minute.</p>
+							<p><b>The blue mug is back</b>, in the glaze you asked for. There are 300 of them, and the last batch went in two days.</p>
+							<p><b>Thank you, Northwind.</b> Our biggest customer this month ordered 48 mugs for their new office. If your team wants the same, reply to this email and we'll set it up.</p>
+							<p><b>Coming in November:</b> carts that follow you from your phone to your computer, and cheaper shipping to Norway, Sweden and Denmark.</p>
+							<p>As ever, reply with anything you'd like us to make next.</p>
+							<p>The shop team</p>
+						</div>
+					</div>
+				</div>
+				<div class="loom-line"><span>Context compacted · 182k → 16k</span></div>
+				<div class="row you"><div class="bubble">Looks good. Send it tomorrow at 9.</div></div>
+				<div class="new-line" data-new-line><span>3 new</span></div>
+				<div class="row reply">
+					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread"></svg>
+					<div class="body"><div class="said"><p>Scheduled for 09:00 tomorrow.</p></div></div>
+				</div>
+				<div class="row you"><div class="bubble">Who were our top customers in October?</div></div>
+				<div class="row reply">
+					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread"></svg>
+					<div class="body">
+						<div class="said">
+							<p>These three:</p>
+							<table class="md-table">
+								<thead><tr>{MOSS_TABLE[0].map((c) => <th>{c}</th>)}</tr></thead>
+								<tbody>{MOSS_TABLE.slice(1).map((r) => <tr>{r.map((c) => <td>{c}</td>)}</tr>)}</tbody>
+							</table>
+							<div class="table-line" data-table-line>
+								<span>{MOSS_TABLE.length - 1} rows</span>
+								<span class="tl-split">
+									<button type="button" class="tl-copy" data-table-copy aria-label="Copy as CSV"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy</button>
+									<button type="button" class="tl-more" data-table-more aria-label="Copy as" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.down} /></button>
+								</span>
+							</div>
+						</div>
+					</div>
+				</div>
+				<div class="row you"><div class="bubble">Can you thank Halden Café in it too?</div></div>
+				<div class="row reply">
+					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread"></svg>
+					<div class="body"><div class="said"><p>Added, after Northwind's.</p></div></div>
+				</div>
+			</div>
+			<!-- Ctrl+F: the find box at the chat's top right (app.rs, find_box), every match marked
+			     and the one it's on brighter, where it is, the arrows to older and newer, and ×. -->
+			<div class="find" data-find role="search" hidden>
+				<svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.search} />
+				<input type="text" data-find-in placeholder="Find in chat" aria-label="Find in chat" spellcheck="false" autocomplete="off" tabindex="-1" />
+				<span class="find-count" data-find-count></span>
+				<button type="button" class="find-btn" data-find-step="-1" aria-label="Older match" title="Older match"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.up} /></button>
+				<button type="button" class="find-btn" data-find-step="1" aria-label="Newer match" title="Newer match"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.down} /></button>
+				<button type="button" class="find-btn" data-find-close aria-label="Close" title="Close"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.x} /></button>
+			</div>
 			<!-- While the chat isn't at its bottom: the way down to the newest, with how many came
 			     meanwhile (app.rs, jump_button). -->
 			<button type="button" class="jump" data-jump aria-label="Jump to latest" hidden
@@ -446,10 +565,49 @@ const BOARD_LAYERS = [
 					<button type="button" class="rb-x" data-reply-x aria-label="Cancel reply"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
 				</div>
 				<div class="attached" data-attached hidden></div>
+				<!-- The + menu, over the composer from its left edge (app.rs, plus_menu): its search,
+				     what adds to the message, a line, and what it does. A row with › opens its list
+				     beside it (plus_sub), which ends in its settings page. -->
+				<div class="plus" data-plus role="menu" aria-label="Add" hidden>
+					<div class="plus-search"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.search} /><span class="plus-ph">Find a file, skill or routine…</span></div>
+					<div class="plus-line"></div>
+					<button type="button" role="menuitem" class="plus-row lit" data-plus-row="attach"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.paperclip} /><span class="plus-title">Attach files</span><span class="plus-keys" data-keys="U">Ctrl+U</span></button>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="recent" data-opens="recent"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.fileClock} /><span class="plus-title">Recent files</span><span class="plus-chev"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.right} /></span></button>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="emoji"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.smile} /><span class="plus-title">Emoji</span></button>
+					<div class="plus-line"></div>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="skills" data-opens="skills"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.book} /><span class="plus-title">Skills</span><span class="plus-chev"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.right} /></span></button>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="routines" data-opens="routines"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.clock} /><span class="plus-title">Routines</span><span class="plus-chev"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.right} /></span></button>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="spools"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.spool} /><span class="plus-title">Spools…</span></button>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="t3"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.terminal} /><span class="plus-title">Start a T3 thread</span></button>
+				</div>
+				{
+					Object.entries(PLUS_LISTS).map(([which, rows]) => (
+						<div class="plus plus-sub" data-plus-sub={which} role="menu" hidden>
+							{rows.map((r) => (
+								<button type="button" role="menuitem" class="plus-row two" data-plus-item={r.name}>
+									<svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON[r.icon]} />
+									<span class="plus-text">
+										<span class="plus-title">{r.name}</span>
+										<span class="plus-sub-line">{r.line}</span>
+									</span>
+								</button>
+							))}
+							{which !== 'recent' && (
+								<>
+									<div class="plus-line" />
+									<button type="button" role="menuitem" class="plus-row" data-plus-item="manage">
+										<svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.settings} />
+										<span class="plus-title">{which === 'skills' ? 'Manage skills…' : 'Manage routines…'}</span>
+									</button>
+								</>
+							)}
+						</div>
+					))
+				}
 				<div class="composer-row">
-					<span class="icon-btn c"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></span>
+					<button type="button" class="icon-btn c plus-btn" data-plus-btn aria-label="Add" aria-expanded="false"><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg></button>
 					<span class="field"
-						><span class="typed"></span><span class="placeholder agent-ph">Reply to Juniper</span><span class="placeholder room-ph"
+						><span class="typed"></span><span class="placeholder agent-ph">Reply to <span data-ph-name>Juniper</span></span><span class="placeholder room-ph"
 							>Message {shop.name}</span
 						></span
 					>
@@ -477,6 +635,8 @@ const BOARD_LAYERS = [
 			<button type="button" class="continue" data-continue>Continue in your own chat</button>
 		</div>
 	</div>
+	<!-- The notice at the window's foot, over everything, after a copy (app.rs, toast). -->
+	<div class="toast" data-toast role="status" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.check} /><span data-toast-words>Copied.</span></div>
 </div>
 
 <template id="demo-you">
@@ -543,6 +703,14 @@ const BOARD_LAYERS = [
 		<button type="button" role="menuitem" data-act="pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg><span>Pin</span></button>
 		<div class="menu-line" role="separator"></div>
 		<button type="button" role="menuitem" data-act="delete" class="danger"><svg class="i" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Delete</button>
+	</div>
+</template>
+<!-- A table's other ways to copy, from the arrow beside its Copy (app.rs, Ctx::Table). -->
+<template id="demo-table-menu">
+	<div class="msg-menu" role="menu">
+		<button type="button" role="menuitem" data-copy-as="csv"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy as CSV</button>
+		<button type="button" role="menuitem" data-copy-as="md"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy as Markdown</button>
+		<button type="button" role="menuitem" data-copy-as="text"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy as text</button>
 	</div>
 </template>
 <template id="demo-gone">
@@ -629,6 +797,29 @@ const BOARD_LAYERS = [
 		<div class="t3-step"><span class="prompt">›_</span><span class="t3-step-words">git log v2.4.0..v2.4.1</span></div>
 		<div class="t3-chips"><span class="t3-chip">PR #214</span></div>
 	</div>
+</template>
+<!-- What the agent kept from the reply, under it (learned.rs, learned_under): a quiet line, which
+     opens to say why the skill failed, its change, and Undo (fix_done, change_view). -->
+<template id="demo-kept">
+	<div class="kept">
+		<button type="button" class="kept-line" aria-expanded="false"
+			><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.book} /><span class="kept-words">Fixed the skill deploy-shop</span><span class="kept-chev"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.down} /></span></button
+		>
+		<div class="kept-open" hidden>
+			<div class="kept-why">Failed at “Wait for the health check”: it gave up after 10 seconds</div>
+			<div class="change">
+				<div class="ch"><span class="ch-mark"></span><span>./deploy.sh production</span></div>
+				<div class="ch del"><span class="ch-mark">−</span><span>wait-for /health --timeout 10s</span></div>
+				<div class="ch add"><span class="ch-mark">+</span><span>wait-for /health --timeout 60s</span></div>
+			</div>
+			<div class="kept-end"><button type="button" class="kept-undo">Undo</button></div>
+		</div>
+	</div>
+</template>
+<!-- A line from loom across the chat (app.rs, chat_row): where a fresh session started, or where
+     the program compacted the context. -->
+<template id="demo-loom-line">
+	<div class="loom-line fresh-in"><span></span></div>
 </template>
 <template id="demo-approval">
 	<div class="row approval fresh">
@@ -789,12 +980,15 @@ const BOARD_LAYERS = [
 	.agent.on {
 		background: var(--active);
 	}
+	/* An agent's thread, 10 tall, or 22 in its shape; a group chat's weave keeps its own 26 by 14. */
 	.agent svg {
-		width: 26px;
-		height: 10px;
 		flex: none;
 	}
-	.agent svg[data-shape] {
+	.agent svg[data-thread] {
+		width: 26px;
+		height: 10px;
+	}
+	.agent svg[data-thread][data-shape] {
 		height: 22px;
 	}
 	/* One line whatever the agent is doing, as in the app: what it's on sits quietly
@@ -936,18 +1130,36 @@ const BOARD_LAYERS = [
 		cursor: pointer;
 	}
 	/* The Shop group chat, open in the chat's place: its row lit, its head, its messages and
-	   "Message Shop" in the composer. A group chat has no brain or mode of its own. */
+	   "Message Shop" in the composer. A group chat has no brain or mode of its own: its header
+	   has its pins and the context of the member that answered last (app.rs, header). */
 	.room-btn,
 	.msgs.room,
+	.msgs.moss,
 	.room-ph,
 	.app.in-room .agent-btn,
-	.app.in-room .chips,
+	.app.in-room :is(.chip.brain, .chip.mode),
 	.app.in-room .msgs.mine,
-	.app.in-room .agent-ph {
+	.app.in-room .agent-ph,
+	.app.in-moss .msgs.mine {
 		display: none;
 	}
-	.app.in-room .msgs.room {
+	.app.in-room .msgs.room,
+	.app.in-moss .msgs.moss {
 		display: block;
+	}
+	/* Moss's chat, open in the chat's place: its row lit, Juniper's not. Another agent's
+	   thread with Juniper is a row under Juniper only while Juniper is open. */
+	.app.in-moss .agent.on {
+		background: none;
+	}
+	.app.in-moss .agent[data-agent='Moss'] {
+		background: var(--active);
+	}
+	.app:is(.in-room, .in-moss) .ask {
+		display: none;
+	}
+	.pins-at[hidden] {
+		display: none;
 	}
 	.app.in-room .room-ph {
 		display: inline;
@@ -1280,6 +1492,8 @@ const BOARD_LAYERS = [
 		border-bottom: 1px solid var(--line);
 		flex: none;
 	}
+	/* What's in it never reaches past it, into the window's buttons. Its popovers hang from the
+	   window, not from it, so they aren't cut. */
 	.header {
 		display: flex;
 		align-items: center;
@@ -1287,7 +1501,9 @@ const BOARD_LAYERS = [
 		gap: 16px;
 		flex: 1;
 		min-width: 0;
+		align-self: stretch;
 		padding: 0 16px;
+		overflow: hidden;
 	}
 	/* In a narrow window it gives way as the app's does (desktop/src/model/header.rs): demo.ts
 	   takes one step at a time, always in this order, until it fits: the brain chip drops its
@@ -1307,34 +1523,20 @@ const BOARD_LAYERS = [
 	.header.fit-close .context-at {
 		margin-left: -4px;
 	}
-	.agent-btn,
-	.room-btn {
-		min-width: 50px;
-		flex-shrink: 1000;
-	}
-	/* Its thread and about three letters of "Juniper" with the ellipsis. */
-	.agent-btn {
-		min-width: 98px;
-	}
+	/* Nothing in it shrinks by itself: demo.ts gives the name and the mode's words their
+	   widths once every step is taken (model::header::fit). */
+	.header > *,
 	.agent-btn > svg,
 	.room-btn > svg,
 	.chips > * {
 		flex: none;
 	}
-	.chips > .chip.mode {
-		flex: 0 1 auto;
-		min-width: 0;
-	}
 	.head-name,
 	.mode-words {
+		display: block;
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
-	}
-	/* While demo.ts measures it, nothing shortens. */
-	.header.fit-measuring > *,
-	.header.fit-measuring .chips > * {
-		flex-shrink: 0;
 	}
 	.agent-btn,
 	.chip {
@@ -1471,11 +1673,18 @@ const BOARD_LAYERS = [
 		justify-content: flex-end;
 		padding: 0 24px;
 	}
+	/* The column leaves each row's hover strip beside it, where its time and buttons are,
+	   inside the chat (app.rs, ROW_SIDE: 70 from the chat's edge). */
 	.msgs {
 		width: 100%;
-		max-width: var(--space-column);
+		max-width: min(var(--space-column), calc(100% - 92px));
 		margin: 0 auto;
 		padding-bottom: 8px;
+	}
+	@media (max-width: 640px) {
+		.msgs {
+			max-width: none;
+		}
 	}
 	/* Across the chat where it paused, or on a new day: when it went on. */
 	.time-line {
@@ -2637,7 +2846,8 @@ const BOARD_LAYERS = [
 		text-align: left;
 		cursor: pointer;
 	}
-	.msg-menu button:hover {
+	.msg-menu button:hover,
+	.msg-menu button.lit {
 		background: var(--hover);
 	}
 	.msg-menu .i {
@@ -3034,26 +3244,30 @@ const BOARD_LAYERS = [
 	   colour, its title with the agent's thread tugging beside it, what it does in a pill,
 	   and Allow, split for Always allow, and Deny. Its edge takes the agent's colour while
 	   it waits. Answered, it's one quiet line. */
-	.approval {
+	/* The card frame's fills (app.rs, card_fill, card_inset, card_shadow), for every card in
+	   the chat and the find box: raised in the dark, the page's own in the light. */
+	.app {
 		--card-fill: var(--raised);
 		--card-inset: var(--bg);
 		--card-edge: var(--line);
 		--card-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.55);
-		padding-left: 26px;
 	}
 	@media (prefers-color-scheme: light) {
-		:root:not([data-theme='dark']) .approval {
+		:root:not([data-theme='dark']) .app {
 			--card-fill: var(--bg);
 			--card-inset: var(--raised);
 			--card-edge: var(--line-strong);
 			--card-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.1);
 		}
 	}
-	:root[data-theme='light'] .approval {
+	:root[data-theme='light'] .app {
 		--card-fill: var(--bg);
 		--card-inset: var(--raised);
 		--card-edge: var(--line-strong);
 		--card-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.1);
+	}
+	.approval {
+		padding-left: 26px;
 	}
 	.card {
 		display: flex;
@@ -3436,7 +3650,6 @@ const BOARD_LAYERS = [
 	/* The context's ring, its own small button after the model: the line all round, filled
 	   clockwise from the top as the session fills, warm from 70% and red from 90%. */
 	.context-at {
-		position: relative;
 		display: flex;
 		margin-left: -8px;
 	}
@@ -3483,16 +3696,16 @@ const BOARD_LAYERS = [
 	.context-at.bad .cc-bar span {
 		background: var(--bad);
 	}
-	/* Its card, hung under it: the tokens of the window, a bar, when it was compacted and
-	   where a fresh session starts, and its two buttons. */
+	/* Its card, hung under it, centred on it and kept 8px inside the window (demo.ts,
+	   placeCard; app.rs, snap_to_window_with_margin): the tokens of the window, a bar, when it
+	   was compacted and where a fresh session starts, and its two buttons. */
 	.context-card {
 		position: absolute;
 		z-index: 20;
-		top: calc(100% + 4px);
-		left: 50%;
-		transform: translateX(-50%);
-		width: var(--layout-context-card);
-		max-width: calc(100vw - 32px);
+		top: var(--card-top, 41px);
+		left: var(--card-left, auto);
+		right: 8px;
+		width: var(--card-width, var(--layout-context-card));
 		display: flex;
 		flex-direction: column;
 		gap: 10px;
@@ -3599,11 +3812,446 @@ const BOARD_LAYERS = [
 		display: none;
 	}
 
+	/* The + menu, 8px over the composer from its left edge (app.rs, plus_menu, PLUS_WIDE), and
+	   the list a row opens beside it (plus_sub, PLUS_SUB_WIDE), placed by demo.ts. */
+	.plus-btn {
+		cursor: pointer;
+	}
+	.plus-btn[aria-expanded='true'] {
+		background: var(--hover);
+	}
+	.plus {
+		position: absolute;
+		z-index: 8;
+		left: 0;
+		bottom: calc(100% + 8px);
+		display: flex;
+		flex-direction: column;
+		width: calc(var(--layout-menu-wide) + 40px);
+		max-width: 100%;
+		padding: 4px;
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 30px rgb(0 0 0 / 0.16);
+		animation: rise 0.16s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	.plus[hidden] {
+		display: none;
+	}
+	.plus-sub {
+		bottom: auto;
+		top: var(--sub-top, 0);
+		left: var(--sub-left, 0);
+		width: calc(var(--layout-menu-wide) + 60px);
+		animation-duration: 0.12s;
+	}
+	.plus-search {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 30px;
+		padding: 2px 4px 6px 12px;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.plus-ph {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.plus-line {
+		flex: none;
+		height: 1px;
+		margin: 4px 8px;
+		background: var(--line);
+	}
+	.plus-row {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		min-width: 0;
+		padding: 8px 12px;
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		line-height: 1.4;
+		color: var(--ink);
+		text-align: left;
+		cursor: pointer;
+	}
+	.plus-row.two {
+		padding-top: 5px;
+		padding-bottom: 5px;
+	}
+	.plus-row > .i {
+		color: var(--ink-2);
+	}
+	/* The lit row: a breath of the agent's colour (app.rs, plus_tint). */
+	.plus-row.lit {
+		background: color-mix(in srgb, var(--tint) 16%, var(--raised));
+	}
+	.plus-title {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.plus-text {
+		display: flex;
+		flex: 1;
+		flex-direction: column;
+		min-width: 0;
+	}
+	.plus-sub-line {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.plus-keys {
+		flex: none;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.plus-chev {
+		display: flex;
+		flex: none;
+		color: var(--ink-3);
+	}
+	.plus-chev .i {
+		width: 12px;
+		height: 12px;
+	}
+
+	/* The find box, at the chat's top right (app.rs, find_box), and its marks: every match in
+	   the find colour, the one it's on brighter. */
+	.find {
+		position: absolute;
+		z-index: 7;
+		top: 8px;
+		right: 16px;
+		display: flex;
+		align-items: center;
+		gap: 2px;
+		width: 330px;
+		max-width: calc(100% - 32px);
+		padding: 4px 4px 4px 12px;
+		background: var(--card-fill);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		box-shadow: var(--card-shadow);
+		font-size: var(--size-small);
+		animation: rise 0.16s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	.find[hidden] {
+		display: none;
+	}
+	.find > .i {
+		color: var(--ink-3);
+	}
+	.find input {
+		flex: 1;
+		min-width: 0;
+		height: 26px;
+		padding: 0 4px 0 8px;
+		border: 0;
+		outline: none;
+		background: transparent;
+		font: inherit;
+		color: var(--ink);
+		user-select: text;
+	}
+	.find input::placeholder {
+		color: var(--ink-3);
+	}
+	.find-count {
+		flex: none;
+		padding: 0 4px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.find-btn {
+		display: grid;
+		flex: none;
+		place-items: center;
+		width: var(--control-icon-small);
+		height: var(--control-icon-small);
+		border-radius: var(--radius-button);
+		color: var(--ink-3);
+		cursor: pointer;
+	}
+	.find.some .find-btn,
+	.find-btn:hover {
+		color: var(--ink-2);
+	}
+	.find-btn:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	.app :global(mark.found) {
+		background: var(--find);
+		color: inherit;
+		border-radius: 2px;
+	}
+	.app :global(mark.found.on) {
+		background: var(--find-current);
+	}
+
+	/* Lines across the column: "3 new" over the first reply that came while the chat was shut,
+	   and loom's own, where the context was compacted or a fresh session started. */
+	.new-line,
+	.loom-line {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 8px 0 4px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.loom-line {
+		gap: 8px;
+		padding: 8px 0;
+	}
+	.new-line::before,
+	.new-line::after,
+	.loom-line::before,
+	.loom-line::after {
+		content: '';
+		flex: 1;
+		height: 1px;
+		background: var(--line-strong);
+	}
+	.loom-line.fresh-in {
+		animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+
+	/* A table in a reply, and under it how many rows it has with Copy, whose arrow has the
+	   other ways to copy it (app.rs, table_line). */
+	.md-table {
+		margin: 8px 0 6px;
+		border-collapse: collapse;
+		font-size: var(--size-small);
+		line-height: 1.5;
+	}
+	.md-table th,
+	.md-table td {
+		padding: 4px 20px 4px 0;
+		text-align: left;
+		white-space: nowrap;
+		border-bottom: 1px solid var(--line-strong);
+	}
+	.md-table th {
+		font-weight: var(--weight-semibold);
+	}
+	.md-table tr:last-child td {
+		border-bottom: 0;
+	}
+	.table-line {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		font-size: var(--size-small);
+		line-height: 1;
+		color: var(--ink-3);
+	}
+	.tl-split {
+		display: inline-flex;
+		align-items: stretch;
+		height: 22px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		overflow: hidden;
+	}
+	.tl-split button {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+		padding: 0 8px;
+		color: var(--ink-3);
+		cursor: pointer;
+		transition:
+			background-color 0.12s,
+			color 0.12s;
+	}
+	.tl-split button:hover,
+	.tl-split button[aria-expanded='true'] {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	.tl-split .tl-more {
+		padding: 0 3px;
+		border-left: 1px solid var(--line);
+	}
+	.tl-split .i {
+		width: 12px;
+		height: 12px;
+	}
+
+	/* The notice at the window's foot after a copy (app.rs, toast). */
+	.toast {
+		position: absolute;
+		z-index: 30;
+		left: 50%;
+		bottom: 88px;
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		max-width: calc(100% - 48px);
+		padding: 10px 16px;
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 30px rgb(0 0 0 / 0.18);
+		font-size: var(--size-small);
+		transform: translateX(-50%);
+		animation: rise 0.2s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	.toast[hidden] {
+		display: none;
+	}
+	.toast .i {
+		color: var(--ok);
+	}
+
+	/* What the agent kept from a reply, under it (learned.rs): a quiet line that opens to say
+	   why the skill failed, its change in mono, removed in red and added in green, and Undo. */
+	.kept {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.kept-line {
+		display: inline-flex;
+		align-self: flex-start;
+		align-items: center;
+		gap: 8px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		cursor: pointer;
+		transition: color 0.12s;
+	}
+	.kept-line:hover {
+		color: var(--ink);
+	}
+	.kept-line .i {
+		width: 12px;
+		height: 12px;
+	}
+	.kept-chev {
+		display: flex;
+	}
+	.kept-open {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+		max-width: 600px;
+		padding-left: 24px;
+	}
+	.kept-open[hidden] {
+		display: none;
+	}
+	.kept-why {
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.change {
+		padding: 4px 0;
+		border-radius: var(--radius-input);
+		background: var(--card-inset);
+		font-family: var(--mono);
+		font-size: var(--size-caption);
+		line-height: 1.5;
+		color: var(--ink-3);
+		overflow: hidden;
+	}
+	.ch {
+		display: flex;
+		gap: 8px;
+		padding: 0 12px;
+		white-space: nowrap;
+	}
+	.ch-mark {
+		flex: none;
+		width: 10px;
+	}
+	.ch.del {
+		background: color-mix(in srgb, var(--bad) 10%, transparent);
+		color: var(--ink);
+	}
+	.ch.del .ch-mark {
+		color: var(--bad);
+	}
+	.ch.add {
+		background: color-mix(in srgb, var(--ok) 10%, transparent);
+		color: var(--ink);
+	}
+	.ch.add .ch-mark {
+		color: var(--ok);
+	}
+	.kept-end {
+		display: flex;
+	}
+	.kept-undo {
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: var(--ink-2);
+		cursor: pointer;
+	}
+	.kept-undo:hover {
+		color: var(--ink);
+	}
+	.kept-undo:disabled {
+		font-weight: var(--weight-regular);
+		color: var(--ink-3);
+		cursor: default;
+	}
+
+	/* A long message cut after ten lines, its last fading into its bubble, with a quiet Show
+	   more under it that opens it in place (app.rs, cut_long; demo.ts, cutLong). */
+	.app :global(.cut-body) {
+		position: relative;
+	}
+	.app :global(.cut .cut-body) {
+		max-height: var(--cut-at);
+		overflow: hidden;
+	}
+	.app :global(.cut .cut-body::after) {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		height: var(--cut-fade);
+		background: linear-gradient(transparent, var(--bubble));
+	}
+	.app :global(.show-more) {
+		display: block;
+		margin-top: 2px;
+		padding: 0;
+		border: 0;
+		background: none;
+		font: inherit;
+		line-height: 1.5;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+		cursor: pointer;
+		transition: color 0.12s;
+	}
+	.app :global(.show-more:hover) {
+		color: var(--ink);
+	}
+	.app :global(.show-more[hidden]) {
+		display: none;
+	}
+
 	/* A narrower window: the sidebar is a rail beside the chat (demo.ts), as the app's is. */
+	/* The window's buttons stay at every width, as the app's do; the header gives way before
+	   them (demo.ts, fitHeader). */
 	@media (max-width: 860px) {
-		.winctl {
-			display: none;
-		}
 		.app {
 			height: 600px;
 		}
