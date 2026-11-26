@@ -17896,9 +17896,10 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// The context card: how many tokens the session holds of its window, as a bar, when
-    /// it was last compacted and where a fresh session starts, with Compact now (where its
-    /// program compacts when asked) and Start a fresh session.
+    /// The context card: how many tokens the session holds of its window, as a bar, what
+    /// the chat costs (its last turn's tokens and the last 24 hours'), when it was last
+    /// compacted, with Compact now (where its program compacts when asked) and Start a
+    /// fresh session.
     fn context_card_view(
         &self,
         fill: &model::ContextFill,
@@ -17989,12 +17990,30 @@ ACTA_KEY=secret:ACTA_KEY",
                             .bg(ink),
                     ),
             )
-            .child(
+            .children(fill.costs().into_iter().map(|(name, tokens)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .child(name)
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(crate::prefs::mono_font())
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink)
+                            .child(tokens),
+                    )
+            }))
+            .children(fill.line(now).map(|line| {
                 div()
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .child(fill.line(now)),
-            )
+                    .child(line)
+            }))
             .child(
                 div()
                     .flex()

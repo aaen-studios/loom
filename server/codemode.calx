@@ -270,6 +270,30 @@ fn score(t: Tool, wanted: List<String>) -> i64 {
     return total
 }
 
+// Which of `trouble`, what search_tools says of the servers that didn't start,
+// a search for `query` says, when the session has said `said` already: each
+// once a session, and again when the search names its server.
+pub fn trouble_to_say(trouble: List<String>, said: List<String>, query: String) -> List<String> {
+    let asked = query.to_lower_root()
+    var out = List<String>()
+    for t in trouble {
+        let name = server_named(t.copy()).to_lower_root()
+        if not said.contains(t.copy()) or (name.len() > 0 and asked.contains(name)) { out.push(t.copy()) }
+    }
+    return out
+}
+
+// The server a line of trouble is about: its first words, up to ":", " didn't" or " needs".
+fn server_named(trouble: String) -> String {
+    var end = trouble.len()
+    for mark in [":", " didn't", " needs"] {
+        if let k = trouble.find(mark) {
+            if k < end { end = k }
+        }
+    }
+    return trouble[..end].trim().copy()
+}
+
 // search_tools: the tools that best match `query`, up to `limit`, or every
 // tool's name for an empty query. `trouble` says which servers didn't start.
 pub fn search(tools: List<Tool>, query: String, limit: usize, trouble: List<String>) -> String {
@@ -618,4 +642,19 @@ fn results_become_values() {
     assert(cut(String("abcdef"), 3) == "abc… (3 more characters cut)" and cut(String("abc"), 3) == "abc")
     assert(told(List<String>(), false, String("null")) == "The script ran, and returned nothing.")
     assert(told([String("hi")], true, String("boom")) == "Logged:\nhi\n\nThe script failed: boom")
+}
+
+@test
+fn a_server_that_didnt_start_is_said_once_a_session() {
+    let trouble: List<String> = [String("gitbox didn't start: no such program"), String("home-assistant: it answered 401"), String("acta needs your person to sign in.")]
+    assert(trouble_to_say(trouble.copy(), List<String>(), String("notify")).len() == 3)
+    let said = trouble.copy()
+    assert(trouble_to_say(trouble.copy(), said.copy(), String("notify")).len() == 0)
+    // Again when the search names its server, and a new one comes up once.
+    let named: List<String> = [String("home-assistant: it answered 401")]
+    assert(trouble_to_say(trouble.copy(), said.copy(), String("Home-Assistant lights")) == named)
+    var more = trouble.copy()
+    more.push(String("files: it stopped"))
+    let new_one: List<String> = [String("files: it stopped")]
+    assert(trouble_to_say(more, said, String("x")) == new_one)
 }

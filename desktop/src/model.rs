@@ -2127,18 +2127,26 @@ pub struct ContextFill {
     pub compacts: bool,
     /// In a group chat, the member whose session it is: the one that answered last.
     pub agent: Option<String>,
+    /// What the chat costs, in tokens: its person's last turn there, and every turn
+    /// there in the last 24 hours. 0 for not known.
+    pub turn: i64,
+    pub day: i64,
 }
-
-/// How full a context may get before the chat's next message goes to a fresh session
-/// (the instance's `CONTEXT_RENEW_PERCENT`).
-pub const CONTEXT_RENEW_PERCENT: i64 = 80;
 
 impl ContextFill {
     pub fn of(x: &Value) -> Option<ContextFill> {
         let n = |k: &str| x.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let tokens = |k: &str| {
+            x.get("tokens")
+                .and_then(|t| t.get(k))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
         let fill = ContextFill {
             used: n("used"),
             size: n("size"),
+            turn: tokens("turn"),
+            day: tokens("day"),
             compacted: x.get("compacted").and_then(Value::as_i64),
             compacts: x.get("compacts").and_then(Value::as_bool).unwrap_or(false),
             agent: x
@@ -2180,14 +2188,24 @@ impl ContextFill {
         format!("{} of {}", tokens_short(self.used), tokens_short(self.size))
     }
 
-    /// The card's line under its bar, at `now` (Unix ms): when the session was last
-    /// compacted, if it was, and where a fresh one starts.
-    pub fn line(&self, now: i64) -> String {
-        let fresh = format!("fresh session starts at {CONTEXT_RENEW_PERCENT}%");
-        match self.compacted {
-            Some(at) => format!("Compacted {} · a {fresh}", ago(now - at)),
-            None => format!("A {fresh}"),
+    /// The card's rows of what the chat costs, each a title and its tokens: "Last
+    /// turn" "410k", "Last 24 hours" "6.2M". None that isn't known.
+    pub fn costs(&self) -> Vec<(&'static str, String)> {
+        let mut rows = Vec::new();
+        if self.turn > 0 {
+            rows.push(("Last turn", tokens_short(self.turn)));
         }
+        if self.day > 0 {
+            rows.push(("Last 24 hours", tokens_short(self.day)));
+        }
+        rows
+    }
+
+    /// The card's line over its buttons, at `now` (Unix ms): when the session was last
+    /// compacted, if it was.
+    pub fn line(&self, now: i64) -> Option<String> {
+        self.compacted
+            .map(|at| format!("Compacted {}", ago(now - at)))
     }
 }
 
@@ -13985,7 +14003,11 @@ mod tests {
         assert_eq!(fill.percent(), 56);
         assert_eq!(fill.tip(), "Context 56%, 112k of 200k");
         assert_eq!(fill.amount(), "112k of 200k");
-        assert_eq!(fill.line(0), "A fresh session starts at 80%");
+        assert_eq!(fill.line(0), None);
+        assert!(
+            fill.costs().is_empty(),
+            "nothing it costs until a turn says"
+        );
         assert_eq!(m.context_title(&fill), "Context");
         m.select(Some("a_2".into()));
         assert_eq!(m.context(), None, "nothing until its program says");
@@ -13995,6 +14017,8 @@ mod tests {
             compacted: None,
             compacts: false,
             agent: None,
+            turn: 0,
+            day: 0,
         };
         assert_eq!(at(750_000).percent(), 75);
         assert_eq!(at(-5).fraction(), 0.0);
@@ -14009,15 +14033,23 @@ mod tests {
     fn the_context_card_says_when_it_was_compacted_and_compacts_or_starts_fresh() {
         let mut m = Model::new();
         m.take(&conversations(json!([
-            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000, "compacted": 1_000, "compacts": true}},
+            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000, "compacted": 1_000, "compacts": true, "tokens": {"turn": 410_000, "day": 6_200_000}}},
         ])));
         m.select(Some("a_1".into()));
         let fill = m.context().expect("its program said");
         assert!(fill.compacts);
         let hour = 3_600_000;
         assert_eq!(
-            fill.line(1_000 + 2 * hour),
-            "Compacted 2 h ago · a fresh session starts at 80%"
+            fill.line(1_000 + 2 * hour).as_deref(),
+            Some("Compacted 2 h ago")
+        );
+        // What the chat costs: its last turn and its last 24 hours, a title and tokens each.
+        assert_eq!(
+            fill.costs(),
+            vec![
+                ("Last turn", "410k".to_string()),
+                ("Last 24 hours", "6.2M".to_string())
+            ]
         );
         assert_eq!(ago(30_000), "just now");
         assert_eq!(ago(5 * 60_000), "5 min ago");

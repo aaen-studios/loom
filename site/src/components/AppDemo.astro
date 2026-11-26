@@ -288,7 +288,9 @@ const BOARD_LAYERS = [
 						<div class="context-card" data-context-card role="dialog" aria-label="Context" hidden>
 							<div class="cc-head"><span class="cc-title">Context</span><span class="cc-amount" data-context-amount>82k of 200k</span></div>
 							<div class="cc-bar"><span data-context-bar style="--fill: 41%"></span></div>
-							<div class="cc-line" data-context-line>Compacted 2 h ago · a fresh session starts at 80%</div>
+							<div class="cc-row"><span>Last turn</span><span class="cc-tokens" data-context-turn>410k</span></div>
+							<div class="cc-row"><span>Last 24 hours</span><span class="cc-tokens" data-context-day>6.2M</span></div>
+							<div class="cc-line" data-context-line>Compacted 2 h ago</div>
 							<div class="cc-actions">
 								<button type="button" data-context-act="compact">Compact now</button>
 								<button type="button" data-context-act="fresh">Start a fresh session</button>
@@ -2949,9 +2951,25 @@ const BOARD_LAYERS = [
 		background: var(--ink-3);
 		transition: width 0.6s ease;
 	}
+	.cc-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.cc-tokens {
+		font-family: var(--font-mono), ui-monospace, monospace;
+		font-size: var(--size-caption);
+		color: var(--ink);
+	}
 	.cc-line {
 		font-size: var(--size-caption);
 		color: var(--ink-3);
+	}
+	.cc-line[hidden] {
+		display: none;
 	}
 	.cc-actions {
 		display: flex;

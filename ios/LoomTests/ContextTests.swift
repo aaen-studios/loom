@@ -44,9 +44,17 @@ import Testing
         #expect(ContextFill.ago(2 * 60 * minute) == "2 h ago")
         #expect(ContextFill.ago(30 * 60 * minute) == "yesterday")
         #expect(ContextFill.ago(3 * 24 * 60 * minute) == "3 days ago")
-        #expect(ContextFill(used: 1, size: 2).line(now: 0) == "A fresh session starts at 80%")
+        #expect(ContextFill(used: 1, size: 2).line(now: 0) == nil)
         let now = 1_795_187_131_000
-        #expect(ContextFill(used: 1, size: 2, compacted: now - 2 * 60 * minute).line(now: now) == "Compacted 2 h ago · a fresh session starts at 80%")
+        #expect(ContextFill(used: 1, size: 2, compacted: now - 2 * 60 * minute).line(now: now) == "Compacted 2 h ago")
+    }
+
+    @Test func whatTheChatCosts() throws {
+        let given: JSON = ["used": 82_000, "size": 200_000, "tokens": ["turn": 410_000, "day": 6_200_000]]
+        let fill = try #require(ContextFill(given))
+        #expect(fill.costs.map { "\($0.0) \($0.1)" } == ["Last turn 410k", "Last 24 hours 6.2M"])
+        #expect(ContextFill(used: 1, size: 2).costs.isEmpty)
+        #expect(ContextSheet.height(fill) > ContextSheet.height(nil))
     }
 
     @Test func aGroupChatsCardSaysWhoseItIs() throws {

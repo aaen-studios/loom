@@ -34,11 +34,17 @@ struct ContextRing: View {
 }
 
 /// The ring's card, as a sheet: how many tokens the session holds of its window, as a bar,
-/// when it was last compacted and where a fresh session starts, with Compact now (where
-/// its program compacts when asked) and Start a fresh session.
+/// what the chat costs (its last turn's tokens and the last 24 hours'), when it was last
+/// compacted, with Compact now (where its program compacts when asked) and Start a fresh
+/// session.
 struct ContextSheet: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
+
+    /// The sheet's height: the card's, with a row more for each of what the chat costs.
+    static func height(_ fill: ContextFill?) -> CGFloat {
+        220 + CGFloat((fill?.costs.count ?? 0) * 30)
+    }
 
     var body: some View {
         let model = session.model
@@ -61,10 +67,23 @@ struct ContextSheet: View {
                     }
                 }
                 .frame(height: 6)
-                TimelineView(.periodic(from: .now, by: 60)) { t in
-                    Text(fill.line(now: Int(t.date.timeIntervalSince1970 * 1000)))
-                        .font(Fonts.caption)
-                        .foregroundStyle(P.ink3)
+                ForEach(fill.costs, id: \.0) { name, tokens in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(name)
+                            .font(Fonts.ui(Tokens.PhoneSize.small))
+                            .foregroundStyle(P.ink2)
+                        Spacer(minLength: Tokens.Space.s)
+                        Text(tokens)
+                            .font(Fonts.mono(Tokens.PhoneSize.small, relativeTo: .subheadline))
+                            .foregroundStyle(P.ink)
+                    }
+                }
+                if fill.compacted != nil {
+                    TimelineView(.periodic(from: .now, by: 60)) { t in
+                        Text(fill.line(now: Int(t.date.timeIntervalSince1970 * 1000)) ?? "")
+                            .font(Fonts.caption)
+                            .foregroundStyle(P.ink3)
+                    }
                 }
                 HStack(spacing: Tokens.Space.s) {
                     if fill.compacts {
@@ -91,7 +110,7 @@ struct ContextSheet: View {
         .padding(.top, Tokens.Space.xl)
         .frame(maxHeight: .infinity, alignment: .top)
         .background(P.bg)
-        .presentationDetents([.height(220)])
+        .presentationDetents([.height(ContextSheet.height(model.context))])
         .presentationDragIndicator(.visible)
         // Its chat's context went, as when another chat opened: so does its card.
         .onChange(of: model.context == nil) { _, gone in
