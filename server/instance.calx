@@ -5488,7 +5488,7 @@ impl Instance {
         // sandbox, for a member's) once the server gave others than the ones
         // kept: each checked here, as anything from a sandbox is.
         if req.path == "/api/mcp/icon" {
-            let name = str_at(body.copy(), "server") ?? String()
+            let name = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
             if try i.store.mcp_server(g.user.copy(), name.copy()) == none { return some(http_error(404, "not_found", "There's no MCP server {name}.")) }
             var got = icons.Got { key: str_at(body.copy(), "key") ?? String(), fresh: true, light: List<u8>(), dark: List<u8>() }
             for (field, light) in [("icon", true), ("icon_dark", false)] {
@@ -5518,7 +5518,7 @@ impl Instance {
         // says they must sign in; `sign_in` shows them a card for it in the
         // agent's reply.
         if req.path == "/api/mcp/token" or req.path == "/api/mcp/sign_in" {
-            let name = str_at(body, "server") ?? String()
+            let name = i.server_now(g.user.copy(), str_at(body, "server") ?? String())
             let server = try i.store.mcp_server(g.user.copy(), name.copy()) else return some(http_error(404, "not_found", "There's no MCP server {name}."))
             if str_at(server.copy(), "url") == none or own_auth(server) { return some(http_error(400, "bad_request", "{name} doesn't sign in.")) }
             if req.path == "/api/mcp/sign_in" {
@@ -5535,7 +5535,7 @@ impl Instance {
             i.renew(g.user, name, some(req.copy()))
             return none
         }
-        let server = str_at(body.copy(), "server") ?? String()
+        let server = i.server_now(g.user.copy(), str_at(body.copy(), "server") ?? String())
         let tool = str_at(body.copy(), "tool") ?? String()
         let read_only = bool_at(body.copy(), "read_only") ?? false
         let args = at(body, "arguments")
@@ -10446,6 +10446,10 @@ impl Instance {
             try i.store.delete_meta("{kept}/{user}/{was}")
         }
         _ = try i.store.delete_mcp_server(user.copy(), was.copy())
+        // A chat already running knows it by `was` until its next session
+        // (LOO-378): `server_now` takes that name to this one.
+        try i.store.delete_meta("mcp_renamed/{user}/{name}")
+        try i.store.set_meta("mcp_renamed/{user}/{was}", name.copy())
         if let c = i.connects.remove("{user}/{was}") {
             var moved = c
             moved.server = name.copy()
@@ -10462,6 +10466,22 @@ impl Instance {
             if test.user == user and test.server == was { test.server = name.copy() }
         }
         return Answer.Value(Json.Null)
+    }
+
+    // The name `user`'s MCP server `name` has now: its own, or, for one
+    // renamed since (rename_server), the name it has now, so a chat already
+    // running reaches it by the name its session started with. A name that's
+    // neither is given back as it is.
+    fn server_now(i: Instance, user: String, name: String) -> String {
+        var current = name.copy()
+        for _ in 0..8 {
+            if let ok(some(_)) = i.store.mcp_server(user.copy(), current.copy()) { return current }
+            current = match i.store.meta("mcp_renamed/{user}/{current}") {
+                ok(some(next)) => next,
+                _ => return name.copy(),
+            }
+        }
+        return name.copy()
     }
 
     // What a test of `user`'s server `server` found, kept for mcp.list's
@@ -17274,6 +17294,8 @@ impl Instance {
                 }
             }
             try i.store.put_mcp_server(user.copy(), done.copy())
+            // A server by this name is this one now, not one renamed from it.
+            try i.store.delete_meta("mcp_renamed/{user}/{server_name}")
             if renamed {
                 if let Answer.Refused(code, message) = try i.rename_server(user.copy(), device.copy(), was, server_name.copy()) { return Answer.Refused(code, message) }
             }

@@ -198,6 +198,12 @@ fn run(i: Instance, fake: String) ! Error {
     try check(found_again.contains("mcp.acta.whoami("), "and the waiting agent's tools come once its person has")
 
     // --- Renaming it ---
+    // A chat that keeps its servers, running from before the rename.
+    let keeper = str_at(at(at(try app.cmd("q_k1", "agent.create", Obj.new().s("name", String("Keeper")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).j("mcp", Json.Array([Json.Str(String("acta"))])).done()), "value"), "agent"), "id") ?? String()
+    let kept_chat = str_at(at(try app.cmd("q_k2", "conversation.create", Obj.new().s("agent", keeper.copy()).done()), "value"), "conversation") ?? String()
+    let whoami = "/mcpkeep run_code {Obj.new().s("code", String("return await mcp.acta.whoami();")).done()}"
+    let first_call = try say(mut app, kept_chat.copy(), String("m_k1"), whoami.copy())
+    try check(first_call.contains("ada"), "an agent that keeps its servers calls the server by its name")
     let revoked_before = try count(fake.copy(), "revoked")
     let renamed = try app.cmd("q_r1", "mcp.put", Obj.new().s("name", String("tracker")).s("was", String("acta")).s("url", "{fake}/mcp").done())
     wait_ms(500)
@@ -208,6 +214,14 @@ fn run(i: Instance, fake: String) ! Error {
     let c3 = try app.cmd("q_r4", "conversation.create", Obj.new().s("agent", agent.copy()).done())
     let found_renamed = try say(mut app, str_at(at(c3, "value"), "conversation") ?? String(), String("m_5"), String(#"/mcp search_tools {"query":"whoami"}"#))
     try check(found_renamed.contains("mcp.tracker.whoami("), "and its agent gets its tools by its new name")
+    // The chat from before still knows it as acta (LOO-378).
+    _ = try fetch_text("{fake}/test/expire")
+    let refreshed_before = try count(fake.copy(), "refreshed")
+    let old_name = try say(mut app, kept_chat, String("m_k2"), whoami)
+    try check(old_name.contains("ada") and try count(fake.copy(), "refreshed") == refreshed_before + 1, "a chat running from before reaches it by its old name, and its token is renewed under it")
+    // A rollback to before the rename keeps the server by its new name.
+    let rolled = try app.cmd("q_k3", "agent.rollback", Obj.new().s("agent", keeper.copy()).i("revision", 1).done())
+    try check(ok_of(rolled.copy()) and "{at(at(at(rolled, "value"), "agent"), "mcp")}" == #"["tracker"]"#, "rolling the agent back to a revision from before keeps the server by its new name")
 
     // --- A server that doesn't let apps sign up ---
     _ = try app.cmd("q_23", "mcp.put", Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").done())
