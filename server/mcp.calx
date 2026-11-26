@@ -190,6 +190,7 @@ struct Code {
     tools: List<Tool>
     servers: Map<String, Server>
     trouble: List<String>    // servers that didn't start, and why
+    said_trouble: List<String>    // the trouble search_tools has said in this session
     signing: List<String>    // servers that wait for their person to sign in
     added: bool    // an add_mcp_server call went, so the agent may have a server more
     runs: i64
@@ -429,7 +430,14 @@ impl Code {
         self.load(link)
         let limit = int_at(args.copy(), "limit") ?? 10
         let most: usize = if limit < 1 { 1 } else if limit > 30 { 30 } else { usize.wrap(limit) }
-        return said(codemode.search(self.tools.copy(), str_at(args, "query") ?? String(), most, self.not_reached()))
+        // A server that didn't start is said once a session, and again when the
+        // search names it.
+        let query = str_at(args, "query") ?? String()
+        let trouble = codemode.trouble_to_say(self.not_reached(), self.said_trouble.copy(), query.copy())
+        for t in trouble.copy() {
+            if not self.said_trouble.contains(t.copy()) { self.said_trouble.push(t.copy()) }
+        }
+        return said(codemode.search(self.tools.copy(), query, most, trouble))
     }
 
     // Where Deno is, asking the instance, which fetches it the first time.
@@ -823,7 +831,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), said_trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }

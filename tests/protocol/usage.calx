@@ -1,0 +1,409 @@
+module tests.protocol.usage
+
+// What loom sends an agent program on each turn, measured (LOO-384). The fake
+// agent, with FAKE_RECORD, keeps a line for each prompt it gets: its session,
+// its characters, those of loom's "[loom: ...]" notes, and what it said back. So
+// this test counts what each kind of turn carries: what's sent, how many earlier
+// turns came with it in its session and their characters, as a real program
+// would read them again. It prints what it measured, then checks the numbers
+// that should stay true; with --measure it only prints them.
+//
+//  - A person's messages: the notes on a session's first turn, on the turns
+//    after, after the program is started again on the same session, and after
+//    its context is compacted.
+//  - The turn an agent looks back over a paused chat in: after a short exchange,
+//    one of only tool calls, and a long one.
+//  - search_tools in a session whose MCP server didn't start.
+//  - A chat whose context crosses the size it's compacted at.
+//
+//     calx tests/protocol/usage.calx [--measure]
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{Child, Stdio, exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, post_json, reply_text}
+import tests.kit
+import tests.kit.{Instance, calx, device, loom}
+
+const MINUTE_MS: str = "50"    // after the restart, a chat pauses 200 ms after its last turn, and its cache is cold 3 s after
+const WAIT: u64 = 120000
+
+struct Turn {
+    session: String
+    chars: i64
+    loom: i64
+    notes: List<String>
+    said: i64
+    summary: bool    // whether loom asked for a summary of the chat
+}
+
+// What the fake agent recorded, every prompt in order.
+fn turns(path: String) -> List<Turn> {
+    var out = List<Turn>()
+    let text = match fs.read_text(path) {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+    for line in text.split("\n") {
+        if line.trim().len() == 0 { continue }
+        let j = match parse(line.copy()) {
+            ok(v) => v,
+            err(_) => continue,
+        }
+        var notes = List<String>()
+        if let Json.Array(list) = at(j.copy(), "notes") {
+            for n in list { notes.push(n.as_str() ?? String()) }
+        }
+        out.push(Turn { session: str_at(j.copy(), "session") ?? String(), chars: int_at(j.copy(), "chars") ?? 0, loom: int_at(j.copy(), "loom") ?? 0, notes: notes, said: int_at(j.copy(), "said") ?? 0, summary: bool_at(j, "summary") ?? false })
+    }
+    return out
+}
+
+// How many turns came before turn `k` in its session, and their characters,
+// prompts and answers, as its program would carry them.
+fn carried(all: List<Turn>, k: usize) -> (i64, i64) {
+    var n: i64 = 0
+    var chars: i64 = 0
+    for j in 0usize..k {
+        if all[j].session != all[k].session { continue }
+        n += 1
+        chars += all[j].chars + all[j].said
+    }
+    return (n, chars)
+}
+
+fn noted(t: Turn, start: str) -> bool {
+    for n in t.notes {
+        if n.starts_with(start) { return true }
+    }
+    return false
+}
+
+fn looks_back(t: Turn) -> bool {
+    return noted(t, "[loom: Your chat with your person has paused") or noted(t, "[loom: Look back")
+}
+
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created", 60000)
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: String, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation.copy()).s("text", text).done())
+    return reply_text(try reply_in(mut app, conversation))
+}
+
+fn wait_ms(ms: u64) {
+    unsafe { sleep(ms * 1000000) }
+}
+
+// An instance on `data` with the fake agent picking sessions up again, recording
+// to `record`, with `extra` options for `loom serve`.
+fn serve(data: String, record: String, extra: List<String>) -> (Child, String) ! Error {
+    var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
+    args.extend(extra)
+    let server = try loom(data, args).env(String("FAKE_RECORD"), record).own_group().stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        server.kill_tree()
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    return (server, base)
+}
+
+fn start_instance(record: String) -> Instance ! Error {
+    let data = try fs.temp_dir()
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent, String("--resume")]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    let (server, base) = try serve(data.copy(), record, List<String>())
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        server.kill_tree()
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    let (status, owner) = try post_json(base.copy(), "/api/setup", Obj.new().s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", device("Desk PC")).done())
+    if status != 200 {
+        server.kill_tree()
+        fail "setup failed: {owner}"
+    }
+    return Instance { server: server, data: data, base: base, token: str_at(owner, "token") ?? String() }
+}
+
+// The instance killed, as a crash would, its agents with it, and started again.
+fn again(i: own Instance, record: String, extra: List<String>) -> Instance ! Error {
+    var old = i.server
+    old.kill_tree()
+    _ = old.wait()
+    let (server, base) = try serve(i.data.copy(), record, extra)
+    return Instance { server: server, data: i.data, base: base, token: i.token }
+}
+
+// What was measured, a line each, and the checks to make of it.
+struct Measured {
+    lines: List<String>
+    checks: List<(bool, String)>
+}
+
+impl Measured {
+    fn say(m: mut Measured, line: own String) {
+        println("      {line}")
+        m.lines.push(line)
+    }
+
+    fn want(m: mut Measured, passed: bool, what: own String) {
+        m.checks.push((passed, what))
+    }
+}
+
+fn agent_in(app: mut Session, id: str, name: str, mcp: List<String>) -> String ! Error {
+    var list = List<Json>()
+    for s in mcp { list.push(Json.Str(s.copy())) }
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("allow")).j("mcp", Json.Array(list)).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+fn chat_of(app: mut Session, id: str, agent: String) -> String ! Error {
+    let c = try app.cmd(id, "conversation.create", Obj.new().s("agent", agent).done())
+    return str_at(at(c, "value"), "conversation") ?? String()
+}
+
+// A person's messages in a short chat and a long one, then after the program
+// starts again on the same session, and after a compaction.
+fn messages_part(app: mut Session, m: mut Measured, record: String, agent: String) -> String ! Error {
+    _ = try app.cmd("q_p1", "profile.put", Obj.new().s("text", String("Ada builds a chat app for agents in Calx. Ada lives in Bergen, works at a studio until the end of the year, and likes short answers without filler. Ada's main projects: an app, a compiler, a bot.")).done())
+    // The fake agent keeps its prompt cache an hour, as Claude Code does.
+    _ = try app.cmd("q_p0", "acp.settings", Obj.new().s("name", String("fake")).j("env", Obj.new().s("ENABLE_PROMPT_CACHING_1H", String("1")).done()).done())
+    _ = try app.cmd("q_p2", "defaults.put", Obj.new().s("instructions", String("Answer in English, in short paragraphs.")).done())
+    let chat = try chat_of(mut app, "q_p3", agent)
+    let from = turns(record.copy()).len()
+    for n in 1..21 {
+        _ = try say(mut app, chat.copy(), "m_p{n}", "Message {n}: here is a little more about the plan for today.")
+    }
+    let all = turns(record.copy())
+    let first = all[from].copy()
+    var later: i64 = 0
+    for k in from + 1..all.len() { later += all[k].loom }
+    let (n20, c20) = carried(all.copy(), all.len() - 1)
+    m.say("person, 1st turn of a session: {first.chars} chars sent, {first.loom} of them loom's notes ({first.notes.len()} notes)")
+    m.say("person, turns 2-20: {later} chars of loom's notes in all; turn 20 carries {n20} earlier turns, {c20} chars")
+    m.want(later == 0, String("a short chat's later turns carry no notes of loom's"))
+    return chat
+}
+
+fn after_restart_part(app: mut Session, m: mut Measured, record: String, chat: String) ! Error {
+    let from = turns(record.copy()).len()
+    _ = try say(mut app, chat.copy(), String("m_r1"), String("After the restart: what was the plan again?"))
+    let all = turns(record.copy())
+    let t = all[from].copy()
+    let (n, c) = carried(all.copy(), from)
+    m.say("person, 1st turn after the program started again on its session: {t.loom} chars of loom's notes ({t.notes.len()} notes); it carries {n} earlier turns, {c} chars")
+    m.want(t.loom == 0, String("a session picked up again isn't told loom's notes again"))
+    // Compacted, the session's summary may have lost them: the next turn says them again.
+    _ = try say(mut app, chat.copy(), String("m_r2"), String("/usage 60000 200000\nfuller"))
+    let compact = try app.cmd("q_r1", "conversation.compact", Obj.new().s("conversation", chat.copy()).done())
+    let run = str_at(at(compact, "value"), "run") ?? String()
+    loop {
+        let done = try app.until("event", "run.finished", 30000)
+        if str_at(done, "run") == some(run.copy()) { break }
+    }
+    let at_compact = turns(record.copy()).len()
+    _ = try say(mut app, chat.copy(), String("m_r3"), String("After the compaction."))
+    let after = turns(record.copy())[at_compact].copy()
+    m.say("person, 1st turn after a compaction: {after.loom} chars of loom's notes ({after.notes.len()} notes)")
+    m.want(noted(after.copy(), "[loom: Your person's agents share the folder") and noted(after.copy(), "[loom: To give your person a file") and noted(after, "[loom: About the person"), String("the turn after a compaction is told loom's notes again"))
+}
+
+// The turn an agent looks back in, after a short exchange, a tool-only one and a long one.
+fn look_back_part(app: mut Session, m: mut Measured, record: String, agent: String) ! Error {
+    let chat = try chat_of(mut app, "q_l1", agent)
+    let start = turns(record.copy()).len()
+    _ = try say(mut app, chat.copy(), String("m_l1"), String("Hi there, starting a new chat now."))
+    wait_ms(1500)
+    var mark = turns(record.copy()).len()
+    _ = try say(mut app, chat.copy(), String("m_l2"), String("thanks"))
+    wait_ms(1500)
+    let short = turns(record.copy())
+    var short_looks: i64 = 0
+    var short_carried: i64 = 0
+    for k in mark..short.len() {
+        if looks_back(short[k].copy()) {
+            short_looks += 1
+            let (_, c) = carried(short.copy(), k)
+            short_carried += c
+        }
+    }
+    m.say("look-back after a short exchange (thanks / thanks): {short_looks} turns, carrying {short_carried} chars")
+    mark = short.len()
+    _ = try say(mut app, chat.copy(), String("m_l3"), String("/tool ls\n/tool cat notes.md"))
+    wait_ms(1500)
+    let tools = turns(record.copy())
+    var tool_looks: i64 = 0
+    for k in mark..tools.len() {
+        if looks_back(tools[k].copy()) { tool_looks += 1 }
+    }
+    m.say("look-back after an exchange of only tool calls: {tool_looks} turns")
+    mark = tools.len()
+    var long = String("Here's what I decided about the trip. ")
+    for k in 0..12 { long.push_str("Day {k}: we take the morning train to Bergen, hike in the afternoon and eat at the place by the harbour. ") }
+    _ = try say(mut app, chat.copy(), String("m_l4"), long)
+    wait_ms(1500)
+    let longs = turns(record.copy())
+    var long_looks: i64 = 0
+    var long_sent: i64 = 0
+    var long_carried: i64 = 0
+    for k in mark..longs.len() {
+        if looks_back(longs[k].copy()) {
+            long_looks += 1
+            long_sent += longs[k].chars
+            let (_, c) = carried(longs.copy(), k)
+            long_carried += c
+        }
+    }
+    m.say("look-back after a long exchange (~1.3k chars each way): {long_looks} turns, {long_sent} chars sent, carrying {long_carried} chars")
+    var all_looks: i64 = 0
+    for k in start..longs.len() {
+        if looks_back(longs[k].copy()) { all_looks += 1 }
+    }
+    m.say("look-back turns over the four exchanges: {all_looks}")
+    m.want(short_looks == 0, String("no look-back after a short exchange"))
+    m.want(tool_looks == 0, String("no look-back after an exchange of only tool calls"))
+    m.want(long_looks == 1, String("one look-back after a long exchange"))
+}
+
+// search_tools in a session whose MCP server didn't start, three times.
+fn search_part(app: mut Session, m: mut Measured) ! Error {
+    _ = try app.cmd("q_s1", "mcp.put", Obj.new().s("name", String("gitbox")).s("command", String("loom-no-such-program")).j("args", Json.Array(List<Json>())).done())
+    let agent = try agent_in(mut app, "q_s2", "Searcher", [String("gitbox")])
+    let chat = try chat_of(mut app, "q_s3", agent)
+    var said: usize = 0
+    for n in 1..4 {
+        let r = try say(mut app, chat.copy(), "m_s{n}", String(#"/mcpkeep search_tools {"query":"notification"}"#))
+        said += r.split("Not reached").len() - 1
+    }
+    m.say("search_tools three times with an MCP server down: \"Not reached\" said {said} times")
+    let named = try say(mut app, chat.copy(), String("m_s4"), String(#"/mcpkeep search_tools {"query":"gitbox issues"}"#))
+    m.say("search_tools naming the server that's down: says it {if named.contains("Not reached") { "again" } else { "not" }}")
+    m.want(said == 1, String("search_tools says a server that didn't start once a session"))
+    m.want(named.contains("Not reached: gitbox"), String("and again when the search names it"))
+}
+
+// A long chat: its turns while the prompt cache is warm stay in its session,
+// whatever it holds; once it holds 60k tokens, the quiet turn at its pause asks
+// for a summary; and the first turn after the cache went cold goes to a fresh
+// session given that summary and the newest of the chat, at once, with no line
+// in the chat.
+fn swap_part(app: mut Session, m: mut Measured, record: String) ! Error {
+    let agent = try agent_in(mut app, "q_c1", "Grower", List<String>())
+    let chat = try chat_of(mut app, "q_c2", agent)
+    let start = turns(record.copy()).len()
+    var summary = String("/next /say Summary: Ada is planning a trip to Tromsø in May.")
+    for k in 0..6 { summary.push_str(" Day {k} has the morning train, a hike and dinner by the harbour.") }
+    // Each turn adds 35k tokens, to 140k, with a pause after each while the cache is warm.
+    var long_session = String()
+    for n in 1..5 {
+        let used = n * 35000
+        let r = try say(mut app, chat.copy(), "m_c{n}", "/usage {used} 200000\n{if n == 4 { "{summary}\n/session" } else { String() }}\nTurn {n} of a growing chat, with enough words in it to be worth looking back over later on. The plan is to keep going with the trip, the trains and the hikes, and to book the places to stay before the end of the week.")
+        if n == 4 { long_session = session_in(r) }
+        wait_ms(1000)
+    }
+    let warm = try say(mut app, chat.copy(), String("m_c5"), String("/session\nStill warm."))
+    let before = turns(record.copy())
+    var asked: i64 = 0
+    for k in start..before.len() {
+        if before[k].summary { asked += 1 }
+    }
+    let warm_session = session_in(warm.copy())
+    let carried_warm = before[before.len() - 1].chars
+    // The cache goes cold: 60 minutes here are 3 s.
+    wait_ms(3500)
+    let sent_at = unsafe { Instant.now() }
+    let cold = try say(mut app, chat.copy(), String("m_c6"), String("/session\n/context\nBack after a while: which day had the harbour dinner?"))
+    let waited = unsafe { Instant.now() }.nanos_since(sent_at) / 1000000
+    let after = turns(record.copy())
+    let swapped = after[after.len() - 1].copy()
+    // Little was said after the summary, so the warm turn's pause didn't ask again.
+    var again_asked: i64 = 0
+    for k in before.len()..after.len() {
+        if after[k].summary { again_asked += 1 }
+    }
+    var lines: i64 = 0
+    let msgs = try app.cmd("q_c5", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    if let Json.Array(items) = at(at(msgs, "value"), "messages") {
+        for x in items {
+            if str_at(x, "role") == some(String("loom")) { lines += 1 }
+        }
+    }
+    let fresh = session_in(cold.copy()) != warm_session
+    m.say("a chat growing to 140k tokens: {asked} pause turns asked for a summary, and {again_asked} after a short turn that followed it; a turn while warm {if warm_session == long_session { "stays in its session" } else { "moved" }} ({carried_warm} chars sent)")
+    m.say("its first turn after the cache went cold: {if fresh { "a fresh session" } else { "the same session, holding 140k tokens" }}, sent {swapped.chars} chars ({swapped.loom} of them the carried summary and chat), answered in {waited} ms; {lines} lines in the chat")
+    m.want(asked >= 1, String("a long chat's pause asks for its summary"))
+    m.want(again_asked == 0, String("and not again when little was said since"))
+    m.want(warm_session == long_session and long_session.len() > 0, String("a turn while the cache is warm stays in its session"))
+    m.want(fresh and noted(swapped.copy(), "[loom: Your chat with your person goes on from"), String("the first turn after it's cold goes to a fresh session"))
+    m.want(cold.contains("Your summary of it, as you wrote it at") and cold.contains("Ada is planning a trip to Tromsø in May") and cold.contains("Turn 4 of a growing chat"), String("which is given the summary the pause wrote and the newest of the chat"))
+    m.want(swapped.loom > 0 and swapped.loom < 30000, String("in under 30k chars"))
+    m.want(lines == 0, String("with no line in the chat"))
+}
+
+fn measure(record: String, m: mut Measured, i: mut Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let agent = try agent_in(mut app, "q_a", "Main", List<String>())
+    let chat = try messages_part(mut app, mut m, record.copy(), agent.copy())
+    app.close()
+    // The instance and its agent programs start again: the session is picked up.
+    i = try again(i.copy(), record.copy(), [String("--test-minute-ms"), String(MINUTE_MS)])
+    app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    try after_restart_part(mut app, mut m, record.copy(), chat)
+    try look_back_part(mut app, mut m, record.copy(), agent)
+    try search_part(mut app, mut m)
+    try swap_part(mut app, mut m, record)
+    app.close()
+}
+
+fn main() ! Error {
+    let measure_only = env.args().contains(String("--measure"))
+    let scratch = try fs.temp_dir()
+    let record = "{scratch}/record.jsonl"
+    println("usage, as measured:")
+    var m = Measured { lines: List<String>(), checks: List<(bool, String)>() }
+    var inst = try start_instance(record.copy())
+    let failure: String? = match measure(record, mut m, mut inst) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    kit.remove_scratch(scratch)
+    if let e = failure {
+        eprintln("\n{e}")
+        exit(1)
+    }
+    if measure_only { return }
+    var failed = false
+    for (passed, what) in m.checks {
+        if passed { println("ok    {what}") } else {
+            println("FAIL  {what}")
+            failed = true
+        }
+    }
+    if failed { exit(1) }
+    println("\nusage: all good")
+}
+
+// The session a reply of /session names ("session ID"), or "".
+fn session_in(reply: String) -> String {
+    let found = reply.find("session fake_") else return String()
+    var id = String()
+    for r in reply[found + 8..].runes() {
+        if not ((r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') or r == '_') { break }
+        id.push(r)
+    }
+    return id
+}

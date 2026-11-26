@@ -22,13 +22,11 @@ import { threadOf, threadsIn, yarnsIn, type Mood, type Thread } from './thread';
 
 type Chat = 'juniper' | 'shop' | 'moss';
 /** How full each chat's session is, in thousands of tokens of 200k, what its card's title
- * says, and its line: in the Shop group chat, the member that answered last's. */
-type Fill = { used: number; title: string; line: string; who?: string };
-/** Where the context card says a fresh session starts, after when it was compacted or on its own. */
-const FRESH_AT = 'a fresh session starts at 80%';
-const FRESH_ALONE = 'A fresh session starts at 80%';
+ * says, what the chat costs (its last turn's tokens and the last 24 hours') and its line, when
+ * it was compacted: in the Shop group chat, the member that answered last's. */
+type Fill = { used: number; title: string; line: string; turn: string; day: string; who?: string };
 /** The Shop group chat's context once Biscuit has answered there. */
-const BISCUIT_FILL: Fill = { used: 61, title: "Biscuit's context", line: FRESH_ALONE, who: 'Biscuit' };
+const BISCUIT_FILL: Fill = { used: 61, title: "Biscuit's context", line: '', turn: '58k', day: '1.2M', who: 'Biscuit' };
 /** The steps of Moss's T3 thread, a minute apart as its card counts them, before it's done. */
 const T3_STEPS = ['rg -n Contiune src', 'Edit src/checkout/PayButton.tsx', 'bun test checkout'];
 
@@ -181,14 +179,14 @@ export function play(app: HTMLElement) {
 	let cardLeft = 0;
 	// Each chat's session: Juniper's, the Shop group chat's member that answered last, Juniper
 	// until Biscuit answers ("Juniper's context"), and Moss's (model.rs, context_title,
-	// ContextFill::line).
+	// ContextFill::costs, ContextFill::line).
 	const fills: Record<Chat, Fill> = {
-		juniper: { used: 82, title: 'Context', line: `Compacted 2 h ago · ${FRESH_AT}` },
-		shop: { used: 23, title: "Juniper's context", line: FRESH_ALONE, who: 'Juniper' },
-		moss: { used: 24, title: 'Context', line: `Compacted 15 h ago · ${FRESH_AT}` },
+		juniper: { used: 82, title: 'Context', line: 'Compacted 2 h ago', turn: '410k', day: '6.2M' },
+		shop: { used: 23, title: "Juniper's context", line: '', turn: '96k', day: '1.1M', who: 'Juniper' },
+		moss: { used: 24, title: 'Context', line: 'Compacted 15 h ago', turn: '64k', day: '380k' },
 	};
 	const drawContext = () => {
-		const { used, title, line } = fills[chat];
+		const { used, title, line, turn, day } = fills[chat];
 		const size = 200;
 		const percent = Math.floor((used * 100) / size);
 		ring.querySelector<SVGElement>('.fill')!.style.setProperty('--fill', String(percent));
@@ -197,6 +195,9 @@ export function play(app: HTMLElement) {
 		card.querySelector<HTMLElement>('.cc-title')!.textContent = title;
 		card.setAttribute('aria-label', title);
 		cardLine.textContent = line;
+		cardLine.hidden = line === '';
+		card.querySelector<HTMLElement>('[data-context-turn]')!.textContent = turn;
+		card.querySelector<HTMLElement>('[data-context-day]')!.textContent = day;
 		ringAt.classList.toggle('warn', percent >= 70 && percent < 90);
 		ringAt.classList.toggle('bad', percent >= 90);
 		ring.setAttribute('aria-label', `Context ${percent}%, ${used}k of ${size}k`);
@@ -246,7 +247,7 @@ export function play(app: HTMLElement) {
 			const before = fills[chat].used;
 			const after = compact ? Math.max(1, Math.round(before / 10)) : 0;
 			const who = fills[chat].who;
-			fills[chat] = { ...fills[chat], used: after, line: compact ? `Compacted just now · ${FRESH_AT}` : FRESH_ALONE };
+			fills[chat] = { ...fills[chat], used: after, line: compact ? 'Compacted just now' : '' };
 			drawContext();
 			const line = tpl('demo-loom-line');
 			line.querySelector('span')!.textContent = compact

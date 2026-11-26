@@ -118,6 +118,12 @@ module tests.fake_agent.main
 // With "USAGE:USED/SIZE" in the message, the router's session also reports its
 // context as USED tokens of a SIZE window (usage_update), as /usage does.
 //
+// With FAKE_RECORD set to a file, it adds a line of JSON to that file for each
+// prompt it plays, for measuring what loom sends (tests/protocol/usage.calx):
+// {"session", "chars" (every text block's), "loom" (those of its "[loom: ...]"
+// blocks), "notes" (the start of each of those), "said" (what it said back),
+// "summary" (whether loom asked it for a summary of its chat)}.
+//
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
 // session/load and refuses every one. Without, it offers neither. With
@@ -1247,6 +1253,7 @@ impl Agent {
             r.insert("usage", Json.Object(usage))
         }
         respond(id, Json.Object(r))
+        usage_record(session.copy(), params.copy(), said_chars)
         if let (used, size) = compacted {
             a.next_id += 1
             compaction(session, "compact_{a.next_id}", last_used, used, size)
@@ -1443,6 +1450,41 @@ fn route_pick(context: String, up: String) -> String {
 
 fn method(m: Json) -> String {
     return (m.get(String("method")) ?? Json.Null).as_str() ?? String()
+}
+
+// With FAKE_RECORD set, a line for the prompt `params` gave `session`, which it
+// answered with `said` characters: its text blocks' characters, those of loom's
+// notes and the start of each.
+fn usage_record(session: String, params: Json, said: i64) {
+    let path = env.variable(String("FAKE_RECORD")) else return
+    var chars: i64 = 0
+    var loom: i64 = 0
+    var notes = List<Json>()
+    var summary = false
+    if let Json.Array(blocks) = params.get(String("prompt")) ?? Json.Null {
+        for b in blocks {
+            let t = (b.get(String("text")) ?? Json.Null).as_str() else continue
+            chars += i64.wrap(t.len())
+            if t.starts_with("[loom:") {
+                loom += i64.wrap(t.len())
+                if t.contains("answer with a summary") { summary = true }
+                var start = String()
+                for r in t.runes() {
+                    if start.len() >= 48 { break }
+                    start.push(r)
+                }
+                notes.push(js(start))
+            }
+        }
+    }
+    var line = LinkedMap<String, Json>()
+    line.insert("session", js(session))
+    line.insert("chars", int(chars))
+    line.insert("loom", int(loom))
+    line.insert("notes", Json.Array(notes))
+    line.insert("said", int(said))
+    line.insert("summary", Json.Bool(summary))
+    if let err(e) = fs.append_text(path, "{Json.Object(line)}\n") { eprintln("fake agent: recording: {e}") }
 }
 
 fn main() {

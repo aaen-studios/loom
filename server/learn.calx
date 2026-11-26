@@ -13,9 +13,6 @@ import std.json.{Json}
 import server.acp
 import shared.obj.{Obj, at, bool_at, str_at}
 
-// How long after a chat's last turn it has paused, in minutes: inside the five
-// minutes a prompt cache lasts, so looking back reads the chat from the cache.
-pub const PAUSE_MINUTES: i64 = 4
 // The most lines a fix's change shows, removed, added and around them.
 pub const LINES_MOST: usize = 400
 // The lines around each change in a fix, for where it is.
@@ -29,10 +26,36 @@ pub fn keeps_itself(mode: String) -> bool {
     return acp.allows(mode, String("edit"))
 }
 
+// The fewest characters the person and the agent said in a chat since its last
+// look back, without tool calls, that are worth looking back over: a "thanks",
+// an "ok, do it" with its "Done.", or a turn of only tool calls, isn't. What it
+// skips is looked back over with what comes after, at a later pause.
+pub const LOOK_BACK_LEAST: usize = 300
+
+// Whether a paused chat is looked back over, with `words` said in it since the
+// last look: enough of them, or any before its session is compacted, which would
+// leave them out, or a skill the agent said failed, which wants its fix.
+pub fn worth_looking_back(words: usize, compacting: bool, failed: bool) -> bool {
+    return words >= LOOK_BACK_LEAST or (compacting and words > 0) or failed
+}
+
 // What the agent is told in its quiet turn once its chat has paused, with the
-// failures of skills it said that no fix was proposed for. In a group chat it's
-// one of the members that answered there, and looks back over its own part.
-pub fn look_back(failures: List<Json>, in_room: bool) -> String {
+// failures of skills it said that no fix was proposed for, and where what's new
+// since it last looked back starts: the start of the person's message there, or
+// "" for the chat's start. In a group chat it's one of the members that answered
+// there, and looks back over its own part.
+pub fn look_back(failures: List<Json>, in_room: bool, since: String) -> String {
+    return pause_turn(failures, in_room, since, true, false)
+}
+
+// What the agent is told in its quiet turn at a pause: to look back, as
+// look_back says, when `looking`, and when `summing`, to answer with a summary of
+// the chat for the fresh session its next turn may go to, once the prompt cache
+// has gone cold (PLAN.md, "One endless chat").
+pub fn pause_turn(failures: List<Json>, in_room: bool, since: String, looking: bool, summing: bool) -> String {
+    let part = if in_room { "your part in the group chat you answer in with your person and their other agents" } else { "your chat with your person" }
+    let summary = "answer with a summary of {part} so far, for a fresh session of yours to carry on from: what they asked for and decided, the facts and names that matter, what you did and found, and what's still open, newest last, in up to 600 words. It goes with the newest of the chat word for word, and search_messages finds the rest, so give what's needed to carry on, not every detail."
+    if not looking { return "[loom: {if in_room { "The group chat you answer in has paused" } else { "Your chat with your person has paused" }}. Your person doesn't see this turn or what you say in it. Don't answer them: {summary}]" }
     var fixes = String()
     if failures.len() > 0 {
         var said = List<String>()
@@ -42,7 +65,9 @@ pub fn look_back(failures: List<Json>, in_room: bool) -> String {
         fixes = " You said {if said.len() == 1 { "a skill" } else { "skills" }} failed: {said.join("; ")}. Fix {if said.len() == 1 { "it" } else { "each" }} with fix_skill: read it with read_skill, and give it whole, with what went wrong put right and the rest as it was."
     }
     let chat = if in_room { "The group chat you answer in with your person and their other agents has paused. Look back over your part of it" } else { "Your chat with your person has paused. Look back over it" }
-    return "[loom: {chat}, from where you last did this or from its start, for what's worth keeping, and keep each with propose_note: a lasting fact about them or their work that you'd want in a later chat, one fact a note, with shared for one every agent of theirs should know, and site for one about a site. Not what recall has already, what only mattered today, or a secret.{fixes} Nothing at all is a fine answer. Your person doesn't see this turn or what you say in it, only what you keep, so don't answer them, and say nothing more than a word.]"
+    let from = if since.len() > 0 { "from your person's message \"{cut(since, 80)}\" on, which you haven't looked back over yet" } else { String("from its start") }
+    let then = if summing { "Your person doesn't see this turn or what you say in it, only what you keep. Don't answer them: once you've kept what's worth it, {summary}" } else { String("Your person doesn't see this turn or what you say in it, only what you keep, so don't answer them, and say nothing more than a word.") }
+    return "[loom: {chat}, {from}, for what's worth keeping, and keep each with propose_note: a lasting fact about them or their work that you'd want in a later chat, one fact a note, with shared for one every agent of theirs should know, and site for one about a site. Not what recall has already, what only mattered today, or a secret.{fixes} Nothing at all is a fine answer. {then}]"
 }
 
 // What a failure an agent says of a skill keeps: its step and why, cut short.
@@ -202,11 +227,29 @@ fn a_fix_shows_what_it_removes_and_adds_around_it() {
 
 @test
 fn looking_back_asks_for_notes_and_fixes() {
-    let plain = look_back(List<Json>(), false)
-    assert(plain.starts_with("[loom: Your chat with your person has paused.") and plain.contains("propose_note") and not plain.contains("fix_skill"))
-    let failed = look_back([Obj.new().s("skill", String("post-release-notes")).s("step", String("Press Publish")).s("why", String("There's no Publish button.")).done()], false)
+    let plain = look_back(List<Json>(), false, String())
+    assert(plain.starts_with("[loom: Your chat with your person has paused. Look back over it, from its start,") and plain.contains("propose_note") and not plain.contains("fix_skill"))
+    let failed = look_back([Obj.new().s("skill", String("post-release-notes")).s("step", String("Press Publish")).s("why", String("There's no Publish button.")).done()], false, String())
     assert(failed.contains("You said a skill failed: post-release-notes, at \"Press Publish\" (There's no Publish button.). Fix it with fix_skill"))
-    assert(look_back(List<Json>(), true).starts_with("[loom: The group chat you answer in with your person and their other agents has paused. Look back over your part of it, from where"))
+    assert(look_back(List<Json>(), true, String("Can you book\nthe train?")).starts_with("[loom: The group chat you answer in with your person and their other agents has paused. Look back over your part of it, from your person's message \"Can you book the train?\" on, which you haven't looked back over yet,"))
+}
+
+@test
+fn a_long_chats_pause_asks_for_its_summary_too() {
+    let both = pause_turn(List<Json>(), false, String("Book the train"), true, true)
+    assert(both.contains("propose_note") and both.contains("once you've kept what's worth it, answer with a summary of your chat with your person so far") and not both.contains("say nothing more than a word"))
+    let only = pause_turn(List<Json>(), true, String(), false, true)
+    assert(only.starts_with("[loom: The group chat you answer in has paused.") and only.contains("answer with a summary of your part in the group chat") and not only.contains("propose_note"))
+    assert(pause_turn(List<Json>(), false, String(), true, false) == look_back(List<Json>(), false, String()))
+}
+
+@test
+fn a_short_exchange_isnt_looked_back_over_but_before_a_compaction() {
+    assert(not worth_looking_back(0, false, false) and not worth_looking_back(LOOK_BACK_LEAST - 1, false, false))
+    assert(worth_looking_back(LOOK_BACK_LEAST, false, false))
+    // Before its session is compacted, anything said is, and a skill that failed always is.
+    assert(worth_looking_back(12, true, false) and not worth_looking_back(0, true, false))
+    assert(worth_looking_back(0, false, true))
 }
 
 @test

@@ -26,6 +26,8 @@ const MINUTE_MS: str = "150"
 
 const SKILL: str = "# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Publish.\n4. Share the link.\n"
 const FIXED: str = "# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release, at the top.\n4. Share the link.\n"
+// Words enough for a chat to be looked back over once it pauses (learn.LOOK_BACK_LEAST).
+const TALK: str = "We talked it through: the chess club meets on Tuesdays at the library, the Sunday runs start at the bridge at nine, and both of them should go in the shared calendar so nobody books anything else over them. Next week we try the new route along the river and the longer opening in the club games."
 
 // The agent's reply in `conversation`, the next to come.
 fn reply_in(app: mut Session, conversation: String, wait_ms: u32 = 30000) -> Json ! Error {
@@ -157,8 +159,10 @@ fn look_back_part(app: mut Session, chat: String) ! Error {
     try check((try skill_body(mut app, "q_l5")) == SKILL, "and the skill is as it was")
     try check((try activity(mut app, "q_l6")).contains("Undid the fix to the skill post-release-notes"), "which the activity log says")
 
-    // A message while it looks back stops that turn, and goes at once.
-    _ = try say(mut app, chat.copy(), "m_l6", String("/next /sleep 20000\nok"))
+    // A message while it looks back stops that turn, and goes at once. It says
+    // enough to be looked back over itself, whether or not the pause after the last
+    // came before it.
+    _ = try say(mut app, chat.copy(), "m_l6", "/next /sleep 20000\nok, and one more thing. {TALK}")
     let slow = try app.until("event", "run.started", 30000)
     try check(bool_at(slow.copy(), "quiet") == some(true), "the agent looks back again after the next pause")
     try app.send(Obj.new().s("t", String("send")).s("cid", String("m_l7")).s("conversation", chat.copy()).s("text", String("straight away")).done())
@@ -225,8 +229,8 @@ fn room_part(app: mut Session, juniper: String) ! Error {
     try agent_cmd(mut app, "q_g2", moss.copy(), "allow")
     let room = try app.cmd("q_g3", "room.create", Obj.new().s("name", String("Pair")).j("members", Json.Array([Json.Str(juniper.copy()), Json.Str(moss.copy())])).done())
     let pair = str_at(at(at(room, "value"), "conversation"), "id") ?? String()
-    let first = try say(mut app, pair.copy(), "m_g1", "[@Juniper](loom:agent/{juniper})\n/next /mcp propose_note \{\"text\":\"Ann plays chess.\"\}\nok")
-    let second = try say(mut app, pair.copy(), "m_g2", "[@Moss](loom:agent/{moss})\n/next /mcp propose_note \{\"text\":\"Ann runs on Sundays.\"\}\nok")
+    let first = try say(mut app, pair.copy(), "m_g1", "[@Juniper](loom:agent/{juniper})\n/next /mcp propose_note \{\"text\":\"Ann plays chess.\"\}\nok\n{TALK}")
+    let second = try say(mut app, pair.copy(), "m_g2", "[@Moss](loom:agent/{moss})\n/next /mcp propose_note \{\"text\":\"Ann runs on Sundays.\"\}\nok\n{TALK}")
     try check(str_at(first.copy(), "agent") == some(juniper.copy()) and str_at(second.copy(), "agent") == some(moss.copy()), "two members answer in a group chat")
     var quiet = List<Json>()
     var overlapped = false

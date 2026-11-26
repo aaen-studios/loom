@@ -175,7 +175,8 @@ CREATE TABLE IF NOT EXISTS events (
     at INTEGER NOT NULL, PRIMARY KEY (user, seq));
 CREATE TABLE IF NOT EXISTS acp_sessions (
     user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, program TEXT NOT NULL,
-    session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', PRIMARY KEY (user, conversation));
+    session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', told TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (user, conversation));
 -- How full a conversation's session context is, as its program last said: the tokens
 -- in it of its window (PLAN.md, "One endless chat"); when its program last compacted
 -- it (0 for not since it began); whether its program compacts one on request; in a
@@ -401,18 +402,27 @@ fn conversation_of(r: List<Value>) -> Json {
     }
     // How full its session's context is, once its program has said.
     let size = int(r[13].copy())
-    if size > 0 { o = o.j("context", context_of(int(r[12].copy()), size, int(r[14].copy()), int(r[15].copy()) != 0, text(r[16].copy()))) }
+    if size > 0 { o = o.j("context", context_of(int(r[12].copy()), size, int(r[14].copy()), int(r[15].copy()) != 0, text(r[16].copy()), int(r[17].copy()), int(r[18].copy()))) }
     return o.done()
 }
 
+const DAY_MS: i64 = 86400000
+
+// What a conversation's row joins for what its chat costs (context_of): its
+// person's last turn's tokens, and the last day's of every turn there, the
+// person's and then the day's start (Unix ms) as its parameters.
+const COSTS: str = "LEFT JOIN meta mt ON mt.key = 'turn_tokens/' || c.user || '/' || c.id LEFT JOIN (SELECT r.conversation AS conversation, SUM(u.total) AS day FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = ? AND u.at >= ? GROUP BY r.conversation) d ON d.conversation = c.id"
+
 // How full a session's context is, as the apps are told it: its tokens of its
 // window, when its program last compacted it, whether its program compacts one
-// on request, and in a group chat the member whose it is.
-fn context_of(used: i64, size: i64, compacted: i64, compacts: bool, agent: String) -> Json {
+// on request, in a group chat the member whose it is, and what the chat costs,
+// its person's last turn's tokens and the last 24 hours' of every turn there.
+fn context_of(used: i64, size: i64, compacted: i64, compacts: bool, agent: String, turn: i64, day: i64) -> Json {
     var o = Obj.new().i("used", used).i("size", size)
     if compacted > 0 { o = o.i("compacted", compacted) }
     if compacts { o = o.b("compacts", true) }
     if agent.len() > 0 { o = o.s("agent", agent) }
+    if turn > 0 or day > 0 { o = o.j("tokens", Obj.new().i("turn", turn).i("day", day).done()) }
     return o.done()
 }
 
@@ -509,11 +519,16 @@ impl Store {
         if not sited { try s.db.execute_script(String("ALTER TABLE memories ADD COLUMN site TEXT NOT NULL DEFAULT '';")) }
         // ACP sessions from before a session kept its tools get the column,
         // empty for not known.
+        // And from before it kept what loom has told it, the column, empty for
+        // nothing told yet, so the next turn tells it once.
         var tooled = false
+        var told = false
         for r in try s.db.query(String("PRAGMA table_info(acp_sessions)")) {
             if text(r[1].copy()) == "tools" { tooled = true }
+            if text(r[1].copy()) == "told" { told = true }
         }
         if not tooled { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN tools TEXT NOT NULL DEFAULT '';")) }
+        if not told { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN told TEXT NOT NULL DEFAULT '';")) }
         // Runs from before a run kept the routine that started it, and how that
         // routine said it went, get the columns, empty for none or not known.
         var routined = false
@@ -1127,7 +1142,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -1136,7 +1151,7 @@ impl Store {
     // chat. A task's conversation is the task's, not the chat, and another
     // agent's thread with it (`asks`) is that agent's.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -1150,7 +1165,7 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -2705,7 +2720,10 @@ impl Store {
         let r = try self.db.query_one(String("SELECT used, size, compacted, compacts, agent FROM contexts WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return none
         let size = int(r[1].copy())
         if size <= 0 { return none }
-        return some(context_of(int(r[0].copy()), size, int(r[2].copy()), int(r[3].copy()) != 0, text(r[4].copy())))
+        let turn = i64.parse(try self.meta("turn_tokens/{user}/{conversation}") ?? String()) ?? 0
+        let day_row = try self.db.query_one(String("SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = ? AND r.conversation = ? AND u.at >= ?"), [t(user), t(conversation), Value.Int(now() - DAY_MS)])
+        let day = if let d = day_row { int(d[0].copy()) } else { 0 }
+        return some(context_of(int(r[0].copy()), size, int(r[2].copy()), int(r[3].copy()) != 0, text(r[4].copy()), turn, day))
     }
 
     // Whether `conversation`'s program compacts its session on request, as it last said.
@@ -2756,8 +2774,30 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO plan_limits (user, program, json) VALUES (?, ?, ?) ON CONFLICT (user, program) DO UPDATE SET json = excluded.json"), [t(user), t(program), t("{limits}")])
     }
 
+    // `conversation`'s session, new, which loom has told nothing yet, or picked up again.
     pub fn put_acp_session(self, user: String, conversation: String, program: String, session: String, tools: str) ! Error {
-        _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at, tools) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, session = excluded.session, at = excluded.at, tools = excluded.tools"), [t(user), t(conversation), t(program), t(session), Value.Int(now()), t(String(tools))])
+        _ = try self.db.execute(String("INSERT INTO acp_sessions (user, conversation, program, session, at, tools, told) VALUES (?, ?, ?, ?, ?, ?, '') ON CONFLICT (user, conversation) DO UPDATE SET program = excluded.program, told = CASE WHEN acp_sessions.session = excluded.session THEN acp_sessions.told ELSE '' END, session = excluded.session, at = excluded.at, tools = excluded.tools"), [t(user), t(conversation), t(program), t(session), Value.Int(now()), t(String(tools))])
+    }
+
+    // What loom has told `session` that it says once a session (PLAN.md, "One
+    // endless chat"), as an object of what each was when it was told: kept with
+    // the session, so a program started again on it, or an instance, doesn't tell
+    // it again. An empty object for nothing told, or a session that isn't
+    // `conversation`'s.
+    pub fn acp_session_told(self, user: String, conversation: String, session: String) -> Json ! Error {
+        let r = try self.db.query_one(String("SELECT told FROM acp_sessions WHERE user = ? AND conversation = ? AND session = ?"), [t(user), t(conversation), t(session)]) else return Json.Object(LinkedMap<String, Json>())
+        let kept = text(r[0].copy())
+        if kept.len() == 0 { return Json.Object(LinkedMap<String, Json>()) }
+        return match parse(kept) {
+            ok(Json.Object(m)) => Json.Object(m),
+            _ => Json.Object(LinkedMap<String, Json>()),
+        }
+    }
+
+    // `session` has been told `told`; an empty object once it should be told
+    // everything again, as after its context was compacted.
+    pub fn put_acp_session_told(self, user: String, conversation: String, session: String, told: Json) ! Error {
+        _ = try self.db.execute(String("UPDATE acp_sessions SET told = ? WHERE user = ? AND conversation = ? AND session = ?"), [t("{told}"), t(user), t(conversation), t(session)])
     }
 
     // --- Files ---
@@ -3915,6 +3955,16 @@ fn acp_sessions_are_kept_per_conversation_and_program() {
     s.used_acp_session(a.id.copy(), String("c_1"), String("s_2"))!
     assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_2"))! > 5)
     assert(s.acp_session_at(a.id.copy(), String("c_1"), String("s_1"))! == 0)
+    // And what it was told once a session, until a new session starts.
+    assert("{s.acp_session_told(a.id.copy(), String("c_1"), String("s_2"))!}" == "\{\}")
+    s.put_acp_session_told(a.id.copy(), String("c_1"), String("s_2"), parse(#"{"shared":"1","profile":"3"}"#)!)!
+    assert("{s.acp_session_told(a.id.copy(), String("c_1"), String("s_2"))!}" == #"{"shared":"1","profile":"3"}"#)
+    assert("{s.acp_session_told(a.id.copy(), String("c_1"), String("s_1"))!}" == "\{\}")
+    // Picked up again, it keeps it; a new session starts with nothing told.
+    s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_2"), "plain")!
+    assert("{s.acp_session_told(a.id.copy(), String("c_1"), String("s_2"))!}" == #"{"shared":"1","profile":"3"}"#)
+    s.put_acp_session(a.id.copy(), String("c_1"), String("codex"), String("s_3"), "plain")!
+    assert("{s.acp_session_told(a.id.copy(), String("c_1"), String("s_3"))!}" == "\{\}")
 }
 
 @test
@@ -3940,6 +3990,21 @@ fn a_chat_has_its_context_once_its_program_says() {
     assert(int_at(compacted.copy(), "compacted") == some(1700i64) and "{compacted}".contains(#""compacts":true"#))
     assert("{s.conversation(a.id.copy(), id.copy())!}".contains(#""compacted":1700"#))
     assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(#""compacts":true"#))
+    // What the chat costs: its person's last turn, and the last day's turns there,
+    // in every listing of it.
+    assert(not "{s.conversations(a.id.copy())!}".contains(#""tokens""#))
+    s.add_run(a.id.copy(), String("run_1"), id.copy())!
+    s.add_usage(a.id.copy(), String("claude"), String("run_1"), 400000, 2000, 410000, false)!
+    s.add_run(a.id.copy(), String("run_2"), String("c_other"))!
+    s.add_usage(a.id.copy(), String("claude"), String("run_2"), 9000, 100, 9100, false)!
+    s.set_meta("turn_tokens/{a.id}/{id}", String("410000"))!
+    let costs = #""tokens":{"turn":410000,"day":410000}"#
+    assert("{s.context_shown(a.id.copy(), id.copy())! ?? Json.Null}".contains(costs))
+    assert("{s.conversation(a.id.copy(), id.copy())!}".contains(costs))
+    assert("{s.conversations(a.id.copy())!}".contains(costs))
+    assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(costs))
+    _ = s.db.execute(String("UPDATE usage SET at = 5"), [])!
+    assert("{s.conversations(a.id.copy())!}".contains(#""tokens":{"turn":410000,"day":0}"#))
     // A fresh session asked for is kept until it's started.
     assert(not s.fresh_asked(a.id.copy(), id.copy())!)
     s.ask_fresh(a.id.copy(), id.copy(), true)!
