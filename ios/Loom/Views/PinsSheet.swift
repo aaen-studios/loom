@@ -149,7 +149,7 @@ struct PinsSheet: View {
         }
         if !p.message.text.isEmpty {
             Button {
-                UIPasteboard.general.string = p.message.text
+                UIPasteboard.general.string = Emoji.asNames(p.message.text)
                 note = Note(unpinned: false)
             } label: {
                 Label("Copy", systemImage: "doc.on.doc")

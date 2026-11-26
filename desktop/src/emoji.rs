@@ -188,6 +188,45 @@ pub fn as_names(text: &str) -> String {
     out
 }
 
+/// `text` with each of the person's own outside code as `:name:`; in code it stays as
+/// written, as the chat shows and copies it.
+fn names_outside_code(text: &str) -> String {
+    let code = code_ranges(text);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for t in tokens(text) {
+        if code
+            .iter()
+            .any(|c| c.start <= t.range.start && t.range.start < c.end)
+        {
+            continue;
+        }
+        out.push_str(&text[at..t.range.start]);
+        out.push_str(&format!(":{}:", t.name));
+        at = t.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// What copying `selected` from the composer gives (LOO-347): its words with each of the
+/// person's own outside code as `:name:`, as copying from the chat gives them, and the
+/// words as they are when that's different, kept with them, so a paste into the composer
+/// takes the emoji back (`pasted`). A built-in emoji is its character in both.
+pub fn copied(selected: &str) -> (String, Option<String>) {
+    let shown = names_outside_code(selected);
+    let kept = (shown != selected).then(|| selected.to_string());
+    (shown, kept)
+}
+
+/// What a paste of `text` into the composer puts there: the words it was copied from, its
+/// emoji tokens and all, when `kept` is what `copied` kept with them; nothing otherwise,
+/// for the paste to go on as it does.
+pub fn pasted(text: &str, kept: Option<&str>) -> Option<String> {
+    kept.filter(|k| names_outside_code(k) == text)
+        .map(String::from)
+}
+
 /// Whether a message's words are only one to three emoji, built-in or the person's
 /// own, with nothing but spaces between, which the chat shows big.
 pub fn jumbo(text: &str) -> bool {
@@ -373,6 +412,25 @@ pub fn wanted() -> Vec<String> {
     WANTED.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
+/// A message's words as copying them from the chat gives them (LOO-347): each emoji the
+/// chat draws as what it copies as (`drawn`), and the rest as written, code and the
+/// person's own it has no picture of yet too.
+pub fn as_copied(text: &str) -> String {
+    let marks = drawn(text, 1, |id| {
+        let (name, _, path) = OWN.with(|o| o.borrow().get(id).cloned())?;
+        path.map(|_| (name, String::new()))
+    });
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for d in marks {
+        out.push_str(&text[at..d.range.start]);
+        out.push_str(&d.copies);
+        at = d.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// One of the person's own, as the chat knows it: its name, whether it moves, and its
 /// picture once there. One that isn't fetched yet is wanted.
 pub fn own_one(id: &str) -> Option<Own> {
@@ -463,6 +521,64 @@ pub fn code_ranges(text: &str) -> Vec<Range<usize>> {
     out
 }
 
+/// An emoji the chat draws as a picture (LOO-347): where it's written in a message's
+/// words, all of it, whether one code point, several (👍🏽, 👨‍👩‍👧) or one of the person's
+/// own tokens, and what it copies as, the emoji itself or `:name:`. The selection takes
+/// it in whole or not at all, as one character.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drawn {
+    pub range: Range<usize>,
+    pub copies: String,
+    /// Its picture's source in the chat's Markdown, and the link to its card.
+    pub source: String,
+    pub link: String,
+}
+
+/// The emoji the chat draws in a message's words, in order: each built-in one, drawn
+/// `side` device pixels square, and each of the person's own that `own` gives a name and a
+/// picture's source for, outside code. One of the person's own escaped as the person's
+/// words are (`model::literal_html`), `\<:name:id>`, takes its backslash in too.
+pub fn drawn(text: &str, side: u32, own: impl Fn(&str) -> Option<(String, String)>) -> Vec<Drawn> {
+    let code = code_ranges(text);
+    let in_code = |r: &Range<usize>| code.iter().any(|c| c.start <= r.start && r.start < c.end);
+    let mut out: Vec<Drawn> = Vec::new();
+    for t in tokens(text) {
+        if in_code(&t.range) {
+            continue;
+        }
+        let Some((name, source)) = own(&t.id) else {
+            continue;
+        };
+        let mut range = t.range.clone();
+        if range.start > 0 && text.as_bytes()[range.start - 1] == b'\\' {
+            range.start -= 1;
+        }
+        out.push(Drawn {
+            range,
+            copies: format!(":{name}:"),
+            source,
+            link: format!("{OWN_LINK}{}", t.id),
+        });
+    }
+    for (r, file) in find(text) {
+        if in_code(&r)
+            || out
+                .iter()
+                .any(|d| d.range.start <= r.start && r.start < d.range.end)
+        {
+            continue;
+        }
+        out.push(Drawn {
+            copies: text[r.clone()].to_string(),
+            range: r,
+            source: source(file, side),
+            link: format!("{LINK}{file}"),
+        });
+    }
+    out.sort_by_key(|d| d.range.start);
+    out
+}
+
 /// A message's Markdown with each emoji in it drawn: a built-in one as its Twemoji
 /// picture, one of the person's own as its picture, both `text_px` tall among words or
 /// `JUMBO` in a message of only one to three, and each a link to its card. Code stays as
@@ -477,58 +593,30 @@ pub fn pictured(text: &str, text_px: f32) -> String {
     } else {
         (text_px * IN_TEXT).round()
     };
-    let code = code_ranges(text);
-    let in_code = |r: &Range<usize>| code.iter().any(|c| c.start <= r.start && r.start < c.end);
-    // Each emoji: where it is, its picture's source, its link and what it copies as.
-    let mut marks: Vec<(Range<usize>, String, String, String)> = Vec::new();
-    for t in tokens(text) {
-        if in_code(&t.range) {
-            continue;
-        }
-        let Some((name, animated, Some(path))) = own_one(&t.id) else {
-            continue;
-        };
-        let mut range = t.range.clone();
-        if range.start > 0 && text.as_bytes()[range.start - 1] == b'\\' {
-            range.start -= 1;
-        }
+    let marks = drawn(text, device(side), |id| {
+        let (name, animated, path) = own_one(id)?;
         // One that moves is still unless it plays: its card plays it under the pointer.
         let from = if animated && !playing(false) {
             STILL_SOURCE
         } else {
             OWN_SOURCE
         };
-        marks.push((
-            range,
-            format!("{from}{path}"),
-            format!("{OWN_LINK}{}", t.id),
-            format!(":{name}:"),
-        ));
-    }
-    for (r, file) in find(text) {
-        if in_code(&r)
-            || marks
-                .iter()
-                .any(|m| m.0.start <= r.start && r.start < m.0.end)
-        {
-            continue;
-        }
-        marks.push((
-            r.clone(),
-            source(file, device(side)),
-            format!("{LINK}{file}"),
-            text[r].to_string(),
-        ));
-    }
+        Some((name, format!("{from}{}", path?)))
+    });
     if marks.is_empty() {
         return text.to_string();
     }
-    marks.sort_by_key(|m| m.0.start);
     let mut out = String::with_capacity(text.len() + marks.len() * 96);
     let mut at = 0;
     // Inside a link's words, as a mention's, an emoji is only its picture.
     let mut depth = 0i32;
-    for (range, src, link, alt) in marks {
+    for Drawn {
+        range,
+        copies: alt,
+        source: src,
+        link,
+    } in marks
+    {
         let before = &text[at..range.start];
         for c in before.chars() {
             match c {
@@ -1038,8 +1126,8 @@ pub fn plays(always: bool, hovered: bool, reduced: bool) -> bool {
 mod tests {
     // Not a glob: GPUI has an attribute of its own named test.
     use super::{
-        as_names, code_ranges, find, jumbo, name_from_file, pictured, plays, svg, sync_own,
-        text_of, tokens, untoned, wanted, Custom, Emojis, PickerEscape,
+        as_names, code_ranges, copied, drawn, find, jumbo, name_from_file, pasted, pictured, plays,
+        svg, sync_own, text_of, tokens, untoned, wanted, Custom, Emojis, PickerEscape,
     };
     use serde_json::{json, Value};
 
@@ -1099,6 +1187,90 @@ mod tests {
         assert!(e.found.is_none() && e.picking);
         assert_eq!(e.picker_escape(""), PickerEscape::Shut);
         assert!(!e.picking && e.held.is_none());
+    }
+
+    /// Each emoji drawn in `text`: the words it's written with, and what it copies as.
+    fn spans(text: &str) -> Vec<(String, String)> {
+        let own = |id: &str| (id == "e_3").then(|| ("party_cat".into(), "/f/e_3".into()));
+        drawn(text, 36, own)
+            .into_iter()
+            .map(|d| (text[d.range].to_string(), d.copies))
+            .collect()
+    }
+
+    /// The words as copying them whole gives them: each drawn emoji as what it copies as.
+    fn copy_of(text: &str) -> String {
+        let own = |id: &str| (id == "e_3").then(|| ("party_cat".into(), "/f/e_3".into()));
+        let mut out = String::new();
+        let mut at = 0;
+        for d in drawn(text, 36, own) {
+            out.push_str(&text[at..d.range.start]);
+            out.push_str(&d.copies);
+            at = d.range.end;
+        }
+        out + &text[at..]
+    }
+
+    #[test]
+    fn each_drawn_emoji_is_its_whole_writing_and_copies_as_itself() {
+        let text = "Word 😭 word word 💢 wad";
+        assert_eq!(
+            spans(text),
+            vec![("😭".into(), "😭".into()), ("💢".into(), "💢".into())]
+        );
+        assert_eq!(copy_of(text), text);
+        // Several code points are one emoji: a skin tone, a family, a keycap.
+        let text = "a 👍🏽 b 👨‍👩‍👧 c #️⃣";
+        assert_eq!(
+            spans(text),
+            vec![
+                ("👍🏽".into(), "👍🏽".into()),
+                ("👨‍👩‍👧".into(), "👨‍👩‍👧".into()),
+                ("#️⃣".into(), "#️⃣".into()),
+            ]
+        );
+        assert_eq!(copy_of(text), text);
+        // One of the person's own copies as its name, its escape taken in with it; one
+        // that isn't known, and code, are words.
+        let text = "hi \\<:party_cat:e_3> and <:gone:e_9> `😭`";
+        assert_eq!(
+            spans(text),
+            vec![("\\<:party_cat:e_3>".into(), ":party_cat:".into())]
+        );
+        assert_eq!(copy_of(text), "hi :party_cat: and <:gone:e_9> `😭`");
+        // Side by side, each is its own.
+        assert_eq!(
+            spans("😭<:party_cat:e_3>👍🏽"),
+            vec![
+                ("😭".into(), "😭".into()),
+                ("<:party_cat:e_3>".into(), ":party_cat:".into()),
+                ("👍🏽".into(), "👍🏽".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn copying_from_the_composer_gives_the_persons_own_by_name_and_pastes_them_back() {
+        // Built-in emoji copy as themselves, and nothing needs keeping.
+        assert_eq!(copied("Word 😭 wad 👨‍👩‍👧"), ("Word 😭 wad 👨‍👩‍👧".into(), None));
+        let raw = "Word <:party_cat:e_3> 👍🏽 wad";
+        let (text, kept) = copied(raw);
+        assert_eq!(text, "Word :party_cat: 👍🏽 wad");
+        assert_eq!(kept.as_deref(), Some(raw));
+        // A paste back into the composer takes the tokens back.
+        assert_eq!(pasted(&text, kept.as_deref()).as_deref(), Some(raw));
+        // Anything else pastes as it is: what was kept is for other words.
+        assert_eq!(pasted("other words", kept.as_deref()), None);
+        assert_eq!(pasted(&text, None), None);
+        // In code a token is copied as written, as the chat copies it.
+        let code = "see `<:party_cat:e_3>` and <:party_cat:e_3>";
+        let (text, kept) = copied(code);
+        assert_eq!(text, "see `<:party_cat:e_3>` and :party_cat:");
+        assert_eq!(pasted(&text, kept.as_deref()).as_deref(), Some(code));
+        assert_eq!(
+            copied("`<:party_cat:e_3>`"),
+            ("`<:party_cat:e_3>`".into(), None)
+        );
     }
 
     #[test]
