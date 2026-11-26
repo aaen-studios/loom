@@ -254,7 +254,24 @@ impl Model {
                     .find(|m| self.agent(m).is_some())
                     .cloned()
             });
+        // The lead is selected only so the screen's agent parts are about it. Its own chat
+        // isn't read, so it keeps its dot and where its new replies start (LOO-371).
+        let kept = lead.as_ref().map(|a| {
+            (
+                a.clone(),
+                self.unread.contains(a),
+                self.first_unread.get(a).cloned(),
+            )
+        });
         self.select(lead);
+        if let Some((a, unread, first)) = kept {
+            if unread {
+                self.unread.insert(a.clone());
+            }
+            if let Some(first) = first {
+                self.first_unread.insert(a, first);
+            }
+        }
         self.unread.remove(id);
         self.open_room = Some(id.to_string());
         self.open_task = None;
@@ -598,6 +615,34 @@ mod tests {
         assert!(m.fold_flips().is_empty());
         m.take(&page(&["msg_1", "msg_2"]));
         assert_eq!(came(&m), vec![Came::Before, Came::Before]);
+    }
+
+    // LOO-371: opening a group chat reads the group chat, not its lead agent's own chat.
+    #[test]
+    fn opening_a_group_chat_keeps_its_lead_agent_s_unread_dot() {
+        let mut m = Model::new();
+        with_room(&mut m);
+        m.take(&json!({"t": "core.data", "what": "conversations", "items": [
+            {"id": "c_1", "agent": "a_1", "title": "Chat"},
+            {"id": "c_2", "agent": "a_2", "title": "Chat"},
+            {"id": "c_9", "agent": "", "title": "Money", "room": {"name": "Money", "members": ["a_1", "a_2"], "default": "a_2"}}
+        ]}));
+        m.synced = true;
+        m.take(&json!({"t": "event", "seq": 4, "kind": "message.created", "conversation": "c_2",
+            "message": {"id": "msg_7", "conversation": "c_2", "role": "agent", "agent": "a_2", "at": 5, "blocks": []}}));
+        assert!(m.unread.contains("a_2"));
+        // Hermes leads the group chat, and is selected while it's open.
+        m.show_room("c_9");
+        assert_eq!(m.selected.as_deref(), Some("a_2"));
+        assert!(m.unread.contains("a_2"), "its own chat isn't read");
+        assert_eq!(m.new_line, None);
+        // Closed for another agent's chat, Hermes still has its dot.
+        m.select(Some("a_1".into()));
+        assert!(m.unread.contains("a_2"));
+        // Its own chat read: the dot goes, and the new line is over its reply.
+        m.select(Some("a_2".into()));
+        assert!(!m.unread.contains("a_2"));
+        assert_eq!(m.new_line, Some(("msg_7".to_string(), 1)));
     }
 
     #[test]
