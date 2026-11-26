@@ -16494,6 +16494,30 @@ ACTA_KEY=secret:ACTA_KEY",
             .when_some(control, |d, c| d.child(div().flex_none().child(c)))
     }
 
+    /// A row of a title and a wide control: beside it when both fit, under it when they
+    /// don't, so neither is cut.
+    fn wrapping_row(&self, title: impl Into<SharedString>, control: AnyElement) -> Div {
+        let p = self.p;
+        div()
+            .min_h(px(control::ROW))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .child(
+                div()
+                    .flex_grow(1.0)
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink)
+                    .child(title.into()),
+            )
+            .child(div().flex_none().child(control))
+    }
+
     /// A row of words alone, wrapping, such as a warning or how to use something.
     fn note_row(&self, text: impl Into<SharedString>, ink: Hsla) -> AnyElement {
         div()
@@ -16933,6 +16957,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let program = prog.name.clone();
         let mut share = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(space::S))
             .child(div().w(px(96.0)).child(Input::new(&self.share_in).small()))
@@ -16978,8 +17003,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             );
         }
+        // Its control is wide: under its title when they don't fit side by side (LOO-401).
         rows.push(
-            self.row(None, "Share it", None, Some(share.into_any_element()))
+            self.wrapping_row("Share it", share.into_any_element())
                 .into_any_element(),
         );
         // Who has it, and who gets the settings shared: the owner's to say.
