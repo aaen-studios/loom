@@ -1617,10 +1617,7 @@ impl Routine {
                 .map(|a| a.iter().map(FlowStep::of).collect())
                 .unwrap_or_default(),
             event: watch::RoutineEvent::of(r.get("event").unwrap_or(&Value::Null)),
-            gate: r
-                .get("gate")
-                .map(|g| s(g, "command"))
-                .unwrap_or_default(),
+            gate: r.get("gate").map(|g| s(g, "command")).unwrap_or_default(),
             gate_seconds: r
                 .get("gate")
                 .and_then(|g| g.get("timeout"))
@@ -16081,15 +16078,15 @@ mod tests {
             (RunMark::Going, String::new())
         );
         // A gate that found nothing new: quiet, and it says so.
-        let gated = run(
-            json!({"run": "r5", "at": 1000, "ended": 1500, "status": "quiet", "woke": false}),
-        );
+        let gated =
+            run(json!({"run": "r5", "at": 1000, "ended": 1500, "status": "quiet", "woke": false}));
         assert_eq!(
             (gated.mark(), gated.pill(), gated.line()),
             (RunMark::Quiet, "Quiet", "Nothing new".into())
         );
         // One its agent was woken for, that posted nothing, says what it answered.
-        let woken = run(json!({"run": "r6", "at": 1000, "status": "quiet", "said": "Still 1.21.4."}));
+        let woken =
+            run(json!({"run": "r6", "at": 1000, "status": "quiet", "said": "Still 1.21.4."}));
         assert_eq!(woken.line(), "Still 1.21.4.");
     }
 
@@ -16102,7 +16099,12 @@ mod tests {
             "cost": {"run": 1_350_000, "day": 5_400_000, "runs": 28, "quiet": 27, "wasted": true}
         }));
         assert_eq!(
-            (r.gate.as_str(), r.gate_seconds, r.model.as_str(), r.effort.as_str()),
+            (
+                r.gate.as_str(),
+                r.gate_seconds,
+                r.model.as_str(),
+                r.effort.as_str()
+            ),
             ("gh pr view 8006 | ./changed.sh", 90, "haiku", "low")
         );
         assert_eq!(
@@ -16110,9 +16112,15 @@ mod tests {
             "1.4M tokens a run · 5.4M a day · mostly quiet"
         );
         assert_eq!(r.cost.warning(), "5.4M tokens a day, mostly quiet");
-        let plain = Routine::of(&json!({"id": "rt_2", "cost": {"run": 40_000, "day": 80_000, "runs": 2, "quiet": 0, "wasted": false}}));
+        let plain = Routine::of(
+            &json!({"id": "rt_2", "cost": {"run": 40_000, "day": 80_000, "runs": 2, "quiet": 0, "wasted": false}}),
+        );
         assert_eq!(
-            (plain.gate.as_str(), plain.cost.words(), plain.cost.warning()),
+            (
+                plain.gate.as_str(),
+                plain.cost.words(),
+                plain.cost.warning()
+            ),
             ("", "40k tokens a run · 80k a day".into(), String::new())
         );
         assert_eq!(Routine::of(&json!({"id": "rt_3"})).cost.words(), "");

@@ -820,7 +820,12 @@ mod tests {
         };
         let d = RoutineDraft::of(&gated);
         assert_eq!(
-            (d.gate.as_str(), d.gate_seconds.as_str(), d.model.as_str(), d.effort.as_str()),
+            (
+                d.gate.as_str(),
+                d.gate_seconds.as_str(),
+                d.model.as_str(),
+                d.effort.as_str()
+            ),
             ("./changed.sh", "90", "haiku", "low")
         );
         assert_eq!(RoutineDraft::of(&r).gate_seconds, "");
