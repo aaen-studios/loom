@@ -45,7 +45,7 @@ mod room_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
-use emoji_ui::RowKey;
+use emoji_ui::{Greeting, RowKey};
 #[path = "list_page.rs"]
 mod list_page;
 #[path = "routines.rs"]
@@ -11177,7 +11177,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .flex_col()
                     .relative()
-                    // Up for the picker, the greeting goes under the header.
+                    // Up for the picker, what of the greeting would pass under the header
+                    // has faded by then (`greeting`); this keeps anything else off it.
                     .when(lift > 0.0, |d| d.overflow_hidden())
                     .child(if empty && !in_task {
                         self.hero(agent.as_ref(), composer.take(), cx)
@@ -11986,13 +11987,19 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XL))
             .px(px(space::XL))
             .pb(px(60.0))
-            .child(thread("hero", mood, tint, 140.0, 16.0, snapped))
+            .child(self.greeting(
+                Greeting::Line,
+                thread("hero", mood, tint, 140.0, 16.0, snapped),
+            ))
             .child(
-                div()
-                    .text_size(px(size::HERO))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child(a.name.clone()),
+                self.greeting(
+                    Greeting::Name,
+                    div()
+                        .text_size(px(size::HERO))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(a.name.clone()),
+                ),
             )
             .when_some(composer, |d, c| {
                 // An empty chat keeps its composer at the normal width, whatever the

@@ -47,6 +47,10 @@ pub(super) struct EmojiUi {
     /// Where the composer is in the window, for the picker to fit over it, as it is with
     /// a new chat's middle block down (`hero_lift`).
     pub composer_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// How far up a new chat's middle block is, and how far it goes (`hero_lift`).
+    lift: Cell<(f32, f32)>,
+    /// Where the top of each piece of a new chat's greeting is with the block down.
+    greeting_at: [Rc<Cell<Option<f32>>>; 2],
 }
 
 /// The side of the composer the picker opens on.
@@ -85,23 +89,39 @@ fn picker_room(top: f32, bottom: f32, high: f32) -> (f32, f32) {
     (above, below)
 }
 
-/// The picker with four lines of its grid.
-const FOUR_LINES: f32 = CHROME + 4.0 * TILE;
-
 /// How far a new chat's middle block, its greeting and its composer from `top` to
 /// `bottom` down a window `high` tall, moves up while the picker is open. Where neither
-/// side of the composer has four lines of the picker's grid, as far as gives the picker
-/// four lines under it, and no further than leaves the composer 12 px under the title
-/// bar, so at the least heights the picker takes what there is and its grid scrolls.
+/// side of the composer has room for all of the picker, as far as gives it all of its
+/// height under it, and no further than leaves the composer 12 px under the title bar,
+/// so at the least heights the picker takes what there is and its grid scrolls.
 /// Elsewhere it stays.
 fn picker_lift(top: f32, bottom: f32, high: f32) -> f32 {
     let (above, below) = picker_room(top, bottom, high);
-    if above.max(below) >= FOUR_LINES {
+    if above.max(below) >= PICKER_H {
         return 0.0;
     }
-    (FOUR_LINES - below)
+    (PICKER_H - below)
         .min(top - layout::TITLEBAR - space::M)
         .max(0.0)
+}
+
+/// How much shows of a piece of a new chat's greeting whose top is at `top` with the
+/// middle block down, the block being `now` up of the `full` way it goes for the picker
+/// (`picker_lift`). A piece that would pass under the title bar fades as the block
+/// rises, gone as it reaches the title bar, and back as it comes down; the rest stay.
+fn picker_fade(top: f32, now: f32, full: f32) -> f32 {
+    let room = top - layout::TITLEBAR;
+    if full <= room {
+        return 1.0;
+    }
+    (1.0 - now / room.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// A piece of a new chat's greeting: its agent's line, or its name.
+#[derive(Clone, Copy)]
+pub(super) enum Greeting {
+    Line,
+    Name,
 }
 
 pub(super) struct Picker {
@@ -622,13 +642,38 @@ impl Loom {
             0.0
         };
         let high = f32::from(window.viewport_size().height);
+        let full = self.emoji_ui.composer_at.get().map_or(0.0, |b| {
+            picker_lift(f32::from(b.top()), f32::from(b.bottom()), high)
+        });
         // In whole pixels of the screen, as the layout places things, so the composer
         // measured with it, put back down by it, is where it was.
         let scale = window.scale_factor();
-        self.emoji_ui.composer_at.get().map_or(0.0, |b| {
-            let lift = picker_lift(f32::from(b.top()), f32::from(b.bottom()), high);
-            (k * lift * scale).round() / scale
-        })
+        let now = (k * full * scale).round() / scale;
+        self.emoji_ui.lift.set((now, full));
+        now
+    }
+
+    /// A piece of a new chat's greeting, fading as it would pass under the title bar
+    /// while the middle block is up for the picker (`picker_fade`).
+    pub(super) fn greeting(&self, piece: Greeting, child: impl IntoElement) -> Div {
+        let (now, full) = self.emoji_ui.lift.get();
+        let at = self.emoji_ui.greeting_at[piece as usize].clone();
+        let shows = at.get().map_or(1.0, |top| picker_fade(top, now, full));
+        div()
+            .relative()
+            .opacity(shows)
+            // Where it is with the block down.
+            .child(
+                canvas(
+                    move |b, _, _| at.set(Some(f32::from(b.top()) + now)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .child(child)
     }
 
     /// The picker, by the composer at its right, above it or below it (`picker_place`),
@@ -1465,7 +1510,8 @@ impl Loom {
 #[cfg(test)]
 mod tests {
     use super::{
-        lines, picker_lift, picker_place, unpieced, Line, Side, CHROME, COLS, PICKER_H, TILE,
+        lines, picker_fade, picker_lift, picker_place, unpieced, Line, Side, CHROME, COLS,
+        PICKER_H, TILE,
     };
     use crate::emoji::{Group, Item};
 
@@ -1510,38 +1556,50 @@ mod tests {
     }
 
     #[test]
-    fn a_new_chat_moves_up_as_far_as_gives_the_picker_four_lines_under_it() {
-        let shown = |h: f32| ((h - CHROME) / TILE).floor();
+    fn a_new_chat_moves_up_as_far_as_gives_the_picker_all_of_its_height_under_it() {
         // Where the picker lands once the composer from `top` to `bottom` moved up.
         let lifted = |top: f32, bottom: f32, high: f32| {
             let lift = picker_lift(top, bottom, high);
             (lift, picker_place(Some((top - lift, bottom - lift)), high))
         };
-        // At the default height there's room for four lines below already: it stays.
-        assert_eq!(picker_lift(370.0, 420.0, 752.0), 0.0);
-        // A chat's composer at the window's foot has all of it above.
+        // A chat's composer at the window's foot has all of it above: it stays.
         assert_eq!(picker_lift(690.0, 740.0, 752.0), 0.0);
-        // A new chat in a tall window, all of it above.
+        // A new chat in a tall window, all of it above, or all of it below.
         assert_eq!(picker_lift(520.0, 570.0, 1052.0), 0.0);
-        // A shorter window: up as far as leaves four lines below, and no further.
-        let (lift, (side, h)) = lifted(294.0, 344.0, 600.0);
-        assert_eq!(lift, 56.0);
-        assert_eq!(side, Side::Below);
-        assert_eq!(shown(h), 4.0);
-        // The window's least height, the same.
-        let (lift, (side, h)) = lifted(234.0, 284.0, 480.0);
-        assert_eq!(lift, 116.0);
-        assert_eq!(side, Side::Below);
-        assert_eq!(shown(h), 4.0);
-        assert!(234.0 - lift >= 48.0 + 12.0);
-        // A tall composer there: up to 12 px under the title bar, and the picker takes
-        // what's below it and its grid scrolls.
-        let (lift, (side, h)) = lifted(150.0, 330.0, 480.0);
+        assert_eq!(picker_lift(300.0, 350.0, 1000.0), 0.0);
+        // At the default height: up as far as leaves all of it below, and no further.
+        assert_eq!(lifted(370.0, 420.0, 752.0), (88.0, (Side::Below, PICKER_H)));
+        // A shorter window, the same.
+        let (lift, place) = lifted(294.0, 344.0, 600.0);
+        assert_eq!((lift, place), (164.0, (Side::Below, PICKER_H)));
+        assert!(294.0 - lift > 48.0 + 12.0);
+        // The window's least height: up to 12 px under the title bar, and the picker
+        // takes what's below it and its grid scrolls.
+        let (lift, place) = lifted(234.0, 284.0, 480.0);
+        assert_eq!(234.0 - lift, 48.0 + 12.0);
+        assert_eq!(place, (Side::Below, 480.0 - (284.0 - lift) - 20.0));
+        assert!(place.1 < PICKER_H);
+        // A tall composer there, the same.
+        let (lift, place) = lifted(150.0, 330.0, 480.0);
         assert_eq!(150.0 - lift, 48.0 + 12.0);
-        assert_eq!((side, h), (Side::Below, 480.0 - (330.0 - lift) - 20.0));
-        assert!(shown(h) < 4.0);
+        assert_eq!(place, (Side::Below, 480.0 - (330.0 - lift) - 20.0));
         // Already up against the title bar: it stays.
         assert_eq!(picker_lift(55.0, 300.0, 400.0), 0.0);
+    }
+
+    #[test]
+    fn what_of_the_greeting_would_pass_under_the_title_bar_fades_on_the_way() {
+        // With the block down, all of it shows.
+        assert_eq!(picker_fade(120.0, 0.0, 174.0), 1.0);
+        assert_eq!(picker_fade(120.0, 0.0, 0.0), 1.0);
+        // A piece that stays under the title bar all the way up shows all the way.
+        assert_eq!(picker_fade(200.0, 100.0, 100.0), 1.0);
+        assert_eq!(picker_fade(200.0, 152.0, 152.0), 1.0);
+        // One that would pass under it fades as it rises, gone as it reaches it, and
+        // stays gone the rest of the way.
+        assert_eq!(picker_fade(120.0, 36.0, 174.0), 0.5);
+        assert_eq!(picker_fade(120.0, 72.0, 174.0), 0.0);
+        assert_eq!(picker_fade(120.0, 174.0, 174.0), 0.0);
     }
 
     fn item(e: &str) -> Item {
