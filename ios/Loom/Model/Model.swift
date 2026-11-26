@@ -98,6 +98,8 @@ struct Conversation: Equatable, Sendable {
     var title = ""
     /// For a group chat, its room (PLAN.md, "Group chats"). Never an agent's chat.
     var room: Room?
+    /// How full its session's context is, once its program has said.
+    var context: ContextFill?
 
     init(id: String, agent: String, isChat: Bool = true, askedBy: String? = nil, title: String = "") {
         self.id = id
@@ -114,6 +116,81 @@ struct Conversation: Equatable, Sendable {
         title = c["title"].text
         room = c["room"].isNull ? nil : Room(id: id, c["room"])
         isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && room == nil
+        context = ContextFill(c["context"])
+    }
+}
+
+/// How full a chat's session context is, as its agent program last said (PLAN.md, "One
+/// endless chat"), as desktop/src/model.rs has it. Its program says only how many tokens
+/// are in it of its window, not what they are.
+struct ContextFill: Equatable, Sendable {
+    var used: Int
+    var size: Int
+    /// When its program last compacted the session, in Unix ms.
+    var compacted: Int?
+    /// Whether its program compacts a session when asked, for Compact now.
+    var compacts = false
+    /// In a group chat, the member whose session it is: the one that answered last.
+    var agent: String?
+
+    /// How full a context may get before the chat's next message goes to a fresh session.
+    static let renewPercent = 80
+
+    init(used: Int, size: Int, compacted: Int? = nil, compacts: Bool = false, agent: String? = nil) {
+        self.used = used
+        self.size = size
+        self.compacted = compacted
+        self.compacts = compacts
+        self.agent = agent
+    }
+
+    init?(_ x: JSON) {
+        guard let size = x["size"].int, size > 0 else { return nil }
+        self.init(used: x["used"].int ?? 0, size: size, compacted: x["compacted"].int, compacts: x["compacts"].bool ?? false, agent: x["agent"].string.flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    var percent: Int { size > 0 ? min(max(used, 0) * 100 / size, 100) : 0 }
+
+    /// How much of the ring is filled, from 0 to 1.
+    var fraction: Double { size > 0 ? min(max(Double(used) / Double(size), 0), 1) : 0 }
+
+    /// Quiet, warm from 70% (before its fresh session at 80%), and red from 90%.
+    enum Level { case quiet, warn, bad }
+    var level: Level { percent >= 90 ? .bad : percent >= 70 ? .warn : .quiet }
+
+    /// What a screen reader says of the ring.
+    var tip: String { "Context \(percent)%, \(amount)" }
+
+    /// Its tokens of its window, beside the card's title: "82k of 200k".
+    var amount: String { "\(ContextFill.short(used)) of \(ContextFill.short(size))" }
+
+    /// The card's line under its bar, at `now` (Unix ms).
+    func line(now: Int) -> String {
+        let fresh = "fresh session starts at \(ContextFill.renewPercent)%"
+        guard let at = compacted else { return "A \(fresh)" }
+        return "Compacted \(ContextFill.ago(now - at)) · a \(fresh)"
+    }
+
+    /// A count of tokens as the ring says it: 900, 16k, 182k, 1M, 1.5M.
+    static func short(_ n: Int) -> String {
+        if n >= 1_000_000 {
+            let tenths = (n + 50_000) / 100_000
+            return tenths % 10 == 0 ? "\(tenths / 10)M" : "\(tenths / 10).\(tenths % 10)M"
+        }
+        return n >= 1000 ? "\((n + 500) / 1000)k" : "\(max(n, 0))"
+    }
+
+    /// How long ago something was, `ms` before now: "just now", "5 min ago", "2 h ago",
+    /// "yesterday", "3 days ago".
+    static func ago(_ ms: Int) -> String {
+        let minutes = max(ms, 0) / 60_000
+        switch minutes {
+        case 0: return "just now"
+        case ..<60: return "\(minutes) min ago"
+        case ..<(24 * 60): return "\(minutes / 60) h ago"
+        case ..<(48 * 60): return "yesterday"
+        default: return "\(minutes / (24 * 60)) days ago"
+        }
     }
 }
 
@@ -2011,6 +2088,10 @@ final class Model {
             if let error { notice = error; makingRoom = nil } else { roomMade(f) }
         case let id where id.hasPrefix("app.room_summary:"):
             if error == nil { roomUsageCame(f) }
+        case let id where id.hasPrefix("app.context"):
+            // Compact now, or Start a fresh session: the chat shows what came of it, and
+            // a refusal, as while the agent is answering, is said.
+            if let error { notice = error }
         case let id where id.hasPrefix("app.preview:"):
             // A link pasted in the composer, looked up: its preview, or its site when
             // the lookup failed.
@@ -2946,5 +3027,34 @@ final class Model {
     func startFresh() -> JSON? {
         guard let agent = selected else { return nil }
         return ["t": "cmd", "id": JSON(id("app.fresh")), "name": "conversation.create", "args": ["agent": JSON(agent)]]
+    }
+
+    // MARK: The context of the chat's session (PLAN.md, "One endless chat")
+
+    /// How full the open chat's session context is, once its program has said. In a
+    /// group chat, the session of the member that answered last.
+    var context: ContextFill? {
+        guard let chat = conversation else { return nil }
+        return conversations.first { $0.id == chat }?.context
+    }
+
+    /// The context card's title: "Context", or in a group chat, whose it is.
+    func contextTitle(_ fill: ContextFill) -> String {
+        guard room != nil, let name = fill.agent.flatMap({ agent($0) })?.name else { return "Context" }
+        return "\(name)'s context"
+    }
+
+    /// Compacts the open chat's session now, in a turn the person doesn't see: the chat
+    /// gets the compaction's line.
+    func compactNow() -> JSON? { contextCommand("conversation.compact") }
+
+    /// Starts the open chat's next turn in a fresh session, given the newest of the chat.
+    func freshSession() -> JSON? { contextCommand("conversation.fresh") }
+
+    private func contextCommand(_ name: String) -> JSON? {
+        guard let chat = conversation, let fill = context else { return nil }
+        var args: [String: JSON] = ["conversation": JSON(chat)]
+        if room != nil, let agent = fill.agent { args["agent"] = JSON(agent) }
+        return ["t": "cmd", "id": JSON(id("app.context")), "name": JSON(name), "args": .object(args)]
     }
 }

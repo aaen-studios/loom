@@ -170,10 +170,14 @@ CREATE TABLE IF NOT EXISTS acp_sessions (
     user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, program TEXT NOT NULL,
     session TEXT NOT NULL, at INTEGER NOT NULL, tools TEXT NOT NULL DEFAULT '', PRIMARY KEY (user, conversation));
 -- How full a conversation's session context is, as its program last said: the tokens
--- in it of its window (PLAN.md, "One endless chat").
+-- in it of its window (PLAN.md, "One endless chat"); when its program last compacted
+-- it (0 for not since it began); whether its program compacts one on request; in a
+-- group chat, the member whose it is; and whether the person asked for its next turn
+-- to start a fresh session.
 CREATE TABLE IF NOT EXISTS contexts (
     user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL, used INTEGER NOT NULL,
-    size INTEGER NOT NULL, PRIMARY KEY (user, conversation));
+    size INTEGER NOT NULL, compacted INTEGER NOT NULL DEFAULT 0, compacts INTEGER NOT NULL DEFAULT 0,
+    agent TEXT NOT NULL DEFAULT '', fresh INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user, conversation));
 -- The limits of a person's plan with an agent program, as the program last reported them
 -- (PLAN.md, "Usage limits"): its plan's name, and how much of the session and the week
 -- is used, with when each resets.
@@ -383,7 +387,18 @@ fn conversation_of(r: List<Value>) -> Json {
     }
     // How full its session's context is, once its program has said.
     let size = int(r[13].copy())
-    if size > 0 { o = o.j("context", Obj.new().i("used", int(r[12].copy())).i("size", size).done()) }
+    if size > 0 { o = o.j("context", context_of(int(r[12].copy()), size, int(r[14].copy()), int(r[15].copy()) != 0, text(r[16].copy()))) }
+    return o.done()
+}
+
+// How full a session's context is, as the apps are told it: its tokens of its
+// window, when its program last compacted it, whether its program compacts one
+// on request, and in a group chat the member whose it is.
+fn context_of(used: i64, size: i64, compacted: i64, compacts: bool, agent: String) -> Json {
+    var o = Obj.new().i("used", used).i("size", size)
+    if compacted > 0 { o = o.i("compacted", compacted) }
+    if compacts { o = o.b("compacts", true) }
+    if agent.len() > 0 { o = o.s("agent", agent) }
     return o.done()
 }
 
@@ -539,6 +554,14 @@ impl Store {
             if text(r[1].copy()) == "proposal" { undoable = true }
         }
         if not undoable { try s.db.execute_script(String("ALTER TABLE activity ADD COLUMN proposal TEXT NOT NULL DEFAULT '';")) }
+        // Contexts from before one kept when it was compacted, whether its program
+        // compacts on request, whose it is in a group chat and a fresh session asked
+        // for get the columns, 0 and empty for not known.
+        var compacted = false
+        for r in try s.db.query(String("PRAGMA table_info(contexts)")) {
+            if text(r[1].copy()) == "compacted" { compacted = true }
+        }
+        if not compacted { try s.db.execute_script(String("ALTER TABLE contexts ADD COLUMN compacted INTEGER NOT NULL DEFAULT 0; ALTER TABLE contexts ADD COLUMN compacts INTEGER NOT NULL DEFAULT 0; ALTER TABLE contexts ADD COLUMN agent TEXT NOT NULL DEFAULT ''; ALTER TABLE contexts ADD COLUMN fresh INTEGER NOT NULL DEFAULT 0;")) }
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS proposals_by_message ON proposals (user, message) WHERE message != '';"))
         // What prune_rows looks for, by age.
         try s.db.execute_script(String("CREATE INDEX IF NOT EXISTS runs_by_at ON runs (at); CREATE INDEX IF NOT EXISTS sent_by_at ON sent (at); CREATE INDEX IF NOT EXISTS usage_by_at ON usage (at);"))
@@ -1090,7 +1113,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
+        let row = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.id = ? AND c.user = ? AND c.deleted = 0"), [t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -1099,7 +1122,7 @@ impl Store {
     // chat. A task's conversation is the task's, not the chat, and another
     // agent's thread with it (`asks`) is that agent's.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -1113,7 +1136,7 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
+        for r in try self.db.query(String("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at"), [t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -2604,6 +2627,53 @@ impl Store {
         _ = try self.db.execute(String("INSERT INTO contexts (user, conversation, used, size) VALUES (?, ?, ?, ?) ON CONFLICT (user, conversation) DO UPDATE SET used = excluded.used, size = excluded.size"), [t(user), t(conversation), Value.Int(used), Value.Int(size)])
     }
 
+    // `conversation`'s context as the apps are told it (context_of), or none
+    // before its program has said how full it is.
+    pub fn context_shown(self, user: String, conversation: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT used, size, compacted, compacts, agent FROM contexts WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return none
+        let size = int(r[1].copy())
+        if size <= 0 { return none }
+        return some(context_of(int(r[0].copy()), size, int(r[2].copy()), int(r[3].copy()) != 0, text(r[4].copy())))
+    }
+
+    // Whether `conversation`'s program compacts its session on request, as it last said.
+    pub fn context_compacts(self, user: String, conversation: String) -> bool ! Error {
+        let r = try self.db.query_one(String("SELECT compacts FROM contexts WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return false
+        return int(r[0].copy()) != 0
+    }
+
+    pub fn put_compacts(self, user: String, conversation: String, compacts: bool) ! Error {
+        _ = try self.db.execute(String("UPDATE contexts SET compacts = ? WHERE user = ? AND conversation = ?"), [Value.Int(if compacts { 1 } else { 0 }), t(user), t(conversation)])
+    }
+
+    // `conversation`'s session was compacted at `at`, or 0 for one that hasn't
+    // been since it began.
+    pub fn put_compacted(self, user: String, conversation: String, at: i64) ! Error {
+        _ = try self.db.execute(String("UPDATE contexts SET compacted = ? WHERE user = ? AND conversation = ?"), [Value.Int(at), t(user), t(conversation)])
+    }
+
+    // A group chat shows the context of its member `agent`, whose seat is `seat`,
+    // as it is now.
+    pub fn show_seat_context(self, user: String, conversation: String, seat: String, agent: String) ! Error {
+        _ = try self.db.execute(String("INSERT INTO contexts (user, conversation, used, size, compacted, compacts, agent) SELECT user, ?, used, size, compacted, compacts, ? FROM contexts WHERE user = ? AND conversation = ? ON CONFLICT (user, conversation) DO UPDATE SET used = excluded.used, size = excluded.size, compacted = excluded.compacted, compacts = excluded.compacts, agent = excluded.agent"), [t(conversation), t(agent), t(user), t(seat)])
+    }
+
+    // The member whose context a group chat shows, or "" before one has.
+    pub fn context_agent(self, user: String, conversation: String) -> String ! Error {
+        let r = try self.db.query_one(String("SELECT agent FROM contexts WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return String()
+        return text(r[0].copy())
+    }
+
+    // Whether the person asked for `conversation`'s next turn to start a fresh session.
+    pub fn fresh_asked(self, user: String, conversation: String) -> bool ! Error {
+        let r = try self.db.query_one(String("SELECT fresh FROM contexts WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return false
+        return int(r[0].copy()) != 0
+    }
+
+    pub fn ask_fresh(self, user: String, conversation: String, asked: bool) ! Error {
+        _ = try self.db.execute(String("INSERT INTO contexts (user, conversation, used, size, fresh) VALUES (?, ?, 0, 0, ?) ON CONFLICT (user, conversation) DO UPDATE SET fresh = excluded.fresh"), [t(user), t(conversation), Value.Int(if asked { 1 } else { 0 })])
+    }
+
     // The limits of `user`'s plan with `program`, as it last reported them, or none.
     pub fn plan_limits(self, user: String, program: String) -> Json? ! Error {
         let r = try self.db.query_one(String("SELECT json FROM plan_limits WHERE user = ? AND program = ?"), [t(user), t(program)]) else return none
@@ -3754,6 +3824,28 @@ fn a_chat_has_its_context_once_its_program_says() {
     assert(int_at(shown.copy(), "used") == some(113000i64) and int_at(shown, "size") == some(200000i64))
     assert("{s.conversations(a.id.copy())!}".contains("113000"))
     assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains("113000"))
+    // When it was compacted, and whether its program compacts on request, go with it.
+    assert(not s.context_compacts(a.id.copy(), id.copy())!)
+    s.put_compacts(a.id.copy(), id.copy(), true)!
+    s.put_compacted(a.id.copy(), id.copy(), 1700)!
+    let compacted = s.context_shown(a.id.copy(), id.copy())! ?? Json.Null
+    assert(int_at(compacted.copy(), "compacted") == some(1700i64) and "{compacted}".contains(#""compacts":true"#))
+    assert("{s.conversation(a.id.copy(), id.copy())!}".contains(#""compacted":1700"#))
+    assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(#""compacts":true"#))
+    // A fresh session asked for is kept until it's started.
+    assert(not s.fresh_asked(a.id.copy(), id.copy())!)
+    s.ask_fresh(a.id.copy(), id.copy(), true)!
+    assert(s.fresh_asked(a.id.copy(), id.copy())! and s.context(a.id.copy(), id.copy())! == some((i64(113000), i64(200000))))
+    s.ask_fresh(a.id.copy(), id.copy(), false)!
+    assert(not s.fresh_asked(a.id.copy(), id.copy())!)
+    // A group chat shows its member's seat's, with whose it is.
+    let room = s.add_conversation(a.id.copy(), String(""), String("Shop"))!
+    let room_id = field(room, "id")
+    s.put_context(a.id.copy(), "{room_id}/a_2", 40000, 200000)!
+    s.show_seat_context(a.id.copy(), room_id.copy(), "{room_id}/a_2", String("a_2"))!
+    let shown_room = s.context_shown(a.id.copy(), room_id.copy())! ?? Json.Null
+    assert(int_at(shown_room.copy(), "used") == some(40000i64) and str_at(shown_room, "agent") == some(String("a_2")))
+    assert(s.context_agent(a.id.copy(), room_id)! == "a_2")
 }
 
 @test
