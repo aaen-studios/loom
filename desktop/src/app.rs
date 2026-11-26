@@ -164,24 +164,28 @@ impl Render for SideDrag {
                 .flex_none()
                 .child(thread::weave(self.weave.clone(), 0.0, 1.0, 14.0))
         };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(space::M))
-            .when(!self.rail, |d| {
-                d.w(px(layout::SIDEBAR - 2.0 * space::S)).px(px(space::M))
-            })
-            .when(self.rail, |d| d.size(px(RAIL_ROW)).justify_center())
-            .py(px(space::S))
-            .rounded(px(radius::ROW))
-            .bg(p.raised_2)
-            .shadow_lg()
-            .text_size(px(size::BODY))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(p.ink)
-            .opacity(0.96)
-            .child(mark)
-            .when(!self.rail, |d| d.child(self.name.clone()))
+        // Lifted a little down and to the right of where it was taken, so the line
+        // where it lands shows beside it.
+        div().pt(px(space::M)).pl(px(space::S)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::M))
+                .when(!self.rail, |d| {
+                    d.w(px(layout::SIDEBAR - 2.0 * space::S)).px(px(space::M))
+                })
+                .when(self.rail, |d| d.size(px(RAIL_ROW)).justify_center())
+                .py(px(space::S))
+                .rounded(px(radius::ROW))
+                .bg(p.raised_2)
+                .shadow_lg()
+                .text_size(px(size::BODY))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink)
+                .opacity(0.96)
+                .child(mark)
+                .when(!self.rail, |d| d.child(self.name.clone())),
+        )
     }
 }
 
