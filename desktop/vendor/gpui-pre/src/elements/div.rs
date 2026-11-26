@@ -3747,7 +3747,9 @@ pub(crate) fn clear_active_tooltip_if_not_hoverable(
 ) {
     let should_clear = match active_tooltip.borrow().as_ref() {
         None => false,
-        Some(ActiveTooltip::WaitingForShow { .. }) => false,
+        // loom: a press or a scroll before the tooltip shows cancels it, as one after
+        // does, so it doesn't come up over a menu the press opened.
+        Some(ActiveTooltip::WaitingForShow { .. }) => true,
         Some(ActiveTooltip::Visible { is_hoverable, .. }) => !is_hoverable,
         Some(ActiveTooltip::WaitingForHide { .. }) => false,
     };
