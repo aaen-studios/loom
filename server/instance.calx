@@ -2443,6 +2443,7 @@ impl Instance {
         browser.stop_leftovers("{i.data}/browsers")
         try i.give_imported_servers()
         try i.drop_mcp_browser()
+        try i.keep_waiting_notes()
         i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -4090,12 +4091,12 @@ impl Instance {
     // Keeps an agent's proposal of a skill, a note or a fix to a skill that
     // failed, under the reply of the turn that made it, and tells the person's
     // devices. A note is kept at once, its agent's or every agent's, whatever
-    // the permission mode, for the person to forget after; a fix is when the
-    // agent's mode doesn't ask about everyday changes; anything else waits for
-    // the person. Gives the proposal as it is now.
+    // the permission mode, for the person to forget after, and never waits; a
+    // fix is when the agent's mode doesn't ask about everyday changes; anything
+    // else waits for the person. Gives the proposal as it is now.
     fn propose(i: Instance, g: Grant, kind: str, data: Json, why: String, recording: String) -> Json ! Error {
         let message = i.reply_of_run(g.copy())
-        let itself = try i.kept_at_once(g.user.copy(), g.agent.copy(), kind)
+        let itself = kind == "note" or try i.kept_at_once(g.user.copy(), g.agent.copy(), kind)
         if not itself {
             let waiting = try i.store.proposals(g.user.copy(), String("waiting"), PROPOSALS_WAITING_MOST + 1)
             if waiting.len() >= PROPOSALS_WAITING_MOST { fail "Your person has {PROPOSALS_WAITING_MOST} proposals waiting already. Wait until they've gone through them." }
@@ -4115,6 +4116,29 @@ impl Instance {
         try i.event(g.user.copy(), "proposal.created", Obj.new().j("proposal", p.copy()).done())
         if message.len() > 0 { try i.relearn(g.user, message) }
         return p
+    }
+
+    // Notes still waiting from before every note was kept at once (LOO-397),
+    // kept at start as the Keep on their card kept them, and their replies
+    // told, so nothing waits for a card that's gone (LOO-399).
+    fn keep_waiting_notes(i: Instance) ! Error {
+        for u in try i.store.users() {
+            var under = List<String>()
+            for p in try i.store.proposals(u.id.copy(), String("waiting"), 10000) {
+                if str_at(p.copy(), "kind") != some(String("note")) { continue }
+                let id = str_at(p.copy(), "id") ?? String()
+                let note = at(p.copy(), "note")
+                let why = try i.keep_note(u.id.copy(), str_at(p.copy(), "agent") ?? String(), id.copy(), note.copy(), String("auto"))
+                // An empty one, which there's nothing to keep of, goes.
+                if why.len() > 0 { _ = try i.store.decide_proposal(u.id.copy(), id.copy(), "dropped", note, String("auto")) }
+                let decided = try i.store.proposal(u.id.copy(), id) ?? Json.Null
+                try i.event(u.id.copy(), "proposal.updated", Obj.new().j("proposal", decided.copy()).done())
+                if let m = str_at(decided, "message") {
+                    if not under.contains(m.copy()) { under.push(m) }
+                }
+            }
+            for m in under { try i.relearn(u.id.copy(), m) }
+        }
     }
 
     // Whether what `agent` proposes, of `kind`, is kept at once (learn.kept_at_once).
