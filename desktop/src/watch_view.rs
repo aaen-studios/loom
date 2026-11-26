@@ -66,10 +66,55 @@ fn pill_words(p: Palette, words: String) -> Div {
         .child(words)
 }
 
+/// How a line's card pill is cut so its row, `inner` wide (`row_room`), holds it and what happened,
+/// which keeps its words (`model::pill_fit`): its title cut to the room left, down to its
+/// id alone. None when it fits whole, or the line has no card.
+pub(super) fn line_pill_cut(
+    p: Palette,
+    m: &Message,
+    line: &WatchLine,
+    inner: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> Option<(f32, bool)> {
+    if line.mark() != LineMark::Board {
+        return None;
+    }
+    let card = line.card_shown(m.cards.get(&line.card));
+    let dot = ink_color(p, line.dot(&card));
+    let key = SharedString::from(format!("line-{}", m.id));
+    let mut pill = card_pill_in(p, key, &line.card, Some(&card), Some(dot), None);
+    let natural = pill
+        .layout_as_root(
+            gpui::size(
+                gpui::AvailableSpace::MaxContent,
+                gpui::AvailableSpace::MaxContent,
+            ),
+            window,
+            cx,
+        )
+        .width
+        .as_f32();
+    let words = ui_text_width(&line.words(), size::CAPTION, FontWeight::NORMAL, window)
+        .min(layout::PILL_TITLE);
+    // Its mark and the words, each with its gap, and a little short of the edge.
+    let room = inner - MARK_W - space::M - space::S - words - 2.0;
+    if natural <= room {
+        return None;
+    }
+    let title = ui_text_width(&card.title, size::SMALL, FontWeight::NORMAL, window)
+        .min(layout::PILL_TITLE)
+        + 5.0;
+    let bare = natural - title;
+    let w = model::pill_fit(natural, bare, room, room).unwrap_or(room);
+    Some((w, model::pill_titled(w, bare)))
+}
+
 /// A watch's line in the chat, left-aligned and quiet, as a routine's line is: its mark
 /// in the thread's place (the board's tile, or T3's strand), the card's pill or the
 /// thread's title, and what happened and who in quiet ink. Lines one after another sit
-/// tight (`joined`); the reply of an agent it woke follows it as any reply does.
+/// tight (`joined`); the reply of an agent it woke follows it as any reply does. `cut` is
+/// the pill's, when the row is narrower than it and its words (`line_pill_cut`).
 pub(super) fn update_line(
     p: Palette,
     m: &Message,
@@ -77,6 +122,7 @@ pub(super) fn update_line(
     joined: model::Joined,
     column: f32,
     time_line: Option<Div>,
+    cut: Option<(f32, bool)>,
 ) -> Stateful<Div> {
     let key = SharedString::from(format!("line-{}", m.id));
     let mark = match line.mark() {
@@ -90,7 +136,14 @@ pub(super) fn update_line(
         LineMark::Board => {
             let card = line.card_shown(m.cards.get(&line.card));
             let dot = ink_color(p, line.dot(&card));
-            Some(card_pill_in(p, key, &line.card, Some(&card), Some(dot)))
+            Some(card_pill_in(
+                p,
+                key,
+                &line.card,
+                Some(&card),
+                Some(dot),
+                cut,
+            ))
         }
         LineMark::Strand(_) => Some(
             div()
@@ -137,10 +190,12 @@ pub(super) fn update_line(
                         .items_center()
                         .gap(px(space::S))
                         .children(subject)
-                        // What happened keeps its words; the pill's title gives way.
+                        // What happened keeps its words; the pill's title gives way, and
+                        // once the pill is its id alone, the words do too.
                         .child(
                             div()
-                                .flex_none()
+                                .when(cut.is_none_or(|(_, titled)| titled), |d| d.flex_none())
+                                .min_w_0()
                                 .max_w(px(layout::PILL_TITLE))
                                 .truncate()
                                 .text_size(px(size::CAPTION))
@@ -229,7 +284,7 @@ impl Loom {
                     Some(model::CardPreview::Ready(c)) => Some((**c).clone()),
                     _ => None,
                 };
-                card_pill(p, key, id, card.as_ref())
+                card_pill(p, key, id, card.as_ref(), None)
             }
             FollowPill::Board(name) => pill_frame(p)
                 .child(board_icon(14.0))

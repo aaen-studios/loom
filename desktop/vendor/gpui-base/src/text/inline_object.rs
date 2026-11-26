@@ -45,6 +45,10 @@ pub(super) struct MeasuredInlineObject {
     text: SharedString,
     font_size: Pixels,
     text_style: TextStyle,
+    /// loom: how the line cuts it (`InlineElement::cut_to_fit`), and, when this layout
+    /// did, its own width, so it's built again at `metrics.size.width`.
+    pub fit: Option<Rc<super::inline_element::InlineFit>>,
+    pub cut: Option<Pixels>,
 }
 
 impl MeasuredInlineObject {
@@ -78,8 +82,11 @@ impl MeasuredInlineObject {
             text,
             font_size,
             text_style: style.clone(),
+            fit: None,
+            cut: None,
         };
         if let Some(presentation) = presentation {
+            let fit = presentation.fit.clone();
             // The wrapper carries inherited marks into both layout and painting.
             let mut wrapper = div().child(presentation.element);
             wrapper.style().text = style.subtract(&Default::default());
@@ -99,6 +106,7 @@ impl MeasuredInlineObject {
             if metrics.is_valid() {
                 result.metrics = metrics;
                 result.content = Some(Rc::new(RefCell::new(Some(element))));
+                result.fit = fit;
             }
         }
         result
@@ -122,6 +130,14 @@ impl MeasuredInlineObject {
     }
 
     fn element(&self) -> (AnyElement, bool) {
+        // loom: cut by its line, it's made again at its width, and laid out there.
+        if let Some(natural) = self.cut
+            && let Some(fit) = &self.fit
+        {
+            let mut wrapper = div().child((fit.build)(natural, self.metrics.size.width));
+            wrapper.style().text = self.text_style.subtract(&Default::default());
+            return (wrapper.into_any_element(), false);
+        }
         if let Some(content) = &self.content {
             return (
                 content

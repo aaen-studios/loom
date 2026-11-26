@@ -42,6 +42,8 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
+#[path = "acta_ui.rs"]
+mod acta_ui;
 #[path = "learned.rs"]
 mod learned;
 #[path = "room_view.rs"]
@@ -291,6 +293,8 @@ enum Screen {
     AddServer,
     /// A group chat's settings, or the form that makes one.
     Room,
+    /// Acta beside the chat: a card's side preview, making a card, or a board.
+    Acta,
     Aside,
     Page,
     Tables,
@@ -1905,6 +1909,7 @@ ACTA_KEY=secret:ACTA_KEY",
             place,
             notice: None,
         };
+        loom.model.keep_boards(&loom.prefs.card_boards);
         loom.fetch();
         window.focus(&loom.keys, cx);
         loom
@@ -1930,6 +1935,8 @@ ACTA_KEY=secret:ACTA_KEY",
             self.end_search(window, cx);
         } else if self.popup.is_some() {
             self.popup = None;
+        } else if self.side == Some(Screen::Acta) && self.model.shut_acta_menu() {
+            // A menu in Acta's panel shuts first.
         } else if self.side.is_some() && self.screen == Screen::Chat {
             self.close_side(cx);
         } else if self.model.conn == Some(Conn::SignedOut) {
@@ -2469,6 +2476,7 @@ ACTA_KEY=secret:ACTA_KEY",
         // The choice is the first server's.
         self.show_server("", cx);
         self.model = Model::new();
+        self.model.keep_boards(&self.prefs.card_boards);
         self.screen = Screen::Chat;
         self.menu = None;
         // The old core stops, and its instance with it, as it's dropped.
@@ -2635,6 +2643,7 @@ ACTA_KEY=secret:ACTA_KEY",
         std::mem::swap(&mut self.events, &mut a.events);
         std::mem::swap(&mut self.model, &mut a.model);
         std::mem::swap(&mut self.here, &mut a.dir);
+        self.model.keep_boards(&self.prefs.card_boards);
         keep_last_server(&self.here);
         // The one away notifies whatever the window does; the one here, only while it's
         // not looked at, and it's looked at now.
@@ -3649,6 +3658,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The panel beside the chat on the right: an agent's page, or a plugin's panel,
     /// whose web view sits over the space left for it under the head.
     fn side_panel(&mut self, side: Screen, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if side == Screen::Acta {
+            return self.acta_side(window, cx);
+        }
         let p = self.p;
         let width = side_width(
             side == Screen::Plugins || side == Screen::Page,
@@ -9096,10 +9108,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let drawn = pieces.clone();
         Textarea::new(&self.composer)
             .appearance(false)
-            .token(move |t, _, _| {
+            .token(move |t, window, cx| {
                 // A selected piece has the selection's colour while the words beside it
                 // show theirs: the textarea leaves it to the piece (LOO-347).
-                composer_token(p, &drawn, t.token().id(), t.token().text(), t.selection())
+                composer_token(p, &drawn, t, window, cx)
             })
             .on_token_click(move |e, _, cx| {
                 let id = e.token().id().to_string();
@@ -9610,6 +9622,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx,
                 );
             }
+            PlusRow::Boards => {
+                self.shut_plus(window, cx);
+                self.open_board_panel(None, cx);
+            }
         }
     }
 
@@ -9686,6 +9702,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 (Ico::Settings, title.into(), None)
             }
             PlusRow::StartT3 => (Ico::SquareTerminal, "Start a T3 thread".into(), None),
+            PlusRow::Boards => (Ico::Layers, "Boards".into(), None),
         }
     }
 
@@ -10375,6 +10392,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let pinned = m.pinned;
                 let pin_id = m.id.clone();
+                let (card_from, card_live) = (m.id.clone(), m.live);
                 let (gone_id, can_delete) = (m.id.clone(), !m.live && !m.queued);
                 panel = panel
                     .child(
@@ -10398,6 +10416,16 @@ ACTA_KEY=secret:ACTA_KEY",
                                 close(this, cx);
                             })),
                     );
+                // With Acta connected: a card made from it, in the panel beside the chat.
+                if self.model.has_acta() && !card_live {
+                    panel = panel.child(
+                        self.menu_item("ctx-card", Ico::LayersPlus, "Make a card…", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                close(this, cx);
+                                this.start_card_panel(&card_from, window, cx);
+                            })),
+                    );
+                }
                 // Delete, in red after a line: at once, leaving a mark (LOO-208).
                 if can_delete {
                     panel = panel
@@ -11135,7 +11163,9 @@ ACTA_KEY=secret:ACTA_KEY",
         let w = window.viewport_size().width.as_f32();
         let side = match self.side {
             Some(side) => side_width(
-                side == Screen::Plugins || side == Screen::Page,
+                side == Screen::Plugins
+                    || side == Screen::Page
+                    || (side == Screen::Acta && self.acta_wide()),
                 w,
                 self.bar_width(w),
                 self.side_w,
@@ -22711,25 +22741,30 @@ fn card_id_text(id: &str, color: Hsla) -> Div {
 /// A card's pill, in a message or the composer (PLAN.md, "Cards in messages"): its board's
 /// tile, its id in mono, its title cut to fit and a dot in its status's colour, on the
 /// bubble's fill with a line around it. Under the pointer its preview shows under it, and
-/// a click opens it in Acta. A card that isn't there, or that the person can't see, is
-/// its id alone, quiet; one still being looked up, its tile and its id.
+/// a click opens its side preview. A card that isn't there, or that the person can't see, is
+/// its id alone, quiet; one still being looked up, its tile and its id. `cut` is the
+/// width a line too narrow for it cut it to, and whether its title still shows there
+/// (`model::pill_fit`).
 fn card_pill(
     p: Palette,
     key: SharedString,
     id: &str,
     card: Option<&model::ActaCard>,
+    cut: Option<(f32, bool)>,
 ) -> AnyElement {
-    card_pill_in(p, key, id, card, None)
+    card_pill_in(p, key, id, card, None, cut)
 }
 
 /// `card_pill`, and in a watch's line (`line_dot`, watch_view.rs): without its tile, which
 /// the line's mark already is, and its dot in the colour of the status the line is about.
+/// There, in a row, it gives way as the row narrows, and takes no `cut`.
 fn card_pill_in(
     p: Palette,
     key: SharedString,
     id: &str,
     card: Option<&model::ActaCard>,
     line_dot: Option<Hsla>,
+    cut: Option<(f32, bool)>,
 ) -> AnyElement {
     if card.is_some_and(|c| c.missing) {
         return card_id_text(id, p.ink_3).into_any_element();
@@ -22739,6 +22774,7 @@ fn card_pill_in(
         .h(px(control::PILL))
         .min_w_0()
         .max_w(px(layout::PILL_TITLE + 110.0))
+        .when_some(cut, |d, (w, _)| d.w(px(w)))
         .pl(px(if line_dot.is_some() { 7.0 } else { 4.0 }))
         .pr(px(7.0))
         .flex()
@@ -22754,7 +22790,7 @@ fn card_pill_in(
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
     };
-    let url = card.link();
+    let to_open = card.clone();
     let title = div()
         .min_w_0()
         .max_w(px(layout::PILL_TITLE))
@@ -22764,7 +22800,7 @@ fn card_pill_in(
         .when(card.struck(), |d| d.line_through())
         .child(card.title.clone());
     let pill = pill
-        .child(title)
+        .when(cut.is_none_or(|(_, titled)| titled), |d| d.child(title))
         .child(
             div()
                 .flex_none()
@@ -22772,16 +22808,57 @@ fn card_pill_in(
                 .rounded_full()
                 .bg(line_dot.unwrap_or_else(|| card_ink(p, &card))),
         )
-        .on_click(move |_, _, cx| cx.open_url(&url));
-    // In a row (a watch's line, Following), it gives way, its title cut shorter.
+        // Its side preview, beside the chat.
+        .on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx));
+    // In a row (Following, the cards made from a message), it gives way, its title cut
+    // shorter; cut to a width (a watch's line, `watch_view::line_pill_cut`), it keeps it.
     gpui_kit::base::HoverCard::new(key)
-        .min_w_0()
+        .when(cut.is_none(), |d| d.min_w_0())
+        .when(cut.is_some(), |d| d.flex_none())
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
         .close_delay(Duration::from_millis(150))
         .trigger(pill)
         .content(move |_, _, _| card_preview(p, &card))
         .into_any_element()
+}
+
+/// A card's pill on a line `line` wide that isn't a message's words, the composer's:
+/// measured as it is, and when it's wider than the line, cut to it as a message's words
+/// cut it (`model::pill_fit`), there being nowhere else on the line for it to start.
+fn line_pill(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(c) = card.filter(|c| !c.missing) else {
+        return card_pill(p, key, id, card, None);
+    };
+    let mut measured = card_pill(p, key.clone(), id, card, None);
+    let natural = measured
+        .layout_as_root(
+            gpui::size(
+                gpui::AvailableSpace::MaxContent,
+                gpui::AvailableSpace::MaxContent,
+            ),
+            window,
+            cx,
+        )
+        .width
+        .as_f32();
+    let cut = (natural > line).then(|| {
+        let bare = natural
+            - (ui_text_width(&c.title, size::SMALL, FontWeight::NORMAL, window)
+                .min(layout::PILL_TITLE)
+                + 5.0);
+        let w = model::pill_fit(natural, bare, line, line).unwrap_or(line);
+        (w, model::pill_titled(w, bare))
+    });
+    card_pill(p, key, id, card, cut)
 }
 
 /// A card's preview, under its pill: its board and id, its title, chips for its status (in
@@ -22811,7 +22888,7 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
     for c in card.chips() {
         chips = chips.child(chip(c, p.ink_2, p.line_strong));
     }
-    let button = |name: &'static str, url: String| {
+    let button = |name: &'static str| {
         div()
             .id(name)
             .h(px(28.0))
@@ -22827,10 +22904,10 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
             .cursor_pointer()
             .soft_hover(transparent_black(), p.hover, None)
             .child(name)
-            .on_click(move |_, _, cx| cx.open_url(&url))
     };
-    // Both open it in Acta, until it has a preview beside the chat.
+    // Open shows its side preview beside the chat, and its board's name the board.
     let url = card.link();
+    let (to_open, board, board_name) = (card.clone(), card.board.clone(), card.board_label());
     div().id("card-preview").pt(px(space::XS)).child(
         div()
             .w(px(layout::CARD_PREVIEW))
@@ -22851,7 +22928,16 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
                     .child(board_icon(14.0))
-                    .child(card.place()),
+                    .child(
+                        div()
+                            .id("card-preview-board")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .soft_ink(p.ink_3, p.ink)
+                            .child(board_name)
+                            .on_click(move |_, _, cx| acta_ui::open_board(&board, cx)),
+                    )
+                    .child(format!("· {}", card.id)),
             )
             .child(
                 div()
@@ -22897,8 +22983,10 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .pt(px(2.0))
                     .flex()
                     .gap(px(space::S))
-                    .child(button("Open", url.clone()))
-                    .child(button("Open in Acta", url)),
+                    .child(
+                        button("Open").on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx)),
+                    )
+                    .child(button("Open in Acta").on_click(move |_, _, cx| cx.open_url(&url))),
             ),
     )
 }
@@ -22931,15 +23019,40 @@ impl MarkdownPlugin for CardPills {
     fn render_inline(
         &self,
         node: &MarkdownNode,
-        _context: &InlineRenderContext,
-        _window: &mut Window,
+        context: &InlineRenderContext,
+        window: &mut Window,
         _cx: &mut App,
     ) -> Option<InlineElement> {
         let id = node.data::<String>()?.clone();
         let (p, card) = CARD_TIPS.with(|t| t.borrow().get(&id).cloned())?;
         let key = SharedString::from(format!("card-{id}"));
+        // How much of it is its title, with the gap before it, for a line that cuts it.
+        let run = context.text_style().to_run(card.title.len());
+        let title = window
+            .text_system()
+            .shape_line(
+                SharedString::from(card.title.clone()),
+                px(size::SMALL),
+                &[run],
+                None,
+            )
+            .width
+            .as_f32()
+            .min(layout::PILL_TITLE)
+            + 5.0;
+        let pill = card_pill(p, key.clone(), &id, Some(&card), None);
         // Its text sits on the line's baseline.
-        Some(InlineElement::new(card_pill(p, key, &id, Some(&card))).with_baseline(px(15.5)))
+        Some(InlineElement::new(pill).with_baseline(px(15.5)).cut_to_fit(
+            move |natural, room, line| {
+                let bare = natural.as_f32() - title;
+                model::pill_fit(natural.as_f32(), bare, room.as_f32(), line.as_f32()).map(px)
+            },
+            move |natural, width| {
+                let w = width.as_f32();
+                let titled = model::pill_titled(w, natural.as_f32() - title);
+                card_pill(p, key.clone(), &id, Some(&card), Some((w, titled)))
+            },
+        ))
     }
 }
 
@@ -22952,8 +23065,8 @@ fn card_extensions() -> MarkdownExtensions {
     EXT.with(|e| e.clone())
 }
 
-/// Opens a card a message's words link to (`model::CARD_LINK`), in Acta. Gives whether
-/// `url` was one.
+/// Opens a card a message's words link to (`model::CARD_LINK`) in its side preview.
+/// Gives whether `url` was one.
 fn open_card_link(url: &str, cx: &mut App) -> bool {
     // A T3 thread's link opens its page in T3's app, once its card is known.
     if let Some(page) = t3_view::page_of(url) {
@@ -22964,7 +23077,7 @@ fn open_card_link(url: &str, cx: &mut App) -> bool {
         return false;
     };
     if let Some((_, card)) = CARD_TIPS.with(|t| t.borrow().get(id).cloned()) {
-        cx.open_url(&card.link());
+        acta_ui::open_card(&card, cx);
     }
     true
 }
@@ -23209,24 +23322,44 @@ struct ComposerPieces {
 /// stands with others), or a link pasted as a preview as its site's icon and its page's
 /// title, or its site until that's known. The whole name or address shows on hover.
 /// While the selection takes it in, it has the selection's colour across the line's height,
-/// `selected`, as the words beside it do.
+/// as the words beside it do. None is wider than the composer's line: a card's pill has its
+/// title cut, as in a message (`line_pill`).
 fn composer_token(
+    p: Palette,
+    pieces: &ComposerPieces,
+    t: &gpui_kit::base::input::InlineTokenContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let line = t.available_width();
+    let (id, words) = (t.token().id(), t.token().text());
+    div()
+        .h_full()
+        .max_w(line)
+        .flex()
+        .items_center()
+        .when_some(t.selection(), |d, color| d.bg(color))
+        .child(composer_piece_of(
+            p,
+            pieces,
+            id,
+            words,
+            line.as_f32(),
+            window,
+            cx,
+        ))
+        .into_any_element()
+}
+
+fn composer_piece_of(
     p: Palette,
     pieces: &ComposerPieces,
     id: &str,
     words: &str,
-    selected: Option<Hsla>,
+    line: f32,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    div()
-        .h_full()
-        .flex()
-        .items_center()
-        .when_some(selected, |d, color| d.bg(color))
-        .child(composer_piece_of(p, pieces, id, words))
-        .into_any_element()
-}
-
-fn composer_piece_of(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
     let row = |tip: String, tint: Hsla| {
         div()
             .id(SharedString::from(format!("piece-{id}")))
@@ -23263,12 +23396,8 @@ fn composer_piece_of(p: Palette, pieces: &ComposerPieces, id: &str, words: &str)
             .filter(|i| !i.is_empty())
             .or_else(|| model::card_link(r).map(|(_, i)| i))
             .unwrap_or_else(|| r.to_string());
-        return card_pill(
-            p,
-            SharedString::from(format!("piece-{id}")),
-            &card_id,
-            shown.as_ref(),
-        );
+        let key = SharedString::from(format!("piece-{id}"));
+        return line_pill(p, key, &card_id, shown.as_ref(), line, window, cx);
     }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {
@@ -25757,6 +25886,7 @@ impl Render for Loom {
         self.settle_server(cx);
         sync_badge_files(&self.model.files);
         sync_mention_agents(&self.model.agents);
+        acta_ui::keep_opener(cx.entity().downgrade());
         self.finish_weaving(window, cx);
         if std::mem::take(&mut self.rows_dirty) {
             self.refresh_rows(cx);
@@ -27139,6 +27269,7 @@ mod row_tests {
             hold_keys: Rc::default(),
             lit: false,
             found: None,
+            line_cut: None,
         }
     }
 
@@ -27654,6 +27785,8 @@ struct RowInputs {
     /// What's found in it, while the find box has matches: what was looked for, and
     /// the match it'"'"'s on when that'"'"'s in it, by its piece and which.
     found: Option<(String, Option<(usize, usize)>)>,
+    /// A watch line's card pill, cut to its row (`watch_view::line_pill_cut`).
+    line_cut: Option<(f32, bool)>,
 }
 
 impl RowInputs {
@@ -27685,6 +27818,7 @@ impl RowInputs {
             && self.hold_keys == o.hold_keys
             && self.lit == o.lit
             && self.found == o.found
+            && self.line_cut == o.line_cut
     }
 }
 
@@ -27991,6 +28125,10 @@ fn chat_list(
                         .map(|a| (a.piece, a.nth));
                 Some((f.query.clone(), at))
             }),
+            line_cut: m.and_then(|m| {
+                let line = model::watch::line_of(m)?;
+                watch_view::line_pill_cut(p, m, line, content, window, cx)
+            }),
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -28104,7 +28242,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         Row::Message(m) => model::watch::line_of(m).map(|l| (m, l)),
         _ => None,
     } {
-        return watch_view::update_line(p, line.0, line.1, joined, column, time_line);
+        return watch_view::update_line(p, line.0, line.1, joined, column, time_line, i.line_cut);
     }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.
@@ -28311,6 +28449,11 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     let more_at = branch_at.clone();
     let to_more = this.clone();
     let lit = i.lit;
+    // Under it, the pills of the cards made from it (LOO-342).
+    let made = match &row {
+        Row::Message(m) if !m.deleted => acta_ui::made_pills(p, m),
+        _ => None,
+    };
     // To a screen reader, a message is an item in the chat, named by who said
     // what.
     let (row_id, said) = match row {
@@ -28356,6 +28499,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 .rounded(px(radius::BUBBLE))
                 .when(lit, |d| d.bg(tint.opacity(if p.dark { 0.16 } else { 0.1 })))
                 .child(inner)
+                .children(made)
                 .child(links)
                 // Over the message, where it's in the corner.
                 .children(when)
