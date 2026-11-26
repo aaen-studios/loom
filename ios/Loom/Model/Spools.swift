@@ -169,6 +169,13 @@ struct Entry: Equatable, Sendable, Identifiable {
         unsupported = v["unsupported"].text
     }
 
+    /// The mark the app has for it, by its id, as scripts/ios.calx bundles the catalog's
+    /// (`mark-acta`): one of the catalog's with a mark. A registry server's own SVG isn't
+    /// bundled, so it keeps its initial.
+    var mark: String? {
+        community || iconSvg.isEmpty ? nil : id
+    }
+
     static func == (a: Entry, b: Entry) -> Bool {
         a.id == b.id && a.name == b.name && a.servers == b.servers && a.tools.map(\.name) == b.tools.map(\.name) && a.secrets == b.secrets && a.badge == b.badge && a.unsupported == b.unsupported
     }

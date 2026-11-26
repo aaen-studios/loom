@@ -183,7 +183,7 @@ struct SpoolsView: View {
                         InstalledDetail(server: r.server.name)
                     } label: {
                         HStack(spacing: Tokens.Space.m) {
-                            BadgeView(badge: r.server.badge ?? r.entry?.badge, name: r.title, size: Tokens.Control.lead)
+                            BadgeView(badge: r.server.badge ?? r.entry?.badge, name: r.title, size: Tokens.Control.lead, mark: r.entry?.mark)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.title).font(Fonts.body).foregroundStyle(P.ink).lineLimit(1)
                                 if !r.line.isEmpty {
@@ -227,9 +227,9 @@ private struct SpoolCard: View {
                     .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
                     .overlay(Knot().frame(width: 20, height: 20))
                     .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
-                SpanView(taut: status?.dot == .ok, tint: tint)
+                SpanView(taut: status?.dot == .ok, tint: tint, dashed: true)
                     .frame(width: 56)
-                BadgeView(badge: entry.badge, name: entry.name)
+                BadgeView(badge: entry.badge, name: entry.name, mark: entry.mark)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.name).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink).lineLimit(1)
@@ -295,7 +295,7 @@ private struct SpoolTile: View {
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top, spacing: Tokens.Space.xs) {
-                    BadgeView(badge: entry.badge, name: entry.name, size: 28)
+                    BadgeView(badge: entry.badge, name: entry.name, size: 28, mark: entry.mark)
                     Spacer(minLength: 0)
                     if let status {
                         if status.dot == .ok {
@@ -371,7 +371,7 @@ private struct SpoolDetailSheet: View {
     private func page(_ e: Entry, _ flow: SpoolFlow) -> some View {
         VStack(alignment: .leading, spacing: Tokens.Space.l) {
             HStack(spacing: Tokens.Space.m) {
-                BadgeView(badge: e.badge, name: e.name)
+                BadgeView(badge: e.badge, name: e.name, mark: e.mark)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(e.name).font(Fonts.ui(Tokens.PhoneSize.body + 2, .semibold)).foregroundStyle(P.ink).lineLimit(1)
                     HStack(spacing: Tokens.Space.s) {
@@ -550,7 +550,7 @@ private struct InstalledDetail: View {
             if let row {
                 VStack(alignment: .leading, spacing: Tokens.Space.l) {
                     HStack(spacing: Tokens.Space.m) {
-                        BadgeView(badge: row.server.badge ?? row.entry?.badge, name: row.title)
+                        BadgeView(badge: row.server.badge ?? row.entry?.badge, name: row.title, mark: row.entry?.mark)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.title).font(Fonts.ui(Tokens.PhoneSize.body + 2, .semibold)).foregroundStyle(P.ink).lineLimit(1)
                             let under = installedUnder(row.server, row.entry)

@@ -35,6 +35,11 @@ targets:
       - path: ../build/ios/Twemoji.xcassets
         group: Loom/Resources
         optional: true
+      # Spools' marks from server/catalog, which scripts/ios.calx puts in a catalog that
+      # keeps their vectors, each named for its entry (`mark-acta`).
+      - path: ../build/ios/Marks.xcassets
+        group: Loom/Resources
+        optional: true
       - path: ../design/twemoji/sequences.txt
         group: Loom/Resources
         buildPhase: resources

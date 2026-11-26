@@ -14,9 +14,11 @@
 //    in build/ios/Icons.xcassets, since Xcode's asset compiler doesn't follow links;
 // 5. puts Twemoji's pictures, design/twemoji/svg, in build/ios/Twemoji.xcassets, each
 //    keeping its vectors;
-// 6. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
+// 6. puts Spools' marks, server/catalog/*.svg, in build/ios/Marks.xcassets, each keeping
+//    its vectors and drawn as a template;
+// 7. runs `xcodegen` in ios/, with LOOM_CORE=YES so ios/core.yml links it.
 //
-// --sample does only the last three.
+// --sample does only the last four.
 //
 // CALX names the compiler to build with, `calx` otherwise.
 import std.env
@@ -85,6 +87,31 @@ fn twemoji() ! Error {
     println("put {n} emoji in {catalog}")
 }
 
+/// Spools' marks (server/catalog/README.md) as build/ios/Marks.xcassets: each SVG in
+/// server/catalog an image set named `mark-` and its file's name, as a catalog entry's id
+/// is, which keeps its vectors and is drawn as a template in the badge's ink. Its
+/// `currentColor` is black here, since a template keeps only its shape. Made again each
+/// time, from the marks as they are.
+fn marks() ! Error {
+    let catalog = "{OUT}/Marks.xcassets"
+    if fs.exists(catalog.copy()) {
+        try fs.remove_dir_all(catalog.copy())
+    }
+    try fs.make_dir_all(catalog.copy())
+    try fs.write_text("{catalog}/Contents.json", String("\{\n  \"info\" : \{\n    \"author\" : \"xcode\",\n    \"version\" : 1\n  \}\n\}\n"))
+    var n = 0
+    for file in try fs.list(String("server/catalog")) {
+        if not file.ends_with(".svg") { continue }
+        let set = "{catalog}/mark-{file.trim_suffix(".svg")}.imageset"
+        try fs.make_dir_all(set.copy())
+        let svg = (try fs.read_text("server/catalog/{file}")) ?? String()
+        try fs.write_text("{set}/{file}", svg.replace("currentColor", "#000000"))
+        try fs.write_text("{set}/Contents.json", "\{\n  \"images\" : [\n    \{\n      \"filename\" : \"{file}\",\n      \"idiom\" : \"universal\"\n    \}\n  ],\n  \"info\" : \{\n    \"author\" : \"xcode\",\n    \"version\" : 1\n  \},\n  \"properties\" : \{\n    \"preserves-vector-representation\" : true,\n    \"template-rendering-intent\" : \"template\"\n  \}\n\}\n")
+        n += 1
+    }
+    println("put {n} marks in {catalog}")
+}
+
 fn main() ! Error {
     if not fs.is_file(String("core/lib.calx")) or not fs.is_file(String("ios/project.yml")) {
         eprintln("run it from loom's root: calx scripts/ios.calx")
@@ -113,6 +140,7 @@ fn main() ! Error {
     }
     try icons()
     try twemoji()
+    try marks()
     var gen = Command.new(String("xcodegen")).arg(String("--quiet")).dir(String("ios"))
     gen = gen.env(String("LOOM_CORE"), String(if sample { "NO" } else { "YES" }))
     try gen.run()

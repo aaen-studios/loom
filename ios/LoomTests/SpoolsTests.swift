@@ -58,6 +58,18 @@ import Testing
         #expect(!playwright.remote)
     }
 
+    @Test func anEntryWithAMarkDrawsTheAppsCopyOfIt() throws {
+        let m = withCatalog()
+        // The catalog's marks are bundled by id (`mark-acta`); one without keeps its initial.
+        #expect(m.entry("acta")?.mark == "acta")
+        #expect(m.entry("t3")?.mark == nil)
+        // A registry server's own SVG isn't bundled, whatever its id.
+        var found = Entry(["id": "acta", "name": "acta", "community": true, "icon_svg": "<svg/>"])
+        #expect(found.mark == nil)
+        found.community = false
+        #expect(found.mark == "acta")
+    }
+
     @Test func anEntrySaysWhereItRunsAndHowItSignsIn() {
         let m = withCatalog()
         let words = { (id: String) in (m.entry(id)?.runsWords ?? "", m.entry(id)?.signInWords ?? "") }

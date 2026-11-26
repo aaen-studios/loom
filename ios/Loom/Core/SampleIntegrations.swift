@@ -291,32 +291,32 @@ extension Sample {
          "badge": ["name": "github", "initial": "G", "color": "grey"]],
     ]
 
-    /// Spools: loom's own first, then the rest.
+    /// Spools, as server/catalog.calx has it: loom's own first, then the rest, those with a
+    /// mark in server/catalog saying so (`icon_svg`; the app draws its own copy).
     static let entries: [JSON] = [
-        ["id": "acta", "name": "Acta", "category": "Work", "description": "Boards and cards: find, make and move them", "maker": "Aaen Studios", "server": "acta", "runs": "remote",
-         "url": "https://acta.aaenz.no/api/mcp", "fields": [], "sign_in": "oauth", "secrets": [], "badge": ["name": "acta", "initial": "A", "color": "lavender"], "tools_checked": true,
+        ["id": "acta", "name": "Acta", "category": "Work", "description": "Boards, tasks and comments in Acta.", "maker": "Aaen Studios", "server": "acta", "runs": "remote",
+         "url": "https://acta.aaenz.no/api/mcp", "fields": [], "sign_in": "oauth", "secrets": [], "badge": ["name": "acta", "initial": "A", "color": "lavender"], "icon_svg": "<svg/>", "tools_checked": true,
          "tools": [["name": "list_tasks", "kind": "read"], ["name": "get_task", "kind": "read"], ["name": "search_tasks", "kind": "read"], ["name": "create_tasks", "kind": "change"],
                    ["name": "update_task", "kind": "change"], ["name": "add_comment", "kind": "change"]]],
-        ["id": "t3", "name": "T3 Code", "category": "Code", "description": "Start coding threads and answer them from the chat", "maker": "T3 Tools", "server": "t3", "runs": "remote",
+        ["id": "t3", "name": "T3 Code", "category": "Code", "description": "Projects and coding threads in T3 Code.", "maker": "T3 Tools", "server": "t3", "runs": "remote",
          "url": "{address}/mcp", "fields": [["name": "address", "label": "Address", "placeholder": "https://my-computer.tail1234.ts.net"]], "sign_in": "oauth", "secrets": [],
          "badge": ["name": "t3", "initial": "T", "color": "sky"], "tools_checked": true,
          "tools": [["name": "list_threads", "kind": "read"], ["name": "get_thread", "kind": "read"], ["name": "start_thread", "kind": "change"], ["name": "answer_thread", "kind": "change"]]],
-        entry("github", "GitHub", "Code", "Issues, pull requests and code", "GitHub", "grey"),
-        entry("linear", "Linear", "Work", "Issues and projects", "Linear", "periwinkle"),
-        entry("notion", "Notion", "Work", "Pages and databases", "Notion", "grey"),
-        entry("gmail", "Gmail", "Mail & calendar", "Read and send mail", "Google", "apricot"),
-        entry("gcal", "Google Calendar", "Mail & calendar", "Events and free time", "Google", "sky"),
-        entry("drive", "Google Drive", "Files", "Find and read files", "Google", "gold"),
-        entry("vercel", "Vercel", "Code", "Deployments and logs", "Vercel", "sky"),
-        entry("home", "Home Assistant", "Home", "Lights, heat and sensors", "Home Assistant", "mint"),
-        entry("spotify", "Spotify", "Fun", "What's playing, and queue songs", "Spotify", "mint"),
-        entry("figma", "Figma", "Work", "Read designs and their parts", "Figma", "pink"),
+        entry("github", "GitHub", "Code", "Repositories, issues and pull requests on GitHub.", "GitHub", "grey", mark: true),
+        entry("notion", "Notion", "Work", "Pages, databases and comments in Notion.", "Notion", "grey", mark: true),
+        entry("linear", "Linear", "Work", "Issues, projects and cycles in Linear.", "Linear", "periwinkle", mark: true),
+        entry("vercel", "Vercel", "Code", "Projects, deployments and their logs on Vercel.", "Vercel", "sky", mark: true),
+        entry("cloudflare", "Cloudflare", "Code", "Your Cloudflare account through its API, and Cloudflare's docs.", "Cloudflare", "apricot", mark: true),
+        entry("playwright", "Playwright", "Code", "Microsoft's Playwright browser, run on the instance.", "Microsoft", "mint", mark: false),
+        entry("home-assistant", "Home Assistant", "Home", "Lights, devices and what's on at home, through Home Assistant.", "Open Home Foundation", "sky", mark: true),
     ]
 
-    private static func entry(_ id: String, _ name: String, _ category: String, _ line: String, _ maker: String, _ color: String) -> JSON {
-        ["id": JSON(id), "name": JSON(name), "category": JSON(category), "description": JSON(line), "maker": JSON(maker), "server": JSON(id), "runs": "remote",
-         "url": JSON("https://mcp.\(id).example.com/mcp"), "fields": [], "sign_in": "oauth", "secrets": [], "tools": [["name": "search", "kind": "read"]], "tools_checked": false,
-         "badge": ["name": JSON(id), "initial": JSON(String(name.prefix(1))), "color": JSON(color)]]
+    private static func entry(_ id: String, _ name: String, _ category: String, _ line: String, _ maker: String, _ color: String, mark: Bool) -> JSON {
+        var e: [String: JSON] = ["id": JSON(id), "name": JSON(name), "category": JSON(category), "description": JSON(line), "maker": JSON(maker), "server": JSON(id), "runs": "remote",
+                                 "url": JSON("https://mcp.\(id).example.com/mcp"), "fields": [], "sign_in": "oauth", "secrets": [], "tools": [["name": "search", "kind": "read"]], "tools_checked": false,
+                                 "badge": ["name": JSON(id), "initial": JSON(String(name.prefix(1))), "color": JSON(color)]]
+        if mark { e["icon_svg"] = "<svg/>" }
+        return .object(e)
     }
 
     /// What the MCP Registry finds.
