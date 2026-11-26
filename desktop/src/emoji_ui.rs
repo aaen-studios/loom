@@ -44,7 +44,8 @@ pub(super) struct EmojiUi {
     told: Option<String>,
     /// One of the person's own whose name is being changed on Settings → Emoji, by id.
     pub renaming: Option<String>,
-    /// Where the composer is in the window, for the picker to fit over it.
+    /// Where the composer is in the window, for the picker to fit over it, as it is with
+    /// a new chat's middle block down (`hero_lift`).
     pub composer_at: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
@@ -65,16 +66,42 @@ fn picker_place(composer: Option<(f32, f32)>, high: f32) -> (Side, f32) {
     let Some((top, bottom)) = composer else {
         return (Side::Above, PICKER_H);
     };
-    // Under the title bar, with the gap over the composer.
-    let above = top - layout::TITLEBAR - 2.0 * space::S;
-    // The gap under the composer, and inside the window's foot.
-    let below = high - bottom - space::S - space::M;
+    let (above, below) = picker_room(top, bottom, high);
     let (side, room) = if above >= PICKER_H || above >= below {
         (Side::Above, above)
     } else {
         (Side::Below, below)
     };
     (side, room.clamp(CHROME, PICKER_H))
+}
+
+/// The room for the picker over a composer from `top` to `bottom` down a window `high`
+/// tall, and under it.
+fn picker_room(top: f32, bottom: f32, high: f32) -> (f32, f32) {
+    // Under the title bar, with the gap over the composer.
+    let above = top - layout::TITLEBAR - 2.0 * space::S;
+    // The gap under the composer, and inside the window's foot.
+    let below = high - bottom - space::S - space::M;
+    (above, below)
+}
+
+/// The picker with four lines of its grid.
+const FOUR_LINES: f32 = CHROME + 4.0 * TILE;
+
+/// How far a new chat's middle block, its greeting and its composer from `top` to
+/// `bottom` down a window `high` tall, moves up while the picker is open. Where neither
+/// side of the composer has four lines of the picker's grid, as far as gives the picker
+/// four lines under it, and no further than leaves the composer 12 px under the title
+/// bar, so at the least heights the picker takes what there is and its grid scrolls.
+/// Elsewhere it stays.
+fn picker_lift(top: f32, bottom: f32, high: f32) -> f32 {
+    let (above, below) = picker_room(top, bottom, high);
+    if above.max(below) >= FOUR_LINES {
+        return 0.0;
+    }
+    (FOUR_LINES - below)
+        .min(top - layout::TITLEBAR - space::M)
+        .max(0.0)
 }
 
 pub(super) struct Picker {
@@ -581,10 +608,39 @@ impl Loom {
         self.find_emoji(cx);
     }
 
-    /// The picker, by the composer at its right, above it or below it (`picker_place`):
-    /// the search, a tab for each group, the grid, and the foot with the emoji under the
-    /// pointer and the skin tones.
-    pub(super) fn emoji_picker_view(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
+    /// How far a new chat's middle block is up for the picker under it (`picker_lift`):
+    /// it eases up as the picker opens and back as it shuts, as the picker comes in, and
+    /// with reduce motion it's there at once.
+    pub(super) fn hero_lift(&self, window: &Window, cx: &App) -> f32 {
+        let open = self.emoji_ui.picker.is_some();
+        let eased = motion::level(&SharedString::from("emoji-lift"), open, 0.16);
+        let k = if !cx.reduce_motion() {
+            eased
+        } else if open {
+            1.0
+        } else {
+            0.0
+        };
+        let high = f32::from(window.viewport_size().height);
+        // In whole pixels of the screen, as the layout places things, so the composer
+        // measured with it, put back down by it, is where it was.
+        let scale = window.scale_factor();
+        self.emoji_ui.composer_at.get().map_or(0.0, |b| {
+            let lift = picker_lift(f32::from(b.top()), f32::from(b.bottom()), high);
+            (k * lift * scale).round() / scale
+        })
+    }
+
+    /// The picker, by the composer at its right, above it or below it (`picker_place`),
+    /// the composer being `lift` up from where it's measured (`hero_lift`): the search, a
+    /// tab for each group, the grid, and the foot with the emoji under the pointer and
+    /// the skin tones.
+    pub(super) fn emoji_picker_view(
+        &self,
+        lift: f32,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let picker = self.emoji_ui.picker.as_ref()?;
         let p = self.p;
         let k = motion::arrive(&SharedString::from("emoji-picker"), 0.16);
@@ -707,7 +763,7 @@ impl Loom {
             .emoji_ui
             .composer_at
             .get()
-            .map(|b| (f32::from(b.top()), f32::from(b.bottom())));
+            .map(|b| (f32::from(b.top()) - lift, f32::from(b.bottom()) - lift));
         let (side, high) = picker_place(composer, f32::from(window.viewport_size().height));
         // It opens from the composer's right edge, by the smiley, the gap from it growing
         // as it comes in.
@@ -1408,7 +1464,9 @@ impl Loom {
 
 #[cfg(test)]
 mod tests {
-    use super::{lines, picker_place, unpieced, Line, Side, CHROME, COLS, PICKER_H, TILE};
+    use super::{
+        lines, picker_lift, picker_place, unpieced, Line, Side, CHROME, COLS, PICKER_H, TILE,
+    };
     use crate::emoji::{Group, Item};
 
     #[test]
@@ -1449,6 +1507,41 @@ mod tests {
         assert_eq!(picker_place(Some((100.0, 150.0)), 200.0).1, CHROME);
         // Before the composer is laid out: above, all of it.
         assert_eq!(picker_place(None, 752.0), (Side::Above, PICKER_H));
+    }
+
+    #[test]
+    fn a_new_chat_moves_up_as_far_as_gives_the_picker_four_lines_under_it() {
+        let shown = |h: f32| ((h - CHROME) / TILE).floor();
+        // Where the picker lands once the composer from `top` to `bottom` moved up.
+        let lifted = |top: f32, bottom: f32, high: f32| {
+            let lift = picker_lift(top, bottom, high);
+            (lift, picker_place(Some((top - lift, bottom - lift)), high))
+        };
+        // At the default height there's room for four lines below already: it stays.
+        assert_eq!(picker_lift(370.0, 420.0, 752.0), 0.0);
+        // A chat's composer at the window's foot has all of it above.
+        assert_eq!(picker_lift(690.0, 740.0, 752.0), 0.0);
+        // A new chat in a tall window, all of it above.
+        assert_eq!(picker_lift(520.0, 570.0, 1052.0), 0.0);
+        // A shorter window: up as far as leaves four lines below, and no further.
+        let (lift, (side, h)) = lifted(294.0, 344.0, 600.0);
+        assert_eq!(lift, 56.0);
+        assert_eq!(side, Side::Below);
+        assert_eq!(shown(h), 4.0);
+        // The window's least height, the same.
+        let (lift, (side, h)) = lifted(234.0, 284.0, 480.0);
+        assert_eq!(lift, 116.0);
+        assert_eq!(side, Side::Below);
+        assert_eq!(shown(h), 4.0);
+        assert!(234.0 - lift >= 48.0 + 12.0);
+        // A tall composer there: up to 12 px under the title bar, and the picker takes
+        // what's below it and its grid scrolls.
+        let (lift, (side, h)) = lifted(150.0, 330.0, 480.0);
+        assert_eq!(150.0 - lift, 48.0 + 12.0);
+        assert_eq!((side, h), (Side::Below, 480.0 - (330.0 - lift) - 20.0));
+        assert!(shown(h) < 4.0);
+        // Already up against the title bar: it stays.
+        assert_eq!(picker_lift(55.0, 300.0, 400.0), 0.0);
     }
 
     fn item(e: &str) -> Item {

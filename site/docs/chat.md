@@ -151,7 +151,7 @@ On an iPhone, **+** opens a sheet with the same lists, and your newest photos in
 
 Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
 
-The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box, or below it in a new chat when there's more room there. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box, or below it in a new chat when there's more room there; in a short window the new chat's message box moves up to make room for it. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
 
 A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
 
