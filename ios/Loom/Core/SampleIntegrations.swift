@@ -284,10 +284,10 @@ extension Sample {
     /// The person's MCP servers, as `mcp.list` gives them.
     static let servers: [JSON] = [
         ["name": "acta", "url": "https://acta.aaenz.no/api/mcp", "catalog": "acta", "sign_in": "signed_in", "signed_in_as": "Elliot", "status": "connected",
-         "tools": ["list_tasks", "get_task", "update_task", "add_comment"], "agents": ["a_1", "a_2"], "badge": ["name": "acta", "initial": "A", "color": "lavender"]],
+         "tools": ["list_tasks", "get_task", "search_tasks", "create_tasks", "update_task", "add_comment"], "agents": ["a_1", "a_2"], "badge": ["name": "acta", "initial": "A", "color": "lavender"]],
         ["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed", "status": "sign_in", "agents": ["a_1"], "catalog": "vercel",
          "badge": ["name": "vercel", "initial": "V", "color": "sky"]],
-        ["name": "github", "url": "https://api.githubcopilot.com/mcp/", "catalog": "github", "status": "failing", "why": "The token it has was revoked", "agents": ["a_1"],
+        ["name": "github", "url": "https://api.githubcopilot.com/mcp/", "catalog": "github", "status": "failing", "why": "Its token was revoked", "agents": ["a_1"],
          "badge": ["name": "github", "initial": "G", "color": "grey"]],
     ]
 

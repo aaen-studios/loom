@@ -197,6 +197,8 @@ struct SpoolsView: View {
                     .accessibilityLabel("\(r.title), \(r.line)")
                 }
             }
+            // As close under the tabs as Find's search.
+            .contentMargins(.top, Tokens.Space.xs, for: .scrollContent)
             .scrollContentBackground(.hidden)
         }
     }
@@ -310,6 +312,7 @@ private struct SpoolTile: View {
                     .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
                     .foregroundStyle(P.ink)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             .padding(Tokens.Space.m)
@@ -356,6 +359,9 @@ private struct SpoolDetailSheet: View {
                     page(e, flow)
                 }
             }
+            // Over Settings' sheet, this sheet doesn't cut what scrolls under the home
+            // indicator at its own edge, so the scroll stops at the safe area.
+            .clipped()
             .background(P.bg)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
