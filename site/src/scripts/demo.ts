@@ -257,11 +257,28 @@ export function play(app: HTMLElement) {
 		picked?.remove();
 		picked = null;
 	};
+	// What a selection takes in, an emoji's picture as the emoji itself, as the app copies
+	// and quotes it (emoji.rs, drawn; PLAN.md, "Emoji").
+	const selectedWords = (sel: Selection | null): string => {
+		if (!sel || sel.rangeCount === 0) return '';
+		const part = sel.getRangeAt(0).cloneContents();
+		const pictures = part.querySelectorAll('img[alt]');
+		if (pictures.length === 0) return sel.toString();
+		for (const img of pictures) img.replaceWith(img.getAttribute('alt') ?? '');
+		// Laid out off screen, so its lines break where the message's do.
+		const box = document.createElement('div');
+		box.style.cssText = 'position: fixed; left: -10000px; top: 0';
+		box.append(part);
+		document.body.append(box);
+		const words = box.innerText;
+		box.remove();
+		return words;
+	};
 	msgs.addEventListener('mouseup', (e) => {
 		setTimeout(() => {
 			unpick();
 			const sel = getSelection();
-			const words = sel?.toString().replace(/\s+/g, ' ').trim() ?? '';
+			const words = selectedWords(sel).replace(/\s+/g, ' ').trim();
 			const row = (sel?.anchorNode?.parentElement)?.closest<HTMLElement>('.row[data-msg]');
 			if (!words || !row || !row.contains(sel!.focusNode)) return;
 			picked = tpl('demo-picked');

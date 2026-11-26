@@ -26,7 +26,7 @@ use crate::{
             Inline, InlineHighlight, InlineState, code_insets, combine_highlights, fade_highlights,
             foreground_highlights, point_in_text_selection, text_runs, text_size_ranges,
         },
-        inline_flow::{InlineFlow, InlineFlowItem, slice_ranges},
+        inline_flow::{EmojiPick, InlineFlow, InlineFlowItem, slice_ranges},
         range_highlight::{RangeHighlightFrame, RevealAt, RevealRequest},
         stream_fade::{StreamFadeFrame, TextLeafKey},
         text_view::handle_link_click,
@@ -1809,53 +1809,34 @@ impl Paragraph {
 
     pub(super) fn selected_text(&self) -> String {
         let mut text = String::new();
-        // loom: an emoji drawn as a picture (`loom_emoji_alt`) copies as its alt text, the
-        // emoji itself, when the selection runs over it, as `selected_markdown` decides:
-        // reaching the end of the run before it and starting at the beginning of the run
-        // after it, where a missing run counts as reaching it.
-        let mut pending = String::new();
-        let mut reach = true;
-        let mut take_run = |state: &InlineState, text: &mut String, pending: &mut String| {
-            match state.selection.as_ref().filter(|s| s.start < s.end) {
-                Some(selection) => {
-                    if selection.start == 0 {
-                        text.push_str(pending);
-                    }
-                    pending.clear();
-                    text.push_str(&state.text[selection.start..selection.end]);
-                    reach = selection.end >= state.text.len();
-                }
-                None if !state.text.is_empty() => {
-                    pending.clear();
-                    reach = false;
-                }
-                None => {}
-            }
-            reach
-        };
 
         for c in self.children.iter() {
             let Ok(state) = c.state.lock() else {
                 continue;
             };
-            let reached = take_run(&state, &mut text, &mut pending);
-            if let Some(alt) = c.image.as_ref().and_then(loom_emoji_alt)
-                && reached
-            {
-                pending.push_str(&alt);
+            if let Some(selection) = &state.selection {
+                text.push_str(&state.text[selection.start..selection.end]);
             }
+            let picked = c.custom_selection.lock().is_ok_and(|selected| *selected);
             if let Some(custom) = &c.custom
-                && c.custom_selection.lock().is_ok_and(|selected| *selected)
+                && picked
             {
                 text.push_str(custom.as_text());
             }
+            // loom: an emoji drawn as a picture (`loom_emoji_alt`) is selected as one
+            // unit, as an inline object is (`EmojiPicture`), and copies as its alt text:
+            // the emoji itself, or `:name:` for one of the person's own.
+            if let Some(alt) = c.image.as_ref().and_then(loom_emoji_alt)
+                && picked
+            {
+                text.push_str(&alt);
+            }
         }
 
-        if let Ok(state) = self.state.lock() {
-            let reached = take_run(&state, &mut text, &mut pending);
-            if reached && !text.is_empty() {
-                text.push_str(&pending);
-            }
+        if let Ok(state) = self.state.lock()
+            && let Some(selection) = &state.selection
+        {
+            text.push_str(&state.text[selection.start..selection.end]);
         }
 
         text
@@ -1923,7 +1904,13 @@ impl Paragraph {
         };
 
         for child in &self.children {
-            if child.custom.is_some() {
+            // loom: an emoji drawn as a picture is selected as one unit, as an inline
+            // object is (`selected_text`).
+            let emoji = child
+                .image
+                .as_ref()
+                .filter(|image| loom_emoji_alt(image).is_some());
+            if child.custom.is_some() || emoji.is_some() {
                 let (run_range, run_selection) = include_run(&child.state, &run);
                 if run_selection.emitted && run_selection.at_start {
                     merge_images(&mut selected, &mut pending_images);
@@ -1940,6 +1927,9 @@ impl Paragraph {
                                 .custom
                                 .as_ref()
                                 .and_then(MarkdownNode::source_range)
+                                .or_else(|| {
+                                    emoji.and_then(|image| image.span).map(|s| s.start..s.end)
+                                })
                                 .map(SourceRangeSelection::Mapped)
                                 .unwrap_or(SourceRangeSelection::Unmapped),
                         );
@@ -2031,7 +2021,10 @@ impl Paragraph {
         let mut enters_image = true;
 
         for child in self.children.iter() {
-            if child.custom.is_some() {
+            // loom: an emoji drawn as a picture is selected as one unit, as an inline
+            // object is, and is its alt text (`selected_text`).
+            let emoji = child.image.as_ref().and_then(loom_emoji_alt);
+            if child.custom.is_some() || emoji.is_some() {
                 let selected = emit_run(&child.state, &run, &mut pending_images, &mut source);
                 let object_selected = child
                     .custom_selection
@@ -2041,7 +2034,10 @@ impl Paragraph {
                     if run.is_empty() || (selected.emitted && selected.at_end) {
                         source.push_images(&pending_images);
                     }
-                    source.push_object(child);
+                    match emoji {
+                        Some(alt) => source.push_images(&[alt]),
+                        None => source.push_object(child),
+                    }
                 }
                 pending_images.clear();
                 enters_image = object_selected;
@@ -3293,7 +3289,13 @@ impl Paragraph {
         }
         // Images are inline content: several of them share a line, as words
         // do, even with nothing between them. The plain path stacks them.
+        // loom: an emoji drawn as a picture is selected in the flow alone, even by
+        // itself, as a message of one emoji is.
         self.children.iter().any(|child| child.custom.is_some())
+            || self
+                .children
+                .iter()
+                .any(|child| child.image.as_ref().and_then(loom_emoji_alt).is_some())
             || images > 1
             || (images > 0 && has_text)
             || self
@@ -3396,6 +3398,11 @@ impl Paragraph {
                     title: image.title(),
                     width: image.width,
                     height: image.height,
+                    // loom: an emoji drawn as a picture is selected as one unit.
+                    emoji: loom_emoji_alt(image).map(|alt| EmojiPick {
+                        alt: alt.into(),
+                        selected: inline_node.custom_selection.clone(),
+                    }),
                 });
 
                 consumed += text.len();

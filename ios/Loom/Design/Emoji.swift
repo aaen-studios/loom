@@ -157,6 +157,89 @@ enum Emoji {
         return (1...3).contains(count)
     }
 
+    // MARK: Selecting and copying (LOO-347)
+
+    /// A stretch of a message's words as Select text shows them: words, or an emoji drawn
+    /// as its picture, one character to the selection, which takes it in whole and copies
+    /// it as the emoji itself or `:name:`.
+    enum Piece: Equatable {
+        case words(String)
+        /// What it copies as, and its picture: Twemoji's by name (`1f62d`), or for one of
+        /// the person's own, its id.
+        case emoji(copies: String, picture: String, own: Bool)
+    }
+
+    /// `text` in pieces: each built-in emoji outside code, a whole emoji however many code
+    /// points it has (👍🏽, 👨‍👩‍👧), and each of the person's own outside code that `paths`
+    /// has the picture of. One whose picture isn't here yet is its `:name:` in the words.
+    static func pieces(_ text: String, paths: [String: String]) -> [Piece] {
+        var out: [Piece] = []
+        var words = ""
+        func flush() {
+            if !words.isEmpty { out.append(.words(words)) }
+            words = ""
+        }
+        let code = codeRanges(text)
+        let own = tokens(text).filter { t in !code.contains { $0.overlaps(t.range) } }
+        var next = 0
+        var i = text.startIndex
+        while i < text.endIndex {
+            if next < own.count, own[next].range.lowerBound == i {
+                let t = own[next]
+                if paths[t.id] != nil {
+                    flush()
+                    out.append(.emoji(copies: ":\(t.name):", picture: t.id, own: true))
+                } else {
+                    words += ":\(t.name):"
+                }
+                i = t.range.upperBound
+                next += 1
+                continue
+            }
+            let c = text[i]
+            if let picture = name(c), !code.contains(where: { $0.contains(i) }) {
+                flush()
+                out.append(.emoji(copies: String(c), picture: picture, own: false))
+            } else {
+                words.append(c)
+            }
+            i = text.index(after: i)
+        }
+        flush()
+        return out
+    }
+
+    /// How long a piece is in the text Select text shows, in UTF-16: its words, or the one
+    /// character of its picture.
+    static func shownLength(_ p: Piece) -> Int {
+        if case .words(let w) = p { return w.utf16.count }
+        return 1
+    }
+
+    /// What copying `range` of the shown pieces gives, `range` in UTF-16 of the text shown,
+    /// where each picture is one character: the words in it, and each emoji in it as what it
+    /// copies as.
+    static func copied(_ pieces: [Piece], _ range: NSRange) -> String {
+        var out = ""
+        var at = 0
+        let lo = range.location, hi = range.location + range.length
+        for p in pieces {
+            let n = shownLength(p)
+            let from = max(lo, at), to = min(hi, at + n)
+            if from < to {
+                switch p {
+                case .words(let w):
+                    let units = Array(w.utf16)
+                    out += String(decoding: units[(from - at)..<(to - at)], as: UTF16.self)
+                case .emoji(let copies, _, _):
+                    out += copies
+                }
+            }
+            at += n
+        }
+        return out
+    }
+
     // MARK: Pictures
 
     /// Twemoji's picture `name` drawn `side` points square, sharp at the screen's scale,
