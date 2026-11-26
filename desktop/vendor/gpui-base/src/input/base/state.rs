@@ -5955,6 +5955,70 @@ mod tests {
         });
     }
 
+    // loom: a token renderer is told the selection's colour only while the input shows
+    // its selection over the token, so a token it paints matches the words beside it.
+    #[gpui::test]
+    fn test_a_selected_token_has_the_selection_colour_while_it_shows(cx: &mut TestAppContext) {
+        use crate::input::{InlineToken, InlineTokenPresentation};
+        use std::{cell::Cell, rc::Rc};
+        cx.update(crate::init);
+        let seen: Rc<Cell<Option<Option<gpui::Hsla>>>> = Rc::new(Cell::new(None));
+        let told = seen.clone();
+        let view = InputView::build(cx, |state| state.default_value("before @alice after"));
+        let elsewhere = view
+            .window_handle
+            .update(cx, |_, window, cx| {
+                view.input.update(cx, |state, cx| {
+                    state
+                        .replace_range_with_token(
+                            7..13,
+                            InlineToken::new("a", "@alice"),
+                            window,
+                            cx,
+                        )
+                        .unwrap();
+                    state.set_token_presentation(InlineTokenPresentation::default().token(
+                        move |t, _, _| {
+                            told.set(Some(t.selection()));
+                            div().w(px(40.)).h(px(20.))
+                        },
+                    ));
+                    state.focus(window, cx);
+                    state.set_selected_range(0..19, cx);
+                });
+                cx.focus_handle()
+            })
+            .unwrap();
+        let mut visual = VisualTestContext::from_window(view.window_handle.into(), cx);
+        let mut drawn = |visual: &mut VisualTestContext| {
+            seen.set(None);
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            seen.get().expect("the token is drawn")
+        };
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        let colour = view
+            .input
+            .read_with(&visual, |state, _| state.editor_style.selection);
+        assert_eq!(drawn(&mut visual), Some(colour), "selected while it shows");
+
+        visual.update(|_, cx| view.input.update(cx, |s, cx| s.set_selected_range(0..3, cx)));
+        assert_eq!(drawn(&mut visual), None, "a selection beside the token");
+
+        visual.update(|_, cx| view.input.update(cx, |s, cx| s.set_selected_range(0..19, cx)));
+        visual.deactivate_window();
+        assert_eq!(drawn(&mut visual), None, "a window in the background");
+        visual.update(|window, _| window.activate_window());
+        visual.run_until_parked();
+        assert_eq!(drawn(&mut visual), Some(colour), "the window in front again");
+
+        visual.update(|window, cx| {
+            view.input.update(cx, |s, cx| s.set_selected_range(0..19, cx));
+            elsewhere.focus(window, cx);
+        });
+        assert_eq!(drawn(&mut visual), None, "a selection the input doesn't show");
+    }
+
     #[gpui::test]
     fn test_inline_token_click_selects_it(cx: &mut TestAppContext) {
         use crate::input::InlineToken;

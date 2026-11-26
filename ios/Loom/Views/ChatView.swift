@@ -285,7 +285,7 @@ struct ChatView: View {
         }
         .sheet(item: $reading) { r in
             NavigationStack {
-                SelectableText(text: r.text, message: r.message, agent: r.agent) { quote, ask in
+                SelectableText(text: r.text, message: r.message, agent: r.agent, paths: session.model.emoji.paths, selectAll: r.selectAll) { quote, ask in
                     reading = nil
                     if let id = r.message { session.model.reply(to: id, quote: quote, ask: ask) }
                 }
@@ -335,6 +335,15 @@ struct ChatView: View {
         // `-context` opens the context's card, for screenshots of the sheet.
         if thread == nil, args.contains("-context") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { contextOpen = true }
+        }
+        // `-select <message>` opens Select text on that message with all its words
+        // selected, for screenshots of the selection over its emoji.
+        if thread == nil, let i = args.firstIndex(of: "-select"), i + 1 < args.count {
+            let id = args[i + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                guard let m = session.model.messages.first(where: { $0.id == id }) else { return }
+                reading = Reading(text: m.text, message: m.id, agent: !m.isPerson, selectAll: true)
+            }
         }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
         threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
@@ -392,26 +401,38 @@ struct ChatView: View {
         /// The message it's from, to reply to a part of; nil for one that can't be.
         var message: String? = nil
         var agent = false
+        /// Whether it opens with all its words selected (`-select`).
+        var selectAll = false
     }
 }
 
 /// A message's text, to select any part of it, and with a part selected, to quote it or,
-/// in an agent's reply, ask about it (LOO-200).
+/// in an agent's reply, ask about it (LOO-200). Its emoji are drawn as the chat draws
+/// them, each one character to the selection, which highlights it as the words beside it
+/// and copies and quotes it as the emoji itself or `:name:` (LOO-347).
 private struct SelectableText: UIViewRepresentable {
     var text: String
     var message: String?
     var agent: Bool
+    /// The person's own emoji's pictures, by id.
+    var paths: [String: String]
+    /// Whether it opens with all its words selected (`-select` at launch).
+    var selectAll = false
     var quote: (String, Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: SelectableText
+        /// What it shows, piece by piece, to copy and quote from.
+        var shown: [Emoji.Piece] = []
+        /// What it was drawn from, so it's drawn again only when that changes.
+        var drawn: (text: String, paths: [String: String])?
         init(_ parent: SelectableText) { self.parent = parent }
 
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
-            guard parent.message != nil, range.length > 0, let r = Range(range, in: textView.text) else { return nil }
-            let words = String(textView.text[r])
+            guard parent.message != nil, range.length > 0 else { return nil }
+            let words = Emoji.copied(shown, range)
             var mine = [UIAction(title: "Quote", image: UIImage(systemName: "text.quote")) { [parent] _ in parent.quote(words, false) }]
             if parent.agent {
                 mine.append(UIAction(title: "Ask about this", image: UIImage(systemName: "questionmark.bubble")) { [parent] _ in parent.quote(words, true) })
@@ -420,22 +441,70 @@ private struct SelectableText: UIViewRepresentable {
         }
     }
 
-    func makeUIView(context: Context) -> UITextView {
-        let v = UITextView()
+    /// The text view, which copies what's selected as `copied` gives it.
+    final class Words: UITextView {
+        var copied: ((NSRange) -> String)?
+
+        override func copy(_ sender: Any?) {
+            guard let copied, selectedRange.length > 0 else { return super.copy(sender) }
+            UIPasteboard.general.string = copied(selectedRange)
+        }
+    }
+
+    func makeUIView(context: Context) -> Words {
+        let v = Words()
         v.delegate = context.coordinator
         v.isEditable = false
         v.isSelectable = true
         v.backgroundColor = .clear
-        v.font = UIFont.preferredFont(forTextStyle: .body)
         v.adjustsFontForContentSizeCategory = true
-        v.textColor = UIColor(P.ink)
         v.textContainerInset = UIEdgeInsets(top: 16, left: 12, bottom: 16, right: 12)
+        let coordinator = context.coordinator
+        v.copied = { [weak coordinator] range in coordinator.map { Emoji.copied($0.shown, range) } ?? "" }
         return v
     }
 
-    func updateUIView(_ v: UITextView, context: Context) {
-        context.coordinator.parent = self
-        if v.text != text { v.text = text }
+    func updateUIView(_ v: Words, context: Context) {
+        let c = context.coordinator
+        c.parent = self
+        guard c.drawn?.text != text || c.drawn?.paths != paths else { return }
+        let first = c.drawn == nil
+        c.drawn = (text, paths)
+        let font = UIFont.preferredFont(forTextStyle: .body)
+        let words: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(P.ink)]
+        let side = (font.pointSize * Emoji.inText).rounded()
+        let made = NSMutableAttributedString()
+        c.shown = []
+        for p in Emoji.pieces(text, paths: paths) {
+            var image: UIImage?
+            if case .emoji(_, let picture, let own) = p {
+                image = own ? paths[picture].flatMap { Emoji.picture(path: $0, side: side) } : Emoji.picture(picture, side: side)
+            }
+            switch (p, image) {
+            case (.emoji, .some(let image)):
+                let a = NSTextAttachment(image: image)
+                // On the line as the chat's emoji sit (`Emoji.inline`).
+                a.bounds = CGRect(x: 0, y: -side * 0.2, width: side, height: side)
+                let one = NSMutableAttributedString(attachment: a)
+                one.addAttributes(words, range: NSRange(location: 0, length: one.length))
+                made.append(one)
+                c.shown.append(p)
+            case (.emoji(let copies, _, _), .none):
+                // A picture it doesn't have is the emoji as text, as it copies.
+                made.append(NSAttributedString(string: copies, attributes: words))
+                c.shown.append(.words(copies))
+            case (.words(let w), _):
+                made.append(NSAttributedString(string: w, attributes: words))
+                c.shown.append(p)
+            }
+        }
+        v.attributedText = made
+        if first && selectAll {
+            DispatchQueue.main.async {
+                v.becomeFirstResponder()
+                v.selectedRange = NSRange(location: 0, length: v.textStorage.length)
+            }
+        }
     }
 }
 

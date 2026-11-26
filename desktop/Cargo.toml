@@ -77,11 +77,13 @@ gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] 
 # says more.
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
-# GPUI Base, as 0.10.0 with four changes (marked "loom:"): an inline <span> in Markdown can
+# GPUI Base, as 0.10.0 with five changes (marked "loom:"): an inline <span> in Markdown can
 # give its text a color and weight, for an agent's name where a message mentions it; a
 # link in such a span keeps that colour, with a light background of it under the pointer;
-# an emoji drawn as a picture (a `loom-emoji` source) copies as its alt text; and a
-# picture in a line of text shows its link's tooltip, for the emoji card.
+# an emoji drawn as a picture (a `loom-emoji` source) is one character to the selection,
+# highlighted as the words beside it, and copies as its alt text; a picture in a line of
+# text shows its link's tooltip, for the emoji card; and an input tells a token's renderer
+# its selection's colour while that selection shows over it, for the composer's pieces.
 gpui-base = { path = "vendor/gpui-base" }
 # GPUI, as 0.3.12 with two changes (marked "loom:"): an image can be drawn rotated, as an SVG
 # icon can, through Window::paint_image_transformed, for the tilted cards of a message's

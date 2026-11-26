@@ -3957,11 +3957,12 @@ pub fn selected_in(m: &Message, selected: &str) -> bool {
     if picked.is_empty() {
         return false;
     }
+    // One of the person's own emoji is selected as its name, as it copies (LOO-347).
     let shown = m
         .blocks
         .iter()
         .filter(|b| b.kind == "text" && b.parent.is_none())
-        .map(|b| spoken(&b.text))
+        .map(|b| spoken(&crate::emoji::as_names(&b.text)))
         .collect::<Vec<_>>()
         .join(" ");
     squash(&shown).contains(&picked)
@@ -11424,6 +11425,23 @@ mod tests {
         assert!(m.replying().is_none());
         // One still being written can't be replied to.
         assert!(!m.reply_to("msg_9", None, false));
+    }
+
+    // LOO-347: words selected with emoji in them are the message's, one of the person's
+    // own selected as its name.
+    #[test]
+    fn words_selected_with_emoji_are_the_messages() {
+        let mut m = in_chat();
+        m.take(
+            &json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "items": [
+                {"id": "msg_1", "role": "person", "from": "d_1", "at": 1, "blocks": [
+                    {"kind": "text", "text": "Word 😭 word <:party_cat:e_3> 👨‍👩‍👧 wad"}
+                ]}
+            ]}),
+        );
+        assert!(model_selected(&m, "msg_1", "Word 😭 word"));
+        assert!(model_selected(&m, "msg_1", "😭 word :party_cat: 👨‍👩‍👧 wad"));
+        assert!(!model_selected(&m, "msg_1", "<:party_cat:e_3> wad x"));
     }
 
     fn model_selected(m: &Model, id: &str, words: &str) -> bool {

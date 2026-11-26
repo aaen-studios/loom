@@ -4808,6 +4808,87 @@ mod tests {
             assert_eq!(selected(&state, cx), "first one\nsecond one");
         }
 
+        // loom: emoji drawn as pictures are selected as one unit each, as inline objects
+        // are, and copy as their alt text.
+        fn emoji(alt: &str, source: &str) -> String {
+            format!("<img src=\"{source}\" alt=\"{alt}\" width=\"18\" height=\"18\" />")
+        }
+
+        #[gpui::test]
+        fn a_drag_over_emoji_pictures_copies_them(cx: &mut TestAppContext) {
+            let sob = format!("[{}](loom:emoji/1f62d)", emoji("😭", "loom-emoji:1f62d@36"));
+            let anger = emoji("💢", "loom-emoji:1f4a2@36");
+            let (state, cx) = setup(&format!("Word {sob} word word {anger} wad"), cx);
+
+            let start = position(&state, "Word ", 0, cx);
+            press(start, 1, false, cx);
+            let end = position(&state, " wad", " wad".len(), cx);
+            drag(end, cx);
+            assert_eq!(selected(&state, cx), "Word 😭 word word 💢 wad");
+            release(end, 1, cx);
+            assert_eq!(selected(&state, cx), "Word 😭 word word 💢 wad");
+
+            // From inside a word to inside the next, the emoji between comes too.
+            let start = position(&state, "Word ", 2, cx);
+            press(start, 1, false, cx);
+            let end = position(&state, " word word ", 3, cx);
+            drag(end, cx);
+            release(end, 1, cx);
+            assert_eq!(selected(&state, cx), "rd 😭 wo");
+
+            // Only past its middle: a drag that stops just into it leaves it out.
+            press(start, 1, false, cx);
+            let into = position(&state, "Word ", "Word ".len(), cx);
+            drag(into, cx);
+            release(into, 1, cx);
+            assert_eq!(selected(&state, cx), "rd");
+        }
+
+        #[gpui::test]
+        fn a_double_click_selects_an_emoji_picture_alone(cx: &mut TestAppContext) {
+            let sob = format!("[{}](loom:emoji/1f62d)", emoji("😭", "loom-emoji:1f62d@36"));
+            let (state, cx) = setup(&format!("Word {sob} word"), cx);
+            // The middle of the picture, just after "Word ".
+            let on = position(&state, "Word ", "Word ".len(), cx) + gpui::point(px(8.), px(0.));
+            press(on, 1, false, cx);
+            release(on, 1, cx);
+            press(on, 2, false, cx);
+            release(on, 2, cx);
+            assert_eq!(selected(&state, cx), "😭");
+            // A triple click takes its paragraph, the emoji in it.
+            press(position(&state, "Word ", 1, cx), 3, false, cx);
+            assert_eq!(selected(&state, cx), "Word 😭 word");
+        }
+
+        #[gpui::test]
+        fn the_persons_own_emoji_copy_as_their_names(cx: &mut TestAppContext) {
+            let own = emoji(":party_cat:", "loom-emoji-own:/x/e_3");
+            let family = emoji("👨‍👩‍👧", "loom-emoji:1f468-200d-1f469-200d-1f467@36");
+            let thumb = emoji("👍🏽", "loom-emoji:1f44d-1f3fd@36");
+            let (state, cx) = setup(&format!("a {own} b {family}{thumb} c"), cx);
+            let start = position(&state, "a ", 0, cx);
+            press(start, 1, false, cx);
+            let end = position(&state, " c", " c".len(), cx);
+            drag(end, cx);
+            release(end, 1, cx);
+            assert_eq!(selected(&state, cx), "a :party_cat: b 👨‍👩‍👧👍🏽 c");
+        }
+
+        #[gpui::test]
+        fn a_message_of_only_emoji_selects_and_copies_them(cx: &mut TestAppContext) {
+            let sob = format!("[{}](loom:emoji/1f62d)", emoji("😭", "loom-emoji:1f62d@36"));
+            let (state, cx) = setup(&format!("{sob}\n\nnext"), cx);
+            state.update(cx, |state, cx| state.select_all(cx));
+            assert_eq!(selected(&state, cx), "😭\nnext");
+            // A drag from the next paragraph back up over it takes it in.
+            let end = position(&state, "next", "next".len(), cx);
+            press(end, 1, false, cx);
+            let top = gpui::point(px(1.), px(1.));
+            drag(top, cx);
+            release(top, 1, cx);
+            assert_eq!(selected(&state, cx), "😭\nnext");
+        }
+
         /// A hard break adds a line to a paragraph without ending that paragraph.
         #[gpui::test]
         fn triple_click_drag_and_shift_click_keep_hard_break_paragraphs_whole(
