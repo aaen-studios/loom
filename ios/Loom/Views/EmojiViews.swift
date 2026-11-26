@@ -61,7 +61,8 @@ struct EmojiRowView: View {
 
 /// The emoji picker, a sheet: **Find an emoji**, the skin tone, a tab for each group,
 /// and the grid under them with a heading for each, the person's own with a dashed +
-/// that opens Settings → Emoji.
+/// that opens Settings → Emoji. A tap puts an emoji in and the sheet stays up, for the
+/// next; Recently used keeps its order until it opens again (`Emojis.openPicker`).
 struct EmojiPicker: View {
     @Environment(Session.self) private var session
     var pick: (EmojiItem) -> Void

@@ -861,6 +861,10 @@ impl Loom {
                         if let Some(frame) = this.model.send(&text) {
                             this.core.send(&frame.to_string());
                             state.update(cx, |s, cx| s.set_value("", window, cx));
+                            // Sending shuts the emoji picker.
+                            if this.emoji_ui.picker.is_some() {
+                                this.close_emoji_picker(cx);
+                            }
                         }
                     }
                     // A / alone in the composer opens the + menu, with its search.
@@ -9808,7 +9812,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.menu_item("ctx-hide-emoji", Ico::EyeOff, "Hide emoji button", false)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             close(this, cx);
-                            this.emoji_ui.picker = None;
+                            this.close_emoji_picker(cx);
                             this.set_prefs(|p| p.emoji_button = false, window, cx);
                         })),
                 );
@@ -11062,6 +11066,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                         this.send(frame);
                                         this.composer
                                             .update(cx, |s, cx| s.set_value("", window, cx));
+                                        if this.emoji_ui.picker.is_some() {
+                                            this.close_emoji_picker(cx);
+                                        }
                                     }
                                 })),
                         ),
