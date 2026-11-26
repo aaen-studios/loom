@@ -232,6 +232,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["messages": .array(page), "count": JSON(all.count), "more": JSON(from + page.count < all.count)]])
             case "routine.run":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
+            case "routine.put":
+                turnOn(f)
             case "emoji.add", "emoji.rename", "emoji.delete", "emoji.restore":
                 ownEmoji(f)
             case "agent.file":
@@ -445,6 +447,28 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             return
         }
         tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": JSON("There's no message \(id.text).")]])
+    }
+
+    /// A routine turned on (`routine.put` with `on`), as the instance does: the card it
+    /// left when it turned off says it's on, with message.updated.
+    private func turnOn(_ f: JSON) {
+        let routine = f["args"]["id"].text
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["routine": ["id": JSON(routine), "on": JSON(f["args"]["on"].bool ?? true)]]])
+        guard f["args"]["on"].bool == true else { return }
+        for (c, list) in messages {
+            for (i, m) in list.enumerated() {
+                guard m["role"].text == "loom", case .object(var o) = m, case .array(var blocks) = m["blocks"],
+                      let k = blocks.firstIndex(where: { $0["card"]["type"].text == "routine_off" && $0["card"]["routine"].text == routine }),
+                      case .object(var b) = blocks[k], case .object(var card) = b["card"] else { continue }
+                card["state"] = "on"
+                b["card"] = .object(card)
+                blocks[k] = .object(b)
+                o["blocks"] = .array(blocks)
+                messages[c]![i] = .object(o)
+                seq += 1
+                tell(["t": "event", "kind": "message.updated", "seq": JSON(seq), "at": JSON(Sample.now()), "conversation": JSON(c), "message": .object(o)])
+            }
+        }
     }
 
     /// A group chat made, as the instance makes one (server/rooms.calx, `room_made`): its
@@ -704,6 +728,9 @@ enum Sample {
          "last": ["status": "done", "at": 1795165200000]],
         ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
          "last": ["status": "failed", "at": 1795100000000]],
+        // Off after five failures in a row, with its card in Builder's chat.
+        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_1", "prompt": "", "schedule": ["daily": "09:00"], "on": false,
+         "failures": 5, "off_card": "msg_14", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795187129000]],
     ]
 
     static let recent: [JSON] = [
@@ -775,6 +802,10 @@ enum Sample {
                          "event": "finished", "state": "completed", "said": "Thread finished", "text": "Thread finished · Fix the build"]]],
             ["id": "msg_9", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_3", "at": 1795187128000,
              "blocks": [["kind": "text", "text": "The build fix landed and LOO-206 shipped. Both are in the release notes."]]],
+            // A routine that turned off on its own: its card, to turn it on.
+            ["id": "msg_14", "conversation": "c_1", "role": "loom", "at": 1795187129000,
+             "blocks": [["kind": "card", "card": ["id": "msg_14", "type": "routine_off", "title": "Running shoe prices", "routine": "rt_3",
+                                                  "why": "XXL's product page didn't load (503)", "failures": 5, "state": "off"]]]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,
