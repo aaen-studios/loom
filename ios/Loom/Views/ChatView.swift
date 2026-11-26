@@ -357,6 +357,7 @@ struct ChatView: View {
             if let roomId {
                 model.open(room: roomId)
                 session.flush()
+                openFromLaunch()
                 return
             }
             model.select(agentId)

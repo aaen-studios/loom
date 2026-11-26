@@ -121,10 +121,12 @@ extension View {
 }
 
 /// A card's pill as a view of its own: under the message a card was made from, in a
-/// board's rows and in Following. A tap opens its sheet, where it has one.
+/// board's rows and in Following. A tap opens its sheet, where it has one. Its title is
+/// cut at most 260 points across, or, where it `shrinks`, at what the row leaves it.
 struct CardPillView: View {
     var card: ActaCard
     var open: (() -> Void)?
+    var shrinks = false
 
     var body: some View {
         if let open {
@@ -142,15 +144,21 @@ struct CardPillView: View {
         PillFrame {
             Image(uiImage: Pill.tile())
             Text(card.id).font(Fonts.mono(Tokens.PhoneSize.small - 1)).foregroundStyle(P.ink2)
+                .fixedSize()
             if !card.missing && !card.title.isEmpty {
-                Text(card.title)
+                let title = Text(card.title)
                     .font(Fonts.ui(Tokens.PhoneSize.small))
                     .foregroundStyle(card.struck ? P.ink3 : P.ink)
                     .strikethrough(card.struck)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                    .frame(maxWidth: Tokens.Layout.pillTitle, alignment: .leading)
-                    .fixedSize(horizontal: true, vertical: false)
+                if shrinks {
+                    title
+                } else {
+                    title
+                        .frame(maxWidth: Tokens.Layout.pillTitle, alignment: .leading)
+                        .fixedSize(horizontal: true, vertical: false)
+                }
                 Circle().fill(card.ink.color).frame(width: 7, height: 7)
             }
         }

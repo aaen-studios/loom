@@ -54,7 +54,7 @@ struct FollowPillView: View {
         switch pill {
         case .card(let id, _):
             if let card = model.followedCard(pill) {
-                CardPillView(card: card)
+                CardPillView(card: card, shrinks: true)
             } else {
                 PillFrame {
                     Image(uiImage: Pill.tile())
@@ -74,12 +74,11 @@ struct FollowPillView: View {
         }
     }
 
+    /// A board's name or a thread's title, cut at what the row leaves it.
     private func words(_ s: String) -> some View {
         Text(s)
             .font(Fonts.ui(Tokens.PhoneSize.small)).foregroundStyle(P.ink)
             .lineLimit(1).truncationMode(.tail)
-            .frame(maxWidth: Tokens.Layout.pillTitle, alignment: .leading)
-            .fixedSize(horizontal: true, vertical: false)
     }
 }
 
