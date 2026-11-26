@@ -72,6 +72,7 @@ pub mod layout {
     pub const CONTEXT_CARD: f32 = 300.0;
     pub const PILL_TITLE: f32 = 260.0;
     pub const CARD_PREVIEW: f32 = 330.0;
+    pub const BOARD_COLUMN: f32 = 140.0;
     pub const FIELD_LABEL: f32 = 120.0;
 }
 

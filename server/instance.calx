@@ -54,6 +54,7 @@ import server.mcpcall
 import server.acta
 import server.t3
 import server.t3ws
+import server.acta_panels
 import server.links
 import server.oauth
 import server.move
@@ -523,6 +524,7 @@ pub struct Instance {
     acta_boards: Map<String, ActaBoards>    // a person -> their Acta boards, as list_boards last gave them
     acta_cards: Map<String, Json>    // "user\nID" -> the card as it was last looked up
     card_asks: Map<String, CardAsk>    // "user\nID" being looked up -> what waits on it
+    acta_waits: Map<i64, ActaWait>    // each call for Acta beside the chat under way -> what waits on it
     watch: Watches    // what the person follows outside loom, and what that has under way (server/watches.calx)
     t3: T3State    // T3 Code's threads on messages (PLAN.md, "T3 threads")
     oauth_to: Sender<oauth.Job>    // the thread that signs in to MCP servers and renews their tokens
@@ -849,6 +851,15 @@ fn new_watches() -> Watches {
 // What a turn a watch woke an agent for says it comes from, and what it's told.
 const WOKEN_FROM: str = "an event outside loom that your person follows (a watch they set up, or one you set up by starting a T3 thread); your person isn't writing this"
 const WOKEN_NOTE: str = "[loom: Your person sees your answer in this chat, under a line that says what came. Say what matters about it, or do what it calls for; with nothing to say, say so in a few words.]"
+
+// A call to Acta for its panels beside the chat (card.get, card.update, card.create,
+// acta.board, acta.tasks): who waits, the message a card is made from, and what was
+// asked of Acta.
+struct ActaWait {
+    waiter: Waiter
+    message: String
+    asked: Json
+}
 
 // An MCP server's test under way: who waits, and whose server it is.
 struct McpTest {
@@ -2334,7 +2345,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -6300,6 +6311,14 @@ impl Instance {
                 }
             }
         }
+        // And the cards made from it, which show under it.
+        for r in acta_panels.made_refs(message) {
+            var had = false
+            for o in out {
+                if o.id == r.id { had = true }
+            }
+            if not had { out.push(r.copy()) }
+        }
         return out
     }
 
@@ -6427,6 +6446,8 @@ impl Instance {
             try i.watch_called(c, d)
         } else if c.kind.starts_with("t3_") {
             try i.t3_called(c, d)
+        } else if c.kind.starts_with("panel.") {
+            try i.acta_panel_came(c, d)
         }
     }
 
@@ -6566,6 +6587,113 @@ impl Instance {
             }
         }
         return Answer.Value(Obj.new().done())
+    }
+
+    // --- Acta beside the chat (PLAN.md, "Acta beside the chat") ---
+
+    // card.get, card.update, card.create, acta.board and acta.tasks: each asks the
+    // person's Acta, as them, and is answered once Acta has.
+    fn acta_panel_cmd(i: mut Instance, w: own Waiter, user: own String, name: String, args: Json) {
+        if not i.has_acta(user.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("Acta isn't connected.")))
+            return
+        }
+        let board = str_at(args.copy(), "board") ?? String()
+        if not acta_panels.is_board(board.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("board is a board's ref: workspace/board.")))
+            return
+        }
+        if name == "acta.board" {
+            i.acta_ask(w, user, "panel.board", board.copy(), String(), "get_board", Obj.new().s("board", board).done(), String())
+            return
+        }
+        if name == "acta.tasks" {
+            match acta_panels.tasks_args(board.copy(), args) {
+                ok(a) => i.acta_ask(w, user, "panel.tasks", board, String(), "list_tasks", a, String()),
+                err(e) => i.answer_cmd(w, Answer.Refused(String("bad_request"), "{e}")),
+            }
+            return
+        }
+        if name == "card.create" {
+            let message = str_at(args.copy(), "message") ?? String()
+            match acta_panels.create_args(board.copy(), args) {
+                ok(a) => i.acta_ask(w, user, "panel.create", board, String(), "create_tasks", a, message),
+                err(e) => i.answer_cmd(w, Answer.Refused(String("bad_request"), "{e}")),
+            }
+            return
+        }
+        let id = str_at(args.copy(), "id") ?? String()
+        if not acta.is_id(id.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("id is a card's id, such as LOO-12.")))
+            return
+        }
+        if name == "card.get" {
+            i.acta_ask(w, user, "panel.card", board.copy(), id.copy(), "get_task", Obj.new().s("board", board).s("task", id).done(), String())
+            return
+        }
+        match acta_panels.update_args(board.copy(), id.copy(), args) {
+            ok(a) => i.acta_ask(w, user, "panel.update", board, id, "update_task", a, String()),
+            err(e) => i.answer_cmd(w, Answer.Refused(String("bad_request"), "{e}")),
+        }
+    }
+
+    // Calls `tool` of the person's Acta for a panel, with `w` waiting on its answer.
+    fn acta_ask(i: mut Instance, w: own Waiter, user: own String, kind: str, board: own String, id: own String, tool: str, arguments: own Json, message: own String) {
+        if not i.call_acta(user, kind, id, board, tool, arguments.copy()) {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("Acta isn't connected.")))
+            return
+        }
+        i.acta_waits.insert(i.next_job, ActaWait { waiter: w, message: message, asked: arguments })
+    }
+
+    // What Acta answered a panel's call: a board, its tasks, a card (after a change,
+    // looked up again, so the answer has it as it is now), or the card made, which is
+    // kept with the message it was made from.
+    fn acta_panel_came(i: mut Instance, c: OutCall, d: mcpcall.Done) ! Error {
+        let wait = i.acta_waits.remove(d.id) else return
+        if d.error.len() > 0 {
+            i.answer_cmd(wait.waiter, Answer.Refused(String("unavailable"), String("Acta didn't answer.")))
+            return
+        }
+        if let why = mcpcall.tool_failed(d.result.copy()) {
+            i.answer_cmd(wait.waiter, Answer.Refused(String("mcp_failed"), if why.len() > 0 { why } else { String("Acta refused it.") }))
+            return
+        }
+        let got = mcpcall.json_of(d.result.copy())
+        var boards = List<acta.Board>()
+        if let b = i.acta_boards.find(c.user.copy()) { boards = b.boards.copy() }
+        let name = acta.board_name(boards, c.board.copy())
+        if c.kind == "panel.board" {
+            i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("board", acta_panels.board_of(got)).done()))
+        } else if c.kind == "panel.tasks" {
+            i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("tasks", acta_panels.tasks_of(got)).done()))
+        } else if c.kind == "panel.update" {
+            i.acta_ask(wait.waiter, c.user.copy(), "panel.card", c.board.copy(), c.id.copy(), "get_task", Obj.new().s("board", c.board.copy()).s("task", c.id.copy()).done(), String())
+        } else if c.kind == "panel.card" {
+            if str_at(got.copy(), "id") == none {
+                i.answer_cmd(wait.waiter, Answer.Refused(String("not_found"), "{c.id} isn't on {name}."))
+                return
+            }
+            // The next message that names it has it as it is now.
+            i.acta_cards.insert("{c.user}\n{c.id}", acta.card_of(got.copy(), c.board.copy(), name.copy(), now()))
+            i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("card", acta_panels.detail_of(got, c.board.copy(), name, now())).done()))
+        } else if c.kind == "panel.create" {
+            let card = acta_panels.made_card(got, wait.asked.copy(), c.board.copy(), name, now()) else {
+                i.answer_cmd(wait.waiter, Answer.Refused(String("unavailable"), String("Acta didn't say which card it made.")))
+                return
+            }
+            let id = str_at(card.copy(), "id") ?? String()
+            i.acta_cards.insert("{c.user}\n{id}", card.copy())
+            if wait.message.len() > 0 {
+                if let message = try i.store.message(c.user.copy(), wait.message.copy()) {
+                    // With its other cards as they're known now, such as one just moved.
+                    let changed = i.with_cards(c.user.copy(), acta_panels.with_made(message, card.copy()))
+                    try i.store.put_message(c.user.copy(), changed.copy())
+                    try i.event(c.user.copy(), "message.updated", Obj.new().s("conversation", str_at(changed.copy(), "conversation") ?? String()).j("message", changed).done())
+                }
+            }
+            i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("card", card).done()))
+        }
     }
 
     // The files a reply names that are in its agent's folder or the shared
@@ -15349,6 +15477,11 @@ impl Instance {
         if name == "cards.refresh" {
             let answer = try i.refresh_cards(user.copy(), args)
             i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
+            return
+        }
+        // Acta beside the chat (PLAN.md, "Acta beside the chat"): only from a device.
+        if name == "card.get" or name == "card.update" or name == "card.create" or name == "acta.board" or name == "acta.tasks" {
+            i.acta_panel_cmd(Waiter { socket: some(s), id: id }, user.copy(), name.copy(), args)
             return
         }
         let result = try i.command(user, device, name.copy(), args)

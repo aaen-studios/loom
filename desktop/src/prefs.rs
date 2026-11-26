@@ -103,6 +103,9 @@ pub struct Prefs {
     /// `None` while they haven't, and it opens at most of the window
     /// (`crate::model::popup::size`).
     pub popup_size: Option<(f32, f32)>,
+    /// The Acta boards cards were made on here, the last first, for Make a card's
+    /// picker (`crate::model::acta`).
+    pub card_boards: Vec<String>,
 }
 
 impl Default for Prefs {
@@ -131,6 +134,7 @@ impl Default for Prefs {
             width: Width::Normal,
             server_names: BTreeMap::new(),
             popup_size: None,
+            card_boards: Vec::new(),
         }
     }
 }
@@ -243,6 +247,17 @@ impl Prefs {
                     _ => None,
                 })
                 .filter(|(w, h)| *w > 0.0 && *h > 0.0),
+            card_boards: v
+                .get("card_boards")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|b| b.contains('/'))
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -315,6 +330,9 @@ impl Prefs {
         m.insert("server_names".into(), json!(self.server_names));
         if let Some((w, h)) = self.popup_size {
             m.insert("popup_size".into(), json!([w.round(), h.round()]));
+        }
+        if !self.card_boards.is_empty() {
+            m.insert("card_boards".into(), json!(self.card_boards));
         }
         Value::Object(m)
     }
@@ -504,6 +522,22 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn the_boards_cards_were_made_on_are_kept_in_order() {
+        assert!(Prefs::default().to_json().get("card_boards").is_none());
+        let p = Prefs {
+            card_boards: vec!["aaen-studios/calcite".into(), "aaen-studios/loom".into()],
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&p.to_json()), p);
+        // What isn't a board's ref is dropped.
+        let kept = Prefs::from_json(&json!({"card_boards": ["w/b", 3, "", "loom"]}));
+        assert_eq!(kept.card_boards, vec!["w/b".to_string()]);
+        assert!(Prefs::from_json(&json!({"card_boards": "w/b"}))
+            .card_boards
+            .is_empty());
     }
 
     #[test]

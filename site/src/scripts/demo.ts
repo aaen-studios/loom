@@ -19,7 +19,9 @@
 // subagent's call in the earlier reply opens to show what its subagent did inside it (model.rs,
 // inside). The earlier reply's sources tab opens their list (app.rs, sources_tab), and the Acta
 // card it names is a pill whose preview opens under it under the pointer, which the page's CSS
-// does (app.rs, card_pill, card_preview). The moods,
+// does (app.rs, card_pill, card_preview); a click on it, or Open in the preview, opens the card's
+// side preview beside the chat, whose status chip moves it and whose ticks tick its subtasks
+// (acta_ui.rs, card_side). The moods,
 // what the sidebar says after an agent's name on its one line ("Thinking", the tool's title,
 // "Wants to …"), or under the pointer on a pinned agent's tile, and the wording are the app's.
 // Clicking Allow, Always allow (under the arrow beside Allow) or Deny answers the approval,
@@ -146,6 +148,70 @@ export function play(app: HTMLElement) {
 		};
 		pill.addEventListener('pointerenter', place);
 		pill.addEventListener('focus', place);
+	}
+	// A card's pill, or Open in its preview, opens its side preview beside the chat (PLAN.md,
+	// "Acta beside the chat"; acta_ui.rs, card_side). Its status chip's menu moves the card, and
+	// its pill's dot and preview with it; a tick ticks a subtask, and the counts follow.
+	const actaSide = app.querySelector<HTMLElement>('[data-acta-side]');
+	const sidePill = app.querySelector<HTMLElement>('.acta-pill[data-card="SHOP-31"]');
+	// Makes another of SHOP-31's pills open its side preview too: a watch's line's.
+	let opensSide = (_pill: HTMLElement) => {};
+	if (actaSide && sidePill) {
+		const show = (open: boolean, pill = sidePill) => {
+			actaSide.hidden = !open;
+			if (open) pill.blur();
+		};
+		opensSide = (pill: HTMLElement) => {
+			pill.querySelector('.acta-face')!.addEventListener('click', () => show(true, pill));
+			pill.querySelector('[data-acta-open]')?.addEventListener('click', (e) => {
+				e.stopPropagation();
+				show(true, pill);
+			});
+		};
+		opensSide(sidePill);
+		actaSide.querySelector('[data-acta-close]')!.addEventListener('click', () => show(false));
+		// Follow, and Following with its tick, which stops it.
+		const follow = actaSide.querySelector<HTMLButtonElement>('[data-acta-follow]')!;
+		follow.addEventListener('click', () => {
+			const on = follow.getAttribute('aria-pressed') !== 'true';
+			follow.setAttribute('aria-pressed', String(on));
+			follow.querySelector('[data-follow-words]')!.textContent = on ? 'Following' : 'Follow';
+		});
+		const chip = actaSide.querySelector<HTMLButtonElement>('[data-acta-status]')!;
+		const menu = actaSide.querySelector<HTMLElement>('[data-acta-menu]')!;
+		const openMenu = (open: boolean) => {
+			menu.hidden = !open;
+			chip.setAttribute('aria-expanded', String(open));
+		};
+		chip.addEventListener('click', () => openMenu(menu.hidden === true));
+		for (const item of menu.querySelectorAll<HTMLButtonElement>('[data-status]')) {
+			item.addEventListener('click', () => {
+				const words = item.dataset.words!;
+				for (const at of [chip, sidePill]) at.style.setProperty('--status', item.dataset.color!);
+				chip.querySelector('.as-words')!.textContent = words;
+				sidePill.querySelector('.cp-status')!.textContent = words;
+				for (const other of menu.querySelectorAll('[data-status]')) other.classList.toggle('on', other === item);
+				openMenu(false);
+			});
+		}
+		document.addEventListener('pointerdown', (e) => {
+			if (!menu.hidden && !chip.parentElement!.contains(e.target as Node)) openMenu(false);
+		});
+		const ticks = [...actaSide.querySelectorAll<HTMLButtonElement>('[data-tick]')];
+		for (const tick of ticks) {
+			tick.addEventListener('click', () => {
+				const done = tick.classList.toggle('done');
+				tick.setAttribute('aria-checked', String(done));
+				const n = ticks.filter((t) => t.classList.contains('done')).length;
+				const words = `Subtasks ${n} of ${ticks.length}`;
+				actaSide.querySelector('[data-acta-count]')!.textContent = words;
+				const line = sidePill.querySelector<HTMLElement>('.cp-subtasks');
+				if (line) {
+					line.firstChild!.textContent = words;
+					line.querySelector<HTMLElement>('.cp-bar span')!.style.width = `${(100 * n) / ticks.length}%`;
+				}
+			});
+		}
 	}
 	for (const pill of app.querySelectorAll<HTMLElement>('.acta-pill')) placed(pill);
 	const typed = app.querySelector<HTMLElement>('.typed')!;
@@ -946,7 +1012,9 @@ export function play(app: HTMLElement) {
 		const line = tpl('demo-watch-line');
 		const reply = tpl('demo-woken');
 		for (const row of [line, reply]) row.classList.toggle('fresh', fresh);
-		placed(line.querySelector<HTMLElement>('.acta-pill')!);
+		const pill = line.querySelector<HTMLElement>('.acta-pill')!;
+		placed(pill);
+		opensSide(pill);
 		return { line, reply, p: reply.querySelector<HTMLElement>('.said p')! };
 	}
 
