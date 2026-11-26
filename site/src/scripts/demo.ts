@@ -134,16 +134,57 @@ export function play(app: HTMLElement) {
 		return you;
 	}
 
-	// How full Juniper's session context is, by Send, in thousands of tokens of its 200k: it
-	// fills a little with each turn (app.rs, meter::ring; model.rs, ContextFill).
-	const ring = app.querySelector<HTMLElement>('[data-context]')!;
+	// How full Juniper's session context is, after its model, in thousands of tokens of its
+	// 200k: it fills a little with each turn (app.rs, context_ring; model.rs, ContextFill).
+	// Its card shows under the pointer and stays once the ring is clicked, until a click
+	// outside, Esc or the ring again (app.rs, context_hover, toggle_context).
+	const ringAt = app.querySelector<HTMLElement>('.context-at')!;
+	const ring = ringAt.querySelector<HTMLButtonElement>('[data-context]')!;
+	const card = ringAt.querySelector<HTMLElement>('[data-context-card]')!;
+	const cardLine = card.querySelector<HTMLElement>('[data-context-line]')!;
+	let cardKept = false;
+	let cardLeft = 0;
 	function context(used: number) {
 		const size = 200;
 		const percent = Math.floor((used * 100) / size);
 		ring.querySelector<SVGElement>('.fill')!.style.setProperty('--fill', String(percent));
-		ring.classList.toggle('warn', percent >= 75 && percent < 90);
-		ring.classList.toggle('bad', percent >= 90);
-		ring.title = `Context ${percent}%, ${used}k of ${size}k. A fresh session starts at 80%.`;
+		card.querySelector<HTMLElement>('[data-context-bar]')!.style.setProperty('--fill', `${percent}%`);
+		card.querySelector<HTMLElement>('[data-context-amount]')!.textContent = `${used}k of ${size}k`;
+		ringAt.classList.toggle('warn', percent >= 70 && percent < 90);
+		ringAt.classList.toggle('bad', percent >= 90);
+		ring.setAttribute('aria-label', `Context ${percent}%, ${used}k of ${size}k`);
+	}
+	const showCard = (open: boolean, kept = false) => {
+		card.hidden = !open;
+		cardKept = open && kept;
+		ring.setAttribute('aria-expanded', String(cardKept));
+	};
+	ringAt.addEventListener('pointerenter', () => {
+		cardLeft++;
+		if (card.hidden) showCard(true);
+	});
+	ringAt.addEventListener('pointerleave', () => {
+		const left = ++cardLeft;
+		setTimeout(() => {
+			if (!cardKept && left === cardLeft) showCard(false);
+		}, 160);
+	});
+	ring.addEventListener('click', () => showCard(!cardKept, !cardKept));
+	document.addEventListener('pointerdown', (e) => {
+		if (cardKept && !ringAt.contains(e.target as Node)) showCard(false);
+	});
+	document.addEventListener('keydown', (e) => {
+		if (e.key === 'Escape' && !card.hidden) showCard(false);
+	});
+	// Compact now leaves a tenth, as a compaction does; a fresh session starts from nothing.
+	for (const b of card.querySelectorAll<HTMLButtonElement>('[data-context-act]')) {
+		b.addEventListener('click', () => {
+			const compact = b.dataset.contextAct === 'compact';
+			const amount = card.querySelector<HTMLElement>('[data-context-amount]')!.textContent ?? '';
+			context(compact ? Math.round(parseInt(amount, 10) / 10) : 0);
+			cardLine.textContent = compact ? 'Compacted just now · a fresh session starts at 80%' : 'A fresh session starts at 80%';
+			showCard(false);
+		});
 	}
 
 	// Replying (PLAN.md, "Replying to a message"): a message's Reply, or words selected in it,
@@ -447,7 +488,30 @@ export function play(app: HTMLElement) {
 		lit?.classList.add('lit');
 		lit?.scrollIntoView({ block: 'nearest' });
 	};
+	/** Where the popover goes across the window, as the app works it out (model::pop_under):
+	 * centred under the pin, 12px inside the window's edges and no wider than the window less
+	 * those, with its nub on the pin but clear of its rounded corners. */
+	const placePins = () => {
+		const frame = app.getBoundingClientRect();
+		const pin = pinsBtn.getBoundingClientRect();
+		const room = app.clientWidth;
+		const margin = 12;
+		const inset = 12 + 11 / Math.SQRT2;
+		const middle = (pin.left + pin.right) / 2 - frame.left - app.clientLeft;
+		const width = Math.max(0, Math.min(460, room - 2 * margin));
+		const left = Math.min(Math.max(middle - width / 2, margin), Math.max(margin, room - margin - width));
+		const nub = width > 2 * inset ? Math.min(Math.max(middle - left, inset), width - inset) : width / 2;
+		const at = pop.parentElement!.style;
+		at.setProperty('--pop-left', `${left}px`);
+		at.setProperty('--pop-width', `${width}px`);
+		at.setProperty('--nub-in', `${nub}px`);
+		at.setProperty('--nub-at', `${left + nub}px`);
+	};
+	addEventListener('resize', () => {
+		if (!pop.hidden) placePins();
+	});
 	const showPins = (open: boolean) => {
+		if (open) placePins();
 		pop.hidden = !open;
 		pinsBtn.setAttribute('aria-expanded', String(open));
 		lit = null;

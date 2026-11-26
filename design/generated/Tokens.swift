@@ -76,6 +76,9 @@ enum Tokens {
         static let cardLeast: CGFloat = 220
         static let menu: CGFloat = 230
         static let menuWide: CGFloat = 240
+        static let pins: CGFloat = 460
+        static let caret: CGFloat = 11
+        static let contextCard: CGFloat = 300
         static let fieldLabel: CGFloat = 120
     }
 
@@ -88,7 +91,8 @@ enum Tokens {
         static let icon: CGFloat = 28
         static let iconSmall: CGFloat = 26
         static let iconComposer: CGFloat = 32
-        static let contextRing: CGFloat = 16
+        static let contextRing: CGFloat = 14
+        static let contextButton: CGFloat = 26
         static let iconLarge: CGFloat = 34
         static let lead: CGFloat = 30
         static let server: CGFloat = 46

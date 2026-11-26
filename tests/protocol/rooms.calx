@@ -107,6 +107,12 @@ fn run(i: Instance) ! Error {
     // --- A member's fresh session goes on from its part, by who said each ---
     let (_, full) = try say(mut app, money.copy(), "m_9", String("ROUTE:Hermes nearly full\n/usage 90 100"))
     try check(str_at(full, "agent") == some(hermes.copy()), "a member fills its session")
+    var shown = Json.Null
+    for f in app.frames {
+        let changed = at(f.copy(), "conversation")
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) and str_at(changed.copy(), "id") == some(money.copy()) and at(changed.copy(), "context") != Json.Null { shown = at(changed, "context") }
+    }
+    try check(str_at(shown.copy(), "agent") == some(hermes.copy()) and int_at(shown, "used") == some(90i64), "the group chat shows how full the session of the member that answered last is, by whose it is")
     let (_, fresh) = try say(mut app, money.copy(), "m_10", String("ROUTE:Hermes and now?\n/context"))
     let told = reply_text(fresh.copy())
     try check(str_at(fresh, "agent") == some(hermes.copy()) and told.contains("Your part in this group chat goes on from an earlier session of yours, which grew too long"), "its next message goes to a fresh session of its own there")

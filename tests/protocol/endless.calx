@@ -85,6 +85,56 @@ fn run(i: Instance) ! Error {
     }
     try check(told.len() > 0 and told[0] == "500/1000", "the context goes to the apps once the program says it")
     try check(told.contains(String("0/1000")) and told.contains(String("100/1000")) and told[told.len() - 1] == "50/1000", "from nothing in a fresh session, and small after a compaction")
+    let shown = try newest_context(app, chat.copy())
+    try check(int_at(shown.copy(), "compacted") != none and "{shown}".contains(#""compacts":true"#), "with when it was last compacted, and that its program compacts one when asked")
+
+    // Compact now: a quiet turn of the program's own /compact, which leaves no
+    // reply, only the compaction's line, and what's sent meanwhile waits for it.
+    _ = try say(mut app, chat.copy(), "m_11", String("/usage 600 1000\nfuller"))
+    let compact = try app.cmd("q_4", "conversation.compact", Obj.new().s("conversation", chat.copy()).done())
+    let compacting = str_at(at(compact, "value"), "run") ?? String()
+    try check(compacting.len() > 0, "conversation.compact starts a turn")
+    var quiet = false
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("run.started")) and str_at(f.copy(), "run") == some(compacting.copy()) { quiet = "{f}".contains(#""quiet":true"#) }
+    }
+    try check(quiet, "which is quiet")
+    loop {
+        let done = try app.until("event", "run.finished")
+        if str_at(done, "run") == some(compacting.copy()) { break }
+    }
+    let after_compact = try app.cmd("q_6", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    var newest = Json.Null
+    var replies = 0
+    if let Json.Array(items) = at(at(after_compact, "value"), "messages") {
+        for m in items {
+            if str_at(m.copy(), "role") == some(String("agent")) { replies += 1 }
+            newest = m.copy()
+        }
+    }
+    try check(replies == 11 and str_at(newest.copy(), "role") == some(String("loom")) and "{at(newest, "blocks")}".contains(#""before":600"#), "it leaves no reply, and a line from 600 tokens")
+    let compacted_now = try newest_context(app, chat.copy())
+    try check(int_at(compacted_now.copy(), "used") == some(60i64) and int_at(compacted_now, "compacted") != none, "the context is small again, and says when it was compacted")
+
+    // Start a fresh session: a line in the chat now, the context from nothing,
+    // and its next turn in a fresh session, given the newest of the chat.
+    let fresh_now = try app.cmd("q_7", "conversation.fresh", Obj.new().s("conversation", chat.copy()).done())
+    try check(at(fresh_now, "error") == Json.Null, "conversation.fresh is answered")
+    let line = at(try app.event("message.created"), "message")
+    try check(str_at(line.copy(), "role") == some(String("loom")) and "{at(line, "blocks")}".contains(#""mark":"fresh""#), "a line says a fresh session starts there")
+    let emptied = try newest_context(app, chat.copy())
+    try check(int_at(emptied.copy(), "used") == some(0i64) and int_at(emptied, "compacted") == none, "and the context starts again from nothing")
+    let nothing = try app.cmd("q_8", "conversation.compact", Obj.new().s("conversation", chat.copy()).done())
+    try check(str_at(at(nothing, "error"), "code") == some(String("bad_request")), "with nothing in it to compact")
+    let asked = try say(mut app, chat.copy(), "m_12", String("/session\n/context"))
+    try check(not asked.starts_with(fresh[..first.len()].copy()) and asked.contains("chose to start afresh") and asked.contains("kiwi"), "its next turn goes to a fresh session, given the newest of the chat")
+    let stays = try say(mut app, chat.copy(), "m_13", String("/session\n/context"))
+    try check(stays.starts_with(asked[..first.len()].copy()) and not stays.contains("earlier session"), "once")
+
+    // A chat whose program hasn't said how full it is has nothing to compact.
+    let other = str_at(at(try app.cmd("q_9", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    let untold = try app.cmd("q_10", "conversation.compact", Obj.new().s("conversation", other).done())
+    try check(str_at(at(untold, "error"), "code") == some(String("bad_request")), "a chat with no context has nothing to compact")
     app.close()
 
     // A device that connects later has it with the conversation.
@@ -93,8 +143,21 @@ fn run(i: Instance) ! Error {
     for f in later.frames {
         if str_at(f.copy(), "kind") == some(String("conversation.updated")) { seen = "{at(at(f, "conversation"), "context")}" }
     }
-    try check(seen.contains(#""used":50"#), "a device that connects later has it")
+    try check(seen.contains(#""used":0"#) and seen.contains(#""compacts":true"#), "a device that connects later has it")
     later.close()
+}
+
+// The context the apps were last told for `conversation`.
+fn newest_context(app: Session, conversation: String) -> Json ! Error {
+    var n = app.frames.len()
+    while n > 0 {
+        n -= 1
+        let f = app.frames[n].copy()
+        if str_at(f.copy(), "kind") != some(String("conversation.updated")) { continue }
+        let changed = at(f, "conversation")
+        if str_at(changed.copy(), "id") == some(conversation.copy()) and at(changed.copy(), "context") != Json.Null { return at(changed, "context") }
+    }
+    fail "no context for {conversation} came"
 }
 
 fn main() ! Error {

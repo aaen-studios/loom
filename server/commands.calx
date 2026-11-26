@@ -25,11 +25,13 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 98] = [
+const COMMANDS: [Command; 100] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
     Command { name: "conversation.move", args: "conversation, program", does: "Moves a chat to another agent program, which starts with loom's summary of it." },
+    Command { name: "conversation.compact", args: "conversation, agent? (in a group chat, the member whose session it is)", does: "Compacts the session a chat's agent answers in, in a turn its person doesn't see, when its program can." },
+    Command { name: "conversation.fresh", args: "conversation, agent? (in a group chat, the member whose session it is)", does: "Starts a chat's next turn in a fresh session, given the newest of the chat." },
     Command { name: "conversation.delete", args: "conversation", does: "Deletes a conversation and its messages." },
     Command { name: "messages.list", args: "conversation, before? (a message id), limit? (up to 100)", does: "A conversation's messages, newest last." },
     Command { name: "messages.search", args: "query, agent?, after?, before? (Unix ms), conversation?, limit?", does: "Finds words in every chat, and in file names, or in one chat, oldest first." },
@@ -188,7 +190,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 98 and access(String("routine.runs")) == Access.Runs)
+    assert(catalog().len() == 100 and access(String("routine.runs")) == Access.Runs)
     assert(access(String("message.delete")) == Access.Asks(String("delete")))
     assert(access(String("device.list")) == Access.Runs)
     if let Access.Never(_) = access(String("link.answer")) {} else { panic("an agent could answer a device's ask to join") }
