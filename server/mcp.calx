@@ -225,6 +225,7 @@ impl Task for Starter {
         let done = match mcpclient.start(self.spec) {
             ok(s) => {
                 var server = s
+                server.follow()
                 match server.tools() {
                     ok(listed) => Started { at: n, name: name, server: some(server), tools: listed, trouble: String() },
                     err(e) => Started { at: n, name: name.copy(), server: some(server), tools: List<Json>(), trouble: "{name}: {e}" },
@@ -272,10 +273,19 @@ impl Code {
     // started the first time.
     fn load(self: mut Code, link: Link) {
         if self.loaded {
-            if self.signing.len() > 0 { self.signed_since(link) }
-            if self.added {
-                self.added = false
-                self.take_added(link)
+            // The servers the instance gives the agent now: ones taken from
+            // it, or signed out of, are let go, ones it waited to sign in to
+            // are started once it has, and ones just added are taken in.
+            if self.servers.len() > 0 or self.signing.len() > 0 or self.added {
+                if let ok(given) = link.fetch("/api/mcp/servers", 30000) {
+                    self.known_icons = at(given.copy(), "icons")
+                    self.let_go(given.copy())
+                    if self.signing.len() > 0 { self.signed_since(link, given.copy()) }
+                    if self.added {
+                        self.added = false
+                        self.take_added(link, given)
+                    }
+                }
             }
             self.relist(link)
             return
@@ -342,12 +352,7 @@ impl Code {
     // After add_mcp_server (PLAN.md, "Signing in to MCP servers"): the servers
     // the agent has now that this session hasn't started yet, started, so their
     // tools are the agent's without a new session.
-    fn take_added(self: mut Code, link: Link) {
-        let given = match link.fetch("/api/mcp/servers", 30000) {
-            ok(g) => g,
-            err(_) => return,
-        }
-        self.known_icons = at(given.copy(), "icons")
+    fn take_added(self: mut Code, link: Link, given: Json) {
         let renamed = at(given.copy(), "renamed")
         let Json.Array(specs) = at(given, "servers") else return
         var fresh = List<Json>()
@@ -408,12 +413,7 @@ impl Code {
     }
 
     // Servers that waited for a sign-in, started once the person has.
-    fn signed_since(self: mut Code, link: Link) {
-        let given = match link.fetch("/api/mcp/servers", 30000) {
-            ok(g) => g,
-            err(_) => return,
-        }
-        self.known_icons = at(given.copy(), "icons")
+    fn signed_since(self: mut Code, link: Link, given: Json) {
         let renamed = at(given.copy(), "renamed")
         let Json.Array(specs) = at(given, "servers") else return
         for spec in specs {
@@ -436,6 +436,52 @@ impl Code {
                 self.signing = left
             }
         }
+    }
+
+    // The servers this session has that the instance no longer gives the
+    // agent, `given` from /api/mcp/servers, are stopped, so they're no longer
+    // listened to, and their tools go: one taken from the agent or removed,
+    // and one the person signed out of (Disconnect), which waits for them to
+    // sign in again, without a card, since they chose it.
+    fn let_go(self: mut Code, given: Json) {
+        let renamed = at(given.copy(), "renamed")
+        var now = Map<String, Json>()
+        if let Json.Array(specs) = at(given, "servers") {
+            for spec in specs {
+                now.insert(self.known_as(str_at(spec.copy(), "name") ?? String(), renamed.copy()), spec.copy())
+            }
+        }
+        var names = List<String>()
+        for (name, _) in self.servers { names.push(name.copy()) }
+        for name in names {
+            var spec = Json.Null
+            if let s = now.find(name.copy()) { spec = s.copy() }
+            let server = self.servers.remove(name.copy()) else continue
+            let gone = spec == Json.Null
+            if not gone and not (server.signed() and auth_of(spec).len() == 0) {
+                self.servers.insert(name.copy(), server)
+                continue
+            }
+            server.stop()
+            self.drop_tools(name.copy())
+            if not gone and not self.signing.contains(name.copy()) { self.signing.push(name.copy()) }
+        }
+        // One that waited for a sign-in and was removed waits no more.
+        var waiting = List<String>()
+        var removed = List<String>()
+        for w in self.signing {
+            if now.contains(w.copy()) { waiting.push(w.copy()) } else { removed.push(w.copy()) }
+        }
+        self.signing = waiting
+        for w in removed { self.drop_tools(w) }
+    }
+
+    fn drop_tools(self: mut Code, name: String) {
+        var kept = List<Tool>()
+        for t in self.tools {
+            if t.server != name { kept.push(t.copy()) }
+        }
+        self.tools = kept
     }
 
     // The servers that said their tools changed since they were listed
@@ -724,8 +770,10 @@ impl Code {
     }
 
     fn stop(self: mut Code) {
-        for (_, s) in self.servers {
-            s.stop()
+        var names = List<String>()
+        for (name, _) in self.servers { names.push(name.copy()) }
+        for name in names {
+            if let s = self.servers.remove(name) { s.stop() }
         }
         for c in [self.spare.take(), self.done.take()] {
             if let child = c {
@@ -797,6 +845,7 @@ fn outcome(server: mut Server, name: String, args: Json) -> (Json, String) {
 // Starts the server `spec` gives and lists its tools.
 fn start_listed(spec: Json) -> (Server, List<Json>) ! Error {
     var server = try mcpclient.start(spec)
+    server.follow()
     match server.tools() {
         ok(listed) => return (server, listed),
         err(e) => {

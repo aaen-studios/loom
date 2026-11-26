@@ -6,7 +6,9 @@ module server.mcpclient
 // server with a command is started as a child, speaking MCP's JSON-RPC a line
 // at a time on its standard input and output; one with a url is spoken to over
 // MCP's Streamable HTTP. Each is started the first time a script or a search
-// needs the tools, and kept until `loom mcp` ends.
+// needs the tools, and kept until `loom mcp` ends, or the agent no longer has
+// it. `loom mcp` follows its tool changes (`follow`), over HTTP on a stream
+// that stays open (std.http.sse).
 //
 // MCP has two eras (PLAN.md, "MCP versions"). From 2026-07-28 (MODERN), every
 // request says its version, the client's name and what the client can do in
@@ -18,6 +20,7 @@ module server.mcpclient
 // compatibility says.
 import std.bytes
 import std.http.{Header, post}
+import std.http.sse.{EventSource, connect_post}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio}
 import std.time.{Instant}
@@ -39,6 +42,12 @@ const SIGN_IN: str = "it asks for a sign-in"
 // And one that answers 403 for want of scopes, before its challenge.
 const MORE_SCOPES: str = "it asks for a sign-in with more scopes"
 const ANSWER_MOST: usize = 67108864
+// Over HTTP, how long a subscriptions/listen has for its answer to start, and
+// how long loom waits to ask again after a stream that ended doesn't open: a
+// second, doubled each time, up to a minute.
+const LISTEN_MS: u32 = 10000
+const LISTEN_RETRY_MS: u64 = 1000
+const LISTEN_RETRY_MOST_MS: u64 = 60000
 // The errors only a server of the modern era gives: its HTTP headers don't
 // match its body, it needs something of the client the request didn't
 // declare, or it doesn't speak the version asked for.
@@ -58,7 +67,12 @@ pub struct Server {
     params: Map<String, List<Param>>    // over HTTP in the modern era, each tool's x-mcp-header parameters
     next: i64
     changed: bool    // whether it said its tools changed since they were listed (notifications/tools/list_changed)
-    listen: i64    // over stdio in the modern era, the id of its subscriptions/listen for tool changes, or 0
+    offers: bool    // in the modern era, whether its discovery says its tools change (listChanged)
+    following: bool    // whether `follow` asked it for its tool changes
+    listen: i64    // in the modern era, the id of its subscriptions/listen for tool changes, or 0
+    events: EventSource?    // over HTTP, that stream, while it's open
+    dropped: Instant?    // over HTTP, when that stream ended or didn't open, while it's to be asked for again
+    retry_ms: u64    // and how long after that it's asked for: 0 at once
 }
 
 // A tool's parameter that a call over HTTP gives as a header too (2026-07-28,
@@ -166,6 +180,28 @@ fn server_info(answer: Json) -> Json {
     return at(at(at(answer, "result"), "_meta"), "io.modelcontextprotocol/serverInfo")
 }
 
+// Whether an answer to server/discover says the server's tools change.
+fn offers_changes(answer: Json) -> bool {
+    return at(at(at(answer, "result"), "capabilities"), "tools").get(String("listChanged")) == some(Json.Bool(true))
+}
+
+// Whether a body is a JSON-RPC error for a method the server doesn't know.
+fn refuses_method(body: own List<u8>) -> bool {
+    let answer = match parse(String.from_utf8(body) ?? String()) {
+        ok(j) => j,
+        err(_) => return false,
+    }
+    return int_at(at(answer, "error"), "code") == some(-32601)
+}
+
+// How long to wait before a stream of tool changes is asked for again, after
+// waiting `ms` the last time: a second, then twice as long each time, up to a
+// minute.
+fn backoff(ms: u64) -> u64 {
+    if ms == 0 { return LISTEN_RETRY_MS }
+    return if ms * 2 > LISTEN_RETRY_MOST_MS { LISTEN_RETRY_MOST_MS } else { ms * 2 }
+}
+
 // Whether a result is one loom can use. From 2026-07-28 a result says its
 // `resultType`: `complete` for a final one, and `input_required` for one that
 // asks the client for more first (sampling, elicitation, roots), which loom
@@ -207,7 +243,7 @@ pub fn start(spec: Json) -> Server ! Error {
 // The same, waiting at most `ms` for each answer as it starts.
 pub fn start_within(spec: Json, ms: u64) -> Server ! Error {
     let name = str_at(spec.copy(), "name") ?? String()
-    var s = Server { name: name.copy(), child: none, spec: spec.copy(), url: String(), headers: List<Header>(), session: String(), version: String(), info: Json.Null, params: Map<String, List<Param>>(), next: 0, changed: false, listen: 0 }
+    var s = Server { name: name.copy(), child: none, spec: spec.copy(), url: String(), headers: List<Header>(), session: String(), version: String(), info: Json.Null, params: Map<String, List<Param>>(), next: 0, changed: false, offers: false, following: false, listen: 0, events: none, dropped: none, retry_ms: 0 }
     if let address = str_at(spec.copy(), "url") {
         s.url = address
         for (k, v) in pairs(at(spec, "headers")) {
@@ -377,7 +413,7 @@ impl Server {
         let version = try version_from(self.name.copy(), answer.copy())
         if version == MODERN {
             self.info = server_info(answer.copy())
-            try self.listen_if_offered(answer)
+            self.offers = offers_changes(answer)
             return
         }
         try self.initialize(if version.len() > 0 { version } else { String(LEGACY[0]) }, ms)
@@ -404,7 +440,7 @@ impl Server {
             if try version_from(self.name.copy(), got.copy()) == MODERN {
                 self.version = String(MODERN)
                 self.info = server_info(got.copy())
-                try self.listen_if_offered(got)
+                self.offers = offers_changes(got)
                 return
             }
         }
@@ -486,9 +522,12 @@ impl Server {
     }
 
     // Whether its tools have changed since they were listed, as it said with
-    // notifications/tools/list_changed (PLAN.md, "MCP versions"): over stdio,
-    // what it has written since it was last read is read first, without
-    // waiting. `tools` lists them again.
+    // notifications/tools/list_changed (PLAN.md, "MCP versions"): what it has
+    // sent since it was last read is read first, without waiting, over stdio
+    // its lines and over HTTP its stream of changes. A stream that ended is
+    // asked for again, and its tools are taken to have changed once it's
+    // back, since a change while it was gone wasn't heard. `tools` lists them
+    // again.
     pub fn tools_changed(self: mut Server) -> bool {
         if self.child != none {
             loop {
@@ -499,22 +538,130 @@ impl Server {
                     break
                 }
             }
+        } else if self.following {
+            self.read_events()
+            if self.following and self.events == none and self.due() and self.open_listen() {
+                self.changed = true
+                self.read_events()
+            }
         }
         return self.changed
     }
 
-    // Over stdio in the modern era, a server whose discovery says its tools
-    // change is asked for a stream of those changes (subscriptions/listen),
-    // which is never answered while it's open: what comes on it is read with
-    // its other lines. Over HTTP the stream would be an answer that stays open,
-    // which loom can't read as it comes yet (CLX-459).
-    fn listen_if_offered(self: mut Server, discovery: Json) ! Error {
-        if self.url.len() > 0 { return }
-        let offered = at(at(at(discovery, "result"), "capabilities"), "tools").get(String("listChanged")) == some(Json.Bool(true))
-        if not offered { return }
+    // Asks a server of the modern era whose discovery says its tools change
+    // for a stream of those changes (subscriptions/listen), before its tools
+    // are listed, so none is missed. Over stdio the stream is never answered
+    // while it's open, and what comes on it is read with its other lines. Over
+    // HTTP it's an answer that stays open, read as it comes. A server of the
+    // legacy era says its changes without being asked.
+    pub fn follow(self: mut Server) {
+        if self.following or not self.modern() or not self.offers { return }
+        self.following = true
+        if self.url.len() > 0 {
+            _ = self.open_listen()
+            return
+        }
         self.next += 1
         self.listen = self.next
-        try self.send_line(message(self.listen, "subscriptions/listen", with_meta(Obj.new().j("notifications", Obj.new().b("toolsListChanged", true).done()).done())))
+        if let err(e) = self.send_line(self.listen_message()) { eprintln("loom: {self.name}: {e}") }
+    }
+
+    fn listen_message(self) -> Json {
+        return message(self.listen, "subscriptions/listen", with_meta(Obj.new().j("notifications", Obj.new().b("toolsListChanged", true).done()).done()))
+    }
+
+    // Over HTTP, asks for the stream of its tool changes, with its sign-in,
+    // and whether it opened. One that didn't is asked for again later, unless
+    // the server doesn't keep such streams.
+    fn open_listen(self: mut Server) -> bool {
+        self.next += 1
+        self.listen = self.next
+        let m = self.listen_message()
+        var headers = self.headers.copy()
+        headers.push(Header { name: String("Content-Type"), value: String("application/json") })
+        headers.push(Header { name: String("Accept"), value: String("application/json, text/event-stream") })
+        headers.push(Header { name: String("MCP-Protocol-Version"), value: self.version.copy() })
+        headers.extend(self.mirrored(m.copy()))
+        match connect_post(self.url.copy(), headers, "{m}".to_bytes(), LISTEN_MS) {
+            ok(es) => {
+                self.events = some(es)
+                self.dropped = none
+                // One that ends before anything comes on it waits longer each time.
+                self.retry_ms = backoff(self.retry_ms)
+                return true
+            },
+            err(e) => {
+                // One that doesn't know the method, or takes no stream.
+                let refused = match e.copy() {
+                    NotEvents(head, body) => head.status == 404 or head.status == 405 or refuses_method(body),
+                    _ => false,
+                }
+                if refused {
+                    eprintln("loom: {self.name} keeps no stream of its tool changes: {e}")
+                    self.following = false
+                    return false
+                }
+                eprintln("loom: {self.name}'s stream of tool changes: {e}")
+                self.retry_ms = backoff(self.retry_ms)
+                self.dropped = some(unsafe { Instant.now() })
+                return false
+            },
+        }
+    }
+
+    // Whether the stream that ended is to be asked for again now.
+    fn due(self) -> bool {
+        let when = self.dropped else return true
+        return millis_since(when) >= self.retry_ms
+    }
+
+    // What has come on its stream of tool changes over HTTP, without waiting.
+    // One that ended, or that the server answered, which ends it, is asked
+    // for again at once the first time, and after a backoff when that fails.
+    fn read_events(self: mut Server) {
+        loop {
+            var es = self.events.take() else return
+            let ready = match es.ready() {
+                ok(r) => r,
+                err(_) => {
+                    self.stream_ended(es)
+                    return
+                },
+            }
+            if not ready {
+                self.events = some(es)
+                return
+            }
+            let ev = match es.next() {
+                ok(some(got)) => got,
+                _ => {
+                    self.stream_ended(es)
+                    return
+                },
+            }
+            let m = match parse(ev.data) {
+                ok(j) => j,
+                err(_) => {
+                    self.events = some(es)
+                    continue
+                },
+            }
+            // Its answer ends it: one that refuses the method isn't asked again.
+            if int_at(m.copy(), "id") == some(self.listen) and str_at(m.copy(), "method") == none {
+                if int_at(at(m, "error"), "code") == some(-32601) { self.following = false }
+                self.stream_ended(es)
+                return
+            }
+            // It's working: a stream that ends after this is asked for again at once.
+            self.retry_ms = 0
+            self.events = some(es)
+            if m.get(String("id")) == none and str_at(m.copy(), "method") != none { self.heard(m) }
+        }
+    }
+
+    fn stream_ended(self: mut Server, es: own EventSource) {
+        es.close()
+        self.dropped = some(unsafe { Instant.now() })
     }
 
     // A notification it sent: a change to its tools is noted, in the modern
@@ -551,6 +698,8 @@ impl Server {
     }
 
     // Sends `token` as its bearer token from now on, in place of the one it had.
+    // Its stream of tool changes is asked for again with it, at once: a
+    // sign-in with more scopes may reach more tools.
     pub fn bearer(self: mut Server, access: String) {
         var kept = List<Header>()
         for h in self.headers {
@@ -558,10 +707,25 @@ impl Server {
         }
         kept.push(Header { name: String("Authorization"), value: "Bearer {access}" })
         self.headers = kept
+        if let es = self.events.take() { es.close() }
+        if self.following {
+            self.dropped = none
+            self.retry_ms = 0
+        }
     }
 
-    pub fn stop(self: Server) {
-        if let c = self.child {
+    // Whether it's sent a bearer token, as a server the person signed in to is.
+    pub fn signed(self) -> bool {
+        for h in self.headers {
+            if h.name.to_lower_root() == "authorization" and h.value.starts_with("Bearer ") { return true }
+        }
+        return false
+    }
+
+    pub fn stop(own self) {
+        var s = self
+        if let es = s.events.take() { es.close() }
+        if let c = s.child.take() {
             var running = c
             running.kill_tree()
             _ = running.wait()
@@ -775,6 +939,21 @@ fn finds_the_answer_in_a_stream() {
     let got = answer_in_stream(stream.copy(), 3) ?? Json.Null
     assert("{got}" == #"{"jsonrpc":"2.0","id":3,"result":{}}"#)
     assert(answer_in_stream(stream, 4) == none)
+}
+
+@test
+fn waits_longer_for_a_stream_each_time() {
+    assert(backoff(0) == 1000)
+    assert(backoff(1000) == 2000)
+    assert(backoff(32000) == 60000)
+    assert(backoff(60000) == 60000)
+}
+
+@test
+fn knows_a_server_that_keeps_no_stream() {
+    assert(refuses_method(#"{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"Method not found"}}"#.to_bytes()))
+    assert(not refuses_method(#"{"jsonrpc":"2.0","id":4,"error":{"code":-32020,"message":"Header mismatch"}}"#.to_bytes()))
+    assert(not refuses_method("<html>".to_bytes()))
 }
 
 fn json_of(text: str) -> Json {

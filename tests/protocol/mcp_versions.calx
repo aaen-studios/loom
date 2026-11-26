@@ -14,8 +14,10 @@ module tests.protocol.mcp_versions
 // the modern era as any other, and `loom mcp` answers an agent of the modern
 // era: server/discover, its tools and their calls with no initialize, and an
 // error naming its versions for one it doesn't speak. A server whose tools
-// change has them listed again, over stdio in both eras, and an agent's
-// session and mcp.list get them.
+// change has them listed again, over stdio in both eras, and over HTTP on a
+// subscriptions/listen stream that stays open, asked for with its sign-in and
+// again when it ends; an agent's session and mcp.list get them, and a chat
+// lets go of a server that's removed.
 //
 //     calx tests/protocol/mcp_versions.calx
 import std.fs
@@ -88,7 +90,14 @@ fn tried(era: str) -> (String, String, String) {
 
 // The fake over HTTP in `era`, and its address.
 fn start_http(era: str) -> (Child, String) ! Error {
-    let child = try Command.new(calx()).arg(try fake_main()).arg(String("--http")).env(String("FAKE_ERA"), String(era)).stdout(Stdio.Pipe).spawn()
+    return try start_http_with(era, false)
+}
+
+// The same, with FAKE_GROW when `grows`.
+fn start_http_with(era: str, grows: bool) -> (Child, String) ! Error {
+    var c = Command.new(calx()).arg(try fake_main()).arg(String("--http")).env(String("FAKE_ERA"), String(era))
+    if grows { c = c.env(String("FAKE_GROW"), String("1")) }
+    let child = try c.stdout(Stdio.Pipe).spawn()
     let line = child.wait_for_line(String("fake mcp: "), 120000) else {
         child.kill()
         fail "the fake MCP server over HTTP didn't start"
@@ -109,12 +118,78 @@ fn stats(address: String) -> Json ! Error {
     return try parse(String.from_utf8(r.body) ?? String())
 }
 
+// Asks the fake over HTTP at `address` for one of its test pages, such as
+// /test/grow?name=late.
+fn poke(address: String, page: str) ! Error {
+    var req = get(address.replace("/mcp", page), List<Header>(), 10000, 65536)
+    _ = try req.wait()
+}
+
+// Whether `s` says its tools changed within two seconds: a notification
+// comes on its own, so it may not be there at once.
+fn changes_soon(s: mut Server) -> bool {
+    for _ in 0..100 {
+        if s.tools_changed() { return true }
+        unsafe { sleep(20000000) }
+    }
+    return false
+}
+
+// `int_at(stats, key)` once it's `want`, within two seconds, or what it was.
+fn stat_soon(address: String, key: str, want: i64) -> i64 ! Error {
+    var got: i64 = -1
+    for _ in 0..100 {
+        got = int_at(try stats(address.copy()), key) ?? -1
+        if got == want { return got }
+        unsafe { sleep(20000000) }
+    }
+    return got
+}
+
+// The fake over HTTP in the modern era with FAKE_GROW, at `address`: loom
+// listens for its tool changes on a subscriptions/listen stream, with the
+// server's sign-in, and lists its tools again when it says they changed, on
+// that stream; a stream that ends is asked for again, and its tools listed
+// again, since a change while it was gone wasn't heard; and a new token opens
+// it again with that.
+fn growing_http(address: String) ! Error {
+    let spec = Obj.new().s("name", String("fake")).s("url", address.copy()).j("headers", Json.Array([Obj.new().s("name", String("Authorization")).s("value", String("Bearer first")).done()])).done()
+    var s = try mcpclient.start(spec)
+    let unasked = int_at(try stats(address.copy()), "listens") == some(0)
+    s.follow()
+    let before = names(try s.tools())
+    let opened = try stats(address.copy())
+    try check(unasked and int_at(opened.copy(), "listens") == some(1) and int_at(opened.copy(), "open") == some(1) and str_at(opened, "listen_auth") == some(String("Bearer first")), "over HTTP, a server of the modern era whose tools change is asked for a stream of them only when they're followed, with its sign-in")
+    try check(not before.contains("late") and not s.tools_changed(), "and before they change, they haven't")
+    try poke(address.copy(), "/test/grow?name=late")
+    let changed = changes_soon(mut s)
+    let after = names(try s.tools())
+    try check(changed and after.contains("late") and not s.tools_changed(), "a change it sends on the stream has its tools listed again, once")
+
+    try poke(address.copy(), "/test/drop")
+    try poke(address.copy(), "/test/grow?name=unheard")
+    let back = changes_soon(mut s)
+    let relisted = names(try s.tools())
+    try check(back and relisted.contains("unheard") and int_at(try stats(address.copy()), "listens") == some(2) and try stat_soon(address.copy(), "open", 1) == 1, "a stream that ends is asked for again, and its tools are listed again, for a change made while it was gone")
+    let grew = try said(mut s, "grow", Obj.new().done())
+    try check(grew == "grown" and changes_soon(mut s) and names(try s.tools()).contains("grown"), "and changes come on the new stream")
+
+    s.bearer(String("second"))
+    _ = s.tools_changed()
+    let renewed = try stats(address.copy())
+    try check(int_at(renewed.copy(), "listens") == some(3) and str_at(renewed, "listen_auth") == some(String("Bearer second")), "a new token, as a renewed or stepped-up sign-in gives, asks for the stream again with it")
+    try check(try stat_soon(address.copy(), "open", 1) == 1, "and the one with the old token is closed")
+    s.stop()
+    try check(try stat_soon(address, "open", 0) == 0, "a server that's stopped is no longer listened to")
+}
+
 // The fake in `era` with FAKE_GROW: its tools, listed again once `grow` has
 // it say they changed, and not before.
 fn growing(era: str) ! Error {
     let env = Json.Array([Obj.new().s("name", String("FAKE_ERA")).s("value", String(era)).done(), Obj.new().s("name", String("FAKE_GROW")).s("value", String("1")).done()])
     let spec = merge(try over_stdio(era), Obj.new().j("env", env).done())
     var s = try mcpclient.start(spec)
+    s.follow()
     let before = names(try s.tools())
     let quiet = s.tools_changed()
     let grew = try said(mut s, "grow", Obj.new().done())
@@ -177,6 +252,14 @@ fn over_http_checks() ! Error {
     stop_child(child)
     if let e = outcome { fail "{e}" }
 
+    let (grows, grows_at) = try start_http_with("modern", true)
+    let followed: String? = match growing_http(grows_at) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    stop_child(grows)
+    if let e = followed { fail "{e}" }
+
     for (era, version) in [("dual", modern.copy()), ("legacy", String("2025-11-25")), ("newer", String("2025-11-25"))] {
         let (c, at_address) = try start_http(era)
         let result: String? = match http_era(at_address.copy(), version.copy()) {
@@ -193,8 +276,9 @@ fn http_era(address: String, version: String) -> String ! Error {
     var s = try mcpclient.start(Obj.new().s("name", String("fake")).s("url", address).done())
     let tools = names(try s.tools())
     let spoke = try said(mut s, "spoke", Obj.new().done())
+    let spoken = s.version.copy()
     s.stop()
-    if s.version != version or spoke != version { fail "it was spoken to in {s.version}, and said {spoke}, not {version}" }
+    if spoken != version or spoke != version { fail "it was spoken to in {spoken}, and said {spoke}, not {version}" }
     return tools
 }
 
@@ -269,7 +353,55 @@ fn instance_checks(i: Instance) ! Error {
         }
     }
     try check("{at(growing_listed, "tools")}".contains("\"grown\""), "and mcp.list has them, for Spools")
+
+    // --- The same over HTTP, where the changes come on a stream that stays open ---
+    let (fake, address) = try start_http_with("modern", true)
+    let outcome: String? = match chat_over_http(mut app, address) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    stop_child(fake)
     app.close()
+    if let e = outcome { fail "{e}" }
+}
+
+// What a search for every tool in `chat` says, once it `has` (or hasn't) `text`,
+// trying a few times: a change comes on its own, so it may not be there at once.
+fn search_until(app: mut Session, chat: String, n: mut i64, text: str, has: bool) -> String ! Error {
+    var got = String()
+    for _ in 0..20 {
+        n += 1
+        try app.send(Obj.new().s("t", String("send")).s("cid", "h_{n}").s("conversation", chat.copy()).s("text", "/mcpkeep search_tools {Obj.new().s("query", String()).done()}").done())
+        got = try reply_in(mut app, chat.copy())
+        if got.contains(text) == has { return got }
+        unsafe { sleep(100000000) }
+    }
+    return got
+}
+
+fn chat_over_http(app: mut Session, address: String) ! Error {
+    _ = try app.cmd("q_9", "mcp.put", Obj.new().s("name", String("remote")).s("url", address.copy()).done())
+    let made = try app.cmd("q_10", "agent.create", Obj.new().s("name", String("Remote")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("allow")).j("mcp", Json.Array([Json.Str(String("remote"))])).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_11", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+    var n: i64 = 0
+    let first = try search_until(mut app, chat.copy(), mut n, "mcp.remote.echo", true)
+    try check(first.contains("mcp.remote.echo") and not first.contains("mcp.remote.late") and int_at(try stats(address.copy()), "listens") == some(1), "a chat with a server of the modern era over HTTP listens for its tool changes")
+    try poke(address.copy(), "/test/grow?name=late")
+    let later = try search_until(mut app, chat.copy(), mut n, "mcp.remote.late", true)
+    try check(later.contains("mcp.remote.late"), "and gets a tool the server says it has now, on that stream, without a new session")
+
+    try poke(address.copy(), "/test/drop")
+    try poke(address.copy(), "/test/grow?name=unheard")
+    let back = try search_until(mut app, chat.copy(), mut n, "mcp.remote.unheard", true)
+    try check(back.contains("mcp.remote.unheard") and int_at(try stats(address.copy()), "listens") == some(2), "a stream that ends is asked for again, and the chat gets what changed while it was gone")
+    try poke(address.copy(), "/test/grow?name=again")
+    let again = try search_until(mut app, chat.copy(), mut n, "mcp.remote.again", true)
+    try check(again.contains("mcp.remote.again"), "and what comes on the new stream")
+
+    _ = try app.cmd("q_12", "mcp.delete", Obj.new().s("name", String("remote")).done())
+    let gone = try search_until(mut app, chat, mut n, "mcp.remote.", false)
+    try check(not gone.contains("mcp.remote.") and try stat_soon(address, "open", 0) == 0, "a server that's removed is let go: its tools leave the chat, and its stream is closed")
 }
 
 fn main() ! Error {
