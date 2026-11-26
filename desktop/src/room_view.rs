@@ -418,7 +418,7 @@ impl Loom {
             });
         page = page.child(self.field("Name", name_row));
         // Its members: every one of the person's agents, each on or off. Everyone's
-        // are all of them, always.
+        // are all of them, always. While one is made, the label counts the picked.
         if panel.members_row {
             let mut chips = div().flex().flex_wrap().gap(px(space::S));
             for a in self.model.agents.iter() {
@@ -431,7 +431,10 @@ impl Loom {
                         })),
                 );
             }
-            page = page.child(self.field("Members", chips));
+            page = page.child(match &panel.members_count {
+                Some(c) => self.counted_field("Members", c, chips),
+                None => self.field("Members", chips),
+            });
         }
         // Its colour, or none.
         page = page.child(self.field("Colour", self.room_swatches(&panel.color, cx)));
@@ -443,8 +446,6 @@ impl Loom {
             let cancel = self
                 .button("room-cancel", "Cancel", false)
                 .on_click(cx.listener(|this, _, _, cx| this.close_side(cx)));
-            // What Make still waits for (`panel.needs`: a name, or two members) goes
-            // after Cancel in this row, once its design is approved.
             page = page.child(div().flex().gap(px(space::S)).child(make).child(cancel));
             if let Some(e) = self.model.room_error.clone() {
                 page = page.child(
@@ -475,6 +476,40 @@ impl Loom {
                 .pb(px(space::XXL))
                 .child(page),
         )
+    }
+
+    /// A field whose label has a count after it, as `field` draws its label: ink-3
+    /// until it's met, then the ok colour.
+    fn counted_field(
+        &self,
+        label: &str,
+        count: &model::MembersCount,
+        input: impl IntoElement,
+    ) -> Div {
+        let p = self.p;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XS + 2.0))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .child(
+                        div()
+                            .text_color(p.ink_2)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_color(if count.met { p.ok } else { p.ink_3 })
+                            .child(count.text.clone()),
+                    ),
+            )
+            .child(input)
     }
 
     /// What the group chat used: its members' turns, then the router's picks.

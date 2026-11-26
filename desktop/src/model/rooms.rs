@@ -87,6 +87,35 @@ pub struct RoomPanel {
     /// What the one being made still needs before Make turns on, or None once it can
     /// be made.
     pub needs: Option<MakeNeeds>,
+    /// The count after the Members label while one is made, or None for the open
+    /// one's settings.
+    pub members_count: Option<MembersCount>,
+}
+
+/// The count after Members while a group chat is made: how many are picked of the two
+/// it needs ("1 of 2"), then how many once it has them ("2 picked").
+#[derive(Clone, Debug, PartialEq)]
+pub struct MembersCount {
+    pub text: String,
+    /// Two picked at least: drawn in the ok colour, and in ink-3 until then.
+    pub met: bool,
+}
+
+/// The fewest members a group chat has: the instance says so too.
+const MIN_MEMBERS: usize = 2;
+
+impl MembersCount {
+    fn of(picked: usize) -> MembersCount {
+        let met = picked >= MIN_MEMBERS;
+        MembersCount {
+            text: if met {
+                format!("{picked} picked")
+            } else {
+                format!("{picked} of {MIN_MEMBERS}")
+            },
+            met,
+        }
+    }
 }
 
 /// What a group chat being made still needs before Make turns on, the first in the
@@ -266,12 +295,13 @@ impl Model {
                 members: r.members.clone(),
                 color: r.color.clone(),
                 needs: None,
+                members_count: None,
             };
         }
         let f = &self.room_form;
         let needs = if name.trim().is_empty() {
             Some(MakeNeeds::Name)
-        } else if f.members.len() < 2 {
+        } else if f.members.len() < MIN_MEMBERS {
             Some(MakeNeeds::Members)
         } else {
             None
@@ -282,6 +312,7 @@ impl Model {
             members: f.members.clone(),
             color: f.color.clone(),
             needs,
+            members_count: Some(MembersCount::of(f.members.len())),
         }
     }
 
@@ -300,8 +331,7 @@ impl Model {
         };
         let (room, mut members) = (r.id.clone(), r.members.clone());
         match members.iter().position(|m| m == agent) {
-            // Two at least: the instance says so too.
-            Some(_) if members.len() <= 2 => return None,
+            Some(_) if members.len() <= MIN_MEMBERS => return None,
             Some(i) => {
                 members.remove(i);
             }
@@ -563,6 +593,13 @@ mod tests {
         assert!(p.members.is_empty());
         assert_eq!(p.color, "");
         assert_eq!(p.needs, Some(MakeNeeds::Name));
+        assert_eq!(
+            p.members_count,
+            Some(MembersCount {
+                text: "0 of 2".into(),
+                met: false
+            })
+        );
         assert!(!p.can_make());
         assert_eq!(m.room_changing(), None);
     }
@@ -672,6 +709,45 @@ mod tests {
         assert!(m.room_panel("Code").can_make());
         let f = m.make_form_room("Code").unwrap();
         assert_eq!(f["args"]["members"], json!(["a_2", "a_3"]));
+    }
+
+    #[test]
+    fn members_counts_the_picked_of_two_until_it_has_them() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_0");
+        m.start_room_form();
+        let count = |m: &Model| {
+            let c = m.room_panel("Code").members_count.unwrap();
+            (c.text, c.met)
+        };
+        assert_eq!(count(&m), ("0 of 2".to_string(), false));
+        m.toggle_room_member("a_1");
+        assert_eq!(count(&m), ("1 of 2".to_string(), false));
+        m.toggle_room_member("a_2");
+        assert_eq!(count(&m), ("2 picked".to_string(), true));
+        m.toggle_room_member("a_3");
+        assert_eq!(count(&m), ("3 picked".to_string(), true));
+        // Taken out again, it counts down, and the name doesn't change it.
+        m.toggle_room_member("a_3");
+        m.toggle_room_member("a_2");
+        assert_eq!(count(&m), ("1 of 2".to_string(), false));
+        assert_eq!(
+            m.room_panel("").members_count.map(|c| c.text),
+            Some("1 of 2".to_string())
+        );
+    }
+
+    #[test]
+    fn an_open_group_chat_s_settings_have_no_members_count() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_9");
+        let p = m.room_panel("Money");
+        assert!(p.members_row);
+        assert_eq!(p.members_count, None);
+        m.show_room("c_0");
+        assert_eq!(m.room_panel("Everyone").members_count, None);
     }
 
     #[test]

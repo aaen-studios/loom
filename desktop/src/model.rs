@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 mod rooms;
-pub use rooms::{Room, RoomForm, RoomUsage, Routed};
+pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
