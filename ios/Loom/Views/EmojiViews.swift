@@ -59,18 +59,25 @@ struct EmojiRowView: View {
     }
 }
 
-/// The emoji picker, a sheet: **Find an emoji**, the skin tone, a tab for each group,
-/// and the grid under them with a heading for each, the person's own with a dashed +
-/// that opens Settings → Emoji. A tap puts an emoji in and the sheet stays up, for the
-/// next; Recently used keeps its order until it opens again (`Emojis.openPicker`).
+/// The emoji picker, in the keyboard's place under the composer: **Find an emoji**, the
+/// skin tone, a tab for each group, and the grid under them with a heading for each, the
+/// person's own with a dashed + that opens Settings → Emoji. A tap puts an emoji in and
+/// it stays up, for the next; Recently used keeps its order until it opens again
+/// (`Emojis.openPicker`). A swipe down on it puts it away.
 struct EmojiPicker: View {
     @Environment(Session.self) private var session
+    var close: () -> Void
     var pick: (EmojiItem) -> Void
     @State private var query = ""
     @State private var settingsOpen = false
+    /// The grid is scrolled to its top, so a swipe down puts the picker away.
+    @State private var atTop = true
     @AppStorage(Prefs.skinTone) private var skinTone = 0
 
     private static let columns = Array(repeating: GridItem(.flexible(), spacing: 0), count: 8)
+    /// How the picker comes and goes, about as the keyboard does, so the composer stays
+    /// put while one takes the other's place.
+    static let swap = Animation.smooth(duration: 0.3)
 
     var body: some View {
         let emoji = session.model.emoji
@@ -140,13 +147,23 @@ struct EmojiPicker: View {
                     .padding(.horizontal, Tokens.Space.s)
                     .padding(.bottom, Tokens.Space.m)
                 }
+                .onScrollGeometryChange(for: Bool.self) { g in
+                    g.contentOffset.y + g.contentInsets.top <= 1
+                } action: { _, top in
+                    atTop = top
+                }
             }
         }
         .padding(.top, Tokens.Space.m)
         .background(P.raised)
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .presentationCornerRadius(Tokens.Radius.card * 2)
+        .overlay(alignment: .top) { Rectangle().fill(P.line).frame(height: 1) }
+        // A swipe down puts it away, while its grid is at its top.
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 24).onEnded { d in
+                let down = d.translation.height
+                if atTop && down > 60 && down > abs(d.translation.width) * 2 { close() }
+            }
+        )
         .onChange(of: query) { _, now in
             let q = now.trimmingCharacters(in: .whitespaces)
             if !q.isEmpty { session.send(session.model.emoji.find(q)) }

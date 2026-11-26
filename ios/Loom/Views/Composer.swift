@@ -19,8 +19,9 @@ struct Composer: View {
     /// Whether the + sheet is up, and whether it opened with its search, from a /.
     @State private var plusOpen = false
     @State private var plusSearch = false
-    /// The emoji picker is up (PLAN.md, "Emoji").
-    @State private var emojiOpen = false
+    /// How tall the keyboard was when it last came up, for the emoji picker in its place,
+    /// and before it has, as tall as an iPhone's with its suggestions.
+    @MainActor private static var keyboard: CGFloat = 336
     @AppStorage(Prefs.emojiButton) private var emojiButton = true
     @AppStorage(Prefs.emoticons) private var emoticons = false
     @AppStorage(Prefs.skinTone) private var skinTone = 0
@@ -49,8 +50,22 @@ struct Composer: View {
                 .padding(.top, Tokens.Space.xs)
             }
             composerBox
+            // The emoji picker, in the keyboard's place and as tall, under the composer,
+            // which stays where the keyboard had it (PLAN.md, "Emoji").
+            if model.emoji.up {
+                EmojiPicker(close: closeEmoji) { pickEmoji($0) }
+                    .frame(height: max(Composer.keyboard - homeIndicator, 200))
+                    .transition(.move(edge: .bottom))
+            }
         }
         .background(P.bg)
+        // Leaving the chat puts the emoji picker away.
+        .onDisappear { session.model.emoji.shutPicker() }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { note in
+            if let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect, end.height > 100 {
+                Composer.keyboard = end.height
+            }
+        }
         .onChange(of: box.typed) { _, now in
             // A / alone opens the + sheet with its search.
             if now == "/" && box.attached.isEmpty && box.links.isEmpty {
@@ -80,6 +95,8 @@ struct Composer: View {
             if model.writeNow { takeCursor() }
             box.opened = { piece in open(piece) }
             box.pasted = { url in session.send(model.previewLink(url)) }
+            // The keyboard coming back for the field takes the emoji picker's place.
+            box.focused = { closeEmoji() }
             #if DEBUG
             // Once the chat has selected its agent and the field is made.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { fromLaunch() }
@@ -121,9 +138,16 @@ struct Composer: View {
         Task {
             for path in values("-attach") { await attach(path: path, name: (path as NSString).lastPathComponent) }
             for url in values("-paste") { box.view?.pasteLink(url) }
-            // What's typed, as the keyboard types it, and the emoji picker.
+            // What's typed, as the keyboard types it, and the emoji picker, with `-pick <n>`
+            // its first n emoji picked once its groups have come, as n taps pick them.
             for text in values("-type") { box.view?.insertText(text) }
-            if args.contains("-emoji") { openEmoji() }
+            if args.contains("-emoji") {
+                openEmoji()
+                if let n = values("-pick").first.flatMap(Int.init) {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    for item in session.model.emoji.groups.flatMap(\.emoji).prefix(n) { pickEmoji(item) }
+                }
+            }
         }
     }
     #endif
@@ -167,17 +191,23 @@ struct Composer: View {
                     // As far from the plus as the plus is from the edge.
                     .padding(.leading, Tokens.Space.xs - Tokens.Space.s)
 
+                // The smiley, or while the emoji picker is up, the keyboard to go back to.
                 if emojiButton {
+                    let picking = model.emoji.up
                     Button {
-                        openEmoji()
+                        if picking {
+                            box.view?.becomeFirstResponder()
+                        } else {
+                            openEmoji()
+                        }
                     } label: {
-                        Image(systemName: "face.smiling")
-                            .font(.system(size: 18))
+                        Image(systemName: picking ? "keyboard" : "face.smiling")
+                            .font(.system(size: picking ? 16 : 18))
                             .foregroundStyle(P.ink2)
                             .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
                             .contentShape(Circle())
                     }
-                    .accessibilityLabel("Emoji")
+                    .accessibilityLabel(picking ? "Keyboard" : "Emoji")
                     .contextMenu {
                         Button("Hide emoji button", systemImage: "eye.slash") { emojiButton = false }
                     }
@@ -225,11 +255,6 @@ struct Composer: View {
         .sheet(isPresented: $plusOpen) {
             PlusSheet(take: take, searchFirst: plusSearch)
         }
-        // It stays up while emoji are tapped, one after another; a swipe down or a tap
-        // outside it shuts it.
-        .sheet(isPresented: $emojiOpen, onDismiss: { session.model.emoji.shutPicker() }) {
-            EmojiPicker { pickEmoji($0) }
-        }
         // `-plus` at launch opens the sheet, for screenshots (ios/README.md).
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("-plus") { plusOpen = true }
@@ -273,12 +298,28 @@ struct Composer: View {
 
     // MARK: Emoji
 
-    /// Opens the emoji picker, with its groups in the person's skin tone.
+    /// Opens the emoji picker in the keyboard's place, with its groups in the person's
+    /// skin tone. It comes up as the keyboard goes down, so the composer stays put. It
+    /// stays up while emoji are tapped and messages sent, as the keyboard does.
     private func openEmoji() {
         let model = session.model
         model.emoji.tone = skinTone
-        session.send(model.emoji.openPicker())
-        emojiOpen = true
+        withAnimation(EmojiPicker.swap) { session.send(model.emoji.openPicker()) }
+        box.view?.resignFirstResponder()
+    }
+
+    /// Puts the emoji picker away: for the keyboard, a swipe down on it, or a tap in the
+    /// chat.
+    private func closeEmoji() {
+        guard session.model.emoji.up else { return }
+        withAnimation(EmojiPicker.swap) { session.model.emoji.shutPicker() }
+    }
+
+    /// What's under the screen's foot that the picker reaches down over, as the keyboard
+    /// does: the home indicator's room.
+    private var homeIndicator: CGFloat {
+        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        return scene?.keyWindow?.safeAreaInsets.bottom ?? 0
     }
 
     /// An emoji picked in the picker goes where the person was writing, and the caret
@@ -427,9 +468,11 @@ final class ComposerBox {
     private(set) var attached: [String] = []
     private(set) var links: [String] = []
     @ObservationIgnored weak var view: PieceTextView?
-    /// Set by the composer: opens a tapped piece, and looks up a pasted link.
+    /// Set by the composer: opens a tapped piece, looks up a pasted link, and hears the
+    /// field take the keyboard.
     @ObservationIgnored var opened: (Piece) -> Void = { _ in }
     @ObservationIgnored var pasted: (String) -> Void = { _ in }
+    @ObservationIgnored var focused: () -> Void = {}
     /// The pieces put in before the field was made.
     @ObservationIgnored private var waiting: [Piece] = []
 
@@ -883,6 +926,10 @@ private struct ComposerField: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             box.changed()
             (textView as? PieceTextView)?.redraw()
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            box.focused()
         }
 
         /// A tap on a piece opens what it is.

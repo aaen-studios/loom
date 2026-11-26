@@ -151,11 +151,11 @@ On an iPhone, **+** opens a sheet with the same lists, and your newest photos in
 
 Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
 
-The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. Shift+click takes one and keeps the picker open. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box, or below it in a new chat when there's more room there. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
 
 A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
 
-On the iPhone, the row of matches runs sideways over the message box, and the smiley opens the picker as a sheet, with the same groups and search. When the smiley is hidden, the **+** sheet has **Emoji**. An emoji from the keyboard shows as loom draws it.
+On the iPhone, the row of matches runs sideways over the message box, and the smiley opens the picker where the keyboard goes, under the message box, with the same groups and search. It stays up while you tap emoji and send. The keyboard button in the smiley's place brings the keyboard back, and a swipe down or a tap in the chat puts the picker away. When the smiley is hidden, the **+** sheet has **Emoji**. An emoji from the keyboard shows as loom draws it.
 
 Your own emoji are pictures you add in **Settings → Emoji**. On the iPhone, **Add** takes one from Photos and asks its name, and a tile's menu has Rename and Delete. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
 
