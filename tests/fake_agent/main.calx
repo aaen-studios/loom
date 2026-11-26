@@ -95,6 +95,12 @@ module tests.fake_agent.main
 //                         and /mcp hints each one's name and annotations, a line each
 //     /mcpkeep TOOL JSON  the same, through one loom mcp the session keeps, started
 //                         at its first /mcpkeep, as a real agent keeps its servers
+//     /mcpnew TOOL JSON   the same as /mcp, as a client of MCP 2026-07-28 would:
+//                         no initialize, and each request says its version in
+//                         _meta; it says "TOOL (RESULTTYPE): RESULT". /mcpnew
+//                         discover says server/discover's "discover: RESULTTYPE
+//                         VERSIONS NAME", and /mcpnew stale what tools/list
+//                         asked in 1900-01-01 gives: "stale: CODE VERSIONS"
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Each session it starts or picks up offers /compact
@@ -175,6 +181,7 @@ pub enum Step {
     Context
     Mcp(String, String)
     McpKeep(String, String)
+    McpNew(String, String)
     Env(String)
     Net(String)
     Servers
@@ -253,12 +260,12 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Crash)
         } else if word == "/files" {
             steps.push(Step.Files)
-        } else if word == "/mcp" or word == "/mcpkeep" {
+        } else if word == "/mcp" or word == "/mcpkeep" or word == "/mcpnew" {
             let (tool, args) = match rest.find(" ") {
                 some(at) => (rest[..at].copy(), rest[at + 1..].copy()),
                 none => (rest.copy(), String(#"{}"#)),
             }
-            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else { Step.McpKeep(tool, args) })
+            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else if word == "/mcpkeep" { Step.McpKeep(tool, args) } else { Step.McpNew(tool, args) })
         } else if word == "/context" {
             steps.push(Step.Context)
         } else if word == "/uptime" {
@@ -832,8 +839,31 @@ impl Agent {
         return said
     }
 
+    // Calls `tool` of loom's own MCP server as a client of MCP 2026-07-28: no
+    // initialize, and each request says its version in its _meta.
+    fn call_modern(a: Agent, session: String, tool: String, args: String) -> String {
+        let child = match a.spawn_loom(session) {
+            ok(ch) => ch,
+            err(e) => return "{e}",
+        }
+        let said = talk_modern(child, tool, args)
+        child.kill()
+        return said
+    }
+
     // Starts the loom mcp the session was given, and says initialize.
     fn start_loom(a: Agent, session: String) -> Child ! Error {
+        let child = try a.spawn_loom(session)
+        let init = String(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"#)
+        if let err(e) = child.write_text("{init}\n") { fail "loom mcp: {e}" }
+        if child.wait_for_line(String("\"id\":1"), 60000) == none { fail "loom mcp didn't answer initialize" }
+        let initialized = String(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+        if let err(e) = child.write_text("{initialized}\n") { fail "loom mcp: {e}" }
+        return child
+    }
+
+    // Starts the loom mcp the session was given.
+    fn spawn_loom(a: Agent, session: String) -> Child ! Error {
         var found = Json.Null
         var servers = Json.Null
         if let s = a.mcp.find(session.copy()) { servers = s.copy() }
@@ -858,11 +888,6 @@ impl Agent {
             ok(ch) => ch,
             err(e) => fail "loom mcp didn't start: {e}",
         }
-        let init = String(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"#)
-        if let err(e) = child.write_text("{init}\n") { fail "loom mcp: {e}" }
-        if child.wait_for_line(String("\"id\":1"), 60000) == none { fail "loom mcp didn't answer initialize" }
-        let initialized = String(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
-        if let err(e) = child.write_text("{initialized}\n") { fail "loom mcp: {e}" }
         return child
     }
 
@@ -1137,6 +1162,7 @@ impl Agent {
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.McpKeep(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_kept(session.copy(), tool, args)),
+                Step.McpNew(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_modern(session.copy(), tool, args)),
                 Step.Link(path) => {
                     var content = LinkedMap<String, Json>()
                     content.insert("type", js(String("resource_link")))
@@ -1425,4 +1451,68 @@ fn path_of(uri: String) -> String {
 fn value_of(values: Map<String, String>, key: str) -> String {
     if let v = values.find(String(key)) { return v.copy() }
     return String()
+}
+
+// A request to loom mcp as MCP 2026-07-28 makes it, and what to say of its
+// answer (/mcpnew).
+fn talk_modern(child: Child, tool: String, args: String) -> String {
+    let arguments = match parse(args.copy()) {
+        ok(j) => j,
+        err(_) => return "the arguments aren't JSON: {args}",
+    }
+    var info = LinkedMap<String, Json>()
+    info.insert("name", js(String("fake-agent")))
+    info.insert("version", js(String("1")))
+    var meta = LinkedMap<String, Json>()
+    meta.insert("io.modelcontextprotocol/protocolVersion", js(String(if tool == "stale" { "1900-01-01" } else { "2026-07-28" })))
+    meta.insert("io.modelcontextprotocol/clientInfo", Json.Object(info))
+    meta.insert("io.modelcontextprotocol/clientCapabilities", Json.Object(LinkedMap<String, Json>()))
+    let asked = if tool == "discover" { "server/discover" } else if tool == "list" or tool == "stale" { "tools/list" } else { "tools/call" }
+    var p = LinkedMap<String, Json>()
+    if asked == "tools/call" {
+        p.insert("name", js(tool.copy()))
+        p.insert("arguments", arguments)
+    }
+    p.insert("_meta", Json.Object(meta))
+    var m = LinkedMap<String, Json>()
+    m.insert("jsonrpc", js(String("2.0")))
+    m.insert("id", int(2))
+    m.insert("method", js(String(asked)))
+    m.insert("params", Json.Object(p))
+    if let err(e) = child.write_text("{Json.Object(m)}\n") { return "loom mcp: {e}" }
+    let line = child.wait_for_line(String("\"id\":2,"), 300000) else return String("loom mcp didn't answer in 5 minutes")
+    let answer = match parse(line) {
+        ok(j) => j,
+        err(_) => return String("loom mcp's answer isn't JSON"),
+    }
+    if tool == "stale" {
+        let e = answer.get(String("error")) ?? Json.Null
+        let data = e.get(String("data")) ?? Json.Null
+        return "stale: {e.get(String("code")) ?? Json.Null} {names_in(data.get(String("supported")) ?? Json.Null)}"
+    }
+    let result = answer.get(String("result")) ?? Json.Null
+    let kind = (result.get(String("resultType")) ?? Json.Null).as_str() ?? String("none")
+    if tool == "discover" {
+        let server = ((result.get(String("_meta")) ?? Json.Null).get(String("io.modelcontextprotocol/serverInfo")) ?? Json.Null).get(String("name")) ?? Json.Null
+        return "discover: {kind} {names_in(result.get(String("supportedVersions")) ?? Json.Null)} {server.as_str() ?? String()}"
+    }
+    if tool == "list" { return "tools ({kind}): {names_in(result.get(String("tools")) ?? Json.Null)}" }
+    var text = String()
+    if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
+        for c in content {
+            text.push_str((c.get(String("text")) ?? Json.Null).as_str() ?? String())
+        }
+    }
+    return "{tool} ({kind}): {text}"
+}
+
+// A list's strings, or its objects' names, joined with commas.
+fn names_in(list: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(xs) = list {
+        for x in xs {
+            out.push(x.as_str() ?? (x.get(String("name")) ?? Json.Null).as_str() ?? String())
+        }
+    }
+    return out.join(",")
 }
