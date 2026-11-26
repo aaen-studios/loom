@@ -12,7 +12,7 @@ struct WatchLineRow: View {
             LineMark(mark: line.mark)
             switch line.mark {
             case .board:
-                CardChip(id: line.card, title: line.title, status: line.status)
+                LineCardPill(id: line.card, title: line.title, status: line.status)
                     .layoutPriority(-1)
             case .strand:
                 Text(line.threadTitle)
@@ -85,7 +85,7 @@ private struct Strand: View {
 
 /// A card as a line names it: its id in mono, its title cut to fit, and a dot in its
 /// status's colour, on the bubble's fill with a line around it.
-private struct CardChip: View {
+private struct LineCardPill: View {
     var id: String
     var title: String
     var status: String
