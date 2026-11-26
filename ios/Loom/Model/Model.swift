@@ -84,6 +84,15 @@ struct Conversation: Equatable, Sendable {
     var room: Room?
     /// How full its session's context is, once its program has said.
     var context: ContextFill?
+    /// Where side questions about the agent's chat are asked.
+    var side = false
+    /// When its newest message is from, and when the newest the person has read there is
+    /// from, as the instance keeps it (protocol.md, "Unread"), once they've read one.
+    var last = 0
+    var read: Int?
+
+    /// Whether it's a thread beside its agent's chat: another agent's, or one an agent made.
+    var besideChat: Bool { !main && (askedBy != nil || madeBy != nil) }
 
     init(id: String, agent: String, isChat: Bool = true, main: Bool = false, askedBy: String? = nil, madeBy: String? = nil, title: String = "") {
         self.id = id
@@ -105,6 +114,9 @@ struct Conversation: Equatable, Sendable {
         room = c["room"].isNull ? nil : Room(id: id, c["room"])
         isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && madeBy == nil && room == nil
         context = ContextFill(c["context"])
+        side = c["side"].bool ?? false
+        last = c["last"].int ?? 0
+        read = c["read"].int
     }
 }
 
@@ -1829,6 +1841,33 @@ final class Model {
         cardsChatOpened()
     }
 
+    /// What the person has read in each conversation, as far as this phone knows: what the
+    /// instance keeps (`read`), and what it marked read since.
+    private var conversationRead: [String: Int] = [:]
+
+    /// Marks what's open read (protocol.md, "Unread"), as the desktop does, so its dots
+    /// clear: a group chat or a thread as it shows, or else each of the selected agent's
+    /// conversations but the threads beside its chat and group chats, each up to its
+    /// newest message, as they open and as messages come while they're open. Nothing while
+    /// the chat is left for the agents list. The frames to send, once each.
+    func readFrames() -> [JSON] {
+        guard synced, !away else { return [] }
+        let open: [Conversation]
+        if let c = room ?? thread {
+            open = conversations.filter { $0.id == c }
+        } else if let agent = selected {
+            open = conversations.filter { $0.agent == agent && !$0.side && !$0.besideChat && $0.room == nil }
+        } else {
+            open = []
+        }
+        var out: [JSON] = []
+        for c in open where c.last > max(conversationRead[c.id] ?? 0, c.read ?? 0) {
+            conversationRead[c.id] = c.last
+            out.append(["t": "cmd", "id": JSON(id("app.read")), "name": "conversation.read", "args": ["conversation": JSON(c.id), "at": JSON(c.last)]])
+        }
+        return out
+    }
+
     /// The chat is left for the agents list. Its agent stays selected, so its chat opens
     /// again at once, but as a chat opened again: afresh, with what came meanwhile unread.
     func leaveChat() {
@@ -2234,6 +2273,8 @@ final class Model {
 
     private func result(_ f: JSON) {
         if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) || routineResult(f) { return }
+        // What's marked read: quietly, as an instance from before it kept reads refuses it.
+        if f["id"].text.hasPrefix("app.read_") { return }
         if f["id"].text == "app.acp" {
             // Quietly: without the titles, programs show by their own names.
             var titles: [String: String] = [:]
@@ -2613,6 +2654,7 @@ final class Model {
         // What the Acta cards and the T3 threads of the chat need asked.
         out += cardFetches(now: nowMs())
         out += t3Fetches()
+        out += readFrames()
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }
