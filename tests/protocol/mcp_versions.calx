@@ -1,0 +1,249 @@
+module tests.protocol.mcp_versions
+
+// The versions of MCP loom speaks (PLAN.md, "MCP versions"), with the fake MCP
+// server in each era it can be in (tests/fake_mcp). Loom asks a server
+// server/discover first, and speaks 2026-07-28 to one of the modern era, over
+// stdio and over Streamable HTTP, where a request's headers mirror its body
+// and a tool's x-mcp-header parameters, and a tool whose annotation breaks
+// MCP's rules is left out. It initializes one of the legacy era in the version
+// that server takes, whether it answers server/discover with an error, with a
+// result that isn't a discovery's, with nothing at all or by stopping, and one
+// of the modern era that names only a version of the legacy era loom speaks.
+// One that speaks no version loom does is said so. A tool whose header is
+// renamed is listed again and called once more. The instance tries a server of
+// the modern era as any other, and `loom mcp` answers an agent of the modern
+// era: server/discover, its tools and their calls with no initialize, and an
+// error naming its versions for one it doesn't speak.
+//
+//     calx tests/protocol/mcp_versions.calx
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import server.mcpclient
+import server.mcpclient.{Server}
+import tests.kit.{Instance, calx, check}
+
+fn fake_main() -> String ! Error {
+    return try fs.absolute(String("tests/fake_mcp/main.calx"))
+}
+
+// The fake over stdio in `era`, as the instance gives a server to loom mcp.
+fn over_stdio(era: str) -> Json ! Error {
+    let env = if era.len() > 0 { Json.Array([Obj.new().s("name", String("FAKE_ERA")).s("value", String(era)).done()]) } else { Json.Array(List<Json>()) }
+    return Obj.new().s("name", "fake-{era}").s("command", calx()).j("args", Json.Array([Json.Str(try fake_main())])).j("env", env).done()
+}
+
+fn names(tools: List<Json>) -> String {
+    var out = List<String>()
+    for t in tools {
+        out.push(str_at(t, "name") ?? String())
+    }
+    return out.join(" ")
+}
+
+// What a call to `tool` says, as text.
+fn said(s: mut Server, tool: str, args: Json) -> String ! Error {
+    let r = try s.call(String(tool), args)
+    var out = String()
+    if let Json.Array(items) = at(r, "content") {
+        for c in items {
+            out.push_str(str_at(c, "text") ?? String())
+        }
+    }
+    return out
+}
+
+// The fake in `era` over stdio, started: the version loom speaks to it in,
+// its tools, and what its `spoke` says, or why it didn't start.
+fn tried(era: str) -> (String, String, String) {
+    let spec = match over_stdio(era) {
+        ok(s) => s,
+        err(e) => return (String(), String(), "{e}"),
+    }
+    var s = match mcpclient.start(spec) {
+        ok(x) => x,
+        err(e) => return (String(), String(), "{e}"),
+    }
+    let tools = match s.tools() {
+        ok(t) => names(t),
+        err(e) => "{e}",
+    }
+    var spoke = String()
+    if era.len() > 0 {
+        spoke = match said(mut s, "spoke", Obj.new().done()) {
+            ok(t) => t,
+            err(e) => "{e}",
+        }
+    }
+    let version = s.version.copy()
+    s.stop()
+    return (version, tools, spoke)
+}
+
+// The fake over HTTP in `era`, and its address.
+fn start_http(era: str) -> (Child, String) ! Error {
+    let child = try Command.new(calx()).arg(try fake_main()).arg(String("--http")).env(String("FAKE_ERA"), String(era)).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake mcp: "), 120000) else {
+        child.kill()
+        fail "the fake MCP server over HTTP didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn stop_child(c: Child) {
+    var running = c
+    running.kill()
+    _ = running.wait()
+}
+
+// What the fake over HTTP at `address` says happened.
+fn stats(address: String) -> Json ! Error {
+    var req = get(address.replace("/mcp", "/test/stats"), List<Header>(), 10000, 65536)
+    let r = try req.wait()
+    return try parse(String.from_utf8(r.body) ?? String())
+}
+
+fn over_stdio_checks() ! Error {
+    let modern = String(mcpclient.MODERN)
+    let (v0, t0, _) = tried("")
+    try check(v0 == "2025-06-18" and t0 == "echo add key_length", "a server of the legacy era that answers server/discover with a result that isn't a discovery's is initialized, in the version it takes")
+    let (v1, _, s1) = tried("legacy")
+    try check(v1 == "2025-11-25" and s1 == "2025-11-25", "one that doesn't know server/discover is initialized in 2025-11-25, and its tools are called in it")
+    let (v2, _, s2) = tried("old")
+    try check(v2 == "2025-03-26" and s2 == "2025-03-26", "one that takes only an older version is spoken to in it")
+    let (_, _, odd) = tried("odd")
+    try check(odd.contains("speaks MCP 2024-01-01, which loom doesn't"), "one that answers initialize in a version that isn't MCP's is said so")
+    let (v3, _, s3) = tried("silent")
+    try check(v3 == "2025-11-25" and s3 == "2025-11-25", "one that says nothing before initialize is initialized once it hasn't answered")
+    let (v4, _, s4) = tried("exits")
+    try check(v4 == "2025-11-25" and s4 == "2025-11-25", "and one that stops at server/discover is started again and initialized")
+    let (v5, t5, s5) = tried("modern")
+    try check(v5 == modern and s5 == modern and t5 == "echo add key_length spoke region header_bad", "a server of the modern era is spoken to in 2026-07-28, with no initialize, its tools listed and called with their version in _meta; over stdio a tool's x-mcp-header is passed over")
+    let (v6, _, s6) = tried("dual")
+    try check(v6 == modern and s6 == modern, "one of both eras is spoken to in 2026-07-28")
+    let (v7, _, s7) = tried("newer")
+    try check(v7 == "2025-11-25" and s7 == "2025-11-25", "one of the modern era that speaks only a newer version, and 2025-11-25, is initialized in 2025-11-25")
+    let (v8, _, s8) = tried("slow")
+    try check(v8 == modern and s8 == modern, "one of the modern era that's slow to start is spoken to in 2026-07-28, when its late answer to server/discover comes")
+
+    var s = try mcpclient.start(try over_stdio("modern"))
+    try check(str_at(s.info.copy(), "name") == some(String("fake")), "a server of the modern era's serverInfo comes from server/discover's _meta")
+    _ = try s.tools()
+    try check(try said(mut s, "region", Obj.new().s("region", String("eu-west")).done()) == "none", "and over stdio no headers are sent")
+    s.stop()
+}
+
+fn over_http_checks() ! Error {
+    let modern = String(mcpclient.MODERN)
+    let (child, address) = try start_http("modern")
+    let outcome: String? = match http_modern(address.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    stop_child(child)
+    if let e = outcome { fail "{e}" }
+
+    for (era, version) in [("dual", modern.copy()), ("legacy", String("2025-11-25")), ("newer", String("2025-11-25"))] {
+        let (c, at_address) = try start_http(era)
+        let result: String? = match http_era(at_address.copy(), version.copy()) {
+            ok(tools) => if era == "legacy" and not tools.contains("header_bad") { some("a server of the legacy era over HTTP had a tool left out: {tools}") } else { none },
+            err(e) => some("{era}: {e}"),
+        }
+        stop_child(c)
+        if let e = result { fail "{e}" }
+    }
+    try check(true, "over HTTP, one of both eras is spoken to in 2026-07-28, one of the legacy era is initialized and its session kept, with every tool, and one of the modern era that speaks only a newer version is initialized in 2025-11-25")
+}
+
+fn http_era(address: String, version: String) -> String ! Error {
+    var s = try mcpclient.start(Obj.new().s("name", String("fake")).s("url", address).done())
+    let tools = names(try s.tools())
+    let spoke = try said(mut s, "spoke", Obj.new().done())
+    s.stop()
+    if s.version != version or spoke != version { fail "it was spoken to in {s.version}, and said {spoke}, not {version}" }
+    return tools
+}
+
+fn http_modern(address: String) ! Error {
+    let modern = String(mcpclient.MODERN)
+    var s = try mcpclient.start(Obj.new().s("name", String("fake")).s("url", address.copy()).done())
+    try check(s.version == modern, "a server of the modern era over Streamable HTTP is spoken to in 2026-07-28")
+    let tools = names(try s.tools())
+    try check(tools == "echo add key_length spoke region", "a tool whose x-mcp-header breaks MCP's rules is left out")
+    try check(try said(mut s, "echo", Obj.new().s("text", String("hi")).done()) == "hi" and try said(mut s, "spoke", Obj.new().done()) == modern, "its calls say their method and tool in headers that match their body")
+    try check(try said(mut s, "region", Obj.new().s("region", String("eu-west")).done()) == "eu-west", "a tool's x-mcp-header parameter is sent as an Mcp-Param header")
+    try check(try said(mut s, "region", Obj.new().s("region", String("Zürich ")).done()) == "Zürich ", "and one that isn't plain ASCII in base64")
+    let before = try stats(address.copy())
+    try check(int_at(before.copy(), "initialized") == some(0) and int_at(before.copy(), "discovered") == some(1) and int_at(before, "mismatched") == some(0), "it's never sent initialize, and no request's headers mismatched its body")
+    var renamed = get(address.replace("/mcp", "/test/rename"), List<Header>(), 10000, 65536)
+    _ = try renamed.wait()
+    try check(try said(mut s, "region", Obj.new().s("region", String("north")).done()) == "north", "a call whose header the server has renamed has its tools listed again and is made once more")
+    try check(int_at(try stats(address), "mismatched") == some(1), "after the one mismatch")
+    s.stop()
+}
+
+// The agent's next reply in `conversation`, as text.
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+fn instance_checks(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let spec = Obj.new().s("name", String("modern")).s("command", calx()).j("args", Json.Array([Json.Str(try fake_main())])).j("env", Obj.new().s("FAKE_ERA", String("modern")).done()).done()
+    _ = try app.cmd("q_1", "mcp.put", spec)
+    let tested = try app.cmd("q_2", "mcp.test", Obj.new().s("name", String("modern")).done())
+    try check("{at(at(tested, "value"), "tools")}".contains("spoke"), "the instance tries a server of the modern era as any other")
+
+    let made = try app.cmd("q_3", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).b("code_mode", false).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_4", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+    let versions = "{mcpclient.MODERN},{mcpclient.LEGACY[0]},{mcpclient.LEGACY[1]},{mcpclient.LEGACY[2]},{mcpclient.LEGACY[3]}"
+    let discover = try say(mut app, chat.copy(), "m_1", String("/mcpnew discover"))
+    try check(discover == "discover: complete {versions} loom", "loom mcp answers server/discover with the versions it speaks and its name")
+    let listed = try say(mut app, chat.copy(), "m_2", String("/mcpnew list"))
+    try check(listed.starts_with("tools (complete): ") and listed.contains("list_agents"), "and lists its tools to a request of the modern era, with no initialize")
+    let agents = try say(mut app, chat.copy(), "m_3", String("/mcpnew list_agents"))
+    try check(agents.starts_with("list_agents (complete): ") and agents.contains("Main"), "and calls them")
+    let stale = try say(mut app, chat.copy(), "m_4", String("/mcpnew stale"))
+    try check(stale == "stale: -32022 {versions}", "a request in a version it doesn't speak is answered with the versions it does")
+    let old = try say(mut app, chat, "m_5", String("/mcp list_agents"))
+    try check(old.contains("Main"), "and a client of the legacy era is still answered after initialize")
+    app.close()
+}
+
+fn main() ! Error {
+    let failure: String? = match over_stdio_checks() {
+        ok => match over_http_checks() {
+            ok => none,
+            err(e) => some("{e}"),
+        },
+        err(e) => some("{e}"),
+    }
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    let inst = try Instance.start()
+    let later: String? = match instance_checks(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = later {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmcp_versions: all good")
+}
