@@ -1,0 +1,172 @@
+module tests.protocol.routine_off
+
+// A routine turned off by something other than its person leaves a card in the
+// chat where it posts (PLAN.md, "Routines"): five failures in a row, with the
+// last error, or its agent's pause_routine, with the agent's reason. The card
+// is a `loom` message with one `routine_off` card, and Turn on is routine.put
+// with `on`: the routine runs again from its next time, its failures cleared,
+// and the card says it's on, with message.updated. Turning it on in the editor
+// does the same, and deleting it says so on the card. The notification opens
+// that chat.
+//
+//     calx tests/protocol/routine_off.calx
+import std.json.{Json}
+import std.process.{exit}
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+fn put(app: mut Session, q: str, name: str, prompt: str, post: str) -> String ! Error {
+    let r = try app.cmd(q, "routine.put", Obj.new().s("name", String(name)).s("agent", String("Main")).s("prompt", String(prompt)).j("schedule", Obj.new().i("every", 600).done()).b("notify", true).s("post", String(post)).done())
+    return str_at(at(at(r, "value"), "routine"), "id") ?? String()
+}
+
+// Runs routine `id` by hand and gives the routine once its run has ended, with
+// the frames that came meanwhile.
+fn run_once(app: mut Session, q: str, id: String) -> (Json, List<Json>) ! Error {
+    let from = app.frames.len()
+    let ran = try app.cmd(q, "routine.run", Obj.new().s("id", id.copy()).done())
+    if bool_at(ran.copy(), "ok") != some(true) { fail "routine.run refused: {ran}" }
+    loop {
+        let e = try app.until("event", "routine.updated")
+        let r = at(e, "routine")
+        let status = str_at(at(r.copy(), "last"), "status") ?? String()
+        if str_at(r.copy(), "id") == some(id.copy()) and status != "running" {
+            loop {
+                let f = try app.until("event", "run.finished")
+                if str_at(f, "run") == some(str_at(at(r.copy(), "last"), "run") ?? String()) { break }
+            }
+            return (r, app.frames[from..].copy())
+        }
+    }
+}
+
+fn kinds(frames: List<Json>, kind: str) -> List<Json> {
+    var out = List<Json>()
+    for f in frames {
+        if str_at(f.copy(), "kind") == some(String(kind)) { out.push(f.copy()) }
+    }
+    return out
+}
+
+// The routine_off card among the messages that came, with its message.
+fn off_card(frames: List<Json>) -> (Json, Json) {
+    for f in kinds(frames, "message.created") {
+        let m = at(f, "message")
+        if let Json.Array(blocks) = at(m.copy(), "blocks") {
+            if blocks.len() == 1 and str_at(at(blocks[0].copy(), "card"), "type") == some(String("routine_off")) { return (m.copy(), at(blocks[0].copy(), "card")) }
+        }
+    }
+    return (Json.Null, Json.Null)
+}
+
+// The card in message `id` once a message.updated says it's `state`, from the
+// frames since `since` or those still to come.
+fn card_is(app: mut Session, since: usize, id: String, state: str) -> Json ! Error {
+    var n = since
+    loop {
+        while n < app.frames.len() {
+            let f = app.frames[n].copy()
+            n += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "id") != some(id.copy()) { continue }
+            if let Json.Array(blocks) = at(m, "blocks") {
+                let card = at(blocks[0].copy(), "card")
+                if str_at(card.copy(), "state") == some(String(state)) { return card }
+            }
+        }
+        _ = try app.until("event", "message.updated")
+    }
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_a", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let main_id = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+
+    // Five failures in a row: the card, with the last error.
+    let failing = try put(mut app, "q_1", "Prices", #"/mcp routine_failed {"why": "the shop was down"}"#, "chat")
+    var frames = List<Json>()
+    var last = Json.Null
+    for k in 0..5 {
+        let (r, fs) = try run_once(mut app, if k == 0 { "q_r0" } else if k == 1 { "q_r1" } else if k == 2 { "q_r2" } else if k == 3 { "q_r3" } else { "q_r4" }, failing.copy())
+        last = r
+        frames = fs
+    }
+    try check(bool_at(last.copy(), "on") == some(false) and int_at(last.copy(), "failures") == some(5), "five failures in a row turn the routine off")
+    let (message, card) = off_card(frames.copy())
+    let conversation = str_at(last.copy(), "conversation") ?? String()
+    try check(str_at(message.copy(), "role") == some(String("loom")) and str_at(message.copy(), "conversation") == some(conversation.copy()), "and leave a loom message in the chat it posts in")
+    try check(str_at(card.copy(), "title") == some(String("Prices")) and str_at(card.copy(), "routine") == some(failing.copy()) and str_at(card.copy(), "state") == some(String("off")), "a routine_off card, with the routine's name, that it's off")
+    try check(str_at(card.copy(), "why") == some(String("the shop was down")) and int_at(card.copy(), "failures") == some(5) and str_at(card.copy(), "agent") == none, "and why: the last error, after five failures")
+    let card_id = str_at(message.copy(), "id") ?? String()
+    try check(str_at(last.copy(), "off_card") == some(card_id.copy()), "the routine keeps where its card is")
+    let notified = kinds(frames.copy(), "notify")
+    try check(notified.len() == 1 and str_at(notified[0].copy(), "conversation") == some(conversation.copy()), "its one notification opens that chat")
+    let listed = "{try app.cmd("q_2", "messages.list", Obj.new().s("conversation", conversation.copy()).done())}"
+    try check(listed.contains("routine_off"), "the card is kept in the chat")
+
+    // Turn on: routine.put with on, from its next time, failures cleared, and the card says so.
+    let since = app.frames.len()
+    let before = unsafe { Timestamp.now() }.unix_ms
+    let on = at(at(try app.cmd("q_3", "routine.put", Obj.new().s("id", failing.copy()).b("on", true).done()), "value"), "routine")
+    try check(bool_at(on.copy(), "on") == some(true) and (int_at(on.copy(), "failures") ?? 0) == 0 and (int_at(on.copy(), "next") ?? 0) > before, "Turn on turns it on with its schedule, from now, its failures cleared")
+    try check(str_at(on.copy(), "off_card") == none and str_at(at(on, "last"), "status") == some(String("failed")), "and runs nothing at once")
+    let now_on = try card_is(mut app, since, card_id.copy(), "on")
+    try check(str_at(now_on.copy(), "title") == some(String("Prices")) and str_at(now_on, "why") == some(String("the shop was down")), "and the card says it's on, as it was otherwise")
+    let changed = "{try app.cmd("q_4", "messages.list", Obj.new().s("conversation", conversation.copy()).done())}"
+    try check(changed.contains(#""state":"on""#), "kept so")
+
+    // pause_routine: the card, with the agent's reason, in the routine's own thread.
+    let pausing = try put(mut app, "q_5", "Sale", #"/mcp pause_routine {"why": "the sale is over"}"#, "thread")
+    let (p, p_frames) = try run_once(mut app, "q_6", pausing.copy())
+    let (p_message, p_card) = off_card(p_frames.copy())
+    let thread = str_at(p.copy(), "conversation") ?? String()
+    try check(bool_at(p.copy(), "on") == some(false) and thread.len() > 0 and thread != conversation, "pause_routine pauses a routine that posts in a thread of its own")
+    try check(str_at(p_message.copy(), "conversation") == some(thread.copy()) and str_at(p_message.copy(), "role") == some(String("loom")), "and leaves its card in that thread")
+    try check(str_at(p_card.copy(), "why") == some(String("the sale is over")) and str_at(p_card.copy(), "agent") == some(main_id.copy()) and int_at(p_card.copy(), "failures") == none, "with the agent's reason, and which agent paused it")
+    let paused = kinds(p_frames, "notify")
+    try check(paused.len() >= 1 and str_at(paused[0].copy(), "conversation") == some(thread.copy()), "and its notification opens the thread")
+
+    // In the editor: the whole routine put again with on, and the card says so too.
+    let p_id = str_at(p_message, "id") ?? String()
+    let p_since = app.frames.len()
+    let edited = at(at(try app.cmd("q_7", "routine.put", Obj.new().s("id", pausing.copy()).s("name", String("Sale")).s("agent", String("Main")).s("prompt", String("Check the sale.")).j("schedule", Obj.new().i("every", 600).done()).b("on", true).b("notify", true).s("post", String("thread")).done()), "value"), "routine")
+    try check(bool_at(edited, "on") == some(true), "turned on in the editor")
+    _ = try card_is(mut app, p_since, p_id.copy(), "on")
+    try check(true, "the card says it's on")
+
+    // Off again and deleted: the new card says it's gone.
+    let again = try put(mut app, "q_8", "Once", #"/mcp pause_routine {"why": "done for today"}"#, "chat")
+    let (_, a_frames) = try run_once(mut app, "q_9", again.copy())
+    let (a_message, _) = off_card(a_frames)
+    let d_since = app.frames.len()
+    _ = try app.cmd("q_10", "routine.delete", Obj.new().s("id", again).done())
+    _ = try card_is(mut app, d_since, str_at(a_message, "id") ?? String(), "deleted")
+    try check(true, "a card whose routine is deleted says so")
+
+    // A routine the person turned off leaves no card.
+    let mine = try put(mut app, "q_11", "Mine", "Nothing.", "chat")
+    let o_since = app.frames.len()
+    _ = try app.cmd("q_12", "routine.put", Obj.new().s("id", mine).b("on", false).done())
+    let (none_message, _) = off_card(app.frames[o_since..].copy())
+    try check(none_message == Json.Null, "a routine its person turns off leaves no card")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    var failure: String? = none
+    match run(inst.copy()) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nroutine_off: all good")
+}

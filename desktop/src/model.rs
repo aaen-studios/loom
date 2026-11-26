@@ -16,6 +16,7 @@ pub mod header;
 mod popover;
 pub mod popup;
 mod rooms;
+pub mod routine_off;
 pub mod t3;
 pub mod watch;
 pub use popover::pop_under;
@@ -2349,6 +2350,21 @@ pub enum CardBody {
         sending: bool,
         error: String,
     },
+    /// A routine turned off by something other than its person (loom's own card, in a
+    /// `loom` message; `model/routine_off.rs`): which routine, why, the agent that
+    /// paused it (its id, and its name) or how many failures did, how it stands (`off`,
+    /// `on` or `deleted`), whether Turn on is on its way, and what the instance said to
+    /// one it refused.
+    RoutineOff {
+        routine: String,
+        why: String,
+        paused_by: String,
+        agent: String,
+        failures: i64,
+        state: String,
+        sending: bool,
+        error: String,
+    },
 }
 
 /// A field the person fills in on a card: what it's for, whether it's hidden as it's
@@ -2525,6 +2541,7 @@ impl Card {
                 signing: false,
                 tools: strings(v.get("tools")),
             },
+            "routine_off" => routine_off::body_of(v),
             "secret_ask" => CardBody::SecretAsk {
                 call: s(v, "call"),
                 agent: s(v, "agent"),
@@ -6287,6 +6304,9 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// Turn on, on the cards routines leave when they turn off on their own
+    /// (`model/routine_off.rs`).
+    routine_off: routine_off::Turning,
     /// The person's watches, and the cards their lines show (`model/watch.rs`).
     pub watch: watch::Watches,
     /// The files sent or received lately in the person's chats, newest first, for the
@@ -8180,6 +8200,10 @@ impl Model {
         if self.take_card_answer(&id, f) {
             return;
         }
+        // Turn on, on a routine's card (src/model/routine_off.rs).
+        if self.take_routine_on_answer(&id, f) {
+            return;
+        }
         // A T3 thread's answer, the start form's, or the threads followed (src/model/t3.rs).
         if self.take_t3_answer(&id, f) {
             return;
@@ -9515,6 +9539,7 @@ impl Model {
             }
         }
         self.line_cards(&mut out);
+        self.routine_off_cards(&mut out);
         let conversation = self.conversation();
         for r in &self.runs {
             // A routine's quiet run shows only what its agent posts, which comes as messages.
