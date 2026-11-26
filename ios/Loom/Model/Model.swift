@@ -1528,8 +1528,10 @@ final class Model {
     var room: String?
     /// The group chats' order in the sidebar, as the core gives it.
     var roomOrder: [String] = []
+    /// New group chat's form: the members and colour picked so far.
+    var roomForm = RoomForm()
     /// The room.create sent last, to show the group chat once it's made.
-    var makingRoom: String?
+    var makingRoom: MakingRoom?
     /// What a group chat used, as `room.summary` gives it, for its settings.
     var roomUsage: RoomUsage?
     /// How each reply still being written in a group chat came to its agent, by its message.
@@ -1794,7 +1796,11 @@ final class Model {
             case "update_needed": conn = .updateNeeded
             default: conn = .starting
             }
-            if state != "live" { synced = false }
+            if state != "live" {
+                synced = false
+                // What was sent on the connection that went is never answered.
+                roomCreateLost(nil)
+            }
             if state == "signed_out" {
                 loggingIn = false
                 me = nil
@@ -1884,7 +1890,12 @@ final class Model {
             // A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) says why
             // here too, and the app stays where it is.
             let code = f["code"].text
-            if code != "offline" { notice = f["message"].string ?? code }
+            if code != "offline" {
+                notice = f["message"].string ?? code
+            } else {
+                // A room.create that didn't go: Make is on again.
+                roomCreateLost(f["for"].text)
+            }
         default:
             break
         }
@@ -2008,7 +2019,7 @@ final class Model {
             pinsMore = v["more"].bool ?? false
             pinsCount = v["count"].int ?? pins.count
         case let id where id.hasPrefix("app.room_create"):
-            if let error { notice = error; makingRoom = nil } else { roomMade(f) }
+            roomCreateAnswered(f)
         case let id where id.hasPrefix("app.room_summary:"):
             if error == nil { roomUsageCame(f) }
         case let id where id.hasPrefix("app.preview:"):
