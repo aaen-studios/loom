@@ -5,9 +5,11 @@ module server.oauth
 // PKCE. A server that wants a sign-in answers 401 with a WWW-Authenticate
 // challenge. Its Protected Resource Metadata (RFC 9728) names its
 // authorization server, whose metadata (RFC 8414, or OpenID Connect's
-// discovery) gives where to sign in and where tokens come from. Loom signs up
-// there as a client by itself (RFC 7591) when it may, or uses the client id
-// the person gave, sends the person's browser to sign in with a PKCE
+// discovery) gives where to sign in and where tokens come from. Loom uses the
+// client id the person gave; or, where the authorization server takes Client
+// ID Metadata Documents, its own, whose address is its client id
+// (CLIENT_DOCUMENT); or signs up there as a client by itself (RFC 7591) when
+// it may. It sends the person's browser to sign in with a PKCE
 // challenge (S256) and the server as `resource` (RFC 8707), and swaps the
 // code that comes back for tokens.
 //
@@ -19,6 +21,7 @@ module server.oauth
 // No token is ever put in an error, so none reaches a log.
 import std.bytes
 import std.crypto.{random_bytes}
+import std.fs
 import std.hash.{sha256}
 import std.http.{Header, get, post}
 import std.json.{Json, parse}
@@ -34,6 +37,12 @@ const MOST: usize = 1048576
 // A token is renewed this long before it ends at the most, or halfway
 // through its life when that's shorter.
 const EARLY_MS: i64 = 300000
+// Loom's Client ID Metadata Document, which loom.rip serves from
+// site/public/client.json: at an authorization server that takes them, its
+// address is loom's client id, for the return addresses it names, which are
+// the desktop's loopback on port 47251 and the iPhone's.
+pub const CLIENT_DOCUMENT: str = "https://loom.rip/client.json"
+pub const DOCUMENT_REDIRECTS: [str; 3] = ["http://127.0.0.1:47251/callback", "http://localhost:47251/callback", "loom:/callback"]
 
 fn now() -> i64 {
     return unsafe { Timestamp.now() }.unix_ms
@@ -188,8 +197,9 @@ fn resource_for(address: String, named: String) -> bool {
 
 // Finds where and how to sign in to the MCP server at `address`: the
 // beginnings of its grant, with `resource`, `issuer`, `authorize`, `token`,
-// `register` and `revoke` (the last two empty when there's none), `scope`
-// and `methods`, the ways its token endpoint takes a client's secret.
+// `register` and `revoke` (the last two empty when there's none), `scope`,
+// `methods`, the ways its token endpoint takes a client's secret, and
+// `documents`, whether it takes a Client ID Metadata Document as a client.
 pub fn discover(address: String, https_only: bool) -> Json ! Error {
     let (status, asked) = try probe(address.copy(), https_only)
     let said = challenge_params(asked)
@@ -243,7 +253,17 @@ pub fn discover(address: String, https_only: bool) -> Json ! Error {
     }
     let methods = strings(at(server.copy(), "token_endpoint_auth_methods_supported")).join(" ")
     let grants = strings(at(server.copy(), "grant_types_supported")).join(" ")
-    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).s("grants", grants).b("https_only", https_only).done()
+    let documents = bool_at(server.copy(), "client_id_metadata_document_supported") == some(true)
+    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).s("grants", grants).b("documents", documents).b("https_only", https_only).done()
+}
+
+// Whether the browser coming back to `redirect` lets loom be its Client ID
+// Metadata Document's client: it's one of the addresses the document names.
+fn document_takes(redirect: String) -> bool {
+    for r in DOCUMENT_REDIRECTS {
+        if redirect == r { return true }
+    }
+    return false
 }
 
 // The grant types loom asks for when it signs up: a code, and refresh tokens
@@ -304,14 +324,21 @@ fn said_why(answer: Json) -> String {
 }
 
 // Everything a sign-in needs before the person's browser goes: where, and
-// the client. `client_id` (with `client_secret`) is the person's own, for a
-// server that doesn't let apps sign up; `had` is the last grant, whose
-// client is used again when it's for the same place and return address.
+// the client, in the order MCP gives. `client_id` (with `client_secret`) is
+// the person's own, for a server that doesn't let apps sign up, and comes
+// first. Then loom's Client ID Metadata Document, where the authorization
+// server takes one and the browser comes back to an address it names. Then
+// signing up: `had` is the last grant, whose client is used again when it's
+// for the same place and return address.
 pub fn begin(address: String, redirect: String, client_id: String, client_secret: String, had: Json, https_only: bool) -> Json ! Error {
     let found = try discover(address, https_only)
     if client_id.len() > 0 {
         let method = method_for(str_at(found.copy(), "methods") ?? String(), client_secret.copy())
         return merge(found, Obj.new().s("client_id", client_id).s("client_secret", client_secret).s("auth_method", method).b("registered", false).s("redirect", redirect).done())
+    }
+    let documents = bool_at(found.copy(), "documents") == some(true)
+    if documents and document_takes(redirect.copy()) {
+        return merge(found, Obj.new().s("client_id", String(CLIENT_DOCUMENT)).s("client_secret", String()).s("auth_method", String("none")).b("registered", false).b("document", true).s("redirect", redirect).done())
     }
     let same = str_at(had.copy(), "issuer") == str_at(found.copy(), "issuer") and bool_at(had.copy(), "registered") == some(true) and str_at(had.copy(), "redirect") == some(redirect.copy())
     if same {
@@ -320,7 +347,9 @@ pub fn begin(address: String, redirect: String, client_id: String, client_secret
         }
     }
     if (str_at(found.copy(), "register") ?? String()).len() == 0 {
-        fail "{str_at(found, "issuer") ?? String()} doesn't let apps sign up by themselves: it needs a client ID from it, added to the server in loom."
+        let issuer = str_at(found, "issuer") ?? String()
+        if documents { fail "{issuer} takes loom only by its client document, which doesn't name {redirect}, where the browser would come back: on the desktop, sign in again once port 47251 is free, or add a client ID from it to the server in loom." }
+        fail "{issuer} doesn't let apps sign up by themselves: it needs a client ID from it, added to the server in loom."
     }
     return try sign_up(found, redirect)
 }
@@ -654,6 +683,19 @@ fn signs_up_for_what_the_server_takes() {
     assert(grant_types(String()) == [String("authorization_code"), String("refresh_token")])
     assert(application_type(String("http://127.0.0.1:47251/callback")) == "native" and application_type(String("loom:/callback")) == "native")
     assert(application_type(String("https://app.example/callback")) == "web")
+}
+
+// The document loom.rip serves is the one loom signs in as: run from the
+// repository's root, as scripts/check.calx runs it.
+@test
+fn is_the_client_its_document_says() {
+    let doc = parse(fs.read_text(String("site/public/client.json"))! ?? String())!
+    assert(str_at(doc.copy(), "client_id") == some(String(CLIENT_DOCUMENT)) and str_at(doc.copy(), "token_endpoint_auth_method") == some(String("none")))
+    var named = List<String>()
+    for r in DOCUMENT_REDIRECTS { named.push(String(r)) }
+    assert(strings(at(doc.copy(), "redirect_uris")) == named and strings(at(doc, "grant_types")) == [String("authorization_code"), String("refresh_token")])
+    assert(document_takes(String("http://127.0.0.1:47251/callback")) and document_takes(String("loom:/callback")))
+    assert(not document_takes(String("http://127.0.0.1:47252/callback")) and not document_takes(String("https://app.example/callback")))
 }
 
 @test

@@ -1,0 +1,134 @@
+module tests.protocol.mcp_client_document
+
+// Loom's Client ID Metadata Document (PLAN.md, "Signing in to MCP servers"),
+// against the fake OAuth server (tests/fake_oauth), which reads the document
+// from site/public/client.json as loom.rip serves it. Where the authorization
+// server takes documents, loom's client id is the document's address and it
+// signs up nowhere: the sign-in goes through, and a token is renewed, as that
+// client. A return address the document doesn't name signs up as before, so
+// does an authorization server that doesn't take documents, and a client id
+// the person gave comes before the document.
+//
+//     calx tests/protocol/mcp_client_document.calx
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.fs
+import std.url
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, calx, check}
+
+const DOCUMENT: str = "https://loom.rip/client.json"
+// The desktop's return address, which the document names; nothing listens
+// there, since the test reads the address off the fake's consent page.
+const NAMED: str = "http://127.0.0.1:47251/callback"
+const OTHER: str = "http://127.0.0.1:9/callback"
+
+fn fetch_text(address: String) -> String ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return String.from_utf8(r.body) ?? String()
+}
+
+fn stats(fake: String) -> Json ! Error {
+    return try parse(try fetch_text("{fake}/test/stats"))
+}
+
+// What the browser brings back: the consent page's link, to the redirect.
+fn consent(address: String) -> String ! Error {
+    let page = try fetch_text(address)
+    let at_link = page.find("href=\"") else { fail "the sign-in page has no link: {page}" }
+    let rest = page[at_link + 6..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    return rest[..end].copy()
+}
+
+fn query_of(link: String) -> String {
+    let q = link.find("?") ?? link.len()
+    return if q < link.len() { link[q + 1..].copy() } else { String() }
+}
+
+// The client id a sign-in address sends.
+fn client_in(address: String) -> String {
+    for (k, v) in url.form_decode(query_of(address)) {
+        if k == "client_id" { return v.copy() }
+    }
+    return String()
+}
+
+fn ok_of(r: Json) -> bool {
+    return at(r, "ok") == Json.Bool(true)
+}
+
+fn tools_of(r: Json) -> String {
+    return "{at(at(r, "value"), "tools")}"
+}
+
+fn begin(app: mut Session, id: str, name: str, redirect: str) -> String ! Error {
+    let began = try app.cmd(id, "mcp.sign_in", Obj.new().s("name", String(name)).s("redirect", String(redirect)).done())
+    if not ok_of(began.copy()) { fail "{name}'s sign-in didn't begin: {began}" }
+    return str_at(at(began, "value"), "url") ?? String()
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    _ = try app.cmd("q_1", "mcp.put", Obj.new().s("name", String("docs")).s("url", "{fake}/mcp3").done())
+    _ = try app.cmd("q_2", "mcp.put", Obj.new().s("name", String("plain")).s("url", "{fake}/mcp").done())
+
+    // --- An authorization server that takes documents ---
+    let address = try begin(mut app, "q_3", "docs", NAMED)
+    try check(client_in(address.copy()) == DOCUMENT and int_at(try stats(fake.copy()), "registered") == some(0), "where the authorization server takes documents, loom's client id is its document's address, and it signs up nowhere")
+    let link = try consent(address)
+    let done = try app.cmd("q_4", "mcp.signed_in", Obj.new().s("query", query_of(link)).done())
+    try check(ok_of(done) and int_at(try stats(fake.copy()), "by_document") == some(1), "the sign-in goes through as the document's client, for an address it names")
+    try check(tools_of(try app.cmd("q_5", "mcp.test", Obj.new().s("name", String("docs")).done())) == #"["whoami"]"#, "and the server takes its token")
+    _ = try fetch_text("{fake}/test/expire")
+    try check(tools_of(try app.cmd("q_6", "mcp.test", Obj.new().s("name", String("docs")).done())) == #"["whoami"]"# and int_at(try stats(fake.copy()), "refreshed") == some(1), "a token that's over is renewed as that client too")
+
+    // --- Signing up, as before ---
+    let other = try begin(mut app, "q_7", "docs", OTHER)
+    try check(client_in(other).starts_with("client-") and int_at(try stats(fake.copy()), "registered") == some(1), "a return address the document doesn't name signs up as before")
+    let plain = try begin(mut app, "q_8", "plain", NAMED)
+    try check(client_in(plain).starts_with("client-") and int_at(try stats(fake.copy()), "registered") == some(2), "and so does an authorization server that doesn't take documents")
+
+    // --- A client id of the person's own comes first ---
+    _ = try app.cmd("q_9", "mcp.put", Obj.new().s("name", String("docs")).s("url", "{fake}/mcp3").s("client_id", String("own-client")).done())
+    try check(client_in(try begin(mut app, "q_10", "docs", NAMED)) == "own-client", "a client id the person gave comes before the document")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_oauth/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake oauth: "), 120000) else {
+        child.kill()
+        fail "the fake OAuth server didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nmcp_client_document: all good")
+}
