@@ -13,7 +13,9 @@ module tests.protocol.mcp_versions
 // renamed is listed again and called once more. The instance tries a server of
 // the modern era as any other, and `loom mcp` answers an agent of the modern
 // era: server/discover, its tools and their calls with no initialize, and an
-// error naming its versions for one it doesn't speak.
+// error naming its versions for one it doesn't speak. A server whose tools
+// change has them listed again, over stdio in both eras, and an agent's
+// session and mcp.list get them.
 //
 //     calx tests/protocol/mcp_versions.calx
 import std.fs

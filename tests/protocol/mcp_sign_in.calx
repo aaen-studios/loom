@@ -12,8 +12,10 @@ module tests.protocol.mcp_sign_in
 // server, and a server that doesn't let apps sign up takes the person's own
 // client id and secret. An agent whose server needs a sign-in is told so, and
 // its person gets a card with Sign in, and an agent can't sign in itself. A
-// server renamed keeps its sign-in, and its agent's tools. No token is in
-// what the app got, the activity log or the database.
+// server renamed keeps its sign-in, and its agent's tools, and a chat running
+// from before reaches it by its old name. A call that needs more scopes than
+// the sign-in has (403) gets its person Sign in, whose next sign-in asks for
+// them. No token is in what the app got, the activity log or the database.
 //
 //     calx tests/protocol/mcp_sign_in.calx
 import std.bytes
