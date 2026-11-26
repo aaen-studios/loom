@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{json, Value};
 
 use super::popup::{finds, Dot};
-use super::{s, Badge, McpServer, McpStatus, Model, SignIn};
+use super::{s, Badge, McpServer, McpStatus, McpTest, Model, SignIn};
 
 /// The entries the Find tab shows first, as two wide cards: loom's own.
 pub const FEATURED: [&str; 2] = ["acta", "t3"];
@@ -43,7 +43,10 @@ pub struct Entry {
     pub category: String,
     pub description: String,
     pub maker: String,
+    /// Its badge, with the icons the person's server from it gave of its own once it has.
     pub badge: Option<Badge>,
+    /// Its mark, an SVG in currentColor, drawn on its badge until a server gives an icon.
+    pub icon_svg: Option<String>,
     /// The name its server is added as, unless the person gives another.
     pub server: String,
     /// Reached over HTTP, or a program the instance starts.
@@ -86,6 +89,11 @@ impl Entry {
             description: s(v, "description"),
             maker: s(v, "maker"),
             badge: v.get("badge").and_then(Badge::of),
+            icon_svg: v
+                .get("icon_svg")
+                .and_then(Value::as_str)
+                .filter(|svg| !svg.is_empty())
+                .map(str::to_string),
             server: s(v, "server"),
             remote: s(v, "runs") != "instance",
             url: s(v, "url"),
@@ -326,6 +334,8 @@ pub fn tools_shown(tools: &[(String, bool)], all: bool) -> Vec<usize> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
     SignIn,
+    /// Tries one not tried yet (`mcp.test`).
+    Try,
     Reconnect,
     Disconnect,
     Remove,
@@ -404,21 +414,20 @@ pub fn found(entries: &[Entry], pill: Option<&str>, query: &str) -> (Vec<usize>,
 }
 
 /// How an entry's card stands: none until the person has a server from it, then the
-/// worst of how its servers stand: failing, then needing a sign-in, or else connected.
-/// Its thread is taut only while it's connected.
+/// worst of how its servers stand, in Installed's words: failing, needing a sign-in,
+/// not tried yet, or else connected. Its thread is taut only while it's connected.
 pub fn card_status(entry: &Entry, servers: &[McpServer]) -> Option<(String, Dot)> {
-    if !entry.connected() {
-        return None;
-    }
     let mine: Vec<&McpServer> = servers
         .iter()
         .filter(|m| entry.servers.contains(&m.name))
         .collect();
-    if let Some(m) = mine.iter().find(|m| m.status == McpStatus::Failing) {
-        return Some((status_words(m), Dot::Bad));
+    if mine.is_empty() {
+        return None;
     }
-    if mine.iter().any(|m| m.status == McpStatus::SignIn) {
-        return Some(("Needs you to sign in".into(), Dot::Warn));
+    for worst in [McpStatus::Failing, McpStatus::SignIn, McpStatus::Untested] {
+        if let Some(m) = mine.iter().find(|m| m.status == worst) {
+            return Some((status_words(m), status_dot(m)));
+        }
     }
     Some(("Connected".into(), Dot::Ok))
 }
@@ -459,14 +468,18 @@ pub fn status_dot(m: &McpServer) -> Dot {
     }
 }
 
-/// What can be done with it: Sign in where it needs one, Reconnect, Disconnect where
-/// it's signed in, and Remove.
+/// What can be done with it: Sign in where it needs one, Try it before it's been tried
+/// and Reconnect once it has, Disconnect where it's signed in, and Remove.
 pub fn acts(m: &McpServer) -> Vec<Act> {
     let mut out = Vec::new();
     if m.status == McpStatus::SignIn || m.sign_in == SignIn::Needed {
         out.push(Act::SignIn);
     }
-    out.push(Act::Reconnect);
+    out.push(if m.status == McpStatus::Untested {
+        Act::Try
+    } else {
+        Act::Reconnect
+    });
     if matches!(m.sign_in, SignIn::SignedIn(_)) {
         out.push(Act::Disconnect);
     }
@@ -520,6 +533,26 @@ pub fn installed(
         key(a).cmp(&key(b))
     });
     rows
+}
+
+/// The line under a server's title in Installed's pane: its own name only where it
+/// isn't the one its entry gives (`t3-vps-2`, not `acta`), and its host where the person
+/// gave it (T3's) or added it by hand.
+pub fn installed_under(m: &McpServer, entry: Option<&Entry>) -> String {
+    let mut parts = Vec::new();
+    match entry {
+        Some(e) => {
+            if m.name != e.server {
+                parts.push(m.name.clone());
+            }
+            if e.several() {
+                parts.push(host(&m.url));
+            }
+        }
+        None => parts.push(host(&m.url)),
+    }
+    parts.retain(|p| !p.is_empty());
+    parts.join(" · ")
 }
 
 /// The name of another server from `entry`, reached at `address`, for an entry the
@@ -894,6 +927,28 @@ impl Model {
         )
     }
 
+    /// How one of the person's servers stands in its pane, in words and a dot: being
+    /// connected or tried just now says so, or else how its last test found it.
+    pub fn server_standing(&self, m: &McpServer) -> (String, Dot) {
+        if self
+            .spools
+            .connects
+            .get(&m.name)
+            .is_some_and(|c| c.step == Step::Adding)
+        {
+            return ("Connecting…".into(), Dot::Quiet);
+        }
+        if matches!(self.mcp_tests.get(&m.name), Some(McpTest::Testing)) {
+            return ("Trying…".into(), Dot::Quiet);
+        }
+        (status_line(m), status_dot(m))
+    }
+
+    /// Try it: one not tried yet is tested, as the MCP servers page tests one.
+    pub fn spool_try(&mut self, server: &str) -> Value {
+        self.test_mcp(server)
+    }
+
     /// Reconnect: one from the catalog is connected again from its entry, as it is,
     /// keeping its agents; one added by hand is tried again.
     pub fn spool_reconnect(&mut self, server: &str) -> Option<Value> {
@@ -936,7 +991,7 @@ mod tests {
     fn catalog() -> Value {
         json!({"entries": [
             {"id": "acta", "name": "Acta", "category": "Work", "description": "Boards, tasks and comments in Acta.",
-             "maker": "Aaen Studios", "badge": {"name": "acta", "initial": "A", "color": "plum"}, "server": "acta",
+             "maker": "Aaen Studios", "badge": {"name": "acta", "initial": "A", "color": "plum", "icon": "ab12"}, "icon_svg": "<svg/>", "server": "acta",
              "runs": "remote", "url": "https://acta.aaenz.no/api/mcp", "fields": [], "sign_in": "oauth", "secrets": [],
              "tools": [{"name": "list_tasks", "kind": "read"}, {"name": "create_tasks", "kind": "change"}],
              "tools_from": "x", "tools_checked": true, "servers": ["acta"], "connected": true},
@@ -993,6 +1048,30 @@ mod tests {
         let playwright = m.entry("playwright").unwrap();
         assert_eq!(playwright.command, "npx -y @playwright/mcp@latest");
         assert!(!playwright.remote);
+        // Acta's mark comes with it; one without has none.
+        assert_eq!(acta.icon_svg.as_deref(), Some("<svg/>"));
+        assert_eq!(t3.icon_svg, None);
+    }
+
+    #[test]
+    fn the_icons_servers_gave_are_fetched_for_their_badges() {
+        let mut m = with_catalog();
+        m.take(&json!({"t": "result", "id": "app.mcp_list_1", "ok": true, "value": {"servers": [
+            {"name": "t3", "url": "https://pc.ts.net/mcp", "status": "connected", "catalog": "t3",
+             "badge": {"name": "t3", "initial": "T", "color": "mint", "icon": "cd34", "icon_dark": "ef56"}}
+        ]}}));
+        assert_eq!(
+            m.mcp_servers[0].badge.as_ref().map(|b| b.icon_for(true)),
+            Some("ef56")
+        );
+        let wanted: Vec<String> = m
+            .file_fetches()
+            .iter()
+            .map(|f| f["file"].as_str().unwrap_or_default().to_string())
+            .collect();
+        for icon in ["ab12", "cd34", "ef56"] {
+            assert!(wanted.contains(&icon.to_string()), "{icon} isn't fetched");
+        }
     }
 
     #[test]
@@ -1297,13 +1376,20 @@ mod tests {
         let t3 = m.entry("t3").unwrap().clone();
         let mut servers = vec![
             server("t3", "t3", McpStatus::Connected),
-            server("t3-vps", "t3", McpStatus::Untested),
+            server("t3-vps", "t3", McpStatus::Connected),
             server("other", "", McpStatus::Failing),
         ];
         assert_eq!(
             card_status(&t3, &servers),
             Some(("Connected".into(), Dot::Ok))
         );
+        // One not tried yet says so, as Installed does, and isn't taut.
+        servers[1].status = McpStatus::Untested;
+        assert_eq!(
+            card_status(&t3, &servers),
+            Some(("Not tried yet".into(), Dot::Quiet))
+        );
+        assert_eq!(status_words(&servers[1]), "Not tried yet");
         servers[1].status = McpStatus::SignIn;
         assert_eq!(
             card_status(&t3, &servers),
@@ -1374,6 +1460,60 @@ mod tests {
         );
         let keyed = server("github", "github", McpStatus::Connected);
         assert_eq!(acts(&keyed), [Act::Reconnect, Act::Remove]);
+        let failing = server("notes", "", McpStatus::Failing);
+        assert_eq!(acts(&failing), [Act::Reconnect, Act::Remove]);
+        // One not tried yet is tried, not reconnected.
+        let untried = server("acta", "acta", McpStatus::Untested);
+        assert_eq!(acts(&untried), [Act::Try, Act::Remove]);
+    }
+
+    #[test]
+    fn trying_a_server_tests_it_and_its_pane_says_so() {
+        let mut m = with_catalog();
+        m.mcp_servers = vec![server("acta", "acta", McpStatus::Untested)];
+        let acta = m.mcp_servers[0].clone();
+        assert_eq!(
+            m.server_standing(&acta),
+            ("Not tried yet".into(), Dot::Quiet)
+        );
+        let f = m.spool_try("acta");
+        assert_eq!(f["name"], "mcp.test");
+        assert_eq!(f["args"]["name"], "acta");
+        assert_eq!(m.server_standing(&acta), ("Trying…".into(), Dot::Quiet));
+    }
+
+    #[test]
+    fn a_servers_pane_names_it_only_where_its_title_doesnt() {
+        let m = with_catalog();
+        let acta = m.entry("acta").cloned();
+        let t3 = m.entry("t3").cloned();
+        // Acta's own name repeats its title.
+        let own = server("acta", "acta", McpStatus::Connected);
+        assert_eq!(installed_under(&own, acta.as_ref()), "");
+        // T3's has its host, and another's its name too.
+        let first = McpServer {
+            url: "https://pc.ts.net/mcp".into(),
+            ..server("t3", "t3", McpStatus::Connected)
+        };
+        assert_eq!(installed_under(&first, t3.as_ref()), "pc.ts.net");
+        let another = McpServer {
+            url: "https://vps.ts.net/mcp".into(),
+            ..server("t3-vps-2", "t3", McpStatus::Connected)
+        };
+        assert_eq!(
+            installed_under(&another, t3.as_ref()),
+            "t3-vps-2 · vps.ts.net"
+        );
+        // One added by hand has its host, or nothing for a program.
+        let hand = McpServer {
+            url: "https://mcp.example.com/sse".into(),
+            ..server("calendar", "", McpStatus::Connected)
+        };
+        assert_eq!(installed_under(&hand, None), "mcp.example.com");
+        assert_eq!(
+            installed_under(&server("notes", "", McpStatus::Failing), None),
+            ""
+        );
     }
 
     #[test]

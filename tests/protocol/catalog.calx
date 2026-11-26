@@ -127,6 +127,8 @@ fn run(i: Instance, fake: String) ! Error {
     let listed = try app.cmd("q_3", "catalog.list", Obj.new().done())
     let first = items(at(at(listed.copy(), "value"), "entries"))[0].copy()
     try check(str_at(first, "id") == some(String("acta")) and "{at(at(listed.copy(), "value"), "categories")}" == #"["Work","Code","Home"]"#, "catalog.list starts with Acta, and gives the categories that have entries")
+    let acta_mark = str_at(entry_in(listed.copy(), "acta"), "icon_svg") ?? String()
+    try check(acta_mark.starts_with("<svg ") and acta_mark.contains("currentColor") and str_at(entry_in(listed.copy(), "t3"), "icon_svg") == none, "an entry with a mark gives it as an SVG in currentColor, and one without has none")
     let github = entry_in(listed.copy(), "github")
     let github_tools = "{at(github.copy(), "tools")}"
     try check(str_at(github.copy(), "sign_in") == some(String("secret")) and "{at(github.copy(), "secrets")}" == #"[{"name":"GITHUB_TOKEN","label":"Personal access token","placeholder":"github_pat_…","have":false}]"# and str_at(github.copy(), "runs") == some(String("remote")), "GitHub takes a personal access token as a secret, and runs remotely")

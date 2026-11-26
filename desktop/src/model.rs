@@ -554,6 +554,8 @@ pub struct McpServer {
     pub agents: Vec<String>,
     /// The id of the catalog entry it came from, or whose fixed address it has.
     pub catalog: String,
+    /// Its badge, with the icons it gave of its own once it has.
+    pub badge: Option<Badge>,
 }
 
 /// How one of the person's MCP servers stands, as `mcp.list` says.
@@ -641,6 +643,7 @@ impl McpServer {
             tools: names("tools"),
             agents: names("agents"),
             catalog: s(v, "catalog"),
+            badge: v.get("badge").and_then(Badge::of),
         }
     }
 
@@ -9881,7 +9884,19 @@ impl Model {
             _ => Vec::new(),
         });
         let sites = sites.chain(previews);
-        for icon in cards.chain(asks).flat_map(Badge::icons).chain(sites) {
+        // And the icons Spools shows: those the person's servers gave of their own.
+        let spools = self
+            .spools
+            .entries
+            .iter()
+            .filter_map(|e| e.badge.as_ref())
+            .chain(self.mcp_servers.iter().filter_map(|m| m.badge.as_ref()));
+        for icon in cards
+            .chain(asks)
+            .chain(spools)
+            .flat_map(Badge::icons)
+            .chain(sites)
+        {
             if !wanted.contains(icon) {
                 wanted.push(icon.clone());
             }

@@ -10,7 +10,7 @@ use crate::model::popup::Dot;
 use crate::model::spools::{self, Act, Entry, Flow, Stage, Step};
 
 /// How many tiles a row of the grid has.
-const ACROSS: usize = 4;
+const ACROSS: u16 = 4;
 
 /// Spools' own boxes: its search, and the open form's, each field's and each secret's
 /// by its name, for the entry (and whether it's another of it) they were made for.
@@ -258,25 +258,15 @@ impl Loom {
                     .child("Nothing found"),
             );
         }
-        for chunk in tiles.chunks(ACROSS) {
-            let mut row = div().flex().gap(px(space::S));
-            for &i in chunk {
+        // A grid of equal columns, so every tile is as wide as every other, whatever
+        // its row.
+        if !tiles.is_empty() {
+            let mut grid = div().grid().grid_cols(ACROSS).gap(px(space::S));
+            for &i in &tiles {
                 let picked = open.as_deref() == Some(entries[i].id.as_str());
-                row = row.child(self.spool_tile(&entries[i], picked, cx));
+                grid = grid.child(self.spool_tile(&entries[i], picked, cx));
             }
-            // The last row's gaps take a tile's room, padding and edge too, so its tiles
-            // are as wide as the others.
-            for _ in chunk.len()..ACROSS {
-                row = row.child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .p(px(space::M))
-                        .border_1()
-                        .border_color(transparent_black()),
-                );
-            }
-            column = column.child(row);
+            column = column.child(grid);
         }
         let flow = self.model.spools.flow.clone();
         let pane = flow.and_then(|flow| {
@@ -332,6 +322,51 @@ impl Loom {
         }
     }
 
+    /// An integration's logo, `size` square: the icon its server gave of its own, once
+    /// it's fetched (`own`, a server's, before its entry's); else its entry's mark, drawn
+    /// on the badge's colour as its initial would be; else its initial.
+    fn spool_logo(
+        &self,
+        own: Option<&model::Badge>,
+        entry: Option<&Entry>,
+        server: &str,
+        size: f32,
+    ) -> Div {
+        let p = self.p;
+        let base = entry.and_then(|e| e.badge.as_ref());
+        let fetched = |b: &&model::Badge| badge_icon(b.icon_for(p.dark)).is_some();
+        if let Some(b) = own.filter(fetched).or(base.filter(fetched)) {
+            return badge_view(p, b, size);
+        }
+        let Some((id, mark)) = entry.and_then(|e| Some((e.id.as_str(), e.icon_svg.as_deref()?)))
+        else {
+            return server_badge(p, base.or(own), server, size);
+        };
+        let fill = match base.filter(|b| !b.color.is_empty()) {
+            Some(b) => thread::color(&b.color, p.dark),
+            None => p.ink_3,
+        };
+        let path = crate::runtime_svg(&format!("spools/{id}.svg"), mark);
+        div()
+            .size(px(size))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(if size >= BADGE {
+                radius::CARD
+            } else {
+                radius::ROW
+            }))
+            .bg(fill)
+            .child(
+                svg()
+                    .path(path)
+                    .size(px((size * 0.56).round()))
+                    .text_color(motion::ink_on(fill, p.button_ink, p.button)),
+            )
+    }
+
     /// One of loom's own as a wide card in a soft tint of its colour: loom's knot tied
     /// to its logo, slack until it's connected and taut once it is; its name and line;
     /// and Connect, or ✓ Connected (or what's wrong) with Manage, and Connect another
@@ -365,7 +400,7 @@ impl Loom {
                 tint,
                 MARK_H * 2.0,
             ))
-            .child(server_badge(p, e.badge.as_ref(), &e.server, BADGE));
+            .child(self.spool_logo(None, Some(e), &e.server, BADGE));
         let id = e.id.clone();
         let mut actions = div().flex().items_center().gap(px(space::S));
         if e.connected() {
@@ -407,10 +442,11 @@ impl Loom {
             );
         }
         let state = status.map(|(words, dot)| {
-            let ink = match dot {
-                Dot::Ok | Dot::Quiet => p.ok,
-                Dot::Warn => p.warn,
-                Dot::Bad => p.bad,
+            let (ink, words_ink) = match dot {
+                Dot::Ok => (p.ok, p.ok),
+                Dot::Quiet => (p.ink_3, p.ink_2),
+                Dot::Warn => (p.warn, p.warn),
+                Dot::Bad => (p.bad, p.bad),
             };
             div()
                 .min_w_0()
@@ -419,7 +455,7 @@ impl Loom {
                 .gap(px(space::XS + 2.0))
                 .text_size(px(size::SMALL))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(ink)
+                .text_color(words_ink)
                 .when(dot == Dot::Ok, |d| d.child(Icon::new(Ico::Check).small()))
                 .when(dot != Dot::Ok, |d| {
                     d.child(div().size(px(6.0)).flex_none().rounded_full().bg(ink))
@@ -480,24 +516,27 @@ impl Loom {
     }
 
     /// An entry as a tile in the grid: its logo, a check once it's connected (or a dot
-    /// in the colour of what's wrong), and its name. It opens the entry's pane.
+    /// in the colour of how else it stands), and its name. It opens the entry's pane.
     fn spool_tile(&self, e: &Entry, picked: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
         let fill = self.card_fill();
         let id = e.id.clone();
         let mark = spools::card_status(e, &self.model.mcp_servers).map(|(_, dot)| match dot {
-            Dot::Ok | Dot::Quiet => div().text_color(p.ok).child(Icon::new(Ico::Check).xsmall()),
-            Dot::Warn | Dot::Bad => div()
+            Dot::Ok => div().text_color(p.ok).child(Icon::new(Ico::Check).xsmall()),
+            Dot::Quiet | Dot::Warn | Dot::Bad => div()
                 .mt(px(space::XS))
                 .size(px(6.0))
                 .rounded_full()
-                .bg(if dot == Dot::Warn { p.warn } else { p.bad }),
+                .bg(match dot {
+                    Dot::Warn => p.warn,
+                    Dot::Bad => p.bad,
+                    _ => p.ink_3,
+                }),
         });
         div()
             .id(SharedString::from(format!("spool-tile-{id}")))
             .role(Role::Button)
             .aria_label(e.name.clone())
-            .flex_1()
             .min_w_0()
             .h(px(control::TILE))
             .p(px(space::M))
@@ -516,12 +555,7 @@ impl Loom {
                     .flex()
                     .items_start()
                     .justify_between()
-                    .child(server_badge(
-                        p,
-                        e.badge.as_ref(),
-                        &e.server,
-                        BADGE_STEP + 4.0,
-                    ))
+                    .child(self.spool_logo(None, Some(e), &e.server, BADGE_STEP + 4.0))
                     .children(mark),
             )
             .child(
@@ -555,7 +589,7 @@ impl Loom {
             .flex()
             .items_center()
             .gap(px(space::M))
-            .child(server_badge(p, e.badge.as_ref(), &e.server, BADGE))
+            .child(self.spool_logo(None, Some(e), &e.server, BADGE))
             .child(
                 div()
                     .flex_1()
@@ -953,17 +987,7 @@ impl Loom {
     /// as it allows.
     fn server_block(&mut self, m: &model::McpServer, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = self.p;
-        let going = self
-            .model
-            .spools
-            .connects
-            .get(&m.name)
-            .is_some_and(|c| c.step == Step::Adding);
-        let (words, dot) = if going {
-            ("Connecting…".to_string(), Dot::Quiet)
-        } else {
-            (spools::status_line(m), spools::status_dot(m))
-        };
+        let (words, dot) = self.model.server_standing(m);
         let ink = match dot {
             Dot::Ok => p.ok,
             Dot::Warn => p.warn,
@@ -1003,6 +1027,13 @@ impl Loom {
             let id = format!("spool-{}-{act:?}", m.name);
             let button = match act {
                 Act::SignIn => self.sign_in_button(&name, cx),
+                Act::Try => self.small_button(id, "Try it", false).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        let f = this.model.spool_try(&name);
+                        this.send(f);
+                        cx.notify();
+                    },
+                )),
                 Act::Reconnect => self
                     .small_button(id, "Reconnect", false)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1114,15 +1145,19 @@ impl Loom {
         let Some(row) = self.model.installed_rows().get(ix).cloned() else {
             return div().into_any_element();
         };
-        let p = self.p;
         let m = &self.model.mcp_servers[row.server];
         let name = m.name.clone();
-        let badge = row
-            .entry
-            .and_then(|e| self.model.spools.entries[e].badge.clone());
+        let logo = self
+            .spool_logo(
+                m.badge.as_ref(),
+                row.entry.map(|e| &self.model.spools.entries[e]),
+                &name,
+                control::LEAD,
+            )
+            .into_any_element();
         self.list_row(
             format!("installed-{name}"),
-            server_badge(p, badge.as_ref(), &name, control::LEAD).into_any_element(),
+            logo,
             row.title.clone(),
             row.line.clone(),
             row.dot,
@@ -1135,22 +1170,20 @@ impl Loom {
         .into_any_element()
     }
 
-    /// The server picked on Installed: its logo and name, with its host or its own name
-    /// under it, then how it stands, its agents, and what can be done with it.
+    /// The server picked on Installed: its logo and name, with its own name under it
+    /// where that isn't its entry's and its host where it has one (`installed_under`),
+    /// then how it stands, its agents, and what can be done with it.
     fn installed_pane(&mut self, row: &spools::Row, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let p = self.p;
         let m = self.model.mcp_servers[row.server].clone();
         let entry = row.entry.map(|e| self.model.spools.entries[e].clone());
-        let badge = entry.as_ref().and_then(|e| e.badge.clone());
-        let line = match &entry {
-            Some(e) if e.several() => spools::host(&m.url),
-            Some(e) if e.name != m.name => m.name.clone(),
-            _ => String::new(),
-        };
+        let under = spools::installed_under(&m, entry.as_ref());
+        let logo = self
+            .spool_logo(m.badge.as_ref(), entry.as_ref(), &m.name, BADGE)
+            .into_any_element();
         let mut out = vec![self.pane_head(
-            Some(server_badge(p, badge.as_ref(), &m.name, BADGE).into_any_element()),
+            Some(logo),
             row.title.clone(),
-            Some(line),
+            (!under.is_empty()).then_some(under),
             None,
         )];
         out.extend(self.server_block(&m, cx));

@@ -8,6 +8,11 @@ import Get from '../components/Get.astro';
 import Knot from '../components/Knot.astro';
 import { INSTALL } from '../lib/site.mjs';
 import { brains, count } from '../lib/registry.mjs';
+import actaMark from '../../../server/catalog/acta.svg?raw';
+import githubMark from '../../../server/catalog/github.svg?raw';
+import notionMark from '../../../server/catalog/notion.svg?raw';
+import linearMark from '../../../server/catalog/linear.svg?raw';
+import vercelMark from '../../../server/catalog/vercel.svg?raw';
 
 // The Brains page as the app draws it (desktop/src/app.rs, programs_page, and list_page.rs): the
 // brains down the left and the ACP Registry, picked, beside them, with the registry's own names,
@@ -35,18 +40,19 @@ const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
 
 // Spools' Find tab as the app draws it (desktop/src/spools.rs): Acta and T3 Code as wide cards,
 // each with loom's knot tied to its logo, the category pills, and the rest as tiles four to a row,
-// in the catalog's own words, each with its badge's colour (server/catalog.calx, shared/badge.calx).
-// When the panel comes into view, T3 Code connects: its tie pulls taut and Installed counts it.
+// in the catalog's own words, each with its badge's colour and its mark, or its initial where it has
+// none (server/catalog.calx, server/catalog/, shared/badge.calx). When the panel comes into view,
+// T3 Code connects: its tie pulls taut and Installed counts it.
 const featured = [
-	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', color: 'mint', connected: true },
-	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', color: 'mint', connected: false },
+	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', color: 'mint', mark: actaMark, connected: true },
+	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', color: 'mint', mark: '', connected: false },
 ];
 const PILLS = ['All', 'Work', 'Code', 'Mail & calendar', 'Files', 'Home', 'Fun'];
 const tiles = [
-	{ name: 'GitHub', color: 'pink' },
-	{ name: 'Notion', color: 'pink' },
-	{ name: 'Linear', color: 'mint' },
-	{ name: 'Vercel', color: 'sky' },
+	{ name: 'GitHub', color: 'pink', mark: githubMark },
+	{ name: 'Notion', color: 'pink', mark: notionMark },
+	{ name: 'Linear', color: 'mint', mark: linearMark },
+	{ name: 'Vercel', color: 'sky', mark: vercelMark },
 ];
 
 // Each with an agent's thread, which works while the item is hovered.
@@ -309,7 +315,7 @@ const faq = {
 											<Knot size={20} />
 										</span>
 										<svg data-tie data-color={e.color} data-taut={e.connected ? '' : undefined} height="28" aria-hidden="true" />
-										<span class="badge">{e.name[0]}</span>
+										{e.mark ? <span class="badge" set:html={e.mark} /> : <span class="badge">{e.name[0]}</span>}
 									</div>
 									<span class="card-text">
 										<span class="spool-name">{e.name}</span>
@@ -331,9 +337,7 @@ const faq = {
 						{
 							tiles.map((t) => (
 								<div class="spool-tile">
-									<span class="badge small" style={`--tint: var(--thread-${t.color})`}>
-										{t.name[0]}
-									</span>
+									<span class="badge small" style={`--tint: var(--thread-${t.color})`} set:html={t.mark} />
 									<span class="spool-tile-name">{t.name}</span>
 								</div>
 							))
@@ -1007,6 +1011,11 @@ const faq = {
 		--size: 26px;
 		border-radius: var(--radius-row);
 		font-size: 11px;
+	}
+	/* Its mark, in the initial's place and ink. */
+	.badge :global(svg) {
+		width: 56%;
+		height: 56%;
 	}
 	.spool-card .card-text {
 		min-width: 0;

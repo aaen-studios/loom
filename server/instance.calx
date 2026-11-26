@@ -24,6 +24,7 @@ import std.signal
 import std.text.utf8.{decode_lossy_unicode}
 import std.time.{DateTime, Timestamp}
 import std.url
+import shared.badge
 import shared.obj.{Obj, at, bool_at, int_at, merge, without, str_at}
 import shared.protocol
 import shared.pushrelay
@@ -4513,8 +4514,9 @@ impl Instance {
                 if has_server(a.copy(), name.copy()) { having.push(Json.Str(str_at(a, "id") ?? String())) }
             }
             let from = try i.catalog_of(user.copy(), s)
-            shown = merge(shown, server_status(signed, try i.tested_of(user.copy(), name)))
-            shown = merge(shown, Obj.new().j("agents", Json.Array(having)).maybe("catalog", if from.len() > 0 { some(from) } else { none }).done())
+            let (icon, dark) = i.icon_of(user.copy(), name.copy())
+            shown = merge(shown, server_status(signed, try i.tested_of(user.copy(), name.copy())))
+            shown = merge(shown, Obj.new().j("agents", Json.Array(having)).maybe("catalog", if from.len() > 0 { some(from) } else { none }).j("badge", badge.badge(name, icon, dark)).done())
             out.push(shown)
         }
         return out
@@ -8867,14 +8869,18 @@ impl Instance {
         for e in catalog.entries() {
             let id = str_at(e.copy(), "id") ?? String()
             var servers = List<String>()
+            // The first of them with an icon of its own gives the entry's badge it.
+            var own_icons = (String(), String())
             for (entry, name) in from.copy() {
-                if entry == id { servers.push(name.copy()) }
+                if entry != id { continue }
+                servers.push(name.copy())
+                if own_icons.0.len() == 0 { own_icons = i.icon_of(user.copy(), name) }
             }
             var connecting = Json.Null
             for (_, c) in i.connects {
                 if c.user == user and c.entry == id { connecting = c.json() }
             }
-            out.push(catalog.listed(e, have.copy(), servers, connecting))
+            out.push(catalog.listed(e, have.copy(), servers, own_icons, connecting))
         }
         var categories = List<Json>()
         for c in catalog.categories() { categories.push(Json.Str(c.copy())) }
