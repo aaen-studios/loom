@@ -976,7 +976,7 @@ impl Element for TextView {
                 let key = |motion: SelectionMotion| {
                     let state = state.clone();
                     move |window: &mut Window, cx: &mut App| {
-                        if !TextViewState::select_by_key(&state, motion, cx) {
+                        if !TextViewState::select_by_key(&state, motion, window, cx) {
                             cx.propagate();
                             return;
                         }
@@ -5101,8 +5101,11 @@ mod tests {
             assert_eq!(keys("shift-end", &state, cx), "n and the end");
         }
 
+        /// Text cut off on purpose, as under a message's Show more, then a text
+        /// below it, over what the cut hides.
         struct Clipped {
             text_view: Entity<TextViewState>,
+            below: Entity<TextViewState>,
         }
 
         impl Render for Clipped {
@@ -5110,31 +5113,126 @@ mod tests {
                 div()
                     .w(px(400.))
                     .child(crate::TextSelectionLayer)
-                    .child(
+                    .child(crate::cut_text_selection(
                         div()
                             .h(px(40.))
                             .overflow_hidden()
                             .child(TextView::new(&self.text_view).selectable(true)),
-                    )
+                    ))
+                    .child(TextView::new(&self.below).selectable(true))
                     .child(div().h(px(200.)))
             }
         }
 
-        /// Text cut off, as under a message's Show more, lies over what's drawn
-        /// below it: keys keep the selection's end to the text that shows.
-        #[gpui::test]
-        fn shift_arrows_keep_to_the_text_that_shows(cx: &mut TestAppContext) {
+        fn clipped(
+            cx: &mut TestAppContext,
+        ) -> (
+            Entity<TextViewState>,
+            Entity<TextViewState>,
+            &mut VisualTestContext,
+        ) {
             cx.update(crate::init);
             let (root, cx) = cx.add_window_view(|_, cx| Clipped {
                 text_view: cx.new(|cx| TextViewState::markdown("one\n\ntwo\n\nthree\n\nfour", cx)),
+                below: cx.new(|cx| TextViewState::markdown("under it", cx)),
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let (state, below) =
+                root.read_with(cx, |root, _| (root.text_view.clone(), root.below.clone()));
+            (state, below, cx)
+        }
+
+        fn window_selection(cx: &mut VisualTestContext) -> String {
+            cx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                crate::TextSelection::selected_text(window, cx)
+                    .trim()
+                    .to_string()
+            })
+        }
+
+        /// A drag from text into the text under a cut leaves out what the cut
+        /// hides, which lies over it.
+        #[gpui::test]
+        fn a_drag_leaves_out_what_a_cut_hides(cx: &mut TestAppContext) {
+            let (state, below, cx) = clipped(cx);
+            press(position(&state, "one", 0, cx), 1, false, cx);
+            let end = position(&below, "under it", 5, cx);
+            drag(end, cx);
+            release(end, 1, cx);
+            assert_eq!(window_selection(cx), "one\n\nunder");
+            cx.simulate_keystrokes("ctrl-c");
+            let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+            assert_eq!(copied.as_deref(), Some("one\n\nunder"));
+        }
+
+        struct Scrolled {
+            text_view: Entity<TextViewState>,
+            scroll: gpui::ScrollHandle,
+        }
+
+        impl Render for Scrolled {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).child(crate::TextSelectionLayer).child(
+                    div()
+                        .id("scrolled")
+                        .h(px(60.))
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .child(TextView::new(&self.text_view).selectable(true)),
+                )
+            }
+        }
+
+        /// Past a scrolled view's edge, the view scrolls to the selection's
+        /// end, as it does under a drag.
+        #[gpui::test]
+        fn shift_down_past_the_edge_scrolls_to_the_end(cx: &mut TestAppContext) {
+            cx.update(crate::init);
+            let scroll = gpui::ScrollHandle::new();
+            let (root, cx) = cx.add_window_view({
+                let scroll = scroll.clone();
+                move |_, cx| Scrolled {
+                    text_view: cx.new(|cx| {
+                        TextViewState::markdown("one\n\ntwo\n\nthree\n\nfour\n\nfive\n\nsix", cx)
+                    }),
+                    scroll,
+                }
             });
             cx.run_until_parked();
             cx.update(|window, cx| window.draw(cx).clear(cx));
             let state = root.read_with(cx, |root, _| root.text_view.clone());
             click(position(&state, "one", 0, cx), cx);
-            // Only "one" shows in the clip.
-            assert_eq!(keys("shift-down shift-down", &state, cx), "one");
-            assert_eq!(keys("shift-right shift-right", &state, cx), "one");
+            assert_eq!(scroll.offset().y, px(0.));
+            for _ in 0..5 {
+                cx.simulate_keystrokes("shift-down");
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
+            assert_eq!(selected(&state, cx), "one\ntwo\nthree\nfour\nfive");
+            assert!(scroll.offset().y < px(-60.), "{:?}", scroll.offset());
+            // The last row shows.
+            let six = position(&state, "six", 0, cx);
+            let viewport = cx.update(|window, _| window.bounds());
+            assert!(six.y < px(60.) + viewport.origin.y, "{six:?}");
+            assert_eq!(
+                keys("shift-end", &state, cx),
+                "one\ntwo\nthree\nfour\nfive\nsix"
+            );
+        }
+
+        /// Keys keep the selection's end to what a cut shows.
+        #[gpui::test]
+        fn shift_arrows_keep_to_the_text_that_shows(cx: &mut TestAppContext) {
+            let (state, _, cx) = clipped(cx);
+            click(position(&state, "one", 0, cx), cx);
+            // Only "one" shows in the cut: on past it is the text under it.
+            assert_eq!(keys("shift-end", &state, cx), "one");
+            cx.simulate_keystrokes("shift-right");
+            assert_eq!(window_selection(cx), "one\n\nu");
+            cx.simulate_keystrokes("shift-left shift-left");
+            assert_eq!(window_selection(cx), "on");
             // A select-all takes the whole text, and a key then keeps to what shows.
             assert_eq!(keys("ctrl-a", &state, cx), "one\ntwo\nthree\nfour");
             assert_eq!(keys("shift-left", &state, cx), "on");

@@ -357,6 +357,8 @@ impl TextViewSelectionAdapter {
             .in_paint_order()
             .with_text_bounds(frame.text_bounds.clone())
             .with_self_scroll(self_scroll)
+            // loom: what a clip that cuts the text off lets show.
+            .with_cut(GlobalState::global(cx).text_cut())
             .with_rendered_element(&self.selection, window, cx);
         let registration = match frame.selection_edges {
             Some((start, end)) => registration.with_selection_edges(start, end),
@@ -414,8 +416,13 @@ impl TextViewSelectionAdapter {
     }
 
     /// loom: see [`TextSelectionHandle::move_by_key`].
-    pub(super) fn move_by_key(&self, motion: crate::SelectionMotion, cx: &mut App) -> bool {
-        self.selection.move_by_key(motion, cx)
+    pub(super) fn move_by_key(
+        &self,
+        motion: crate::SelectionMotion,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
+        self.selection.move_by_key(motion, window, cx)
     }
 
     /// loom: see [`TextSelectionHandle::select_whole`].

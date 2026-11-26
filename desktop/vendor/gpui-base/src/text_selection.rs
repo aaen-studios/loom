@@ -231,6 +231,8 @@ pub struct TextSelectionRegistration {
     self_scroll: bool,
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     rendered: Option<WeakEntity<RenderedMarker>>,
+    /// loom: what a clip that cuts the text off lets show (`crate::cut_text_selection`).
+    cut: Option<Bounds<Pixels>>,
 }
 
 impl TextSelectionRegistration {
@@ -247,7 +249,15 @@ impl TextSelectionRegistration {
             self_scroll: false,
             selection_edges: None,
             rendered: None,
+            cut: None,
         }
+    }
+
+    /// loom: what a clip that cuts the text off on purpose lets show, if one
+    /// does: text outside it is out of reach of the selection's keys.
+    pub fn with_cut(mut self, cut: Option<Bounds<Pixels>>) -> Self {
+        self.cut = cut;
+        self
     }
 
     /// Ties this registration to the retained state of the element reporting
@@ -1051,11 +1061,11 @@ impl TextSelectionHandle {
     /// loom: moves the window selection's cursor by `motion`, as Shift with an
     /// arrow, Home or End does. Returns whether there was a selection, or a
     /// place clicked in text, to move.
-    pub fn move_by_key(&self, motion: SelectionMotion, cx: &mut App) -> bool {
+    pub fn move_by_key(&self, motion: SelectionMotion, window: &Window, cx: &mut App) -> bool {
         let Some(state) = self.window_selection(cx) else {
             return false;
         };
-        state.update(cx, |state, cx| state.move_by_key(motion, cx))
+        state.update(cx, |state, cx| state.move_by_key(motion, window, cx))
     }
 
     /// loom: selects all of this participant's text through the window

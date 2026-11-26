@@ -1060,6 +1060,7 @@ impl TextViewState {
     pub(super) fn select_by_key(
         state: &gpui::Entity<Self>,
         motion: SelectionMotion,
+        window: &gpui::Window,
         cx: &mut App,
     ) -> bool {
         let (selectable, whole, selection) = {
@@ -1083,7 +1084,7 @@ impl TextViewState {
             });
         }
         state.update(cx, |state, cx| state.end_multi_click_selection(cx));
-        let moved = selection.move_by_key(motion, cx);
+        let moved = selection.move_by_key(motion, window, cx);
         if moved {
             state.update(cx, |_, cx| cx.notify());
         }

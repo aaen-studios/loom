@@ -10,7 +10,10 @@
 //! from it rather than from the point, which can't tell the end of a wrapped
 //! row from the start of the next.
 
-use gpui::{App, Entity, Pixels, Point, SharedString, TextLayout, WeakEntity, point};
+use gpui::{
+    App, Bounds, Entity, InputEvent as _, Pixels, Point, ScrollDelta, ScrollEvent, SharedString,
+    TextLayout, WeakEntity, Window, point, px,
+};
 
 use super::{SelectableTextState, SelectionEndpoint, WindowSelectionState};
 
@@ -56,9 +59,10 @@ struct Row {
     end: usize,
 }
 
-/// A run of text as its participant last painted it, with the rows of it that
-/// show. Rows cut off, as under a message's Show more, are left out: they lie
-/// over whatever is drawn there, and a selection end in them would select that.
+/// A run of text as its participant last painted it, with its rows. What a
+/// clip that cuts text off on purpose hides, as a message's Show more does, is
+/// left out (`crate::cut_text_selection`); what a scrolled view hides is in,
+/// and the view scrolls to it.
 struct KeyRun {
     participant: usize,
     /// Its place among its participant's runs.
@@ -66,7 +70,7 @@ struct KeyRun {
     text: SharedString,
     layout: TextLayout,
     rows: Vec<Row>,
-    /// The offsets its rows that show span.
+    /// The offsets its rows span, as far as they aren't cut off.
     min: usize,
     max: usize,
 }
@@ -84,6 +88,8 @@ struct Place {
 struct Participant {
     entity: Entity<SelectableTextState>,
     origin: Point<Pixels>,
+    /// What of it shows now, in the window: a scrolled view's edge cuts it.
+    shown: Bounds<Pixels>,
 }
 
 /// The text of every participant in the active scope, in document order.
@@ -192,6 +198,47 @@ fn rows(layout: &TextLayout) -> Vec<Row> {
     rows
 }
 
+/// The rows of `layout` as far as `cut` lets them show, a row cut off across
+/// ending where its first character cut off starts, or `None` when none shows.
+fn rows_shown(text: &str, layout: &TextLayout, cut: Option<Bounds<Pixels>>) -> Option<Vec<Row>> {
+    let all = rows(layout);
+    let Some(cut) = cut else {
+        return (!all.is_empty()).then_some(all);
+    };
+    let line_height = layout.line_height();
+    let mut shown = Vec::new();
+    for mut row in all {
+        let middle = row.top + line_height / 2.;
+        if middle < cut.top() || middle >= cut.bottom() {
+            continue;
+        }
+        let mut offset = row.start;
+        let mut cut_across = false;
+        while let Some(c) = text[offset..row.end].chars().next() {
+            let next = offset + c.len_utf8();
+            if let Some(at) = layout.position_for_index(offset)
+                && at.y == row.top
+            {
+                let width = layout
+                    .position_for_index(next)
+                    .filter(|after| after.y == at.y)
+                    .map_or(line_height / 2., |after| after.x - at.x);
+                if !crate::selection_cut::shows(Some(cut), at, width, line_height) {
+                    cut_across = true;
+                    break;
+                }
+            }
+            offset = next;
+        }
+        row.end = offset;
+        shown.push(row);
+        if cut_across {
+            break;
+        }
+    }
+    (!shown.is_empty()).then_some(shown)
+}
+
 impl KeyDocument {
     fn gather(state: &WindowSelectionState, cx: &App) -> Self {
         let mut found = state
@@ -205,18 +252,19 @@ impl KeyDocument {
                     registration.document_order,
                     registration.participant.upgrade()?,
                     geometry.bounds.origin + geometry.scroll_offset,
-                    // What of it shows: its hitbox, as far as its clip lets it.
+                    // What of it shows now: its hitbox, as far as its clips let it.
                     geometry
                         .hitbox
                         .bounds
                         .intersect(&geometry.hitbox.content_mask.bounds),
+                    geometry.cut,
                 ))
             })
             .collect::<Vec<_>>();
-        found.sort_by_key(|(order, _, _, _)| *order);
+        found.sort_by_key(|(order, ..)| *order);
         let mut participants = Vec::new();
         let mut runs = Vec::new();
-        for (_, entity, origin, shown) in found {
+        for (_, entity, origin, shown, cut) in found {
             let mut painted = entity.read(cx).runs.borrow().clone();
             painted.sort_by_key(|run| run.document_order);
             let participant = participants.len();
@@ -224,18 +272,10 @@ impl KeyDocument {
                 if run.text.is_empty() || run.text.len() != run.layout.len() {
                     continue;
                 }
-                let line_height = run.layout.line_height();
-                let rows = rows(&run.layout)
-                    .into_iter()
-                    .filter(|row| {
-                        let middle = row.top + line_height / 2.;
-                        middle >= shown.top() && middle < shown.bottom()
-                    })
-                    .collect::<Vec<_>>();
-                let (Some(first), Some(last)) = (rows.first(), rows.last()) else {
+                let Some(rows) = rows_shown(&run.text, &run.layout, cut) else {
                     continue;
                 };
-                let (min, max) = (first.start, last.end);
+                let (min, max) = (rows[0].start, rows[rows.len() - 1].end);
                 runs.push(KeyRun {
                     participant,
                     index,
@@ -246,7 +286,11 @@ impl KeyDocument {
                     max,
                 });
             }
-            participants.push(Participant { entity, origin });
+            participants.push(Participant {
+                entity,
+                origin,
+                shown,
+            });
         }
         Self { participants, runs }
     }
@@ -501,6 +545,46 @@ impl KeyDocument {
         }
     }
 
+    /// How far the view `place` is in has to scroll down (or up, less than
+    /// nothing) for its row to show, and where in the view to scroll it, or
+    /// `None` when it shows. A participant out of view altogether measures
+    /// against what shows of the others.
+    fn scroll_for(&self, place: Place) -> Option<(Point<Pixels>, Pixels)> {
+        const INSET: Pixels = px(1.);
+        let run = &self.runs[place.run];
+        let usable = |shown: &Bounds<Pixels>| {
+            shown.size.width > INSET * 2. && shown.size.height > INSET * 2.
+        };
+        let own = self.participants[run.participant].shown;
+        let shown = if usable(&own) {
+            own
+        } else {
+            // The nearest that shows, before or after it.
+            let order = run.participant;
+            self.participants
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| usable(&p.shown))
+                .min_by_key(|(i, _)| i.abs_diff(order))
+                .map(|(_, p)| p.shown)?
+        };
+        let line_height = run.line_height();
+        let top = run.rows[place.row].top;
+        let bottom = top + line_height;
+        let by = if top < shown.top() {
+            top - shown.top()
+        } else if bottom > shown.bottom() {
+            bottom - shown.bottom()
+        } else {
+            return None;
+        };
+        let x = run
+            .x(place)
+            .clamp(shown.left() + INSET, shown.right() - INSET);
+        let y = (top + line_height / 2.).clamp(shown.top() + INSET, shown.bottom() - INSET);
+        Some((point(x, y), by))
+    }
+
     /// A selection end at `place`, and the caret that keeps it.
     fn endpoint(
         &self,
@@ -539,7 +623,12 @@ impl WindowSelectionState {
     /// Moves the selection's cursor by `motion`, keeping its anchor. A word or
     /// line a double or triple click selected is the selection it moves.
     /// Returns whether there was a selection, or a place clicked, to move.
-    pub(super) fn move_by_key(&mut self, motion: SelectionMotion, cx: &mut App) -> bool {
+    pub(super) fn move_by_key(
+        &mut self,
+        motion: SelectionMotion,
+        window: &Window,
+        cx: &mut App,
+    ) -> bool {
         if self.snapshot().is_none()
             && let Some(unit) = self.unit.clone()
         {
@@ -578,6 +667,24 @@ impl WindowSelectionState {
         self.is_selecting = false;
         self.pending_extension_anchor = None;
         self.publish_snapshots(cx);
+        // A row past a scrolled view's edge: the view scrolls to show it, as
+        // it does under a drag, by a wheel's worth of pixels at it.
+        if let Some((position, by)) = document.scroll_for(place) {
+            let window = window.window_handle();
+            cx.defer(move |cx| {
+                _ = window.update(cx, |_, window, cx| {
+                    window.dispatch_event(
+                        ScrollEvent {
+                            position,
+                            delta: ScrollDelta::Pixels(point(px(0.), -by)),
+                            ..Default::default()
+                        }
+                        .to_platform_input(),
+                        cx,
+                    );
+                });
+            });
+        }
         true
     }
 

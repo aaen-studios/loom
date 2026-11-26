@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
-use gpui_kit::base::TextSelection;
+use gpui_kit::base::{cut_text_selection, TextSelection};
 use gpui_kit::component::input::{
     Copy as CopyText, Cut as CutText, Enter, Escape, IndentInline, InlineToken, Input,
     InputContent, InputEvent, InputState, MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea,
@@ -19657,7 +19657,7 @@ fn pin_cut(
     .top_0()
     .left_0()
     .size_full();
-    div()
+    let shown = div()
         .relative()
         .flex()
         .flex_col()
@@ -19677,8 +19677,13 @@ fn pin_cut(
                         linear_color_stop(fill, 1.0),
                     )),
             )
-        })
-        .into_any_element()
+        });
+    // What the cut hides is no part of a selection (LOO-412).
+    if cut {
+        cut_text_selection(shown).into_any_element()
+    } else {
+        shown.into_any_element()
+    }
 }
 
 /// A quote over the person's message, with its spine: a short line from the quote's
@@ -19796,32 +19801,36 @@ fn cut_long(
         .size_full(),
     );
     let cut = long && !open;
+    let shown = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .when(cut, |d| d.max_h(px(limit)).overflow_hidden())
+        .child(whole)
+        .when(cut, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(line_h * 2.0))
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(bg.opacity(0.0), 0.0),
+                        linear_color_stop(bg, 1.0),
+                    )),
+            )
+        });
     div()
         .flex()
         .flex_col()
-        .child(
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .when(cut, |d| d.max_h(px(limit)).overflow_hidden())
-                .child(whole)
-                .when(cut, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(line_h * 2.0))
-                            .bg(linear_gradient(
-                                180.0,
-                                linear_color_stop(bg.opacity(0.0), 0.0),
-                                linear_color_stop(bg, 1.0),
-                            )),
-                    )
-                }),
-        )
+        // What the cut hides is no part of a selection (LOO-412).
+        .child(if cut {
+            cut_text_selection(shown).into_any_element()
+        } else {
+            shown.into_any_element()
+        })
         .when(long, |d| {
             d.child(
                 div().flex().child(
