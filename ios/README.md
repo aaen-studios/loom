@@ -23,18 +23,20 @@ Emoji are drawn with [Twemoji](https://github.com/jdecked/twemoji), not the syst
 
 The core builds for iOS with Calx's iOS targets ([CLX-408](https://acta.aaenz.no/aaen-studios/clx#CLX-408), [CLX-410](https://acta.aaenz.no/aaen-studios/clx#CLX-410)): nightly 202611231257 or newer, so the Calx loom is pinned to in [`.calx-version`](../.calx-version).
 
-A build without the core (`--sample`, or `xcodegen` run by hand) runs on [`SampleCore`](Loom/Core/SampleCore.swift): sample agents and chats, a reply that streams, and a question to answer, in the frames the core sends. SwiftUI previews use it too. With the core linked, `-sample` at launch runs on it as well.
+A build without the core (`--sample`, or `xcodegen` run by hand) runs on [`SampleCore`](Loom/Core/SampleCore.swift): sample agents and chats, a reply that streams, a question to answer, and the group chat New group chat makes, checked as the instance checks it, in the frames the core sends. SwiftUI previews use it too. With the core linked, `-sample` at launch runs on it as well.
 
 To run against an instance, set `LOOM_SERVER` in the scheme's environment, or type its address on the sign-in screen.
 
 ## Testing it
 
-The app's unit tests, in [`LoomTests/`](LoomTests/), test what it works out without the core: where each emoji is in what Select text and the composer show, and what copying gives. They run in the app in the simulator:
+The app's unit tests, in [`LoomTests/`](LoomTests/), test what it works out without the core. Most are the model's rules, each as the desktop's model has it: which long message is cut, and how each came to its chat (`FoldTests`); New group chat's Make, one group chat for a double tap, and Make on again when no answer comes (`RoomTests`); the context's ring and card (`ContextTests`); how a reply reads, its fan and its cards (`ReplyTests`); the agents list, what a thread shows and the @ picker (`AgentListTests`); and links, mentions, quotes, the composer's pieces and emoji names (`WordsTests`), in Swift Testing. Some hand the model frames as the core sends them ([`Frames.swift`](LoomTests/Frames.swift)); others start a session on `SampleCore`, as `-sample` does, and wait for its answers. The rest, in XCTest, are where each emoji is in what Select text and the composer show, and what copying gives. They run in the app in the simulator, with or without the core linked:
 
 ```sh
 calx scripts/ios.calx --sample
 xcodebuild test -project ios/Loom.xcodeproj -scheme Loom -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
+
+On a Mac reached over SSH, Developer mode has to be on first (`sudo DevToolsSecurity -enable`, once), or the test runner never connects to the simulator.
 
 ## Testing it against an instance
 

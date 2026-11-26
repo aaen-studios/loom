@@ -85,11 +85,19 @@ impl Task for Worker {
 }
 
 pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let done = Receiver<Done>()
+    let to = start_to(done.sender())
+    return (to, done)
+}
+
+/// A worker of its own whose answers go to `done`, which several share: a
+/// watch's waits on a T3 thread (server/watches.calx), which would hold up the
+/// rest. It ends once its sender is dropped.
+pub fn start_to(done: own Sender<Done>) -> Sender<Job> {
     let jobs = Receiver<Job>()
     let to = jobs.sender()
-    let done = Receiver<Done>()
-    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender(), sessions: LinkedMap<String, Session>(), kept: LinkedMap<String, (Json, i64)>() }) }
-    return (to, done)
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done, sessions: LinkedMap<String, Session>(), kept: LinkedMap<String, (Json, i64)>() }) }
+    return to
 }
 
 // `spec` with `token` as its bearer token, in place of any Authorization it had.

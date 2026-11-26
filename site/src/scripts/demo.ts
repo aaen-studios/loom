@@ -390,6 +390,46 @@ export function play(app: HTMLElement) {
 		const on = e.target as Element;
 		if (menu && !menu.contains(on) && !on.closest?.('.more-btn')) unmenu();
 	});
+	// The header in a narrow window gives way as the app's does (desktop/src/model/header.rs):
+	// one step at a time, always in this order, until nothing in it runs past its end. Then the
+	// name shortens to a few letters, and then the mode's words (AppDemo.astro). What it took
+	// from each of them shows whole under the pointer (model::header::Fit::cut).
+	const header = app.querySelector<HTMLElement>('[data-header]')!;
+	const steps = ['fit-effort', 'fit-members', 'fit-icon', 'fit-close', 'fit-chevrons'];
+	const brainChip = header.querySelector<HTMLElement>('.chip.brain')!;
+	const modeChip = header.querySelector<HTMLElement>('.chip.mode')!;
+	const wordsIn = (el: Element | null) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+	const shortened = (el: Element | null) => !!el && el.scrollWidth > el.clientWidth;
+	const tipIf = (el: HTMLElement, cut: boolean, words: string) => {
+		if (cut) el.title = words;
+		else el.removeAttribute('title');
+	};
+	const fitHeader = () => {
+		header.classList.remove(...steps);
+		header.classList.add('fit-measuring');
+		for (const step of steps) {
+			if (header.scrollWidth <= header.clientWidth) break;
+			header.classList.add(step);
+		}
+		header.classList.remove('fit-measuring');
+		const brainWords = brainChip.querySelector('.brain-words');
+		tipIf(brainChip, header.classList.contains('fit-effort'), wordsIn(brainWords));
+		const modeWords = modeChip.querySelector('.mode-words');
+		tipIf(modeChip, shortened(modeWords), wordsIn(modeWords));
+		for (const head of header.querySelectorAll<HTMLElement>('.agent-btn, .room-btn')) {
+			const name = head.querySelector('.head-name');
+			const count = head.querySelector('.room-count');
+			const cut = shortened(name) || (!!count && header.classList.contains('fit-members'));
+			tipIf(head, cut, count ? `${wordsIn(name)} · ${wordsIn(count)}` : wordsIn(name));
+		}
+	};
+	new ResizeObserver(fitHeader).observe(header);
+	document.fonts.ready.then(fitHeader);
+	// And once the sidebar has finished sliding, at the width it ends at.
+	const side = app.querySelector<HTMLElement>('.side')!;
+	side.addEventListener('transitionend', (e) => {
+		if (e.target === side) fitHeader();
+	});
 	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place,
 	// read only; the strip's arrow, Continue in your own chat in the composer's place, or
 	// Juniper's own row, goes back to the person's chat (app.rs, open_thread, branch_strip,
@@ -409,6 +449,7 @@ export function play(app: HTMLElement) {
 			if (!pop.hidden) showPins(false);
 		}
 		app.classList.toggle('in-room', on);
+		fitHeader();
 	};
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => inRoom(true));
 	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));

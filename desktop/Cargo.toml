@@ -85,11 +85,13 @@ gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
 # text shows its link's tooltip, for the emoji card; and an input tells a token's renderer
 # its selection's colour while that selection shows over it, for the composer's pieces.
 gpui-base = { path = "vendor/gpui-base" }
-# GPUI, as 0.3.12 with two changes (marked "loom:"): an image can be drawn rotated, as an SVG
-# icon can, through Window::paint_image_transformed, for the tilted cards of a message's
-# pictures; and Window::set_pan_cursor shows a browser's middle-button scrolling cursors
-# over every other, with Window::hovered_cursor_style saying what's under the pointer.
-# Its Metal and wgpu renderers below draw the rotated image on the Mac and on Linux.
+# GPUI, as 0.3.12 with three changes (marked "loom:"): an image can be drawn rotated, as an
+# SVG icon can, through Window::paint_image_transformed, for the tilted cards of a message's
+# pictures; Window::set_pan_cursor shows a browser's middle-button scrolling cursors over
+# every other, with Window::hovered_cursor_style saying what's under the pointer; and text
+# wrapped at one width doesn't answer for its size at another, so a reply's bubble takes
+# the chat's width. Its Metal and wgpu renderers below draw the rotated image on the Mac
+# and on Linux.
 gpui-pre = { path = "vendor/gpui-pre" }
 # GPUI's Metal renderer, as 0.3.12 with the same change (marked "loom:") in its shaders.
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
