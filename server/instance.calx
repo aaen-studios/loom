@@ -15046,16 +15046,15 @@ impl Instance {
             }
         }
         // A routine's quiet run, or a step of its flow, leaves nothing in the chat
-        // but what its agent posted with routine_post (PLAN.md, "Routines"), unless
-        // it failed: the person sees that, as its agent said it or as its turn ended.
+        // but what its agent posted with routine_post (PLAN.md, "Routines"), failed
+        // or not: a failure reaches the person through its notification, the
+        // routine's runs and, once it turns the routine off, its card.
         let (mark, why) = i.routine_marks.remove(r.id.copy()) ?? (String(), String())
         var posted = List<String>()
         var keep = true
-        var quiet_for = String()
         if let q = i.quiet_turns.remove(r.id.copy()) {
-            quiet_for = q.routine.copy()
             posted = q.posted.copy()
-            keep = status == "failed" or status == "limit" or (status == "done" and mark == "failed")
+            keep = false
             if q.step.len() > 0 { try i.step_ran(r.user.copy(), q, r.id.copy(), r.agent.copy(), status.copy(), error.copy(), said.copy()) }
         }
         // A pause's quiet turn that ended well: its chat is looked back over up to
@@ -15117,9 +15116,8 @@ impl Instance {
             let message = i.with_threads(r.user.copy(), carded, r.id.copy())
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
-            // A routine's failed run, or a watch's wake in a session of its own,
-            // which the chat's own session hears of with its next turn.
-            if quiet_for.len() > 0 { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), quiet_for.copy(), String()) }
+            // A watch's wake in a session of its own, which the chat's own session
+            // hears of with its next turn.
             if woke_alone { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), String(), r.prompt.copy()) }
             for (named, path, key) in pictures { i.picture_to.send(files.Picture { user: r.user.copy(), message: r.message.copy(), named: named.copy(), path: path.copy(), key: key.copy() }) }
         }

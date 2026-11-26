@@ -5,7 +5,8 @@ module tests.protocol.quiet
 // nothing reaches the chat and no one is notified, and the run ends quiet.
 // What the agent posts with routine_post is its message in the chat, and a
 // notification. routine_quiet ends a run quiet; routine_failed makes it a
-// failure with why, which the person sees and is told, and five in a row
+// failure with why, which the person is told and sees in its runs, never in
+// the chat, as for a run whose turn failed, and five in a row
 // turn the routine off with a notice. pause_routine pauses it and tells the
 // person. A prompt still naming OpenBot's tools reaches them as loom's.
 // Outside a routine run, they're refused. routine.runs keeps each run. A post
@@ -135,7 +136,10 @@ fn run(i: Instance) ! Error {
     let told = kinds(f1_frames.copy(), "notify")
     try check(str_at(at(f1.copy(), "last"), "status") == some(String("failed")) and str_at(at(f1.copy(), "last"), "error") == some(String("the shop was down")) and int_at(f1, "failures") == some(1), "routine_failed makes the run a failure, with why")
     try check(told.len() == 1 and (str_at(told[0].copy(), "body") ?? String()).contains("the shop was down"), "and its person is told why")
-    try check(shown(f1_frames).len() == 1, "and sees its agent's answer in the chat")
+    try check(shown(f1_frames).len() == 0, "but nothing of the run reaches the chat, not even its agent's answer")
+    let broke = try put(mut app, "q_11b", "Broke", "/fail the program broke")
+    let (b1, b1_frames) = try run_once(mut app, "q_12b", broke.copy())
+    try check(str_at(at(b1, "last"), "status") == some(String("failed")) and shown(b1_frames).len() == 0, "nor does a run whose turn failed")
     var last = Json.Null
     var last_frames = List<Json>()
     for k in 0..4 {
