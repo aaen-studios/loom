@@ -41,6 +41,7 @@ struct ChatView: View {
         let here = roomId != nil ? model.room == roomId : model.selected == agentId && model.thread == thread?.id && model.room == nil
         let messages = here ? model.shown : []
         let approvals = here ? model.shownApprovals : []
+        let stacked = stackedLines(messages)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Tokens.Space.l + 2) {
@@ -51,7 +52,10 @@ struct ChatView: View {
                     }
                     ForEach(messages) { m in
                         Group {
-                            if m.deleted {
+                            if let line = m.watchLine {
+                                WatchLineRow(line: line)
+                                    .padding(.top, stacked.contains(m.id) ? 6 - (Tokens.Space.l + 2) : 0)
+                            } else if m.deleted {
                                 DeletedMark(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent)
                             } else if m.isPerson {
                                 PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
@@ -61,19 +65,19 @@ struct ChatView: View {
                         }
                         // Lit for a moment, once a quote went to it.
                         .background(lit == m.id ? P.thread(agent?.color ?? "").opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
-                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted) { model.reply(to: m.id) })
+                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil) { model.reply(to: m.id) })
                         .contextMenu {
                             // One menu a message rather than selectable text in each
                             // paragraph, which made each row many times dearer to build.
                             let text = m.text
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Button {
                                     model.reply(to: m.id)
                                 } label: {
                                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                                 }
                             }
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Button {
                                     session.send(model.pin(m.id, !m.pinned))
                                 } label: {
@@ -93,7 +97,7 @@ struct ChatView: View {
                                 }
                             }
                             // At once, leaving a mark where it was (PLAN.md, "Deleting a message").
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Divider()
                                 Button(role: .destructive) {
                                     session.send(model.deleteMessage(m.id))

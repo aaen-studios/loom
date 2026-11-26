@@ -363,6 +363,8 @@ struct Block: Equatable, Sendable {
     /// "Messages and streaming"): the phone leaves them out of the reply.
     var parent: String?
     var card: Card?
+    /// A watch's line, a `loom` message's `update` block (Watches.swift).
+    var update: WatchLine?
 
     static func text(_ kind: String, _ text: String) -> Block {
         Block(kind: kind, text: text, call: nil, file: nil)
@@ -377,7 +379,8 @@ struct Block: Equatable, Sendable {
             file: kind == "file" ? FileRef(b) : nil,
             plan: b["entries"].array.map { PlanEntry(content: $0["content"].text, status: $0["status"].text) },
             parent: b["parent"].string,
-            card: kind == "card" ? Card(b["card"]) : nil
+            card: kind == "card" ? Card(b["card"]) : nil,
+            update: kind == "update" ? WatchLine(b) : nil
         )
     }
 }
@@ -2308,8 +2311,9 @@ final class Model {
         case .messages:
             moreMessages = f["more"].bool ?? false
             messagesCame = true
-            // Loom's own lines across the chat (a compaction, a fresh session) are the desktop's.
-            messages = items.filter { !routinePrompt($0) && $0["role"].text != "loom" }.map(messageOf)
+            // Loom's own lines across the chat (a compaction, a fresh session) are the
+            // desktop's; a watch's lines show here too, as quiet rows.
+            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0)) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.

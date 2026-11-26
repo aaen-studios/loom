@@ -60,6 +60,8 @@ mod list_page;
 mod routines;
 #[path = "spools.rs"]
 mod spools;
+#[path = "watch_view.rs"]
+mod watch_view;
 use crate::model::drafts::Page as DraftPage;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
@@ -2271,6 +2273,12 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Routines => {
                 let f = self.model.load_routines();
                 self.send(f);
+                // The person's Acta and T3 servers, for "On an event".
+                for f in self.model.load_mcp() {
+                    self.send(f);
+                }
+                let f = self.model.ask_t3_servers();
+                self.send(f);
                 self.routine_open = None;
                 _ = self.model.load_routine_runs(None);
             }
@@ -2958,6 +2966,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.core.send(&f.to_string());
         }
         for f in self.model.t3_fetches() {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.watch_fetches() {
             self.core.send(&f.to_string());
         }
     }
@@ -13258,6 +13269,9 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             list = list.child(row);
         }
+        // What it follows outside loom, to take away (watch_view.rs).
+        let editing = self.model.editing.clone().unwrap_or_default();
+        let following = self.following_list(model::watch::Follower::Agent(&editing), cx);
         // The person's MCP servers, each on or off for this agent.
         let has: Vec<String> = self
             .model
@@ -13723,6 +13737,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
                     .child(rows(vec![activity, routines, usage]))
+                    .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
@@ -22670,7 +22685,12 @@ fn board_icon(size: f32) -> AnyElement {
 
 /// The colour a card's status is drawn in (`model::CardInk`).
 fn card_ink(p: Palette, card: &model::ActaCard) -> Hsla {
-    match card.ink() {
+    ink_color(p, card.ink())
+}
+
+/// A card status's colour.
+fn ink_color(p: Palette, ink: model::CardInk) -> Hsla {
+    match ink {
         model::CardInk::Quiet => p.ink_3,
         model::CardInk::Sky => thread::color("sky", p.dark),
         model::CardInk::Gold => thread::color("gold", p.dark),
@@ -22699,14 +22719,27 @@ fn card_pill(
     id: &str,
     card: Option<&model::ActaCard>,
 ) -> AnyElement {
+    card_pill_in(p, key, id, card, None)
+}
+
+/// `card_pill`, and in a watch's line (`line_dot`, watch_view.rs): without its tile, which
+/// the line's mark already is, and its dot in the colour of the status the line is about.
+fn card_pill_in(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line_dot: Option<Hsla>,
+) -> AnyElement {
     if card.is_some_and(|c| c.missing) {
         return card_id_text(id, p.ink_3).into_any_element();
     }
     let pill = div()
         .id(SharedString::from(format!("{key}-pill")))
         .h(px(control::PILL))
+        .min_w_0()
         .max_w(px(layout::PILL_TITLE + 110.0))
-        .pl(px(4.0))
+        .pl(px(if line_dot.is_some() { 7.0 } else { 4.0 }))
         .pr(px(7.0))
         .flex()
         .items_center()
@@ -22716,7 +22749,7 @@ fn card_pill(
         .border_color(p.line)
         .bg(p.bubble)
         .cursor_pointer()
-        .child(board_icon(14.0))
+        .when(line_dot.is_none(), |d| d.child(board_icon(14.0)))
         .child(card_id_text(id, p.ink_2));
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
@@ -22737,10 +22770,12 @@ fn card_pill(
                 .flex_none()
                 .size(px(7.0))
                 .rounded_full()
-                .bg(card_ink(p, &card)),
+                .bg(line_dot.unwrap_or_else(|| card_ink(p, &card))),
         )
         .on_click(move |_, _, cx| cx.open_url(&url));
+    // In a row (a watch's line, Following), it gives way, its title cut shorter.
     gpui_kit::base::HoverCard::new(key)
+        .min_w_0()
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
         .close_delay(Duration::from_millis(150))
@@ -27010,6 +27045,7 @@ mod row_tests {
             file: None,
             card: None,
             parent: None,
+            update: None,
         };
         let mut blocks = vec![block("text", text, None)];
         if let Some(c) = call {
@@ -28063,6 +28099,13 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .text_color(p.ink_3)
             .child(line)
     });
+    // A watch's line, quiet and left-aligned (watch_view.rs).
+    if let Some(line) = match &row {
+        Row::Message(m) => model::watch::line_of(m).map(|l| (m, l)),
+        _ => None,
+    } {
+        return watch_view::update_line(p, line.0, line.1, joined, column, time_line);
+    }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.
     if let Row::Message(m) = &row {
