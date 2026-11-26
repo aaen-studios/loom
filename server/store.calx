@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS skills (
     body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
-    title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+    title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+    read INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     json TEXT NOT NULL, at INTEGER NOT NULL);
@@ -403,6 +404,9 @@ fn conversation_of(r: List<Value>) -> Json {
     // How full its session's context is, once its program has said.
     let size = int(r[13].copy())
     if size > 0 { o = o.j("context", context_of(int(r[12].copy()), size, int(r[14].copy()), int(r[15].copy()) != 0, text(r[16].copy()), int(r[17].copy()), int(r[18].copy()))) }
+    // When the newest message its person has read is from, once they've read one.
+    let read = int(r[19].copy())
+    if read > 0 { o = o.i("read", read) }
     return o.done()
 }
 
@@ -529,6 +533,13 @@ impl Store {
         }
         if not tooled { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN tools TEXT NOT NULL DEFAULT '';")) }
         if not told { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN told TEXT NOT NULL DEFAULT '';")) }
+        // Conversations from before they kept what their person has read count
+        // as read up to their newest message, so an update shows no dots.
+        var reads = false
+        for r in try s.db.query(String("PRAGMA table_info(conversations)")) {
+            if text(r[1].copy()) == "read" { reads = true }
+        }
+        if not reads { try s.db.execute_script(String("ALTER TABLE conversations ADD COLUMN read INTEGER NOT NULL DEFAULT 0; UPDATE conversations SET read = COALESCE((SELECT MAX(m.at) FROM messages m WHERE m.user = conversations.user AND m.conversation = conversations.id), 0);")) }
         // Runs from before a run kept the routine that started it, and how that
         // routine said it went, get the columns, empty for none or not known.
         var routined = false
@@ -1142,7 +1153,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
+        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), c.read FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -1151,7 +1162,7 @@ impl Store {
     // chat. A task's conversation is the task's, not the chat, and another
     // agent's thread with it (`asks`) is that agent's.
     pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?), c.read FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -1165,10 +1176,19 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
+        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), c.read FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
             out.push(conversation_of(r))
         }
         return out
+    }
+
+    // The person has read conversation `id` up to a message from `at` (Unix ms):
+    // kept unless they'd read further already. Gives what's kept now, or none
+    // when there's no such conversation.
+    pub fn mark_read(self, user: String, id: String, at: i64) -> i64? ! Error {
+        _ = try self.db.execute(String("UPDATE conversations SET read = max(read, ?) WHERE id = ? AND user = ? AND deleted = 0"), [Value.Int(at), t(id.copy()), t(user.copy())])
+        let r = try self.db.query_one(String("SELECT read FROM conversations WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)]) else return none
+        return some(int(r[0].copy()))
     }
 
     pub fn rename_conversation(self, user: String, id: String, title: String) ! Error {

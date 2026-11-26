@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS agents (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, json TEXT NOT NULL, last INTEGER NOT NULL, agent TEXT, chat INTEGER NOT NULL DEFAULT 0,
-    partial INTEGER NOT NULL DEFAULT 0);
+    partial INTEGER NOT NULL DEFAULT 0, replied INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, conversation TEXT NOT NULL, at INTEGER NOT NULL, json TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation, at);
@@ -43,8 +43,10 @@ const TABLES: [str; 8] = ["agents", "conversations", "messages", "devices", "run
 // What each list the app reads is, in order.
 const AGENTS: str = "SELECT json FROM agents ORDER BY rowid"
 // Each conversation with `last`, when its newest message is from, which orders them, so
-// the app keeps the order as messages come without reading the list again.
-const CONVERSATIONS: str = "SELECT json_set(json, '$.last', last) FROM conversations ORDER BY last DESC, rowid DESC"
+// the app keeps the order as messages come without reading the list again, and
+// `replied`, when its newest agent's message is from, which is unread while it's
+// newer than the conversation's `read` (protocol.md, "Unread").
+const CONVERSATIONS: str = "SELECT json_set(json, '$.last', last, '$.replied', replied) FROM conversations ORDER BY last DESC, rowid DESC"
 const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
 const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
 // What a tool block shows of each call: its call, run, title and status, its block in
@@ -90,6 +92,14 @@ const PARTIAL_COLUMN: str = #"
 BEGIN;
 ALTER TABLE conversations ADD COLUMN partial INTEGER NOT NULL DEFAULT 0;
 UPDATE conversations SET partial = 1;
+COMMIT;
+"#
+// A cache from before conversations kept when their newest agent's message is from:
+// from the messages it has.
+const REPLIED_COLUMN: str = #"
+BEGIN;
+ALTER TABLE conversations ADD COLUMN replied INTEGER NOT NULL DEFAULT 0;
+UPDATE conversations SET replied = COALESCE((SELECT MAX(m.at) FROM messages m WHERE m.conversation = conversations.id AND json_extract(m.json, '$.role') = 'agent'), 0);
 COMMIT;
 "#
 // How long the cache keeps a tool call: as long as the instance keeps events (protocol.md,
@@ -207,6 +217,9 @@ impl Cache {
         }
         if try db.query_one(String("SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'partial'"), List<Value>()) == none {
             try db.execute_script(String(PARTIAL_COLUMN))
+        }
+        if try db.query_one(String("SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'replied'"), List<Value>()) == none {
+            try db.execute_script(String(REPLIED_COLUMN))
         }
         try db.execute_script(String(CHATS_BY_AGENT))
         return Cache { db: db, stop_checkpoints: stop, big: big }
@@ -651,7 +664,8 @@ impl Cache {
         let conversation = str_at(m, "conversation") ?? String()
         let when = int_at(m, "at") ?? 0
         _ = try self.db.execute(String("INSERT OR REPLACE INTO messages (id, conversation, at, json) VALUES (?, ?, ?, ?)"), [t(id), t(conversation.copy()), Value.Int(when), t("{m}")])
-        _ = try self.db.execute(String("UPDATE conversations SET last = max(last, ?) WHERE id = ?"), [Value.Int(when), t(conversation)])
+        _ = try self.db.execute(String("UPDATE conversations SET last = max(last, ?) WHERE id = ?"), [Value.Int(when), t(conversation.copy())])
+        if str_at(m, "role") == some(String("agent")) { _ = try self.db.execute(String("UPDATE conversations SET replied = max(replied, ?) WHERE id = ?"), [Value.Int(when), t(conversation)]) }
     }
 
     fn one(self, sql: str, id: String) -> Json? ! Error {
@@ -896,6 +910,15 @@ fn applies_events_with_the_cursor() ! Error {
     _ = try c.apply(ev(4, "message.deleted", Obj.new().s("conversation", String("c_1")).s("message", String("msg_1")).done()))
     let (left, _) = try c.messages(String("c_1"), none, 50)
     assert(left.len() == 0)
+    // And when its newest agent's message is from, which is unread while it's newer
+    // than the conversation's `read`: none yet, then the reply, not the person's after it.
+    assert(int_at(cs[0].copy(), "replied") == some(0))
+    let reply = Obj.new().s("id", String("msg_2")).s("conversation", String("c_1")).s("role", String("agent")).i("at", 30).done()
+    _ = try c.apply(ev(5, "message.created", Obj.new().s("conversation", String("c_1")).j("message", reply).done()))
+    let mine = Obj.new().s("id", String("msg_3")).s("conversation", String("c_1")).s("role", String("person")).i("at", 40).done()
+    _ = try c.apply(ev(6, "message.created", Obj.new().s("conversation", String("c_1")).j("message", mine).done()))
+    let replied = try c.conversations()
+    assert(int_at(replied[0].copy(), "last") == some(40) and int_at(replied[0].copy(), "replied") == some(30))
 }
 
 @test

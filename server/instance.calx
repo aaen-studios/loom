@@ -16608,6 +16608,18 @@ impl Instance {
             try i.start_run_as(user, c, run_id.copy(), String(), String("/compact"), List<Json>(), String(), String(), String("person"), agent, Json.Null, List<String>())
             return Answer.Value(Obj.new().s("run", run_id).done())
         }
+        // The person read a conversation up to a message from `at` (PLAN.md,
+        // "Unread"): kept with the conversation, so its dots agree on every
+        // device and stay across a restart.
+        if name == "conversation.read" {
+            let id = str_at(args.copy(), "conversation") ?? String()
+            let upto = int_at(args, "at") ?? 0
+            if upto <= 0 { return Answer.Refused(String("bad_request"), String("Give at, when the newest message read is from, in Unix ms.")) }
+            let had = int_at(try i.store.conversation(user.copy(), id.copy()) ?? Json.Null, "read") ?? 0
+            let read = try i.store.mark_read(user.copy(), id.copy(), if upto > now() { now() } else { upto }) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
+            if read != had { try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id).i("read", read).done()).done()) }
+            return Answer.Value(Obj.new().i("read", read).done())
+        }
         if name == "conversation.rename" or name == "conversation.delete" {
             let id = str_at(args.copy(), "conversation") ?? String()
             let had = try i.store.conversation(user.copy(), id.copy()) ?? Json.Null
