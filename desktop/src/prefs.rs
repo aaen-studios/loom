@@ -99,6 +99,10 @@ pub struct Prefs {
     /// The names the person gave servers on this device, by address (empty for the
     /// instance in the app).
     pub server_names: BTreeMap<String, String>,
+    /// The settings popup's size, as the person last resized it from its corner, or
+    /// `None` while they haven't, and it opens at most of the window
+    /// (`crate::model::popup::size`).
+    pub popup_size: Option<(f32, f32)>,
 }
 
 impl Default for Prefs {
@@ -126,6 +130,7 @@ impl Default for Prefs {
             emoticons: false,
             width: Width::Normal,
             server_names: BTreeMap::new(),
+            popup_size: None,
         }
     }
 }
@@ -230,6 +235,14 @@ impl Prefs {
                         .collect()
                 })
                 .unwrap_or_default(),
+            popup_size: v
+                .get("popup_size")
+                .and_then(Value::as_array)
+                .and_then(|wh| match wh.as_slice() {
+                    [w, h] => Some((w.as_f64()? as f32, h.as_f64()? as f32)),
+                    _ => None,
+                })
+                .filter(|(w, h)| *w > 0.0 && *h > 0.0),
         }
     }
 
@@ -300,6 +313,9 @@ impl Prefs {
             }),
         );
         m.insert("server_names".into(), json!(self.server_names));
+        if let Some((w, h)) = self.popup_size {
+            m.insert("popup_size".into(), json!([w.round(), h.round()]));
+        }
         Value::Object(m)
     }
 
@@ -465,6 +481,29 @@ mod tests {
         assert_eq!(Prefs::from_json(&p.to_json()), p);
         p.rename_server("https://vps:8443", " ");
         assert_eq!(p.server_name("https://vps:8443"), None);
+    }
+
+    #[test]
+    fn the_settings_popup_keeps_the_size_the_person_gave_it() {
+        assert_eq!(Prefs::default().popup_size, None);
+        assert!(Prefs::default().to_json().get("popup_size").is_none());
+        let p = Prefs {
+            popup_size: Some((1100.0, 760.0)),
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&p.to_json()), p);
+        // Anything else kept there opens it as it opens anyway.
+        for bad in [
+            json!([1100]),
+            json!("big"),
+            json!([0, 700]),
+            json!(["a", "b"]),
+        ] {
+            assert_eq!(
+                Prefs::from_json(&json!({ "popup_size": bad })).popup_size,
+                None
+            );
+        }
     }
 
     #[test]
