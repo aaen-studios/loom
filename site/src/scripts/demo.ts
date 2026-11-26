@@ -372,10 +372,13 @@ export function play(app: HTMLElement) {
 	// The header in a narrow window gives way as the app's does (desktop/src/model/header.rs),
 	// before it reaches the window's buttons: one step at a time, always in this order, until
 	// nothing in it runs past its end. Then the name shortens to about three letters, then the
-	// mode's words, and then the rest of the name (model::header::fit). What it took from each
-	// shows whole under the pointer (model::header::Fit::cut).
+	// mode's words, and then the rest of the name (model::header::fit). Narrower than the app's
+	// window ever gets, as on a phone, the mode's chip goes once it has no words left, and then
+	// the thread beside the name, before the name gives any more. What it took from each shows
+	// whole under the pointer (model::header::Fit::cut).
 	const header = app.querySelector<HTMLElement>('[data-header]')!;
 	const steps = ['fit-effort', 'fit-members', 'fit-icon', 'fit-close', 'fit-chevrons'];
+	const phoneSteps = ['fit-mode', 'fit-thread'];
 	/** The least of its name a shortened head keeps while the mode's words can still give
 	 * (model::header::NAME_LEAST). */
 	const NAME_LEAST = 48;
@@ -391,7 +394,7 @@ export function play(app: HTMLElement) {
 		const modeWords = modeChip.querySelector<HTMLElement>('.mode-words')!;
 		const headBtn = header.querySelector<HTMLElement>(app.classList.contains('in-room') ? '.room-btn' : '.agent-btn')!;
 		const name = headBtn.querySelector<HTMLElement>('.head-name')!;
-		header.classList.remove(...steps);
+		header.classList.remove(...steps, ...phoneSteps);
 		for (const el of header.querySelectorAll<HTMLElement>('.head-name, .mode-words')) el.style.maxWidth = '';
 		const over = () => header.scrollWidth - header.clientWidth;
 		for (const step of steps) {
@@ -404,6 +407,17 @@ export function play(app: HTMLElement) {
 			name.style.maxWidth = `${most}px`;
 			if (over() > 0 && modeWords.offsetParent) {
 				modeWords.style.maxWidth = `${Math.max(modeWords.scrollWidth - over(), 0)}px`;
+			}
+			// Each step it takes here gives the name back what it can: all of it once it fits.
+			for (const step of phoneSteps) {
+				if (over() <= 0) break;
+				header.classList.add(step);
+				name.style.maxWidth = '';
+				most = whole;
+				if (over() > 0) {
+					most = Math.max(whole - over(), Math.min(whole, NAME_LEAST));
+					name.style.maxWidth = `${most}px`;
+				}
 			}
 			if (over() > 0) {
 				most = Math.max(most - over(), 0);
