@@ -13542,13 +13542,57 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }),
         );
+        // With what they cost a day, and a line for each that spends a lot for nothing,
+        // which opens it (LOO-391).
+        let (cost, wasted) = self
+            .model
+            .routines_cost(self.model.editing.as_deref().unwrap_or_default());
         let routines = self.stat_row(
             "edit-routines",
             "Routines",
-            count(summary.as_ref().map(|s| s.routines)),
+            match summary.as_ref().map(|s| s.routines) {
+                Some(n) if n > 0 && !cost.is_empty() => format!("{n} · {cost}"),
+                n => count(n),
+            },
             true,
             cx.listener(|this, _, _, cx| this.open(Screen::Routines, cx)),
         );
+        let wasted: Vec<Stateful<Div>> = wasted
+            .into_iter()
+            .map(|(r, line)| {
+                let p = self.p;
+                div()
+                    .id(SharedString::from(format!("edit-routine-{}", r.id)))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .pl(px(space::S + space::M))
+                    .pr(px(space::S))
+                    .py(px(space::XS + 2.0))
+                    .rounded(px(radius::ROW))
+                    .text_size(px(size::CAPTION))
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(p.ink_2)
+                            .child(r.name.clone()),
+                    )
+                    .child(div().flex_none().text_color(p.warn).child(line))
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open(Screen::Routines, cx);
+                        this.open_routine(&r, window, cx);
+                    }))
+            })
+            .collect();
         let usage = self.stat_row(
             "edit-usage",
             "Tokens",
@@ -13682,7 +13726,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(self.field("MCP servers", self.add_from_spools(servers, cx)))
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
-                    .child(rows(vec![activity, routines, usage]))
+                    .child(rows(
+                        [vec![activity, routines], wasted, vec![usage]]
+                            .into_iter()
+                            .flatten()
+                            .collect(),
+                    ))
                     .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))

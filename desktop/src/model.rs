@@ -10600,7 +10600,29 @@ impl Model {
             json!({"t": "cmd", "id": id, "name": "agent.summary", "args": {"agent": agent}}),
             // Whether it can be isolated here, and whether it's the owner's.
             self.programs(),
+            // What its routines cost, as their page has it.
+            self.load_routines(),
         ]
+    }
+
+    /// What `agent`'s settings panel says its routines cost (LOO-391): their tokens a
+    /// day together, "6.2M tokens a day", empty before any of them used any, and each of
+    /// them that spends a lot for nothing, with its line ("5.4M tokens a day, mostly
+    /// quiet").
+    pub fn routines_cost(&self, agent: &str) -> (String, Vec<(Routine, String)>) {
+        let own: Vec<&Routine> = self.routines.iter().filter(|r| r.agent == agent).collect();
+        let day: i64 = own.iter().map(|r| r.cost.day).sum();
+        let words = if day > 0 {
+            format!("{} tokens a day", tokens_short(day))
+        } else {
+            String::new()
+        };
+        let wasted = own
+            .into_iter()
+            .filter(|r| r.cost.wasted)
+            .map(|r| (r.clone(), r.cost.warning()))
+            .collect();
+        (words, wasted)
     }
 
     fn revisions_cmd(&mut self) -> Value {
@@ -16130,6 +16152,25 @@ mod tests {
         let plain = Routine::of(
             &json!({"id": "rt_2", "cost": {"run": 40_000, "day": 80_000, "runs": 2, "quiet": 0, "wasted": false}}),
         );
+        // Its agent's settings panel says what they cost together, and names the one
+        // that spends a lot for nothing (LOO-391).
+        let mut panel = Model::new();
+        let other = Routine::of(
+            &json!({"id": "rt_4", "agent": "a_2", "cost": {"run": 9_000_000, "day": 9_000_000, "runs": 1, "quiet": 1, "wasted": true}}),
+        );
+        let theirs = Routine {
+            agent: "a_1".into(),
+            ..plain.clone()
+        };
+        panel.routines = vec![r.clone(), theirs, other];
+        let (words, wasted) = panel.routines_cost("a_1");
+        assert_eq!(words, "5.5M tokens a day");
+        assert_eq!(wasted.len(), 1);
+        assert_eq!(
+            (wasted[0].0.id.as_str(), wasted[0].1.as_str()),
+            ("rt_1", "5.4M tokens a day, mostly quiet")
+        );
+        assert_eq!(panel.routines_cost("a_3"), (String::new(), Vec::new()));
         assert_eq!(
             (
                 plain.gate.as_str(),
@@ -16754,9 +16795,10 @@ mod tests {
         let mut m = Model::new();
         m.select(Some("a_1".into()));
         let asked = m.edit_agent();
-        assert_eq!(asked.len(), 3);
+        assert_eq!(asked.len(), 4);
         assert_eq!(asked[1]["name"], "agent.summary");
         assert_eq!(asked[2]["name"], "acp.list");
+        assert_eq!(asked[3]["name"], "routine.list");
         assert_eq!(m.summary, None);
         m.result(
             &json!({"t": "result", "id": asked[1]["id"], "ok": true, "value": {
