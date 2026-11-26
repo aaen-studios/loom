@@ -115,6 +115,13 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // A tap in the chat puts the emoji picker away, as it goes on to what it hit.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    withAnimation(EmojiPicker.swap) { model.emoji.shutPicker() }
+                },
+                including: model.emoji.up ? .all : .subviews
+            )
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 80
             } action: { _, near in
@@ -601,6 +608,60 @@ struct DeletedMark: View {
     }
 }
 
+extension View {
+    /// A message's words in the chat, cut after about ten lines while `folds` says so
+    /// (PLAN.md, "Long messages and tables"); in a pin, the pin's own cut.
+    @ViewBuilder
+    func foldLong(_ came: Came, key: String, pin: PinCut?) -> some View {
+        if pin != nil {
+            pinCut(pin, key: key)
+        } else {
+            modifier(ChatFold(came: came, key: key))
+        }
+    }
+}
+
+/// Long words in the chat, cut at about ten lines as the desktop cuts them, with a short
+/// fade into what's behind them and a quiet Show more under them, then Show less. A tap
+/// on the cut words opens them too. What the person flips holds while the chat is open
+/// (`Model.flipFold`).
+private struct ChatFold: ViewModifier {
+    @Environment(Session.self) private var session
+    var came: Came
+    var key: String
+    /// A line of a message's words.
+    @ScaledMetric(relativeTo: .body) private var line: CGFloat = Tokens.PhoneSize.body * Tokens.Line.body
+    @State private var tall: CGFloat = 0
+
+    func body(content: Content) -> some View {
+        let model = session.model
+        let most = line * 10
+        // Cut only what's more than a line and a half past it: nothing opens to one line.
+        let long = tall > most + line * 1.5
+        let cut = long && folds(came, flipped: model.foldFlips.contains(key))
+        // The fade, over its last two lines.
+        let fade = cut ? 1 - 2 * line / most : 1
+        VStack(alignment: .leading, spacing: Tokens.Space.xs) {
+            content
+                .fixedSize(horizontal: false, vertical: true)
+                .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { tall = $0 }
+                .frame(maxHeight: cut ? most : nil, alignment: .top)
+                .clipped()
+                .mask {
+                    LinearGradient(stops: [.init(color: .black, location: 0), .init(color: .black, location: fade), .init(color: .black.opacity(cut ? 0 : 1), location: 1)], startPoint: .top, endPoint: .bottom)
+                }
+                .contentShape(Rectangle())
+                .simultaneousGesture(TapGesture().onEnded { model.flipFold(key) }, including: cut ? .all : .subviews)
+            if long {
+                Button(cut ? "Show more" : "Show less") { model.flipFold(key) }
+                    .font(Fonts.caption)
+                    .foregroundStyle(P.ink3)
+                    .buttonStyle(.plain)
+            }
+        }
+    }
+}
+
 struct PersonMessage: View {
     @Environment(Session.self) private var session
     @AppStorage(Prefs.vibrant) private var vibrant = false
@@ -663,7 +724,7 @@ struct PersonMessage: View {
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 MarkdownView(titledLinks(words, message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
                     .fixedSize(horizontal: false, vertical: true)
-                    .pinCut(pin, key: message.id)
+                    .foldLong(message.came, key: message.id, pin: pin)
                     .padding(.horizontal, Tokens.Space.l)
                     .padding(.vertical, Tokens.Space.s + 3)
                     .background(bubble(sender), in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
@@ -791,7 +852,7 @@ struct Reply: View {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
                     let bubble = MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
-                        .pinCut(pin, key: "\(message.id)/\(i)")
+                        .foldLong(message.came, key: "\(message.id)/\(i)", pin: pin)
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
                         .background(P.bubble, in: UnevenRoundedRectangle(topLeadingRadius: Tokens.Radius.bubbleJoined, bottomLeadingRadius: Tokens.Radius.bubble, bottomTrailingRadius: Tokens.Radius.bubble, topTrailingRadius: Tokens.Radius.bubble, style: .continuous))
@@ -807,7 +868,7 @@ struct Reply: View {
                     }
                 } else {
                     MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
-                        .pinCut(pin, key: "\(message.id)/\(i)")
+                        .foldLong(message.came, key: "\(message.id)/\(i)", pin: pin)
                     if i == sourcesAt { SourcesTab(message: message) }
                 }
             }

@@ -49,6 +49,11 @@ fn millis_since(from: Instant) -> u64 {
 // Starts the server `spec` says, as the instance's /api/mcp/servers gives it:
 // {name, command, args, env} or {name, url, headers}, and says initialize.
 pub fn start(spec: Json) -> Server ! Error {
+    return try start_within(spec, START_MS)
+}
+
+// The same, waiting at most `ms` for it to answer initialize.
+pub fn start_within(spec: Json, ms: u64) -> Server ! Error {
     let name = str_at(spec.copy(), "name") ?? String()
     var s = Server { name: name.copy(), child: none, url: String(), headers: List<Header>(), session: String(), info: Json.Null, next: 0 }
     if let address = str_at(spec.copy(), "url") {
@@ -74,9 +79,9 @@ pub fn start(spec: Json) -> Server ! Error {
         s.child = some(try c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).own_group().spawn())
     }
     let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
-    let began = try s.request("initialize", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done(), START_MS)
+    let began = try s.request("initialize", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done(), ms)
     s.info = at(began, "serverInfo")
-    try s.notify("notifications/initialized")
+    try s.notify_within("notifications/initialized", ms)
     return s
 }
 
@@ -98,7 +103,12 @@ impl Server {
 
     // Calls the tool `name`: its MCP result.
     pub fn call(self: mut Server, name: String, arguments: Json) -> Json ! Error {
-        return try self.request("tools/call", Obj.new().s("name", name).j("arguments", arguments).done(), CALL_MS)
+        return try self.call_within(name, arguments, CALL_MS)
+    }
+
+    // The same, waiting at most `ms` for its answer.
+    pub fn call_within(self: mut Server, name: String, arguments: Json, ms: u64) -> Json ! Error {
+        return try self.request("tools/call", Obj.new().s("name", name).j("arguments", arguments).done(), ms)
     }
 
     // Sends `token` as its bearer token from now on, in place of the one it had.
@@ -130,10 +140,10 @@ impl Server {
         return at(answer, "result")
     }
 
-    fn notify(self: mut Server, method: str) ! Error {
+    fn notify_within(self: mut Server, method: str, ms: u64) ! Error {
         let m = Obj.new().s("jsonrpc", String("2.0")).s("method", String(method)).done()
         if self.url.len() > 0 {
-            _ = try self.over_http(m, -1, START_MS)
+            _ = try self.over_http(m, -1, ms)
             return
         }
         if let c = self.child { try c.write_text("{m}\n") }

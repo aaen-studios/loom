@@ -12,6 +12,7 @@ module tests.protocol.rooms
 //     calx tests/protocol/rooms.calx
 import std.json.{Json}
 import std.process.{exit}
+import std.sqlite.{Database, Value}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check}
@@ -47,6 +48,67 @@ fn num(value: Json, key: str) -> i64 {
 
 fn by(m: Json) -> String {
     return str_at(at(m, "routed"), "by") ?? String()
+}
+
+// Until the run `id` has finished, as it may have already.
+fn finished(app: mut Session, id: String) ! Error {
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("run.finished")) and str_at(f, "run") == some(id.copy()) { return }
+    }
+    loop {
+        let done = try app.until("event", "run.finished")
+        if str_at(done, "run") == some(id.copy()) { return }
+    }
+}
+
+// The context the apps were last told for `conversation`.
+fn shown_context(app: Session, conversation: String) -> Json {
+    var shown = Json.Null
+    for f in app.frames {
+        let changed = at(f.copy(), "conversation")
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) and str_at(changed.copy(), "id") == some(conversation.copy()) and at(changed.copy(), "context") != Json.Null { shown = at(changed, "context") }
+    }
+    return shown
+}
+
+// What the frames read so far wrote: the ids of loom's lines made in `conversation`,
+// and how many messages or contexts went anywhere but a chat, as a member's seat
+// (CONVERSATION/AGENT) or the router's session.
+fn lines_in(app: Session, conversation: String) -> (List<String>, usize) {
+    var lines = List<String>()
+    var astray: usize = 0
+    for f in app.frames {
+        let kind = str_at(f.copy(), "kind") ?? String()
+        let to = if kind == "conversation.updated" { str_at(at(f.copy(), "conversation"), "id") ?? String() } else if kind.starts_with("message.") { str_at(f.copy(), "conversation") ?? String() } else { String() }
+        if to.contains("/") or to == "route" { astray += 1 }
+        let m = at(f, "message")
+        if kind == "message.created" and to == conversation and str_at(m.copy(), "role") == some(String("loom")) { lines.push(str_at(m, "id") ?? String()) }
+    }
+    return (lines, astray)
+}
+
+// What `sql` counts in the instance's database, with `value` for its one parameter.
+fn count(i: Instance, sql: str, value: String) -> i64 ! Error {
+    let db = try Database.open("{i.data}/loom.db")
+    let row = try db.query_one(String(sql), [Value.Text(value.copy())]) else return 0
+    return match row[0].copy() {
+        Value.Int(n) => n,
+        _ => 0,
+    }
+}
+
+// The ids of loom's lines kept in `conversation`, and their blocks, oldest first.
+fn kept_lines(app: mut Session, id: str, conversation: String) -> (List<String>, List<String>) ! Error {
+    var ids = List<String>()
+    var blocks = List<String>()
+    if let Json.Array(items) = at(at(try app.cmd(id, "messages.list", Obj.new().s("conversation", conversation).done()), "value"), "messages") {
+        for m in items {
+            if str_at(m.copy(), "role") != some(String("loom")) { continue }
+            ids.push(str_at(m.copy(), "id") ?? String())
+            blocks.push("{at(m, "blocks")}")
+        }
+    }
+    return (ids, blocks)
 }
 
 fn run(i: Instance) ! Error {
@@ -113,15 +175,14 @@ fn run(i: Instance) ! Error {
         if str_at(f.copy(), "kind") == some(String("conversation.updated")) and str_at(changed.copy(), "id") == some(money.copy()) and at(changed.copy(), "context") != Json.Null { shown = at(changed, "context") }
     }
     try check(str_at(shown.copy(), "agent") == some(hermes.copy()) and int_at(shown, "used") == some(90i64), "the group chat shows how full the session of the member that answered last is, by whose it is")
-    let (_, fresh) = try say(mut app, money.copy(), "m_10", String("ROUTE:Hermes and now?\n/context"))
+    let (going_on, fresh) = try say(mut app, money.copy(), "m_10", String("ROUTE:Hermes and now?\n/context"))
+    try finished(mut app, str_at(going_on, "run") ?? String())
     let told = reply_text(fresh.copy())
     try check(str_at(fresh, "agent") == some(hermes.copy()) and told.contains("Your part in this group chat goes on from an earlier session of yours, which grew too long"), "its next message goes to a fresh session of its own there")
     try check(told.contains("Ledger: @ledger and the budget?") and told.contains("You: ROUTE:Hermes nearly full") and not told.contains("You: @ledger"), "where another member's replies are by its name, and its own are its")
-    var marked = false
-    for f in app.frames {
-        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(at(f.copy(), "message"), "role") == some(String("loom")) and str_at(at(f, "message"), "conversation") == some(money.copy()) { marked = true }
-    }
-    try check(not marked, "and the group chat has no line for one member's fresh session")
+    let (fresh_made, _) = lines_in(app, money.copy())
+    let (_, fresh_lines) = try kept_lines(mut app, "q_18", money.copy())
+    try check(fresh_made.len() == 1 and fresh_lines.len() == 1 and fresh_lines[0].contains(#""mark":"fresh""#) and fresh_lines[0].contains("\"agent\":\"{hermes}\""), "and the group chat has a line where it did, naming the member")
 
     // --- Its usage has the router's ---
     _ = try say(mut app, money.copy(), "m_11", String("ROUTE:Ledger count this\n/tokens 100"))
@@ -131,6 +192,49 @@ fn run(i: Instance) ! Error {
     let ledger_own = str_at(at(try app.cmd("q_13", "conversation.create", Obj.new().s("agent", ledger.copy()).done()), "value"), "conversation") ?? String()
     let in_own_chat = try app.cmd("q_14", "room.summary", Obj.new().s("conversation", ledger_own).done())
     try check(str_at(at(in_own_chat, "error"), "code") == some(String("bad_request")), "an agent's own chat has no group chat's usage")
+
+    // --- The router's usage is its pick's, never a chat's ---
+    let (routed, _) = try say(mut app, money.copy(), "m_14", String("ROUTE:Ledger USAGE:900/1000 the router's session fills"))
+    let pick = str_at(routed, "run") ?? String()
+    try finished(mut app, pick.copy())
+    try check(try count(i, "SELECT COUNT(*) FROM usage WHERE run = ? AND total = 12", "route:{pick}") == 1, "the router's tokens for a pick are kept as route:RUN")
+    try check(try count(i, "SELECT COUNT(*) FROM contexts WHERE conversation = ?", String("route")) == 0 and try count(i, "SELECT COUNT(*) FROM conversations WHERE id = ?", String("route")) == 0, "and what its session says of its context isn't kept as a chat's")
+    var router_told = false
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) and int_at(at(at(f, "conversation"), "context"), "used") == some(900i64) { router_told = true }
+    }
+    let (_, router_astray) = lines_in(app, money.copy())
+    try check(not router_told and router_astray == 0, "nor sent to the apps as a context")
+
+    // --- A member's compaction is a line in the group chat, by whose it is ---
+    let (compacting, _) = try say(mut app, money.copy(), "m_12", String("ROUTE:Ledger tidy the books\n/usage 120000 200000\n/compact 120000 76000 200000\ndone"))
+    try finished(mut app, str_at(compacting, "run") ?? String())
+    let compact = try app.cmd("q_15", "conversation.compact", Obj.new().s("conversation", money.copy()).s("agent", ledger.copy()).done())
+    try finished(mut app, str_at(at(compact, "value"), "run") ?? String())
+    // After Hermes's fresh session's line, one for each compaction.
+    let (made, astray) = lines_in(app, money.copy())
+    let (kept, lines) = try kept_lines(mut app, "q_16", money.copy())
+    if made.len() != 3 or kept != made { fail "one line in the group chat for each compaction, kept with it, not {made} made and {kept} kept: {lines}" }
+    try check(true, "one line in the group chat for each compaction, kept with it")
+    let whose = "\"agent\":\"{ledger}\""
+    try check(lines[1].contains(#""mark":"compacted""#) and lines[1].contains(whose.copy()) and lines[1].contains(#""before":120000"#) and lines[1].contains(#""after":76000"#), "a member's compaction in a turn names the member, with its tokens before and after")
+    try check(lines[2].contains(whose.copy()) and lines[2].contains(#""before":76000"#) and lines[2].contains(#""after":7600"#), "and so does one the person asked for")
+    try check(astray == 0, "with nothing written under a member's seat")
+    let compacted = shown_context(app, money.copy())
+    try check(str_at(compacted.copy(), "agent") == some(ledger.copy()) and int_at(compacted.copy(), "used") == some(7600i64) and int_at(compacted, "compacted") != none, "its context is the member's, small again, and says when it was compacted")
+
+    // --- A fresh session for a member: its context from nothing, under a line ---
+    let fresh_now = try app.cmd("q_17", "conversation.fresh", Obj.new().s("conversation", money.copy()).s("agent", ledger.copy()).done())
+    try check(at(fresh_now, "error") == Json.Null, "conversation.fresh starts a member's session afresh")
+    let emptied = shown_context(app, money.copy())
+    try check(str_at(emptied.copy(), "agent") == some(ledger.copy()) and int_at(emptied.copy(), "used") == some(0i64) and int_at(emptied, "compacted") == none, "the group chat shows the member's context from nothing")
+    let (asked_made, _) = lines_in(app, money.copy())
+    let (_, asked_lines) = try kept_lines(mut app, "q_19", money.copy())
+    try check(asked_made.len() == 4 and asked_lines.len() == 4 and asked_lines[3].contains(#""mark":"fresh""#) and asked_lines[3].contains(whose), "with a line in the group chat at once, naming the member")
+    let (_, afresh) = try say(mut app, money.copy(), "m_13", String("ROUTE:Ledger and now?\n/context"))
+    try check(str_at(afresh.copy(), "agent") == some(ledger.copy()) and reply_text(afresh).contains("which your person chose to start afresh"), "and its next turn there goes to a fresh session of its own")
+    let (after_fresh, astray_now) = lines_in(app, money.copy())
+    try check(after_fresh.len() == 4 and astray_now == 0, "with no second line, and nothing under its seat")
 
     // --- One agent's chat never routes, and pins stay in their chat ---
     let single = str_at(at(try app.cmd("q_8", "conversation.create", Obj.new().s("agent", casper.copy()).done()), "value"), "conversation") ?? String()
