@@ -1,7 +1,9 @@
 import SwiftUI
 
-/// The agents, each one ongoing chat, as the desktop's sidebar shows them: its thread,
-/// its name, and what it's doing.
+/// The agents and group chats, as the desktop's sidebar lists them (PLAN.md, "The
+/// sidebar"): the pinned agents as tiles, who's waiting on the person, then one list of
+/// agents and group chats in the person's order with the folders in it, which a long
+/// press and a drag rearranges, and the hidden agents.
 struct AgentsView: View {
     @Environment(Session.self) private var session
     @State private var path: [String] = []
@@ -12,85 +14,42 @@ struct AgentsView: View {
     /// The sheet that makes a group chat.
     @State private var newRoom = false
 
+    private static let insets = EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l)
+
     var body: some View {
         let model = session.model
+        let sections = model.sideSections
+        let pinned = Self.agents(.pinned, sections, model)
+        let waiting = Self.agents(.waiting, sections, model)
+        let hidden = Self.agents(.hidden, sections, model)
         NavigationStack(path: $path) {
             List {
-                // The group chats first, Everyone at the top, as the core orders them.
-                if !model.rooms.isEmpty || model.agents.count >= 2 {
+                if !pinned.isEmpty {
+                    tiles(pinned)
+                }
+                if !waiting.isEmpty {
                     Section {
-                        ForEach(model.rooms) { r in
-                            NavigationLink(value: "room:" + r.id) {
-                                RoomRow(room: r)
-                            }
-                            .listRowBackground(P.bg)
-                            .listRowSeparatorTint(P.line)
-                            .listRowInsets(EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l))
-                            .contextMenu {
-                                if !r.everyone {
-                                    Button("Delete group chat", systemImage: "trash", role: .destructive) {
-                                        session.send(model.deleteRoom(r.id))
-                                    }
-                                }
-                            }
-                        }
+                        ForEach(waiting) { agentLink($0) }
                     } header: {
-                        HStack {
-                            GroupHead(title: "Group chats")
-                            Button {
-                                newRoom = true
-                            } label: {
-                                Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).foregroundStyle(P.ink3)
-                            }
-                            .accessibilityLabel("New group chat")
-                        }
+                        GroupHead(title: "Waiting on you")
                     }
                 }
-                if model.sidebar.isEmpty {
-                    rows(model.agents)
+                Section {
+                    ForEach(model.listRows) { listRow($0) }
+                        .onMove { from, to in
+                            guard let f = from.first, let moved = model.rowDrop(from: f, to: to) else { return }
+                            for c in model.drop(moved.0, moved.1) { session.send(c) }
+                        }
+                    newRow
                 }
-                ForEach(Array(model.sidebar.enumerated()), id: \.offset) { _, section in
-                    let members = section.agents.compactMap { model.agent($0) }
-                    switch section.part {
-                    case .waiting:
-                        if !members.isEmpty {
-                            Section { rows(members) } header: { GroupHead(title: "Waiting on you") }
-                        }
-                    case .pinned:
-                        rows(members)
-                    case .agents:
-                        // One just made that the list doesn't have yet goes here too.
-                        let listed = Set(model.sidebar.flatMap(\.agents))
-                        rows(members + model.agents.filter { !listed.contains($0.id) })
-                    case .folder(let id, let name, let collapsed):
-                        Section {
-                            if !collapsed { rows(members) }
-                        } header: {
-                            Button {
-                                session.send(model.collapseFolder(id, !collapsed))
-                            } label: {
-                                GroupHead(title: name, open: !collapsed)
-                            }
-                            .contextMenu {
-                                Button("Rename", systemImage: "pencil") {
-                                    naming = Naming(folder: id, agent: nil, name: name)
-                                }
-                                Button("Delete folder", systemImage: "trash", role: .destructive) {
-                                    session.send(model.deleteFolder(id))
-                                }
-                            }
-                        }
-                    case .hidden:
-                        if !members.isEmpty {
-                            Section {
-                                if hiddenOpen { rows(members) }
-                            } header: {
-                                Button {
-                                    hiddenOpen.toggle()
-                                } label: {
-                                    GroupHead(title: "Hidden", open: hiddenOpen)
-                                }
-                            }
+                if !hidden.isEmpty {
+                    Section {
+                        if hiddenOpen { ForEach(hidden) { agentLink($0) } }
+                    } header: {
+                        Button {
+                            hiddenOpen.toggle()
+                        } label: {
+                            GroupHead(title: "Hidden · \(hidden.count)", open: hiddenOpen)
                         }
                     }
                 }
@@ -173,43 +132,181 @@ struct AgentsView: View {
         }
     }
 
-    /// Each agent's row, which opens its chat, with a long press for its folder and
-    /// whether it's hidden.
-    private func rows(_ agents: [Agent]) -> some View {
+    /// The agents of a part of the list, in order.
+    private static func agents(_ part: SideSection.Part, _ sections: [SideSection], _ model: Model) -> [Agent] {
+        (sections.first { $0.part == part }?.agents ?? []).compactMap { model.agent($0) }
+    }
+
+    /// The pinned agents as tiles, four to a row, from the left. A tap opens its chat, a
+    /// long press has its menu, and a long press and a drag moves it among the tiles.
+    private func tiles(_ agents: [Agent]) -> some View {
         let model = session.model
-        return ForEach(agents) { agent in
-            NavigationLink(value: agent.id) {
-                AgentRow(agent: agent)
+        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Tokens.Space.s), count: 4), alignment: .leading, spacing: Tokens.Space.s) {
+            ForEach(agents) { agent in
+                Button {
+                    path = [agent.id]
+                } label: {
+                    AgentTile(agent: agent)
+                }
+                .buttonStyle(.plain)
+                .contextMenu { agentMenu(agent) }
+                .draggable(agent.id) {
+                    AgentTile(agent: agent).frame(width: 80)
+                }
+                .dropDestination(for: String.self) { ids, _ in
+                    guard let id = ids.first else { return false }
+                    let sent = model.drop(id, model.onto(id, agent.id))
+                    for c in sent { session.send(c) }
+                    return !sent.isEmpty
+                }
             }
-            .listRowBackground(P.bg)
-            .listRowSeparatorTint(P.line)
-            .listRowInsets(EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.Space.l))
-            .contextMenu {
-                Menu("Move to folder", systemImage: "folder") {
-                    ForEach(model.folders, id: \.id) { folder in
-                        Button {
-                            session.send(model.groupAgent(agent.id, folder.id))
-                        } label: {
-                            if agent.group == folder.id {
-                                Label(folder.name, systemImage: "checkmark")
-                            } else {
-                                Text(folder.name)
-                            }
-                        }
-                        .disabled(agent.group == folder.id)
-                    }
-                    if agent.group != nil {
-                        Button("Remove from folder", systemImage: "folder.badge.minus") {
-                            session.send(model.groupAgent(agent.id, nil))
-                        }
-                    }
-                    Button("New folder", systemImage: "folder.badge.plus") {
-                        naming = Naming(folder: nil, agent: agent.id, name: "")
+        }
+        .padding(.vertical, Tokens.Space.m)
+        .listRowBackground(P.bg)
+        .listRowSeparatorTint(P.line)
+        .listRowInsets(EdgeInsets(top: 0, leading: Tokens.PhoneSpace.gutter, bottom: 0, trailing: Tokens.PhoneSpace.gutter))
+    }
+
+    /// A row of the list: an agent, a group chat, or a folder's name.
+    @ViewBuilder
+    private func listRow(_ row: SideRow) -> some View {
+        let model = session.model
+        switch row {
+        case .item(.agent(let id)):
+            if let agent = model.agent(id) { agentLink(agent) }
+        case .item(.room(let id)):
+            if let room = model.roomNamed(id) { roomLink(room) }
+        case .folder(let id, let name, let collapsed):
+            folderHead(id, name, collapsed)
+        }
+    }
+
+    /// An agent's row, which opens its chat, with a long press for its folder and
+    /// whether it's hidden.
+    private func agentLink(_ agent: Agent) -> some View {
+        NavigationLink(value: agent.id) {
+            AgentRow(agent: agent)
+        }
+        .listRowBackground(P.bg)
+        .listRowSeparatorTint(P.line)
+        .listRowInsets(Self.insets)
+        .contextMenu { agentMenu(agent) }
+    }
+
+    /// A group chat's row, which opens it, with a long press for its folder, and to delete
+    /// one the person made.
+    private func roomLink(_ room: Room) -> some View {
+        let model = session.model
+        return NavigationLink(value: "room:" + room.id) {
+            RoomRow(room: room)
+        }
+        .listRowBackground(P.bg)
+        .listRowSeparatorTint(P.line)
+        .listRowInsets(Self.insets)
+        .contextMenu {
+            folderMenu(room.id)
+            if !room.everyone {
+                Button("Delete group chat", systemImage: "trash", role: .destructive) {
+                    session.send(model.deleteRoom(room.id))
+                }
+            }
+        }
+    }
+
+    /// A folder's name in the list, which a tap opens and shuts, and a long press renames
+    /// or deletes. It stays where it is; what's moved goes in and out under it.
+    private func folderHead(_ id: String, _ name: String, _ collapsed: Bool) -> some View {
+        let model = session.model
+        return Button {
+            session.send(model.collapseFolder(id, !collapsed))
+        } label: {
+            GroupHead(title: name, open: !collapsed)
+                .padding(.top, Tokens.Space.m)
+                .padding(.bottom, Tokens.Space.xs)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(P.bg)
+        .listRowSeparator(.hidden)
+        .listRowInsets(Self.insets)
+        .moveDisabled(true)
+        .contextMenu {
+            newItems
+            Divider()
+            Button("Rename", systemImage: "pencil") {
+                naming = Naming(folder: id, agent: nil, name: name)
+            }
+            Button("Delete folder", systemImage: "trash", role: .destructive) {
+                session.send(model.deleteFolder(id))
+            }
+        }
+    }
+
+    /// The list's last row: what can be made from here.
+    private var newRow: some View {
+        Menu {
+            newItems
+        } label: {
+            HStack(spacing: Tokens.Space.m + 2) {
+                Image(systemName: "plus")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 26, height: 22)
+                Text("New").font(Fonts.ui(Tokens.PhoneSize.body))
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(P.ink3)
+            .padding(.vertical, Tokens.Space.m)
+            .contentShape(Rectangle())
+        }
+        .listRowBackground(P.bg)
+        .listRowSeparator(.hidden)
+        .listRowInsets(Self.insets)
+        .moveDisabled(true)
+    }
+
+    @ViewBuilder
+    private var newItems: some View {
+        Button("New group chat", systemImage: "person.2") { newRoom = true }
+            .disabled(session.model.agents.count < 2)
+        Button("New folder", systemImage: "folder.badge.plus") {
+            naming = Naming(folder: nil, agent: nil, name: "")
+        }
+    }
+
+    /// An agent's long-press menu: its folder, and whether it's hidden.
+    @ViewBuilder
+    private func agentMenu(_ agent: Agent) -> some View {
+        let model = session.model
+        folderMenu(agent.id)
+        Button(agent.hidden ? "Show" : "Hide", systemImage: agent.hidden ? "eye" : "eye.slash") {
+            session.send(model.hideAgent(agent.id, !agent.hidden))
+        }
+    }
+
+    /// Move to folder, for an agent or a group chat: each folder, Remove from folder, and
+    /// New folder, named in an alert.
+    private func folderMenu(_ item: String) -> some View {
+        let model = session.model
+        let current = model.folderOf(item) ?? model.agent(item)?.group
+        return Menu("Move to folder", systemImage: "folder") {
+            ForEach(model.folders, id: \.id) { folder in
+                Button {
+                    session.send(model.regroup(item, folder.id))
+                } label: {
+                    if current == folder.id {
+                        Label(folder.name, systemImage: "checkmark")
+                    } else {
+                        Text(folder.name)
                     }
                 }
-                Button(agent.hidden ? "Show" : "Hide", systemImage: agent.hidden ? "eye" : "eye.slash") {
-                    session.send(model.hideAgent(agent.id, !agent.hidden))
+                .disabled(current == folder.id)
+            }
+            if current != nil {
+                Button("Remove from folder", systemImage: "folder.badge.minus") {
+                    session.send(model.regroup(item, nil))
                 }
+            }
+            Button("New folder", systemImage: "folder.badge.plus") {
+                naming = Naming(folder: nil, agent: item, name: "")
             }
         }
     }
@@ -223,11 +320,53 @@ struct AgentsView: View {
     }
 }
 
-/// A folder being named: a new one, for an agent, or one being renamed.
+/// A folder being named: a new one, for an agent or a group chat, or one being renamed.
 private struct Naming {
     var folder: String?
     var agent: String?
     var name: String
+}
+
+/// A pinned agent's tile: its thread drawn large in its shape and its name under it, and
+/// a warm dot while it waits on the person.
+private struct AgentTile: View {
+    @Environment(Session.self) private var session
+    var agent: Agent
+
+    var body: some View {
+        let model = session.model
+        let mood = model.mood(agent.id)
+        RoundedRectangle(cornerRadius: Tokens.Radius.card)
+            .fill(P.raised)
+            .aspectRatio(1, contentMode: .fit)
+            .overlay {
+                VStack(spacing: Tokens.Space.xs) {
+                    Group {
+                        if let outline = agent.outline {
+                            ShapeView(points: outline, mood: mood, color: P.thread(agent.color), snapped: model.finished[agent.id])
+                        } else {
+                            ThreadView(mood: mood, color: P.thread(agent.color), snapped: model.finished[agent.id])
+                                .frame(height: 22)
+                        }
+                    }
+                    .frame(width: 48, height: 32)
+                    Text(agent.name)
+                        .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                        .foregroundStyle(P.ink)
+                        .lineLimit(1)
+                }
+                .padding(.horizontal, Tokens.Space.xs)
+            }
+            .overlay(alignment: .topTrailing) {
+                if mood == .waiting {
+                    Circle().fill(P.warn).frame(width: 6, height: 6).padding(Tokens.Space.s)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: Tokens.Radius.card))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(agent.name)
+            .accessibilityValue(model.preview(agent))
+    }
 }
 
 /// A group's head in the agent list: its name, small and quiet, with a chevron when it
@@ -314,13 +453,9 @@ struct AgentRow: View {
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
+            // Waiting on the person: a warm dot, with what it asks under its name.
             if mood == .waiting {
-                Text("Asks")
-                    .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
-                    .foregroundStyle(P.buttonInk)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(P.button, in: Capsule())
+                Circle().fill(P.warn).frame(width: 6, height: 6)
             }
         }
         .padding(.vertical, Tokens.Space.m + 2)

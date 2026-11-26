@@ -87,15 +87,6 @@ struct Routed: Equatable, Sendable {
 }
 
 extension Model {
-    /// The group chats, Everyone first, as the core's sidebar orders them, then any made
-    /// since it came.
-    var rooms: [Room] {
-        let all = conversations.compactMap { c in c.room }
-        var out = roomOrder.compactMap { id in all.first { $0.id == id } }
-        out += all.filter { r in !roomOrder.contains(r.id) }
-        return out
-    }
-
     func roomNamed(_ id: String) -> Room? { conversations.first { $0.id == id }?.room }
 
     /// The group chat the chat shows, if it shows one.
