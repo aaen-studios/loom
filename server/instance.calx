@@ -9779,6 +9779,49 @@ impl Instance {
         return Answer.Value(Obj.new().s("server", server).j("agents", Json.Array(given)).done())
     }
 
+    // Moves what points at `user`'s MCP server `was` to `name`, the name
+    // mcp.put saved it under just now: the agents that have it (as
+    // agent.update changes their `mcp`, as the device), its sign-in, its
+    // icons, what its last test found, the catalog entry it came from, and
+    // a connect, a sign-in, a renewal or a test under way for it. Then `was`
+    // goes, without signing out.
+    fn rename_server(i: mut Instance, user: String, device: String, was: String, name: String) -> Answer ! Error {
+        for a in try i.store.agents(user.copy()) {
+            if not has_server(a.copy(), was.copy()) { continue }
+            var names = List<Json>()
+            for n in catalog.list(at(a.copy(), "mcp")) {
+                if n == Json.Str(was.copy()) { names.push(Json.Str(name.copy())) } else if n != Json.Str(name.copy()) { names.push(n.copy()) }
+            }
+            if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("agent.update"), Obj.new().s("agent", str_at(a, "id") ?? String()).j("mcp", Json.Array(names)).done()) { return Answer.Refused(code, message) }
+        }
+        // A sign-in is sealed to its server's name, so it's sealed again to the new one.
+        let g = i.grant_of(user.copy(), was.copy())
+        if g != Json.Null { try i.keep_grant(user.copy(), name.copy(), g) }
+        _ = try i.store.delete_mcp_auth(user.copy(), was.copy())
+        try i.store.rename_mcp_icon(user.copy(), was.copy(), name.copy())
+        for kept in ["mcp_tested", "mcp_catalog"] {
+            if let value = try i.store.meta("{kept}/{user}/{was}") { try i.store.set_meta("{kept}/{user}/{name}", value) }
+            try i.store.delete_meta("{kept}/{user}/{was}")
+        }
+        _ = try i.store.delete_mcp_server(user.copy(), was.copy())
+        if let c = i.connects.remove("{user}/{was}") {
+            var moved = c
+            moved.server = name.copy()
+            i.connects.insert("{user}/{name}", moved)
+        }
+        if let job = i.renewing.remove("{user}/{was}") { i.renewing.insert("{user}/{name}", job) }
+        for job in mut i.oauth_jobs.values() {
+            if job.user == user and job.server == was { job.server = name.copy() }
+        }
+        for s in mut i.sign_ins.values() {
+            if s.user == user and s.server == was { s.server = name.copy() }
+        }
+        for test in mut i.mcp_tests.values() {
+            if test.user == user and test.server == was { test.server = name.copy() }
+        }
+        return Answer.Value(Json.Null)
+    }
+
     // What a test of `user`'s server `server` found, kept for mcp.list's
     // `status`: it worked, with `tools`, or why not, and whether that was a
     // sign-in it wants.
@@ -15672,6 +15715,15 @@ impl Instance {
             let (spec, why) = mcp_spec(args.copy())
             if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
             let server_name = str_at(spec.copy(), "name") ?? String()
+            // `was`, the name it's saved under, renames it: it moves to `name`
+            // with everything that points at it.
+            let was = str_at(args.copy(), "was") ?? String()
+            let renamed = was.len() > 0 and was != server_name
+            let saved = if renamed { was.copy() } else { server_name.copy() }
+            if renamed {
+                if try i.store.mcp_server(user.copy(), was.copy()) == none { return Answer.Refused(String("not_found"), "There's no MCP server {was}.") }
+                if try i.store.mcp_server(user.copy(), server_name.copy()) != none { return Answer.Refused(String("name_taken"), "There's an MCP server named {server_name} already.") }
+            }
             var server = Obj.new()
             if let Json.Object(m) = spec.copy() { server.m = m.copy() }
             if str_at(spec, "url") != none {
@@ -15683,7 +15735,7 @@ impl Instance {
                     server = server.s("client_id", client_id.copy())
                     var secret = at(args.copy(), "client_secret")
                     if secret == Json.Null {
-                        if let had = try i.store.mcp_server(user.copy(), server_name.copy()) {
+                        if let had = try i.store.mcp_server(user.copy(), saved.copy()) {
                             if str_at(had.copy(), "client_id") == some(client_id.copy()) { secret = at(had, "client_secret") }
                         }
                     }
@@ -15695,16 +15747,19 @@ impl Instance {
             }
             let done = server.done()
             // A sign-in is for one address: a server moved elsewhere signs in again.
-            if let had = try i.store.mcp_server(user.copy(), server_name.copy()) {
+            if let had = try i.store.mcp_server(user.copy(), saved.copy()) {
                 // What its last test found was for the server as it was.
-                if not catalog.same_server(had.copy(), done.copy()) { try i.store.delete_meta("mcp_tested/{user}/{server_name}") }
+                if not catalog.same_server(had.copy(), done.copy()) { try i.store.delete_meta("mcp_tested/{user}/{saved}") }
                 if str_at(had, "url") != str_at(done.copy(), "url") {
-                    let g = i.grant_of(user.copy(), server_name.copy())
-                    _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())
-                    i.revoke_sign_in(user.copy(), server_name.copy(), g)
+                    let g = i.grant_of(user.copy(), saved.copy())
+                    _ = try i.store.delete_mcp_auth(user.copy(), saved.copy())
+                    i.revoke_sign_in(user.copy(), saved.copy(), g)
                 }
             }
-            try i.store.put_mcp_server(user, done.copy())
+            try i.store.put_mcp_server(user.copy(), done.copy())
+            if renamed {
+                if let Answer.Refused(code, message) = try i.rename_server(user.copy(), device.copy(), was, server_name.copy()) { return Answer.Refused(code, message) }
+            }
             var shown = done.copy()
             if let secret = at(done, "client_secret").as_str() { shown = merge(without(shown, "client_secret"), Obj.new().b("client_secret_set", secret.len() > 0).done()) }
             return Answer.Value(Obj.new().j("server", shown).done())
@@ -15736,7 +15791,16 @@ impl Instance {
             if not valid_skill(skill_name.copy()) { return Answer.Refused(String("bad_name"), String("A skill's name is lowercase letters, digits and hyphens, up to 64, like \"release-notes\".")) }
             let description = str_at(args.copy(), "description") ?? String()
             if description.trim().len() == 0 { return Answer.Refused(String("bad_frame"), String("A skill needs a description: when it's for, which is how an agent knows to read it.")) }
-            try i.store.put_skill(user.copy(), skill_name.copy(), description, str_at(args, "body") ?? String())
+            // `was`, the name it's saved under, renames it, with the failures
+            // and fixes that name it.
+            let was = str_at(args.copy(), "was") ?? String()
+            if was.len() > 0 and was != skill_name {
+                if try i.store.skill(user.copy(), was.copy()) == none { return Answer.Refused(String("not_found"), "There's no skill {was}.") }
+                if try i.store.skill(user.copy(), skill_name.copy()) != none { return Answer.Refused(String("name_taken"), "There's a skill named {skill_name} already.") }
+                try i.store.rename_skill(user.copy(), was, skill_name.copy(), description, str_at(args, "body") ?? String())
+            } else {
+                try i.store.put_skill(user.copy(), skill_name.copy(), description, str_at(args, "body") ?? String())
+            }
             if device.starts_with("a_") { i.log(user.copy(), device.copy(), "agent", "Saved the skill {skill_name}", device.copy()) }
             i.sync_skills(user.copy())
             return Answer.Value(Obj.new().j("skill", try i.store.skill(user, skill_name) ?? Json.Null).done())

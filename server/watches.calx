@@ -274,9 +274,11 @@ pub fn entries_of(answer: Json) -> List<Entry> {
     return out
 }
 
-/// A board watch's cursor when it's made: now, so what came before isn't posted.
+/// A board watch's cursor when it's made: a millisecond before now, so what came
+/// before isn't posted, and a change Acta writes in the very millisecond the
+/// watch is made, which a cursor of now would take as read already, is.
 pub fn start_cursor(now_ms: i64) -> String {
-    return Timestamp { unix_ms: now_ms }.iso(0)
+    return Timestamp { unix_ms: now_ms - 1 }.iso(0)
 }
 
 /// Whether change `e` came after `cursor`, the newest change read before: later
@@ -617,7 +619,11 @@ fn reads_activity_past_its_cursor() {
     // A watch made at a time takes only what came after it.
     let (later, _) = new_since(entries.copy(), start_cursor(ms_of(String("2026-11-26T02:45:00Z"))))
     assert(later.len() == 2)
-    assert(start_cursor(1795187131123) == "2026-11-20T15:05:31.123Z")
+    assert(start_cursor(1795187131123) == "2026-11-20T15:05:31.122Z")
+    // A change in the very millisecond a watch is made is new, as Acta writes it and as ms.
+    let same_ms = entries_of(parse(#"{"activity":[{"task":"LOO-3","title":"C","by":"Ola","at":"2026-11-20T15:05:31.123456+00:00","text":"commented"},{"task":"LOO-3","title":"C","by":"Ola","at":"2026-11-20T15:05:31.123Z","text":"moved it to In review"}]}"#)!)
+    let (caught, _) = new_since(same_ms, start_cursor(1795187131123))
+    assert(caught.len() == 2)
     let since = acta_since(entries.copy(), ms_of(String("2026-11-26T02:45:00Z")))
     assert(since.len() == 2 and "{since[1]}" == #"{"card":"LOO-2","title":"B","by":"Elliot","at":1795661395034,"kind":"moved","to":"done","said":"moved to Done"}"#)
     let given = acta_since(entries_of(parse(#"{"activity":[{"task":"LOO-1","title":"A","by":"Elliot","at":"2026-11-26T02:49:00Z","text":"assigned it to Ola"}]}"#)!), 0)
