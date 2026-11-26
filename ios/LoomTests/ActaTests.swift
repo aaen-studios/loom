@@ -118,11 +118,11 @@ import Testing
         let m = Model()
         m.synced = true
         let now = 10_000_000
+        // The person's watches come once caught up too (WatchTests).
         let asked = m.cardFetches(now: now)
-        #expect(asked.count == 1)
-        #expect(asked.first?["name"] == "acta.boards")
+        #expect(asked.map { $0["name"] } == ["watch.list", "acta.boards"])
         #expect(m.cardFetches(now: now).isEmpty, "the boards are asked for once at a time")
-        answer(m, asked.first, ["value": ["boards": [["board": "aaen-studios/loom", "prefix": "LOO", "name": "loom"]]]])
+        answer(m, asked.last, ["value": ["boards": [["board": "aaen-studios/loom", "prefix": "LOO", "name": "loom"]]]])
         #expect(m.boardPrefixes == ["LOO"])
         #expect(m.hasActa)
         #expect(m.cardFetches(now: nowMs()).isEmpty)
@@ -296,8 +296,9 @@ import Testing
     @Test func followMakesAWatchForTheChatAndGoesBackWhenRefused() throws {
         let m = actaModel()
         #expect(m.conversation == "c_1")
-        // The watches are asked for once a sheet or a board is open, and once.
+        // The watches were asked for once caught up, and are again when it catches up again.
         #expect(m.cardFetches(now: nowMs()).allSatisfy { $0["name"] != "watch.list" })
+        m.take(["t": "synced", "seq": 2])
         _ = m.openCard(board: "aaen-studios/loom", id: "LOO-206")
         let list = try #require(m.cardFetches(now: nowMs()).first { $0["name"] == "watch.list" })
         #expect(m.cardFetches(now: nowMs()).allSatisfy { $0["name"] != "watch.list" })
@@ -309,7 +310,7 @@ import Testing
         ]]])
         // The board's watch posts in another chat, and a routine's isn't one to follow.
         #expect(m.following(board: "aaen-studios/loom") == false)
-        #expect(m.acta.watches?.count == 1)
+        #expect(m.acta.watches?.map(\.id) == ["w_1", "w_2", "w_9"])
         let put = try #require(m.toggleFollow(board: "aaen-studios/loom", card: "LOO-206"))
         #expect(put["name"] == "watch.put")
         #expect(put["args"] == ["target": ["board": "aaen-studios/loom", "card": "LOO-206"], "conversation": "c_1"])
@@ -320,7 +321,7 @@ import Testing
         let made: JSON = ["id": "w_3", "integration": "acta", "target": ["board": "aaen-studios/loom", "card": "LOO-206"], "conversation": "c_1"]
         m.take(["t": "event", "kind": "watch.updated", "seq": 2, "watch": made])
         answer(m, put, ["value": ["watch": made]])
-        #expect(m.acta.watches?.map(\.id) == ["w_1", "w_3"])
+        #expect(m.acta.watches?.map(\.id) == ["w_1", "w_2", "w_9", "w_3"])
         // Following stops with watch.remove, and is back when that's refused.
         let remove = try #require(m.toggleFollow(board: "aaen-studios/loom", card: "LOO-206"))
         #expect(remove["name"] == "watch.remove")

@@ -10,9 +10,20 @@ struct SampleKept {
     /// Each card's status and its subtasks, as the person moved and ticked them.
     var status: [String: String] = [:]
     var ticked: [String: Bool] = [:]
-    var watches: [JSON] = [["id": "w_1", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_2"]]
+    /// Builder's chat follows the loom board and a T3 thread, whose lines it has; Scribe's
+    /// a card and a board it can't see any more; Everyone the loom board; and a routine
+    /// runs when a loom card moves to Done.
+    var watches: [JSON] = [
+        ["id": "w_1", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_1"],
+        ["id": "w_2", "integration": "t3", "server": "t3", "target": ["thread": "th_9", "title": "Fix the build"], "conversation": "c_1", "wake": ["agent": "a_1"]],
+        ["id": "w_3", "integration": "acta", "target": ["board": "aaen-studios/loom", "card": "LOO-342"], "conversation": "c_2"],
+        ["id": "w_4", "integration": "acta", "target": ["board": "aaen-studios/clx"], "conversation": "c_2",
+         "error": "Acta says this key can't see aaen-studios/clx any more.\nIt was looked at 3 times."],
+        ["id": "w_5", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_6"],
+        ["id": "w_6", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "", "wake": ["routine": "r_1"], "kind": "moved", "to": "done"],
+    ]
     var nextCard = 372
-    var nextWatch = 2
+    var nextWatch = 7
     var servers: [JSON] = Sample.servers
 }
 

@@ -553,40 +553,6 @@ struct BoardScreen: Equatable, Sendable {
     }
 }
 
-/// A watch of the person's on an Acta board, or one card on it (PLAN.md, "Watching
-/// outside events"), as far as Follow needs it: what it follows and the chat it posts in.
-struct ActaWatch: Equatable, Sendable {
-    /// "" while `watch.put` is under way.
-    var id: String
-    var board: String
-    /// "" for the whole board.
-    var card: String
-    var conversation: String
-
-    /// A watch as the instance gives it, when it's on an Acta board and not a routine's.
-    init?(_ w: JSON) {
-        let integration = w["integration"].text
-        guard integration.isEmpty || integration == "acta", w["wake"]["routine"].isNull else { return nil }
-        let board = w["target"]["board"].text
-        guard !board.isEmpty, !w["id"].text.isEmpty else { return nil }
-        id = w["id"].text
-        self.board = board
-        card = w["target"]["card"].text
-        conversation = w["conversation"].text
-    }
-
-    init(id: String, board: String, card: String, conversation: String) {
-        self.id = id
-        self.board = board
-        self.card = card
-        self.conversation = conversation
-    }
-
-    func same(_ board: String, _ card: String, _ conversation: String) -> Bool {
-        self.board == board && self.card == card && self.conversation == conversation
-    }
-}
-
 /// What an answer from the instance was asked for.
 private enum ActaAsk {
     case card(board: String, id: String)
@@ -595,8 +561,8 @@ private enum ActaAsk {
     case board
     case tasks(board: String, done: Bool)
     case watches
-    case follow(ActaWatch)
-    case unfollow(ActaWatch)
+    case follow(Watch)
+    case unfollow(Watch)
 }
 
 /// What the model keeps of Acta.
@@ -623,9 +589,12 @@ struct ActaState {
     var used: [String] = []
     /// The messages whose pills a change here redrew, for the instance to keep them so.
     fileprivate var again: [String] = []
-    /// The person's watches on Acta, once `watch.list` gave them, for Follow.
-    var watches: [ActaWatch]?
+    /// The person's watches, Acta's and T3's, once `watch.list` gave them, for Follow and
+    /// Following.
+    var watches: [Watch]?
     fileprivate var watchesAsked = false
+    /// The followed cards looked up for their pills in Following, each once.
+    fileprivate var followLooked: Set<String> = []
     fileprivate var asks: [String: ActaAsk] = [:]
 }
 
@@ -670,13 +639,17 @@ extension Model {
     /// What the cards need asked of the instance (PLAN.md, "Cards in messages"): the
     /// person's boards, every 10 minutes, for the composer's typed ids; each message of
     /// the shown chat, once it shows, whose cards were looked up over 5 minutes ago, and
-    /// those whose pills a change here redrew; and the person's watches, once, while a
-    /// card's sheet or a board is open, for Follow.
+    /// those whose pills a change here redrew; and the person's watches, once caught up,
+    /// for Follow and Following, with each card followed, once, for its pill.
     func cardFetches(now: Int) -> [JSON] {
         var out: [JSON] = []
-        if (acta.sheet != nil || acta.screen != nil) && !acta.watchesAsked {
+        if synced, !acta.watchesAsked {
             acta.watchesAsked = true
             out.append(actaCmd("watch.list", [:], .watches))
+        }
+        for w in acta.watches ?? [] {
+            guard let link = w.pill.link, acta.followLooked.insert(link).inserted, let f = previewCard(link) else { continue }
+            out.append(f)
         }
         if synced, !acta.boardsAsking, acta.boardsAt.map({ now - $0 >= boardsFreshMs }) ?? true {
             acta.boardsAsking = true
@@ -881,7 +854,7 @@ extension Model {
             acta.watches = watches
             return actaCmd("watch.remove", ["id": JSON(w.id)], .unfollow(w))
         }
-        let w = ActaWatch(id: "", board: board, card: card, conversation: chat)
+        let w = Watch(id: "", board: board, card: card, conversation: chat)
         watches.append(w)
         acta.watches = watches
         var target: [String: JSON] = ["board": JSON(board)]
@@ -895,12 +868,52 @@ extension Model {
         if kind == "watch.removed" {
             let id = f["watch"].text
             watches.removeAll { $0.id == id }
-        } else if let w = ActaWatch(f["watch"]) {
+        } else if let w = Watch(f["watch"]) {
             // Made here: it takes the place of the one shown while it was made.
-            watches.removeAll { $0.id == w.id || ($0.id.isEmpty && $0.same(w.board, w.card, w.conversation)) }
-            watches.append(w)
+            if let at = watches.firstIndex(where: { $0.id == w.id }) {
+                watches[at] = w
+            } else {
+                watches.removeAll { $0.id.isEmpty && w.same($0.board, $0.card, $0.conversation) }
+                watches.append(w)
+            }
         }
         acta.watches = watches
+    }
+
+    /// What `who` follows, for Following (PLAN.md, "Watching outside events"), as the
+    /// desktop works it out: an agent's watches are those that wake it or post in one of
+    /// its chats, and a group chat's those that post in it. A routine's event is the
+    /// routine's, and a watch still being made isn't one to take away yet.
+    func following(_ who: Follower) -> [Followed] {
+        (acta.watches ?? []).filter { w in
+            guard w.wakeRoutine.isEmpty, !w.id.isEmpty else { return false }
+            switch who {
+            case .room(let id):
+                return w.conversation == id
+            case .agent(let agent):
+                return w.wakeAgent == agent || (roomNamed(w.conversation) == nil && conversations.contains { $0.id == w.conversation && $0.agent == agent })
+            }
+        }.map(Followed.init)
+    }
+
+    /// Stops following watch `id`, from Following's ×: it goes at once, and comes back if
+    /// the instance refuses.
+    func stopFollowing(_ id: String) -> JSON? {
+        guard var watches = acta.watches, let at = watches.firstIndex(where: { $0.id == id }) else { return nil }
+        let w = watches.remove(at: at)
+        acta.watches = watches
+        return actaCmd("watch.remove", ["id": JSON(id)], .unfollow(w))
+    }
+
+    /// A followed card's pill, once it's looked up.
+    func followedCard(_ pill: FollowPill) -> ActaCard? {
+        guard let link = pill.link, case .ready(let c) = acta.previews[link] else { return nil }
+        return c
+    }
+
+    /// Caught up again: the watches may have changed meanwhile, so they're asked for again.
+    func watchesStale() {
+        acta.watchesAsked = false
     }
 
     /// Shows the instance's words for a refused Follow on the sheet or the board open.
@@ -989,16 +1002,14 @@ extension Model {
                 acta.form = form
             }
         case .watches:
+            // Refused, they're asked for again once caught up again.
             if error == nil {
-                acta.watches = value["watches"].array.compactMap(ActaWatch.init)
-            } else {
-                // Asked again with the next sheet or board.
-                acta.watchesAsked = false
+                acta.watches = value["watches"].array.compactMap(Watch.init)
             }
         case .follow(let asked):
             if var watches = acta.watches, let k = watches.firstIndex(where: { $0.id.isEmpty && $0 == asked }) {
                 // Its watch.updated, which comes first, may have put it in already.
-                if error == nil, let w = ActaWatch(value["watch"]) { watches[k] = w } else { watches.remove(at: k) }
+                if error == nil, let w = Watch(value["watch"]) { watches[k] = w } else { watches.remove(at: k) }
                 acta.watches = watches
             }
             if let error { actaError(error) }

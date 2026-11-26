@@ -363,6 +363,8 @@ struct Block: Equatable, Sendable {
     /// "Messages and streaming"): the phone leaves them out of the reply.
     var parent: String?
     var card: Card?
+    /// A watch's line, a `loom` message's `update` block (Watches.swift).
+    var update: WatchLine?
 
     static func text(_ kind: String, _ text: String) -> Block {
         Block(kind: kind, text: text, call: nil, file: nil)
@@ -377,7 +379,8 @@ struct Block: Equatable, Sendable {
             file: kind == "file" ? FileRef(b) : nil,
             plan: b["entries"].array.map { PlanEntry(content: $0["content"].text, status: $0["status"].text) },
             parent: b["parent"].string,
-            card: kind == "card" ? Card(b["card"]) : nil
+            card: kind == "card" ? Card(b["card"]) : nil,
+            update: kind == "update" ? WatchLine(b) : nil
         )
     }
 }
@@ -1972,6 +1975,7 @@ final class Model {
         case "synced":
             synced = true
             dirty.formUnion(CoreList.allCases)
+            watchesStale()
             programsWanted = true
             // The core tells what catching up brought here, not an event at a time
             // (core/README.md): the text of replies that ended meanwhile goes, and an
@@ -2335,8 +2339,9 @@ final class Model {
             moreMessages = f["more"].bool ?? false
             messagesCame = true
             // Loom's own lines across the chat (a compaction, a fresh session) are the
-            // desktop's; the line a T3 thread started from loom lands in shows as its card.
-            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || !threadsOf($0).isEmpty) }.map(messageOf)
+            // desktop's; a watch's lines show here too, as quiet rows, and the line a T3 thread
+            // started from loom lands in shows as its card.
+            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0) || !threadsOf($0).isEmpty) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.

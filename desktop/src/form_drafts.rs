@@ -117,6 +117,10 @@ impl Loom {
                         .map(|(agent, prompt)| (agent.clone(), area(prompt)))
                         .collect(),
                     flow_kept: self.routine_flow_kept.clone(),
+                    event: model::watch::RoutineEvent {
+                        thread: text(&ui.thread_in),
+                        ..ui.event.clone()
+                    },
                 }))
             }
         })
@@ -163,7 +167,14 @@ impl Loom {
                 put(&self.routine_ui.every_in.clone(), &d.every, window, cx);
                 put(&self.routine_ui.from_in.clone(), &d.from, window, cx);
                 put(&self.routine_ui.to_in.clone(), &d.to, window, cx);
+                put(
+                    &self.routine_ui.thread_in.clone(),
+                    &d.event.thread,
+                    window,
+                    cx,
+                );
                 let ui = &mut self.routine_ui;
+                ui.event = d.event;
                 ui.minutes = d.minutes;
                 ui.adding_time = false;
                 ui.run_open = None;

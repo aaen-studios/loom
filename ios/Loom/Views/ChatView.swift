@@ -32,6 +32,8 @@ struct ChatView: View {
     @State private var contextOpen = false
     /// The group chat's settings, open in a sheet.
     @State private var roomSettings = false
+    /// What the agent follows, open in a sheet from the menu.
+    @State private var followingOpen = false
 
     var body: some View {
         let model = session.model
@@ -41,6 +43,7 @@ struct ChatView: View {
         let here = roomId != nil ? model.room == roomId : model.selected == agentId && model.thread == thread?.id && model.room == nil
         let messages = here ? model.shown : []
         let approvals = here ? model.shownApprovals : []
+        let stacked = stackedLines(messages)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Tokens.Space.l + 2) {
@@ -51,7 +54,10 @@ struct ChatView: View {
                     }
                     ForEach(messages) { m in
                         VStack(alignment: m.isPerson ? .trailing : .leading, spacing: Tokens.Space.s) {
-                            if m.deleted {
+                            if let line = m.watchLine {
+                                WatchLineRow(line: line)
+                                    .padding(.top, stacked.contains(m.id) ? 6 - (Tokens.Space.l + 2) : 0)
+                            } else if m.deleted {
                                 DeletedMark(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent)
                             } else if isStartLine(m) {
                                 // The line a thread the person started lands in: its card.
@@ -69,19 +75,19 @@ struct ChatView: View {
                         .frame(maxWidth: .infinity, alignment: m.isPerson ? .trailing : .leading)
                         // Lit for a moment, once a quote went to it.
                         .background(lit == m.id ? P.thread(agent?.color ?? "").opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
-                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted) { model.reply(to: m.id) })
+                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil) { model.reply(to: m.id) })
                         .contextMenu {
                             // One menu a message rather than selectable text in each
                             // paragraph, which made each row many times dearer to build.
                             let text = m.text
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Button {
                                     model.reply(to: m.id)
                                 } label: {
                                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                                 }
                             }
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Button {
                                     session.send(model.pin(m.id, !m.pinned))
                                 } label: {
@@ -102,7 +108,7 @@ struct ChatView: View {
                             }
                             // A card on one of the person's Acta boards, made from its words
                             // (PLAN.md, "Acta beside the chat").
-                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) {
+                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) && m.watchLine == nil {
                                 Button {
                                     session.send(model.startCard(message: m.id, text: text))
                                 } label: {
@@ -110,7 +116,7 @@ struct ChatView: View {
                                 }
                             }
                             // At once, leaving a mark where it was (PLAN.md, "Deleting a message").
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Divider()
                                 Button(role: .destructive) {
                                     session.send(model.deleteMessage(m.id))
@@ -252,6 +258,14 @@ struct ChatView: View {
                         } label: {
                             Label("Start a new chat", systemImage: "square.and.pencil")
                         }
+                        // What the agent follows, when it follows something.
+                        if !model.following(.agent(agentId)).isEmpty {
+                            Button {
+                                followingOpen = true
+                            } label: {
+                                Label("Following", systemImage: "bell")
+                            }
+                        }
                         // Other agents' threads with it, each to read on a screen of its own.
                         let asks = model.asks(agentId)
                         if !asks.isEmpty {
@@ -288,6 +302,9 @@ struct ChatView: View {
         }
         .sheet(isPresented: $roomSettings) {
             if let roomId { RoomSettingsSheet(roomId: roomId) }
+        }
+        .sheet(isPresented: warming ? .constant(false) : $followingOpen) {
+            FollowingSheet(agentId: agentId)
         }
         // Acta beside the chat and T3's start sheet, from the chat shown: a card's preview
         // here while no board is pushed over it, which shows its own.
@@ -397,6 +414,11 @@ struct ChatView: View {
                 if let id = value("-make"), let m = model.messages.first(where: { $0.id == id }) { session.send(model.startCard(message: m.id, text: m.text)) }
                 if args.contains("-board") { for f in model.openBoard() { session.send(f) } }
                 if args.contains("-t3start") { session.send(model.openT3Form()) }
+                // `-following` opens what the chat follows: the agent's, or the group
+                // chat's settings.
+                if args.contains("-following") {
+                    if roomId != nil { roomSettings = true } else { followingOpen = true }
+                }
             }
         }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }

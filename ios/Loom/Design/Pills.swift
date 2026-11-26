@@ -120,38 +120,56 @@ extension View {
     }
 }
 
-/// A card's pill as a view of its own: under the message a card was made from, and in a
-/// board's rows. A tap opens its sheet.
+/// A card's pill as a view of its own: under the message a card was made from, in a
+/// board's rows and in Following. A tap opens its sheet, where it has one.
 struct CardPillView: View {
     var card: ActaCard
-    var open: () -> Void
+    var open: (() -> Void)?
+
+    var body: some View {
+        if let open {
+            Button(action: open) { face }
+                .buttonStyle(.plain)
+                .accessibilityLabel("\(card.id), \(card.title), \(card.statusWords)")
+        } else {
+            face
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("\(card.id), \(card.title), \(card.statusWords)")
+        }
+    }
+
+    private var face: some View {
+        PillFrame {
+            Image(uiImage: Pill.tile())
+            Text(card.id).font(Fonts.mono(Tokens.PhoneSize.small - 1)).foregroundStyle(P.ink2)
+            if !card.missing && !card.title.isEmpty {
+                Text(card.title)
+                    .font(Fonts.ui(Tokens.PhoneSize.small))
+                    .foregroundStyle(card.struck ? P.ink3 : P.ink)
+                    .strikethrough(card.struck)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: Tokens.Layout.pillTitle, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+                Circle().fill(card.ink.color).frame(width: 7, height: 7)
+            }
+        }
+    }
+}
+
+/// A pill's frame: its parts in a row on the bubble's fill with a line around it, 22
+/// points high.
+struct PillFrame<Content: View>: View {
+    @ViewBuilder var content: Content
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Tokens.Radius.chip, style: .continuous)
-        Button(action: open) {
-            HStack(spacing: 5) {
-                Image(uiImage: Pill.tile())
-                Text(card.id).font(Fonts.mono(Tokens.PhoneSize.small - 1)).foregroundStyle(P.ink2)
-                if !card.missing && !card.title.isEmpty {
-                    Text(card.title)
-                        .font(Fonts.ui(Tokens.PhoneSize.small))
-                        .foregroundStyle(card.struck ? P.ink3 : P.ink)
-                        .strikethrough(card.struck)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: Tokens.Layout.pillTitle, alignment: .leading)
-                        .fixedSize(horizontal: true, vertical: false)
-                    Circle().fill(card.ink.color).frame(width: 7, height: 7)
-                }
-            }
+        HStack(spacing: 5) { content }
             .padding(.horizontal, 6)
             .frame(height: Tokens.Control.pill)
             .background(P.bubble, in: shape)
             .overlay(shape.strokeBorder(P.line, lineWidth: 1))
             .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(card.id), \(card.title), \(card.statusWords)")
     }
 }
 

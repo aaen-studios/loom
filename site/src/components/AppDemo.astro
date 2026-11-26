@@ -630,6 +630,42 @@ const BOARD_LAYERS = [
 		<div class="t3-chips"><span class="t3-chip">PR #214</span></div>
 	</div>
 </template>
+<!-- A watch's line, once Sam moves the release notes' card to Done, as the app draws it
+     (watch_view.rs, update_line): quiet and on the left, the board's tile in the reply
+     thread's place, the card's pill without a tile of its own and its dot in the status the
+     line is about, and what happened and who in quiet ink. -->
+<template id="demo-watch-line">
+	<div class="row watch-line fresh" aria-label="SHOP-31 moved to Done · Sam">
+		<svg class="acta-tile line-mark" viewBox="0 0 14 14" aria-hidden="true"
+			><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+		>
+		<span class="line-what">
+			<span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--ok)"
+				><span class="acta-face"
+					><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
+				><span class="acta-preview" role="tooltip"
+					><span class="cp-place"
+						><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
+							><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+						>shop · SHOP-31</span
+					><span class="cp-title">Write the release notes for 2.4</span><span class="cp-chips"
+						><span class="cp-chip cp-status">Done</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
+					><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
+						>Subtasks 4 of 4<span class="cp-bar"><span style="width: 100%"></span></span></span
+					><span class="cp-buttons"><span class="cp-button">Open</span><span class="cp-button">Open in Acta</span></span></span
+				></span
+			>
+			<span class="line-words">moved to Done · Sam</span>
+		</span>
+	</div>
+</template>
+<!-- The reply of the agent the watch woke, after its line. -->
+<template id="demo-woken">
+	<div class="row reply fresh">
+		<svg data-thread data-color="sky" width="14" height="10" class="reply-thread"></svg>
+		<div class="body"><div class="said"><p></p></div></div>
+	</div>
+</template>
 <template id="demo-approval">
 	<div class="row approval fresh">
 		<div class="card">
@@ -3280,6 +3316,39 @@ const BOARD_LAYERS = [
 		font-family: var(--mono);
 		font-size: var(--size-caption);
 		color: var(--ink-2);
+	}
+	/* A watch's line (watch_view.rs, update_line): its mark where a reply's thread is, then
+	   the card's pill, which gives way first, and what happened in quiet ink. */
+	.watch-line {
+		display: flex;
+		align-items: center;
+		gap: 12px;
+		padding: 4px 0 8px;
+	}
+	.watch-line .line-mark {
+		flex: none;
+		margin-right: 0;
+		vertical-align: 0;
+	}
+	.line-what {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+	}
+	.line-what .acta-pill {
+		min-width: 0;
+	}
+	.line-what .acta-face {
+		padding-left: 7px;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.line-words {
+		flex: none;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
 	}
 	.b {
 		height: var(--control-button-small);
