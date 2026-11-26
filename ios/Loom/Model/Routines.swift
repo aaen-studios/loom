@@ -149,6 +149,20 @@ struct Schedule: Equatable, Sendable {
     var from = "08:00"
     var to = "20:00"
 
+    /// Hours' All day: no window, so it runs around the clock. Some hours gives each
+    /// empty end a new routine's, 08:00 to 20:00.
+    var allDay: Bool {
+        get { from.trimmingCharacters(in: .whitespaces).isEmpty && to.trimmingCharacters(in: .whitespaces).isEmpty }
+        set {
+            if newValue {
+                (from, to) = ("", "")
+            } else {
+                if from.trimmingCharacters(in: .whitespaces).isEmpty { from = Schedule().from }
+                if to.trimmingCharacters(in: .whitespaces).isEmpty { to = Schedule().to }
+            }
+        }
+    }
+
     /// A new routine's: every 2 hours from 08:00 to 20:00, every day.
     init() {}
 

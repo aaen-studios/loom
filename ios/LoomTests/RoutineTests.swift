@@ -126,6 +126,23 @@ import Testing
         #expect(Schedule().json == ["every": 120, "from": "08:00", "to": "20:00"])
     }
 
+    @Test func everyFewHoursIsAllDayUntilItHasHours() {
+        // No window: All day, with no clocks, and none sent.
+        var s = Schedule(["every": 30])
+        #expect(s.allDay)
+        #expect(s.json == ["every": 30])
+        // Some hours: a new routine's, then the person's.
+        s.allDay = false
+        #expect(s.from == "08:00" && s.to == "20:00")
+        s.to = "22:00"
+        s.allDay = false
+        #expect(s.json == ["every": 30, "from": "08:00", "to": "22:00"])
+        // All day again takes the window off.
+        s.allDay = true
+        #expect(s.json == ["every": 30])
+        #expect(!Schedule().allDay)
+    }
+
     @Test func aRoutinesCostSaysWhatItSpends() {
         #expect(RoutineCost(["run": 1_400_000, "day": 5_400_000, "runs": 27, "quiet": 19]).words == "1.4M tokens a run · 5.4M a day · mostly quiet")
         #expect(RoutineCost(["run": 180_000, "day": 180_000, "runs": 7, "quiet": 1]).words == "180k tokens a run · 180k a day")

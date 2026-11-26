@@ -353,8 +353,11 @@ struct RoutinePage: View {
         switch kind {
         case "hours":
             menu("Every", Binding { String(d.wrappedValue.schedule.every) } set: { d.wrappedValue.schedule.every = Int($0) ?? 120 }, everyChoices(d.wrappedValue.schedule.every))
-            clock("From", d.schedule.from)
-            clock("To", d.schedule.to)
+            menu("Hours", Binding { d.wrappedValue.schedule.allDay ? "all" : "some" } set: { d.wrappedValue.schedule.allDay = $0 == "all" }, [("all", "All day"), ("some", "Some hours")])
+            if !d.wrappedValue.schedule.allDay {
+                clock("From", d.schedule.from)
+                clock("To", d.schedule.to)
+            }
             DaysRow(days: d.schedule.days)
         case "days":
             DaysRow(days: d.schedule.days)
