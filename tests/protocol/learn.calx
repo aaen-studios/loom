@@ -9,7 +9,8 @@ module tests.protocol.learn
 // stops that turn and goes at once. A skill it said failed is fixed: the fix
 // is put in, with the lines it removes and adds, and undone. With a mode that
 // asks, the same wait on a card under the reply: put off, they wait on the
-// Proposals page, and a fix the person changed is kept as they changed it. In
+// Proposals page, and a fix the person changed is kept as they changed it, to
+// the skill by the name it has now when it was renamed while the fix waited. In
 // a group chat, each member that answered looks back over its own part, one
 // after the other, and what it keeps goes under its own reply.
 //
@@ -77,8 +78,17 @@ fn memories(app: mut Session, id: str) -> String ! Error {
 }
 
 fn skill_body(app: mut Session, id: str) -> String ! Error {
-    let got = try app.cmd(id, "skill.get", Obj.new().s("name", String("post-release-notes")).done())
+    return try body_of(mut app, id, "post-release-notes")
+}
+
+fn body_of(app: mut Session, id: str, name: str) -> String ! Error {
+    let got = try app.cmd(id, "skill.get", Obj.new().s("name", String(name)).done())
     return str_at(at(at(got, "value"), "skill"), "body") ?? String()
+}
+
+// Renames the skill `was` to `name`, as the Skills page's Save does.
+fn rename_skill(app: mut Session, id: str, was: str, name: str, body: String) -> Json ! Error {
+    return try app.cmd(id, "skill.put", Obj.new().s("name", String(name)).s("was", String(was)).s("description", String("Posting the release notes.")).s("body", body).done())
 }
 
 fn activity(app: mut Session, id: str) -> String ! Error {
@@ -185,10 +195,22 @@ fn card_part(app: mut Session, agent: String, chat: String) ! Error {
     let f = list[list.len() - 1].copy()
     try see(str_at(f.copy(), "status") == some(String("waiting")), "in ask, a fix waits on a card too", "{f}")
     try check((try skill_body(mut app, "q_c6")) == SKILL, "and the skill stays as it was")
+    let renamed = try rename_skill(mut app, "q_cr1", "post-release-notes", "post-notes", String(SKILL))
+    try see(bool_at(renamed.copy(), "ok") == some(true), "the skill is renamed while its fix waits", "{renamed}")
     let changed = String("# Post release notes\n\n1. Open the drafts.\n2. Paste the notes.\n3. Press Release.\n4. Share the link.\n")
     let keep = try app.cmd("q_c7", "proposal.keep", Obj.new().s("id", str_at(f.copy(), "id") ?? String()).j("fix", Obj.new().s("body", changed.copy()).done()).done())
     try see(str_at(at(at(keep.copy(), "value"), "proposal"), "status") == some(String("kept")), "Change it keeps the fix as the person changed it", "{keep}")
-    try check((try skill_body(mut app, "q_c8")) == changed, "and the skill is that")
+    try check((try body_of(mut app, "q_c8", "post-notes")) == changed, "and the skill, by its new name, is that")
+    // Its name back, the kept fix follows it again.
+    _ = try rename_skill(mut app, "q_cr2", "post-notes", "post-release-notes", changed.copy())
+    let kept_ones = try app.cmd("q_cr3", "proposal.list", Obj.new().s("status", String("kept")).done())
+    var named = String()
+    if let Json.Array(ps) = at(at(kept_ones, "value"), "proposals") {
+        for p in ps {
+            if str_at(p.copy(), "id") == str_at(f.copy(), "id") { named = str_at(at(p, "fix"), "name") ?? String() }
+        }
+    }
+    try check(named == "post-release-notes", "a kept fix names its skill by the name it has now")
     _ = try app.cmd("q_c9", "skill.put", Obj.new().s("name", String("post-release-notes")).s("description", String("Posting the release notes.")).s("body", String("Something else.")).done())
     let late = try app.cmd("q_c10", "proposal.undo", Obj.new().s("id", str_at(f, "id") ?? String()).done())
     try check(str_at(at(late, "error"), "code") == some(String("changed")), "a fix isn't undone once the skill has changed since")

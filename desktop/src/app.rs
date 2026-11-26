@@ -13653,11 +13653,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 let client = this.mcp_client_in.read(cx).value().to_string();
                 let secret = this.mcp_client_secret_in.read(cx).value().to_string();
                 let now = this.form_now(DraftPage::Mcp, cx);
-                let f = this.model.put_mcp(crate::model::with_client(
-                    crate::model::server_args(&name, &line, &settings),
-                    &client,
-                    &secret,
-                ));
+                // A new name renames it: the name it's saved under goes as `was`.
+                let f = this.model.put_mcp(
+                    crate::model::with_client(
+                        crate::model::server_args(&name, &line, &settings),
+                        &client,
+                        &secret,
+                    ),
+                    saving.as_deref(),
+                );
                 // Its draft stays until the instance says it's saved, and the form
                 // stays on it: by the name it had until then, and by a new one after
                 // (`moved_in`); refused, it stays as it is.
@@ -13943,7 +13947,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     return;
                 }
                 let now = this.form_now(DraftPage::Skills, cx);
-                let f = this.model.save_skill(&name, &description, &text);
+                let f = this
+                    .model
+                    .save_skill(&name, &description, &text, saving.as_deref());
                 // Its draft stays until the instance says it's saved, and the form
                 // stays on it: by the name it had until then, and by a new one after
                 // (`moved_in`); refused, it stays as it is.
