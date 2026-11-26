@@ -105,7 +105,8 @@ CREATE TABLE IF NOT EXISTS skills (
     body TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY (user, name));
 CREATE TABLE IF NOT EXISTS conversations (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL,
-    title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0);
+    title TEXT NOT NULL, at INTEGER NOT NULL, deleted INTEGER NOT NULL DEFAULT 0,
+    read INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
     json TEXT NOT NULL, at INTEGER NOT NULL);
@@ -418,6 +419,9 @@ fn conversation_of(r: List<Value>) -> Json {
     if int(r[19].copy()) != 0 { o = o.b("main", true) }
     let made_by = text(r[20].copy())
     if made_by.len() > 0 { o = o.s("made_by", made_by) }
+    // When the newest message its person has read is from, once they've read one.
+    let read = int(r[21].copy())
+    if read > 0 { o = o.i("read", read) }
     return o.done()
 }
 
@@ -554,6 +558,13 @@ impl Store {
         }
         if not tooled { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN tools TEXT NOT NULL DEFAULT '';")) }
         if not told { try s.db.execute_script(String("ALTER TABLE acp_sessions ADD COLUMN told TEXT NOT NULL DEFAULT '';")) }
+        // Conversations from before they kept what their person has read count
+        // as read up to their newest message, so an update shows no dots.
+        var reads = false
+        for r in try s.db.query(String("PRAGMA table_info(conversations)")) {
+            if text(r[1].copy()) == "read" { reads = true }
+        }
+        if not reads { try s.db.execute_script(String("ALTER TABLE conversations ADD COLUMN read INTEGER NOT NULL DEFAULT 0; UPDATE conversations SET read = COALESCE((SELECT MAX(m.at) FROM messages m WHERE m.user = conversations.user AND m.conversation = conversations.id), 0);")) }
         // Runs from before a run kept the routine that started it, and how that
         // routine said it went, get the columns, empty for none or not known.
         var routined = false
@@ -1179,7 +1190,7 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS} FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
+        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS}, c.read FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
@@ -1187,7 +1198,7 @@ impl Store {
     // `agent`'s chat with the person, as every app shows it (`main_chats`): never
     // merely its newest conversation. None until it has one.
     pub fn main_chat(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?), 1, NULL FROM main_chats mc JOIN conversations c ON c.id = mc.conversation AND c.user = mc.user WHERE mc.user = ? AND mc.agent = ? AND c.deleted = 0"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?), 1, NULL, c.read FROM main_chats mc JOIN conversations c ON c.id = mc.conversation AND c.user = mc.user WHERE mc.user = ? AND mc.agent = ? AND c.deleted = 0"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
         return some(conversation_of(r))
     }
 
@@ -1260,10 +1271,19 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS} FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
+        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS}, c.read FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
             out.push(conversation_of(r))
         }
         return out
+    }
+
+    // The person has read conversation `id` up to a message from `at` (Unix ms):
+    // kept unless they'd read further already. Gives what's kept now, or none
+    // when there's no such conversation.
+    pub fn mark_read(self, user: String, id: String, at: i64) -> i64? ! Error {
+        _ = try self.db.execute(String("UPDATE conversations SET read = max(read, ?) WHERE id = ? AND user = ? AND deleted = 0"), [Value.Int(at), t(id.copy()), t(user.copy())])
+        let r = try self.db.query_one(String("SELECT read FROM conversations WHERE id = ? AND user = ? AND deleted = 0"), [t(id), t(user)]) else return none
+        return some(int(r[0].copy()))
     }
 
     pub fn rename_conversation(self, user: String, id: String, title: String) ! Error {
@@ -3136,11 +3156,15 @@ impl Store {
 
     // What `user`'s routines cost, from their runs that ended since `since` (Unix ms):
     // each routine's id, with how many runs, how many of them were quiet, the
-    // tokens they used, and when the oldest was due. Only the newest runs of each
-    // are kept (ROUTINE_RUNS_KEPT). `only` is one routine's id, or "" for all of them.
+    // tokens they used, their flow's steps' among them, and when the oldest was
+    // due. Only the newest runs of each are kept (ROUTINE_RUNS_KEPT). `only` is
+    // one routine's id, or "" for all of them.
     pub fn routine_costs(self, user: String, since: i64, only: String) -> List<(String, i64, i64, i64, i64)> ! Error {
         var out = List<(String, i64, i64, i64, i64)>()
-        for r in try self.db.query(String("SELECT rr.routine, COUNT(*), SUM(CASE WHEN json_extract(rr.json, '$.status') = 'quiet' THEN 1 ELSE 0 END), COALESCE(SUM(u.tokens), 0), MIN(rr.at) FROM routine_runs rr LEFT JOIN (SELECT run, SUM(total) AS tokens FROM usage WHERE user = ?1 AND at >= ?2 GROUP BY run) u ON u.run = rr.id WHERE rr.user = ?1 AND rr.at >= ?2 AND (?3 = '' OR rr.routine = ?3) AND json_extract(rr.json, '$.status') IN ('done', 'quiet', 'failed', 'limit', 'cancelled') GROUP BY rr.routine"), [t(user), Value.Int(since), t(only)]) {
+        // Each routine run's own run, and the runs of the steps its flow went on to.
+        let owned = "SELECT rr.id AS of, rr.id AS run FROM routine_runs rr WHERE rr.user = ?1 AND rr.at >= ?2 UNION ALL SELECT rr.id, json_extract(s.value, '$.run') FROM routine_runs rr, json_each(rr.json, '$.steps') s WHERE rr.user = ?1 AND rr.at >= ?2 AND json_extract(s.value, '$.run') IS NOT NULL"
+        let spent = "SELECT o.of AS of, SUM(u.tokens) AS tokens FROM ({owned}) o JOIN (SELECT run, SUM(total) AS tokens FROM usage WHERE user = ?1 AND at >= ?2 GROUP BY run) u ON u.run = o.run GROUP BY o.of"
+        for r in try self.db.query("SELECT rr.routine, COUNT(*), SUM(CASE WHEN json_extract(rr.json, '$.status') = 'quiet' THEN 1 ELSE 0 END), COALESCE(SUM(sp.tokens), 0), MIN(rr.at) FROM routine_runs rr LEFT JOIN ({spent}) sp ON sp.of = rr.id WHERE rr.user = ?1 AND rr.at >= ?2 AND (?3 = '' OR rr.routine = ?3) AND json_extract(rr.json, '$.status') IN ('done', 'quiet', 'failed', 'limit', 'cancelled') GROUP BY rr.routine", [t(user), Value.Int(since), t(only)]) {
             out.push((text(r[0].copy()), int(r[1].copy()), int(r[2].copy()), int(r[3].copy()), int(r[4].copy())))
         }
         return out

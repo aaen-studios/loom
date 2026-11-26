@@ -5,13 +5,14 @@ module tests.protocol.quiet
 // nothing reaches the chat and no one is notified, and the run ends quiet.
 // What the agent posts with routine_post is its message in the chat, and a
 // notification. routine_quiet ends a run quiet; routine_failed makes it a
-// failure with why, which the person sees and is told, and five in a row
+// failure with why, which the person is told and sees in its runs, never in
+// the chat, as for a run whose turn failed, and five in a row
 // turn the routine off with a notice. pause_routine pauses it and tells the
 // person. A prompt still naming OpenBot's tools reaches them as loom's.
 // Outside a routine run, they're refused. routine.runs keeps each run. A post
-// keeps its routine's name. A run while the person's turn goes on waits for
-// it, and for what they queued behind it; one while the routine's last run
-// still goes is skipped, and kept so.
+// keeps its routine's name. A run while the person's turn goes on runs beside
+// it, its post going in after the turn's reply and before what they queued
+// behind it; one while the routine's last run still goes is skipped, and kept so.
 //
 //     calx tests/protocol/quiet.calx
 import std.json.{Json}
@@ -135,7 +136,10 @@ fn run(i: Instance) ! Error {
     let told = kinds(f1_frames.copy(), "notify")
     try check(str_at(at(f1.copy(), "last"), "status") == some(String("failed")) and str_at(at(f1.copy(), "last"), "error") == some(String("the shop was down")) and int_at(f1, "failures") == some(1), "routine_failed makes the run a failure, with why")
     try check(told.len() == 1 and (str_at(told[0].copy(), "body") ?? String()).contains("the shop was down"), "and its person is told why")
-    try check(shown(f1_frames).len() == 1, "and sees its agent's answer in the chat")
+    try check(shown(f1_frames).len() == 0, "but nothing of the run reaches the chat, not even its agent's answer")
+    let broke = try put(mut app, "q_11b", "Broke", "/fail the program broke")
+    let (b1, b1_frames) = try run_once(mut app, "q_12b", broke.copy())
+    try check(str_at(at(b1, "last"), "status") == some(String("failed")) and shown(b1_frames).len() == 0, "nor does a run whose turn failed")
     var last = Json.Null
     var last_frames = List<Json>()
     for k in 0..4 {
@@ -154,25 +158,26 @@ fn run(i: Instance) ! Error {
     try check(bool_at(p.copy(), "on") == some(false) and str_at(at(p, "last"), "status") == some(String("quiet")), "pause_routine pauses its own routine")
     try check(paused.len() >= 1 and str_at(paused[0].copy(), "title") == some(String("Main paused Sale")) and str_at(paused[0].copy(), "body") == some(String("the sale is over")), "and tells the person why")
 
-    // A routine run while the person's turn goes on in the chat waits for it to
-    // end, and for what the person queued behind it, then runs.
+    // A routine run while the person's turn goes on in the chat runs at once,
+    // beside it, and what it posts goes in once the turn is over, before what
+    // the person queued behind it.
     let later = try put(mut app, "q_19", "Later", "/mcp routine_post \{\"text\": \"after you\"\}")
-    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_2")).s("conversation", conversation.copy()).s("text", String("/sleep 1500\nfirst")).done())
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("c_2")).s("conversation", conversation.copy()).s("text", String("/nap 1500\nfirst")).done())
     _ = try app.until("event", "run.started")
     let since = app.frames.len()
     try app.send(Obj.new().s("t", String("send")).s("cid", String("c_3")).s("conversation", conversation.copy()).s("text", String("second")).done())
-    let waited = at(try app.cmd("q_20", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
-    let waiting_run = str_at(waited.copy(), "run") ?? String()
-    try check(bool_at(waited, "waiting") == some(true) and waiting_run.len() > 0, "routine.run in a busy chat says the run waits")
-    let w = try newest_run(mut app, "q_21", later.copy())
-    try check(str_at(w.copy(), "run") == some(waiting_run.copy()) and str_at(w, "status") == some(String("waiting")), "and its runs say so")
+    let ran = at(try app.cmd("q_20", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
+    let beside_run = str_at(ran.copy(), "run") ?? String()
+    try check(at(ran, "waiting") == Json.Null and beside_run.len() > 0, "routine.run in a busy chat runs at once")
     let done = try last_is(mut app, since, later.copy(), "done")
-    try check(str_at(at(done, "last"), "run") == some(waiting_run.copy()), "once the chat is free, that run goes")
+    try check(str_at(at(done, "last"), "run") == some(beside_run.copy()) and not shown(app.frames[since..].copy()).contains(String("agent: first")), "and its run ends while the person's turn goes on")
+    while not shown(app.frames[since..].copy()).contains(String("agent: second")) { _ = try app.until("event", "message.created") }
     let order = shown(app.frames[since..].copy())
-    let second_at = order.position(|x| x == "person: second") ?? 99
-    let posted_at = order.position(|x| x == "agent: after you") ?? 0
-    if second_at > posted_at { eprintln("the chat went: {order}") }
-    try check(second_at < posted_at, "after the message the person queued")
+    let first_at = order.position(|x| x == "agent: first") ?? 99
+    let posted_at = order.position(|x| x == "agent: after you") ?? 99
+    let second_at = order.position(|x| x == "person: second") ?? 0
+    if not (first_at < posted_at and posted_at < second_at) { eprintln("the chat went: {order}") }
+    try check(first_at < posted_at and posted_at < second_at, "its post goes in after the turn's reply, before the message the person queued")
 
     // A run while the routine's run before still goes is skipped, and kept in its runs with why.
     let slow = try put(mut app, "q_22", "Slow", "/sleep 1500")

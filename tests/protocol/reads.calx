@@ -1,0 +1,108 @@
+module tests.protocol.reads
+
+// What the person has read (PLAN.md, "Unread"): conversation.read keeps, with
+// the conversation, when the newest message they've read there is from, never
+// going back, and tells every device with conversation.updated. A conversation
+// lists it as `read`, so after a restart, and on another device, its dots are
+// where they were. An agent can't mark what its person read.
+//
+//     calx tests/protocol/reads.calx
+import std.json.{Json}
+import std.process.{exit}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+// The conversation `id` as a new device's snapshot lists it. The instance keeps
+// only 3 events, so a new device always gets one.
+fn listed(i: Instance, id: String) -> Json ! Error {
+    // The events are let go of every 200 ms, so a new device gets a snapshot soon.
+    for _ in 0..50 {
+        let s = try Session.connect(i.base.copy(), i.token.copy(), 0)
+        var found = Json.Null
+        for f in s.frames {
+            if str_at(f.copy(), "t") != some(String("snapshot")) { continue }
+            if let Json.Array(all) = at(f, "conversations") {
+                for c in all {
+                    if str_at(c.copy(), "id") == some(id.copy()) { found = c.copy() }
+                }
+            }
+        }
+        s.close()
+        if found != Json.Null { return found }
+        unsafe { sleep(100000000) }
+    }
+    fail "no snapshot listed {id}"
+}
+
+fn run(i: Instance) -> (String, i64) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Main")).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let created = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
+    let chat = str_at(at(created, "value"), "conversation") ?? String()
+    let made_one = at(try app.event("conversation.created"), "conversation")
+    try check(str_at(made_one.copy(), "id") == some(chat.copy()) and int_at(made_one, "read") == none, "a new conversation has nothing read")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", String("hello")).done())
+    var reply = Json.Null
+    loop {
+        let m = at(try app.until("event", "message.created"), "message")
+        if str_at(m.copy(), "role") == some(String("agent")) {
+            reply = m
+            break
+        }
+    }
+    try check(reply_text(reply.copy()) == "hello", "its agent replies")
+    let replied = int_at(reply, "at") ?? 0
+
+    // Read up to the reply, every device hears so.
+    var phone = try Session.connect(i.base.copy(), i.token.copy(), app.seq)
+    let marked = try app.cmd("q_4", "conversation.read", Obj.new().s("conversation", chat.copy()).i("at", replied).done())
+    try check(int_at(at(marked, "value"), "read") == some(replied), "conversation.read keeps what the person read")
+    let told = at(try phone.until("event", "conversation.updated"), "conversation")
+    try check(str_at(told.copy(), "id") == some(chat.copy()) and int_at(told, "read") == some(replied), "and every device hears it")
+    try check(int_at(try listed(i.copy(), chat.copy()), "read") == some(replied), "and the conversation lists it")
+
+    // Never back.
+    let older = try app.cmd("q_6", "conversation.read", Obj.new().s("conversation", chat.copy()).i("at", replied - 1000).done())
+    try check(int_at(at(older, "value"), "read") == some(replied), "an older mark doesn't take it back")
+    let gone = try app.cmd("q_7", "conversation.read", Obj.new().s("conversation", String("c_nope")).i("at", replied).done())
+    try check(str_at(at(gone, "error"), "code") == some(String("not_found")), "a conversation that isn't there is not_found")
+
+    // An agent can't mark it.
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_2")).s("conversation", chat.copy()).s("text", "/mcp run_command \{\"name\": \"conversation.read\", \"args\": \{\"conversation\": \"{chat}\", \"at\": 1\}\}").done())
+    loop {
+        let m = at(try app.until("event", "message.created"), "message")
+        if str_at(m.copy(), "role") == some(String("agent")) {
+            try check(reply_text(m).contains("marked by their apps"), "an agent can't mark what its person read")
+            break
+        }
+    }
+    phone.close()
+    app.close()
+    return (chat, replied)
+}
+
+// After a restart, it's still there.
+fn after_restart(i: Instance, chat: String, replied: i64) ! Error {
+    try check(int_at(try listed(i, chat), "read") == some(replied), "and it stays across a restart")
+}
+
+fn main() ! Error {
+    var inst = try Instance.start_with([String("--test-keep-events"), String("3")])
+    var failure: String? = none
+    match run(inst.copy()) {
+        ok((chat, replied)) => {
+            inst = try inst.restart_with([String("--test-keep-events"), String("3")], 0)
+            if let err(e) = after_restart(inst.copy(), chat, replied) { failure = some("{e}") }
+        },
+        err(e) => failure = some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nreads: all good")
+}

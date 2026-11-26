@@ -43,6 +43,8 @@ module tests.fake_agent.main
 //                         "title" (or KIND); says "allowed" or "denied"
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
+//     /nap MS             the same, but plays other sessions' prompts meanwhile, as a
+//                         program running sessions side by side does
 //     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
 //     /tokens N           reports the turn used N tokens (ACP's usage: half input, half output)
 //     /fail MESSAGE       answers session/prompt with an error
@@ -118,11 +120,15 @@ module tests.fake_agent.main
 // With "USAGE:USED/SIZE" in the message, the router's session also reports its
 // context as USED tokens of a SIZE window (usage_update), as /usage does.
 //
-// With FAKE_RECORD set to a file, it adds a line of JSON to that file for each
-// prompt it plays, for measuring what loom sends (tests/protocol/usage.calx):
-// {"session", "chars" (every text block's), "loom" (those of its "[loom: ...]"
-// blocks), "notes" (the start of each of those), "said" (what it said back),
-// "summary" (whether loom asked it for a summary of its chat)}.
+// With --record=PATH, it adds a line of JSON to PATH for each prompt it plays,
+// for measuring what loom sends (tests/protocol/usage.calx, routine_usage.calx,
+// wake_usage.calx): {"session", "turn" (its turn there), "chars" (every text
+// block's), "history" (what the session's turns before it sent and said),
+// "loom" (the characters of its "[loom: ...]" blocks), "notes" (the start of
+// each of those), "said" (what it said back), "summary" (whether loom asked it
+// for a summary of its chat), "model", "effort", "text" and "context" (the
+// start of its steps and of loom's notes)}, written before the prompt is
+// answered; and {"closed": SESSION} for each session/close.
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
@@ -130,7 +136,7 @@ module tests.fake_agent.main
 // --limited it answers every session/prompt with a usage-limit error, as a
 // program whose usage ran out does; with --broken it doesn't initialize.
 //
-//     calx tests/fake_agent/main.calx [--load | --resume | --forget | --limited | --broken]
+//     calx tests/fake_agent/main.calx [--load | --resume | --forget | --limited | --broken] [--record=PATH]
 import std.bytes
 import std.crypto.{random_bytes}
 import std.env
@@ -178,6 +184,7 @@ pub enum Step {
     AskOpen(String)    // the rawInput as JSON
     Slow(u64)
     Sleep(u64)
+    Nap(u64)
     Stop(String)
     Tokens(i64)
     Fail(String)
@@ -264,6 +271,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Slow(u64.parse(rest) ?? 0))
         } else if word == "/sleep" {
             steps.push(Step.Sleep(u64.parse(rest) ?? 0))
+        } else if word == "/nap" {
+            steps.push(Step.Nap(u64.parse(rest) ?? 0))
         } else if word == "/tokens" {
             steps.push(Step.Tokens(i64.parse(rest) ?? 0))
         } else if word == "/stop" {
@@ -747,6 +756,26 @@ impl Agent {
         }
     }
 
+    // The same, for session `session`'s turn, but what another session asks
+    // meanwhile is played at once, as a program running sessions side by side
+    // does: a new session, its prompts and its close.
+    fn nap(a: mut Agent, ms: u64, session: String) -> bool {
+        let start = unsafe { Instant.now() }
+        loop {
+            let spent = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if spent >= ms { return false }
+            let m = a.next(ms - spent) else continue
+            let name = method(m.copy())
+            let of = ((m.get(String("params")) ?? Json.Null).get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+            if name == "session/cancel" and of == session { return true }
+            if of != session and (name == "session/new" or name == "session/prompt" or name == "session/close" or name == "session/set_config_option") {
+                a.handle(m)
+                continue
+            }
+            a.backlog.push(m)
+        }
+    }
+
     // Asks the client's permission for a tool call. Gives whether it was
     // allowed, or none if the turn was cancelled first.
     fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String, raw: Json) -> bool? {
@@ -1004,22 +1033,10 @@ impl Agent {
         }
         // Asked to pick for a group chat, it answers as a router would.
         if context.contains("[loom: route]") { text = route_pick(context.copy(), "up {unsafe { Instant.now() }.nanos_since(a.born) / 1000000} ms") }
-        // With --record, what this prompt carried: how many turns came before it in its
-        // session, and how many characters they sent and said.
+        // For --record: how many turns came before this one in its session, and
+        // how many characters they sent and said.
         let (turns_before, chars_before): (i64, i64) = a.history.get(session.copy()) ?? (i64(0), i64(0))
-        if a.record.len() > 0 {
-            let values = a.values(session.copy())
-            var line = LinkedMap<String, Json>()
-            line.insert("session", js(session.copy()))
-            line.insert("turn", int(turns_before + 1))
-            line.insert("chars", int(sent_chars))
-            line.insert("history", int(chars_before))
-            line.insert("model", js(value_of(values.copy(), "model")))
-            line.insert("effort", js(value_of(values, "effort")))
-            line.insert("text", js(if text.len() > 200 { text[..200].copy() } else { text.copy() }))
-            line.insert("context", js(if context.len() > 2000 { context[..2000].copy() } else { context.copy() }))
-            a.write_record(Json.Object(line))
-        }
+        let recorded_text = if text.len() > 200 { text[..200].copy() } else { text.copy() }
         var said_chars: i64 = 0
         var last_used: i64 = 0
         for step in script(text) {
@@ -1153,6 +1170,9 @@ impl Agent {
                 Step.Sleep(ms) => {
                     if a.idle(ms) { reason = String("cancelled") }
                 },
+                Step.Nap(ms) => {
+                    if a.nap(ms, session.copy()) { reason = String("cancelled") }
+                },
                 Step.Stop(r) => reason = r.copy(),
                 Step.Tokens(n) => tokens = n,
                 Step.Fail(message) => {
@@ -1243,6 +1263,8 @@ impl Agent {
             if reason != "end_turn" { break }
         }
         a.history.insert(session.copy(), (turns_before + 1, chars_before + sent_chars + said_chars))
+        // Written before the answer, so a test that has the reply finds the line.
+        if a.record.len() > 0 { a.write_record(prompt_record(a.values(session.copy()), session.copy(), params.copy(), turns_before + 1, chars_before, recorded_text, context.copy(), said_chars)) }
         var r = LinkedMap<String, Json>()
         r.insert("stopReason", js(reason))
         if tokens > 0 {
@@ -1253,7 +1275,6 @@ impl Agent {
             r.insert("usage", Json.Object(usage))
         }
         respond(id, Json.Object(r))
-        usage_record(session.copy(), params.copy(), said_chars)
         if let (used, size) = compacted {
             a.next_id += 1
             compaction(session, "compact_{a.next_id}", last_used, used, size)
@@ -1452,11 +1473,11 @@ fn method(m: Json) -> String {
     return (m.get(String("method")) ?? Json.Null).as_str() ?? String()
 }
 
-// With FAKE_RECORD set, a line for the prompt `params` gave `session`, which it
-// answered with `said` characters: its text blocks' characters, those of loom's
-// notes and the start of each.
-fn usage_record(session: String, params: Json, said: i64) {
-    let path = env.variable(String("FAKE_RECORD")) else return
+// The --record line for the prompt `params` gave `session`, its turn `turn`
+// there after turns of `history` characters, which it answered with `said`
+// characters: its text blocks' characters, those of loom's notes and the start
+// of each, and its model, effort, text and notes, cut short.
+fn prompt_record(values: Map<String, String>, session: String, params: Json, turn: i64, history: i64, text: String, context: String, said: i64) -> Json {
     var chars: i64 = 0
     var loom: i64 = 0
     var notes = List<Json>()
@@ -1479,12 +1500,18 @@ fn usage_record(session: String, params: Json, said: i64) {
     }
     var line = LinkedMap<String, Json>()
     line.insert("session", js(session))
+    line.insert("turn", int(turn))
     line.insert("chars", int(chars))
+    line.insert("history", int(history))
     line.insert("loom", int(loom))
     line.insert("notes", Json.Array(notes))
     line.insert("said", int(said))
     line.insert("summary", Json.Bool(summary))
-    if let err(e) = fs.append_text(path, "{Json.Object(line)}\n") { eprintln("fake agent: recording: {e}") }
+    line.insert("model", js(value_of(values.copy(), "model")))
+    line.insert("effort", js(value_of(values, "effort")))
+    line.insert("text", js(text))
+    line.insert("context", js(if context.len() > 2000 { context[..2000].copy() } else { context.copy() }))
+    return Json.Object(line)
 }
 
 fn main() {
