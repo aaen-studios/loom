@@ -225,8 +225,9 @@ const GITHUB =
 					<span class="room-count">{shop.colors.length} agents</span>
 				</span>
 				<span class="chips">
-					<!-- The chat's pins: how many, and the popover under it with each pin drawn as the
-					     chat draws its message (app.rs, pins_pop, pin_row). -->
+					<!-- The chat's pins: how many, and the popover centred under it, with its nub on
+					     the pin and each pin drawn as the chat draws its message (app.rs, pins_pop,
+					     pins_placed, pin_row). -->
 					<span class="pins-at">
 						<button type="button" class="chip pins-btn" data-pins aria-expanded="false" aria-label="Pinned" title="Pinned  Ctrl+Shift+P"
 							><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg
@@ -244,6 +245,7 @@ const GITHUB =
 								<div class="pp-note" data-pins-note hidden></div>
 							</div>
 						</div>
+						<span class="pp-nub" aria-hidden="true"></span>
 					</span>
 					<span class="chip brain" aria-hidden="true">
 						{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
@@ -1898,10 +1900,11 @@ const GITHUB =
 			display: none;
 		}
 	}
-	/* The Pinned popover (PLAN.md, "Pinned messages"; app.rs, pins_pop): under the header's pin,
-	   over the chat, which keeps its width. */
+	/* The Pinned popover (PLAN.md, "Pinned messages"; app.rs, pins_pop, pins_placed): over the
+	   chat, which keeps its width, 8px under the header and centred under the header's pin as the
+	   window lets it, 12px inside its edges, with a nub on the pin (demo.ts, placePins). It comes
+	   in from the pin, growing a little as it fades in. */
 	.pins-at {
-		position: relative;
 		display: inline-flex;
 	}
 	.pins-btn {
@@ -1920,11 +1923,13 @@ const GITHUB =
 	.pins-pop {
 		position: absolute;
 		z-index: 20;
-		top: calc(100% + 8px);
-		right: 0;
-		width: 460px;
-		max-width: calc(100vw - 32px);
+		top: calc(var(--layout-titlebar) + 8px);
+		left: var(--pop-left, auto);
+		right: 12px;
+		width: var(--pop-width, var(--layout-pins));
 		display: flex;
+		transform-origin: var(--nub-in, 50%) -8px;
+		animation: pins-in 0.16s cubic-bezier(0.2, 0.7, 0.3, 1);
 		flex-direction: column;
 		background: var(--raised);
 		border: 1px solid var(--line-strong);
@@ -1936,8 +1941,37 @@ const GITHUB =
 		font-size: var(--size-body);
 		color: var(--ink);
 	}
-	.pins-pop[hidden] {
+	.pins-pop[hidden],
+	.pins-pop[hidden] + .pp-nub {
 		display: none;
+	}
+	/* The nub: a square turned 45°, its top half standing on the popover's edge over its line,
+	   in its fill, with the line down its outer sides and its tip a little rounded. */
+	.pp-nub {
+		position: absolute;
+		z-index: 21;
+		top: calc(var(--layout-titlebar) + 8px + 0.5px - var(--layout-caret) / 2);
+		left: calc(var(--nub-at, 0px) - var(--layout-caret) / 2);
+		width: var(--layout-caret);
+		height: var(--layout-caret);
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-right: 0;
+		border-bottom: 0;
+		border-top-left-radius: 2.5px;
+		transform: rotate(45deg);
+		animation: pins-nub-in 0.16s cubic-bezier(0.2, 0.7, 0.3, 1);
+	}
+	@keyframes pins-in {
+		from {
+			opacity: 0;
+			transform: scale(0.96);
+		}
+	}
+	@keyframes pins-nub-in {
+		from {
+			opacity: 0;
+		}
 	}
 	.pp-head {
 		display: flex;
@@ -2172,6 +2206,10 @@ const GITHUB =
 			right: 16px;
 			bottom: 16px;
 			width: auto;
+			transform-origin: 50% 100%;
+		}
+		.pp-nub {
+			display: none;
 		}
 	}
 	.msg-menu {

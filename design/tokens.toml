@@ -59,6 +59,8 @@ page = 520           # a narrow page's column, such as an agent's edit page
 nav = 210            # a popup's nav down its left
 menu = 230           # a menu under the header
 menu-wide = 240      # the composer's plus menu
+pins = 460           # the Pinned popover under the header
+caret = 11           # the nub on a popover's top edge that points at its button: a square this size, turned 45°
 field-label = 120    # a label beside its field
 
 # How big the controls are.

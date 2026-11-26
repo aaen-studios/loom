@@ -59,6 +59,8 @@ pub mod layout {
     pub const NAV: f32 = 210.0;
     pub const MENU: f32 = 230.0;
     pub const MENU_WIDE: f32 = 240.0;
+    pub const PINS: f32 = 460.0;
+    pub const CARET: f32 = 11.0;
     pub const FIELD_LABEL: f32 = 120.0;
 }
 

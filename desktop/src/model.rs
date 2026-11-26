@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+mod popover;
 mod rooms;
+pub use popover::pop_under;
 pub use rooms::{Room, RoomUsage, Routed};
 
 /// What the app asks the core for, and when.
@@ -4314,6 +4316,15 @@ pub fn parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
     }
     out.extend(lay_out(m, &kept));
     quiet(out)
+}
+
+/// How a reply reads as a pin in the Pinned popover: as in the chat, without the line its
+/// steps fold under, so the pin starts with what was said (PLAN.md, "Pinned messages").
+pub fn pin_parts(m: &Message, tools: &Tools, shows: Shows) -> Vec<Part> {
+    parts(m, tools, shows)
+        .into_iter()
+        .filter(|part| !matches!(part, Part::Fold { .. }))
+        .collect()
 }
 
 /// Which of a reply's blocks sit inside a subagent call of the same reply: their
@@ -12013,6 +12024,34 @@ mod tests {
                 fold("1 step", false, vec![Part::Bubbles(vec![0])]),
                 Part::Bubbles(vec![2]),
             ]
+        );
+    }
+
+    #[test]
+    fn a_pin_starts_with_what_was_said() {
+        let m = turn(
+            &[
+                "text:Checking first whether there's a release.",
+                "tool:tc_1",
+                "text:Asked the shop; the notes are due at 15:00.",
+                "plan:Read the notes",
+                "text:Installed, and moved over.",
+            ],
+            false,
+            "done",
+        );
+        // In the chat its steps fold under a line; as a pin, the line is left out and what
+        // stays in view stays.
+        assert!(matches!(parts(&m, &tools(), QUIET)[0], Part::Fold { .. }));
+        assert_eq!(
+            pin_parts(&m, &tools(), QUIET),
+            vec![Part::Block(3), Part::Bubbles(vec![4])]
+        );
+        // A turn that only used tools still says so.
+        let quiet = turn(&["tool:tc_1", "tool:tc_2"], false, "done");
+        assert_eq!(
+            pin_parts(&quiet, &tools(), QUIET),
+            vec![Part::Quiet("Used 2 tools".into())]
         );
     }
 

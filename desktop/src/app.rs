@@ -266,11 +266,18 @@ enum PinNote {
 /// How long Unpinned, with its Undo, stays at the popover's foot, and Copied.
 const UNPIN_SECS: u64 = 6;
 const COPIED_MILLIS: u64 = 1600;
-/// How wide the Pinned popover is, and how much of the window's height it takes at most.
-const PINS_W: f32 = 460.0;
+/// How much of the window's height the Pinned popover takes at most, and how round its
+/// corners are.
 const PINS_TALL: f32 = 0.7;
+const PINS_RADIUS: f32 = 12.0;
+/// How far the popover drops as it comes in, from nearer its pin, and how long it takes.
+const PINS_DROP: f32 = 4.0;
+const PINS_IN: f32 = 0.16;
 /// The room a pin is drawn for: its pictures smaller than the chat's, a picture 200 wide.
 const PIN_ROOM: i32 = 248;
+/// Where the header's pin was at its last draw, in the window, and how wide the window was
+/// then, for the popover to open centred under it.
+type PinAt = Rc<Cell<Option<(Bounds<Pixels>, f32)>>>;
 
 /// The composer's + menu while it's open (PLAN.md, "The composer's + menu").
 #[derive(Clone, Default)]
@@ -362,6 +369,7 @@ pub struct Loom {
     pins_closed_at: Option<Instant>,
     pins_scroll: ScrollHandle,
     pins_keys: FocusHandle,
+    pins_button: PinAt,
     /// How tall the window was at its last draw, for the popover's most height.
     window_h: f32,
     /// When the picture viewer opened, which it fades in from.
@@ -1527,6 +1535,7 @@ ACTA_KEY=secret:ACTA_KEY",
             pins_closed_at: None,
             pins_scroll: ScrollHandle::new(),
             pins_keys: cx.focus_handle(),
+            pins_button: Rc::new(Cell::new(None)),
             window_h: 800.0,
             viewer_at: Instant::now(),
             zoom: None,
@@ -8027,7 +8036,9 @@ ACTA_KEY=secret:ACTA_KEY",
             .pins_count
             .max(self.model.messages.iter().filter(|m| m.pinned).count());
         let pins_open = self.pins.is_some();
-        let pop = self.pins_pop(cx);
+        let pop = self
+            .pins_pop(cx)
+            .and_then(|pop| self.pins_placed(pop, cx.reduce_motion()));
         let pins = div()
             .id("pins-toggle")
             .role(Role::Button)
@@ -8062,20 +8073,28 @@ ACTA_KEY=secret:ACTA_KEY",
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_pins(window, cx);
             }));
-        // The popover hangs from the button's bottom right, over the chat.
-        let pins = div().relative().child(pins).when_some(pop, |d, pop| {
-            d.child(
-                div().absolute().top_full().right_0().child(
-                    deferred(
-                        anchored()
-                            .anchor(Anchor::TopRight)
-                            .snap_to_window_with_margin(px(space::S))
-                            .child(div().mt(px(space::S)).child(pop)),
-                    )
-                    .with_priority(1),
-                ),
+        // Where the pin is, for the popover to open centred under it: placed again the next
+        // frame when it moves, as when the window is resized.
+        let at = self.pins_button.clone();
+        let pins = div()
+            .relative()
+            .child(pins)
+            .child(
+                canvas(
+                    move |b, window, _| {
+                        let now = Some((b, window.viewport_size().width.as_f32()));
+                        if at.replace(now) != now {
+                            window.on_next_frame(|window, _| window.refresh());
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
             )
-        });
+            .children(pop);
         // A group chat: its mark and name, which open its settings, and its pins.
         if let Some(room) = self.model.room_open().cloned() {
             return bar.child(self.room_head(&room, cx)).child(
@@ -17257,10 +17276,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 .role(Role::Dialog)
                 .aria_label("Pinned")
                 .occlude()
-                .w(px(PINS_W))
+                .w_full()
                 .flex()
                 .flex_col()
-                .rounded(px(12.0))
+                .rounded(px(PINS_RADIUS))
                 .border_1()
                 .border_color(p.line_strong)
                 .bg(p.raised)
@@ -17293,6 +17312,45 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(body)
                         .children(note),
                 ),
+        )
+    }
+
+    /// The Pinned popover in its place, over the chat: centred under the header's pin as
+    /// the window lets it, a gap under the header, with its nub on the pin
+    /// (`model::pop_under`). It fades in, dropping a little from nearer the pin unless the
+    /// system asks for less motion. Nothing until the pin has been drawn once.
+    fn pins_placed(&self, pop: Stateful<Div>, reduce_motion: bool) -> Option<AnyElement> {
+        let (pin, window_w) = self.pins_button.get()?;
+        let half = layout::CARET * std::f32::consts::FRAC_1_SQRT_2;
+        let at = model::pop_under(
+            (pin.left().as_f32(), pin.right().as_f32()),
+            window_w,
+            layout::PINS,
+            space::M,
+            PINS_RADIUS + half,
+        );
+        let k = motion::arrive(&SharedString::from("pins-pop"), PINS_IN);
+        let drop = if reduce_motion {
+            0.0
+        } else {
+            PINS_DROP * (1.0 - k)
+        };
+        Some(
+            deferred(
+                anchored()
+                    .position(point(px(at.left), px(layout::TITLEBAR + space::S - drop)))
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(at.width))
+                            .opacity(k)
+                            .child(pop)
+                            .child(pins_nub(self.p, at.nub)),
+                    ),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
@@ -22966,12 +23024,16 @@ fn reply(
         );
     }
     // What shows in the reply, and how it reads: its answer, and its steps folded
-    // under one line (`model::parts`).
+    // under one line (`model::parts`), which a pin leaves out (`model::pin_parts`).
     let shows = model::Shows {
         tools: show.tools != Tools::Hidden,
         thoughts: show.thoughts != Thoughts::Hidden,
     };
-    let parts = model::parts(m, tools, shows);
+    let parts = if show.pin.is_some() {
+        model::pin_parts(m, tools, shows)
+    } else {
+        model::parts(m, tools, shows)
+    };
     // Its sources hang from the bubble of its last words, or else sit under it all.
     let sources_at = (!m.sources.is_empty())
         .then(|| {
@@ -23640,6 +23702,51 @@ fn time_of(ms: i64) -> String {
         chrono::LocalResult::Single(t) => t.format("%H:%M").to_string(),
         _ => String::new(),
     }
+}
+
+/// The Pinned popover's nub, `at` from its left: the top half of a square `layout::CARET`
+/// across turned 45°, standing on the popover's top edge, in its fill and over its line
+/// there, with the line down its two outer sides and its tip a little rounded.
+fn pins_nub(p: Palette, at: f32) -> impl IntoElement {
+    let half = layout::CARET * std::f32::consts::FRAC_1_SQRT_2;
+    // A pixel's room round it, for the line's edges.
+    let room = 1.0;
+    canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            let x = b.origin.x + px(half + room);
+            // Down the middle of the popover's line, where the nub's sides meet it.
+            let edge = b.origin.y + px(half + room + 0.5);
+            let tip = edge - px(half);
+            // The tip, rounded from this far down each side.
+            let round = 2.5 * std::f32::consts::FRAC_1_SQRT_2;
+            let sides = |b: &mut PathBuilder| {
+                b.move_to(point(x - px(half), edge));
+                b.line_to(point(x - px(round), tip + px(round)));
+                b.curve_to(point(x + px(round), tip + px(round)), point(x, tip));
+                b.line_to(point(x + px(half), edge));
+            };
+            // Down past the popover's line, into its fill, so none of the line shows through.
+            let mut fill = PathBuilder::fill();
+            sides(&mut fill);
+            fill.line_to(point(x + px(half), edge + px(1.5)));
+            fill.line_to(point(x - px(half), edge + px(1.5)));
+            fill.close();
+            if let Ok(path) = fill.build() {
+                window.paint_path(path, p.raised);
+            }
+            let mut line = PathBuilder::stroke(px(1.0));
+            sides(&mut line);
+            if let Ok(path) = line.build() {
+                window.paint_path(path, p.line_strong);
+            }
+        },
+    )
+    .absolute()
+    .left(px(at - half - room))
+    .top(px(-half - room))
+    .w(px(2.0 * (half + room)))
+    .h(px(half + 3.0 * room))
 }
 
 /// When a pinned message was sent, over it in the Pinned popover: "Today 12:57",
