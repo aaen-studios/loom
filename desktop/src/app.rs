@@ -58,6 +58,8 @@ use emoji_ui::{Greeting, RowKey};
 mod form_drafts;
 #[path = "list_page.rs"]
 mod list_page;
+#[path = "routine_off_view.rs"]
+mod routine_off_view;
 #[path = "routines.rs"]
 mod routines;
 #[path = "spools.rs"]
@@ -11181,7 +11183,7 @@ ACTA_KEY=secret:ACTA_KEY",
         });
         // Another agent's thread is read only: where the composer would be, the way to
         // your own chat with the agent it's under.
-        let theirs = self.model.ask_open().is_some();
+        let theirs = self.model.ask_open().is_some_and(|k| !k.made);
         let strip = match (
             self.model.task_open().cloned(),
             agent.as_ref(),
@@ -22695,6 +22697,7 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         | CardBody::SignIn { .. }
         | CardBody::McpAdd { .. }
         | CardBody::SecretAsk { .. }
+        | CardBody::RoutineOff { .. }
         | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
@@ -28402,6 +28405,13 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         _ => None,
     } {
         return watch_view::update_line(p, line.0, line.1, joined, column, time_line, i.line_cut);
+    }
+    // A routine that turned off on its own: its card, to turn it on (routine_off_view.rs).
+    if let Some((m, card)) = match &row {
+        Row::Message(m) => model::routine_off::card_of(m).map(|c| (m, c)),
+        _ => None,
+    } {
+        return routine_off_view::row(p, m, card, column, time_line, show.text_scale, this);
     }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.

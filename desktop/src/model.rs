@@ -16,6 +16,7 @@ pub mod header;
 mod popover;
 pub mod popup;
 mod rooms;
+pub mod routine_off;
 pub mod t3;
 pub mod watch;
 pub use popover::pop_under;
@@ -1838,19 +1839,29 @@ pub struct Conversation {
     /// For another agent's thread with it (`message_agent`), that agent's id, or
     /// `plugin:ID` for a plugin's panel. Not the agent's chat either.
     pub asked_by: Option<String>,
+    /// Whether it's its agent's chat with the person (`main`): the one the chat shows,
+    /// however new any other is.
+    pub main: bool,
+    /// For a thread an agent made with conversation.create, that agent's id (or a
+    /// plugin's or a script's): a thread beside the chat, never the chat.
+    pub made_by: Option<String>,
     pub title: String,
 }
 
-/// Another agent's thread with an agent, as the sidebar lists it under that agent.
+/// Another agent's thread with an agent, or a thread an agent made beside its chat, as
+/// the sidebar lists it under that agent.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     pub conversation: String,
-    /// The agent that asks, when it's one of the person's agents still: its look.
+    /// The agent that asks or made it, when it's one of the person's agents still: its look.
     pub by: Option<String>,
     /// "From Casper", by the asking agent's name now, or the thread's own title.
     pub label: String,
     /// A reply came in it while it wasn't open.
     pub unread: bool,
+    /// One an agent made (`made_by`), which the person writes in too, rather than
+    /// another agent's, which is read only.
+    pub made: bool,
 }
 
 /// A side question about an agent's chat, and its answer once it's come
@@ -2339,6 +2350,21 @@ pub enum CardBody {
         sending: bool,
         error: String,
     },
+    /// A routine turned off by something other than its person (loom's own card, in a
+    /// `loom` message; `model/routine_off.rs`): which routine, why, the agent that
+    /// paused it (its id, and its name) or how many failures did, how it stands (`off`,
+    /// `on` or `deleted`), whether Turn on is on its way, and what the instance said to
+    /// one it refused.
+    RoutineOff {
+        routine: String,
+        why: String,
+        paused_by: String,
+        agent: String,
+        failures: i64,
+        state: String,
+        sending: bool,
+        error: String,
+    },
 }
 
 /// A field the person fills in on a card: what it's for, whether it's hidden as it's
@@ -2515,6 +2541,7 @@ impl Card {
                 signing: false,
                 tools: strings(v.get("tools")),
             },
+            "routine_off" => routine_off::body_of(v),
             "secret_ask" => CardBody::SecretAsk {
                 call: s(v, "call"),
                 agent: s(v, "agent"),
@@ -6277,6 +6304,9 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// Turn on, on the cards routines leave when they turn off on their own
+    /// (`model/routine_off.rs`).
+    routine_off: routine_off::Turning,
     /// The person's watches, and the cards their lines show (`model/watch.rs`).
     pub watch: watch::Watches,
     /// The files sent or received lately in the person's chats, newest first, for the
@@ -6768,9 +6798,8 @@ impl Model {
         Some(json!({"t": "cmd", "id": id, "name": name, "args": args}))
     }
 
-    /// The conversation the chat shows: the open task's, or else the selected
-    /// agent's chat, its newest that isn't a task's, a branch, a routine's thread or
-    /// another agent's thread with it, however new that is.
+    /// The conversation the chat shows: the open task's, group chat or thread, or else
+    /// the selected agent's chat (`chat_of`).
     pub fn conversation(&self) -> Option<String> {
         // A group chat by its id, as a branch is.
         if let Some(room) = &self.open_room {
@@ -6783,35 +6812,61 @@ impl Model {
         if let Some(branch) = &self.open_branch {
             return Some(branch.clone());
         }
-        let agent = self.selected.as_ref()?;
-        self.conversations
-            .iter()
+        self.chat_of(self.selected.as_ref()?)
+    }
+
+    /// `agent`'s chat with the person: the conversation the instance marks `main`,
+    /// however new any other is. An instance from before `main` marks none, and its
+    /// chat is then its newest that isn't a task's, a branch, a routine's thread or a
+    /// thread an agent keeps with it or made beside it.
+    pub fn chat_of(&self, agent: &str) -> Option<String> {
+        let mine = || self.conversations.iter().filter(|c| c.agent == agent);
+        if let Some(c) = mine().find(|c| c.main) {
+            return Some(c.id.clone());
+        }
+        mine()
             .find(|c| {
-                &c.agent == agent
-                    && c.task.is_none()
+                c.task.is_none()
                     && !c.side
                     && c.branch_of.is_none()
                     && c.routine.is_none()
                     && c.asked_by.is_none()
+                    && c.made_by.is_none()
             })
             .map(|c| c.id.clone())
     }
 
-    /// The threads other agents (and plugins' panels) keep with `agent`, newest first.
+    /// The threads other agents (and plugins' panels) keep with `agent`, and the ones
+    /// agents made beside its chat, newest first.
     pub fn asks(&self, agent: &str) -> Vec<Ask> {
         self.conversations
             .iter()
-            .filter(|c| c.agent == agent)
+            .filter(|c| c.agent == agent && !c.main)
             .filter_map(|c| {
-                let by = c.asked_by.as_deref()?;
-                let asker = self.agent(by);
+                if let Some(by) = c.asked_by.as_deref() {
+                    let asker = self.agent(by);
+                    return Some(Ask {
+                        conversation: c.id.clone(),
+                        by: asker.map(|a| a.id.clone()),
+                        label: asker
+                            .map(|a| format!("From {}", a.name))
+                            .unwrap_or_else(|| c.title.clone()),
+                        unread: self.asks_unread.contains(&c.id),
+                        made: false,
+                    });
+                }
+                // One an agent made is labelled with its own title.
+                let by = c.made_by.as_deref()?;
                 Some(Ask {
                     conversation: c.id.clone(),
-                    by: asker.map(|a| a.id.clone()),
-                    label: asker
-                        .map(|a| format!("From {}", a.name))
-                        .unwrap_or_else(|| c.title.clone()),
+                    by: self.agent(by).map(|a| a.id.clone()),
+                    label: if c.title.trim().is_empty() {
+                        "New conversation".into()
+                    } else {
+                        c.title.clone()
+                    },
                     unread: self.asks_unread.contains(&c.id),
+                    made: true,
                 })
             })
             .collect()
@@ -6820,7 +6875,9 @@ impl Model {
     /// The thread the chat shows, when it's another agent's with the selected one.
     pub fn ask_open(&self) -> Option<Ask> {
         let open = self.branch_open()?;
-        open.asked_by.as_ref()?;
+        if open.asked_by.is_none() && open.made_by.is_none() {
+            return None;
+        }
         self.asks(&open.agent)
             .into_iter()
             .find(|a| a.conversation == open.id)
@@ -6935,7 +6992,13 @@ impl Model {
                 self.open_task = c.task;
                 self.dirty.insert(List::Messages);
             }
-            Some(c) if c.branch_of.is_some() || c.routine.is_some() || c.asked_by.is_some() => {
+            Some(c)
+                if !c.main
+                    && (c.branch_of.is_some()
+                        || c.routine.is_some()
+                        || c.asked_by.is_some()
+                        || c.made_by.is_some()) =>
+            {
                 self.show_branch(Some(c.id));
             }
             _ => self.show_branch(None),
@@ -7689,12 +7752,14 @@ impl Model {
                 {
                     // A reply in another chat, as it comes; catch-up is what was seen before.
                     let about = self.conversations.iter().find(|c| c.id == conversation);
-                    let asked = about.is_some_and(|c| c.asked_by.is_some());
+                    let asked = about
+                        .is_some_and(|c| !c.main && (c.asked_by.is_some() || c.made_by.is_some()));
                     let agent = about
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| s(&message, "agent"));
-                    // One in another agent's thread with it marks that thread, not the
-                    // agent's chat with the person; one in a group chat marks that.
+                    // One in another agent's thread with it, or one an agent made, marks
+                    // that thread, not the agent's chat with the person; one in a group
+                    // chat marks that.
                     if asked {
                         self.asks_unread.insert(conversation.clone());
                     } else if self.room(&conversation).is_some() {
@@ -8133,6 +8198,10 @@ impl Model {
         }
         // A card for the composer, the person's boards, or a refresh of cards.
         if self.take_card_answer(&id, f) {
+            return;
+        }
+        // Turn on, on a routine's card (src/model/routine_off.rs).
+        if self.take_routine_on_answer(&id, f) {
             return;
         }
         // A T3 thread's answer, the start form's, or the threads followed (src/model/t3.rs).
@@ -9286,6 +9355,8 @@ impl Model {
                         routine: c.get("routine").and_then(Value::as_str).map(String::from),
                         program: c.get("program").and_then(Value::as_str).map(String::from),
                         asked_by: c.get("asked_by").and_then(Value::as_str).map(String::from),
+                        main: c.get("main").and_then(Value::as_bool).unwrap_or(false),
+                        made_by: c.get("made_by").and_then(Value::as_str).map(String::from),
                         title: s(c, "title"),
                     })
                     .collect();
@@ -9468,6 +9539,7 @@ impl Model {
             }
         }
         self.line_cards(&mut out);
+        self.routine_off_cards(&mut out);
         let conversation = self.conversation();
         for r in &self.runs {
             // A routine's quiet run shows only what its agent posts, which comes as messages.
@@ -9970,9 +10042,11 @@ impl Model {
     }
 
     fn send_frame(&self, agent: String, text: &str) -> Value {
+        let chat = self.chat_of(&agent);
         let mut frame = json!({"t": "send", "agent": agent, "text": text});
-        // Into the task's or the branch's conversation when the chat shows one; the core finds
-        // the agent's chat otherwise. Into a group chat, the instance picks who answers.
+        // Into the conversation the chat shows: the task's, the branch's or the thread's
+        // when it shows one, and the agent's chat otherwise, which the core finds (and
+        // makes) while the app has none. Into a group chat, the instance picks who answers.
         if let Some(room) = &self.open_room {
             frame["conversation"] = json!(room);
             if let Some(o) = frame.as_object_mut() {
@@ -9982,6 +10056,8 @@ impl Model {
             frame["conversation"] = json!(task.conversation);
         } else if let Some(branch) = &self.open_branch {
             frame["conversation"] = json!(branch);
+        } else if let Some(chat) = chat {
+            frame["conversation"] = json!(chat);
         }
         frame
     }
@@ -12368,6 +12444,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -12473,6 +12551,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -12524,6 +12604,8 @@ mod tests {
             branch_at: None,
             routine: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             program: None,
             title: String::new(),
         }];
@@ -13918,6 +14000,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -13950,6 +14034,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -14335,6 +14421,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -14446,6 +14534,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -14541,6 +14631,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -14640,6 +14732,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -14677,6 +14771,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15138,6 +15234,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -15184,6 +15282,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             },
             Conversation {
@@ -15196,6 +15296,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             },
         ];
@@ -15254,6 +15356,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             })
             .collect();
@@ -15389,6 +15493,8 @@ mod tests {
             routine: routine.map(String::from),
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         };
         // The thread first, as if it were newer than the chat.
@@ -15462,6 +15568,91 @@ mod tests {
         again.take(&items);
         again.select(Some("a_2".into()));
         assert_eq!(again.conversation().as_deref(), Some("c_3"));
+    }
+
+    #[test]
+    fn an_agents_row_opens_its_marked_chat_whatever_it_makes() {
+        // As the core gives them, newest first: a conversation Casper made for itself
+        // mid-task, with the newest message, an older chat from before the person started
+        // a new one, and the person's chat with Casper, marked main.
+        let items = json!({"t": "core.data", "what": "conversations", "items": [
+            {"id": "c_22", "agent": "a_2", "title": "Plenpartner warm-up", "made_by": "a_2"},
+            {"id": "c_4", "agent": "a_2", "title": ""},
+            {"id": "c_5", "agent": "a_2", "title": "", "main": true},
+            {"id": "c_1", "agent": "a_1", "title": "", "main": true}
+        ]});
+        let agents = json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Redstone", "color": "red"},
+            {"id": "a_2", "name": "Casper", "color": "violet"}
+        ]});
+        let mut m = Model::new();
+        m.take(&agents);
+        m.take(&items);
+        m.select(Some("a_2".into()));
+        assert_eq!(
+            m.conversation().as_deref(),
+            Some("c_5"),
+            "opening Casper shows the person's chat with it"
+        );
+        // What it made is a row under it, by its own title, that the person writes in.
+        let threads = m.asks("a_2");
+        assert_eq!(threads.len(), 1);
+        assert_eq!(threads[0].conversation, "c_22");
+        assert_eq!(threads[0].label, "Plenpartner warm-up");
+        assert_eq!(threads[0].by.as_deref(), Some("a_2"));
+        assert!(threads[0].made);
+        // A message the person sends goes to the chat they see, named.
+        let sent = m.send("hello").unwrap();
+        assert_eq!(sent["conversation"], "c_5");
+        // A reply in the thread marks the thread, not Casper's chat.
+        m.select(Some("a_1".into()));
+        m.synced = true;
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_22", "message": {"id": "msg_9", "conversation": "c_22", "role": "agent", "agent": "a_2"}}));
+        assert!(m.unread.is_empty());
+        assert!(m.asks("a_2")[0].unread);
+        // Opened on purpose, it shows in the chat's place and takes what's sent; and the
+        // chat comes back.
+        m.select(Some("a_2".into()));
+        m.show_branch(Some("c_22".into()));
+        assert_eq!(m.conversation().as_deref(), Some("c_22"));
+        assert!(m.ask_open().is_some_and(|k| k.made));
+        assert_eq!(m.send("for the thread").unwrap()["conversation"], "c_22");
+        m.show_branch(None);
+        assert_eq!(m.conversation().as_deref(), Some("c_5"));
+        // A notification about it opens it; one about the chat, the chat.
+        m.open_about("a_2", "c_22");
+        assert_eq!(m.conversation().as_deref(), Some("c_22"));
+        m.open_about("a_2", "c_5");
+        assert_eq!(m.conversation().as_deref(), Some("c_5"));
+        // The person's new chat is the chat once the instance marks it, and the old one
+        // is neither the chat nor a thread.
+        m.take(
+            &json!({"t": "core.data", "what": "conversations", "items": [
+                {"id": "c_30", "agent": "a_2", "title": "", "main": true},
+                {"id": "c_22", "agent": "a_2", "title": "Plenpartner warm-up", "made_by": "a_2"},
+                {"id": "c_5", "agent": "a_2", "title": ""},
+                {"id": "c_1", "agent": "a_1", "title": "", "main": true}
+            ]}),
+        );
+        assert_eq!(m.conversation().as_deref(), Some("c_30"));
+        assert_eq!(m.asks("a_2").len(), 1);
+        // After a restart, from the same lists.
+        let mut again = Model::new();
+        again.take(&agents);
+        again.take(&items);
+        again.select(Some("a_2".into()));
+        assert_eq!(again.conversation().as_deref(), Some("c_5"));
+        // From an instance before chats were marked, the newest that may be the chat.
+        let mut older = Model::new();
+        older.take(&agents);
+        older.take(
+            &json!({"t": "core.data", "what": "conversations", "items": [
+                {"id": "c_22", "agent": "a_2", "title": "Plenpartner warm-up", "made_by": "a_2"},
+                {"id": "c_5", "agent": "a_2", "title": ""}
+            ]}),
+        );
+        older.select(Some("a_2".into()));
+        assert_eq!(older.conversation().as_deref(), Some("c_5"));
     }
 
     #[test]
@@ -15848,6 +16039,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             },
             Conversation {
@@ -15860,6 +16053,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             },
         ];
@@ -16347,6 +16542,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         };
         let mut m = Model::new();
@@ -16371,6 +16568,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: "Socks, again".into(),
             ..chat
         });
@@ -16459,6 +16658,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             },
             Conversation {
@@ -16471,6 +16672,8 @@ mod tests {
                 routine: None,
                 program: None,
                 asked_by: None,
+                main: false,
+                made_by: None,
                 title: String::new(),
             },
         ];
@@ -16489,12 +16692,12 @@ mod tests {
         m.take(&json!({"t": "event", "kind": "task.updated", "task": {"id": "task_1", "agent": "a_1", "conversation": "c_task", "title": "Count", "status": "failed", "error": "no socks"}}));
         assert_eq!(m.tasks.len(), 1, "an update replaces the task");
         assert_eq!(m.tasks[0].error, "no socks");
-        // Another agent closes it, and the chat's send names no conversation.
+        // Another agent closes it, and the chat's send goes to the chat.
         m.select(Some("a_2".into()));
         assert!(m.task_open().is_none());
         m.select(Some("a_1".into()));
         assert_eq!(m.conversation().as_deref(), Some("c_chat"));
-        assert!(m.send("hi").unwrap().get("conversation").is_none());
+        assert_eq!(m.send("hi").unwrap()["conversation"], "c_chat");
     }
 
     #[test]
@@ -16510,6 +16713,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }];
         m.select(Some("a_1".into()));
@@ -17002,6 +17207,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         };
         m.conversations = vec![
