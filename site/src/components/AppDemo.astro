@@ -612,6 +612,24 @@ const BOARD_LAYERS = [
 <template id="demo-tool">
 	<div class="tool-line"><span class="prompt">›_</span><span class="title"></span><span class="mark">…</span></div>
 </template>
+<!-- A T3 thread the reply started, as the app draws its card (t3_view.rs, thread_card): the
+     strand beside its title in the colour of where it is, waving while it works and straight
+     once it's done, its time at the title's end in the same colour, `T3 · project · model ·
+     effort` in mono under the title, then its latest step while it works, or its pull request. -->
+<template id="demo-t3">
+	<div class="t3">
+		<div class="t3-head">
+			<svg data-thread data-color="sky" data-mood="writing" width="26" height="14" class="t3-strand" aria-hidden="true"></svg>
+			<div class="t3-titles">
+				<div class="t3-title">Write the 2.4.1 release notes</div>
+				<div class="t3-sub">T3 · shop · Opus 5.5 · high</div>
+			</div>
+			<span class="t3-side"></span>
+		</div>
+		<div class="t3-step"><span class="prompt">›_</span><span class="t3-step-words">git log v2.4.0..v2.4.1</span></div>
+		<div class="t3-chips"><span class="t3-chip">PR #214</span></div>
+	</div>
+</template>
 <template id="demo-approval">
 	<div class="row approval fresh">
 		<div class="card">
@@ -3171,6 +3189,97 @@ const BOARD_LAYERS = [
 	}
 	.approval.answered .card-done {
 		display: flex;
+	}
+	/* A T3 thread's card: the card frame, its edge lightly in sky while the thread works. */
+	.t3 {
+		--tone: var(--thread-sky);
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		max-width: 600px;
+		padding: 16px;
+		background: var(--card-fill);
+		border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
+		border-radius: var(--radius-bubble);
+		box-shadow: var(--card-shadow);
+	}
+	.t3.done {
+		--tone: var(--ok);
+		border-color: var(--card-edge);
+	}
+	.t3-head {
+		display: flex;
+		align-items: flex-start;
+		gap: 12px;
+	}
+	/* Level with the title's first line, in the colour of where the thread is. */
+	.t3-strand {
+		flex: none;
+		margin-top: 2px;
+	}
+	.t3 [data-thread] path {
+		stroke: var(--tone) !important;
+	}
+	.t3-titles {
+		display: flex;
+		flex: 1;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+	.t3-title {
+		color: var(--ink);
+		font-weight: var(--weight-semibold);
+		line-height: 1.35;
+	}
+	.t3-sub {
+		overflow: hidden;
+		font-family: var(--mono);
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.t3-side {
+		flex: none;
+		font-size: var(--size-small);
+		font-weight: var(--weight-semibold);
+		color: var(--tone);
+		line-height: 1.5;
+	}
+	.t3-step {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 8px 12px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		background: var(--card-inset);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.t3-step .prompt {
+		font-family: var(--mono);
+		color: var(--ink-3);
+	}
+	.t3-chips {
+		display: none;
+		gap: 8px;
+	}
+	.t3.done .t3-step {
+		display: none;
+	}
+	.t3.done .t3-chips {
+		display: flex;
+	}
+	.t3-chip {
+		padding: 2px 8px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		background: var(--card-inset);
+		font-family: var(--mono);
+		font-size: var(--size-caption);
+		color: var(--ink-2);
 	}
 	.b {
 		height: var(--control-button-small);

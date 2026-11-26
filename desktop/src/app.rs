@@ -46,6 +46,8 @@ mod rules;
 mod learned;
 #[path = "room_view.rs"]
 mod room_view;
+#[path = "t3_view.rs"]
+mod t3_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
@@ -288,6 +290,8 @@ enum Screen {
     Aside,
     Page,
     Tables,
+    /// The form that starts a T3 thread.
+    T3Start,
     Import,
     Appearance,
     ChatPrefs,
@@ -656,6 +660,8 @@ pub struct Loom {
     confirm_delete: bool,
     /// The routine page's schedule fields, history and week (routines.rs).
     routine_ui: routines::RoutineUi,
+    /// The form that starts a T3 thread, beside the chat.
+    t3_ui: t3_view::T3Ui,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
     /// `Some(Some(id))` for one being changed. The form's agent and switches go with it.
@@ -1282,6 +1288,7 @@ impl Loom {
         let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_ui = routines::RoutineUi::new(window, cx);
+        let t3_ui = t3_view::T3Ui::new(window, cx);
         let list_ui = list_page::ListUi::new(window, cx);
         let task_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -1828,6 +1835,7 @@ ACTA_KEY=secret:ACTA_KEY",
             form_at: Instant::now(),
             confirm_delete: false,
             routine_ui,
+            t3_ui,
             routine_prompt_in,
             routine_open: None,
             routine_agent: None,
@@ -2391,6 +2399,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         self.model.page = None;
         self.model.tables_open = false;
+        self.model.t3.form = None;
         self.side = None;
         self.model.editing = None;
         cx.notify();
@@ -2931,6 +2940,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.core.send(&f.to_string());
         }
         for f in self.model.card_fetches(model::now_ms()) {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.t3_fetches() {
             self.core.send(&f.to_string());
         }
     }
@@ -3636,6 +3648,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .map_or_else(|| "New group chat".to_string(), |r| r.name.clone()),
             ),
             Screen::Tables => (Ico::Sheet, format!("{name}'s tables")),
+            Screen::T3Start => (Ico::SquareTerminal, "Start a T3 thread".to_string()),
             Screen::Aside => (
                 Ico::MessageCircleQuestionMark,
                 format!("Ask {name} on the side"),
@@ -3663,6 +3676,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Memory => self.memory_page(cx),
             Screen::Room => self.room_panel(window, cx),
             Screen::Tables => self.tables_panel(cx),
+            Screen::T3Start => self.t3_start_panel(cx),
             Screen::Aside => self.aside_page(&name),
             // The page's web view sits over this, once it's here.
             Screen::Page if self.model.page_path().is_none() => div()
@@ -9543,6 +9557,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 cx.notify();
             }
+            PlusRow::StartT3 => {
+                self.shut_plus(window, cx);
+                self.open_t3_start(window, cx);
+            }
             PlusRow::Manage(s) => {
                 self.shut_plus(window, cx);
                 self.open(
@@ -9628,6 +9646,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 };
                 (Ico::Settings, title.into(), None)
             }
+            PlusRow::StartT3 => (Ico::SquareTerminal, "Start a T3 thread".into(), None),
         }
     }
 
@@ -22880,6 +22899,11 @@ fn card_extensions() -> MarkdownExtensions {
 /// Opens a card a message's words link to (`model::CARD_LINK`), in Acta. Gives whether
 /// `url` was one.
 fn open_card_link(url: &str, cx: &mut App) -> bool {
+    // A T3 thread's link opens its page in T3's app, once its card is known.
+    if let Some(page) = t3_view::page_of(url) {
+        cx.open_url(&page);
+        return true;
+    }
     let Some(id) = url.strip_prefix(model::CARD_LINK) else {
         return false;
     };
@@ -24608,6 +24632,12 @@ fn reply(
             );
         }
         body = body.child(chips);
+    }
+    // The T3 threads it started or names, each a card.
+    if show.pin.is_none() {
+        if let Some(cards) = t3_view::thread_cards(p, m, show.text_scale, &this) {
+            body = body.child(cards);
+        }
     }
     // A pin has its agent's thread and name over it, in the Pinned popover.
     if show.pin.is_some() {
@@ -26984,6 +27014,7 @@ mod row_tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             status: "done".into(),
         }
     }
@@ -28014,6 +28045,25 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.
     if let Row::Message(m) = &row {
+        // A T3 thread the person started: its card, where the chat's replies go.
+        if model::t3::is_start_line(m) {
+            return div()
+                .id(SharedString::from(format!("msg-{}", m.id)))
+                .role(Role::ListItem)
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .px(px(space::XL))
+                .children(time_line)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(column))
+                        .py(px(space::S))
+                        .children(t3_view::thread_cards(p, m, show.text_scale, &this)),
+                );
+        }
         if m.role == "loom" {
             let words = m.blocks.first().map(|b| b.text.clone()).unwrap_or_default();
             let rule = || div().flex_1().h(px(1.0)).bg(p.line_strong);
@@ -28107,7 +28157,8 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             open,
             this.clone(),
             None,
-        ),
+        )
+        .children(t3_view::thread_cards(p, m, show.text_scale, &this)),
         Row::Message(m) => reply(
             p,
             m,

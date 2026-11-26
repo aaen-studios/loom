@@ -36,6 +36,7 @@ import server.codemode.{Tool}
 import server.icons
 import server.mcpclient.{Server}
 import server.mcpclient
+import server.t3
 
 const CALL_WAIT: u32 = 3600000    // message_agent waits on a whole reply
 const DENO_WAIT: u32 = 900000     // the first script waits while Deno is fetched
@@ -627,10 +628,17 @@ impl Code {
         } else {
             self.servers.insert(t.server.copy(), server)
         }
-        if act > 0 {
+        // A T3 tool that started a thread or sent it work: the instance puts its card
+        // on the reply (PLAN.md, "T3 threads").
+        var threads = List<Json>()
+        if why.len() == 0 {
+            if let r = t3.started_by("{value}") { threads.push(Obj.new().s("env", r.env.copy()).s("thread", r.thread.copy()).done()) }
+        }
+        if act > 0 or threads.len() > 0 {
             var done = Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy())
             // A thread started on T3: the instance wakes the agent when it finishes.
-            if why.len() == 0 and t.name == "t3_thread_launch" { done = done.s("server", t.server.copy()).j("launched", value.copy()) }
+            if act > 0 and why.len() == 0 and t.name == "t3_thread_launch" { done = done.s("server", t.server.copy()).j("launched", value.copy()) }
+            if threads.len() > 0 { done = done.j("threads", Json.Array(threads)) }
             _ = link.send("/api/mcp/done", done.done())
         }
         if why.len() > 0 { fail "{why}" }

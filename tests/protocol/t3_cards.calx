@@ -1,0 +1,257 @@
+module tests.protocol.t3_cards
+
+// T3 Code's threads in messages (PLAN.md, "T3 threads"), against a fake T3
+// (tests/fake_t3) added as the person's MCP server `t3`. With no T3 connected, a
+// thread's link is plain words. Once it is, a message's thread links, and the
+// threads an agent's T3 tool call started in its reply, are looked up as the
+// person and kept on the message as `threads`, which comes with message.updated:
+// its title, project, model, state, latest step, time and pull requests. While a
+// device shows the message (t3.view), a thread still going is looked up again
+// every few seconds: a question it waits on comes with its choices and is
+// answered with t3.answer through T3's MCP tools; an approval is answered over
+// T3's /ws, and when /ws won't take it, the card says it's answered in T3. A
+// finished thread comes as done with its pull request, a failed one with why.
+// t3.form gives the start form its servers, projects and models; t3.start
+// launches a thread with its effort, and its card lands in the chat as a line
+// from loom.
+//
+//     calx tests/protocol/t3_cards.calx
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, calx, check}
+
+const LINK: str = "t3-thread://v2/env-test/mcp:fix"
+
+fn fetch_json(address: String) -> Json ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return try parse(String.from_utf8(r.body) ?? String())
+}
+
+fn calls(fake: String, key: str) -> i64 ! Error {
+    return int_at(try fetch_json("{fake}/test/calls"), key) ?? 0
+}
+
+fn send(app: Session, conversation: String, cid: str, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", text).done())
+}
+
+// The next message of `role` created in `conversation`, among the frames from
+// `mark` on, read already or still to come; `mark` moves past it.
+fn created(app: mut Session, mark: mut usize, conversation: String, role: str) -> Json ! Error {
+    loop {
+        while mark < app.frames.len() {
+            let f = app.frames[mark].copy()
+            mark += 1
+            if str_at(f.copy(), "kind") != some(String("message.created")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "role") == some(String(role)) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+        }
+        _ = try app.until("event", "")
+    }
+}
+
+// Message `id` as it was last created or updated among the frames read.
+fn latest(frames: List<Json>, id: String) -> Json {
+    var out = Json.Null
+    for f in frames {
+        let kind = str_at(f.copy(), "kind") ?? String()
+        if kind != "message.created" and kind != "message.updated" { continue }
+        let m = at(f.copy(), "message")
+        if str_at(m.copy(), "id") == some(id.copy()) { out = m }
+    }
+    return out
+}
+
+// Thread `thread`'s card on message `id`, once `ok` says it's as wanted.
+fn card_when(app: mut Session, id: String, thread: str, wanted: fn(Json) -> bool) -> Json ! Error {
+    loop {
+        let card = at(at(latest(app.frames.copy(), id.copy()), "threads"), thread)
+        if card != Json.Null and wanted(card.copy()) { return card }
+        _ = try app.until("event", "")
+    }
+}
+
+fn any_card(c: Json) -> bool {
+    return str_at(c, "state") != none
+}
+
+fn asks_question(c: Json) -> bool {
+    return str_at(at(c, "ask"), "kind") == some(String("question"))
+}
+
+fn asks_approval(c: Json) -> bool {
+    return str_at(at(c, "ask"), "kind") == some(String("approval"))
+}
+
+fn answered_in_t3(c: Json) -> bool {
+    return at(at(c, "ask"), "in_t3") == Json.Bool(true)
+}
+
+fn working(c: Json) -> bool {
+    return str_at(c, "state") == some(String("working"))
+}
+
+fn done(c: Json) -> bool {
+    return str_at(c, "state") == some(String("done"))
+}
+
+fn failed(c: Json) -> bool {
+    return str_at(c, "state") == some(String("failed"))
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var seen = app.frames.len()
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Coder")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+
+    // --- No T3 connected ---
+    try send(app, chat.copy(), "m_1", "See [the test fix]({LINK}).")
+    let plain = try created(mut app, mut seen, chat.copy(), "person")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    try check(at(plain, "threads") == Json.Null, "with no T3 connected, a thread's link is plain words")
+    let none_yet = try app.cmd("q_3", "t3.form", Obj.new().done())
+    try check(str_at(at(none_yet, "error"), "code") == some(String("not_found")), "and t3.form says T3 isn't connected")
+
+    // --- T3 connected: a link ---
+    let put = try app.cmd("q_4", "mcp.put", Obj.new().s("name", String("t3")).s("url", "{fake}/mcp").j("headers", Obj.new().s("Authorization", String("Bearer t3-key")).done()).done())
+    try check(at(put, "ok") == Json.Bool(true), "the person adds T3 as an MCP server")
+    try send(app, chat.copy(), "m_2", "See [the test fix]({LINK}).")
+    let said = try created(mut app, mut seen, chat.copy(), "person")
+    let said_id = str_at(said, "id") ?? String()
+    let c = try card_when(mut app, said_id.copy(), "mcp:fix", any_card)
+    try check(str_at(c.copy(), "title") == some(String("Fix the flaky sign-in test")) and str_at(c.copy(), "project") == some(String("loom")) and str_at(c.copy(), "model") == some(String("Opus 5.5")) and str_at(c.copy(), "server") == some(String("t3")), "a thread's link comes as its card, with its title, project and model")
+    try check(str_at(c.copy(), "state") == some(String("working")) and str_at(c.copy(), "step") == some(String("calx tests/protocol/signin.calx")) and (int_at(c.copy(), "started") ?? 0) > 0, "working, with its latest step and when its run started")
+    try check(str_at(c, "url") == some("{fake}/env-test/mcp:fix"), "and its page in T3's app")
+    let echoed = try created(mut app, mut seen, chat.copy(), "agent")
+    _ = try card_when(mut app, str_at(echoed, "id") ?? String(), "mcp:fix", any_card)
+    try check(true, "the reply that names the same thread has it too")
+
+    // --- An agent's T3 tool call ---
+    let launched = #"{"threadId":"mcp:fix","link":"[Fix the flaky sign-in test](t3-thread://v2/env-test/mcp:fix)","status":"starting"}"#
+    try send(app, chat.copy(), "m_3", "/toolout mcp__t3__t3_thread_launch|{launched}\nStarted it.")
+    _ = try created(mut app, mut seen, chat.copy(), "person")
+    let reply = try created(mut app, mut seen, chat.copy(), "agent")
+    let reply_id = str_at(reply, "id") ?? String()
+    let r = try card_when(mut app, reply_id.copy(), "mcp:fix", any_card)
+    try check(str_at(r, "title") == some(String("Fix the flaky sign-in test")), "a thread an agent's T3 tool call started goes on its reply, with no link in its words")
+
+    // --- A question, answered ---
+    let viewed = try app.cmd("q_5", "t3.view", Obj.new().j("messages", Json.Array([Json.Str(said_id.copy())])).done())
+    try check(at(viewed, "ok") == Json.Bool(true), "the app says which messages with threads it shows")
+    _ = try fetch_json("{fake}/test/ask?thread=mcp:fix&kind=question")
+    let q = try card_when(mut app, said_id.copy(), "mcp:fix", asks_question)
+    let ask = at(q.copy(), "ask")
+    try check(str_at(q, "state") == some(String("waiting")) and str_at(ask.copy(), "text") == some(String("Keep the retry, or make the test wait for the port instead?")) and "{at(ask, "choices")}" == #"["Wait for the port","Keep the retry"]"#, "a question it waits on comes while it's shown, with its choices")
+    let answered = try app.cmd("q_6", "t3.answer", Obj.new().s("thread", String("mcp:fix")).s("answer", String("Wait for the port")).done())
+    try check(at(answered, "ok") == Json.Bool(true), "t3.answer answers it")
+    let told = try fetch_json("{fake}/test/thread?thread=mcp:fix")
+    try check("{at(told, "told")}" == #"[{"q1":"Wait for the port"}]"#, "through T3's MCP tools, by the question's id")
+    _ = try card_when(mut app, said_id.copy(), "mcp:fix", working)
+
+    // --- An approval, over /ws ---
+    _ = try fetch_json("{fake}/test/ask?thread=mcp:fix&kind=approval")
+    let a = try card_when(mut app, said_id.copy(), "mcp:fix", asks_approval)
+    try check(str_at(at(a.copy(), "ask"), "text") == some(String("Run rm -rf build")) and "{at(at(a, "ask"), "choices")}" == #"["Approve","Decline"]"#, "an approval it waits on comes with what it asks")
+    let approved = try app.cmd("q_7", "t3.answer", Obj.new().s("thread", String("mcp:fix")).s("decision", String("accept")).done())
+    try check(at(approved, "ok") == Json.Bool(true) and at(at(approved, "value"), "in_t3") == Json.Null, "t3.answer approves it")
+    let told_again = try fetch_json("{fake}/test/thread?thread=mcp:fix")
+    try check(try calls(fake.copy(), "runtime-request.respond") == 1 and "{at(told_again, "told")}".contains(#"{"decision":"accept"}"#), "over T3's /ws, with runtime-request.respond")
+    _ = try card_when(mut app, said_id.copy(), "mcp:fix", working)
+
+    // --- An approval /ws won't take ---
+    _ = try fetch_json("{fake}/test/ws?refuse=1")
+    _ = try fetch_json("{fake}/test/ask?thread=mcp:fix&kind=approval")
+    _ = try card_when(mut app, said_id.copy(), "mcp:fix", asks_approval)
+    let refused = try app.cmd("q_8", "t3.answer", Obj.new().s("thread", String("mcp:fix")).s("decision", String("accept")).done())
+    try check(at(at(refused, "value"), "in_t3") == Json.Bool(true), "when /ws won't take it, t3.answer says it's answered in T3")
+    _ = try card_when(mut app, said_id.copy(), "mcp:fix", answered_in_t3)
+    try check(true, "and its card says so")
+
+    // --- Done ---
+    _ = try fetch_json("{fake}/test/set?thread=mcp:fix&status=completed")
+    let d = try card_when(mut app, said_id.copy(), "mcp:fix", done)
+    try check("{at(d.copy(), "prs")}".contains(#""number":295"#) and (int_at(d.copy(), "ended") ?? 0) - (int_at(d.copy(), "started") ?? 0) == 1080000 and at(d, "ask") == Json.Null, "once it's done, it's done, with its pull request and how long it took")
+
+    // --- The start form ---
+    let form = try app.cmd("q_9", "t3.form", Obj.new().done())
+    let fv = at(form, "value")
+    try check("{at(fv.copy(), "servers")}" == #"["t3"]"# and str_at(fv.copy(), "server") == some(String("t3")) and "{at(fv.copy(), "projects")}" == #"[{"id":"p1","title":"loom"},{"id":"p2","title":"calcite"}]"#, "t3.form gives the person's T3 servers and the projects of the one picked")
+    try check("{at(fv, "providers")}".contains(#""id":"claude-opus-5-5","name":"Opus 5.5","efforts":["low","medium","high","xhigh","max"]"#), "and the models each provider runs, with their efforts")
+    let bad = try app.cmd("q_10", "t3.start", Obj.new().s("project", String("p1")).s("provider", String("claudeAgent")).s("model", String("claude-haiku-5-5")).s("effort", String("high")).s("task", String("x")).s("conversation", chat.copy()).done())
+    try check(str_at(at(bad, "error"), "code") == some(String("bad_request")), "t3.start refuses an effort the model hasn't")
+    let started = try app.cmd("q_11", "t3.start", Obj.new().s("project", String("p2")).s("provider", String("claudeAgent")).s("model", String("claude-opus-5-5")).s("effort", String("high")).s("task", String("Tidy the CI logs.\nKeep the last week.")).s("conversation", chat.copy()).done())
+    let sv = at(started, "value")
+    let new_thread = str_at(sv.copy(), "thread") ?? String()
+    let line = try created(mut app, mut seen, chat.copy(), "loom")
+    try check(new_thread == "mcp:new1" and str_at(sv, "message") == str_at(line.copy(), "id"), "t3.start launches a thread, and its card lands in the chat as a line from loom")
+    let launched_with = at(try fetch_json("{fake}/test/thread?thread=mcp:new1"), "launched")
+    try check("{launched_with}" == #"{"projectId":"p2","title":"Tidy the CI logs","message":"Tidy the CI logs.\nKeep the last week.","modelSelection":{"provider":"claudeAgent","model":"claude-opus-5-5","options":{"effort":"high"}}}"#, "with its project, title, task, model and effort")
+    let line_id = str_at(line, "id") ?? String()
+    let n = try card_when(mut app, line_id.copy(), "mcp:new1", any_card)
+    try check(str_at(n.copy(), "effort") == some(String("high")) and str_at(n, "project") == some(String("calcite")), "its card has the effort it was started with")
+
+    // --- Failed ---
+    _ = try app.cmd("q_12", "t3.view", Obj.new().j("messages", Json.Array([Json.Str(said_id.copy()), Json.Str(line_id.copy())])).done())
+    _ = try fetch_json("{fake}/test/set?thread=mcp:new1&status=failed")
+    let f = try card_when(mut app, line_id.copy(), "mcp:new1", failed)
+    try check(str_at(f.copy(), "reason") == some(String("Usage limit reached · resets 15:30")) and str_at(f, "step") == none, "a failed thread comes with why")
+    let retried = try app.cmd("q_16", "t3.retry", Obj.new().s("thread", String("mcp:new1")).done())
+    try check(at(retried, "ok") == Json.Bool(true), "t3.retry asks a failed thread to try again")
+    let again = try card_when(mut app, line_id.copy(), "mcp:new1", working)
+    let told_retry = try fetch_json("{fake}/test/thread?thread=mcp:new1")
+    try check(str_at(again, "state") == some(String("working")) and "{at(told_retry, "told")}" == #"["Try again."]"#, "with t3_thread_send, and its card works again")
+    let not_failed = try app.cmd("q_17", "t3.retry", Obj.new().s("thread", String("mcp:fix")).done())
+    try check(str_at(at(not_failed, "error"), "code") == some(String("not_found")), "and refuses one that hasn't failed")
+    let servers = try app.cmd("q_18", "t3.servers", Obj.new().done())
+    try check("{at(at(servers, "value"), "servers")}" == #"["t3"]"#, "t3.servers names the person's T3 servers")
+
+    // --- One no server has ---
+    let gone = try app.cmd("q_13", "t3.thread", Obj.new().s("thread", String("mcp:nothing")).done())
+    try check(at(at(at(gone, "value"), "thread"), "missing") == Json.Bool(true), "t3.thread of a thread no T3 server has says it's missing")
+    let now_card = try app.cmd("q_14", "t3.thread", Obj.new().s("thread", String("mcp:fix")).done())
+    try check(str_at(at(at(now_card, "value"), "thread"), "state") == some(String("done")), "and gives one that is as it is now")
+    _ = try app.cmd("q_15", "t3.view", Obj.new().j("messages", Json.Array(List<Json>())).done())
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_t3/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake t3: "), 120000) else {
+        child.kill()
+        fail "the fake T3 didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start_with([String("--test-minute-ms"), String("1000")]) {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nt3_cards: all good")
+}
