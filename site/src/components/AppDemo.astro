@@ -222,11 +222,18 @@ const BOARD_LAYERS = [
 			</span>
 		</div>
 	</aside>
+	<!-- Over the chat while the sidebar is open over it; a tap on it closes the sidebar. -->
+	<div class="shade" data-shade aria-hidden="true"></div>
 
 	<div class="main">
 		<div class="titlebar">
 			<!-- In a narrow window it gives way as the app's does (model/header.rs, demo.ts). -->
 			<div class="header" data-header>
+				<!-- With no room for the rail, as on a phone, the control that opens the sidebar sits
+				     here, at the header's start, and the sidebar opens over the chat. -->
+				<button type="button" class="icon-btn small head-bar" data-head-bar aria-label="Open the sidebar"
+					><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18m5-12 3 3-3 3"></path></svg></button
+				>
 				<span class="agent-btn" aria-hidden="true">
 					<svg data-thread data-color="sky" data-head width="26" height="10"></svg>
 					<span class="head-name">Juniper</span>
@@ -3227,9 +3234,78 @@ const BOARD_LAYERS = [
 			height: 600px;
 		}
 	}
+	@keyframes side-in {
+		from {
+			transform: translateX(-100%);
+		}
+	}
+	@keyframes shade-in {
+		from {
+			opacity: 0;
+		}
+	}
+	/* The header's control and the shade are only for a window with no room for the rail. */
+	.head-bar,
+	.shade {
+		display: none;
+	}
+	/* No room for the rail, as on a phone: the header's control opens the whole sidebar over
+	   the chat, with a shade over the rest, and a row, the sidebar's own control or the shade
+	   closes it (demo.ts). */
 	@media (max-width: 560px) {
 		.side {
 			display: none;
+		}
+		.app.drawer .side {
+			display: flex;
+			position: absolute;
+			top: 0;
+			bottom: 0;
+			left: 0;
+			z-index: 9;
+			width: min(var(--layout-sidebar), 82%);
+			box-shadow: var(--shadow);
+		}
+		.app.drawer .shade {
+			display: block;
+			position: absolute;
+			inset: 0;
+			z-index: 8;
+			background: rgb(0 0 0 / 0.16);
+			animation: shade-in 0.22s ease both;
+		}
+		.app.drawer .side {
+			animation: side-in 0.22s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+		}
+		.app.drawer .lights {
+			z-index: 10;
+		}
+		.header {
+			justify-content: flex-start;
+		}
+		.header .chips {
+			margin-left: auto;
+		}
+		/* The window's buttons close up a little, so the header keeps room for its name beside
+		   the control. */
+		.winctl {
+			padding: 0 4px;
+		}
+		.winctl span {
+			width: 28px;
+		}
+		.head-bar {
+			display: grid;
+			margin-right: -12px;
+			color: var(--ink-3);
+			cursor: pointer;
+		}
+		.head-bar:hover {
+			color: var(--ink);
+		}
+		/* On a Mac the header's control comes after the traffic lights. */
+		:global(html[data-os='mac']) .app.railed .header {
+			padding-left: 84px;
 		}
 		.app {
 			height: 560px;
