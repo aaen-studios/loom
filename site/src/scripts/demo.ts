@@ -351,6 +351,27 @@ export function play(app: HTMLElement) {
 		const on = e.target as Element;
 		if (menu && !menu.contains(on) && !on.closest?.('.more-btn')) unmenu();
 	});
+	// The header in a narrow window gives way as the app's does (desktop/src/model/header.rs):
+	// one step at a time, always in this order, until nothing in it runs past its end. Then the
+	// name shortens to a few letters, and then the mode's words (AppDemo.astro).
+	const header = app.querySelector<HTMLElement>('[data-header]')!;
+	const steps = ['fit-effort', 'fit-members', 'fit-icon', 'fit-close', 'fit-chevrons'];
+	const fitHeader = () => {
+		header.classList.remove(...steps);
+		header.classList.add('fit-measuring');
+		for (const step of steps) {
+			if (header.scrollWidth <= header.clientWidth) break;
+			header.classList.add(step);
+		}
+		header.classList.remove('fit-measuring');
+	};
+	new ResizeObserver(fitHeader).observe(header);
+	document.fonts.ready.then(fitHeader);
+	// And once the sidebar has finished sliding, at the width it ends at.
+	const side = app.querySelector<HTMLElement>('.side')!;
+	side.addEventListener('transitionend', (e) => {
+		if (e.target === side) fitHeader();
+	});
 	// Biscuit's thread with Juniper opens from its row under Juniper, in the chat's place,
 	// read only; the strip's arrow, Continue in your own chat in the composer's place, or
 	// Juniper's own row, goes back to the person's chat (app.rs, open_thread, branch_strip,
@@ -370,6 +391,7 @@ export function play(app: HTMLElement) {
 			if (!pop.hidden) showPins(false);
 		}
 		app.classList.toggle('in-room', on);
+		fitHeader();
 	};
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => inRoom(true));
 	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));

@@ -259,9 +259,15 @@ impl Loom {
             )
     }
 
-    /// The chat's head while a group chat is open: its mark and its name, which open
-    /// its settings beside it.
-    pub(super) fn room_head(&self, r: &model::Room, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The chat's head while a group chat is open: its mark, its name and how many are
+    /// in it, which open its settings beside it. A narrow header drops how many, then
+    /// shortens the name (`fit`).
+    pub(super) fn room_head(
+        &self,
+        r: &model::Room,
+        fit: &model::header::Fit,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         let p = self.p;
         let open = self.side == Some(Screen::Room);
         div()
@@ -269,6 +275,7 @@ impl Loom {
             .role(Role::Button)
             .aria_label(r.name.clone())
             .occlude()
+            .min_w_0()
             .flex()
             .items_center()
             .gap(px(space::S))
@@ -285,20 +292,44 @@ impl Loom {
                     this.room_settings(cx);
                 }
             }))
-            .child(self.room_mark(r, 26.0, 14.0))
+            .child(self.room_mark(r, super::HEAD_MARK, 14.0))
             .child(
                 div()
+                    .min_w_0()
+                    .when_some(fit.name, |d, most| d.max_w(px(most)))
+                    .truncate()
                     .text_size(px(size::BODY))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(p.ink)
                     .child(r.name.clone()),
             )
-            .child(
-                div()
-                    .text_size(px(size::CAPTION))
-                    .text_color(p.ink_3)
-                    .child(members_line(r.members.len())),
-            )
+            .when(fit.members, |d| {
+                d.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(members_line(r.members.len())),
+                )
+            })
+    }
+
+    /// How wide the group chat's head is, whole, `name` its name's words, and its
+    /// members line with the gap before it (`model::header::Sizes`).
+    pub(super) fn room_head_widths(&self, r: &model::Room, window: &Window) -> (f32, f32, f32) {
+        let name = super::ui_text_width(&r.name, size::BODY, FontWeight::MEDIUM, window);
+        let members = space::S
+            + super::ui_text_width(
+                &members_line(r.members.len()),
+                size::CAPTION,
+                FontWeight::NORMAL,
+                window,
+            );
+        (
+            2.0 * space::S + super::HEAD_MARK + space::S + name + members,
+            name,
+            members,
+        )
     }
 
     /// A right-click on a group chat's row: its settings, and Delete for one the person
