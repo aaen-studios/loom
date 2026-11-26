@@ -13,7 +13,9 @@
 // line under the reply says the step it's on; once it's done, its last words are the answer and
 // the steps before them fold under one line that opens (desktop/src/model.rs, parts), and a
 // subagent's call in the earlier reply opens to show what its subagent did inside it (model.rs,
-// inside). The earlier reply's sources tab opens their list (app.rs, sources_tab). The moods,
+// inside). The earlier reply's sources tab opens their list (app.rs, sources_tab), and the Acta
+// card it names is a pill whose preview opens under it under the pointer, which the page's CSS
+// does (app.rs, card_pill, card_preview). The moods,
 // what the sidebar says after an agent's name on its one line ("Thinking", the tool's title,
 // "Wants to …"), or under the pointer on a pinned agent's tile, and the wording are the app's.
 // Clicking Allow, Always allow (under the arrow beside Allow) or Deny answers the approval,
@@ -120,6 +122,22 @@ export function play(app: HTMLElement) {
 			if (!list.hidden && !tab.parentElement!.contains(e.target as Node)) show(false);
 		});
 	}
+	// An Acta card's preview, which the page's CSS opens under its pill, goes over it when
+	// there's no room under it in the chat, as the app keeps a popover in the window.
+	for (const pill of app.querySelectorAll<HTMLElement>('.acta-pill')) {
+		const preview = pill.querySelector<HTMLElement>('.acta-preview');
+		const chat = pill.closest<HTMLElement>('.chat');
+		if (!preview || !chat) continue;
+		const place = () => {
+			preview.classList.remove('up');
+			preview.style.display = 'flex';
+			const tall = preview.offsetHeight;
+			preview.style.display = '';
+			if (pill.getBoundingClientRect().bottom + tall + 8 > chat.getBoundingClientRect().bottom) preview.classList.add('up');
+		};
+		pill.addEventListener('pointerenter', place);
+		pill.addEventListener('focus', place);
+	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
 	const composer = app.querySelector<HTMLElement>('.composer')!;
@@ -193,9 +211,13 @@ export function play(app: HTMLElement) {
 	const replyBar = app.querySelector<HTMLElement>('[data-reply-bar]')!;
 	type Replying = { row: HTMLElement; who: string; words: string; part: boolean; ask: boolean };
 	let replying: Replying | null = null;
-	/** A message's words, on one line: an agent's answer, or what the person wrote. */
-	const wordsOf = (row: HTMLElement) =>
-		(row.querySelector('.said:not(.on-the-way)') ?? row.querySelector('.bubble'))?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+	/** A message's words, on one line: an agent's answer, or what the person wrote, with an
+	 *  Acta card's pill as its id, as it was written (PLAN.md, "Cards in messages"). */
+	const wordsOf = (row: HTMLElement) => {
+		const said = (row.querySelector('.said:not(.on-the-way)') ?? row.querySelector('.bubble'))?.cloneNode(true) as HTMLElement | undefined;
+		for (const pill of said?.querySelectorAll<HTMLElement>('.acta-pill') ?? []) pill.replaceWith(pill.dataset.card ?? '');
+		return said?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
+	};
 	const replyTo = (row: HTMLElement, part?: string, ask = false) => {
 		const agent = row.classList.contains('reply');
 		const who = agent ? (row.querySelector('.who')?.textContent ?? 'Juniper') : 'You';
@@ -510,7 +532,30 @@ export function play(app: HTMLElement) {
 		lit?.classList.add('lit');
 		lit?.scrollIntoView({ block: 'nearest' });
 	};
+	/** Where the popover goes across the window, as the app works it out (model::pop_under):
+	 * centred under the pin, 12px inside the window's edges and no wider than the window less
+	 * those, with its nub on the pin but clear of its rounded corners. */
+	const placePins = () => {
+		const frame = app.getBoundingClientRect();
+		const pin = pinsBtn.getBoundingClientRect();
+		const room = app.clientWidth;
+		const margin = 12;
+		const inset = 12 + 11 / Math.SQRT2;
+		const middle = (pin.left + pin.right) / 2 - frame.left - app.clientLeft;
+		const width = Math.max(0, Math.min(460, room - 2 * margin));
+		const left = Math.min(Math.max(middle - width / 2, margin), Math.max(margin, room - margin - width));
+		const nub = width > 2 * inset ? Math.min(Math.max(middle - left, inset), width - inset) : width / 2;
+		const at = pop.parentElement!.style;
+		at.setProperty('--pop-left', `${left}px`);
+		at.setProperty('--pop-width', `${width}px`);
+		at.setProperty('--nub-in', `${nub}px`);
+		at.setProperty('--nub-at', `${left + nub}px`);
+	};
+	addEventListener('resize', () => {
+		if (!pop.hidden) placePins();
+	});
 	const showPins = (open: boolean) => {
+		if (open) placePins();
 		pop.hidden = !open;
 		pinsBtn.setAttribute('aria-expanded', String(open));
 		lit = null;

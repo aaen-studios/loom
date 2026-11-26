@@ -14,7 +14,10 @@ use gpui_kit::component::input::{
     MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::text::{RangeHighlight, RenderedText, TextView, TextViewState};
+use gpui_kit::component::text::{
+    markdown_ast, InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode,
+    MarkdownParseContext, MarkdownPlugin, RangeHighlight, RenderedText, TextView, TextViewState,
+};
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -288,11 +291,18 @@ const CONTEXT_LINGER_MS: u64 = 160;
 /// How long Unpinned, with its Undo, stays at the popover's foot, and Copied.
 const UNPIN_SECS: u64 = 6;
 const COPIED_MILLIS: u64 = 1600;
-/// How wide the Pinned popover is, and how much of the window's height it takes at most.
-const PINS_W: f32 = 460.0;
+/// How much of the window's height the Pinned popover takes at most, and how round its
+/// corners are.
 const PINS_TALL: f32 = 0.7;
+const PINS_RADIUS: f32 = 12.0;
+/// How far the popover drops as it comes in, from nearer its pin, and how long it takes.
+const PINS_DROP: f32 = 4.0;
+const PINS_IN: f32 = 0.16;
 /// The room a pin is drawn for: its pictures smaller than the chat's, a picture 200 wide.
 const PIN_ROOM: i32 = 248;
+/// Where the header's pin was at its last draw, in the window, and how wide the window was
+/// then, for the popover to open centred under it.
+type PinAt = Rc<Cell<Option<(Bounds<Pixels>, f32)>>>;
 
 /// The composer's + menu while it's open (PLAN.md, "The composer's + menu").
 #[derive(Clone, Default)]
@@ -384,6 +394,7 @@ pub struct Loom {
     pins_closed_at: Option<Instant>,
     pins_scroll: ScrollHandle,
     pins_keys: FocusHandle,
+    pins_button: PinAt,
     /// The context card under the header's ring while it shows, and when a click outside
     /// last closed it (PLAN.md, "One endless chat").
     context_card: Option<ContextCard>,
@@ -906,6 +917,7 @@ impl Loom {
                     InputEvent::Change => {
                         this.track_mention(cx);
                         this.track_emoji(window, cx);
+                        this.track_cards(window, cx);
                         // A file whose piece was taken out goes with it, and comes back
                         // with an undo.
                         this.sync_attachments(cx);
@@ -1561,6 +1573,7 @@ ACTA_KEY=secret:ACTA_KEY",
             pins_closed_at: None,
             pins_scroll: ScrollHandle::new(),
             pins_keys: cx.focus_handle(),
+            pins_button: Rc::new(Cell::new(None)),
             context_card: None,
             context_closed_at: None,
             window_h: 800.0,
@@ -2789,6 +2802,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.core.send(&f.to_string());
         }
         for f in self.model.file_fetches() {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.card_fetches(model::now_ms()) {
             self.core.send(&f.to_string());
         }
     }
@@ -8104,7 +8120,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.watch(id, cx);
                 }
             }));
-        let pop = self.pins_pop(cx);
+        let pop = self
+            .pins_pop(cx)
+            .and_then(|pop| self.pins_placed(pop, cx.reduce_motion()));
         let pins = div()
             .id("pins-toggle")
             .role(Role::Button)
@@ -8139,20 +8157,28 @@ ACTA_KEY=secret:ACTA_KEY",
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.toggle_pins(window, cx);
             }));
-        // The popover hangs from the button's bottom right, over the chat.
-        let pins = div().relative().child(pins).when_some(pop, |d, pop| {
-            d.child(
-                div().absolute().top_full().right_0().child(
-                    deferred(
-                        anchored()
-                            .anchor(Anchor::TopRight)
-                            .snap_to_window_with_margin(px(space::S))
-                            .child(div().mt(px(space::S)).child(pop)),
-                    )
-                    .with_priority(1),
-                ),
+        // Where the pin is, for the popover to open centred under it: placed again the next
+        // frame when it moves, as when the window is resized.
+        let at = self.pins_button.clone();
+        let pins = div()
+            .relative()
+            .child(pins)
+            .child(
+                canvas(
+                    move |b, window, _| {
+                        let now = Some((b, window.viewport_size().width.as_f32()));
+                        if at.replace(now) != now {
+                            window.on_next_frame(|window, _| window.refresh());
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
             )
-        });
+            .children(pop);
         // How full the agent's session context is, after its model, half a gap closer to it.
         let context = self.context_ring(cx).map(|c| c.ml(px(-fit.gap / 2.0)));
         // A group chat: its mark and name, which open its settings, its pins, and the
@@ -8677,6 +8703,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .collect(),
             together,
             previews: self.model.link_previews.clone(),
+            cards: self.model.card_previews.clone(),
             thumbs: self.model.files.clone(),
         });
         let this = cx.entity().downgrade();
@@ -8714,6 +8741,28 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         } else if let Some(url) = id.strip_prefix(model::LINK) {
             cx.open_url(url);
+        } else if let Some(r) = id.strip_prefix(model::CARD) {
+            // A card, in Acta.
+            if let Some(model::CardPreview::Ready(c)) = self.model.card_previews.get(r) {
+                cx.open_url(&c.link());
+            } else if r.starts_with("https://") {
+                cx.open_url(r);
+            }
+        }
+    }
+
+    /// A card id the person just finished typing, for one of their boards, becomes the
+    /// card's piece, as the sent message will show it (PLAN.md, "Cards in messages").
+    fn track_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefixes = self.model.board_prefixes();
+        if prefixes.is_empty() {
+            return;
+        }
+        let typed = self
+            .composer
+            .update(cx, |c, cx| put_typed_card(c, &prefixes, window, cx));
+        if let Some(f) = typed.and_then(|id| self.model.preview_card(&id)) {
+            self.send(f);
         }
     }
 
@@ -11120,7 +11169,19 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .read_from_clipboard()
                                         .and_then(|item| item.text())
                                         .unwrap_or_default();
-                                    if let Some(url) = model::pasted_link(&text) {
+                                    // A card's link, with Acta connected, as its pill.
+                                    if let Some(url) = model::pasted_card(&text)
+                                        .filter(|_| !this.model.acta_boards.is_empty())
+                                    {
+                                        cx.stop_propagation();
+                                        let url = url.to_string();
+                                        this.composer
+                                            .update(cx, |c, cx| paste_card(c, &url, window, cx));
+                                        if let Some(f) = this.model.preview_card(&url) {
+                                            this.send(f);
+                                        }
+                                        cx.notify();
+                                    } else if let Some(url) = model::pasted_link(&text) {
                                         cx.stop_propagation();
                                         let url = url.to_string();
                                         this.composer
@@ -17903,10 +17964,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 .role(Role::Dialog)
                 .aria_label("Pinned")
                 .occlude()
-                .w(px(PINS_W))
+                .w_full()
                 .flex()
                 .flex_col()
-                .rounded(px(12.0))
+                .rounded(px(PINS_RADIUS))
                 .border_1()
                 .border_color(p.line_strong)
                 .bg(p.raised)
@@ -17939,6 +18000,45 @@ ACTA_KEY=secret:ACTA_KEY",
                         .child(body)
                         .children(note),
                 ),
+        )
+    }
+
+    /// The Pinned popover in its place, over the chat: centred under the header's pin as
+    /// the window lets it, a gap under the header, with its nub on the pin
+    /// (`model::pop_under`). It fades in, dropping a little from nearer the pin unless the
+    /// system asks for less motion. Nothing until the pin has been drawn once.
+    fn pins_placed(&self, pop: Stateful<Div>, reduce_motion: bool) -> Option<AnyElement> {
+        let (pin, window_w) = self.pins_button.get()?;
+        let half = layout::CARET * std::f32::consts::FRAC_1_SQRT_2;
+        let at = model::pop_under(
+            (pin.left().as_f32(), pin.right().as_f32()),
+            window_w,
+            layout::PINS,
+            space::M,
+            PINS_RADIUS + half,
+        );
+        let k = motion::arrive(&SharedString::from("pins-pop"), PINS_IN);
+        let drop = if reduce_motion {
+            0.0
+        } else {
+            PINS_DROP * (1.0 - k)
+        };
+        Some(
+            deferred(
+                anchored()
+                    .position(point(px(at.left), px(layout::TITLEBAR + space::S - drop)))
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(
+                        div()
+                            .relative()
+                            .w(px(at.width))
+                            .opacity(k)
+                            .child(pop)
+                            .child(pins_nub(self.p, at.nub)),
+                    ),
+            )
+            .with_priority(1)
+            .into_any_element(),
         )
     }
 
@@ -19366,6 +19466,7 @@ fn person(
         // A right-click on one of the person's own emoji: Copy name in its menu.
         None if url.starts_with(crate::emoji::OWN_LINK) => emoji_ui::own_clicked(&opener, url, cx),
         None if url.starts_with("loom:") => {}
+        None if open_card_link(url, cx) => {}
         None => cx.open_url(url),
     };
     // Its corners on the right smaller where it joins the person's messages either side.
@@ -22109,6 +22210,307 @@ fn site_icon(p: Palette, sha: Option<&str>, size: f32) -> AnyElement {
     }
 }
 
+// --- Cards from Acta (PLAN.md, "Cards in messages") ---
+
+thread_local! {
+    /// The cards the messages drawn name, by id, with the palette they're drawn in, for
+    /// their pills (`CardPills`), which draw outside the message.
+    static CARD_TIPS: RefCell<HashMap<String, (Palette, model::ActaCard)>> = RefCell::new(HashMap::new());
+}
+
+/// The board's tile before a card's id: Acta's purple, with its layers glyph, until Acta
+/// gives each board its own icon. An SVG file, written once.
+fn board_tile() -> Option<String> {
+    let tile = hex_of(rgb(color_dark::BOARD).into());
+    mention_svg(&format!("board-{tile}"), || {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"42\" height=\"42\" viewBox=\"0 0 14 14\">\
+             <rect width=\"14\" height=\"14\" rx=\"3\" fill=\"#{tile}\"/>\
+             <g transform=\"translate(2 2) scale(0.4167)\" fill=\"none\" stroke=\"#f4f1fc\" \
+             stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+             <path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"/>\
+             <path d=\"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12\"/>\
+             <path d=\"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17\"/></g></svg>"
+        )
+    })
+}
+
+fn board_icon(size: f32) -> AnyElement {
+    match board_tile() {
+        Some(path) => img(std::path::PathBuf::from(path))
+            .flex_none()
+            .size(px(size))
+            .into_any_element(),
+        None => div()
+            .flex_none()
+            .size(px(size))
+            .rounded(px(3.0))
+            .bg(rgb(color_dark::BOARD))
+            .into_any_element(),
+    }
+}
+
+/// The colour a card's status is drawn in (`model::CardInk`).
+fn card_ink(p: Palette, card: &model::ActaCard) -> Hsla {
+    match card.ink() {
+        model::CardInk::Quiet => p.ink_3,
+        model::CardInk::Sky => thread::color("sky", p.dark),
+        model::CardInk::Gold => thread::color("gold", p.dark),
+        model::CardInk::Ok => p.ok,
+    }
+}
+
+/// A card's id, in mono.
+fn card_id_text(id: &str, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .font_family(font::MONO)
+        .text_size(px(size::CAPTION))
+        .text_color(color)
+        .child(id.to_string())
+}
+
+/// A card's pill, in a message or the composer (PLAN.md, "Cards in messages"): its board's
+/// tile, its id in mono, its title cut to fit and a dot in its status's colour, on the
+/// bubble's fill with a line around it. Under the pointer its preview shows under it, and
+/// a click opens it in Acta. A card that isn't there, or that the person can't see, is
+/// its id alone, quiet; one still being looked up, its tile and its id.
+fn card_pill(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+) -> AnyElement {
+    if card.is_some_and(|c| c.missing) {
+        return card_id_text(id, p.ink_3).into_any_element();
+    }
+    let pill = div()
+        .id(SharedString::from(format!("{key}-pill")))
+        .h(px(control::PILL))
+        .max_w(px(layout::PILL_TITLE + 110.0))
+        .pl(px(4.0))
+        .pr(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .rounded(px(radius::ROW))
+        .border_1()
+        .border_color(p.line)
+        .bg(p.bubble)
+        .cursor_pointer()
+        .child(board_icon(14.0))
+        .child(card_id_text(id, p.ink_2));
+    let Some(card) = card.cloned() else {
+        return pill.into_any_element();
+    };
+    let url = card.link();
+    let title = div()
+        .min_w_0()
+        .max_w(px(layout::PILL_TITLE))
+        .truncate()
+        .text_size(px(size::SMALL))
+        .text_color(if card.struck() { p.ink_3 } else { p.ink })
+        .when(card.struck(), |d| d.line_through())
+        .child(card.title.clone());
+    let pill = pill
+        .child(title)
+        .child(
+            div()
+                .flex_none()
+                .size(px(7.0))
+                .rounded_full()
+                .bg(card_ink(p, &card)),
+        )
+        .on_click(move |_, _, cx| cx.open_url(&url));
+    gpui_kit::base::HoverCard::new(key)
+        .anchor(Anchor::TopLeft)
+        .open_delay(Duration::from_millis(350))
+        .close_delay(Duration::from_millis(150))
+        .trigger(pill)
+        .content(move |_, _, _| card_preview(p, &card))
+        .into_any_element()
+}
+
+/// A card's preview, under its pill: its board and id, its title, chips for its status (in
+/// its colour), assignee, size and labels, the start of its description, its subtasks done
+/// with a bar, and Open and Open in Acta.
+fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
+    let chip = |words: String, color: Hsla, edge: Hsla| {
+        div()
+            .h(px(20.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(edge)
+            .text_size(px(size::CAPTION))
+            .text_color(color)
+            .whitespace_nowrap()
+            .child(words)
+    };
+    let ink = card_ink(p, card);
+    let mut chips = div().flex().flex_wrap().gap(px(6.0)).child(chip(
+        card.status_words(),
+        ink,
+        ink.opacity(0.6),
+    ));
+    for c in card.chips() {
+        chips = chips.child(chip(c, p.ink_2, p.line_strong));
+    }
+    let button = |name: &'static str, url: String| {
+        div()
+            .id(name)
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(radius::BUTTON))
+            .border_1()
+            .border_color(p.line_strong)
+            .text_size(px(size::CAPTION))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, None)
+            .child(name)
+            .on_click(move |_, _, cx| cx.open_url(&url))
+    };
+    // Both open it in Acta, until it has a preview beside the chat.
+    let url = card.link();
+    div().id("card-preview").pt(px(space::XS)).child(
+        div()
+            .w(px(layout::CARD_PREVIEW))
+            .p(px(space::M))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line_strong)
+            .bg(p.raised)
+            .shadow(card_shadow(p))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(board_icon(14.0))
+                    .child(card.place()),
+            )
+            .child(
+                div()
+                    .text_size(px(size::BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if card.struck() { p.ink_3 } else { p.ink })
+                    .when(card.struck(), |d| d.line_through())
+                    .child(card.title.clone()),
+            )
+            .child(chips)
+            .when(!card.text.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .line_height(px(size::SMALL * line::BODY))
+                        .text_color(p.ink_2)
+                        .line_clamp(3)
+                        .child(card.text.clone()),
+                )
+            })
+            .when_some(card.subtasks_line(), |d, words| {
+                let part = card.subtasks_part();
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(div().flex_none().child(words))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(4.0))
+                                .rounded_full()
+                                .bg(p.line_strong)
+                                .child(div().h_full().w(relative(part)).rounded_full().bg(p.ok)),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .flex()
+                    .gap(px(space::S))
+                    .child(button("Open", url.clone()))
+                    .child(button("Open in Acta", url)),
+            ),
+    )
+}
+
+/// Draws the card links `model::with_link_icons` puts in a message's words as the cards'
+/// pills.
+struct CardPills;
+
+impl MarkdownPlugin for CardPills {
+    fn name(&self) -> &str {
+        "loom-card"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        cx: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Link(link) = node else {
+            return None;
+        };
+        let id = link.url.strip_prefix(model::CARD_LINK)?.to_string();
+        Some(
+            MarkdownNode::new("loom-card", id.clone())
+                .text(id)
+                .markdown(cx.node_source(node).unwrap_or_default()),
+        )
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        _context: &InlineRenderContext,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<InlineElement> {
+        let id = node.data::<String>()?.clone();
+        let (p, card) = CARD_TIPS.with(|t| t.borrow().get(&id).cloned())?;
+        let key = SharedString::from(format!("card-{id}"));
+        // Its text sits on the line's baseline.
+        Some(InlineElement::new(card_pill(p, key, &id, Some(&card))).with_baseline(px(15.5)))
+    }
+}
+
+/// The Markdown a message's words are parsed with: its cards as pills. Made once, so a
+/// text's parse is kept from one frame to the next.
+fn card_extensions() -> MarkdownExtensions {
+    thread_local! {
+        static EXT: MarkdownExtensions = MarkdownExtensions::default().plugin(CardPills);
+    }
+    EXT.with(|e| e.clone())
+}
+
+/// Opens a card a message's words link to (`model::CARD_LINK`), in Acta. Gives whether
+/// `url` was one.
+fn open_card_link(url: &str, cx: &mut App) -> bool {
+    let Some(id) = url.strip_prefix(model::CARD_LINK) else {
+        return false;
+    };
+    if let Some((_, card)) = CARD_TIPS.with(|t| t.borrow().get(id).cloned()) {
+        cx.open_url(&card.link());
+    }
+    true
+}
+
 /// How a site icon's file is named in a message's Markdown (`linked_words`).
 const SITE_ICON: &str = "loom-icon:";
 
@@ -22144,10 +22546,19 @@ fn linked_words(p: Palette, text: &str, m: &Message) -> String {
             }
         }
     });
+    CARD_TIPS.with(|t| {
+        let mut t = t.borrow_mut();
+        for (id, c) in m.cards.iter() {
+            if t.get(id).is_none_or(|(tp, tc)| *tp != p || tc != c) {
+                t.insert(id.clone(), (p, c.clone()));
+            }
+        }
+    });
     model::with_link_icons(
         text,
         &model::Inline {
             links: &m.links,
+            cards: &m.cards,
             icon_src: &icon_src,
             agent: &agent,
             file_icon: &file_icon,
@@ -22240,6 +22651,42 @@ fn paste_link(
     let _ = c.replace_range_with_token(at..at + url.len(), InlineToken::new(id, text), window, cx);
 }
 
+/// Pastes a card's link as its pill (PLAN.md, "Cards in messages"), the way `paste_link`
+/// pastes a link.
+fn paste_card(
+    c: &mut TextareaState,
+    url: &str,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let at = c.selected_range().start;
+    c.replace(url.to_string(), window, cx);
+    let (id, text) = model::card_token(url);
+    let _ = c.replace_range_with_token(at..at + url.len(), InlineToken::new(id, text), window, cx);
+}
+
+/// Makes the card id just typed before the cursor, for one of the boards `prefixes`
+/// names, one piece (`model::typed_card`), and gives its id.
+fn put_typed_card(
+    c: &mut TextareaState,
+    prefixes: &[String],
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) -> Option<String> {
+    let text = c.value().to_string();
+    let before = &text[..c.cursor().min(text.len())];
+    let pieces: Vec<std::ops::Range<usize>> = c.tokens().iter().map(|t| t.range()).collect();
+    let (range, id) = model::typed_card(before, prefixes, &pieces)?;
+    let cursor = before.len();
+    let (token, words) = model::card_token(&id);
+    c.replace_range_with_token(range, InlineToken::new(token, words), window, cx)
+        .ok()?;
+    // The piece is as long as the id, so the cursor goes back where it was, after
+    // the space or stop typed after the id, which the replacing put it before.
+    c.set_selected_range(cursor..cursor, cx);
+    Some(id)
+}
+
 /// A picture attached in the composer, made small (`Loom::make_preview`): drawn as its
 /// own when it's alone, from `file` in a fan of two or more, and how big it is.
 #[derive(Clone)]
@@ -22293,6 +22740,8 @@ struct ComposerPieces {
     /// The files that stand side by side with another, by their token's id.
     together: HashSet<String>,
     previews: HashMap<String, model::Preview>,
+    /// The cards in it, by their id or link, as they're looked up.
+    cards: HashMap<String, model::CardPreview>,
     thumbs: Rc<HashMap<String, String>>,
 }
 
@@ -22321,6 +22770,29 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
     };
     if id.starts_with(emoji_ui::PIECE) {
         return emoji_ui::composer_piece(words);
+    }
+    // A card, as the sent message shows it: its pill once it's looked up.
+    if let Some(r) = id.strip_prefix(model::CARD) {
+        let shown = match pieces.cards.get(r) {
+            Some(model::CardPreview::Ready(c)) => Some(c.as_ref().clone()),
+            Some(model::CardPreview::Failed) => Some(model::ActaCard {
+                missing: true,
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        let card_id = shown
+            .as_ref()
+            .map(|c| c.id.clone())
+            .filter(|i| !i.is_empty())
+            .or_else(|| model::card_link(r).map(|(_, i)| i))
+            .unwrap_or_else(|| r.to_string());
+        return card_pill(
+            p,
+            SharedString::from(format!("piece-{id}")),
+            &card_id,
+            shown.as_ref(),
+        );
     }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {
@@ -22557,43 +23029,46 @@ fn mention_file_icon(name: &str, color: &str) -> Option<String> {
     })
 }
 
-/// Draws the site icons `linked_words` put in, and a link's full address when the pointer
-/// is on it.
+/// Draws the site icons `linked_words` put in, its cards as pills, and a link's full
+/// address when the pointer is on it.
 fn with_links(v: TextView) -> TextView {
-    v.image_source(|uri| {
-        // An emoji: a built-in one drawn at its size, one of the person's own its picture.
-        if let Some(drawn) = crate::emoji::from_source(uri) {
-            return ImageSource::Render(drawn);
-        }
-        match uri
-            .strip_prefix(SITE_ICON)
-            .or_else(|| uri.strip_prefix(crate::emoji::OWN_SOURCE))
-        {
-            Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
-            None => uri.clone().into(),
-        }
-    })
-    .link_tooltip(|url, window, cx| {
-        if url.starts_with(crate::emoji::LINK) {
-            return emoji_ui::EmojiCard::view(url, window, cx);
-        }
-        // A file's whole name, which its link shows cut in the middle.
-        let file = model::mention_path(url).or_else(|| {
-            let sha = url.strip_prefix("loom-file:")?;
-            FILE_NAMES.with(|n| n.borrow().get(sha).cloned())
-        });
-        if url.starts_with("https://") || url.starts_with("http://") {
-            // Its preview, once it's looked up.
-            match LINK_TIPS.with(|t| t.borrow().get(url.as_ref()).cloned()) {
-                Some((p, l)) => link_tip(p, url, Some(&l), &badge_icon)(window, cx),
-                None => gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx),
+    v.markdown_extensions(card_extensions())
+        .image_source(|uri| {
+            // An emoji: a built-in one drawn at its size, one of the person's own its picture.
+            if let Some(drawn) = crate::emoji::from_source(uri) {
+                return ImageSource::Render(drawn);
             }
-        } else if let Some(name) = file {
-            gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
-        } else {
-            cx.new(|_| EmptyView).into()
-        }
-    })
+            match uri
+                .strip_prefix(SITE_ICON)
+                .or_else(|| uri.strip_prefix(crate::emoji::OWN_SOURCE))
+            {
+                Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
+                None => uri.clone().into(),
+            }
+        })
+        .link_tooltip(|url, window, cx| {
+            if url.starts_with(crate::emoji::LINK) {
+                return emoji_ui::EmojiCard::view(url, window, cx);
+            }
+            // A file's whole name, which its link shows cut in the middle.
+            let file = model::mention_path(url).or_else(|| {
+                let sha = url.strip_prefix("loom-file:")?;
+                FILE_NAMES.with(|n| n.borrow().get(sha).cloned())
+            });
+            if url.starts_with("https://") || url.starts_with("http://") {
+                // Its preview, once it's looked up.
+                match LINK_TIPS.with(|t| t.borrow().get(url.as_ref()).cloned()) {
+                    Some((p, l)) => link_tip(p, url, Some(&l), &badge_icon)(window, cx),
+                    None => {
+                        gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+                    }
+                }
+            } else if let Some(name) = file {
+                gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
+            } else {
+                cx.new(|_| EmptyView).into()
+            }
+        })
 }
 
 thread_local! {
@@ -22939,6 +23414,7 @@ impl ReplyDraw<'_> {
                             let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
                         } else if url.starts_with(crate::emoji::OWN_LINK) {
                             emoji_ui::own_clicked(&opener, url, cx);
+                        } else if open_card_link(url, cx) {
                         } else if !url.starts_with("loom:") {
                             cx.open_url(url);
                         }
@@ -23626,12 +24102,16 @@ fn reply(
         );
     }
     // What shows in the reply, and how it reads: its answer, and its steps folded
-    // under one line (`model::parts`).
+    // under one line (`model::parts`), which a pin leaves out (`model::pin_parts`).
     let shows = model::Shows {
         tools: show.tools != Tools::Hidden,
         thoughts: show.thoughts != Thoughts::Hidden,
     };
-    let parts = model::parts(m, tools, shows);
+    let parts = if show.pin.is_some() {
+        model::pin_parts(m, tools, shows)
+    } else {
+        model::parts(m, tools, shows)
+    };
     // Its sources hang from the bubble of its last words, or else sit under it all.
     let sources_at = (!m.sources.is_empty())
         .then(|| {
@@ -24300,6 +24780,51 @@ fn time_of(ms: i64) -> String {
         chrono::LocalResult::Single(t) => t.format("%H:%M").to_string(),
         _ => String::new(),
     }
+}
+
+/// The Pinned popover's nub, `at` from its left: the top half of a square `layout::CARET`
+/// across turned 45°, standing on the popover's top edge, in its fill and over its line
+/// there, with the line down its two outer sides and its tip a little rounded.
+fn pins_nub(p: Palette, at: f32) -> impl IntoElement {
+    let half = layout::CARET * std::f32::consts::FRAC_1_SQRT_2;
+    // A pixel's room round it, for the line's edges.
+    let room = 1.0;
+    canvas(
+        |_, _, _| {},
+        move |b, _, window, _| {
+            let x = b.origin.x + px(half + room);
+            // Down the middle of the popover's line, where the nub's sides meet it.
+            let edge = b.origin.y + px(half + room + 0.5);
+            let tip = edge - px(half);
+            // The tip, rounded from this far down each side.
+            let round = 2.5 * std::f32::consts::FRAC_1_SQRT_2;
+            let sides = |b: &mut PathBuilder| {
+                b.move_to(point(x - px(half), edge));
+                b.line_to(point(x - px(round), tip + px(round)));
+                b.curve_to(point(x + px(round), tip + px(round)), point(x, tip));
+                b.line_to(point(x + px(half), edge));
+            };
+            // Down past the popover's line, into its fill, so none of the line shows through.
+            let mut fill = PathBuilder::fill();
+            sides(&mut fill);
+            fill.line_to(point(x + px(half), edge + px(1.5)));
+            fill.line_to(point(x - px(half), edge + px(1.5)));
+            fill.close();
+            if let Ok(path) = fill.build() {
+                window.paint_path(path, p.raised);
+            }
+            let mut line = PathBuilder::stroke(px(1.0));
+            sides(&mut line);
+            if let Ok(path) = line.build() {
+                window.paint_path(path, p.line_strong);
+            }
+        },
+    )
+    .absolute()
+    .left(px(at - half - room))
+    .top(px(-half - room))
+    .w(px(2.0 * (half + room)))
+    .h(px(half + 3.0 * room))
 }
 
 /// When a pinned message was sent, over it in the Pinned popover: "Today 12:57",
@@ -26062,6 +26587,7 @@ mod row_tests {
             sources: Vec::new(),
             learned: Vec::new(),
             links: HashMap::new(),
+            cards: Default::default(),
             status: "done".into(),
         }
     }
@@ -27448,7 +27974,9 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
 #[cfg(test)]
 mod composer_tests {
     // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
-    use super::{composer_edit, composer_text, paste_link, ComposerEdit};
+    use super::{
+        composer_edit, composer_text, paste_card, paste_link, put_typed_card, ComposerEdit,
+    };
     use gpui::{
         div, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, TestAppContext, VisualTestContext, Window,
@@ -27580,6 +28108,54 @@ mod composer_tests {
             c.read_with(cx, |c, _| composer_text(c)),
             "See <https://a.example/x>"
         );
+    }
+
+    // A card's id typed for one of the person's boards becomes its piece once a space or
+    // a stop follows it, and what's typed next goes after that, as typed (LOO-342).
+    #[gpui::test]
+    fn a_typed_card_id_is_one_piece_and_typing_goes_on_after_it(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        let prefixes = vec!["LOO".to_string(), "CAL".to_string()];
+        let track = |c: &Entity<TextareaState>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| c.update(cx, |c, cx| put_typed_card(c, &prefixes, window, cx)))
+        };
+        cx.simulate_input("Is CAL-338");
+        assert_eq!(track(&c, cx), None);
+        cx.simulate_input(" ");
+        assert_eq!(track(&c, cx).as_deref(), Some("CAL-338"));
+        cx.simulate_input("waiting on UTF-8 and LOO-206,");
+        assert_eq!(track(&c, cx).as_deref(), Some("LOO-206"));
+        cx.simulate_input(" yes?");
+        assert_eq!(
+            shown(&c, cx),
+            (
+                "Is CAL-338 waiting on UTF-8 and LOO-206, yes?".into(),
+                vec!["loom-card:CAL-338".into(), "loom-card:LOO-206".into()]
+            )
+        );
+        // Sent as the ids, which the chat shows as the pills again.
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            "Is CAL-338 waiting on UTF-8 and LOO-206, yes?"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pasted_card_link_is_one_piece_sent_as_its_address(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        cx.simulate_input("See ");
+        let url = "https://acta.aaenz.no/aaen-studios/loom#LOO-206";
+        cx.update(|window, cx| c.update(cx, |c, cx| paste_card(c, url, window, cx)));
+        assert_eq!(
+            shown(&c, cx),
+            (format!("See {url}"), vec![format!("loom-card:{url}")])
+        );
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            format!("See {url}")
+        );
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(shown(&c, cx), ("See ".into(), vec![]));
     }
 }
 

@@ -28,9 +28,11 @@ On the desktop, a chat opens on its newest 200 messages. Scroll near the top and
 
 ## How full the chat is
 
-The chat never ends, but the agent program's session under it does. The ring just before Send fills with the session's context, orange from 75% and red from 90%, and under the pointer it says how full it is: "Context 41%, 82k of 200k. A fresh session starts at 80%." Once it's 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost.
+The chat never ends, but the agent program's session under it does. The ring in the chat's header, right after the model, fills with the session's context, orange from 70% and red from 90%. Under the pointer it shows a card: **Context** with its tokens of the window ("82k of 200k"), a bar, when the program last compacted the session and that a fresh session starts at 80% ("Compacted 2 h ago · a fresh session starts at 80%"). **Compact now** has the program compact the session, where it can when asked, as Claude's can, and **Start a fresh session** sends your next message to a fresh one. A click on the ring keeps the card open until you click outside it, press Esc or click the ring again. In a group chat the ring and the card are for the agent that answered last, "Ledger's context".
 
-A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context itself, "Context compacted · 182k → 16k". The iPhone app doesn't show the ring or the lines yet.
+Once the session is 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost. A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context, "Context compacted · 182k → 16k". In a group chat the line names the agent whose session it was: "Ledger's fresh session starts here", "Ledger's context compacted · 120k → 76k".
+
+On the iPhone the ring is in the chat's header too, and a tap opens its card as a sheet, with the same Compact now and Start a fresh session. The iPhone doesn't show the lines across the chat yet.
 
 ## Branching
 
@@ -103,7 +105,7 @@ Point at a message, yours or an agent's, and choose **Delete** from the **⋯** 
 
 ## Long messages and tables
 
-In the desktop app, a message longer than about ten lines is cut when you open its chat, with **Show more** under it to read the rest in place and **Show less** to fold it again. A reply that comes while you're in the chat, what you send, and new replies you haven't read yet show in full.
+A message longer than about ten lines is cut when you open its chat, with **Show more** under it to read the rest in place and **Show less** to fold it again. On the iPhone, a tap on the cut words opens it too. A reply that comes while you're in the chat, what you send, and new replies you haven't read yet show in full.
 
 Under a table in an agent's reply, a quiet line says how many rows it has, with **Copy**, which copies it as CSV for a spreadsheet. Its arrow has **Copy as CSV**, **Copy as Markdown** and **Copy as text**.
 
@@ -151,11 +153,11 @@ On an iPhone, **+** opens a sheet with the same lists, and your newest photos in
 
 Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
 
-The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. Shift+click takes one and keeps the picker open. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box, or below it in a new chat when there's more room there. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
 
 A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
 
-On the iPhone, the row of matches runs sideways over the message box, and the smiley opens the picker as a sheet, with the same groups and search. When the smiley is hidden, the **+** sheet has **Emoji**. An emoji from the keyboard shows as loom draws it.
+On the iPhone, the row of matches runs sideways over the message box, and the smiley opens the picker where the keyboard goes, under the message box, with the same groups and search. It stays up while you tap emoji and send. The keyboard button in the smiley's place brings the keyboard back, and a swipe down or a tap in the chat puts the picker away. When the smiley is hidden, the **+** sheet has **Emoji**. An emoji from the keyboard shows as loom draws it.
 
 Your own emoji are pictures you add in **Settings → Emoji**. On the iPhone, **Add** takes one from Photos and asks its name, and a tile's menu has Rename and Delete. They're kept on the instance, so all your devices have them. You send one as `:its_name:`, and agents read it that way. When an agent writes an emoji's name, it shows as the emoji. Built-in emoji go as the emoji itself. loom draws them with [Twemoji](https://github.com/jdecked/twemoji), the set Discord uses, so they look the same on Windows, a Mac and an iPhone.
 

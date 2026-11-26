@@ -63,6 +63,13 @@ const JUNIPER = mentionThread('yarn');
 // GitHub's mark, as its site icon on the reply's link and sources.
 const GITHUB =
 	'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z';
+// The layers glyph on a board's tile, before an Acta card's id (app.rs, board_tile), in a
+// 24-unit box.
+const BOARD_LAYERS = [
+	'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z',
+	'M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12',
+	'M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17',
+];
 ---
 
 <div class="app" data-demo role="region" aria-label="loom's desktop app, with an agent at work">
@@ -226,8 +233,9 @@ const GITHUB =
 					<span class="room-count">{shop.colors.length} agents</span>
 				</span>
 				<span class="chips">
-					<!-- The chat's pins: how many, and the popover under it with each pin drawn as the
-					     chat draws its message (app.rs, pins_pop, pin_row). -->
+					<!-- The chat's pins: how many, and the popover centred under it, with its nub on
+					     the pin and each pin drawn as the chat draws its message (app.rs, pins_pop,
+					     pins_placed, pin_row). -->
 					<span class="pins-at">
 						<button type="button" class="chip pins-btn" data-pins aria-expanded="false" aria-label="Pinned" title="Pinned  Ctrl+Shift+P"
 							><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg
@@ -245,6 +253,7 @@ const GITHUB =
 								<div class="pp-note" data-pins-note hidden></div>
 							</div>
 						</div>
+						<span class="pp-nub" aria-hidden="true"></span>
 					</span>
 					<span class="chip brain" aria-hidden="true">
 						{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
@@ -359,7 +368,23 @@ const GITHUB =
 							</div>
 							<div class="said">
 								<p>
-									Two things. The notes for 2.4 are due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
+									Two things. <span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--thread-sky)"
+										><span class="acta-face"
+											><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
+												><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+											><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
+										><span class="acta-preview" role="tooltip"
+											><span class="cp-place"
+												><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
+													><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+												>shop · SHOP-31</span
+											><span class="cp-title">Write the release notes for 2.4</span><span class="cp-chips"
+												><span class="cp-chip cp-status">In progress</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
+											><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
+												>Subtasks 2 of 4<span class="cp-bar"><span style="width: 50%"></span></span></span
+											><span class="cp-buttons"><span class="cp-button">Open</span><span class="cp-button">Open in Acta</span></span></span
+										></span
+									> is due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
 										><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
 									> is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
 										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>the billing fix</span
@@ -384,7 +409,17 @@ const GITHUB =
 								><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={JUNIPER}></path></svg>Juniper</span
 							><span>· release question</span></div
 						>
-						<div class="said"><p>Yes, since 09:40. Its health check answers.</p></div>
+						<div class="said">
+							<p>
+								Yes, since 09:40. <span class="acta-pill" data-card="SHOP-29" style="--status: var(--ok)"
+									><span class="acta-face"
+										><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
+											><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+										><span class="acta-id">SHOP-29</span><span class="acta-title">Ship 2.4.1</span><span class="acta-dot"></span></span
+									></span
+								> is done, and its health check answers.
+							</p>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -1609,6 +1644,202 @@ const GITHUB =
 		vertical-align: -2px;
 		margin-right: 4px;
 	}
+	/* An Acta card a message names (PLAN.md, "Cards in messages"; app.rs, card_pill): its
+	   board's tile, its id in mono, its title cut to fit and a dot in its status's colour, on
+	   the bubble's fill with a line around it. Under the pointer, or focused by a tap, its
+	   preview opens under it (app.rs, card_preview), and stays while the pointer is on it. */
+	.acta-pill {
+		position: relative;
+		display: inline-block;
+		max-width: 100%;
+		outline: none;
+	}
+	.acta-face {
+		display: inline-block;
+		box-sizing: border-box;
+		max-width: 100%;
+		height: var(--control-pill);
+		padding: 0 7px 0 4px;
+		line-height: 20px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-row);
+		background: var(--bubble);
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.acta-tile {
+		display: inline-block;
+		width: 14px;
+		height: 14px;
+		margin-right: 5px;
+		vertical-align: -2px;
+		fill: var(--board);
+	}
+	.acta-tile g {
+		fill: none;
+		stroke: #f4f1fc;
+		stroke-width: 2.4;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.acta-id {
+		margin-right: 5px;
+		font-family: var(--mono);
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+	}
+	.acta-title {
+		display: inline-block;
+		max-width: min(var(--layout-pill-title), 40vw);
+		overflow: hidden;
+		text-overflow: ellipsis;
+		vertical-align: top;
+		font-size: var(--size-small);
+		color: var(--ink);
+	}
+	.acta-dot {
+		display: inline-block;
+		width: 7px;
+		height: 7px;
+		margin-left: 5px;
+		border-radius: 50%;
+		background: var(--status);
+		vertical-align: 1px;
+	}
+	.acta-preview {
+		position: absolute;
+		left: 0;
+		top: calc(100% + 4px);
+		z-index: 6;
+		display: none;
+		flex-direction: column;
+		gap: var(--space-s);
+		box-sizing: border-box;
+		width: var(--layout-acta-preview);
+		max-width: calc(100vw - 64px);
+		padding: var(--space-m);
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.1);
+		line-height: var(--line-body);
+		white-space: normal;
+		cursor: default;
+	}
+	/* The gap to the pill, so the pointer crossing it keeps the preview open. */
+	.acta-preview::before {
+		content: '';
+		position: absolute;
+		left: 0;
+		right: 0;
+		top: -6px;
+		height: 6px;
+	}
+	.acta-preview.up {
+		top: auto;
+		bottom: calc(100% + 4px);
+	}
+	.acta-preview.up::before {
+		top: auto;
+		bottom: -6px;
+	}
+	.acta-pill:hover .acta-preview,
+	.acta-pill:focus .acta-preview {
+		display: flex;
+	}
+	.cp-place {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.cp-place .acta-tile {
+		margin: 0;
+	}
+	.cp-title {
+		font-size: var(--size-body);
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
+	}
+	.cp-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.cp-chip {
+		display: inline-flex;
+		align-items: center;
+		height: 20px;
+		padding: 0 8px;
+		border: 1px solid var(--line-strong);
+		border-radius: 10px;
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.cp-status {
+		color: var(--status);
+		border-color: color-mix(in srgb, var(--status) 60%, transparent);
+	}
+	.cp-text {
+		display: -webkit-box;
+		-webkit-line-clamp: 3;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.cp-subtasks {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.cp-bar {
+		flex: 1;
+		height: 4px;
+		border-radius: 2px;
+		background: var(--line-strong);
+		overflow: hidden;
+	}
+	.cp-bar span {
+		display: block;
+		height: 100%;
+		border-radius: 2px;
+		background: var(--ok);
+	}
+	.cp-buttons {
+		display: flex;
+		gap: var(--space-s);
+		padding-top: 2px;
+	}
+	.cp-button {
+		display: inline-flex;
+		align-items: center;
+		height: 28px;
+		padding: 0 10px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-button);
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+		cursor: pointer;
+		transition: background-color 120ms ease;
+	}
+	.cp-button:hover {
+		background: var(--hover);
+	}
+	@media (prefers-color-scheme: dark) {
+		:root:not([data-theme='light']) .acta-preview {
+			box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
+		}
+	}
+	:root[data-theme='dark'] .acta-preview {
+		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
+	}
 
 	/* Another agent's thread with the open one (app.rs, branch_strip): in the chat's place,
 	   with a strip over it that says whose it is, the asker's thread beside its name, and the
@@ -1958,10 +2189,11 @@ const GITHUB =
 			display: none;
 		}
 	}
-	/* The Pinned popover (PLAN.md, "Pinned messages"; app.rs, pins_pop): under the header's pin,
-	   over the chat, which keeps its width. */
+	/* The Pinned popover (PLAN.md, "Pinned messages"; app.rs, pins_pop, pins_placed): over the
+	   chat, which keeps its width, 8px under the header and centred under the header's pin as the
+	   window lets it, 12px inside its edges, with a nub on the pin (demo.ts, placePins). It comes
+	   in from the pin, growing a little as it fades in. */
 	.pins-at {
-		position: relative;
 		display: inline-flex;
 	}
 	.pins-btn {
@@ -1980,11 +2212,13 @@ const GITHUB =
 	.pins-pop {
 		position: absolute;
 		z-index: 20;
-		top: calc(100% + 8px);
-		right: 0;
-		width: 460px;
-		max-width: calc(100vw - 32px);
+		top: calc(var(--layout-titlebar) + 8px);
+		left: var(--pop-left, auto);
+		right: 12px;
+		width: var(--pop-width, var(--layout-pins));
 		display: flex;
+		transform-origin: var(--nub-in, 50%) -8px;
+		animation: pins-in 0.16s cubic-bezier(0.2, 0.7, 0.3, 1);
 		flex-direction: column;
 		background: var(--raised);
 		border: 1px solid var(--line-strong);
@@ -1996,8 +2230,37 @@ const GITHUB =
 		font-size: var(--size-body);
 		color: var(--ink);
 	}
-	.pins-pop[hidden] {
+	.pins-pop[hidden],
+	.pins-pop[hidden] + .pp-nub {
 		display: none;
+	}
+	/* The nub: a square turned 45°, its top half standing on the popover's edge over its line,
+	   in its fill, with the line down its outer sides and its tip a little rounded. */
+	.pp-nub {
+		position: absolute;
+		z-index: 21;
+		top: calc(var(--layout-titlebar) + 8px + 0.5px - var(--layout-caret) / 2);
+		left: calc(var(--nub-at, 0px) - var(--layout-caret) / 2);
+		width: var(--layout-caret);
+		height: var(--layout-caret);
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-right: 0;
+		border-bottom: 0;
+		border-top-left-radius: 2.5px;
+		transform: rotate(45deg);
+		animation: pins-nub-in 0.16s cubic-bezier(0.2, 0.7, 0.3, 1);
+	}
+	@keyframes pins-in {
+		from {
+			opacity: 0;
+			transform: scale(0.96);
+		}
+	}
+	@keyframes pins-nub-in {
+		from {
+			opacity: 0;
+		}
 	}
 	.pp-head {
 		display: flex;
@@ -2232,6 +2495,10 @@ const GITHUB =
 			right: 16px;
 			bottom: 16px;
 			width: auto;
+			transform-origin: 50% 100%;
+		}
+		.pp-nub {
+			display: none;
 		}
 	}
 	.msg-menu {
