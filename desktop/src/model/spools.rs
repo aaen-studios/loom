@@ -18,21 +18,25 @@ pub const FEATURED: [&str; 2] = ["acta", "t3"];
 /// isn't one of them comes after them.
 pub const PILLS: [&str; 6] = ["Work", "Code", "Mail & calendar", "Files", "Home", "Fun"];
 
-/// A field an entry asks the person to fill in, such as T3's address.
+/// A field an entry asks the person to fill in, such as T3's address. One from the
+/// registry may have a default, used where it's left empty.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Field {
     pub name: String,
     pub label: String,
     pub placeholder: String,
+    pub default: String,
 }
 
-/// A secret an entry asks for, and whether the person has one by its name already.
+/// A secret an entry asks for, and whether the person has one by its name already. One
+/// from the registry may be optional.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Key {
     pub name: String,
     pub label: String,
     pub placeholder: String,
     pub have: bool,
+    pub optional: bool,
 }
 
 /// One of the catalog's entries.
@@ -67,6 +71,12 @@ pub struct Entry {
     pub tools_checked: bool,
     /// The person's servers made from it.
     pub servers: Vec<String>,
+    /// One of the MCP Registry's, from a search, by its name there and its version.
+    pub community: bool,
+    pub registry: String,
+    pub version: String,
+    /// Why loom can't connect it, for one from the registry it can't.
+    pub unsupported: String,
 }
 
 impl Entry {
@@ -98,12 +108,19 @@ impl Entry {
             remote: s(v, "runs") != "instance",
             url: s(v, "url"),
             command,
+            // A registry server's field or secret is labelled by its own name, so what
+            // it's for, as the registry says, is its placeholder where it has none.
             fields: list("fields")
                 .iter()
                 .map(|f| Field {
                     name: s(f, "name"),
                     label: s(f, "label"),
-                    placeholder: s(f, "placeholder"),
+                    placeholder: first_of(&[
+                        s(f, "placeholder"),
+                        s(f, "default"),
+                        s(f, "description"),
+                    ]),
+                    default: s(f, "default"),
                 })
                 .collect(),
             sign_in: s(v, "sign_in"),
@@ -112,8 +129,9 @@ impl Entry {
                 .map(|k| Key {
                     name: s(k, "name"),
                     label: s(k, "label"),
-                    placeholder: s(k, "placeholder"),
+                    placeholder: first_of(&[s(k, "placeholder"), s(k, "description")]),
                     have: k.get("have").and_then(Value::as_bool).unwrap_or(false),
+                    optional: k.get("optional").and_then(Value::as_bool).unwrap_or(false),
                 })
                 .collect(),
             note: s(v, "note"),
@@ -130,6 +148,10 @@ impl Entry {
                 .filter_map(Value::as_str)
                 .map(str::to_string)
                 .collect(),
+            community: v.get("community").and_then(Value::as_bool).unwrap_or(false),
+            registry: s(v, "registry"),
+            version: s(v, "version"),
+            unsupported: s(v, "unsupported"),
         }
     }
 
@@ -142,10 +164,10 @@ impl Entry {
         !self.servers.is_empty()
     }
 
-    /// Whether the person can connect more than one: an entry reached at an address
-    /// they give, such as T3 on each of their computers.
+    /// Whether the person can connect more than one: a curated entry reached at an
+    /// address they give, such as T3 on each of their computers.
     pub fn several(&self) -> bool {
-        !self.fields.is_empty()
+        !self.community && !self.fields.is_empty()
     }
 
     /// Whether connecting asks for something first: a field, or a secret the person
@@ -191,9 +213,30 @@ impl Entry {
                 }
                 _ => "With a key".into(),
             },
+            // A remote from the registry with no keys: the registry doesn't say.
+            "unknown" => "Known once it's connected".into(),
             _ => "No sign-in".into(),
         }
     }
+
+    /// How `catalog.connect` names it: a curated entry by its id, one from the registry
+    /// by its name there and its version.
+    fn connect_args(&self) -> Value {
+        if self.community {
+            json!({"registry": self.registry, "version": self.version})
+        } else {
+            json!({"id": self.id})
+        }
+    }
+}
+
+/// The first of `texts` that isn't empty.
+fn first_of(texts: &[String]) -> String {
+    texts
+        .iter()
+        .find(|t| !t.trim().is_empty())
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The host of an address, as `https://acta.aaenz.no/api/mcp` is `acta.aaenz.no`.
@@ -377,6 +420,36 @@ pub struct Spools {
     /// The agent Spools was opened for, from its composer or its settings, picked
     /// first at the agents step.
     pub for_agent: Option<String>,
+    /// The search of the MCP Registry for what's typed, once it's long enough.
+    pub search: Search,
+}
+
+/// How few letters the MCP Registry is searched for.
+pub const SHORTEST: usize = 3;
+
+/// A search of the MCP Registry (`catalog.search`): what it's for, the command asked,
+/// and once answered, the registry's servers, the curated entries it found, or why the
+/// registry couldn't say.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Search {
+    pub query: String,
+    asked: String,
+    pub answered: bool,
+    pub entries: Vec<Entry>,
+    pub curated: Vec<String>,
+    pub error: Option<String>,
+}
+
+/// What the Find tab shows: loom's own that match as cards, the rest of the catalog's
+/// that match and then the registry's as tiles, and under them the search's state.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shown {
+    pub cards: Vec<Entry>,
+    pub tiles: Vec<Entry>,
+    /// Searching…, or why the registry couldn't be searched.
+    pub line: Option<String>,
+    /// Nothing matches, the registry included.
+    pub nothing: bool,
 }
 
 /// The pills, All aside: the decided ones, then any other category the catalog has.
@@ -390,10 +463,16 @@ pub fn pills(categories: &[String]) -> Vec<String> {
     out
 }
 
-/// What the Find tab shows for the pill picked (none is All) and what's typed: the
-/// featured entries that match, as cards, and the rest that match, as tiles, each by
-/// its place in `entries`.
-pub fn found(entries: &[Entry], pill: Option<&str>, query: &str) -> (Vec<usize>, Vec<usize>) {
+/// What the Find tab shows of the catalog for the pill picked (none is All) and what's
+/// typed: the featured entries that match, as cards, and the rest that match, as tiles,
+/// each by its place in `entries`. `also` are the ids of those the registry's search
+/// found too, such as one whose address or package a registry server named is.
+pub fn found(
+    entries: &[Entry],
+    pill: Option<&str>,
+    query: &str,
+    also: &[String],
+) -> (Vec<usize>, Vec<usize>) {
     let mut cards = Vec::new();
     let mut tiles = Vec::new();
     for (i, e) in entries.iter().enumerate() {
@@ -401,7 +480,7 @@ pub fn found(entries: &[Entry], pill: Option<&str>, query: &str) -> (Vec<usize>,
             continue;
         }
         let text = format!("{} {} {} {}", e.name, e.description, e.category, e.maker);
-        if !finds(query, &text) {
+        if !finds(query, &text) && !also.contains(&e.id) {
             continue;
         }
         if e.featured() {
@@ -585,8 +664,9 @@ pub fn another_name(entry: &Entry, address: &str, taken: &[&str]) -> String {
     name
 }
 
-/// What's missing from a form before it can connect: the label of the first field, or
-/// of a secret the person doesn't have, left empty.
+/// What's missing from a form before it can connect: the label of the first field
+/// without a default, or of a secret the person doesn't have and isn't optional, left
+/// empty.
 pub fn missing(
     entry: &Entry,
     fields: &[(String, String)],
@@ -596,12 +676,12 @@ pub fn missing(
         list.iter().any(|(n, v)| n == name && !v.trim().is_empty())
     };
     for f in &entry.fields {
-        if !given(fields, &f.name) {
+        if f.default.is_empty() && !given(fields, &f.name) {
             return Some(format!("Fill in {}", f.label));
         }
     }
     for k in &entry.secrets {
-        if !k.have && !given(secrets, &k.name) {
+        if !k.have && !k.optional && !given(secrets, &k.name) {
             return Some(format!("Fill in {}", k.label));
         }
     }
@@ -631,15 +711,80 @@ impl Model {
         self.load_mcp()
     }
 
-    /// Asks for the catalog.
-    pub(super) fn load_catalog(&mut self) -> Value {
+    /// Asks for the catalog, and the registry's search again where there is one, as
+    /// the person's servers from both change.
+    pub(super) fn load_catalog(&mut self) -> Vec<Value> {
         let id = self.id("app.spools_list");
-        json!({"t": "cmd", "id": id, "name": "catalog.list"})
+        let mut out = vec![json!({"t": "cmd", "id": id, "name": "catalog.list"})];
+        if !self.spools.search.query.is_empty() {
+            let query = self.spools.search.query.clone();
+            out.push(self.ask_search(&query));
+        }
+        out
     }
 
-    /// The catalog's entries, by id.
+    /// An entry by its id: the catalog's, or one the registry's search found.
     pub fn entry(&self, id: &str) -> Option<&Entry> {
-        self.spools.entries.iter().find(|e| e.id == id)
+        let sp = &self.spools;
+        sp.entries
+            .iter()
+            .chain(&sp.search.entries)
+            .find(|e| e.id == id)
+    }
+
+    /// What's typed in Find's search, once typing pauses: the MCP Registry is searched
+    /// for it from `SHORTEST` letters, and fewer forget the last search.
+    pub fn spool_search(&mut self, query: &str) -> Option<Value> {
+        let query = query.trim();
+        if query.chars().count() < SHORTEST {
+            self.spools.search = Search::default();
+            return None;
+        }
+        if self.spools.search.query == query {
+            return None;
+        }
+        self.spools.search = Search {
+            query: query.to_string(),
+            ..Search::default()
+        };
+        Some(self.ask_search(query))
+    }
+
+    /// `catalog.search` for `query`, whose answer is the only one taken.
+    fn ask_search(&mut self, query: &str) -> Value {
+        let id = self.id("app.spools_search");
+        self.spools.search.asked = id.clone();
+        json!({"t": "cmd", "id": id, "name": "catalog.search", "args": {"query": query}})
+    }
+
+    /// What the Find tab shows for what's typed, `query`, with the pill picked: the
+    /// catalog's that match, or that the registry found, then the registry's servers,
+    /// which have no category, under All; and while the registry hasn't answered for
+    /// it, or couldn't, a line that says so.
+    pub fn spools_shown(&self, query: &str) -> Shown {
+        let sp = &self.spools;
+        let query = query.trim();
+        let search =
+            (query.chars().count() >= SHORTEST && sp.search.query == query).then_some(&sp.search);
+        let curated = search.map_or(&[][..], |s| &s.curated[..]);
+        let (cards, tiles) = found(&sp.entries, sp.pill.as_deref(), query, curated);
+        let mut shown = Shown {
+            cards: cards.iter().map(|&i| sp.entries[i].clone()).collect(),
+            tiles: tiles.iter().map(|&i| sp.entries[i].clone()).collect(),
+            ..Shown::default()
+        };
+        if let Some(s) = search {
+            if sp.pill.is_none() {
+                shown.tiles.extend(s.entries.iter().cloned());
+            }
+            shown.line = if !s.answered {
+                Some("Searching…".into())
+            } else {
+                s.error.clone()
+            };
+        }
+        shown.nothing = shown.cards.is_empty() && shown.tiles.is_empty() && shown.line.is_none();
+        shown
     }
 
     /// The person's server `name`.
@@ -664,6 +809,28 @@ impl Model {
                 Some(e) => self.spools.error = Some(e),
                 None => self.catalog_came(f.get("value").unwrap_or(&Value::Null)),
             }
+        } else if id.starts_with("app.spools_search") {
+            let search = &mut self.spools.search;
+            // An answer to a search typed over since is left.
+            if search.asked != id {
+                return;
+            }
+            search.answered = true;
+            let v = f.get("value").unwrap_or(&Value::Null);
+            let list = |key: &str| v.get(key).and_then(Value::as_array).cloned();
+            search.entries = list("entries")
+                .unwrap_or_default()
+                .iter()
+                .map(Entry::of)
+                .collect();
+            search.curated = list("curated")
+                .unwrap_or_default()
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            search.error =
+                error.or_else(|| v.get("error").and_then(Value::as_str).map(str::to_string));
         } else if id.starts_with("app.spools_connect") {
             match (error, f.pointer("/value/connect").and_then(Connect::of)) {
                 (Some(e), _) => {
@@ -810,13 +977,12 @@ impl Model {
     /// Connect, or Connect another, in the open pane: its form, where it asks for
     /// something first, or else connecting at once.
     pub fn spool_connect(&mut self, another: bool) -> Option<Value> {
+        let open = self.spools.flow.as_ref()?.entry.clone();
+        let entry = self.entry(&open)?.clone();
+        if !entry.unsupported.is_empty() {
+            return None;
+        }
         let flow = self.spools.flow.as_mut()?;
-        let entry = self
-            .spools
-            .entries
-            .iter()
-            .find(|e| e.id == flow.entry)?
-            .clone();
         flow.another = another;
         flow.said.clear();
         flow.agents.clear();
@@ -827,7 +993,7 @@ impl Model {
         flow.server = entry.server.clone();
         flow.stage = Stage::Going(Step::Adding);
         let id = self.id("app.spools_connect");
-        Some(json!({"t": "cmd", "id": id, "name": "catalog.connect", "args": {"id": entry.id}}))
+        Some(json!({"t": "cmd", "id": id, "name": "catalog.connect", "args": entry.connect_args()}))
     }
 
     /// The form's Connect, with what was typed in its fields and secrets: what's
@@ -838,12 +1004,7 @@ impl Model {
         secrets: &[(String, String)],
     ) -> Option<Value> {
         let flow = self.spools.flow.as_ref()?;
-        let entry = self
-            .spools
-            .entries
-            .iter()
-            .find(|e| e.id == flow.entry)?
-            .clone();
+        let entry = self.entry(&flow.entry)?.clone();
         if let Some(said) = missing(&entry, fields, secrets) {
             if let Some(flow) = self.spools.flow.as_mut() {
                 flow.said = said;
@@ -856,7 +1017,9 @@ impl Model {
                 .map(|(n, v)| (n.clone(), json!(v.trim())))
                 .collect()
         };
-        let mut args = json!({"id": entry.id, "fields": pick(fields), "secrets": pick(secrets)});
+        let mut args = entry.connect_args();
+        args["fields"] = Value::Object(pick(fields));
+        args["secrets"] = Value::Object(pick(secrets));
         let name = if flow.another {
             let address = fields.first().map(|(_, v)| v.as_str()).unwrap_or_default();
             let taken: Vec<&str> = self.mcp_servers.iter().map(|m| m.name.as_str()).collect();
@@ -878,15 +1041,15 @@ impl Model {
     /// Back from a connect that failed, or from the form: to the form again, for one
     /// that asks, or to the entry.
     pub fn spool_back(&mut self) {
-        let Some(flow) = self.spools.flow.as_mut() else {
+        let Some(flow) = self.spools.flow.as_ref() else {
             return;
         };
         let asks = self
-            .spools
-            .entries
-            .iter()
-            .find(|e| e.id == flow.entry)
+            .entry(&flow.entry)
             .is_some_and(|e| e.asks(flow.another));
+        let Some(flow) = self.spools.flow.as_mut() else {
+            return;
+        };
         flow.stage = if flow.stage == Stage::Going(Step::Failed) && asks {
             Stage::Form
         } else {
@@ -1099,15 +1262,177 @@ mod tests {
         let m = with_catalog();
         let entries = &m.spools.entries;
         // All: Acta and T3 as cards, the rest as tiles in the catalog's order.
-        assert_eq!(found(entries, None, ""), (vec![0, 1], vec![2, 3, 4]));
+        assert_eq!(found(entries, None, "", &[]), (vec![0, 1], vec![2, 3, 4]));
         // A pill: only its category, cards too.
-        assert_eq!(found(entries, Some("Code"), ""), (vec![1], vec![2, 3]));
-        assert_eq!(found(entries, Some("Fun"), ""), (vec![], vec![]));
+        assert_eq!(found(entries, Some("Code"), "", &[]), (vec![1], vec![2, 3]));
+        assert_eq!(found(entries, Some("Fun"), "", &[]), (vec![], vec![]));
         // What's typed finds a name, a line or who makes it, in any case.
-        assert_eq!(found(entries, None, "git"), (vec![], vec![2]));
-        assert_eq!(found(entries, None, "MICROSOFT"), (vec![], vec![3]));
-        assert_eq!(found(entries, None, "boards"), (vec![0], vec![]));
-        assert_eq!(found(entries, Some("Home"), "acta"), (vec![], vec![]));
+        assert_eq!(found(entries, None, "git", &[]), (vec![], vec![2]));
+        assert_eq!(found(entries, None, "MICROSOFT", &[]), (vec![], vec![3]));
+        assert_eq!(found(entries, None, "boards", &[]), (vec![0], vec![]));
+        assert_eq!(found(entries, Some("Home"), "acta", &[]), (vec![], vec![]));
+    }
+
+    /// What `catalog.search` answers for "notion": two servers from the registry, one
+    /// with an icon and one loom can't connect, and the curated GitHub, as if a registry
+    /// server's address were its.
+    fn searched() -> Value {
+        json!({"entries": [
+            {"id": "registry:com.example/notes", "name": "Notes", "category": "", "description": "Notes in Notion.",
+             "maker": "example.com", "badge": {"name": "notes", "initial": "N", "color": "sky"}, "icon_svg": "<svg id=\"notes\"/>",
+             "server": "notes", "runs": "remote", "url": "https://{region}.notes.example.com/mcp",
+             "fields": [{"name": "region", "label": "region", "default": "eu", "description": "Where it runs"}],
+             "sign_in": "secret",
+             "secrets": [{"name": "notes.NOTES_KEY", "label": "NOTES_KEY", "description": "Your key", "have": false},
+                         {"name": "notes.NOTES_TEAM", "label": "NOTES_TEAM", "have": false, "optional": true}],
+             "tools": [], "tools_checked": false, "servers": [], "connected": false,
+             "community": true, "registry": "com.example/notes", "version": "1.2.0"},
+            {"id": "registry:com.example/boxed", "name": "Boxed", "category": "", "description": "Notion in a box.",
+             "maker": "example.com", "server": "boxed", "runs": "remote", "fields": [], "sign_in": "none", "secrets": [],
+             "tools": [], "tools_checked": false, "servers": [], "connected": false,
+             "community": true, "registry": "com.example/boxed", "version": "0.1.0", "unsupported": "It only runs in Docker."}
+        ], "curated": ["github"]})
+    }
+
+    /// Searches for `query` and answers with `value`.
+    fn search(m: &mut Model, query: &str, value: Value) {
+        let ask = m.spool_search(query).unwrap();
+        assert_eq!(ask["name"], "catalog.search");
+        assert_eq!(ask["args"]["query"], query);
+        m.take(&json!({"t": "result", "id": ask["id"], "ok": true, "value": value}));
+    }
+
+    #[test]
+    fn the_registry_is_searched_from_three_letters_and_only_its_last_answer_is_taken() {
+        let mut m = with_catalog();
+        assert_eq!(m.spool_search("no"), None);
+        let first = m.spool_search("not").unwrap();
+        // The same words again don't ask again.
+        assert_eq!(m.spool_search(" not "), None);
+        let shown = m.spools_shown("not");
+        assert_eq!(shown.line.as_deref(), Some("Searching…"));
+        assert!(!shown.nothing);
+        let last = m.spool_search("notion").unwrap();
+        // The answer to the first, typed over since, is left.
+        m.take(&json!({"t": "result", "id": first["id"], "ok": true, "value": {"entries": [], "curated": []}}));
+        assert!(!m.spools.search.answered);
+        m.take(&json!({"t": "result", "id": last["id"], "ok": true, "value": searched()}));
+        assert!(m.spools.search.answered);
+        assert_eq!(m.spools_shown("notion").line, None);
+        // Fewer letters again forget it.
+        assert_eq!(m.spool_search("no"), None);
+        assert_eq!(m.spools.search, Search::default());
+    }
+
+    #[test]
+    fn the_registrys_servers_come_after_the_catalogs_marked_community() {
+        let mut m = with_catalog();
+        search(&mut m, "notion", searched());
+        let shown = m.spools_shown("notion");
+        let ids: Vec<&str> = shown.tiles.iter().map(|e| e.id.as_str()).collect();
+        // GitHub, which the registry found, though its words don't have "notion".
+        assert_eq!(
+            ids,
+            vec![
+                "github",
+                "registry:com.example/notes",
+                "registry:com.example/boxed"
+            ]
+        );
+        assert!(shown.cards.is_empty() && !shown.nothing);
+        let notes = m.entry("registry:com.example/notes").unwrap();
+        assert!(notes.community && !notes.several());
+        assert_eq!(notes.icon_svg.as_deref(), Some("<svg id=\"notes\"/>"));
+        // A field or secret labelled by its own name has what it's for as its placeholder.
+        assert_eq!(notes.fields[0].placeholder, "eu");
+        assert_eq!(notes.secrets[0].placeholder, "Your key");
+        assert!(!m.entry("github").unwrap().community);
+        // With a pill, only the catalog's: the registry's have no category.
+        m.spools.pill = Some("Code".into());
+        let ids: Vec<String> = m
+            .spools_shown("notion")
+            .tiles
+            .iter()
+            .map(|e| e.id.clone())
+            .collect();
+        assert_eq!(ids, vec!["github".to_string()]);
+        // What's typed since, until it's searched, shows only the catalog's.
+        m.spools.pill = None;
+        assert!(m.spools_shown("notio").tiles.is_empty());
+    }
+
+    #[test]
+    fn a_registry_thats_down_says_why_in_place_of_nothing_found() {
+        let mut m = with_catalog();
+        search(
+            &mut m,
+            "zzzz",
+            json!({"entries": [], "curated": [], "error": "The MCP Registry couldn't be reached."}),
+        );
+        let shown = m.spools_shown("zzzz");
+        assert_eq!(
+            shown.line.as_deref(),
+            Some("The MCP Registry couldn't be reached.")
+        );
+        assert!(!shown.nothing);
+        // A search that finds nothing anywhere says so.
+        search(&mut m, "qqqq", json!({"entries": [], "curated": []}));
+        let shown = m.spools_shown("qqqq");
+        assert!(shown.nothing && shown.line.is_none());
+    }
+
+    #[test]
+    fn a_registry_server_connects_by_its_name_and_version() {
+        let mut m = with_catalog();
+        m.open_spools(None);
+        search(&mut m, "notion", searched());
+        m.spool_open("registry:com.example/notes");
+        // It asks for its key; its region has a default and its team is optional.
+        assert_eq!(m.spool_connect(false), None);
+        assert_eq!(m.spools.flow.as_ref().unwrap().stage, Stage::Form);
+        assert_eq!(
+            m.spool_submit(&[("region".into(), String::new())], &[]),
+            None
+        );
+        assert_eq!(m.spools.flow.as_ref().unwrap().said, "Fill in NOTES_KEY");
+        let f = m
+            .spool_submit(
+                &[("region".into(), String::new())],
+                &[("notes.NOTES_KEY".into(), " k1 ".into())],
+            )
+            .unwrap();
+        assert_eq!(f["name"], "catalog.connect");
+        assert_eq!(
+            f["args"],
+            json!({"registry": "com.example/notes", "version": "1.2.0", "fields": {}, "secrets": {"notes.NOTES_KEY": "k1"}})
+        );
+        // Its connect frames name it as the registry's.
+        m.take(&json!({"t": "connect", "connect": {"entry": "registry:com.example/notes", "server": "notes", "step": "agents", "tools": []}}));
+        assert_eq!(
+            m.spools.flow.as_ref().unwrap().stage,
+            Stage::Going(Step::Agents)
+        );
+        // Once connected, the catalog and the search are asked for again, for its servers.
+        let names: Vec<String> = m
+            .load_mcp()
+            .iter()
+            .map(|f| f["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(names.contains(&"catalog.list".to_string()));
+        assert!(names.contains(&"catalog.search".to_string()));
+    }
+
+    #[test]
+    fn one_loom_cant_connect_has_no_connect() {
+        let mut m = with_catalog();
+        search(&mut m, "notion", searched());
+        m.spool_open("registry:com.example/boxed");
+        assert_eq!(m.spool_connect(false), None);
+        assert_eq!(m.spools.flow.as_ref().unwrap().stage, Stage::About);
+        assert_eq!(
+            m.entry("registry:com.example/boxed").unwrap().unsupported,
+            "It only runs in Docker."
+        );
     }
 
     #[test]

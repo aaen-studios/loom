@@ -16,6 +16,9 @@ const ACROSS: u16 = 4;
 /// by its name, for the entry (and whether it's another of it) they were made for.
 pub(super) struct SpoolsUi {
     pub search: Entity<InputState>,
+    /// Counts what's typed in the search, so only the last of it, once typing pauses,
+    /// asks the registry.
+    typed: u64,
     pub fields: Vec<(String, Entity<InputState>)>,
     pub secrets: Vec<(String, Entity<InputState>)>,
     pub made_for: Option<(String, bool)>,
@@ -27,8 +30,28 @@ impl SpoolsUi {
         cx.subscribe_in(
             &search,
             window,
-            |_: &mut Loom, _, event: &InputEvent, _, cx| {
+            |this: &mut Loom, state, event: &InputEvent, _, cx| {
                 if let InputEvent::Change = event {
+                    // The catalog filters at once; the registry is asked once typing
+                    // pauses, not at each letter.
+                    let query = state.read(cx).value().to_string();
+                    this.spools_ui.typed += 1;
+                    let typed = this.spools_ui.typed;
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(300))
+                            .await;
+                        let _ = this.update(cx, |loom, cx| {
+                            if loom.spools_ui.typed != typed {
+                                return;
+                            }
+                            if let Some(frame) = loom.model.spool_search(&query) {
+                                loom.send(frame);
+                            }
+                            cx.notify();
+                        });
+                    })
+                    .detach();
                     cx.notify();
                 }
             },
@@ -36,6 +59,7 @@ impl SpoolsUi {
         .detach();
         SpoolsUi {
             search,
+            typed: 0,
             fields: Vec::new(),
             secrets: Vec::new(),
             made_for: None,
@@ -212,9 +236,8 @@ impl Loom {
             return page.child(div().px(px(space::XL)).child(body));
         }
         let query = self.spools_ui.search.read(cx).value().trim().to_string();
-        let entries = self.model.spools.entries.clone();
         let pill = self.model.spools.pill.clone();
-        let (cards, tiles) = spools::found(&entries, pill.as_deref(), &query);
+        let shown = self.model.spools_shown(&query);
         let open = self.model.spools.flow.as_ref().map(|f| f.entry.clone());
         let mut column = div()
             .px(px(space::XL))
@@ -223,10 +246,10 @@ impl Loom {
             .flex()
             .flex_col()
             .gap(px(space::L));
-        if !cards.is_empty() {
+        if !shown.cards.is_empty() {
             let mut row = div().flex().gap(px(space::M));
-            for &i in &cards {
-                row = row.child(self.spool_card(&entries[i], cx));
+            for e in &shown.cards {
+                row = row.child(self.spool_card(e, cx));
             }
             column = column.child(row);
         }
@@ -249,28 +272,32 @@ impl Loom {
             );
         }
         column = column.child(pills);
-        if tiles.is_empty() && cards.is_empty() {
-            column = column.child(
-                div()
-                    .py(px(space::M))
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_3)
-                    .child("Nothing found"),
-            );
+        let quiet = |text: String| {
+            div()
+                .py(px(space::M))
+                .text_size(px(size::SMALL))
+                .text_color(p.ink_3)
+                .child(text)
+        };
+        if shown.nothing {
+            column = column.child(quiet("Nothing found".into()));
         }
         // A grid of equal columns, so every tile is as wide as every other, whatever
         // its row.
-        if !tiles.is_empty() {
+        if !shown.tiles.is_empty() {
             let mut grid = div().grid().grid_cols(ACROSS).gap(px(space::S));
-            for &i in &tiles {
-                let picked = open.as_deref() == Some(entries[i].id.as_str());
-                grid = grid.child(self.spool_tile(&entries[i], picked, cx));
+            for e in &shown.tiles {
+                let picked = open.as_deref() == Some(e.id.as_str());
+                grid = grid.child(self.spool_tile(e, picked, cx));
             }
             column = column.child(grid);
         }
+        if let Some(line) = shown.line {
+            column = column.child(quiet(line));
+        }
         let flow = self.model.spools.flow.clone();
         let pane = flow.and_then(|flow| {
-            let entry = entries.iter().find(|e| e.id == flow.entry)?.clone();
+            let entry = self.model.entry(&flow.entry)?.clone();
             Some(self.spool_pane(&entry, &flow, cx))
         });
         page.child(
@@ -556,7 +583,14 @@ impl Loom {
                     .items_start()
                     .justify_between()
                     .child(self.spool_logo(None, Some(e), &e.server, BADGE_STEP + 4.0))
-                    .children(mark),
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS + 2.0))
+                            .when(e.community, |d| d.child(community_mark(p)))
+                            .children(mark),
+                    ),
             )
             .child(
                 div()
@@ -607,10 +641,19 @@ impl Loom {
                     )
                     .child(
                         div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .truncate()
-                            .child(format!("by {}", e.maker)),
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(space::S))
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(size::CAPTION))
+                                    .text_color(p.ink_3)
+                                    .truncate()
+                                    .child(format!("by {}", e.maker)),
+                            )
+                            .when(e.community, |d| d.child(community_mark(p))),
                     ),
             )
             .child(close);
@@ -804,6 +847,8 @@ impl Loom {
                     );
                 }
             }
+            // One from the registry loom can't connect says why, in Connect's place.
+            Stage::About if !e.unsupported.is_empty() => out.push(quiet(&e.unsupported)),
             Stage::About => {
                 out.push(
                     div()
@@ -1189,4 +1234,19 @@ impl Loom {
         out.extend(self.server_block(&m, cx));
         out
     }
+}
+
+/// The mark of a server from the MCP Registry, not one of loom's catalog.
+fn community_mark(p: Palette) -> Div {
+    div()
+        .flex_none()
+        .px(px(space::S))
+        .py(px(1.0))
+        .rounded_full()
+        .border_1()
+        .border_color(p.line_strong)
+        .text_size(px(size::CAPTION))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(p.ink_2)
+        .child("Community")
 }

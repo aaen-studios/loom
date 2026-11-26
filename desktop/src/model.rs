@@ -10409,7 +10409,7 @@ impl Model {
             json!({"t": "cmd", "id": b, "name": "secret.list"}),
         ];
         if self.spools.loaded {
-            out.push(self.load_catalog());
+            out.extend(self.load_catalog());
         }
         out
     }
