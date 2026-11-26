@@ -327,8 +327,8 @@ private struct Naming {
     var name: String
 }
 
-/// A pinned agent's tile: its thread drawn large in its shape and its name under it, and
-/// a warm dot while it waits on the person.
+/// A pinned agent's tile: its thread drawn large in its shape, moving as the agent works,
+/// and its name under it.
 private struct AgentTile: View {
     @Environment(Session.self) private var session
     var agent: Agent
@@ -356,11 +356,6 @@ private struct AgentTile: View {
                         .lineLimit(1)
                 }
                 .padding(.horizontal, Tokens.Space.xs)
-            }
-            .overlay(alignment: .topTrailing) {
-                if mood == .waiting {
-                    Circle().fill(P.warn).frame(width: 6, height: 6).padding(Tokens.Space.s)
-                }
             }
             .contentShape(RoundedRectangle(cornerRadius: Tokens.Radius.card))
             .accessibilityElement(children: .ignore)

@@ -4,15 +4,16 @@ Each agent has one chat that never ends. Choose an agent in the sidebar to talk 
 
 ## The sidebar
 
-The sidebar lists your group chats first ([Group chats](#group-chats)), then your agents in groups:
+The sidebar lists, from the top:
 
-- **Waiting on you**, at the top, while an agent waits on a question or a permission. It goes back to its place once you've answered. A pinned agent keeps its tile instead.
-- **Pinned agents**, as tiles, three across. **Pin to top** is in the agent's menu.
-- **The rest**, a line each, with what an agent is on after its name while it works.
-- **Folders** you make: **New folder** in the space under the agents, or **Move to folder** in an agent's menu. Click a folder's name to open or shut it, and right-click it to rename or delete it. Drag an agent onto a folder's name to put it in, or onto an agent outside to take it out. Deleting a folder keeps its agents.
+- **Pinned agents**, as tiles. **Pin to top** is in the agent's menu.
+- **Waiting on you**, while an agent waits on a question or a permission, with what it asks under its name. It goes back to its place once you've answered. A pinned agent keeps its tile instead.
+- **Your agents and group chats** ([Group chats](#group-chats)) in one list, in your order, a line each, with what an agent is on after its name while it works. Drag one to put it somewhere else: a line shows where it will go. Tiles drag among the tiles.
+- **Folders** you make, in the list: **New folder** in the **+ New** menu, or **Move to folder** in an agent's menu. Click a folder's name to open or shut it, and right-click it to rename or delete it. Drag an agent or a group chat onto a folder's name to put it in, or out of the folder to take it out. Deleting a folder keeps what was in it.
+- **+ New**, at the end of the list: a new group chat, agent or folder. Right-clicking the empty space or a folder's name opens the same.
 - **Hidden**, at the bottom and shut until you open it: agents you hid with **Hide** in their menu. **Show** brings one back.
 
-Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
+Your order, folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent or a group chat and drag it to move it, or let go for Move to folder and Hide; long-press a folder's name to rename or delete it.
 
 At the bottom of the sidebar, over the server, a box shows your plan's limits as the agent program reports them: its icon and the plan's name, such as "Claude Max", then how much of the session and of the week is used, each a small ring with when it resets ("42% · 15:30", "78% · Mon"). A ring turns orange from 75% and red from 90%. Click the box to open the program under **Brains**. There's a box for each program your agents run on that reports its limits. Claude does; Codex doesn't, and a program on an API key has no plan, so neither has a box. The iPhone app doesn't show them yet.
 
@@ -38,7 +39,7 @@ To try another way from some point without losing the chat, point at a message a
 
 ## Group chats
 
-A group chat is a chat with several of your agents in it, where loom picks which one answers each message. **Everyone** has all your agents in it, and is there once you have two. To make another, choose **+** by **Group chats** in the sidebar, name it, pick two or more agents, and a colour if you want one. On the iPhone, the **+** is by **Group chats** in the agent list.
+A group chat is a chat with several of your agents in it, where loom picks which one answers each message. **Everyone** has all your agents in it, and is there once you have two. To make another, choose **+ New** at the end of the sidebar's list, then **New group chat**, name it, pick two or more agents, and a colour if you want one. On the iPhone, **+ New** is at the end of the agent list too.
 
 You just write. One agent answers each message: the one your message is for, or the one that answered last while you stay on the same subject. A line over each answer says who answered and why, "→ Ledger · money question", in that agent's shape and colour. To pick yourself, mention an agent: "@Hermes any new mail?" goes to Hermes, and the line says "you asked".
 
