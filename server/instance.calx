@@ -2389,6 +2389,14 @@ impl Instance {
         for (user, conversation, by) in try store.mark_old_asks() {
             _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("asked_by", by).done()).done())
         }
+        // Threads agents made with conversation.create before they were marked, then
+        // each agent's chat with the person, fixed from now on: the devices hear both.
+        for (user, conversation, by) in try store.mark_old_made() {
+            _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).s("made_by", by).b("main", false).done()).done())
+        }
+        for (user, conversation) in try store.pick_main_chats() {
+            _ = try store.append(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).b("main", true).done()).done())
+        }
         var server = try Server.listen(config.port, config.host.copy())
         server.log = false
         server.max_message = protocol.MAX_FRAME
@@ -4389,6 +4397,27 @@ impl Instance {
         if pushed != Json.Null { i.push_event(user, kind, pushed) }
     }
 
+    // `agent`'s chat with the person: its marked one, or one made now and marked as its
+    // chat, titled `title`, when it has none. Where a routine, a flow, a watch or a
+    // script posts in the agent's chat.
+    fn agent_chat(i: Instance, user: String, agent: String, title: String) -> Json ! Error {
+        if let c = try i.store.main_chat(user.copy(), agent.copy()) { return c }
+        let made = try i.store.add_conversation(user.copy(), agent.copy(), title)
+        let id = str_at(made.copy(), "id") ?? String()
+        _ = try i.store.set_main_chat(user.copy(), agent, id.copy())
+        let c = try i.store.conversation(user.copy(), id) ?? made
+        try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
+        return c
+    }
+
+    // Each agent left with conversations but no chat marked, as when its chat was
+    // deleted or an import brought some, gets one, and the devices hear which.
+    fn pick_main_chats(i: Instance) ! Error {
+        for (user, conversation) in try i.store.pick_main_chats() {
+            try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).b("main", true).done()).done())
+        }
+    }
+
     // --- Push (PLAN.md, "Notifications and push") ---
 
     // Whether `device` is connected now.
@@ -5356,11 +5385,7 @@ impl Instance {
             conversation = try i.store.conversation(user.copy(), c.copy()) ?? Json.Null
             if conversation == Json.Null or str_at(conversation.copy(), "agent") != some(agent_id.copy()) { return some(http_error(404, "not_found", "There's no conversation {c} with {key}.")) }
         } else {
-            conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
-            if conversation == Json.Null {
-                conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), String())
-                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-            }
+            conversation = try i.agent_chat(user.copy(), agent_id.copy(), String())
         }
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         for (_, r) in i.runs {
@@ -6068,6 +6093,8 @@ impl Instance {
         if name == "plugin.cmd" {
             let wanted = str_at(args.copy(), "name") ?? String()
             if not plugins.allows(p, "cmd:{wanted}") { return Answer.Refused(String("not_allowed"), "{wanted} isn't allowed for the plugin {id}: its plugin.toml asks for it, and the person allows it.") }
+            // A conversation a panel makes is the panel's thread, not the person's new chat.
+            if wanted == "conversation.create" { return try i.command(user, "plugin:{id}", wanted, at(args, "args")) }
             return try i.command(user, device, wanted, at(args, "args"))
         }
         if name == "plugin.revisions" {
@@ -7433,7 +7460,11 @@ impl Instance {
         }
         // Every device hears of the new conversations, and of the newest of
         // each one's messages, as a snapshot gives them; older ones come with messages.list,
-        // and `partial` says there are some.
+        // and `partial` says there are some. An agent that had no chat has the newest
+        // of what came as its chat from now on, which its conversation says.
+        for (u, picked) in try i.store.pick_main_chats() {
+            if not fresh.contains(picked.copy()) { try i.event(u, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", picked).b("main", true).done()).done()) }
+        }
         for id in fresh {
             let more = if let got = newest.find(id.copy()) { got.len() > IMPORT_ANNOUNCED } else { false }
             if let c = try i.store.conversation(user.copy(), id.copy()) {
@@ -8463,8 +8494,8 @@ impl Instance {
     }
 
     // The conversation routine `r` posts into, made when it has none: its
-    // agent's chat, as the apps show it, its newest conversation. Or a thread
-    // of its own, which is never the chat.
+    // agent's chat, as the apps show it (agent_chat). Or a thread of its own,
+    // which is never the chat.
     fn routine_chat(i: Instance, user: String, r: Json) -> Json ! Error {
         let id = str_at(r.copy(), "id") ?? String()
         let name = str_at(r.copy(), "name") ?? String("A routine")
@@ -8483,11 +8514,7 @@ impl Instance {
                 try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
             }
         } else {
-            conversation = try i.store.newest_conversation(user.copy(), agent_id.copy()) ?? Json.Null
-            if conversation == Json.Null {
-                conversation = try i.store.add_conversation(user.copy(), agent_id.copy(), name.copy())
-                try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-            }
+            conversation = try i.agent_chat(user.copy(), agent_id.copy(), name.copy())
         }
         return conversation
     }
@@ -8747,11 +8774,7 @@ impl Instance {
                     again = true
                     continue
                 }
-                var conversation = try i.store.newest_conversation(f.user.copy(), agent_id.copy()) ?? Json.Null
-                if conversation == Json.Null {
-                    conversation = try i.store.add_conversation(f.user.copy(), agent_id.copy(), f.name.copy())
-                    try i.event(f.user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-                }
+                let conversation = try i.agent_chat(f.user.copy(), agent_id.copy(), f.name.copy())
                 let conversation_id = str_at(conversation.copy(), "id") ?? String()
                 // It waits while its agent answers in its chat, and goes when a run ends.
                 var busy = false
@@ -9252,11 +9275,7 @@ impl Instance {
         let agent = str_at(wake, "agent") ?? String()
         if try i.store.agent(user.copy(), agent.copy()) == none { return }
         var conversation = try i.store.conversation(user.copy(), str_at(w, "conversation") ?? String()) ?? Json.Null
-        if str_at(conversation.copy(), "agent") != some(agent.copy()) { conversation = try i.store.newest_conversation(user.copy(), agent.copy()) ?? Json.Null }
-        if conversation == Json.Null {
-            conversation = try i.store.add_conversation(user.copy(), agent.copy(), String())
-            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", conversation.copy()).done())
-        }
+        if str_at(conversation.copy(), "agent") != some(agent.copy()) { conversation = try i.agent_chat(user.copy(), agent.copy(), String()) }
         i.watch.wakes.push(Wake { user: user.copy(), agent: agent, conversation: str_at(conversation, "id") ?? String(), came: came.copy(), until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms })
         try i.wakes_waited()
     }
@@ -16418,7 +16437,7 @@ impl Instance {
             let agent = try i.store.agent(user.copy(), str_at(args, "agent") ?? String()) else return Answer.Refused(String("not_found"), String("There's no such agent."))
             let agent_id = str_at(agent.copy(), "id") ?? String()
             var chat = String()
-            if let c = try i.store.newest_conversation(user.copy(), agent_id.copy()) {
+            if let c = try i.store.main_chat(user.copy(), agent_id.copy()) {
                 let transcript = try i.transcript(user.copy(), str_at(c, "id") ?? String(), none, agent_id.copy())
                 if transcript.len() > 0 { chat = "\n\nYour chat with them, newest last:\n\n{transcript}" }
             }
@@ -16625,9 +16644,23 @@ impl Instance {
         if name == "conversation.create" {
             let agent = str_at(args.copy(), "agent") ?? String()
             if try i.store.agent(user.copy(), agent.copy()) == none { return Answer.Refused(String("not_found"), "There's no agent {agent}.") }
-            let c = try i.store.add_conversation(user.copy(), agent, str_at(args, "title") ?? String("New conversation"))
-            try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
-            return Answer.Value(Obj.new().s("conversation", str_at(c, "id") ?? String()).done())
+            let made = try i.store.add_conversation(user.copy(), agent.copy(), str_at(args, "title") ?? String("New conversation"))
+            let id = str_at(made.copy(), "id") ?? String()
+            // The person's new chat, from their app, is the agent's chat from now on.
+            // One an agent, a plugin or a script makes is a thread beside it, and never
+            // takes its place.
+            var before: String? = none
+            if device.starts_with("d_") {
+                before = try i.store.set_main_chat(user.copy(), agent, id.copy())
+            } else {
+                try i.store.mark_made(user.copy(), id.copy(), device.copy())
+            }
+            let c = try i.store.conversation(user.copy(), id.copy()) ?? made
+            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
+            if let was = before {
+                try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", was).b("main", false).done()).done())
+            }
+            return Answer.Value(Obj.new().s("conversation", id).done())
         }
         // A chat moved to another program by hand (PLAN.md, "A backup brain"):
         // its next turn there starts with loom's summary of it.
@@ -16731,6 +16764,8 @@ impl Instance {
                     }
                 }
                 try i.event(user, "conversation.deleted", Obj.new().s("conversation", id).done())
+                // A deleted chat's agent has its newest other conversation as its chat.
+                if bool_at(had, "main") == some(true) { try i.pick_main_chats() }
             }
             return Answer.Value(empty)
         }
