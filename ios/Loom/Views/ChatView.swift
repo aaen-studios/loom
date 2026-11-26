@@ -50,15 +50,23 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                     }
                     ForEach(messages) { m in
-                        Group {
+                        VStack(alignment: m.isPerson ? .trailing : .leading, spacing: Tokens.Space.s) {
                             if m.deleted {
                                 DeletedMark(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent)
+                            } else if isStartLine(m) {
+                                // The line a thread the person started lands in: its card.
+                                ThreadCards(message: m)
                             } else if m.isPerson {
                                 PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
                             } else {
                                 Reply(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent, openThoughts: $openThoughts)
                             }
+                            // The cards made from it, under it on its side.
+                            if !m.deleted && !m.made.isEmpty {
+                                MadePills(message: m)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: m.isPerson ? .trailing : .leading)
                         // Lit for a moment, once a quote went to it.
                         .background(lit == m.id ? P.thread(agent?.color ?? "").opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
                         .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted) { model.reply(to: m.id) })
@@ -90,6 +98,15 @@ struct ChatView: View {
                                     reading = Reading(text: text, message: thread == nil && !m.queued ? m.id : nil, agent: !m.isPerson)
                                 } label: {
                                     Label("Select text", systemImage: "selection.pin.in.out")
+                                }
+                            }
+                            // A card on one of the person's Acta boards, made from its words
+                            // (PLAN.md, "Acta beside the chat").
+                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) {
+                                Button {
+                                    session.send(model.startCard(message: m.id, text: text))
+                                } label: {
+                                    Label("Make a card…", systemImage: "square.3.layers.3d")
                                 }
                             }
                             // At once, leaving a mark where it was (PLAN.md, "Deleting a message").
@@ -272,6 +289,25 @@ struct ChatView: View {
         .sheet(isPresented: $roomSettings) {
             if let roomId { RoomSettingsSheet(roomId: roomId) }
         }
+        // Acta beside the chat and T3's start sheet, from the chat shown: a card's preview
+        // here while no board is pushed over it, which shows its own.
+        .sheet(isPresented: shown(here, model.acta.sheet != nil && model.acta.screen == nil) { model.acta.sheet = nil }) {
+            CardSheetView()
+        }
+        .sheet(isPresented: shown(here, model.acta.form != nil) { model.acta.form = nil }) {
+            MakeCardSheet()
+                .presentationDetents([.large])
+        }
+        .sheet(isPresented: shown(here, model.t3.form != nil) { model.t3.form = nil }) {
+            T3StartSheet()
+                .presentationDetents([.large])
+        }
+        .navigationDestination(isPresented: shown(here && thread == nil, model.acta.screen != nil) {
+            model.acta.screen = nil
+            model.acta.sheet = nil
+        }) {
+            BoardScreenView()
+        }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
         .fullScreenCover(item: warming ? .constant(nil) : Bindable(model).viewing) { v in
@@ -345,15 +381,51 @@ struct ChatView: View {
                 reading = Reading(text: m.text, message: m.id, agent: !m.isPerson, selectAll: true)
             }
         }
+        // `-card <id>` opens that card's preview on the loom board, `-make <message>` Make a
+        // card on that message, `-board` the board last used, `-t3start` Start a T3
+        // thread, and `-jump <message>` goes to that message, once the chat's messages and
+        // the person's boards have come, for screenshots of each.
+        func value(_ flag: String) -> String? {
+            guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+            return args[i + 1]
+        }
+        if thread == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                let model = session.model
+                if let id = value("-jump") { model.jumpTo = id }
+                if let id = value("-card") { session.send(model.openCard(board: "aaen-studios/loom", id: id)) }
+                if let id = value("-make"), let m = model.messages.first(where: { $0.id == id }) { session.send(model.startCard(message: m.id, text: m.text)) }
+                if args.contains("-board") { for f in model.openBoard() { session.send(f) } }
+                if args.contains("-t3start") { session.send(model.openT3Form()) }
+            }
+        }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
         threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
     }
 
-    /// A link tapped in a message: a file it mentions or one sent with it opens here, and
-    /// a page in the browser.
+    /// Whether what the model has open shows from this chat: only from the one shown, and
+    /// never from the hidden one drawn before any opens. Shut by the person, `shut` puts it
+    /// away in the model.
+    private func shown(_ here: Bool, _ open: Bool, shut: @escaping () -> Void) -> Binding<Bool> {
+        Binding(get: { !warming && here && open }, set: { if !$0 { shut() } })
+    }
+
+    /// A link tapped in a message: a card's pill opens its preview, a T3 thread opens in T3,
+    /// a file it mentions or one sent with it opens here, and a page in the browser.
     private func follow(_ url: URL) -> OpenURLAction.Result {
         let model = session.model
-        switch LinkTo(url.absoluteString) {
+        let link = url.absoluteString
+        if link.hasPrefix(cardLink) {
+            if let c = model.pillCard(link), !c.board.isEmpty {
+                session.send(model.openCard(board: c.board, id: c.id))
+            }
+            return .handled
+        }
+        if let thread = linkThread(link) {
+            let page = model.messages.lazy.flatMap(\.threads).first { $0.thread == thread }?.url
+            return page.flatMap(URL.init(string:)).map { .systemAction($0) } ?? .handled
+        }
+        switch LinkTo(link) {
         case .file:
             session.send(model.openFileMention(url.absoluteString))
             return .handled
@@ -798,7 +870,7 @@ struct PersonMessage: View {
                 }
             }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(titledLinks(words, message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
+                MarkdownView(titledLinks(withCardPills(words, message.cards), message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
                     .fixedSize(horizontal: false, vertical: true)
                     .foldLong(message.came, key: message.id, pin: pin)
                     .padding(.horizontal, Tokens.Space.l)
@@ -808,6 +880,10 @@ struct PersonMessage: View {
             }
             if message.queued {
                 Text("Waiting to send").font(Fonts.caption).foregroundStyle(P.ink3)
+            }
+            // The T3 threads it names, each a card.
+            if pin == nil {
+                ThreadCards(message: message)
             }
         }
         .frame(maxWidth: .infinity, alignment: pin == nil ? .trailing : .leading)
@@ -896,6 +972,10 @@ struct Reply: View {
             if pin == nil && !message.sources.isEmpty && sourcesAt(laid) == nil {
                 SourcesTab(message: message)
             }
+            // The T3 threads it started or names, each a card.
+            if pin == nil {
+                ThreadCards(message: message)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -923,11 +1003,11 @@ struct Reply: View {
                 if onTheWay {
                     // What it said on its way to the answer: smaller and quieter, never a
                     // bubble, so it doesn't read as a message.
-                    MarkdownView(session.model.replyWords(message, b.text), font: Fonts.small, ink: P.ink2, live: live, links: links)
+                    MarkdownView(withCardPills(session.model.replyWords(message, b.text), message.cards), font: Fonts.small, ink: P.ink2, live: live, links: links)
                 } else if replies == Prefs.bubbles {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
-                    let bubble = MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
+                    let bubble = MarkdownView(titledLinks(withCardPills(session.model.replyWords(message, b.text), message.cards), message.links), live: live, links: links)
                         .foldLong(message.came, key: "\(message.id)/\(i)", pin: pin)
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
@@ -943,7 +1023,7 @@ struct Reply: View {
                         bubble
                     }
                 } else {
-                    MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
+                    MarkdownView(titledLinks(withCardPills(session.model.replyWords(message, b.text), message.cards), message.links), live: live, links: links)
                         .foldLong(message.came, key: "\(message.id)/\(i)", pin: pin)
                     if i == sourcesAt { SourcesTab(message: message) }
                 }

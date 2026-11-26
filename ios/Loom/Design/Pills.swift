@@ -156,20 +156,32 @@ struct CardPillView: View {
 }
 
 /// The composer's picture of a card's piece: its tile and id, and once it's looked up its
-/// title and dot, framed as its pill is, no wider than `most`.
+/// title and dot, framed as its pill is, no wider than `most`, in the light's colours or
+/// the dark's.
 @MainActor
-func cardPieceImage(ref: String, preview: CardPreview?, font: UIFont, most: CGFloat) -> (image: UIImage, bounds: CGRect) {
+func cardPieceImage(ref: String, preview: CardPreview?, font: UIFont, most: CGFloat, dark: Bool) -> (image: UIImage, bounds: CGRect) {
+    var made: (image: UIImage, bounds: CGRect)?
+    let traits = UITraitCollection(userInterfaceStyle: dark ? .dark : .light)
+    traits.performAsCurrent {
+        made = drawCardPiece(ref: ref, preview: preview, font: font, most: most, traits: traits)
+    }
+    return made ?? (UIImage(), .zero)
+}
+
+@MainActor
+private func drawCardPiece(ref: String, preview: CardPreview?, font: UIFont, most: CGFloat, traits: UITraitCollection) -> (image: UIImage, bounds: CGRect) {
+    func ui(_ c: Color) -> UIColor { UIColor(c).resolvedColor(with: traits) }
     let id = cardLinkParts(ref)?.id ?? ref
     var card: ActaCard?
     if case .ready(let c) = preview { card = c }
     let height = max(ceil(font.lineHeight), Tokens.Control.pill)
     let mono = UIFont(name: Tokens.Font.mono, size: font.pointSize - 2) ?? font
     let small = UIFont(name: Tokens.Font.ui, size: font.pointSize - 2) ?? font
-    let idText = NSAttributedString(string: id, attributes: [.font: mono, .foregroundColor: UIColor(P.ink2)])
+    let idText = NSAttributedString(string: id, attributes: [.font: mono, .foregroundColor: ui(P.ink2)])
     let title = card.map { $0.missing ? "" : $0.title } ?? ""
     let style = NSMutableParagraphStyle()
     style.lineBreakMode = .byTruncatingTail
-    let titleText = NSAttributedString(string: title, attributes: [.font: small, .foregroundColor: UIColor(P.ink), .paragraphStyle: style])
+    let titleText = NSAttributedString(string: title, attributes: [.font: small, .foregroundColor: ui(P.ink), .paragraphStyle: style])
     let side: CGFloat = 14, pad: CGFloat = 6, gap: CGFloat = 5, dot: CGFloat = 7
     let fixed = pad + side + gap + ceil(idText.size().width) + pad + (title.isEmpty ? 0 : gap + gap + dot)
     let titleWidth = title.isEmpty ? 0 : min(ceil(titleText.size().width), max(0, most - fixed), Tokens.Layout.pillTitle)
@@ -177,9 +189,9 @@ func cardPieceImage(ref: String, preview: CardPreview?, font: UIFont, most: CGFl
     let image = UIGraphicsImageRenderer(size: CGSize(width: width + 2, height: height)).image { _ in
         let frame = CGRect(x: 1, y: (height - Tokens.Control.pill) / 2 + 0.5, width: width, height: Tokens.Control.pill - 1)
         let path = UIBezierPath(roundedRect: frame, cornerRadius: Tokens.Radius.chip)
-        UIColor(P.bubble).setFill()
+        ui(P.bubble).setFill()
         path.fill()
-        UIColor(P.line).setStroke()
+        ui(P.line).setStroke()
         path.lineWidth = 1
         path.stroke()
         var x = 1 + pad
@@ -193,7 +205,7 @@ func cardPieceImage(ref: String, preview: CardPreview?, font: UIFont, most: CGFl
             let ts = titleText.size()
             titleText.draw(with: CGRect(x: x, y: (height - ts.height) / 2, width: titleWidth, height: ts.height), options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], context: nil)
             x += titleWidth + gap
-            UIColor(card.ink.color).setFill()
+            ui(card.ink.color).setFill()
             UIBezierPath(ovalIn: CGRect(x: x, y: (height - dot) / 2, width: dot, height: dot)).fill()
         }
     }

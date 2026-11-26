@@ -16,6 +16,8 @@ struct SettingsView: View {
     @State private var addingDevice = ProcessInfo.processInfo.arguments.contains("-addDevice")
     /// Settings → Emoji, open at launch with `-emojiSettings`, for its screenshot.
     @State private var emojiSettings = ProcessInfo.processInfo.arguments.contains("-emojiSettings")
+    /// Settings → Spools, open at launch with `-spools`, for its screenshots.
+    @State private var spoolsOpen = ProcessInfo.processInfo.arguments.contains("-spools")
 
     var body: some View {
         let model = session.model
@@ -66,6 +68,11 @@ struct SettingsView: View {
                     }
                 }
                 Section {
+                    NavigationLink {
+                        SpoolsView()
+                    } label: {
+                        Text("Spools").font(Fonts.body).foregroundStyle(P.ink)
+                    }
                     NavigationLink {
                         SecretsView()
                     } label: {
@@ -150,6 +157,7 @@ struct SettingsView: View {
             }
             .navigationDestination(isPresented: $addingDevice) { AddDeviceView() }
             .navigationDestination(isPresented: $emojiSettings) { EmojiSettingsView() }
+            .navigationDestination(isPresented: $spoolsOpen) { SpoolsView() }
         }
         .task { notifications = await Notifications.status() }
         .onAppear {
