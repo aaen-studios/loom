@@ -10800,6 +10800,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let emoji_picker = self.emoji_picker_view(cx);
         let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
             .then(|| self.emoji_button(cx));
+        let composer_at = self.emoji_ui.composer_at.clone();
         let mut composer = Some(
             div()
                 .w_full()
@@ -10815,6 +10816,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::COMPOSER))
                 // The plus menu opens just above the composer, from its left edge.
                 .relative()
+                // Where it is, for the emoji picker to fit over it.
+                .child(
+                    canvas(move |b, _, _| composer_at.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
                 .when_some(plus_menu, |d, menu| {
                     d.child(div().absolute().top_0().left_0().child(deferred(
                         anchored().anchor(Anchor::BottomLeft).child(menu),

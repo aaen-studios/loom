@@ -6,9 +6,10 @@
 use super::*;
 use crate::emoji::{self, Item};
 
-/// The picker's size.
+/// The picker's size, and the least it's made to fit over the composer.
 const PICKER_W: f32 = 372.0;
 const PICKER_H: f32 = 400.0;
+const PICKER_LEAST: f32 = 240.0;
 /// A tile in the picker's grid, and how many to a line.
 const TILE: f32 = 37.0;
 const COLS: usize = 9;
@@ -37,6 +38,17 @@ pub(super) struct EmojiUi {
     told: Option<String>,
     /// One of the person's own whose name is being changed on Settings → Emoji, by id.
     pub renaming: Option<String>,
+    /// Where the composer is in the window, for the picker to fit over it.
+    pub composer_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+}
+
+/// The picker's height over a composer whose top is `top` down the window: all of it
+/// where there's room between the title bar and the composer, so it never covers the
+/// composer, and shorter where there isn't, as over a new chat's composer in the middle
+/// of a short window.
+fn picker_height(top: Option<f32>) -> f32 {
+    let room = top.map_or(PICKER_H, |t| t - layout::TITLEBAR - 2.0 * space::S);
+    room.clamp(PICKER_LEAST, PICKER_H)
 }
 
 pub(super) struct Picker {
@@ -664,6 +676,7 @@ impl Loom {
         .px(px(space::S));
         let empty = all.is_empty();
         let foot = self.emoji_foot(picker, cx);
+        let top = self.emoji_ui.composer_at.get().map(|b| f32::from(b.top()));
         Some(
             div()
                 .id("emoji-picker")
@@ -671,7 +684,7 @@ impl Loom {
                 .opacity(k)
                 .mb(px(space::S - 6.0 * (1.0 - k)))
                 .w(px(PICKER_W))
-                .h(px(PICKER_H))
+                .h(px(picker_height(top)))
                 .flex()
                 .flex_col()
                 .gap(px(space::XS))
@@ -1347,8 +1360,19 @@ impl Loom {
 
 #[cfg(test)]
 mod tests {
-    use super::{lines, unpieced, Line, COLS};
+    use super::{lines, picker_height, unpieced, Line, COLS, PICKER_H, PICKER_LEAST};
     use crate::emoji::{Group, Item};
+
+    #[test]
+    fn the_picker_fits_between_the_title_bar_and_the_composer() {
+        // A chat's composer at the foot of the window: all of it.
+        assert_eq!(picker_height(Some(700.0)), PICKER_H);
+        // A new chat's, in the middle of a short window: what room there is.
+        assert_eq!(picker_height(Some(370.0)), 370.0 - 48.0 - 16.0);
+        // No room: the least, over the composer.
+        assert_eq!(picker_height(Some(200.0)), PICKER_LEAST);
+        assert_eq!(picker_height(None), PICKER_H);
+    }
 
     fn item(e: &str) -> Item {
         Item {
