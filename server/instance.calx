@@ -10104,6 +10104,8 @@ impl Instance {
                 servers.push(name.copy())
                 if own_icons.0.len() == 0 { own_icons = i.icon_of(user.copy(), name) }
             }
+            // Else the icon the MCP Registry gave a server of its (registry_icons).
+            if own_icons.0.len() == 0 { own_icons = (str_at(e.copy(), "icon") ?? String(), str_at(e.copy(), "icon_dark") ?? String()) }
             var connecting = Json.Null
             for (_, c) in i.connects {
                 if c.user == user and c.entry == id { connecting = c.json() }
@@ -10272,6 +10274,21 @@ impl Instance {
         }
     }
 
+    // A search's entries with the PNG icons fetched with the answer
+    // (mcpregistry's `icon_png`, LOO-379) kept as the person's files, as a
+    // server's own are (`keep_icon`), each entry's as `icon` and `icon_dark`,
+    // the SHA-256s its badge has.
+    fn registry_icons(i: mut Instance, user: String, entries: List<Json>) -> List<Json> ! Error {
+        var out = List<Json>()
+        for e in entries {
+            let server = str_at(e.copy(), "server") ?? String()
+            let light = try i.keep_icon(user.copy(), server.copy(), bytes.from_base64(str_at(e.copy(), "icon_png") ?? String()) ?? List<u8>())
+            let dark = try i.keep_icon(user.copy(), server, bytes.from_base64(str_at(e.copy(), "icon_png_dark") ?? String()) ?? List<u8>())
+            out.push(if light.len() > 0 { merge(e.copy(), Obj.new().s("icon", light).s("icon_dark", dark).done()) } else { e.copy() })
+        }
+        return out
+    }
+
     // One ask's answer: a search's entries, or a connect that goes on.
     fn registry_answer(i: mut Instance, ask: RegistryAsk, d: mcpregistry.Done) ! Error {
         let failed = if d.error.len() > 0 { d.error.copy() } else if d.status != 200 and d.status != 404 { "it answered {d.status}" } else { String() }
@@ -10284,7 +10301,7 @@ impl Instance {
                 return
             }
             let (entries, curated) = mcpregistry.found(d.value, query)
-            let listed = try i.listed_entries(ask.user.copy(), entries)
+            let listed = try i.listed_entries(ask.user.copy(), try i.registry_icons(ask.user.copy(), entries))
             i.answer_cmd(ask.waiter, Answer.Value(Obj.new().j("entries", Json.Array(listed)).j("curated", strings_json(curated)).done()))
             return
         }

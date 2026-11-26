@@ -13,7 +13,7 @@ module server.icons
 // a picture yet (CLX-450).
 import std.bytes
 import std.hash.{sha256}
-import std.http.{Header, get}
+import std.http.{Header, Request, get}
 import std.json.{Json, parse}
 import std.url.{Url}
 import shared.obj.{str_at}
@@ -117,19 +117,32 @@ fn loopback(host: String) -> bool {
 // within 5 seconds, of at most `MOST` bytes. An http address is fetched only
 // on this computer, as a test's server gives.
 pub fn fetch(src: String) -> List<u8> ! Error {
-    if src.to_lower_root().starts_with("data:") {
-        let comma = src.find(",") else { fail "the data: URI has no data" }
-        if not src[..comma].to_lower_root().ends_with(";base64") { fail "the data: URI isn't base64" }
-        if comma + 1 + (MOST / 3 + 1) * 4 < src.len() { fail "the icon is over {MOST / 1024} KiB" }
-        return bytes.from_base64(src[comma + 1..].trim().copy()) ?? { fail "the data: URI isn't base64" }
-    }
+    if src.to_lower_root().starts_with("data:") { return try data_of(src) }
+    var req = try ask(src)
+    return try answered(mut req)
+}
+
+// A data: URI's bytes, of at most `MOST`.
+pub fn data_of(src: String) -> List<u8> ! Error {
+    let comma = src.find(",") else { fail "the data: URI has no data" }
+    if not src[..comma].to_lower_root().ends_with(";base64") { fail "the data: URI isn't base64" }
+    if comma + 1 + (MOST / 3 + 1) * 4 < src.len() { fail "the icon is over {MOST / 1024} KiB" }
+    return bytes.from_base64(src[comma + 1..].trim().copy()) ?? { fail "the data: URI isn't base64" }
+}
+
+// The icon at an https address asked for, so several can be under way at once
+// (mcpregistry's search): `answered` waits for it.
+pub fn ask(src: String) -> Request ! Error {
     let url = match Url.parse(src.copy()) {
         ok(u) => u,
         err(why) => fail "the icon's address isn't one: {why}",
     }
     let host = url.host ?? String()
     if url.scheme != "https" and not (url.scheme == "http" and loopback(host)) { fail "the icon isn't at an https address" }
-    var req = get(src, List<Header>(), WAIT_MS, MOST)
+    return get(src, [Header { name: String("User-Agent"), value: String("loom") }], WAIT_MS, MOST)
+}
+
+pub fn answered(req: mut Request) -> List<u8> ! Error {
     let r = try req.wait()
     if r.status != 200 { fail "the icon's address answered {r.status}" }
     return r.body
