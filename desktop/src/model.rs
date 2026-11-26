@@ -7244,7 +7244,7 @@ impl Model {
                 self.queue_stale = true;
                 self.tasks_stale = true;
                 self.updates_stale = true;
-                // The programs, for the limits of the person's plans in the sidebar.
+                // The programs, for the limits of the person's plans in the context card.
                 self.programs_stale = true;
                 for l in [
                     List::Agents,
@@ -10293,18 +10293,27 @@ impl Model {
         frame
     }
 
-    /// The sidebar's plan limits: one for each program that reports them and that the
-    /// person's agents run on, their own or as their backup, in the order installed.
-    pub fn plan_limits(&self) -> Vec<(String, PlanLimits)> {
+    /// The limits of the person's plan with a program on the instance, where it reports
+    /// them: its page under Brains shows them.
+    pub fn program_limits(&self, program: &str) -> Option<&PlanLimits> {
         self.installed
             .iter()
-            .filter(|p| {
-                self.agents
-                    .iter()
-                    .any(|a| a.program == p.name || a.backup == p.name)
-            })
-            .filter_map(|p| Some((p.name.clone(), p.limits.clone()?)))
-            .collect()
+            .find(|p| p.name == program)?
+            .limits
+            .as_ref()
+    }
+
+    /// The plan the context card shows under Context: that of the program the open chat
+    /// runs on, or in a group chat, of the member whose session the ring is for. None
+    /// while that program has reported no plan.
+    pub fn context_plan(&self, fill: &ContextFill) -> Option<(String, PlanLimits)> {
+        let program = if self.open_room.is_some() {
+            self.agent(fill.agent.as_deref()?)?.program.clone()
+        } else {
+            self.chat_program()?
+        };
+        let limits = self.program_limits(&program)?.clone();
+        Some((program, limits))
     }
 
     pub fn programs(&mut self) -> Value {
@@ -13990,42 +13999,75 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_has_the_limits_of_the_plans_the_agents_run_on() {
+    fn a_programs_page_has_the_limits_of_its_plan() {
         let mut m = Model::new();
-        m.take(&json!({"t": "core.data", "what": "agents", "items": [
-            {"id": "a_1", "name": "Main", "acp_agent": "claude"},
-        ]}));
         let limits = json!({"plan": "Claude Max", "session": {"used": 42, "resets": 1_795_620_600_000i64}, "week": {"used": 78, "resets": 1_795_900_000_000i64}});
         m.take(
             &json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [
                 {"name": "claude", "limits": limits},
                 {"name": "codex"},
-                {"name": "other", "limits": limits},
             ]}}),
         );
-        let shown = m.plan_limits();
+        let shown = m.program_limits("claude").expect("it reported them");
+        assert_eq!(shown.plan, "Claude Max");
         assert_eq!(
-            shown.len(),
-            1,
-            "only the programs that report them and that agents use"
-        );
-        assert_eq!(shown[0].0, "claude");
-        assert_eq!(shown[0].1.plan, "Claude Max");
-        assert_eq!(
-            shown[0].1.session,
+            shown.session,
             Some(LimitWindow {
                 used: 42,
                 resets: 1_795_620_600_000
             })
         );
+        assert_eq!(m.program_limits("codex"), None, "it reports none");
+        assert_eq!(m.program_limits("gone"), None);
         // A later report changes them in place.
         m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {"plan": "Claude Max", "session": {"used": 50, "resets": 1_795_620_600_000i64}}}));
-        let shown = m.plan_limits();
-        assert_eq!(shown[0].1.session.map(|w| w.used), Some(50));
-        assert_eq!(shown[0].1.week, None);
+        let shown = m.program_limits("claude").expect("still a plan's");
+        assert_eq!(shown.session.map(|w| w.used), Some(50));
+        assert_eq!(shown.week, None);
         // A login that isn't a plan's has none to show.
         m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {}}));
-        assert!(m.plan_limits().is_empty());
+        assert_eq!(m.program_limits("claude"), None);
+    }
+
+    #[test]
+    fn the_context_card_has_the_plan_of_the_program_the_chat_runs_on() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Main", "acp_agent": "claude"},
+            {"id": "a_2", "name": "Coder", "acp_agent": "codex"},
+            {"id": "a_3", "name": "Scribe", "acp_agent": "claude"},
+        ]}));
+        let max = json!({"plan": "Claude Max", "session": {"used": 42, "resets": 0}, "week": {"used": 78, "resets": 0}});
+        let pro = json!({"plan": "ChatGPT Pro", "week": {"used": 10, "resets": 0}});
+        m.take(
+            &json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [
+                {"name": "claude", "limits": max},
+                {"name": "codex", "limits": pro},
+                {"name": "gemini"},
+            ]}}),
+        );
+        m.take(&conversations(json!([
+            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000}},
+            {"id": "c_2", "agent": "a_2", "at": 1, "context": {"used": 9_000, "size": 200_000}},
+            {"id": "c_3", "agent": "a_3", "at": 1, "context": {"used": 9_000, "size": 200_000}, "program": "gemini"},
+            {"id": "r_1", "agent": "", "room": "r_1", "at": 1, "context": {"used": 5_000, "size": 200_000, "agent": "a_2"}},
+        ])));
+        let plan = |m: &Model| {
+            let fill = m.context()?;
+            m.context_plan(&fill)
+                .map(|(program, limits)| (program, limits.plan))
+        };
+        m.select(Some("a_1".into()));
+        assert_eq!(plan(&m), Some(("claude".into(), "Claude Max".into())));
+        m.select(Some("a_2".into()));
+        assert_eq!(plan(&m), Some(("codex".into(), "ChatGPT Pro".into())));
+        // A chat moved to another program has that one's, and one with no plan, none.
+        m.select(Some("a_3".into()));
+        assert_eq!(plan(&m), None);
+        // In a group chat, the program of the member the ring is for, not the lead's.
+        m.select(Some("a_1".into()));
+        m.open_room = Some("r_1".into());
+        assert_eq!(plan(&m), Some(("codex".into(), "ChatGPT Pro".into())));
     }
 
     #[test]

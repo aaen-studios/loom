@@ -74,6 +74,7 @@ pub mod layout {
     pub const CARD_PREVIEW: f32 = 330.0;
     pub const BOARD_COLUMN: f32 = 140.0;
     pub const FIELD_LABEL: f32 = 120.0;
+    pub const LIMIT_WORDS: f32 = 88.0;
 }
 
 pub mod control {

@@ -74,6 +74,7 @@ pill-title = 260     # a card pill's title, at most
 card-preview = 330   # a card's preview under its pill
 board-column = 140   # a column of a board's view beside the chat, at the least
 field-label = 120    # a label beside its field
+limit-words = 88     # a plan's limit's words after its bar under Brains: "42% · 15:30"
 
 # How big the controls are.
 [control]
@@ -90,7 +91,7 @@ context-button = 26  # the button that ring sits in
 icon-large = 34      # the settings gear, or a colour to pick
 lead = 30            # the icon or initial at a row's start
 server = 46          # the server's row atop the sidebar
-limit-ring = 14      # the ring of each of a plan's limits in the sidebar
+limit-ring = 14      # the ring of each of a plan's limits in the context card
 choice = 50          # a big choice, such as where the server runs
 row = 54             # a settings row, at least
 list-row = 48        # a row of a list page's list

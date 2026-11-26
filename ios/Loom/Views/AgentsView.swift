@@ -141,11 +141,11 @@ struct AgentsView: View {
         (sections.first { $0.part == part }?.agents ?? []).compactMap { model.agent($0) }
     }
 
-    /// The pinned agents as tiles, four to a row, from the left. A tap opens its chat, a
-    /// long press has its menu, and a long press and a drag moves it among the tiles.
+    /// The pinned agents as tiles, four to a row, each row centred. A tap opens its chat,
+    /// a long press has its menu, and a long press and a drag moves it among the tiles.
     private func tiles(_ agents: [Agent]) -> some View {
         let model = session.model
-        return LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: Tokens.Space.s), count: 4), alignment: .leading, spacing: Tokens.Space.s) {
+        return CentredRows(columns: 4, spacing: Tokens.Space.s) {
             ForEach(agents) { agent in
                 Button {
                     path = [agent.id]
@@ -332,6 +332,36 @@ private struct Naming {
     var folder: String?
     var agent: String?
     var name: String
+}
+
+/// Square tiles, `columns` to a row at the size that fills one, each row centred, so a
+/// row of fewer has them in the middle.
+private struct CentredRows: Layout {
+    var columns: Int
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.replacingUnspecifiedDimensions().width
+        let rows = (subviews.count + columns - 1) / columns
+        let height = rows == 0 ? 0 : CGFloat(rows) * side(width) + CGFloat(rows - 1) * spacing
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let s = side(bounds.width)
+        for (i, v) in subviews.enumerated() {
+            let row = i / columns
+            let inRow = CGFloat(min(columns, subviews.count - row * columns))
+            let left = (bounds.width - inRow * s - (inRow - 1) * spacing) / 2
+            let x = bounds.minX + left + CGFloat(i % columns) * (s + spacing)
+            let y = bounds.minY + CGFloat(row) * (s + spacing)
+            v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(width: s, height: s))
+        }
+    }
+
+    private func side(_ width: CGFloat) -> CGFloat {
+        max(0, (width - CGFloat(columns - 1) * spacing) / CGFloat(columns))
+    }
 }
 
 /// A pinned agent's tile: its thread drawn large in its shape, moving as the agent works,
