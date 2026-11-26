@@ -19,6 +19,8 @@ struct SettingsView: View {
     @State private var emojiSettings = ProcessInfo.processInfo.arguments.contains("-emojiSettings")
     /// Settings → Spools, open at launch with `-spools`, for its screenshots.
     @State private var spoolsOpen = ProcessInfo.processInfo.arguments.contains("-spools")
+    /// Settings → Routines, open at launch with `-routines`, for its screenshots.
+    @State private var routinesOpen = ProcessInfo.processInfo.arguments.contains("-routines")
 
     var body: some View {
         let model = session.model
@@ -78,6 +80,11 @@ struct SettingsView: View {
                         SecretsView()
                     } label: {
                         Text("Secrets").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                    NavigationLink {
+                        RoutinesView()
+                    } label: {
+                        Text("Routines").font(Fonts.body).foregroundStyle(P.ink)
                     }
                 }
                 Section("Chat") {
@@ -162,6 +169,7 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $addingDevice) { AddDeviceView() }
             .navigationDestination(isPresented: $emojiSettings) { EmojiSettingsView() }
             .navigationDestination(isPresented: $spoolsOpen) { SpoolsView() }
+            .navigationDestination(isPresented: $routinesOpen) { RoutinesView() }
         }
         .task { notifications = await Notifications.status() }
         .onAppear {

@@ -394,6 +394,12 @@ private struct AgentTile: View {
                 }
                 .padding(.horizontal, Tokens.Space.xs)
             }
+            // A reply not read: the desktop tile's ink dot in its corner.
+            .overlay(alignment: .topTrailing) {
+                if model.unread(agent: agent.id) {
+                    UnreadDot().padding(Tokens.Space.s)
+                }
+            }
             .contentShape(RoundedRectangle(cornerRadius: Tokens.Radius.card))
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(agent.name)
@@ -475,23 +481,41 @@ struct AgentRow: View {
                 }
             }
             .frame(width: 26, height: 22)
+            let unread = model.unread(agent: agent.id)
             VStack(alignment: .leading, spacing: 3) {
                 Text(agent.name)
-                    .font(Fonts.ui(Tokens.PhoneSize.body, .medium))
+                    .font(Fonts.ui(Tokens.PhoneSize.body, unread ? .semibold : .medium))
                     .foregroundStyle(P.ink)
                 Text(model.preview(agent))
                     .font(Fonts.small)
-                    .foregroundStyle(mood == .failed ? P.bad : P.ink3)
+                    .foregroundStyle(mood == .failed ? P.bad : unread ? P.ink : P.ink3)
                     .lineLimit(1)
             }
             Spacer(minLength: 0)
-            // Waiting on the person: a warm dot, with what it asks under its name.
+            // Waiting on the person: a warm dot, with what it asks under its name. Else a
+            // reply not read: an ink dot, or for one in another agent's thread with it, a
+            // dot in the asker's colour (PLAN.md, "The sidebar").
             if mood == .waiting {
                 Circle().fill(P.warn).frame(width: 6, height: 6)
+            } else if unread {
+                UnreadDot()
+            } else if let asker = model.askUnread(agent.id) {
+                UnreadDot(color: model.agent(asker).map { P.thread($0.color) } ?? P.ink)
             }
         }
         .padding(.vertical, Tokens.Space.m + 2)
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// The dot on an agent, a group chat or a thread with a reply the person hasn't read: ink,
+/// or the asker's colour for another agent's thread.
+struct UnreadDot: View {
+    var color: Color = P.ink
+
+    var body: some View {
+        Circle().fill(color).frame(width: 6, height: 6)
+            .accessibilityLabel("Unread")
     }
 }
 
