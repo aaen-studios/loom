@@ -47,6 +47,7 @@ import server.learn
 import server.hashing.{Done, Job}
 import server.installer
 import server.icons
+import server.mcpregistry
 import server.mcptest
 import server.mcpcall
 import server.acta
@@ -84,6 +85,7 @@ pub struct Config {
     pub hasher: PasswordHasher
     pub events: EventLife
     pub registry: String    // the ACP Registry's address
+    pub mcp_registry: String    // the MCP Registry's, for Spools' search
     pub minute_ms: i64    // how long a minute is, for routines: 60,000, but less in tests
     pub apns: String    // where APNs is, or "" for Apple's: a test's fake one
     pub version: String    // loom's version, for what a move says it came from
@@ -217,6 +219,24 @@ impl Connect {
         for t in self.tools { offers.push(Json.Str(t.copy())) }
         return Obj.new().s("entry", self.entry.copy()).s("server", self.server.copy()).s("step", self.step.copy()).s("said", self.said.copy()).j("tools", Json.Array(offers)).done()
     }
+}
+
+// What the MCP Registry answered (server/mcpregistry.calx), kept for
+// mcpregistry.FRESH_MS so a search typed again, or a connect right after it,
+// doesn't ask it again.
+struct RegistryAnswer {
+    at: i64
+    status: u32
+    value: Json
+}
+
+// A catalog.search, or a catalog.connect of a server from the registry, waiting
+// on the registry's answer.
+struct RegistryAsk {
+    waiter: Waiter
+    user: String
+    device: String
+    args: Json
 }
 
 // How long starting Acta's MCP server, and a call to it, may each take.
@@ -517,6 +537,11 @@ pub struct Instance {
     setups: Map<String, Setup>    // tc_ id -> loom going onto one of the person's hosts
     mcp_adds: LinkedMap<String, McpAdd>    // tc_ id -> an MCP server an agent proposed, while its turn goes on
     connects: LinkedMap<String, Connect>    // user/server -> a server being connected from the catalog
+    mcp_registry_at: String    // the MCP Registry's address
+    mcp_registry_to: Sender<mcpregistry.Job>    // the thread that asks it
+    mcp_registry_done: Receiver<mcpregistry.Done>
+    mcp_registry_kept: Map<String, RegistryAnswer>    // what it answered lately, by what was asked
+    mcp_registry_asks: Map<String, List<RegistryAsk>>    // what waits on an answer, by what was asked
     emojis: emoji.Table    // the built-in emoji, for an agent's `:name:` (PLAN.md, "Emoji")
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
@@ -2141,6 +2166,7 @@ impl Instance {
         let (link_to, link_done) = links.start()
         let (call_to, call_done) = mcpcall.start()
         let (oauth_to, oauth_done) = oauth.start()
+        let (mcp_registry_to, mcp_registry_done) = mcpregistry.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
         let (move_to, move_done) = move.start()
         let (update_to, update_back) = update.start()
@@ -2154,7 +2180,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2921,6 +2947,12 @@ impl Instance {
                 match i.mcp_tested(d) {
                     ok => {},
                     err(e) => eprintln("loom: testing an MCP server: {e}"),
+                }
+            }
+            while let d = i.mcp_registry_done.next() {
+                match i.registry_answered(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: the MCP Registry's answer: {e}"),
                 }
             }
             while let d = i.call_done.next() {
@@ -8855,16 +8887,17 @@ impl Instance {
         return String()
     }
 
-    // catalog.list: every entry, as catalog.listed gives it, with the
-    // person's servers made from it and a connect under way.
-    fn catalog_list(i: Instance, user: String) -> Answer ! Error {
+    // Entries as catalog.list and catalog.search give them, each as
+    // catalog.listed gives it, with the person's servers made from it and a
+    // connect under way.
+    fn listed_entries(i: Instance, user: String, entries: List<Json>) -> List<Json> ! Error {
         let have = try i.secret_names_of(user.copy())
         var from = List<(String, String)>()
         for s in try i.store.mcp_servers(user.copy()) {
             from.push((try i.catalog_of(user.copy(), s.copy()), str_at(s, "name") ?? String()))
         }
         var out = List<Json>()
-        for e in catalog.entries() {
+        for e in entries {
             let id = str_at(e.copy(), "id") ?? String()
             var servers = List<String>()
             for (entry, name) in from.copy() {
@@ -8874,8 +8907,14 @@ impl Instance {
             for (_, c) in i.connects {
                 if c.user == user and c.entry == id { connecting = c.json() }
             }
-            out.push(catalog.listed(e, have.copy(), servers, connecting))
+            out.push(catalog.listed(e.copy(), have.copy(), servers, connecting))
         }
+        return out
+    }
+
+    // catalog.list: every entry, in the catalog's order.
+    fn catalog_list(i: Instance, user: String) -> Answer ! Error {
+        let out = try i.listed_entries(user, catalog.entries())
         var categories = List<Json>()
         for c in catalog.categories() { categories.push(Json.Str(c.copy())) }
         return Answer.Value(Obj.new().j("entries", Json.Array(out)).j("categories", Json.Array(categories)).done())
@@ -8888,10 +8927,16 @@ impl Instance {
     // at `adding`; each step after comes as a `connect` frame: `sign_in` for
     // one that wants them to sign in, which goes on once they have, then
     // `agents`, or `failed` with why. mcp.agents finishes it. Connecting one
-    // they have from it again, without fields, tries it again as it is.
+    // they have from it again, without fields, tries it again as it is. One
+    // from the MCP Registry comes through registry_connect.
     fn catalog_connect(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
         let id = str_at(args.copy(), "id") ?? String()
         let entry = catalog.find(id.copy()) else return Answer.Refused(String("not_found"), "There's no {id} in the catalog.")
+        return try i.connect_entry(user, device, id, entry, args)
+    }
+
+    // Connects `entry`, the catalog's or the registry's, whose id is `id`.
+    fn connect_entry(i: mut Instance, user: String, device: String, id: String, entry: Json, args: Json) -> Answer ! Error {
         let given_name = (str_at(args.copy(), "name") ?? String()).trim().copy()
         let server = if given_name.len() > 0 { given_name.copy() } else { str_at(entry.copy(), "server") ?? String() }
         let existing = try i.store.mcp_server(user.copy(), server.copy())
@@ -8902,7 +8947,8 @@ impl Instance {
         if let had = existing.copy() {
             if from == id and has_fields and at(args.copy(), "fields") == Json.Null { spec = had }
         }
-        if spec == Json.Null {
+        let made_now = spec == Json.Null
+        if made_now {
             let (made, why) = catalog.spec_of(entry.copy(), at(args.copy(), "fields"), server.copy())
             if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
             let (checked, bad) = mcp_spec(made)
@@ -8913,19 +8959,26 @@ impl Instance {
             spec = checked
         }
         // The secrets it names: each one given is kept, replacing one the
-        // person has, and each they don't have must be given.
+        // person has, and each they don't have must be given, but for an
+        // optional one, which the server is then made without.
         let given = at(args, "secrets")
         let have = try i.secret_names_of(user.copy())
         var keep = List<(String, String)>()
+        var left_out = List<String>()
         for s in catalog.list(at(entry.copy(), "secrets")) {
             let name = str_at(s.copy(), "name") ?? String()
             let value = ((given.get(name.copy()) ?? Json.Null).as_str() ?? String()).trim().copy()
             if value.len() > 0 {
                 keep.push((name, value))
-            } else if not have.contains(name.copy()) {
+            } else if have.contains(name.copy()) {
+                continue
+            } else if bool_at(s.copy(), "optional") == some(true) {
+                left_out.push(name)
+            } else {
                 return Answer.Refused(String("bad_request"), "Fill in {str_at(s, "label") ?? name} first.")
             }
         }
+        if made_now { spec = catalog.without_secrets(spec, left_out) }
         for (name, value) in keep {
             if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("secret.put"), Obj.new().s("name", name).s("value", value).done()) { return Answer.Refused(code, message) }
         }
@@ -8934,7 +8987,7 @@ impl Instance {
         }
         try i.store.set_meta("mcp_catalog/{user}/{server}", id.copy())
         let key = "{user}/{server}"
-        i.connects.insert(key.copy(), Connect { user: user.copy(), server: server.copy(), entry: id, step: String("adding"), said: String(), tools: List<String>() })
+        i.connects.insert(key.copy(), Connect { user: user.copy(), server: server.copy(), entry: id.copy(), step: String("adding"), said: String(), tools: List<String>() })
         if i.sandboxed(user.copy()) {
             // A sandboxed person's servers run only in their sandboxes, so it isn't tried here.
             if let c = mut i.connects.find(key.copy()) { c.step = String("agents") }
@@ -8943,6 +8996,121 @@ impl Instance {
         }
         let c = i.connects.find(key) else return Answer.Value(Obj.new().done())
         return Answer.Value(Obj.new().j("connect", c.json()).done())
+    }
+
+    // --- Spools' search, through the MCP Registry (server/mcpregistry.calx) ---
+
+    // catalog.search: the registry's servers whose names have `query` in
+    // them, at most `limit`, as Spools' entries, marked `community`, and
+    // `curated`, the ids of the catalog's entries that are one of them or
+    // whose name or line has it. A registry that can't be reached gives none,
+    // with `error`, why.
+    fn catalog_search(i: mut Instance, w: own Waiter, user: own String, device: own String, args: own Json) {
+        let query = (str_at(args.copy(), "query") ?? String()).trim().copy()
+        var letters: usize = 0
+        for _ in query.runes() { letters += 1 }
+        if letters < mcpregistry.SHORTEST {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), "Search for {mcpregistry.SHORTEST} letters or more."))
+            return
+        }
+        var limit = int_at(args.copy(), "limit") ?? mcpregistry.LIMIT
+        if limit < 1 { limit = 1 }
+        if limit > mcpregistry.MOST_LIMIT { limit = mcpregistry.MOST_LIMIT }
+        let address = mcpregistry.search_url(i.mcp_registry_at.copy(), query.copy(), limit)
+        i.ask_registry("search:{limit}:{query}", address, RegistryAsk { waiter: w, user: user, device: device, args: args })
+    }
+
+    // catalog.connect of a server from the registry: `registry`, its name, at
+    // `version`, or its latest. What it is comes from the registry, never from
+    // the device, and it's connected as one of the catalog's is.
+    fn registry_connect(i: mut Instance, w: own Waiter, user: own String, device: own String, args: own Json) {
+        let name = (str_at(args.copy(), "registry") ?? String()).trim().copy()
+        var version = (str_at(args.copy(), "version") ?? String()).trim().copy()
+        if version.len() == 0 { version = String("latest") }
+        if not name.contains("/") or name.contains(" ") or version.contains(" ") {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("registry is a server's name in the MCP Registry, such as io.github.owner/name.")))
+            return
+        }
+        let address = mcpregistry.version_url(i.mcp_registry_at.copy(), name.copy(), version.copy())
+        i.ask_registry("server:{name}@{version}", address, RegistryAsk { waiter: w, user: user, device: device, args: args })
+    }
+
+    // Gives `ask` the registry's answer to `key`: the one it gave in the last
+    // few minutes, or a new one once it comes, asked for once for everyone
+    // waiting on it.
+    fn ask_registry(i: mut Instance, key: own String, address: own String, ask: own RegistryAsk) {
+        var fresh: mcpregistry.Done? = none
+        if let kept = i.mcp_registry_kept.find(key.copy()) {
+            if now() - kept.at < mcpregistry.FRESH_MS { fresh = some(mcpregistry.Done { key: key.copy(), status: kept.status, value: kept.value.copy(), error: String() }) }
+        }
+        if let d = fresh {
+            if let err(e) = i.registry_answer(ask, d) { eprintln("loom: the MCP Registry's answer: {e}") }
+            return
+        }
+        var waiting = i.mcp_registry_asks.remove(key.copy()) ?? List<RegistryAsk>()
+        let first = waiting.is_empty()
+        waiting.push(ask)
+        i.mcp_registry_asks.insert(key.copy(), waiting)
+        if first { i.mcp_registry_to.send(mcpregistry.Job { key: key, url: address }) }
+    }
+
+    // What the registry answered: kept, when it did answer, and given to each
+    // ask waiting on it.
+    fn registry_answered(i: mut Instance, d: mcpregistry.Done) ! Error {
+        if d.error.len() == 0 {
+            var old = List<String>()
+            for (k, kept) in i.mcp_registry_kept {
+                if now() - kept.at >= mcpregistry.FRESH_MS { old.push(k.copy()) }
+            }
+            for k in old { _ = i.mcp_registry_kept.remove(k) }
+            i.mcp_registry_kept.insert(d.key.copy(), RegistryAnswer { at: now(), status: d.status, value: d.value.copy() })
+        }
+        let waiting = i.mcp_registry_asks.remove(d.key.copy()) ?? List<RegistryAsk>()
+        for ask in waiting {
+            try i.registry_answer(ask.copy(), mcpregistry.Done { key: d.key.copy(), status: d.status, value: d.value.copy(), error: d.error.copy() })
+        }
+    }
+
+    // One ask's answer: a search's entries, or a connect that goes on.
+    fn registry_answer(i: mut Instance, ask: RegistryAsk, d: mcpregistry.Done) ! Error {
+        let failed = if d.error.len() > 0 { d.error.copy() } else if d.status != 200 and d.status != 404 { "it answered {d.status}" } else { String() }
+        if d.key.starts_with("search:") {
+            let query = (str_at(ask.args.copy(), "query") ?? String()).trim().copy()
+            if failed.len() > 0 or d.status != 200 {
+                let (_, curated) = mcpregistry.found(Json.Null, query)
+                let why = "The MCP Registry couldn't be reached: {if failed.len() > 0 { failed } else { "it answered {d.status}" }}."
+                i.answer_cmd(ask.waiter, Answer.Value(Obj.new().j("entries", Json.Array(List<Json>())).j("curated", strings_json(curated)).s("error", why).done()))
+                return
+            }
+            let (entries, curated) = mcpregistry.found(d.value, query)
+            let listed = try i.listed_entries(ask.user.copy(), entries)
+            i.answer_cmd(ask.waiter, Answer.Value(Obj.new().j("entries", Json.Array(listed)).j("curated", strings_json(curated)).done()))
+            return
+        }
+        let name = (str_at(ask.args.copy(), "registry") ?? String()).trim().copy()
+        if failed.len() > 0 {
+            i.answer_cmd(ask.waiter, Answer.Refused(String("registry_unavailable"), "The MCP Registry couldn't be reached: {failed}."))
+            return
+        }
+        if d.status == 404 {
+            let version = (str_at(ask.args.copy(), "version") ?? String()).trim().copy()
+            let which = if version.len() > 0 and version != "latest" { "{name} {version}" } else { name.copy() }
+            i.answer_cmd(ask.waiter, Answer.Refused(String("not_found"), "There's no {which} in the MCP Registry."))
+            return
+        }
+        let (s, updated) = mcpregistry.server_of(d.value)
+        if str_at(s.copy(), "name") != some(name.copy()) {
+            i.answer_cmd(ask.waiter, Answer.Refused(String("registry_unavailable"), "The MCP Registry answered with another server than {name}."))
+            return
+        }
+        let entry = mcpregistry.entry_of(s, updated)
+        if let why = str_at(entry.copy(), "unsupported") {
+            i.answer_cmd(ask.waiter, Answer.Refused(String("unsupported"), why))
+            return
+        }
+        let id = str_at(entry.copy(), "id") ?? String()
+        let answer = try i.connect_entry(ask.user.copy(), ask.device.copy(), id, entry, ask.args.copy())
+        i.answer_cmd(ask.waiter, answer)
     }
 
     // Moves the connect `key` to `step`, with `said`, and tells the person's devices.
@@ -13668,7 +13836,16 @@ impl Instance {
             return
         }
         // The catalog, and giving a server to agents: only from one of the
-        // person's devices too, as they're the person's own choices.
+        // person's devices too, as they're the person's own choices. A search,
+        // and connecting a server from the MCP Registry, wait on the registry.
+        if name == "catalog.search" {
+            i.catalog_search(Waiter { socket: some(s), id: id }, user.copy(), device.copy(), args)
+            return
+        }
+        if name == "catalog.connect" and str_at(args.copy(), "registry") != none {
+            i.registry_connect(Waiter { socket: some(s), id: id }, user.copy(), device.copy(), args)
+            return
+        }
         if name == "catalog.list" or name == "catalog.connect" or name == "mcp.agents" {
             let answer = if name == "catalog.list" { try i.catalog_list(user) } else if name == "catalog.connect" { try i.catalog_connect(user, device, args) } else { try i.give_server(user, device, args) }
             i.answer_cmd(Waiter { socket: some(s), id: id }, answer)

@@ -38,6 +38,7 @@ struct AgentsView: View {
                         HStack {
                             GroupHead(title: "Group chats")
                             Button {
+                                model.startRoomForm()
                                 newRoom = true
                             } label: {
                                 Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).foregroundStyle(P.ink3)

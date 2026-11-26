@@ -203,13 +203,16 @@ impl Loom {
             .gap(px(space::XL))
             .px(px(space::XL))
             .pb(px(60.0))
-            .child(self.room_mark(r, 140.0, 20.0))
+            .child(self.greeting(Greeting::Line, self.room_mark(r, 140.0, 20.0)))
             .child(
-                div()
-                    .text_size(px(size::HERO))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child(r.name.clone()),
+                self.greeting(
+                    Greeting::Name,
+                    div()
+                        .text_size(px(size::HERO))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(r.name.clone()),
+                ),
             )
             .when_some(composer, |d, c| {
                 d.child(div().w_full().max_w(px(space::COLUMN)).child(c))

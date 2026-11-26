@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState,
-    MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
+    Copy as CopyText, Cut as CutText, Enter, Escape, IndentInline, InlineToken, Input,
+    InputContent, InputEvent, InputState, MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea,
+    TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{
@@ -48,7 +49,7 @@ mod room_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
-use emoji_ui::RowKey;
+use emoji_ui::{Greeting, RowKey};
 #[path = "form_drafts.rs"]
 mod form_drafts;
 #[path = "list_page.rs"]
@@ -3115,6 +3116,18 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         })
         .detach();
+    }
+
+    /// Ctrl+C or Ctrl+X in the composer, with one of the person's own emoji in what's
+    /// selected: it's copied as `:name:`, with its token kept for a paste back into the
+    /// composer (`emoji::copied`). Gives whether it copied, so other words copy as they do.
+    fn copy_composer(&mut self, cx: &mut Context<Self>) -> bool {
+        let selected = self.composer.read(cx).selected_value().to_string();
+        let (text, Some(kept)) = crate::emoji::copied(&selected) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, kept));
+        true
     }
 
     /// Ctrl+V in the composer: an image, or files copied in Explorer, become attachments.
@@ -8754,7 +8767,11 @@ ACTA_KEY=secret:ACTA_KEY",
         let drawn = pieces.clone();
         Textarea::new(&self.composer)
             .appearance(false)
-            .token(move |t, _, _| composer_token(p, &drawn, t.token().id(), t.token().text()))
+            .token(move |t, _, _| {
+                // A selected piece has the selection's colour while the words beside it
+                // show theirs: the textarea leaves it to the piece (LOO-347).
+                composer_token(p, &drawn, t.token().id(), t.token().text(), t.selection())
+            })
             .on_token_click(move |e, _, cx| {
                 let id = e.token().id().to_string();
                 let _ = this.update(cx, |loom, cx| loom.open_piece(&id, cx));
@@ -11100,7 +11117,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let emoji_row = self.emoji_row().map(|row| self.emoji_row_view(&row, cx));
-        let emoji_picker = self.emoji_picker_view(window, cx);
+        // A new chat's greeting and composer move up for the picker under them.
+        let lift = if empty && !in_task {
+            self.hero_lift(window, cx)
+        } else {
+            0.0
+        };
+        let emoji_picker = self.emoji_picker_view(lift, window, cx);
         let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
             .then(|| self.emoji_button(cx));
         let composer_at = self.emoji_ui.composer_at.clone();
@@ -11122,9 +11145,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .relative()
                 // Where it is, for the emoji picker to open by it, and again in the next
                 // frame once it moved with the picker open, as when the window resizes.
+                // A new chat's is kept as it is down.
                 .child(
                     canvas(
                         move |b, window, _| {
+                            let b = Bounds::new(point(b.left(), b.top() + px(lift)), b.size);
                             if composer_at.replace(Some(b)) != Some(b) && picker_open {
                                 window.request_animation_frame();
                             }
@@ -11206,16 +11231,39 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_size(px(size::COMPOSER))
                                 // Before the textarea's own Paste, which would
                                 // paste a copied file as its path.
+                                // Copying gives the person's own emoji as :name:, with
+                                // their tokens kept for a paste back in here (LOO-347).
+                                .capture_action(cx.listener(|this, _: &CopyText, _, cx| {
+                                    if this.copy_composer(cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .capture_action(cx.listener(|this, _: &CutText, window, cx| {
+                                    if this.copy_composer(cx) {
+                                        cx.stop_propagation();
+                                        this.composer.update(cx, |c, cx| c.replace("", window, cx));
+                                    }
+                                }))
                                 .capture_action(cx.listener(|this, _: &Paste, window, cx| {
                                     if this.paste_files(cx) {
                                         cx.stop_propagation();
                                         return;
                                     }
-                                    // A link alone pastes as its preview.
-                                    let text = cx
-                                        .read_from_clipboard()
+                                    let item = cx.read_from_clipboard();
+                                    let text = item
+                                        .as_ref()
                                         .and_then(|item| item.text())
                                         .unwrap_or_default();
+                                    // What was copied from here, with its emoji.
+                                    let kept = item.as_ref().and_then(|item| item.metadata());
+                                    if let Some(words) =
+                                        crate::emoji::pasted(&text, kept.map(String::as_str))
+                                    {
+                                        cx.stop_propagation();
+                                        this.composer
+                                            .update(cx, |c, cx| c.replace(words, window, cx));
+                                        return;
+                                    }
                                     // A card's link, with Acta connected, as its pill.
                                     if let Some(url) = model::pasted_card(&text)
                                         .filter(|_| !this.model.acta_boards.is_empty())
@@ -11404,8 +11452,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .flex_col()
                     .relative()
+                    // Up for the picker, what of the greeting would pass under the header
+                    // has faded by then (`greeting`); this keeps anything else off it.
+                    .when(lift > 0.0, |d| d.overflow_hidden())
                     .child(if empty && !in_task {
                         self.hero(agent.as_ref(), composer.take(), cx)
+                            .relative()
+                            .top(px(-lift))
                             .into_any_element()
                     } else {
                         let list_at = self.list_at.clone();
@@ -12209,13 +12262,19 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XL))
             .px(px(space::XL))
             .pb(px(60.0))
-            .child(thread("hero", mood, tint, 140.0, 16.0, snapped))
+            .child(self.greeting(
+                Greeting::Line,
+                thread("hero", mood, tint, 140.0, 16.0, snapped),
+            ))
             .child(
-                div()
-                    .text_size(px(size::HERO))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child(a.name.clone()),
+                self.greeting(
+                    Greeting::Name,
+                    div()
+                        .text_size(px(size::HERO))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(a.name.clone()),
+                ),
             )
             .when_some(composer, |d, c| {
                 // An empty chat keeps its composer at the normal width, whatever the
@@ -22771,7 +22830,25 @@ struct ComposerPieces {
 /// tiny picture or icon and its name cut in the middle (only the tiny picture when it
 /// stands with others), or a link pasted as a preview as its site's icon and its page's
 /// title, or its site until that's known. The whole name or address shows on hover.
-fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
+/// While the selection takes it in, it has the selection's colour across the line's height,
+/// `selected`, as the words beside it do.
+fn composer_token(
+    p: Palette,
+    pieces: &ComposerPieces,
+    id: &str,
+    words: &str,
+    selected: Option<Hsla>,
+) -> AnyElement {
+    div()
+        .h_full()
+        .flex()
+        .items_center()
+        .when_some(selected, |d, color| d.bg(color))
+        .child(composer_piece_of(p, pieces, id, words))
+        .into_any_element()
+}
+
+fn composer_piece_of(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
     let row = |tip: String, tint: Hsla| {
         div()
             .id(SharedString::from(format!("piece-{id}")))
