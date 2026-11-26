@@ -24,6 +24,14 @@ const listed = await brains([...MINE, ...CARDS]);
 const toInstall = Math.max(0, (await count()) - MINE.length);
 const mine = listed.filter((b) => MINE.includes(b.id)).map((b) => ({ ...b, settings: b.id === 'claude-acp' ? '1 setting' : 'No settings' }));
 const cards = listed.filter((b) => CARDS.includes(b.id));
+// Claude Agent's page, which its row opens (desktop/src/app.rs, program_pane): its head, then
+// who it's signed in as and the plan's limits as bars, orange from 75% and red from 90%
+// (desktop/src/meter.rs, Level::of).
+const claude = mine.find((b) => b.id === 'claude-acp');
+const LIMITS = [
+	{ name: 'Session', used: 42, resets: '15:30' },
+	{ name: 'This week', used: 78, resets: 'Mon' },
+];
 
 // The Rules page as the app draws it (desktop/src/rules.rs), each rule in the server's own words
 // (server/rules.calx, said).
@@ -149,7 +157,7 @@ const faq = {
 							<div class="list-rows mine">
 								{
 									mine.map((b) => (
-										<div class="list-row">
+										<div class="list-row" data-program={b.id === claude?.id ? b.id : undefined}>
 											<span class="tile" style={`--icon: url(${b.icon})`} />
 											<span class="row-text">
 												<span class="row-title">{b.name}</span>
@@ -160,7 +168,7 @@ const faq = {
 								}
 							</div>
 							<div class="list-foot">
-								<div class="list-row picked">
+								<div class="list-row picked" data-registry>
 									<span class="tile glyph">
 										<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"></path><path d="M12 22V12"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="m7.5 4.27 9 5.15"></path></svg>
 									</span>
@@ -171,7 +179,7 @@ const faq = {
 								</div>
 							</div>
 						</div>
-						<div class="pane">
+						<div class="pane" data-registry-page>
 							<div class="pane-head">
 								<span class="back" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></span>
 								<span class="pane-title">ACP Registry</span>
@@ -193,6 +201,34 @@ const faq = {
 								}
 							</div>
 						</div>
+						{
+							claude && (
+								<div class="pane" data-program-page hidden>
+									<div class="program-head">
+										<span class="tile big" style={`--icon: url(${claude.icon})`} />
+										<span class="row-text">
+											<span class="pane-title">{claude.name}</span>
+											<span class="row-sub">{`Version ${claude.version} · ${claude.settings}`}</span>
+										</span>
+									</div>
+									<div class="box">
+										<div class="field-row">
+											<span class="field-name">Signed in</span>
+											<span class="plan-name">Claude Max</span>
+										</div>
+										{LIMITS.map((l) => (
+											<div class:list={['field-row', 'limit', { warn: l.used >= 75 && l.used < 90, bad: l.used >= 90 }]}>
+												<span class="field-name">{l.name}</span>
+												<span class="limit-bar">
+													<span style={`width: ${l.used}%`} />
+												</span>
+												<span class="limit-words">{`${l.used}% · ${l.resets}`}</span>
+											</div>
+										))}
+									</div>
+								</div>
+							)
+						}
 					</div>
 				</div>
 			</div>
@@ -765,6 +801,82 @@ const faq = {
 	.brains .cards {
 		grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--layout-card-least)), 1fr));
 	}
+	.pane[hidden] {
+		display: none;
+	}
+	/* A brain's row opens its page beside the list, and the ACP Registry's row the registry. */
+	.list-row[data-program],
+	.list-row[data-registry] {
+		cursor: pointer;
+		transition: background-color 0.12s;
+	}
+	.list-row[data-program]:not(.picked):hover,
+	.list-row[data-registry]:not(.picked):hover {
+		background: var(--hover);
+	}
+	/* A brain's page (desktop/src/app.rs, program_pane): its head, then the plan it's signed in
+	   to, its session and its week, each a bar 6 tall with how much is used and when it resets
+	   after it: quiet, orange from 75% and red from 90% (program_plan, limit_inks). */
+	.program-head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		min-width: 0;
+	}
+	.field-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		padding: calc(var(--space-s) + 2px) var(--space-l);
+		font-size: var(--size-body);
+	}
+	/* The app's label column, narrower in this small copy of the page, so the bar keeps room. */
+	.field-name {
+		flex: none;
+		width: min(var(--layout-field-label), 30%);
+		white-space: nowrap;
+	}
+	.plan-name {
+		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.limit-bar {
+		flex: 1;
+		min-width: 0;
+		height: 6px;
+		border-radius: 999px;
+		background: var(--line-strong);
+		overflow: hidden;
+	}
+	.limit-bar span {
+		display: block;
+		height: 100%;
+		border-radius: 999px;
+		background: var(--ink-3);
+	}
+	.limit-words {
+		flex: none;
+		width: var(--layout-limit-words, 88px);
+		text-align: right;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.limit.warn .limit-bar span {
+		background: var(--warn);
+	}
+	.limit.warn .limit-words {
+		color: var(--warn);
+	}
+	.limit.bad .limit-bar span {
+		background: var(--bad);
+	}
+	.limit.bad .limit-words {
+		color: var(--bad);
+	}
 	@media (max-width: 560px) {
 		.split-box {
 			grid-template-columns: minmax(0, 1fr);
@@ -1293,6 +1405,21 @@ const faq = {
 
 	const ease = 'cubic-bezier(0.2, 0.7, 0.3, 1)';
 
+	// Brains: Claude Agent's row opens its page beside the list, with the plan it's signed in to and
+	// its limits, and the ACP Registry's row the registry again (desktop/src/app.rs, program_pane).
+	const brainsPage = document.querySelector<HTMLElement>('.brains');
+	const programPage = brainsPage?.querySelector<HTMLElement>('[data-program-page]');
+	const registryPage = brainsPage?.querySelector<HTMLElement>('[data-registry-page]');
+	const pickBrain = (row: Element, program: boolean) => {
+		if (!brainsPage || !programPage || !registryPage) return;
+		programPage.hidden = !program;
+		registryPage.hidden = program;
+		for (const r of brainsPage.querySelectorAll('.list-row')) r.classList.toggle('picked', r === row);
+	};
+	for (const row of brainsPage?.querySelectorAll('[data-program], [data-registry]') ?? []) {
+		row.addEventListener('click', () => pickBrain(row, row.hasAttribute('data-program')));
+	}
+
 	// Brains: the first card installs and joins the brains down the left, as the app lists it once it's
 	// in, one fewer to install, and the cards move up into its place, the next in the registry coming
 	// in last.
@@ -1315,6 +1442,8 @@ const faq = {
 		button.replaceWith(busy);
 		await pause(2400);
 		const row = model.cloneNode(true) as HTMLElement;
+		row.removeAttribute('data-program');
+		row.classList.remove('picked');
 		row.querySelector('.tile')?.setAttribute('style', `--icon: url(${card.dataset.icon})`);
 		const title = row.querySelector('.row-title');
 		const sub = row.querySelector('.row-sub');
