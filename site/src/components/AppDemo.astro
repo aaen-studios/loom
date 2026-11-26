@@ -1,19 +1,15 @@
 ---
 // A live copy of loom's desktop app, for the first screen: the sidebar with the pinned agents as
-// tiles, an agent waiting on the person under them while it asks, then one list of agents and
-// group chats in the person's order, which a drag rearranges, with a folder in it; an agent's chat with a message written with a link and a file
-// in it, and a reply that thinks, uses a tool, writes and asks before it deploys; another
-// agent's thread with it, opened from its row; and a group chat, where the router picks who
-// answers each message and the line over the reply says so; and Moss's chat, with what came while
-// the person was away. Its sizes, colours and words are the app's
+// tiles, centred, then one list of agents and group chats in the person's order, which a drag
+// rearranges, with a folder in it; and three chats, each with one scene that plays once: Juniper's,
+// whose answer names an Acta card; the Shop group chat, where the router picks who answers and
+// the line over the reply says so; and Moss's, where a T3 thread runs to done. Another agent's
+// thread with Juniper opens from its row. Its sizes, colours and words are the app's
 // (desktop/src/app.rs, design/tokens.toml); the script that plays it is src/scripts/demo.ts. The
-// approval's buttons answer it, a reply's steps open, the thread's row opens it, the jump button
-// goes back down to the newest, the + opens its menu, Ctrl+F finds, and the sidebar collapses to
-// the rail, as the app's do.
+// card's pill, the context ring, the pins, a message's Reply and ⋯, the + and the sidebar's
+// control open what they open in the app.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
-// Twemoji's picture of 🎉, as the app draws built-in emoji (design/twemoji, PLAN.md, "Emoji").
-import TADA from '../../../design/twemoji/svg/1f389.svg?url';
 
 const agents = [
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
@@ -29,6 +25,15 @@ const rest = agents.filter((a) => !a.pinned && !a.folder);
 const home = agents.filter((a) => a.folder === 'Home');
 // The brain chip: the program's icon from the ACP Registry, and what the agent is set to on it.
 const [claude] = await brains(['claude-acp']);
+// Its plan and limits, as Claude reports them, in the context card under the ring: orange from
+// 75% and red from 90% (desktop/src/meter.rs, Level::of).
+const PLAN = {
+	name: 'Claude Max',
+	limits: [
+		{ name: 'Session', used: 42, resets: '15:30' },
+		{ name: 'This week', used: 78, resets: 'Mon' },
+	],
+};
 // An agent's thread where a message mentions it, or over a message it sent: its shape, still,
 // in a box 14 by 14, as desktop/src/app.rs, mention_thread, draws it.
 function mentionThread(shape: keyof typeof shapes): string {
@@ -66,17 +71,6 @@ function wave(k: number, n: number): string {
 	}
 	return pts.join(' ');
 }
-const JUNIPER = mentionThread('yarn');
-
-// Moss's chat, opened from its row after the group chat: a long draft it wrote yesterday, cut
-// after ten lines, the person's messages and its three replies since, "3 new" over them, a
-// table with its copy line, and where its program compacted the context.
-const MOSS_TABLE = [
-	['Customer', 'Orders', 'Spent'],
-	['Northwind', '48', '€1,920'],
-	['Fjord & Co', '31', '€1,240'],
-	['Halden Café', '22', '€880'],
-];
 // The + menu (app.rs, plus_menu, plus_face): what adds to the message, then what it does, and
 // the lists Recent files, Skills and Routines open beside it, each ending in its settings page.
 const PLUS_LISTS = {
@@ -108,14 +102,9 @@ const ICON: Record<string, string> = {
 	settings: '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>',
 	file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"/>',
 	image: '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
-	copy: '<rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
-	down: '<path d="m6 9 6 6 6-6"/>',
-	up: '<path d="m18 15-6-6-6 6"/>',
-	x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
-	check: '<circle cx="12" cy="12" r="10"/><path d="m9 12 2 2 4-4"/>',
 };
 
-// GitHub's mark, as its site icon on the reply's link and sources.
+// GitHub's mark, as its site icon on the reply's link.
 const GITHUB =
 	'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z';
 // The layers glyph on a board's tile, before an Acta card's id (app.rs, board_tile), in a
@@ -159,9 +148,6 @@ const BOARD_LAYERS = [
 						</div>
 					))
 				}
-			</div>
-			<div class="waiting" data-waiting hidden>
-				<div class="group-head">Waiting on you</div>
 			</div>
 			<div class="side-line"></div>
 			{
@@ -218,38 +204,6 @@ const BOARD_LAYERS = [
 				<svg class="i" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"></path></svg>
 				New
 			</div>
-		</div>
-		<div class="limits" aria-hidden="true">
-			<span class="limits-plan">
-				{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
-				Claude Max
-			</span>
-			<span class="limit">
-				<svg class="ring" viewBox="0 0 14 14"
-					><circle cx="7" cy="7" r="6.1" pathLength="100"></circle><circle
-						class="fill"
-						cx="7"
-						cy="7"
-						r="6.1"
-						pathLength="100"
-						stroke-dasharray="42 100"></circle></svg
-				>
-				<span class="limit-name">Session</span>
-				<span class="limit-words">42% · 15:30</span>
-			</span>
-			<span class="limit warn">
-				<svg class="ring" viewBox="0 0 14 14"
-					><circle cx="7" cy="7" r="6.1" pathLength="100"></circle><circle
-						class="fill"
-						cx="7"
-						cy="7"
-						r="6.1"
-						pathLength="100"
-						stroke-dasharray="78 100"></circle></svg
-				>
-				<span class="limit-name">This week</span>
-				<span class="limit-words">78% · Mon</span>
-			</span>
 		</div>
 		<div class="side-foot" aria-hidden="true">
 			<span class="server">
@@ -338,6 +292,26 @@ const BOARD_LAYERS = [
 								<button type="button" data-context-act="compact">Compact now</button>
 								<button type="button" data-context-act="fresh">Start a fresh session</button>
 							</div>
+							<!-- The plan of the program the open agent runs on, as it reports it: its
+							     session's and its week's limits, each a small ring with when it resets. -->
+							<div class="cc-plan">
+								<div class="cc-plan-name">
+									{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
+									{PLAN.name}
+								</div>
+								{
+									PLAN.limits.map((l) => (
+										<div class:list={['limit', { warn: l.used >= 75 && l.used < 90, bad: l.used >= 90 }]}>
+											<svg class="ring" viewBox="0 0 14 14">
+												<circle cx="7" cy="7" r="6.1" pathLength="100" />
+												<circle class="fill" cx="7" cy="7" r="6.1" pathLength="100" stroke-dasharray={`${l.used} 100`} />
+											</svg>
+											<span class="limit-name">{l.name}</span>
+											<span class="limit-words">{`${l.used}% · ${l.resets}`}</span>
+										</div>
+									))
+								}
+							</div>
 						</div>
 					</span>
 					<span class="chip mode" aria-hidden="true">
@@ -379,192 +353,122 @@ const BOARD_LAYERS = [
 					</div>
 				</div>
 			</div>
+			<!-- Each chat's scene: the person's message, and the reply that comes (demo.ts). Until it
+			     plays, neither is there. -->
 			<div class="msgs mine" aria-live="off">
 				<div class="time-line">Today 09:02</div>
-				<div class="row you" data-msg data-pin="2" data-when="Today 09:02">
+				<div class="row you unsent" data-msg data-scene="ask" data-pin="2" data-when="Today 09:02">
 					<div class="bubble">What's on my plate today?</div>
-					<button type="button" class="pin-btn" aria-label="Unpin" title="Unpin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 				</div>
-				<div class="row reply" data-msg data-pin="1" data-when="Today 09:03">
-					<button type="button" class="pin-btn" aria-label="Unpin" title="Unpin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+				<div class="row reply unsent" data-msg data-scene="reply" data-by="Juniper" data-pin="1" data-when="Today 09:02">
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
 						<div class="who">Juniper</div>
-						<div class="fold" data-fold>
-							<button type="button" class="fold-line" aria-expanded="false"><span class="chevron">›</span><span class="words">2 steps</span></button>
-							<div class="steps" hidden>
-								<div class="tool-line done"><span class="prompt">›_</span><span class="title">Read ~/notes/today.md</span><span class="mark">✓</span></div>
-								<div class="sub">
-									<button type="button" class="tool-line done sub-line" aria-expanded="false"><span class="prompt">›_</span><span class="title">Check the open pull requests</span><span class="mark">✓</span><span class="count">2 steps</span><span class="chevron">›</span></button>
-									<div class="inside" hidden>
-										<div class="tool-line done"><span class="prompt">›_</span><span class="title">Fetch github.com/acme/shop/pulls</span><span class="mark">✓</span></div>
-										<div class="on-the-way"><p>One waits on a review: the billing fix.</p></div>
-									</div>
-								</div>
-							</div>
-						</div>
-						<div class="said-wrap">
-							<div class="sources">
-								<button type="button" class="sources-tab" aria-expanded="false" data-sources
-									><span class="site-icons"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg></span>2 sources<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button
-								>
-								<div class="sources-list" hidden>
-									<span class="source"
-										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="t">Pull requests · acme/shop</span><span class="d">github.com</span></span
-									>
-									<span class="source"
-										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="t">Fix double charge on retries</span><span class="d">github.com</span></span
-									>
-								</div>
-							</div>
-							<div class="said">
-								<p>
-									Two things. <span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--thread-sky)"
-										><span class="acta-face"
-											><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-												><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-											><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
-										><span class="acta-preview" role="tooltip"
-											><span class="cp-place"
-												><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-													><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-												>shop · SHOP-31</span
-											><span class="cp-title">Write the release notes for 2.4</span><span class="cp-chips"
-												><span class="cp-chip cp-status">In progress</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
-											><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
-												>Subtasks 2 of 4<span class="cp-bar"><span style="width: 50%"></span></span></span
-											><span class="cp-buttons"><span class="cp-button" data-acta-open role="button">Open</span><span class="cp-button">Open in Acta</span></span></span
-										></span
-									> is due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
-										><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
-									> is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
-										><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>the billing fix</span
-									>. Both are at the top of your list.
-								</p>
-							</div>
-						</div>
-					</div>
-				</div>
-			</div>
-			<!-- The Shop group chat, opened from its row: each reply with the line over it that
-			     says how it came to its agent, in that agent's shape and colour (room_view.rs,
-			     route_line). -->
-			<div class="msgs room" aria-live="off">
-				<div class="time-line">Today 09:41</div>
-				<div class="row you"><div class="bubble">Is 2.4.1 out?</div></div>
-				<!-- Pinned in the group chat, so its header has the pin too (PLAN.md, "Pinned
-				     messages": each chat has its own pins). -->
-				<div class="row reply" data-msg data-pin="1" data-when="Today 09:41">
-					<button type="button" class="pin-btn" aria-label="Unpin" title="Unpin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
-					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
-					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
-					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
-					<div class="body">
-						<div class="routed" role="button" aria-label="Answered by Juniper, release question"
-							>→<span class="routed-who" style="--from: var(--thread-sky)"
-								><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={JUNIPER}></path></svg>Juniper</span
-							><span>· release question</span></div
-						>
 						<div class="said">
 							<p>
-								Yes, since 09:40. <span class="acta-pill" data-card="SHOP-29" style="--status: var(--ok)"
+								Two things. <span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--thread-sky)"
 									><span class="acta-face"
 										><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
 											><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-										><span class="acta-id">SHOP-29</span><span class="acta-title">Ship 2.4.1</span><span class="acta-dot"></span></span
+										><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
+									><span class="acta-preview" role="tooltip"
+										><span class="cp-place"
+											><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
+												><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+											>shop · SHOP-31</span
+										><span class="cp-title">Write the release notes for 2.4</span><span class="cp-chips"
+											><span class="cp-chip cp-status">In progress</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
+										><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
+											>Subtasks 2 of 4<span class="cp-bar"><span style="width: 50%"></span></span></span
+										><span class="cp-buttons"><span class="cp-button" data-acta-open role="button">Open</span><span class="cp-button">Open in Acta</span></span></span
 									></span
-								> is done, and its health check answers.
+								> is due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
+									><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
+								> is waiting on your review of <span class="link" title="https://github.com/acme/shop/pull/212"
+									><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>the billing fix</span
+								>.
 							</p>
 						</div>
 					</div>
 				</div>
 			</div>
-			<!-- Moss's chat, opened from its row: the draft it wrote yesterday, long, so it's cut
-			     after ten lines with Show more (app.rs, cut_long); the replies that came after the
-			     person left, under "3 new" (chat_row); a table with how many rows it has and Copy
-			     (table_line); and where the program compacted the context, a line from loom. -->
+			<!-- The Shop group chat, opened from its row: the reply has the line over it that says
+			     the router gave it to Biscuit and why, in Biscuit's shape and colour (room_view.rs,
+			     route_line). -->
+			<div class="msgs room" aria-live="off">
+				<div class="time-line">Today 10:40</div>
+				<div class="row you unsent" data-msg data-scene="ask" data-when="Today 10:40">
+					<div class="bubble">Did the October invoice go out?</div>
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+				</div>
+				<div class="row reply unsent" data-msg data-scene="reply" data-by="Biscuit" data-when="Today 10:40">
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+					<svg data-thread data-color="apricot" width="14" height="10" class="reply-thread head"></svg>
+					<div class="body">
+						<div class="routed" role="button" aria-label="Answered by Biscuit, invoices"
+							>→<span class="routed-who" style="--from: var(--thread-apricot)"
+								><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
+							><span>· invoices</span></div
+						>
+						<div class="said"><p>It did, on 1 November. Northwind paid it on the 14th.</p></div>
+					</div>
+				</div>
+			</div>
+			<!-- Moss's chat, opened from its row: the reply starts a T3 thread, whose card works
+			     and then lies straight with its pull request (t3_view.rs, thread_card): the strand
+			     beside its title in the colour of where it is, its time at the title's end in the
+			     same colour, `T3 · project · model · effort` in mono under the title, then its
+			     latest step while it works, or its pull request. -->
 			<div class="msgs moss" aria-live="off" style="--tint: var(--thread-mint)">
-				<div class="time-line">Yesterday 17:48</div>
-				<div class="row reply">
+				<div class="time-line">Today 11:15</div>
+				<div class="row you unsent" data-msg data-scene="ask" data-when="Today 11:15">
+					<div class="bubble">The checkout button says “Contiune”. Can you fix it?</div>
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+				</div>
+				<div class="row reply unsent" data-msg data-scene="reply" data-by="Moss" data-when="Today 11:15">
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
 						<div class="who">Moss</div>
-						<div class="said" data-cut>
-							<p>Here's the October newsletter, ready to send:</p>
-							<p><b>2.4 is out.</b> Checkout is a step shorter, and a payment that's tried again is never charged twice.</p>
-							<p><b>Gift cards</b> now work in every country we ship to, and they arrive by email within a minute.</p>
-							<p><b>The blue mug is back</b>, in the glaze you asked for. There are 300 of them, and the last batch went in two days.</p>
-							<p><b>Thank you, Northwind.</b> Our biggest customer this month ordered 48 mugs for their new office. If your team wants the same, reply to this email and we'll set it up.</p>
-							<p><b>Coming in November:</b> carts that follow you from your phone to your computer, and cheaper shipping to Norway, Sweden and Denmark.</p>
-							<p>As ever, reply with anything you'd like us to make next.</p>
-							<p>The shop team</p>
-						</div>
-					</div>
-				</div>
-				<div class="loom-line"><span>Context compacted · 182k → 16k</span></div>
-				<div class="row you"><div class="bubble">Looks good. Send it tomorrow at 9.</div></div>
-				<div class="new-line" data-new-line><span>3 new</span></div>
-				<div class="row reply">
-					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread"></svg>
-					<div class="body"><div class="said"><p>Scheduled for 09:00 tomorrow.</p></div></div>
-				</div>
-				<div class="row you"><div class="bubble">Who were our top customers in October?</div></div>
-				<div class="row reply">
-					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread"></svg>
-					<div class="body">
-						<div class="said">
-							<p>These three:</p>
-							<table class="md-table">
-								<thead><tr>{MOSS_TABLE[0].map((c) => <th>{c}</th>)}</tr></thead>
-								<tbody>{MOSS_TABLE.slice(1).map((r) => <tr>{r.map((c) => <td>{c}</td>)}</tr>)}</tbody>
-							</table>
-							<div class="table-line" data-table-line>
-								<span>{MOSS_TABLE.length - 1} rows</span>
-								<span class="tl-split">
-									<button type="button" class="tl-copy" data-table-copy aria-label="Copy as CSV"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy</button>
-									<button type="button" class="tl-more" data-table-more aria-label="Copy as" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.down} /></button>
-								</span>
+						<div class="said"><p>I started a T3 thread for it.</p></div>
+						<div class="t3 done">
+							<div class="t3-head">
+								<svg data-thread data-color="sky" width="26" height="14" class="t3-strand" aria-hidden="true"></svg>
+								<div class="t3-titles">
+									<div class="t3-title">Fix the typo on the checkout button</div>
+									<div class="t3-sub">T3 · shop · Opus 5.5 · high</div>
+								</div>
+								<span class="t3-side" data-t3-time>4 m</span>
 							</div>
+							<div class="t3-step"><span class="prompt">›_</span><span data-t3-step>bun test checkout</span></div>
+							<div class="t3-chips"><span class="t3-chip">PR #215</span></div>
 						</div>
 					</div>
 				</div>
-				<div class="row you"><div class="bubble">Can you thank Halden Café in it too?</div></div>
-				<div class="row reply">
-					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread"></svg>
-					<div class="body"><div class="said"><p>Added, after Northwind's.</p></div></div>
-				</div>
 			</div>
-			<!-- Ctrl+F: the find box at the chat's top right (app.rs, find_box), every match marked
-			     and the one it's on brighter, where it is, the arrows to older and newer, and ×. -->
-			<div class="find" data-find role="search" hidden>
-				<svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.search} />
-				<input type="text" data-find-in placeholder="Find in chat" aria-label="Find in chat" spellcheck="false" autocomplete="off" tabindex="-1" />
-				<span class="find-count" data-find-count></span>
-				<button type="button" class="find-btn" data-find-step="-1" aria-label="Older match" title="Older match"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.up} /></button>
-				<button type="button" class="find-btn" data-find-step="1" aria-label="Newer match" title="Newer match"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.down} /></button>
-				<button type="button" class="find-btn" data-find-close aria-label="Close" title="Close"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.x} /></button>
-			</div>
-			<!-- While the chat isn't at its bottom: the way down to the newest, with how many came
-			     meanwhile (app.rs, jump_button). -->
-			<button type="button" class="jump" data-jump aria-label="Jump to latest" hidden
-				><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M19 12l-7 7-7-7"></path></svg><span class="jump-count" hidden></span></button
-			>
 		</div>
 
 		<div class="composer-wrap" aria-hidden="true">
 			<div class="composer">
-				<!-- What's attached, over the words, as the sent message will have it (app.rs,
-				     attached_row): a file as its pill. A pasted link is only its piece in the words. -->
 				<!-- What the message replies to, while it's written (app.rs, reply_bar). -->
 				<div class="reply-bar" data-reply-bar hidden>
 					<span class="rb-text"><span class="rb-head"></span><span class="rb-words"></span></span>
 					<button type="button" class="rb-x" data-reply-x aria-label="Cancel reply"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
 				</div>
-				<div class="attached" data-attached hidden></div>
 				<!-- The + menu, over the composer from its left edge (app.rs, plus_menu): its search,
 				     what adds to the message, a line, and what it does. A row with › opens its list
 				     beside it (plus_sub), which ends in its settings page. -->
@@ -635,8 +539,6 @@ const BOARD_LAYERS = [
 			<button type="button" class="continue" data-continue>Continue in your own chat</button>
 		</div>
 	</div>
-	<!-- The notice at the window's foot, over everything, after a copy (app.rs, toast). -->
-	<div class="toast" data-toast role="status" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.check} /><span data-toast-words>Copied.</span></div>
 	<!-- A card's side preview beside the chat, from its pill or Open in its preview (PLAN.md,
 	     "Acta beside the chat"; acta_ui.rs, card_side): the status chip's menu moves it, and a
 	     tick ticks a subtask. -->
@@ -691,9 +593,6 @@ const BOARD_LAYERS = [
 	</aside>
 </div>
 
-<template id="demo-you">
-	<div class="row you fresh"><div class="bubble"></div></div>
-</template>
 <!-- A pin in the Pinned popover (app.rs, pin_row): who said it and when, a line in their colour
      down its left, the message as the chat draws it, cut at about four lines with Show more, and
      its Jump, Copy and Unpin under the pointer. -->
@@ -713,28 +612,6 @@ const BOARD_LAYERS = [
 				><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M15 9.34V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H7.89"></path><path d="m2 2 20 20"></path><path d="M9 9v1.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h11"></path></svg></button
 			>
 		</div>
-	</div>
-</template>
-<!-- An emoji as the app draws it, with Twemoji's picture (emoji_ui.rs, picture): a piece in
-     the composer's words, and in a message of only one to three, big. -->
-<template id="demo-tada">
-	<img class="emoji" src={TADA} alt="🎉" draggable="false" />
-</template>
-<!-- The row over the composer while a name is typed after a colon (emoji_ui.rs,
-     emoji_row_view): the matches, the lit one on a light background, and its name in mono. -->
-<template id="demo-emoji-row">
-	<div class="emoji-row">
-		<span class="er-tile lit"><img src={TADA} alt="🎉" draggable="false" /></span><span class="er-name">:tada:</span>
-	</div>
-</template>
-<!-- What a message replies to, over its bubble, on one line (app.rs, quote_view): the agent's
-     thread, who said it and what, with a spine down onto the bubble. A click goes to the original. -->
-<template id="demo-quote">
-	<div class="quoted">
-		<button type="button" class="quote"
-			><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={JUNIPER}></path></svg><span class="q-who"></span><span
-				class="q-words"></span></button
-		><span class="q-spine" aria-hidden="true"></span>
 	</div>
 </template>
 <!-- Words selected in a message: what can be done with them (app.rs, picked_bar). -->
@@ -757,186 +634,13 @@ const BOARD_LAYERS = [
 		<button type="button" role="menuitem" data-act="delete" class="danger"><svg class="i" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Delete</button>
 	</div>
 </template>
-<!-- A table's other ways to copy, from the arrow beside its Copy (app.rs, Ctx::Table). -->
-<template id="demo-table-menu">
-	<div class="msg-menu" role="menu">
-		<button type="button" role="menuitem" data-copy-as="csv"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy as CSV</button>
-		<button type="button" role="menuitem" data-copy-as="md"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy as Markdown</button>
-		<button type="button" role="menuitem" data-copy-as="text"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.copy} />Copy as text</button>
-	</div>
-</template>
 <template id="demo-gone">
 	<div class="gone"><svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg><span class="gone-words"></span></div>
-</template>
-<!-- A link pasted on its own, as one piece in the words: its site's icon and its page's
-     title (app.rs, composer_token). The sent message shows it the same way. Under the
-     pointer, its preview (app.rs, link_tip): its title, and its site with its icon. -->
-<template id="demo-link">
-	<span class="piece link-piece"
-		><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg><span class="piece-name">Actions · acme/shop</span
-		><span class="link-tip" aria-hidden="true"
-			><span class="link-title">Actions · acme/shop</span
-			><span class="link-site"><svg class="site-icon gh" viewBox="0 0 16 16" aria-hidden="true"><path d={GITHUB}></path></svg>github.com</span></span
-		></span
-	>
-</template>
-<!-- An attached file, as one piece where it was attached: its icon and its name. -->
-<template id="demo-file">
-	<span class="piece" title="notes-2.4.md"
-		><svg class="i file-icon" viewBox="0 0 24 24" aria-hidden="true"
-			><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"></path></svg
-		><span class="piece-name">notes-2.4.md</span></span
-	>
-</template>
-<!-- The attached file as the composer has it (app.rs, attached_row): its icon, name, size and
-     ×; and as the sent message has it over its words (file_view): its name over its size. -->
-<template id="demo-file-pill">
-	<span class="file-pill">
-		<svg class="i file-icon" viewBox="0 0 24 24" aria-hidden="true"
-			><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"></path></svg
-		>
-		<span class="file-text"><span class="file-name">notes-2.4.md</span><span class="file-size">4 KB</span></span>
-		<span class="file-x"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></span>
-	</span>
-</template>
-<template id="demo-reply">
-	<div class="row reply fresh">
-		<svg data-thread data-color="sky" width="14" height="10" class="reply-thread"></svg>
-		<div class="body">
-			<div class="fold" data-fold>
-				<button type="button" class="fold-line" aria-expanded="false"><span class="chevron">›</span><span class="words"></span></button>
-				<div class="steps" hidden></div>
-			</div>
-			<div class="said"></div>
-		</div>
-	</div>
-</template>
-<!-- A reply in the group chat, which the router gave Biscuit: the line over it in Biscuit's
-     shape and colour, and its thread in Biscuit's colour. -->
-<template id="demo-routed">
-	<div class="row reply fresh">
-		<svg data-thread data-color="apricot" width="14" height="10" class="reply-thread"></svg>
-		<div class="body">
-			<div class="routed" role="button" aria-label="Answered by Biscuit, invoices"
-				>→<span class="routed-who" style="--from: var(--thread-apricot)"
-					><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
-				><span>· invoices</span></div
-			>
-			<div class="said"><p></p></div>
-		</div>
-	</div>
-</template>
-<template id="demo-said">
-	<div class="on-the-way"></div>
-</template>
-<template id="demo-tool">
-	<div class="tool-line"><span class="prompt">›_</span><span class="title"></span><span class="mark">…</span></div>
-</template>
-<!-- A T3 thread the reply started, as the app draws its card (t3_view.rs, thread_card): the
-     strand beside its title in the colour of where it is, waving while it works and straight
-     once it's done, its time at the title's end in the same colour, `T3 · project · model ·
-     effort` in mono under the title, then its latest step while it works, or its pull request. -->
-<template id="demo-t3">
-	<div class="t3">
-		<div class="t3-head">
-			<svg data-thread data-color="sky" data-mood="writing" width="26" height="14" class="t3-strand" aria-hidden="true"></svg>
-			<div class="t3-titles">
-				<div class="t3-title">Write the 2.4.1 release notes</div>
-				<div class="t3-sub">T3 · shop · Opus 5.5 · high</div>
-			</div>
-			<span class="t3-side"></span>
-		</div>
-		<div class="t3-step"><span class="prompt">›_</span><span class="t3-step-words">git log v2.4.0..v2.4.1</span></div>
-		<div class="t3-chips"><span class="t3-chip">PR #214</span></div>
-	</div>
-</template>
-<!-- What the agent kept from the reply, under it (learned.rs, learned_under): a quiet line, which
-     opens to say why the skill failed, its change, and Undo (fix_done, change_view). -->
-<template id="demo-kept">
-	<div class="kept">
-		<button type="button" class="kept-line" aria-expanded="false"
-			><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.book} /><span class="kept-words">Fixed the skill deploy-shop</span><span class="kept-chev"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.down} /></span></button
-		>
-		<div class="kept-open" hidden>
-			<div class="kept-why">Failed at “Wait for the health check”: it gave up after 10 seconds</div>
-			<div class="change">
-				<div class="ch"><span class="ch-mark"></span><span>./deploy.sh production</span></div>
-				<div class="ch del"><span class="ch-mark">−</span><span>wait-for /health --timeout 10s</span></div>
-				<div class="ch add"><span class="ch-mark">+</span><span>wait-for /health --timeout 60s</span></div>
-			</div>
-			<div class="kept-end"><button type="button" class="kept-undo">Undo</button></div>
-		</div>
-	</div>
 </template>
 <!-- A line from loom across the chat (app.rs, chat_row): where a fresh session started, or where
      the program compacted the context. -->
 <template id="demo-loom-line">
 	<div class="loom-line fresh-in"><span></span></div>
-</template>
-<!-- A watch's line, once Sam moves the release notes' card to Done, as the app draws it
-     (watch_view.rs, update_line): quiet and on the left, the board's tile in the reply
-     thread's place, the card's pill without a tile of its own and its dot in the status the
-     line is about, and what happened and who in quiet ink. -->
-<template id="demo-watch-line">
-	<div class="row watch-line fresh" aria-label="SHOP-31 moved to Done · Sam">
-		<svg class="acta-tile line-mark" viewBox="0 0 14 14" aria-hidden="true"
-			><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-		>
-		<span class="line-what">
-			<span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--ok)"
-				><span class="acta-face"
-					><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
-				><span class="acta-preview" role="tooltip"
-					><span class="cp-place"
-						><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-							><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-						>shop · SHOP-31</span
-					><span class="cp-title">Write the release notes for 2.4</span><span class="cp-chips"
-						><span class="cp-chip cp-status">Done</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
-					><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
-						>Subtasks 4 of 4<span class="cp-bar"><span style="width: 100%"></span></span></span
-					><span class="cp-buttons"><span class="cp-button">Open</span><span class="cp-button">Open in Acta</span></span></span
-				></span
-			>
-			<span class="line-words">moved to Done · Sam</span>
-		</span>
-	</div>
-</template>
-<!-- The reply of the agent the watch woke, after its line. -->
-<template id="demo-woken">
-	<div class="row reply fresh">
-		<svg data-thread data-color="sky" width="14" height="10" class="reply-thread"></svg>
-		<div class="body"><div class="said"><p></p></div></div>
-	</div>
-</template>
-<template id="demo-approval">
-	<div class="row approval fresh">
-		<div class="card">
-			<div class="card-head">
-				<span class="card-lead" aria-hidden="true"
-					><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="m7 11 2-2-2-2M11 13h4"></path></svg
-				></span>
-				<div class="card-title"><span class="words"></span><svg data-thread data-color="sky" data-mood="waiting" width="26" height="14" class="card-mark"></svg></div>
-				<span class="pill"></span>
-			</div>
-			<div class="card-buttons">
-				<span class="split">
-					<button type="button" class="b primary" data-answer="allow">Allow</button>
-					<button type="button" class="b primary caret" aria-label="More ways to allow" aria-expanded="false" data-more
-						><svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg
-					></button>
-					<span class="menu" hidden>
-						<button type="button" class="item" data-answer="always"
-							><svg class="i" viewBox="0 0 24 24"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"></path><path d="m9 12 2 2 4-4"></path></svg
-							>Always allow</button
-						>
-					</span>
-				</span>
-				<button type="button" class="b" data-answer="deny">Deny</button>
-			</div>
-		</div>
-		<div class="card-done"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span><b></b><span class="what"></span></span></div>
-	</div>
 </template>
 
 <style>
@@ -1109,7 +813,7 @@ const BOARD_LAYERS = [
 		display: none;
 	}
 	/* A group's head (app.rs, group_head): its name, small and quiet, with a chevron when it
-	   opens and shuts. Waiting on you is there only while an agent waits on the person. */
+	   opens and shuts. */
 	.group-head {
 		display: flex;
 		align-items: center;
@@ -1124,37 +828,10 @@ const BOARD_LAYERS = [
 		width: 12px;
 		height: 12px;
 	}
-	/* Who's waiting (app.rs, waiting_row): what it asks under its name, and a warm dot at the
-	   row's end. */
-	.waiting {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr);
-		gap: 2px;
-		margin-bottom: 6px;
-	}
-	.waiting[hidden] {
-		display: none;
-	}
-	.waiting .agent-text {
-		flex-direction: column;
-		align-items: stretch;
-		gap: 0;
-	}
-	.waiting .agent-preview {
-		max-width: none;
-	}
-	.waiting .agent::after {
-		content: '';
-		width: 6px;
-		height: 6px;
-		flex: none;
-		border-radius: 50%;
-		background: var(--warn);
-	}
 	.app.railed .group-head {
 		display: none;
 	}
-	/* The thin line between the tiles, or who's waiting, and the list (app.rs, side_line). */
+	/* The thin line between the tiles and the list (app.rs, side_line). */
 	.side-line {
 		height: 1px;
 		margin: 4px 8px 6px;
@@ -1326,12 +1003,12 @@ const BOARD_LAYERS = [
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	/* The pinned agents over the rest: tiles three across, each with its thread drawn large
-	   in its shape and its name under it. */
+	/* The pinned agents over the rest: tiles three across, the row centred and a fourth on a
+	   centred row of its own, each with its thread drawn large in its shape and its name under it. */
 	.pins {
 		display: flex;
 		flex-wrap: wrap;
-		justify-content: flex-start;
+		justify-content: center;
 		gap: 4px;
 		margin-bottom: 6px;
 	}
@@ -1373,59 +1050,6 @@ const BOARD_LAYERS = [
 	}
 	.tile.on .tile-name {
 		color: var(--ink);
-	}
-	/* The plan's limits over the server, as Claude reports them: the session's and the
-	   week's, each with when it resets. */
-	.limits {
-		display: grid;
-		gap: 4px;
-		margin: 0 8px 4px;
-		padding: 8px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-button);
-		font-size: var(--size-caption);
-		flex: none;
-	}
-	.limits-plan {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: var(--size-small);
-		font-weight: var(--weight-medium);
-	}
-	.limits-plan .brain-icon {
-		width: var(--control-limit-ring);
-		height: var(--control-limit-ring);
-	}
-	.limit {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		color: var(--ink-2);
-		white-space: nowrap;
-	}
-	.limit .ring {
-		width: var(--control-limit-ring);
-		height: var(--control-limit-ring);
-		flex: none;
-		transform: rotate(-90deg);
-	}
-	.limit .ring circle {
-		fill: none;
-		stroke: var(--line-strong);
-		stroke-width: 1.75;
-	}
-	.limit .ring .fill {
-		stroke: var(--ink-2);
-	}
-	.limit.warn .ring .fill {
-		stroke: var(--warn);
-	}
-	.limit-name {
-		flex: 1;
-	}
-	.limit-words {
-		color: var(--ink-3);
 	}
 	.side-foot {
 		display: flex;
@@ -1498,19 +1122,16 @@ const BOARD_LAYERS = [
 		justify-items: center;
 		padding: 4px 0 0;
 	}
-	/* On the rail a pinned agent is its thread, as every agent is, first, then who's waiting
-	   with its warm dot, then the list, a group chat its woven threads, each part with a short
-	   line under it, and a short line before a folder's agents. */
-	.app.railed :is(.pins, .waiting) {
+	/* On the rail a pinned agent is its thread, as every agent is, first, with a short line
+	   under them, then the list, a group chat its woven threads, and a short line before a
+	   folder's agents. */
+	.app.railed .pins {
 		display: grid;
 		justify-items: center;
 		gap: 2px;
 		margin: 0;
 	}
-	.app.railed .waiting[hidden] {
-		display: none;
-	}
-	.app.railed :is(.pins, .waiting)::after,
+	.app.railed .pins::after,
 	.app.railed .group-head.folder {
 		content: '';
 		display: block;
@@ -1524,14 +1145,6 @@ const BOARD_LAYERS = [
 	}
 	.app.railed .group-head.folder .i {
 		display: none;
-	}
-	.app.railed .waiting .agent {
-		position: relative;
-	}
-	.app.railed .waiting .agent::after {
-		position: absolute;
-		top: 6px;
-		right: 6px;
 	}
 	.app.railed :is(.agent, .tile) {
 		width: 40px;
@@ -1551,9 +1164,6 @@ const BOARD_LAYERS = [
 	.app.railed .tile svg {
 		width: 26px;
 		height: 18px;
-	}
-	.app.railed .limits {
-		display: none;
 	}
 	.app.railed .side-foot {
 		flex-direction: column-reverse;
@@ -1753,6 +1363,7 @@ const BOARD_LAYERS = [
 
 	/* The chat: a column 740 wide at most, newest at the bottom. */
 	.chat {
+		position: relative;
 		flex: 1;
 		min-height: 0;
 		overflow: hidden;
@@ -1787,15 +1398,15 @@ const BOARD_LAYERS = [
 	.row.fresh {
 		animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
+	/* A scene's message before it's sent (demo.ts). */
+	.row.unsent {
+		display: none;
+	}
 	@keyframes rise {
 		from {
 			opacity: 0;
 			transform: translateY(6px);
 		}
-	}
-	.row.leaving {
-		transition: opacity 0.35s;
-		opacity: 0;
 	}
 	.you {
 		display: flex;
@@ -1845,119 +1456,6 @@ const BOARD_LAYERS = [
 		font-size: var(--size-small);
 		font-weight: var(--weight-medium);
 		line-height: 1.4;
-	}
-	/* The turn's steps under one quiet line: while it runs, the step it's on, and once it's
-	   done, how many there were, which opens to show them. */
-	.fold {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		min-width: 0;
-	}
-	.fold:not(:has(.words:not(:empty))) {
-		display: none;
-	}
-	.fold-line {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-width: 0;
-		font-size: var(--size-small);
-		line-height: 1.5;
-		color: var(--ink-3);
-		text-align: left;
-		cursor: pointer;
-		transition: color 0.12s;
-	}
-	.fold-line:hover {
-		color: var(--ink);
-	}
-	.fold-line .words {
-		min-width: 0;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.fold.bare .chevron {
-		display: none;
-	}
-	.fold.bare .fold-line {
-		cursor: default;
-	}
-	.fold.bare .fold-line:hover {
-		color: var(--ink-3);
-	}
-	.steps {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding-left: 12px;
-		border-left: 1px solid var(--line-strong);
-	}
-	.steps[hidden] {
-		display: none;
-	}
-	.tool-line {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: var(--size-small);
-		line-height: 1.5;
-		min-width: 0;
-	}
-	.tool-line .prompt {
-		color: var(--ink-3);
-	}
-	.tool-line .title {
-		font-family: var(--mono);
-		color: var(--ink-2);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.tool-line .mark {
-		color: var(--ink-3);
-	}
-	.tool-line.done .mark {
-		color: var(--ok);
-	}
-	.tool-line.denied .mark {
-		color: var(--bad);
-	}
-	/* A subagent's call: how many steps it took, and what its subagent did inside it,
-	   opened with a click. */
-	.sub {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		min-width: 0;
-	}
-	.sub-line {
-		text-align: left;
-		cursor: pointer;
-	}
-	.sub-line .count,
-	.sub-line .chevron {
-		flex: none;
-		color: var(--ink-3);
-	}
-	.inside {
-		display: flex;
-		flex-direction: column;
-		gap: 4px;
-		padding-left: 12px;
-		border-left: 1px solid var(--line-strong);
-	}
-	.inside[hidden] {
-		display: none;
-	}
-	/* Words the agent wrote on its way to the answer, among the steps: smaller and quieter
-	   than the answer, so they don't read as a message in the chat. */
-	.on-the-way {
-		font-size: var(--size-small);
-		line-height: var(--line-reply);
-		color: var(--ink-2);
-		overflow-wrap: anywhere;
 	}
 	/* The answer: a grey bubble, never the agent's colour, which is the person's. Its corner
 	   by the thread is squared off as a speech bubble's tail. */
@@ -2593,146 +2091,6 @@ const BOARD_LAYERS = [
 		color: var(--ink);
 	}
 
-	/* A file or a pasted link in the words (app.rs, composer_token, linked_words): its icon
-	   and its name or page's title, underlined, with the hand and a light background under
-	   the pointer. */
-	.piece {
-		display: inline-flex;
-		align-items: center;
-		gap: 3px;
-		padding: 0 2px;
-		margin: 0 -1px;
-		border-radius: 4px;
-		vertical-align: bottom;
-		white-space: nowrap;
-		cursor: pointer;
-		transition: background-color 0.12s;
-	}
-	.piece:hover {
-		background: color-mix(in srgb, var(--ink) 14%, transparent);
-	}
-	.piece-name {
-		text-decoration: underline;
-		text-underline-offset: 2px;
-		text-decoration-color: var(--line-strong);
-	}
-	.file-icon {
-		color: var(--ink-3);
-	}
-	/* A pasted link's preview, over its piece under the pointer (app.rs, link_tip): 280
-	   wide, its title, two lines at most, and its site with its icon. */
-	.link-piece {
-		position: relative;
-	}
-	.link-tip {
-		position: absolute;
-		left: 0;
-		bottom: calc(100% + 6px);
-		z-index: 5;
-		display: flex;
-		flex-direction: column;
-		gap: 2px;
-		width: 280px;
-		padding: 8px 12px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-row);
-		background: var(--bg);
-		box-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.25);
-		color: var(--ink);
-		white-space: normal;
-		text-align: left;
-		opacity: 0;
-		visibility: hidden;
-		pointer-events: none;
-		transition:
-			opacity 0.12s,
-			visibility 0.12s;
-	}
-	.you .link-tip {
-		left: auto;
-		right: 0;
-	}
-	.link-piece:hover .link-tip {
-		opacity: 1;
-		visibility: visible;
-		transition-delay: 0.4s;
-	}
-	.link-title {
-		font-size: var(--size-small);
-		line-height: 1.4;
-		display: -webkit-box;
-		-webkit-line-clamp: 2;
-		-webkit-box-orient: vertical;
-		overflow: hidden;
-	}
-	.link-site {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: var(--size-caption);
-		color: var(--ink-3);
-	}
-	/* A file over the words: in the composer its icon, name, size and ×; sent, its name
-	   over its size. */
-	.file-pill {
-		display: flex;
-		align-items: center;
-		flex: none;
-		gap: 8px;
-		padding: 4px 4px 4px 12px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-row);
-		font-size: var(--size-small);
-		white-space: nowrap;
-	}
-	.file-text {
-		display: flex;
-		align-items: baseline;
-		gap: 8px;
-	}
-	.file-size {
-		color: var(--ink-3);
-	}
-	.file-x {
-		display: grid;
-		place-items: center;
-		width: 22px;
-		height: 22px;
-		border-radius: var(--radius-row);
-		color: var(--ink-3);
-	}
-	.file-x .i {
-		width: 10px;
-		height: 10px;
-	}
-	.you .file-pill {
-		gap: 12px;
-		max-width: 320px;
-		padding: 8px 12px;
-		cursor: pointer;
-		transition: background-color 0.12s;
-	}
-	.you .file-pill:hover {
-		background: var(--hover);
-	}
-	.you .file-text {
-		flex-direction: column;
-		gap: 0;
-		line-height: 1.4;
-	}
-	.you .file-size {
-		font-size: var(--size-caption);
-	}
-	.you .file-x {
-		display: none;
-	}
-	/* A message with files or a quote has them over its words, on its side. */
-	.you:has(.file-pill, .quote) {
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 4px;
-	}
-
 	/* Replying (PLAN.md, "Replying to a message"). By a message's corner, just outside the
 	   column, as the app has them (app.rs, chat_row): its pin, there while it's pinned and on
 	   hover to pin it, then Reply and the ⋯ under it, on hover. */
@@ -2815,7 +2173,6 @@ const BOARD_LAYERS = [
 		transition: opacity 0.12s, background-color 0.12s, color 0.12s;
 	}
 	.row:hover > .reply-btn,
-	.row.hovered > .reply-btn,
 	.reply-btn:focus-visible,
 	.row:hover > .more-btn,
 	.more-btn:focus-visible {
@@ -3210,147 +2567,9 @@ const BOARD_LAYERS = [
 		width: 12px;
 		height: 12px;
 	}
-	.quote.original-gone .q-words {
-		color: var(--ink-3);
-	}
-	/* Lit for a moment, once a quote went to it. */
+	/* Lit for a moment, once Jump in the pins went to it. */
 	.msgs .row.lit {
 		background: color-mix(in srgb, var(--tint) 10%, transparent);
-	}
-	.msgs.jumping {
-		transition: transform 0.35s cubic-bezier(0.2, 0.7, 0.3, 1);
-	}
-	/* The way down to the newest message, at the bottom of the chat over the composer, with
-	   how many came since it was left in the agent's colour at its corner. */
-	.chat {
-		position: relative;
-	}
-	.jump {
-		position: absolute;
-		left: 50%;
-		bottom: 12px;
-		width: 34px;
-		height: 34px;
-		margin-left: -17px;
-		display: grid;
-		place-items: center;
-		padding: 0;
-		border: 1px solid var(--line);
-		border-radius: 50%;
-		background: var(--bg);
-		color: var(--ink-2);
-		box-shadow: 0 4px 14px -2px rgb(0 0 0 / 0.14);
-		cursor: pointer;
-		animation: rise 0.2s ease-out both;
-	}
-	@media (prefers-color-scheme: dark) {
-		:root:not([data-theme='light']) .jump {
-			background: var(--raised);
-			box-shadow: 0 4px 14px -2px rgb(0 0 0 / 0.5);
-		}
-	}
-	:root[data-theme='dark'] .jump {
-		background: var(--raised);
-		box-shadow: 0 4px 14px -2px rgb(0 0 0 / 0.5);
-	}
-	.jump[hidden] {
-		display: none;
-	}
-	.jump:hover {
-		background: var(--raised-2);
-		color: var(--ink);
-	}
-	.jump .i {
-		width: 16px;
-		height: 16px;
-	}
-	.jump-count {
-		position: absolute;
-		top: -5px;
-		left: 21px;
-		min-width: 17px;
-		height: 17px;
-		padding: 0 4px;
-		border-radius: 9px;
-		background: var(--tint);
-		color: #fff;
-		font-size: calc(var(--size-caption) - 1px);
-		font-weight: 500;
-		line-height: 17px;
-		text-align: center;
-	}
-	.jump-count[hidden] {
-		display: none;
-	}
-	/* The quote over a sent message, on one line: the agent's thread, who said it in their
-	   colour ("You" quiet), and what, cut with "…". A spine from its middle curves down onto
-	   the bubble, 20px in from its edge. */
-	.quoted {
-		display: flex;
-		justify-content: flex-end;
-		max-width: 100%;
-		min-width: 0;
-		padding-right: 20px;
-		margin-bottom: -3px;
-	}
-	.quote {
-		display: flex;
-		align-items: center;
-		gap: 5px;
-		min-width: 0;
-		max-width: 440px;
-		height: 20px;
-		padding: 0 6px;
-		border: 0;
-		border-radius: var(--radius-row);
-		background: transparent;
-		color: inherit;
-		font: inherit;
-		font-size: var(--size-small);
-		white-space: nowrap;
-		cursor: pointer;
-		transition: background-color 0.12s;
-	}
-	.quote:hover {
-		background: var(--hover);
-	}
-	.quote .mention-thread {
-		flex: none;
-		margin: 0;
-		stroke: var(--q, var(--tint));
-		vertical-align: 0;
-	}
-	.q-who {
-		flex: none;
-		font-weight: 500;
-		color: var(--q, var(--tint));
-	}
-	.quote.mine .q-who {
-		color: var(--ink-3);
-	}
-	.q-words {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		color: var(--ink-2);
-	}
-	.q-spine {
-		position: relative;
-		flex: none;
-		width: 14px;
-		height: 20px;
-	}
-	.q-spine::before {
-		content: '';
-		position: absolute;
-		top: 9px;
-		left: 0;
-		box-sizing: border-box;
-		width: 14px;
-		height: 13px;
-		border-top: 2px solid var(--line-strong);
-		border-right: 2px solid var(--line-strong);
-		border-top-right-radius: 7px;
 	}
 	.rb-head {
 		font-size: var(--size-caption);
@@ -3437,140 +2656,8 @@ const BOARD_LAYERS = [
 		color: var(--ink-2);
 	}
 
-	/* A reply's sources (desktop/src/app.rs, sources_tab): a tab hanging from its bubble's
-	   bottom-left corner, tucked under it, a shade lighter than the bubble; open, a shade
-	   darker. Its list opens under it, a line each. */
-	.said-wrap {
-		position: relative;
-		align-self: flex-start;
-		max-width: 94%;
-		padding-bottom: 19px;
-	}
-	.said-wrap .said {
-		position: relative;
-		max-width: 100%;
-	}
-	.sources {
-		position: absolute;
-		left: 14px;
-		bottom: 0;
-	}
-	.sources-tab {
-		display: flex;
-		align-items: center;
-		gap: 6px;
-		height: 26px;
-		padding: 7px 8px 0 5px;
-		border: 1px solid #e4e4e8;
-		border-radius: var(--radius-button);
-		background: #f7f7f8;
-		font-size: var(--size-caption);
-		color: var(--ink-2);
-		cursor: pointer;
-		transition: background-color 0.12s;
-	}
-	.sources-tab:hover,
-	.sources-tab[aria-expanded='true'] {
-		background: #eaeaed;
-	}
-	.sources-tab .site-icon {
-		width: 16px;
-		height: 16px;
-		border-radius: 4px;
-	}
-	.site-icons {
-		display: flex;
-		gap: 3px;
-	}
-	.sources-list {
-		position: absolute;
-		left: 0;
-		top: calc(100% + 4px);
-		z-index: 5;
-		width: 340px;
-		max-width: calc(100vw - 64px);
-		display: grid;
-		padding: 4px;
-		background: var(--raised);
-		border: 1px solid var(--line-strong);
-		border-radius: var(--radius-card);
-		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.1);
-	}
-	/* Shut until the tab opens it: its own display would show it whatever `hidden` says. */
-	.sources-list[hidden] {
-		display: none;
-	}
-	.sources-list.up {
-		top: auto;
-		bottom: calc(100% + 4px);
-	}
-	.source {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		height: 32px;
-		padding: 0 8px;
-		border-radius: var(--radius-row);
-		transition: background-color 0.12s;
-	}
-	.source:hover {
-		background: var(--hover);
-	}
-	.source .site-icon {
-		width: 16px;
-		height: 16px;
-		border-radius: 4px;
-	}
-	.source .t {
-		flex: 1;
-		min-width: 0;
-		max-width: 210px;
-		font-size: var(--size-small);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.source .d {
-		margin-left: auto;
-		max-width: 120px;
-		font-size: var(--size-caption);
-		color: var(--ink-3);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	@media (prefers-color-scheme: dark) {
-		:root:not([data-theme='light']) .sources-tab {
-			background: #222226;
-			border-color: #2e2e33;
-		}
-		:root:not([data-theme='light']) .sources-tab:hover,
-		:root:not([data-theme='light']) .sources-tab[aria-expanded='true'] {
-			background: #2c2c31;
-		}
-		:root:not([data-theme='light']) .sources-list {
-			box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
-		}
-	}
-	:root[data-theme='dark'] .sources-tab {
-		background: #222226;
-		border-color: #2e2e33;
-	}
-	:root[data-theme='dark'] .sources-tab:hover,
-	:root[data-theme='dark'] .sources-tab[aria-expanded='true'] {
-		background: #2c2c31;
-	}
-	:root[data-theme='dark'] .sources-list {
-		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
-	}
-
-	/* An approval: its own row after the messages, lined up with the reply's text, in the
-	   card frame every card in the chat has (the app's CardFrame): its icon in the agent's
-	   colour, its title with the agent's thread tugging beside it, what it does in a pill,
-	   and Allow, split for Always allow, and Deny. Its edge takes the agent's colour while
-	   it waits. Answered, it's one quiet line. */
 	/* The card frame's fills (app.rs, card_fill, card_inset, card_shadow), for every card in
-	   the chat and the find box: raised in the dark, the page's own in the light. */
+	   the chat: raised in the dark, the page's own in the light. */
 	.app {
 		--card-fill: var(--raised);
 		--card-inset: var(--bg);
@@ -3591,144 +2678,6 @@ const BOARD_LAYERS = [
 		--card-edge: var(--line-strong);
 		--card-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.1);
 	}
-	.approval {
-		padding-left: 26px;
-	}
-	.card {
-		display: flex;
-		flex-direction: column;
-		gap: 12px;
-		max-width: 600px;
-		padding: 16px;
-		background: var(--card-fill);
-		border: 1px solid color-mix(in srgb, var(--tint) 40%, transparent);
-		border-radius: var(--radius-bubble);
-		box-shadow: var(--card-shadow);
-	}
-	.card-head {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-	}
-	.card-lead {
-		display: flex;
-		flex: none;
-		align-items: center;
-		justify-content: center;
-		width: var(--control-icon-large);
-		height: var(--control-icon-large);
-		border-radius: var(--radius-card);
-		background: var(--card-inset);
-		color: var(--tint);
-	}
-	.card-title {
-		display: flex;
-		flex: 1;
-		align-items: center;
-		gap: 8px;
-		min-width: 0;
-		color: var(--ink);
-		font-weight: var(--weight-semibold);
-		line-height: 1.35;
-	}
-	.card-mark {
-		flex: none;
-	}
-	/* What it does, as loom knows it: amber for a call that runs something. */
-	.pill {
-		flex: none;
-		padding: 2px 9px;
-		border: 1px solid color-mix(in srgb, var(--warn) 70%, transparent);
-		border-radius: 999px;
-		color: var(--warn);
-		font-size: var(--size-caption);
-		font-weight: var(--weight-medium);
-	}
-	.card-buttons {
-		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 8px;
-	}
-	/* Allow, and beside it the arrow that opens Always allow. */
-	.split {
-		position: relative;
-		display: inline-flex;
-		gap: 1px;
-	}
-	.split .b.primary:first-child {
-		border-radius: var(--radius-button) 0 0 var(--radius-button);
-	}
-	.split .caret {
-		display: flex;
-		align-items: center;
-		padding: 0 7px;
-		border-radius: 0 var(--radius-button) var(--radius-button) 0;
-	}
-	.split .caret .i {
-		width: 14px;
-		height: 14px;
-	}
-	/* Opens upward: the approval sits at the bottom of the chat, which clips what's below. */
-	.menu {
-		position: absolute;
-		bottom: calc(100% + 4px);
-		left: 0;
-		z-index: 2;
-		min-width: 180px;
-		padding: 4px;
-		background: var(--raised);
-		border: 1px solid var(--line-strong);
-		border-radius: var(--radius-card);
-		box-shadow: var(--card-shadow);
-	}
-	.menu[hidden] {
-		display: none;
-	}
-	.menu .item {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		width: 100%;
-		padding: 8px 12px;
-		border: 0;
-		border-radius: var(--radius-row);
-		background: transparent;
-		color: var(--ink);
-		font: inherit;
-		font-size: var(--size-small);
-		text-align: left;
-		cursor: pointer;
-	}
-	.menu .item:hover {
-		background: var(--hover);
-	}
-	.menu .item .i {
-		width: 14px;
-		height: 14px;
-		color: var(--ink-2);
-	}
-	.card-done {
-		display: none;
-		align-items: center;
-		gap: 8px;
-		font-size: var(--size-small);
-		color: var(--ink-3);
-	}
-	.card-done b {
-		color: var(--ink-2);
-		font-weight: var(--weight-medium);
-	}
-	.card-done .i {
-		width: 12px;
-		height: 12px;
-	}
-	.approval.answered .card {
-		display: none;
-	}
-	.approval.answered .card-done {
-		display: flex;
-	}
 	/* A T3 thread's card: the card frame, its edge lightly in sky while the thread works. */
 	.t3 {
 		--tone: var(--thread-sky);
@@ -3741,6 +2690,9 @@ const BOARD_LAYERS = [
 		border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
 		border-radius: var(--radius-bubble);
 		box-shadow: var(--card-shadow);
+	}
+	.t3[hidden] {
+		display: none;
 	}
 	.t3.done {
 		--tone: var(--ok);
@@ -3756,7 +2708,7 @@ const BOARD_LAYERS = [
 		flex: none;
 		margin-top: 2px;
 	}
-	.t3 [data-thread] path {
+	.t3 [data-thread] :global(path) {
 		stroke: var(--tone) !important;
 	}
 	.t3-titles {
@@ -3820,71 +2772,8 @@ const BOARD_LAYERS = [
 		font-size: var(--size-caption);
 		color: var(--ink-2);
 	}
-	/* A watch's line (watch_view.rs, update_line): its mark where a reply's thread is, then
-	   the card's pill, which gives way first, and what happened in quiet ink. */
-	.watch-line {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 4px 0 8px;
-	}
-	.watch-line .line-mark {
-		flex: none;
-		margin-right: 0;
-		vertical-align: 0;
-	}
-	.line-what {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		min-width: 0;
-	}
-	.line-what .acta-pill {
-		min-width: 0;
-	}
-	.line-what .acta-face {
-		padding-left: 7px;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.line-words {
-		flex: none;
-		font-size: var(--size-caption);
-		color: var(--ink-3);
-		white-space: nowrap;
-	}
-	.b {
-		height: var(--control-button-small);
-		padding: 0 12px;
-		border-radius: var(--radius-button);
-		border: 1px solid var(--line-strong);
-		background: transparent;
-		color: var(--ink);
-		font-size: var(--size-small);
-		font-weight: var(--weight-medium);
-		cursor: pointer;
-		transition:
-			background-color 0.12s,
-			transform 0.1s;
-	}
-	.b:hover,
-	.b.pressed {
-		background: var(--hover);
-	}
-	.b.primary {
-		border-color: var(--button);
-		background: var(--button);
-		color: var(--button-ink);
-	}
-	.b.primary:hover,
-	.b.primary.pressed {
-		background: color-mix(in srgb, var(--button) 82%, var(--bg));
-	}
-	.b.pressed {
-		transform: scale(0.97);
-	}
 
-	/* The composer: what's attached over the words, then the + , the words and the buttons. */
+	/* The composer: the reply bar over the words, then the + , the words and the buttons. */
 	.composer-wrap {
 		padding: 4px 24px 16px;
 		flex: none;
@@ -3901,71 +2790,10 @@ const BOARD_LAYERS = [
 		border: 1px solid var(--line);
 		border-radius: var(--radius-composer);
 	}
-	/* An emoji: in the words at 1.25 times the text, and big, 48 px, in a message of only a
-	   few (emoji.rs, IN_TEXT and JUMBO). */
-	.emoji {
-		display: inline-block;
-		width: 1.25em;
-		height: 1.25em;
-		vertical-align: -0.25em;
-		margin: 0 1px;
-	}
-	.bubble .emoji.jumbo {
-		width: 48px;
-		height: 48px;
-		vertical-align: middle;
-	}
-	/* The emoji row, just over the composer from its left edge. */
-	.emoji-row {
-		position: absolute;
-		left: 0;
-		bottom: calc(100% + 8px);
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		padding: 4px;
-		background: var(--raised);
-		border: 1px solid var(--line-strong);
-		border-radius: var(--radius-card);
-		box-shadow: 0 10px 30px rgb(0 0 0 / 0.12);
-		animation: rise 0.16s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-	}
-	.er-tile {
-		display: grid;
-		place-items: center;
-		width: 34px;
-		height: 34px;
-		border-radius: var(--radius-row);
-	}
-	.er-tile.lit {
-		background: var(--hover);
-	}
-	.er-tile img {
-		width: 22px;
-		height: 22px;
-	}
-	.er-name {
-		padding-right: 8px;
-		font-family: var(--mono);
-		font-size: 12px;
-		color: var(--ink-3);
-	}
 	.composer-row {
 		display: flex;
 		align-items: flex-end;
 		gap: 8px;
-	}
-	.attached {
-		display: flex;
-		align-items: flex-end;
-		gap: 8px;
-		overflow: hidden;
-	}
-	.attached[hidden] {
-		display: none;
-	}
-	.attached > * {
-		animation: rise 0.2s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
 	.icon-btn.c {
 		width: var(--control-icon-composer);
@@ -4143,6 +2971,70 @@ const BOARD_LAYERS = [
 	.cc-actions button:hover {
 		background: var(--hover);
 	}
+	/* Under a hairline across the card, the plan (app.rs, context_plan_view): the program's
+	   mark and the plan's name, then its session's and its week's limits, each a small ring
+	   with how much is used and when it resets: quiet, orange from 75% and red from 90%
+	   (limit_inks). */
+	.cc-plan {
+		display: grid;
+		gap: 8px;
+		margin: 0 -12px;
+		padding: 10px 12px 0;
+		border-top: 1px solid var(--line);
+		font-size: var(--size-caption);
+	}
+	.cc-plan-name {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-width: 0;
+		font-size: var(--size-body);
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
+	}
+	.cc-plan-name .brain-icon {
+		width: var(--control-limit-ring);
+		height: var(--control-limit-ring);
+	}
+	.limit {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.limit .ring {
+		width: var(--control-limit-ring);
+		height: var(--control-limit-ring);
+		flex: none;
+		transform: rotate(-90deg);
+	}
+	.limit .ring circle {
+		fill: none;
+		stroke: var(--line-strong);
+		stroke-width: 1.75;
+	}
+	.limit .ring .fill {
+		stroke: var(--ink-3);
+	}
+	.limit.warn .ring .fill {
+		stroke: var(--warn);
+	}
+	.limit.bad .ring .fill {
+		stroke: var(--bad);
+	}
+	.limit-name {
+		flex: 1;
+	}
+	.limit-words {
+		color: var(--ink-3);
+	}
+	.limit.warn .limit-words {
+		color: var(--warn);
+	}
+	.limit.bad .limit-words {
+		color: var(--bad);
+	}
 	.send {
 		display: grid;
 		place-items: center;
@@ -4283,99 +3175,17 @@ const BOARD_LAYERS = [
 		height: 12px;
 	}
 
-	/* The find box, at the chat's top right (app.rs, find_box), and its marks: every match in
-	   the find colour, the one it's on brighter. */
-	.find {
-		position: absolute;
-		z-index: 7;
-		top: 8px;
-		right: 16px;
-		display: flex;
-		align-items: center;
-		gap: 2px;
-		width: 330px;
-		max-width: calc(100% - 32px);
-		padding: 4px 4px 4px 12px;
-		background: var(--card-fill);
-		border: 1px solid var(--line);
-		border-radius: var(--radius-card);
-		box-shadow: var(--card-shadow);
-		font-size: var(--size-small);
-		animation: rise 0.16s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-	}
-	.find[hidden] {
-		display: none;
-	}
-	.find > .i {
-		color: var(--ink-3);
-	}
-	.find input {
-		flex: 1;
-		min-width: 0;
-		height: 26px;
-		padding: 0 4px 0 8px;
-		border: 0;
-		outline: none;
-		background: transparent;
-		font: inherit;
-		color: var(--ink);
-		user-select: text;
-	}
-	.find input::placeholder {
-		color: var(--ink-3);
-	}
-	.find-count {
-		flex: none;
-		padding: 0 4px;
-		font-size: var(--size-caption);
-		color: var(--ink-3);
-		white-space: nowrap;
-	}
-	.find-btn {
-		display: grid;
-		flex: none;
-		place-items: center;
-		width: var(--control-icon-small);
-		height: var(--control-icon-small);
-		border-radius: var(--radius-button);
-		color: var(--ink-3);
-		cursor: pointer;
-	}
-	.find.some .find-btn,
-	.find-btn:hover {
-		color: var(--ink-2);
-	}
-	.find-btn:hover {
-		background: var(--hover);
-		color: var(--ink);
-	}
-	.app :global(mark.found) {
-		background: var(--find);
-		color: inherit;
-		border-radius: 2px;
-	}
-	.app :global(mark.found.on) {
-		background: var(--find-current);
-	}
-
-	/* Lines across the column: "3 new" over the first reply that came while the chat was shut,
-	   and loom's own, where the context was compacted or a fresh session started. */
-	.new-line,
+	/* A line from loom across the column, where the context was compacted or a fresh session
+	   started. */
 	.loom-line {
 		display: flex;
 		align-items: center;
-		gap: 12px;
-		padding: 8px 0 4px;
-		font-size: var(--size-caption);
-		color: var(--ink-3);
-		white-space: nowrap;
-	}
-	.loom-line {
 		gap: 8px;
 		padding: 8px 0;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
 	}
-	.new-line::before,
-	.new-line::after,
 	.loom-line::before,
 	.loom-line::after {
 		content: '';
@@ -4385,225 +3195,6 @@ const BOARD_LAYERS = [
 	}
 	.loom-line.fresh-in {
 		animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-	}
-
-	/* A table in a reply, and under it how many rows it has with Copy, whose arrow has the
-	   other ways to copy it (app.rs, table_line). */
-	.md-table {
-		margin: 8px 0 6px;
-		border-collapse: collapse;
-		font-size: var(--size-small);
-		line-height: 1.5;
-	}
-	.md-table th,
-	.md-table td {
-		padding: 4px 20px 4px 0;
-		text-align: left;
-		white-space: nowrap;
-		border-bottom: 1px solid var(--line-strong);
-	}
-	.md-table th {
-		font-weight: var(--weight-semibold);
-	}
-	.md-table tr:last-child td {
-		border-bottom: 0;
-	}
-	.table-line {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		font-size: var(--size-small);
-		line-height: 1;
-		color: var(--ink-3);
-	}
-	.tl-split {
-		display: inline-flex;
-		align-items: stretch;
-		height: 22px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-row);
-		overflow: hidden;
-	}
-	.tl-split button {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		padding: 0 8px;
-		color: var(--ink-3);
-		cursor: pointer;
-		transition:
-			background-color 0.12s,
-			color 0.12s;
-	}
-	.tl-split button:hover,
-	.tl-split button[aria-expanded='true'] {
-		background: var(--hover);
-		color: var(--ink);
-	}
-	.tl-split .tl-more {
-		padding: 0 3px;
-		border-left: 1px solid var(--line);
-	}
-	.tl-split .i {
-		width: 12px;
-		height: 12px;
-	}
-
-	/* The notice at the window's foot after a copy (app.rs, toast). */
-	.toast {
-		position: absolute;
-		z-index: 30;
-		left: 50%;
-		bottom: 88px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		max-width: calc(100% - 48px);
-		padding: 10px 16px;
-		background: var(--raised);
-		border: 1px solid var(--line-strong);
-		border-radius: var(--radius-card);
-		box-shadow: 0 10px 30px rgb(0 0 0 / 0.18);
-		font-size: var(--size-small);
-		transform: translateX(-50%);
-		animation: rise 0.2s cubic-bezier(0.2, 0.7, 0.3, 1) both;
-	}
-	.toast[hidden] {
-		display: none;
-	}
-	.toast .i {
-		color: var(--ok);
-	}
-
-	/* What the agent kept from a reply, under it (learned.rs): a quiet line that opens to say
-	   why the skill failed, its change in mono, removed in red and added in green, and Undo. */
-	.kept {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-	}
-	.kept-line {
-		display: inline-flex;
-		align-self: flex-start;
-		align-items: center;
-		gap: 8px;
-		font-size: var(--size-caption);
-		color: var(--ink-3);
-		cursor: pointer;
-		transition: color 0.12s;
-	}
-	.kept-line:hover {
-		color: var(--ink);
-	}
-	.kept-line .i {
-		width: 12px;
-		height: 12px;
-	}
-	.kept-chev {
-		display: flex;
-	}
-	.kept-open {
-		display: flex;
-		flex-direction: column;
-		gap: 8px;
-		max-width: 600px;
-		padding-left: 24px;
-	}
-	.kept-open[hidden] {
-		display: none;
-	}
-	.kept-why {
-		font-size: var(--size-small);
-		color: var(--ink-2);
-	}
-	.change {
-		padding: 4px 0;
-		border-radius: var(--radius-input);
-		background: var(--card-inset);
-		font-family: var(--mono);
-		font-size: var(--size-caption);
-		line-height: 1.5;
-		color: var(--ink-3);
-		overflow: hidden;
-	}
-	.ch {
-		display: flex;
-		gap: 8px;
-		padding: 0 12px;
-		white-space: nowrap;
-	}
-	.ch-mark {
-		flex: none;
-		width: 10px;
-	}
-	.ch.del {
-		background: color-mix(in srgb, var(--bad) 10%, transparent);
-		color: var(--ink);
-	}
-	.ch.del .ch-mark {
-		color: var(--bad);
-	}
-	.ch.add {
-		background: color-mix(in srgb, var(--ok) 10%, transparent);
-		color: var(--ink);
-	}
-	.ch.add .ch-mark {
-		color: var(--ok);
-	}
-	.kept-end {
-		display: flex;
-	}
-	.kept-undo {
-		font-size: var(--size-caption);
-		font-weight: var(--weight-medium);
-		color: var(--ink-2);
-		cursor: pointer;
-	}
-	.kept-undo:hover {
-		color: var(--ink);
-	}
-	.kept-undo:disabled {
-		font-weight: var(--weight-regular);
-		color: var(--ink-3);
-		cursor: default;
-	}
-
-	/* A long message cut after ten lines, its last fading into its bubble, with a quiet Show
-	   more under it that opens it in place (app.rs, cut_long; demo.ts, cutLong). */
-	.app :global(.cut-body) {
-		position: relative;
-	}
-	.app :global(.cut .cut-body) {
-		max-height: var(--cut-at);
-		overflow: hidden;
-	}
-	.app :global(.cut .cut-body::after) {
-		content: '';
-		position: absolute;
-		left: 0;
-		right: 0;
-		bottom: 0;
-		height: var(--cut-fade);
-		background: linear-gradient(transparent, var(--bubble));
-	}
-	.app :global(.show-more) {
-		display: block;
-		margin-top: 2px;
-		padding: 0;
-		border: 0;
-		background: none;
-		font: inherit;
-		line-height: 1.5;
-		font-size: var(--size-small);
-		color: var(--ink-3);
-		cursor: pointer;
-		transition: color 0.12s;
-	}
-	.app :global(.show-more:hover) {
-		color: var(--ink);
-	}
-	.app :global(.show-more[hidden]) {
-		display: none;
 	}
 
 	/* A narrower window: the sidebar is a rail beside the chat (demo.ts), as the app's is. */
@@ -4636,9 +3227,6 @@ const BOARD_LAYERS = [
 		}
 		.said {
 			max-width: 100%;
-		}
-		.approval {
-			padding-left: 0;
 		}
 		/* No room beside the chat: the side preview goes over it. */
 		.acta-side {
