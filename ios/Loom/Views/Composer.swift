@@ -213,6 +213,8 @@ struct Composer: View {
                             .contentShape(Circle())
                     }
                     .accessibilityLabel(picking ? "Keyboard" : "Emoji")
+                    // For the UI tests: the system keyboard has an Emoji key of its own.
+                    .accessibilityIdentifier("smiley")
                     .contextMenu {
                         Button("Hide emoji button", systemImage: "eye.slash") { emojiButton = false }
                     }
