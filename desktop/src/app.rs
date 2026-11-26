@@ -8625,21 +8625,10 @@ ACTA_KEY=secret:ACTA_KEY",
         if prefixes.is_empty() {
             return;
         }
-        let (before, pieces) = {
-            let c = self.composer.read(cx);
-            let text = c.value().to_string();
-            let pieces: Vec<std::ops::Range<usize>> =
-                c.tokens().iter().map(|t| t.range()).collect();
-            (text[..c.cursor().min(text.len())].to_string(), pieces)
-        };
-        let Some((range, id)) = model::typed_card(&before, &prefixes, &pieces) else {
-            return;
-        };
-        let (token, words) = model::card_token(&id);
-        self.composer.update(cx, |c, cx| {
-            let _ = c.replace_range_with_token(range, InlineToken::new(token, words), window, cx);
-        });
-        if let Some(f) = self.model.preview_card(&id) {
+        let typed = self
+            .composer
+            .update(cx, |c, cx| put_typed_card(c, &prefixes, window, cx));
+        if let Some(f) = typed.and_then(|id| self.model.preview_card(&id)) {
             self.send(f);
         }
     }
@@ -22528,6 +22517,28 @@ fn paste_card(
     let _ = c.replace_range_with_token(at..at + url.len(), InlineToken::new(id, text), window, cx);
 }
 
+/// Makes the card id just typed before the cursor, for one of the boards `prefixes`
+/// names, one piece (`model::typed_card`), and gives its id.
+fn put_typed_card(
+    c: &mut TextareaState,
+    prefixes: &[String],
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) -> Option<String> {
+    let text = c.value().to_string();
+    let before = &text[..c.cursor().min(text.len())];
+    let pieces: Vec<std::ops::Range<usize>> = c.tokens().iter().map(|t| t.range()).collect();
+    let (range, id) = model::typed_card(before, prefixes, &pieces)?;
+    let cursor = before.len();
+    let (token, words) = model::card_token(&id);
+    c.replace_range_with_token(range, InlineToken::new(token, words), window, cx)
+        .ok()?;
+    // The piece is as long as the id, so the cursor goes back where it was, after
+    // the space or stop typed after the id, which the replacing put it before.
+    c.set_selected_range(cursor..cursor, cx);
+    Some(id)
+}
+
 /// A picture attached in the composer, made small (`Loom::make_preview`): drawn as its
 /// own when it's alone, from `file` in a fan of two or more, and how big it is.
 #[derive(Clone)]
@@ -27779,7 +27790,9 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
 #[cfg(test)]
 mod composer_tests {
     // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
-    use super::{composer_edit, composer_text, paste_link, ComposerEdit};
+    use super::{
+        composer_edit, composer_text, paste_card, paste_link, put_typed_card, ComposerEdit,
+    };
     use gpui::{
         div, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, TestAppContext, VisualTestContext, Window,
@@ -27911,6 +27924,54 @@ mod composer_tests {
             c.read_with(cx, |c, _| composer_text(c)),
             "See <https://a.example/x>"
         );
+    }
+
+    // A card's id typed for one of the person's boards becomes its piece once a space or
+    // a stop follows it, and what's typed next goes after that, as typed (LOO-342).
+    #[gpui::test]
+    fn a_typed_card_id_is_one_piece_and_typing_goes_on_after_it(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        let prefixes = vec!["LOO".to_string(), "CAL".to_string()];
+        let track = |c: &Entity<TextareaState>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| c.update(cx, |c, cx| put_typed_card(c, &prefixes, window, cx)))
+        };
+        cx.simulate_input("Is CAL-338");
+        assert_eq!(track(&c, cx), None);
+        cx.simulate_input(" ");
+        assert_eq!(track(&c, cx).as_deref(), Some("CAL-338"));
+        cx.simulate_input("waiting on UTF-8 and LOO-206,");
+        assert_eq!(track(&c, cx).as_deref(), Some("LOO-206"));
+        cx.simulate_input(" yes?");
+        assert_eq!(
+            shown(&c, cx),
+            (
+                "Is CAL-338 waiting on UTF-8 and LOO-206, yes?".into(),
+                vec!["loom-card:CAL-338".into(), "loom-card:LOO-206".into()]
+            )
+        );
+        // Sent as the ids, which the chat shows as the pills again.
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            "Is CAL-338 waiting on UTF-8 and LOO-206, yes?"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pasted_card_link_is_one_piece_sent_as_its_address(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        cx.simulate_input("See ");
+        let url = "https://acta.aaenz.no/aaen-studios/loom#LOO-206";
+        cx.update(|window, cx| c.update(cx, |c, cx| paste_card(c, url, window, cx)));
+        assert_eq!(
+            shown(&c, cx),
+            (format!("See {url}"), vec![format!("loom-card:{url}")])
+        );
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            format!("See {url}")
+        );
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(shown(&c, cx), ("See ".into(), vec![]));
     }
 }
 
