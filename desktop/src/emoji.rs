@@ -675,9 +675,100 @@ pub struct Emojis {
     /// A picture going up to be one of the person's own, and the name it gets.
     pub uploading: Option<String>,
     want_picker: bool,
+    /// The picker is open (`open_picker`, `shut_picker`).
+    picking: bool,
+    /// Recently used as the open picker first showed it, held until it shuts, so an emoji
+    /// picked doesn't move from under the pointer. It opens with the new order next time.
+    /// None until its groups come.
+    held: Option<Vec<Item>>,
+}
+
+/// What Esc does in the open picker.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PickerEscape {
+    /// Something was typed in its search: that's cleared, and the picker stays.
+    Clear,
+    /// The picker shuts.
+    Shut,
+}
+
+/// Whether two of the picker's emoji are the same one, whatever their skin tone: one of
+/// the person's own by its id.
+fn same_emoji(a: &Item, b: &Item) -> bool {
+    match (&a.custom, &b.custom) {
+        (Some(x), Some(y)) => x == y,
+        (None, None) => untoned(&a.emoji) == untoned(&b.emoji),
+        _ => false,
+    }
 }
 
 impl Emojis {
+    /// The picker opens: its groups, unless they're here in this skin tone. Picking in it
+    /// keeps it open, and Recently used keeps the order it opened with until it shuts.
+    pub fn open_picker(&mut self) -> Option<Value> {
+        self.found = None;
+        self.picking = true;
+        let ask = self.picker(false);
+        self.held = match ask {
+            Some(_) => None,
+            None => Some(self.recent()),
+        };
+        ask
+    }
+
+    pub fn shut_picker(&mut self) {
+        self.picking = false;
+        self.held = None;
+    }
+
+    /// Esc in the open picker, with `query` typed in its search: what's typed is cleared
+    /// first, and the next Esc shuts the picker.
+    pub fn picker_escape(&mut self, query: &str) -> PickerEscape {
+        if query.is_empty() {
+            self.shut_picker();
+            return PickerEscape::Shut;
+        }
+        self.found = None;
+        PickerEscape::Clear
+    }
+
+    fn recent(&self) -> Vec<Item> {
+        self.groups
+            .iter()
+            .find(|g| g.id == "recent")
+            .map(|g| g.emoji.clone())
+            .unwrap_or_default()
+    }
+
+    /// Recently used while the picker is open: in the order it opened with, each emoji as
+    /// the groups now have it (in a new skin tone, say), and none picked since. The first
+    /// groups to come after it opens set that order.
+    fn hold_recent(&mut self) {
+        if !self.picking {
+            return;
+        }
+        let Some(held) = &self.held else {
+            self.held = Some(self.recent());
+            return;
+        };
+        let now: Vec<Item> = held
+            .iter()
+            .map(|was| {
+                self.groups
+                    .iter()
+                    .flat_map(|g| &g.emoji)
+                    .find(|e| same_emoji(e, was))
+                    .cloned()
+                    .unwrap_or_else(|| was.clone())
+            })
+            .collect();
+        if let Some(g) = self.groups.iter_mut().find(|g| g.id == "recent") {
+            g.emoji = now;
+        }
+        // These aren't the core's groups as they are: the next opening asks again.
+        self.picker_tone = None;
+    }
+
     /// What's typed up to the cursor, for the suggestion row or a replacement.
     pub fn typed(&mut self, before: &str, emoticons: bool) -> Value {
         let tone = self.tone;
@@ -871,6 +962,7 @@ impl Emojis {
                                 .collect()
                         })
                         .unwrap_or_default();
+                    self.hold_recent();
                     for g in &self.groups {
                         for e in &g.emoji {
                             if e.custom.is_none() {
@@ -947,9 +1039,67 @@ mod tests {
     // Not a glob: GPUI has an attribute of its own named test.
     use super::{
         as_names, code_ranges, find, jumbo, name_from_file, pictured, plays, svg, sync_own,
-        text_of, tokens, untoned, wanted, Custom, Emojis,
+        text_of, tokens, untoned, wanted, Custom, Emojis, PickerEscape,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
+
+    /// The picker's groups as the core gives them: Recently used, then a group with 👍 in
+    /// the skin tone `tone`.
+    fn groups(recent: &[&str], tone: &str) -> Value {
+        let recent: Vec<Value> = recent.iter().map(|e| json!({"emoji": e})).collect();
+        json!({"t": "core.emoji", "id": "app.emoji.picker", "groups": [
+            {"id": "recent", "name": "Recently used", "emoji": recent},
+            {"id": "people", "name": "People & Body", "emoji": [{"emoji": format!("👍{tone}"), "tones": true}]},
+        ]})
+    }
+
+    fn recent(e: &Emojis) -> Vec<String> {
+        e.groups[0].emoji.iter().map(|i| i.emoji.clone()).collect()
+    }
+
+    #[test]
+    fn recently_used_holds_still_while_the_picker_is_open() {
+        let mut e = Emojis::default();
+        assert!(e.open_picker().is_some());
+        e.take(&groups(&["😭", "👍"], ""));
+        assert_eq!(recent(&e), ["😭", "👍"]);
+        // 👍 picked goes first for the core, and 🎉 is new, but the open picker keeps
+        // the order it opened with, in a new skin tone too.
+        let _ = e.used("👍");
+        let _ = e.used("🎉");
+        e.tone = 3;
+        assert!(e.picker(true).is_some());
+        e.take(&groups(&["🎉", "👍🏽", "😭"], "🏽"));
+        assert_eq!(recent(&e), ["😭", "👍🏽"]);
+        // Opened again, it asks and shows the new order.
+        e.shut_picker();
+        assert!(e.open_picker().is_some());
+        e.take(&groups(&["🎉", "👍🏽", "😭"], "🏽"));
+        assert_eq!(recent(&e), ["🎉", "👍🏽", "😭"]);
+        // Opened with its groups here, it holds those as they are.
+        e.shut_picker();
+        assert!(e.open_picker().is_none());
+        let _ = e.used("😭");
+        e.tone = 0;
+        let _ = e.picker(true);
+        e.take(&groups(&["😭", "🎉", "👍"], ""));
+        assert_eq!(recent(&e), ["🎉", "👍", "😭"]);
+        // Shut, its groups are the core's.
+        e.shut_picker();
+        e.take(&groups(&["😭", "🎉", "👍"], ""));
+        assert_eq!(recent(&e), ["😭", "🎉", "👍"]);
+    }
+
+    #[test]
+    fn esc_in_the_picker_clears_its_search_then_shuts_it() {
+        let mut e = Emojis::default();
+        let _ = e.open_picker();
+        e.found = Some(("sob".into(), Vec::new()));
+        assert_eq!(e.picker_escape("sob"), PickerEscape::Clear);
+        assert!(e.found.is_none() && e.picking);
+        assert_eq!(e.picker_escape(""), PickerEscape::Shut);
+        assert!(!e.picking && e.held.is_none());
+    }
 
     #[test]
     fn the_chat_draws_emoji_but_not_in_code() {

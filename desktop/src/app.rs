@@ -38,11 +38,10 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
-#[path = "room_view.rs"]
-mod room_view;
-use room_view::RoomForm;
 #[path = "learned.rs"]
 mod learned;
+#[path = "room_view.rs"]
+mod room_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
@@ -388,9 +387,8 @@ pub struct Loom {
     /// and when a click outside last closed it.
     custom_color: bool,
     color_closed_at: Option<Instant>,
-    /// The group chats' panel: the one being made, its name field, and the open one's
-    /// name to put in that field when the panel next draws.
-    room_form: RoomForm,
+    /// The group chats' panel: its name field, and the open one's name to put in that
+    /// field when the panel next draws. The form itself is the model's.
     room_name_in: Entity<InputState>,
     room_name_fill: Option<String>,
     /// An agent's what-I'm-for line, on its edit panel.
@@ -869,6 +867,10 @@ impl Loom {
                         if let Some(frame) = this.model.send(&text) {
                             this.core.send(&frame.to_string());
                             state.update(cx, |s, cx| s.set_value("", window, cx));
+                            // Sending shuts the emoji picker.
+                            if this.emoji_ui.picker.is_some() {
+                                this.close_emoji_picker(cx);
+                            }
                         }
                     }
                     // A / alone in the composer opens the + menu, with its search.
@@ -1544,7 +1546,6 @@ ACTA_KEY=secret:ACTA_KEY",
             fresh_armed: false,
             custom_color: false,
             color_closed_at: None,
-            room_form: RoomForm::default(),
             room_name_in,
             room_name_fill: None,
             for_in,
@@ -3372,10 +3373,9 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Memory => (Ico::Brain, format!("What {name} remembers")),
             Screen::Room => (
                 Ico::Users,
-                match self.model.room_open() {
-                    Some(r) if !self.room_form.making => r.name.clone(),
-                    _ => "New group chat".to_string(),
-                },
+                self.model
+                    .room_changing()
+                    .map_or_else(|| "New group chat".to_string(), |r| r.name.clone()),
             ),
             Screen::Tables => (Ico::Sheet, format!("{name}'s tables")),
             Screen::Aside => (
@@ -9827,7 +9827,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.menu_item("ctx-hide-emoji", Ico::EyeOff, "Hide emoji button", false)
                         .on_click(cx.listener(move |this, _, window, cx| {
                             close(this, cx);
-                            this.emoji_ui.picker = None;
+                            this.close_emoji_picker(cx);
                             this.set_prefs(|p| p.emoji_button = false, window, cx);
                         })),
                 );
@@ -10634,7 +10634,10 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .map(|a| self.model.mood(&a.id))
             .unwrap_or(Mood::Idle);
-        let open = self.open_thoughts.clone();
+        // What's open, with the long messages folded or opened by hand since the chat
+        // opened (`model::folds`).
+        let mut open = self.open_thoughts.clone();
+        open.extend(self.model.fold_flips().iter().cloned());
         let show = Show {
             tools: self.prefs.tools,
             thoughts: self.prefs.thoughts,
@@ -10815,6 +10818,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let emoji_picker = self.emoji_picker_view(cx);
         let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
             .then(|| self.emoji_button(cx));
+        let composer_at = self.emoji_ui.composer_at.clone();
         let mut composer = Some(
             div()
                 .w_full()
@@ -10830,6 +10834,14 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::COMPOSER))
                 // The plus menu opens just above the composer, from its left edge.
                 .relative()
+                // Where it is, for the emoji picker to fit over it.
+                .child(
+                    canvas(move |b, _, _| composer_at.set(Some(b)), |_, _, _, _| {})
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                )
                 .when_some(plus_menu, |d, menu| {
                     d.child(div().absolute().top_0().left_0().child(deferred(
                         anchored().anchor(Anchor::BottomLeft).child(menu),
@@ -11081,6 +11093,9 @@ ACTA_KEY=secret:ACTA_KEY",
                                         this.send(frame);
                                         this.composer
                                             .update(cx, |s, cx| s.set_value("", window, cx));
+                                        if this.emoji_ui.picker.is_some() {
+                                            this.close_emoji_picker(cx);
+                                        }
                                     }
                                 })),
                         ),
@@ -18025,6 +18040,15 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Folds a long message in the chat by hand, or opens it, from its Show more or Show
+    /// less: so it stays while the chat is open (`model::folds`).
+    fn flip_fold(&mut self, key: String, cx: &mut Context<Self>) {
+        self.model.flip_fold(&key);
+        self.refresh_rows(cx);
+        self.scroller.update(cx, |s, cx| s.remeasure(cx));
+        cx.notify();
+    }
+
     /// Opens or shuts a reply's list of sources, from its tab.
     pub fn toggle_sources(&mut self, key: String, cx: &mut Context<Self>) {
         let just_shut = self
@@ -18788,12 +18812,13 @@ fn person(
     )
     .found_in(&m.id, 0);
     // In a pin, cut at about four lines with Show more; in the chat, cut after ten
-    // lines, to open in place, and open while the find box is on it.
+    // lines when it was there before the chat opened, to open in place, and open while
+    // the find box is on it (`model::folds`).
     let said = if pin.is_some() {
         pin_cut(kept, &m.id, pin, size::BODY * scale, bg)
     } else {
         let fold = format!("more-{}", m.id);
-        let unfolded = open.contains(&fold) || find_is_on(&m.id);
+        let unfolded = !model::folds(m.came, open.contains(&fold), find_is_on(&m.id));
         let toggler = this.clone();
         cut_long(
             fold.clone(),
@@ -18805,7 +18830,7 @@ fn person(
             ink,
             unfolded,
             move |cx| {
-                let _ = toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+                let _ = toggler.update(cx, |loom, cx| loom.flip_fold(fold.clone(), cx));
             },
         )
         .into_any_element()
@@ -22435,13 +22460,18 @@ impl ReplyDraw<'_> {
             }
             // A pin's are cut at about four lines in the Pinned popover, fading into its
             // bubble, or into the popover where replies are plain text. In the chat, cut
-            // after ten lines, to open in place, and open while the find box is on it.
+            // after ten lines when it was there before the chat opened, to open in place,
+            // and open while the find box is on it (`model::folds`).
             let cut = if show.pin.is_some() {
                 let fill = if show.bubbles { p.bubble } else { p.raised };
                 pin_cut(said_in, &key, show.pin, size::REPLY * show.text_scale, fill)
             } else {
                 let fold = format!("more-{key}");
-                let open = self.open.contains(&fold) || find_is_on(&self.m.id);
+                let open = !model::folds(
+                    self.m.came,
+                    self.open.contains(&fold),
+                    find_is_on(&self.m.id),
+                );
                 let toggler = self.this.clone();
                 cut_long(
                     fold.clone(),
@@ -22453,8 +22483,7 @@ impl ReplyDraw<'_> {
                     p.ink,
                     open,
                     move |cx| {
-                        let _ =
-                            toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+                        let _ = toggler.update(cx, |loom, cx| loom.flip_fold(fold.clone(), cx));
                     },
                 )
                 .into_any_element()
@@ -25481,6 +25510,7 @@ mod row_tests {
             blocks,
             live: false,
             queued: false,
+            came: model::Came::Before,
             from_agent: None,
             routed: None,
             routine: String::new(),

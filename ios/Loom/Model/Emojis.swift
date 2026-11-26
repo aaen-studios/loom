@@ -89,6 +89,44 @@ final class Emojis {
     /// Frames to send once something the core said comes: an emoji to add once its
     /// picture went up.
     @ObservationIgnored private var outbox: [JSON] = []
+    /// The picker is up (`openPicker`, `shutPicker`).
+    @ObservationIgnored private var picking = false
+    /// Recently used as the open picker first showed it, held until it shuts, so an emoji
+    /// tapped doesn't move from under the finger. It opens with the new order next time.
+    /// Nil until its groups come.
+    @ObservationIgnored private var held: [EmojiItem]?
+
+    /// The picker opens: its groups, unless they're here in this skin tone. Tapping in it
+    /// keeps it up, and Recently used keeps the order it opened with until it shuts.
+    func openPicker() -> JSON? {
+        picking = true
+        let ask = picker()
+        held = ask == nil ? recent : nil
+        return ask
+    }
+
+    func shutPicker() {
+        picking = false
+        held = nil
+    }
+
+    private var recent: [EmojiItem] { groups.first { $0.id == "recent" }?.emoji ?? [] }
+
+    /// Recently used while the picker is up: in the order it opened with, each emoji as
+    /// the groups now have it (in a new skin tone, say), and none tapped since. The first
+    /// groups to come after it opens set that order.
+    private func holdRecent() {
+        guard picking else { return }
+        guard let held else {
+            self.held = recent
+            return
+        }
+        let all = groups.flatMap(\.emoji)
+        let now = held.map { was in all.first { sameEmoji($0, was) } ?? was }
+        if let i = groups.firstIndex(where: { $0.id == "recent" }) { groups[i].emoji = now }
+        // These aren't the core's groups as they are: the next opening asks again.
+        pickerTone = nil
+    }
 
     /// What's typed up to the cursor, for the suggestion row or a replacement.
     func typed(_ before: String, emoticons: Bool) -> JSON {
@@ -211,6 +249,7 @@ final class Emojis {
                 groups = f["groups"].array.map { g in
                     EmojiGroup(id: g["id"].text, name: g["name"].text, emoji: g["emoji"].array.map(EmojiItem.init))
                 }
+                holdRecent()
             } else if id.hasPrefix("app.emoji.find:") {
                 found = (String(id.dropFirst("app.emoji.find:".count)), f["items"].array.map(EmojiItem.init))
             }
@@ -224,6 +263,14 @@ final class Emojis {
         own = list.array.map { CustomEmoji(id: $0["id"].text, name: $0["name"].text, file: $0["file"].text, animated: $0["animated"].bool ?? false) }
         if let gone = deleted, own.contains(where: { $0.id == gone.id }) { deleted = nil }
     }
+}
+
+/// Whether two of the picker's emoji are the same one, whatever their skin tone: one of
+/// the person's own by its id.
+func sameEmoji(_ a: EmojiItem, _ b: EmojiItem) -> Bool {
+    if a.custom != nil || b.custom != nil { return a.custom == b.custom }
+    let untoned = { (s: String) in s.unicodeScalars.map(\.value).filter { !(0x1F3FB...0x1F3FF).contains($0) && $0 != 0xFE0F } }
+    return untoned(a.emoji) == untoned(b.emoji)
 }
 
 /// A name for one of the person's own from what the person typed, as the instance takes
