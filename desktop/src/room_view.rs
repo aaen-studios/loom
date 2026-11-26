@@ -261,15 +261,17 @@ impl Loom {
 
     /// The chat's head while a group chat is open: its mark, its name and how many are
     /// in it, which open its settings beside it. A narrow header drops how many, then
-    /// shortens the name (`fit`).
+    /// shortens the name (`fit`), and then (`cut`) both are whole under the pointer.
     pub(super) fn room_head(
         &self,
         r: &model::Room,
         fit: &model::header::Fit,
+        cut: bool,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let p = self.p;
         let open = self.side == Some(Screen::Room);
+        let whole = format!("{} · {}", r.name, members_line(r.members.len()));
         div()
             .id("room-head")
             .role(Role::Button)
@@ -285,6 +287,7 @@ impl Loom {
             .cursor_pointer()
             .when(open, |d| d.bg(p.hover))
             .soft_hover(transparent_black(), p.hover, None)
+            .when(cut, |d| d.tooltip(super::tip_text(whole)))
             .on_click(cx.listener(|this, _, _, cx| {
                 if this.side == Some(Screen::Room) {
                     this.close_side(cx);

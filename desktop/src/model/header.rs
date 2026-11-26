@@ -135,6 +135,32 @@ impl Fit {
         let head = s.head - short(s.name, self.name) - members;
         head + chips.iter().sum::<f32>() + self.gap * shown as f32 - pull - chevrons
     }
+
+    /// Which of the header's controls lost words, laid out this way, and so show them
+    /// whole under the pointer.
+    pub fn cut(&self, s: &Sizes) -> Cut {
+        let shorter = |words: f32, most: Option<f32>| most.is_some_and(|n| n < words);
+        Cut {
+            brain: s.brain.0 > 0.0 && self.brain != Brain::Whole,
+            browser: s.browser.0 > s.browser.1 && !self.browser_word,
+            head: shorter(s.name, self.name) || (s.members > 0.0 && !self.members),
+            permission: shorter(s.permission_words, self.permission),
+        }
+    }
+}
+
+/// The header's controls that a narrow window took words from (`Fit::cut`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Cut {
+    /// The brain chip, without its effort or as its icon alone.
+    pub brain: bool,
+    /// The browser chip, as its globe alone.
+    pub browser: bool,
+    /// The agent's menu or the group chat's head: its name shortened, or the group
+    /// chat's members line gone.
+    pub head: bool,
+    /// The permission chip, its words shortened.
+    pub permission: bool,
 }
 
 /// The least of its name a shortened head keeps while the permission's words can still
@@ -347,10 +373,9 @@ mod tests {
         assert_eq!((f.name, f.permission), (Some(40.0), Some(38.0)));
     }
 
-    #[test]
-    fn a_group_chat_drops_its_members_line_after_the_browser() {
-        // A group chat's head, "Shop" and "2 members", with its pins and its ring.
-        let s = Sizes {
+    /// A group chat's head, "Shop" and "2 agents", with its pins and its ring.
+    fn group() -> Sizes {
+        Sizes {
             room: 1000.0,
             head: 160.0,
             name: 34.0,
@@ -362,7 +387,12 @@ mod tests {
             permission: 0.0,
             permission_words: 0.0,
             chevrons: 0.0,
-        };
+        }
+    }
+
+    #[test]
+    fn a_group_chat_drops_its_members_line_after_the_browser() {
+        let s = group();
         let whole = Fit::WHOLE.width(&s);
         assert_eq!(whole, 160.0 + 40.0 + 26.0 + 2.0 * 16.0 - 8.0);
         let f = fit(&Sizes {
@@ -402,12 +432,10 @@ mod tests {
         assert!(f.width(&s) <= s.room);
     }
 
-    #[test]
-    fn the_narrowest_window_fits_an_agents_header_with_every_chip() {
-        // With pins, the browser, "Asks when it's risky" and a long name, it fits by
-        // shortening the name to its least (77 off), the permission's words to nothing
-        // (115), and 8 more off the name.
-        let s = Sizes {
+    /// An agent's header at the narrowest window with pins, the browser, "Asks when it's
+    /// risky" and a long name.
+    fn every_chip() -> Sizes {
+        Sizes {
             room: NARROWEST,
             head: 70.0 + 125.0,
             name: 125.0,
@@ -416,10 +444,106 @@ mod tests {
             permission: 147.0,
             permission_words: 115.0,
             ..agent()
-        };
+        }
+    }
+
+    #[test]
+    fn the_narrowest_window_fits_an_agents_header_with_every_chip() {
+        // It fits by shortening the name to its least (77 off), the permission's words to
+        // nothing (115), and 8 more off the name.
+        let s = every_chip();
         let f = fit(&s);
         assert_eq!((f.brain, f.browser_word), (Brain::Icon, false));
         assert_eq!((f.name, f.permission), (Some(NAME_LEAST - 8.0), Some(0.0)));
         assert_eq!(f.width(&s), s.room);
+    }
+
+    #[test]
+    fn a_control_that_lost_words_is_cut() {
+        // Whole, nothing is.
+        assert_eq!(Fit::WHOLE.cut(&agent()), Cut::default());
+        let brain = Cut {
+            brain: true,
+            ..Cut::default()
+        };
+        // The brain chip without its effort, and as its icon alone.
+        let s = Sizes {
+            room: Fit::WHOLE.width(&agent()) - 1.0,
+            ..agent()
+        };
+        assert_eq!(fit(&s).brain, Brain::Model);
+        assert_eq!(fit(&s).cut(&s), brain);
+        // At the narrowest window the chevrons are gone too, but no more words:
+        // "Juniper" and "Asks first" are whole.
+        let s = Sizes {
+            room: NARROWEST,
+            ..agent()
+        };
+        assert_eq!(fit(&s).cut(&s), brain);
+        // With every chip, every control lost some.
+        let s = every_chip();
+        let all = Cut {
+            brain: true,
+            browser: true,
+            head: true,
+            permission: true,
+        };
+        assert_eq!(fit(&s).cut(&s), all);
+        // A name shorter than the least is kept whole while the permission's words give.
+        let s = Sizes {
+            head: 70.0 + 40.0,
+            name: 40.0,
+            ..agent()
+        };
+        let s = Sizes {
+            room: *widths(&s).last().unwrap() - 20.0,
+            ..s
+        };
+        let f = fit(&s);
+        assert_eq!(f.name, Some(40.0));
+        assert_eq!(
+            f.cut(&s),
+            Cut {
+                permission: true,
+                ..brain
+            }
+        );
+        // With no brain chip and no browser, their steps are passed over to close up, and
+        // what isn't there isn't cut.
+        let s = Sizes {
+            brain: (0.0, 0.0, 0.0),
+            ..agent()
+        };
+        let s = Sizes {
+            room: Fit::WHOLE.width(&s) - 1.0,
+            ..s
+        };
+        let f = fit(&s);
+        assert_eq!(
+            (f.brain, f.browser_word, f.gap),
+            (Brain::Icon, false, space::S)
+        );
+        assert_eq!(f.cut(&s), Cut::default());
+    }
+
+    #[test]
+    fn a_group_chats_head_is_cut_once_its_members_line_goes() {
+        let s = group();
+        assert_eq!(fit(&s).cut(&s), Cut::default());
+        let s = Sizes {
+            room: Fit::WHOLE.width(&group()) - 1.0,
+            ..group()
+        };
+        let head = Cut {
+            head: true,
+            ..Cut::default()
+        };
+        assert_eq!(fit(&s).cut(&s), head);
+        // And while its name shortens.
+        let s = Sizes {
+            room: 150.0,
+            ..group()
+        };
+        assert_eq!(fit(&s).cut(&s), head);
     }
 }

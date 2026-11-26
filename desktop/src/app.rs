@@ -8114,14 +8114,17 @@ ACTA_KEY=secret:ACTA_KEY",
             .max(self.model.messages.iter().filter(|m| m.pinned).count());
         let pins_open = self.pins.is_some();
         let group = self.model.room_open().cloned();
-        let fit = model::header::fit(&self.header_sizes(
+        let sizes = self.header_sizes(
             room,
             &agent,
             group.as_ref(),
             (pinned > 0 || pins_open).then_some(pinned),
             browsing || watching,
             window,
-        ));
+        );
+        let fit = model::header::fit(&sizes);
+        // What a narrow header took from a control shows whole under the pointer.
+        let cut = fit.cut(&sizes);
         let bar = bar.gap(px(fit.gap));
         let globe = div()
             .id("browser-toggle")
@@ -8149,6 +8152,7 @@ ACTA_KEY=secret:ACTA_KEY",
             )
             .child(Icon::new(Ico::Globe).small())
             .when(fit.browser_word, |d| d.child("Browser"))
+            .when(cut.browser, |d| d.tooltip(tip("Browser")))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let id = this.model.selected.clone();
                 if this.model.watching == id && this.browser_docked {
@@ -8222,7 +8226,7 @@ ACTA_KEY=secret:ACTA_KEY",
         // A group chat: its mark and name, which open its settings, its pins, and the
         // context of the member that answered last.
         if let Some(room) = group {
-            return bar.child(self.room_head(&room, &fit, cx)).child(
+            return bar.child(self.room_head(&room, &fit, cut.head, cx)).child(
                 div()
                     .flex_none()
                     .flex()
@@ -8251,6 +8255,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.menu == Some(Menu::Agent) && self.menu_at.is_none(),
                     |d| d.bg(p.hover),
                 )
+                .when(cut.head, |d| d.tooltip(tip_text(agent.name.clone())))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu_at = None;
                     this.menu_folders = false;
@@ -8295,7 +8300,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(fit.gap))
                 .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
-                .children(self.brain_chip(&agent, fit.brain, cx))
+                .children(self.brain_chip(&agent, fit.brain, cut.brain, cx))
                 .children(context)
                 .child(
                     div()
@@ -8311,6 +8316,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         .cursor_pointer()
                         .soft_hover(transparent_black(), p.hover, None)
                         .when(self.menu == Some(Menu::Permission), |d| d.bg(p.hover))
+                        .when(cut.permission, |d| d.tooltip(tip(permission)))
                         .flex()
                         .items_center()
                         .gap(px(space::XS))
@@ -9724,12 +9730,14 @@ ACTA_KEY=secret:ACTA_KEY",
 
     /// The header's brain chip: the program's icon and what the agent is set to on it,
     /// such as "Opus 5.5 · Medium", or as a narrow header shows it (`model::header`):
-    /// "Opus 5.5", or the icon alone. It opens one menu just under it, with each setting
-    /// the program offers (its model, then its effort) under its name.
+    /// "Opus 5.5", or the icon alone, with its words whole under the pointer then (`cut`).
+    /// It opens one menu just under it, with each setting the program offers (its model,
+    /// then its effort) under its name.
     fn brain_chip(
         &self,
         agent: &model::Agent,
         shows: model::header::Brain,
+        cut: bool,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
         let p = self.p;
@@ -9758,6 +9766,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
                 .when(open, |d| d.bg(p.hover))
+                .when(cut, |d| d.tooltip(tip_text(picked.clone())))
                 .flex()
                 .items_center()
                 .gap(px(BRAIN_GAP))
