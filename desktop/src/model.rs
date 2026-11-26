@@ -2105,7 +2105,8 @@ impl ContextFill {
     /// The card's line over its buttons, at `now` (Unix ms): when the session was last
     /// compacted, if it was.
     pub fn line(&self, now: i64) -> Option<String> {
-        self.compacted.map(|at| format!("Compacted {}", ago(now - at)))
+        self.compacted
+            .map(|at| format!("Compacted {}", ago(now - at)))
     }
 }
 
@@ -13896,7 +13897,10 @@ mod tests {
         assert_eq!(fill.tip(), "Context 56%, 112k of 200k");
         assert_eq!(fill.amount(), "112k of 200k");
         assert_eq!(fill.line(0), None);
-        assert!(fill.costs().is_empty(), "nothing it costs until a turn says");
+        assert!(
+            fill.costs().is_empty(),
+            "nothing it costs until a turn says"
+        );
         assert_eq!(m.context_title(&fill), "Context");
         m.select(Some("a_2".into()));
         assert_eq!(m.context(), None, "nothing until its program says");
@@ -13928,11 +13932,17 @@ mod tests {
         let fill = m.context().expect("its program said");
         assert!(fill.compacts);
         let hour = 3_600_000;
-        assert_eq!(fill.line(1_000 + 2 * hour).as_deref(), Some("Compacted 2 h ago"));
+        assert_eq!(
+            fill.line(1_000 + 2 * hour).as_deref(),
+            Some("Compacted 2 h ago")
+        );
         // What the chat costs: its last turn and its last 24 hours, a title and tokens each.
         assert_eq!(
             fill.costs(),
-            vec![("Last turn", "410k".to_string()), ("Last 24 hours", "6.2M".to_string())]
+            vec![
+                ("Last turn", "410k".to_string()),
+                ("Last 24 hours", "6.2M".to_string())
+            ]
         );
         assert_eq!(ago(30_000), "just now");
         assert_eq!(ago(5 * 60_000), "5 min ago");
