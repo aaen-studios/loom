@@ -178,9 +178,10 @@ struct ChatView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                // The composer writes to the agent's chat, so a thread is only read here,
-                // with the way back to that chat in the composer's place.
-                if thread == nil {
+                // The composer writes to the agent's chat, or a thread an agent made, so
+                // another agent's thread is only read here, with the way back to that chat
+                // in the composer's place.
+                if thread == nil || thread?.made == true {
                     Composer(agentName: room?.name ?? agent?.name ?? "the agent") {
                         withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                     }
@@ -270,7 +271,8 @@ struct ChatView: View {
                                 Label("Following", systemImage: "bell")
                             }
                         }
-                        // Other agents' threads with it, each to read on a screen of its own.
+                        // Other agents' threads with it, and the ones agents made beside its chat,
+                        // each on a screen of its own.
                         let asks = model.asks(agentId)
                         if !asks.isEmpty {
                             Section {

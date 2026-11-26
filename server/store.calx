@@ -22,7 +22,7 @@ import std.regex.{Regex}
 import std.sqlite.{Database, Value}
 import std.thread.{Task, sleep}
 import std.time.{Timestamp}
-import shared.obj.{Obj, int_at, merge, str_at, without}
+import shared.obj.{Obj, bool_at, int_at, merge, str_at, without}
 import server.defaults.{blank, filled}
 import server.routines.{RESTARTED_WAITING}
 import shared.checkpoint
@@ -147,6 +147,17 @@ CREATE TABLE IF NOT EXISTS routine_threads (
 -- A conversation another agent (by its id) or a plugin's panel (plugin:ID) keeps with
 -- an agent, with message_agent: never the agent's chat.
 CREATE TABLE IF NOT EXISTS asks (
+    conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL);
+-- Each agent's chat with its person: the one conversation every app shows as that chat,
+-- however new any other is. Only the person's new chat (conversation.create from a
+-- device) moves it.
+CREATE TABLE IF NOT EXISTS main_chats (
+    user TEXT NOT NULL REFERENCES users(id), agent TEXT NOT NULL, conversation TEXT NOT NULL,
+    PRIMARY KEY (user, agent));
+CREATE INDEX IF NOT EXISTS main_chats_by_conversation ON main_chats (conversation);
+-- A conversation an agent (by its id), a plugin or a script made with conversation.create:
+-- a thread beside its agent's chat, never the chat.
+CREATE TABLE IF NOT EXISTS made_threads (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL);
 -- A group chat (PLAN.md, "Group chats"): the conversation, and its room as JSON: name,
 -- members, colour, default agent and corrections. Everyone is marked.
@@ -403,8 +414,22 @@ fn conversation_of(r: List<Value>) -> Json {
     // How full its session's context is, once its program has said.
     let size = int(r[13].copy())
     if size > 0 { o = o.j("context", context_of(int(r[12].copy()), size, int(r[14].copy()), int(r[15].copy()) != 0, text(r[16].copy()), int(r[17].copy()), int(r[18].copy()))) }
+    // Its agent's chat with the person, or a thread an agent made beside it: who made it.
+    if int(r[19].copy()) != 0 { o = o.b("main", true) }
+    let made_by = text(r[20].copy())
+    if made_by.len() > 0 { o = o.s("made_by", made_by) }
     return o.done()
 }
+
+// What a conversation's row joins for whether it's its agent's chat and who made it,
+// when an agent did, as conversation_of's last two columns: MAIN_COLUMNS.
+const MAIN_JOINS: str = "LEFT JOIN main_chats mc ON mc.user = c.user AND mc.agent = c.agent AND mc.conversation = c.id LEFT JOIN made_threads mk ON mk.conversation = c.id"
+const MAIN_COLUMNS: str = "mc.conversation IS NOT NULL, mk.by"
+
+// The conversations that may be their agent's chat: not a task's, the side questions',
+// a branch, a routine's thread, another agent's thread with it, one an agent made, or
+// a group chat. As a condition on `c`.
+const MAY_BE_CHAT: str = "c.deleted = 0 AND c.agent != '' AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) AND c.id NOT IN (SELECT conversation FROM made_threads) AND c.id NOT IN (SELECT conversation FROM rooms)"
 
 const DAY_MS: i64 = 86400000
 
@@ -1154,17 +1179,75 @@ impl Store {
     }
 
     pub fn conversation(self, user: String, id: String) -> Json? ! Error {
-        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
+        let row = try self.db.query_one("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS} FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.id = ? AND c.user = ? AND c.deleted = 0", [t(user.copy()), Value.Int(now() - DAY_MS), t(id), t(user)])
         let r = row else return none
         return some(conversation_of(r))
     }
 
-    // `agent`'s conversation with the newest message, as the apps show its
-    // chat. A task's conversation is the task's, not the chat, and another
-    // agent's thread with it (`asks`) is that agent's.
-    pub fn newest_conversation(self, user: String, agent: String) -> Json? ! Error {
-        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?) FROM conversations c WHERE c.user = ? AND c.agent = ? AND c.deleted = 0 AND c.id NOT IN (SELECT conversation FROM tasks) AND c.id NOT IN (SELECT conversation FROM sides) AND c.id NOT IN (SELECT conversation FROM branches) AND c.id NOT IN (SELECT conversation FROM routine_threads) AND c.id NOT IN (SELECT conversation FROM asks) ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
+    // `agent`'s chat with the person, as every app shows it (`main_chats`): never
+    // merely its newest conversation. None until it has one.
+    pub fn main_chat(self, user: String, agent: String) -> Json? ! Error {
+        let r = try self.db.query_one(String("SELECT c.id, c.agent, c.title, c.at, NULL, NULL, NULL, NULL, NULL, (SELECT program FROM conversation_programs WHERE conversation = c.id), NULL, NULL, (SELECT used FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT size FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacted FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT compacts FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT agent FROM contexts WHERE user = c.user AND conversation = c.id), (SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'turn_tokens/' || c.user || '/' || c.id), (SELECT COALESCE(SUM(u.total), 0) FROM usage u JOIN runs r ON r.id = u.run WHERE u.user = c.user AND r.conversation = c.id AND u.at >= ?), 1, NULL FROM main_chats mc JOIN conversations c ON c.id = mc.conversation AND c.user = mc.user WHERE mc.user = ? AND mc.agent = ? AND c.deleted = 0"), [Value.Int(now() - DAY_MS), t(user), t(agent)]) else return none
         return some(conversation_of(r))
+    }
+
+    // Makes `conversation` `agent`'s chat with the person, in place of the one before,
+    // whose id it gives, if there was another.
+    pub fn set_main_chat(self, user: String, agent: String, conversation: String) -> String? ! Error {
+        let before = try self.db.query_one(String("SELECT conversation FROM main_chats WHERE user = ? AND agent = ?"), [t(user.copy()), t(agent.copy())])
+        _ = try self.db.execute(String("INSERT INTO main_chats (user, agent, conversation) VALUES (?, ?, ?) ON CONFLICT (user, agent) DO UPDATE SET conversation = excluded.conversation"), [t(user), t(agent), t(conversation.copy())])
+        let r = before else return none
+        let was = text(r[0].copy())
+        if was == conversation { return none }
+        return some(was)
+    }
+
+    // Each agent with a conversation that may be its chat (MAY_BE_CHAT) but no chat
+    // marked gets one: the conversation the apps showed as its chat before chats were
+    // marked, the one with the newest message, leaving out every thread an agent made.
+    // So it is when the instance starts from an older one, and once a chat is
+    // deleted or an import brings conversations. Given as (user, conversation), for
+    // the devices to hear of.
+    pub fn pick_main_chats(self) -> List<(String, String)> ! Error {
+        var out = List<(String, String)>()
+        let missing = try self.db.query("SELECT DISTINCT c.user, c.agent FROM conversations c WHERE {MAY_BE_CHAT} AND NOT EXISTS (SELECT 1 FROM main_chats mc JOIN conversations m ON m.id = mc.conversation AND m.deleted = 0 WHERE mc.user = c.user AND mc.agent = c.agent)", [])
+        for r in missing {
+            let user = text(r[0].copy())
+            let agent = text(r[1].copy())
+            let pick = try self.db.query_one("SELECT c.id FROM conversations c WHERE c.user = ? AND c.agent = ? AND {MAY_BE_CHAT} ORDER BY coalesce((SELECT max(m.at) FROM messages m WHERE m.user = c.user AND m.conversation = c.id), c.at) DESC, c.rowid DESC LIMIT 1", [t(user.copy()), t(agent.copy())]) else { continue }
+            let id = text(pick[0].copy())
+            _ = try self.set_main_chat(user.copy(), agent, id.copy())
+            out.push((user, id))
+        }
+        return out
+    }
+
+    // Marks `conversation` as one `by` (an agent's id, plugin:ID or a script) made with
+    // conversation.create: a thread beside its agent's chat, never the chat.
+    pub fn mark_made(self, user: String, conversation: String, by: String) ! Error {
+        _ = try self.db.execute(String("INSERT OR IGNORE INTO made_threads (conversation, user, by) VALUES (?, ?, ?)"), [t(conversation), t(user), t(by)])
+    }
+
+    // The conversations agents made with conversation.create before made_threads kept
+    // them, found once, from the activity log: each `run_command conversation.create`
+    // an agent ran, and the conversation with the agent and title it asked for, made
+    // while the command ran. Each is marked, and given as (user, conversation, by),
+    // for the devices to hear of.
+    pub fn mark_old_made(self) -> List<(String, String, String)> ! Error {
+        var out = List<(String, String, String)>()
+        if try self.meta(String("made_threads_marked")) != none { return out }
+        for r in try self.db.query(String("SELECT a.user, a.agent, (SELECT c.id FROM conversations c WHERE c.user = a.user AND c.agent = json_extract(a.input, '$.args.agent') AND c.title = coalesce(json_extract(a.input, '$.args.title'), 'New conversation') AND c.at >= a.at AND c.at <= (CASE WHEN a.ended > 0 THEN a.ended ELSE a.at + 60000 END) AND c.id NOT IN (SELECT conversation FROM made_threads) ORDER BY c.rowid LIMIT 1) FROM activity a WHERE a.kind = 'tool' AND a.text = 'run_command conversation.create' AND substr(a.agent, 1, 2) = 'a_' AND json_valid(a.input) ORDER BY a.id"), []) {
+            let conversation = text(r[2].copy())
+            if conversation.len() == 0 { continue }
+            let user = text(r[0].copy())
+            let by = text(r[1].copy())
+            try self.mark_made(user.copy(), conversation.copy(), by.copy())
+            // One that was its agent's chat isn't any more.
+            _ = try self.db.execute(String("DELETE FROM main_chats WHERE user = ? AND conversation = ?"), [t(user.copy()), t(conversation.copy())])
+            out.push((user, conversation, by))
+        }
+        try self.set_meta(String("made_threads_marked"), String("1"))
+        return out
     }
 
     // The conversation of `user`'s newest turn that wasn't a routine's or another agent's ask: the
@@ -1177,7 +1260,7 @@ impl Store {
 
     pub fn conversations(self, user: String) -> List<Json> ! Error {
         var out = List<Json>()
-        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0) FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
+        for r in try self.db.query("SELECT c.id, c.agent, c.title, c.at, k.id, s.agent, b.from_conversation, b.from_message, rt.routine, cp.program, ak.by, rm.json, cx.used, cx.size, cx.compacted, cx.compacts, cx.agent, CAST(COALESCE(mt.value, '0') AS INTEGER), COALESCE(d.day, 0), {MAIN_COLUMNS} FROM conversations c LEFT JOIN tasks k ON k.conversation = c.id LEFT JOIN sides s ON s.conversation = c.id LEFT JOIN branches b ON b.conversation = c.id LEFT JOIN routine_threads rt ON rt.conversation = c.id LEFT JOIN conversation_programs cp ON cp.conversation = c.id LEFT JOIN asks ak ON ak.conversation = c.id LEFT JOIN rooms rm ON rm.conversation = c.id LEFT JOIN contexts cx ON cx.user = c.user AND cx.conversation = c.id {COSTS} {MAIN_JOINS} WHERE c.user = ? AND c.deleted = 0 ORDER BY c.at", [t(user.copy()), Value.Int(now() - DAY_MS), t(user)]) {
             out.push(conversation_of(r))
         }
         return out
@@ -1194,6 +1277,8 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM branches WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM routine_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM asks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM made_threads WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM main_chats WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM posts_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
@@ -2613,7 +2698,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "deleted_untold", "posts_untold", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "watches", "status_checks", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "deleted_untold", "posts_untold", "routine_threads", "asks", "main_chats", "made_threads", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "watches", "status_checks", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -3762,15 +3847,91 @@ fn another_agents_thread_is_never_the_chat() {
     s.set_meta("talk:{a.id}:a_2:a_1", asked.copy())!
     let panel = str_at(s.add_conversation(a.id.copy(), String("a_1"), String("From Notes"))!, "id") ?? String()
     s.set_meta("talk:{a.id}:plugin:notes:a_1", panel.copy())!
-    assert(str_at(s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null, "id") == some(panel.copy()))
     let marked = s.mark_old_asks()!
     assert(marked.len() == 2)
-    assert(str_at(s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null, "id") == some(chat.copy()))
+    // The chat picked once they're marked is the person's, however new they are.
+    assert(s.main_chat(a.id.copy(), String("a_1"))! == none)
+    assert(s.pick_main_chats()!.len() == 1)
+    assert(str_at(s.main_chat(a.id.copy(), String("a_1"))! ?? Json.Null, "id") == some(chat.copy()))
     assert(str_at(s.conversation(a.id.copy(), asked.copy())! ?? Json.Null, "asked_by") == some(String("a_2")))
     assert(str_at(s.conversation(a.id.copy(), panel)! ?? Json.Null, "asked_by") == some(String("plugin:notes")))
     assert(str_at(s.conversation(a.id.copy(), chat)! ?? Json.Null, "asked_by") == none)
     // Once marked, they aren't again.
     assert(s.mark_old_asks()!.len() == 0)
+}
+
+// A message of `role` at `at` in `conversation`.
+fn put_said(s: Store, user: String, id: str, conversation: String, role: str, at: i64) {
+    s.put_message(user, Obj.new().s("id", String(id)).s("conversation", conversation).s("role", String(role)).i("at", at).done())!
+}
+
+@test
+fn an_older_stores_chats_are_fixed_and_what_agents_made_are_threads() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let u = a.id.copy()
+    // Casper's chat with the person, long.
+    let chat = field(s.add_conversation(u.copy(), String("a_2"), String())!, "id")
+    put_said(s, u.copy(), "msg_1", chat.copy(), "person", 10)
+    put_said(s, u.copy(), "msg_2", chat.copy(), "agent", 11)
+    put_said(s, u.copy(), "msg_3", chat.copy(), "person", 12)
+    // Casper made a conversation for itself mid-task, and the person's next message went
+    // there, so it's the newest.
+    let act = s.record(u.copy(), String("a_2"), "tool", String("run_command conversation.create"), #"{"name":"conversation.create","args":{"agent":"a_2","title":"Plenpartner warm-up"}}"#, String("a_2"))!
+    let warm = field(s.add_conversation(u.copy(), String("a_2"), String("Plenpartner warm-up"))!, "id")
+    s.settle(act, "done", String())!
+    put_said(s, u.copy(), "msg_4", warm.copy(), "agent", 20)
+    put_said(s, u.copy(), "msg_5", warm.copy(), "person", 21)
+    // One by the same name it didn't make, before it ran the command, stays what it was.
+    let other = field(s.add_conversation_at(u.copy(), String("a_9"), String("Plenpartner warm-up"), 1)!, "id")
+    // Builder's person started a new chat on purpose: the newer one is the chat, though
+    // the older has more of the person's messages.
+    let old = field(s.add_conversation(u.copy(), String("a_3"), String())!, "id")
+    put_said(s, u.copy(), "msg_6", old.copy(), "person", 5)
+    put_said(s, u.copy(), "msg_7", old.copy(), "person", 6)
+    let fresh = field(s.add_conversation(u.copy(), String("a_3"), String())!, "id")
+    put_said(s, u.copy(), "msg_8", fresh.copy(), "person", 30)
+    let made = s.mark_old_made()!
+    assert(made.len() == 1)
+    let (_, thread, by) = made[0].copy()
+    assert(thread == warm and by == "a_2")
+    let picked = s.pick_main_chats()!
+    assert(picked.len() == 3)
+    assert(field(s.main_chat(u.copy(), String("a_2"))! ?? Json.Null, "id") == chat)
+    assert(field(s.main_chat(u.copy(), String("a_3"))! ?? Json.Null, "id") == fresh)
+    assert(field(s.main_chat(u.copy(), String("a_9"))! ?? Json.Null, "id") == other)
+    let shown = s.conversation(u.copy(), warm.copy())! ?? Json.Null
+    assert(field(shown.copy(), "made_by") == "a_2" and bool_at(shown, "main") != some(true))
+    assert(bool_at(s.conversation(u.copy(), chat.copy())! ?? Json.Null, "main") == some(true))
+    assert("{s.conversations(u.copy())!}".contains(#""made_by":"a_2""#))
+    // Nothing was deleted, and it's done once.
+    assert(s.conversations(u.copy())!.len() == 5)
+    assert(s.mark_old_made()!.len() == 0)
+    assert(s.pick_main_chats()!.len() == 0)
+}
+
+@test
+fn the_chat_moves_only_when_its_marked() {
+    let s = test_store()
+    let a = s.add_user(String("a"), String("password1"), "owner")!
+    let u = a.id.copy()
+    let chat = field(s.add_conversation(u.copy(), String("a_1"), String())!, "id")
+    assert(s.set_main_chat(u.copy(), String("a_1"), chat.copy())! == none)
+    assert(s.set_main_chat(u.copy(), String("a_1"), chat.copy())! == none)
+    // A thread an agent made, newer and with the newest message, isn't the chat.
+    let thread = field(s.add_conversation(u.copy(), String("a_1"), String("Notes"))!, "id")
+    s.mark_made(u.copy(), thread.copy(), String("a_1"))!
+    put_said(s, u.copy(), "msg_1", thread.copy(), "agent", now() + 1000)
+    assert(field(s.main_chat(u.copy(), String("a_1"))! ?? Json.Null, "id") == chat)
+    // The person's new chat is, in place of the one before.
+    let fresh = field(s.add_conversation(u.copy(), String("a_1"), String())!, "id")
+    assert(s.set_main_chat(u.copy(), String("a_1"), fresh.copy())! == some(chat.copy()))
+    assert(field(s.main_chat(u.copy(), String("a_1"))! ?? Json.Null, "id") == fresh)
+    // Once it's deleted, the newest other that may be the chat is, never the thread.
+    s.delete_conversation(u.copy(), fresh)!
+    assert(s.main_chat(u.copy(), String("a_1"))! == none)
+    assert(s.pick_main_chats()!.len() == 1)
+    assert(field(s.main_chat(u.copy(), String("a_1"))! ?? Json.Null, "id") == chat)
 }
 
 @test
@@ -3985,6 +4146,7 @@ fn a_chat_has_its_context_once_its_program_says() {
     let a = s.add_user(String("a"), String("password1"), "owner")!
     let c = s.add_conversation(a.id.copy(), String("a_1"), String("Chat"))!
     let id = field(c, "id")
+    _ = s.set_main_chat(a.id.copy(), String("a_1"), id.copy())!
     assert(s.context(a.id.copy(), id.copy())! == none)
     assert((s.conversation(a.id.copy(), id.copy())! ?? Json.Null).get(String("context")) == none)
     s.put_context(a.id.copy(), id.copy(), 112000, 200000)!
@@ -3993,7 +4155,7 @@ fn a_chat_has_its_context_once_its_program_says() {
     let shown = (s.conversation(a.id.copy(), id.copy())! ?? Json.Null).get(String("context")) ?? Json.Null
     assert(int_at(shown.copy(), "used") == some(113000i64) and int_at(shown, "size") == some(200000i64))
     assert("{s.conversations(a.id.copy())!}".contains("113000"))
-    assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains("113000"))
+    assert("{s.main_chat(a.id.copy(), String("a_1"))! ?? Json.Null}".contains("113000"))
     // When it was compacted, and whether its program compacts on request, go with it.
     assert(not s.context_compacts(a.id.copy(), id.copy())!)
     s.put_compacts(a.id.copy(), id.copy(), true)!
@@ -4001,7 +4163,7 @@ fn a_chat_has_its_context_once_its_program_says() {
     let compacted = s.context_shown(a.id.copy(), id.copy())! ?? Json.Null
     assert(int_at(compacted.copy(), "compacted") == some(1700i64) and "{compacted}".contains(#""compacts":true"#))
     assert("{s.conversation(a.id.copy(), id.copy())!}".contains(#""compacted":1700"#))
-    assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(#""compacts":true"#))
+    assert("{s.main_chat(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(#""compacts":true"#))
     // What the chat costs: its person's last turn, and the last day's turns there,
     // in every listing of it.
     assert(not "{s.conversations(a.id.copy())!}".contains(#""tokens""#))
@@ -4014,7 +4176,7 @@ fn a_chat_has_its_context_once_its_program_says() {
     assert("{s.context_shown(a.id.copy(), id.copy())! ?? Json.Null}".contains(costs))
     assert("{s.conversation(a.id.copy(), id.copy())!}".contains(costs))
     assert("{s.conversations(a.id.copy())!}".contains(costs))
-    assert("{s.newest_conversation(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(costs))
+    assert("{s.main_chat(a.id.copy(), String("a_1"))! ?? Json.Null}".contains(costs))
     _ = s.db.execute(String("UPDATE usage SET at = 5"), [])!
     assert("{s.conversations(a.id.copy())!}".contains(#""tokens":{"turn":410000,"day":0}"#))
     // A fresh session asked for is kept until it's started.
