@@ -97,6 +97,13 @@ fn run(i: Instance) ! Error {
         err(_) => Image.new(1, 1, Kind.Gray, Color.gray(0)),
     }
     try check(status == 200 and mime == "image/png" and picture.width() == 64 and picture.height() == 64, "the icon is the person's file, a PNG the apps fetch as any other")
+    var listed_badge = Json.Null
+    if let Json.Array(servers) = at(at(try app.cmd("q_list", "mcp.list", Obj.new().done()), "value"), "servers") {
+        for s in servers {
+            if str_at(s.copy(), "name") == some(String("fake")) { listed_badge = at(s, "badge") }
+        }
+    }
+    try check(str_at(listed_badge.copy(), "icon") == some(icon.copy()) and str_at(listed_badge, "icon_dark") == some(dark.copy()), "mcp.list has the server's badge with its icons, for Spools' Installed list")
 
     // --- Icons a badge doesn't draw ---
     let bad = try added(mut app, chat.copy(), 2, "broken", "bad")

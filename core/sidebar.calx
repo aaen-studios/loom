@@ -1,34 +1,33 @@
 module core.sidebar
 
-// How the sidebar groups the person's agents (PLAN.md, "The sidebar"), so the
-// desktop and the phone show the same, with the group chats first. `arrange_with`
-// takes the group chats as the cache keeps them, then the agents and folders, and
-// the agents waiting on the person; a `rooms` section comes first, with each
-// group chat's `id`, `name`, `color` and `everyone`, Everyone first:
+// How the sidebar groups the person's agents and group chats (PLAN.md, "The
+// sidebar"), so the desktop and the phone show the same. `arrange` takes the
+// group chats, the agents and the folders as the cache keeps them, and the
+// agents waiting on the person, and gives the sections in order:
 //
-//     {"kind": "rooms", "rooms": [{"id": "c_4", "name": "Everyone", "color": "", "everyone": true}], "agents": []},
+//     [{"kind": "pinned", "agents": ["a_1"]},
+//      {"kind": "waiting", "agents": ["a_4"]},
+//      {"kind": "list", "items": [{"kind": "room", "id": "c_4", "name": "Everyone", "color": "", "everyone": true}, {"kind": "agent", "id": "a_2"}]},
+//      {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "items": [{"kind": "agent", "id": "a_3"}]},
+//      {"kind": "hidden", "agents": ["a_5"]},
+//      {"kind": "order", "items": ["a_1", "c_4", "a_2", "a_3", "a_4", "a_5"]}]
 //
-// then the agents' sections, as `arrange` gives them: it takes the agents and
-// folders as the cache keeps them, and the agents waiting on the person, and
-// gives the sections in order, each `kind` with its `agents`' ids:
-//
-//     [{"kind": "waiting", "agents": ["a_4"]},
-//      {"kind": "pinned", "agents": ["a_1"]},
-//      {"kind": "agents", "agents": ["a_2"]},
-//      {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "agents": ["a_3"]},
-//      {"kind": "hidden", "agents": ["a_5"]}]
-//
+// - `pinned`: the pinned agents, as tiles.
 // - `waiting`: every agent with a question open, hidden or in a folder too, but
 //   a pinned one, whose tile stays where it is.
-// - `pinned`: the pinned agents, as tiles.
-// - `agents`: the rest that aren't in a folder.
-// - `group`: one for each folder, in the order they were made, empty ones too.
+// - `list`: the agents and group chats that aren't in a folder, together, each
+//   item an agent or a group chat (with its `name`, `color` and `everyone`).
+// - `group`: one for each folder, in the order they were made, empty ones too,
+//   with its agents and group chats as `list` has them.
 // - `hidden`: the hidden agents.
+// - `order`: every agent and group chat in the person's order, pinned ones
+//   first, waiting and hidden ones where they'd be, as `sidebar.order` takes them.
 //
-// Each agent is in one section. Within each, agents are in the list's order: the
-// pinned ones as they were dragged and then as they were pinned; the rest as they
-// were dragged, then as they were made. `waiting`, `pinned`, `agents` and `hidden`
-// are always there, empty or not.
+// Each agent and group chat is in one section but `order`. Within each, they're
+// in the person's order: pinned ones as they were dragged, then as they were
+// pinned; the rest as they were dragged (`order`), with what was never placed
+// as it was made: group chats over the rest, Everyone first, and agents under
+// it. All but `group` are always there, empty or not.
 import std.json.{Json}
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 
@@ -44,89 +43,109 @@ fn section(kind: str, agents: List<String>) -> Json {
     return Obj.new().s("kind", String(kind)).j("agents", ids(agents)).done()
 }
 
-/// The agents in the list's order, as the apps listed them before folders: pinned ones
-/// first, as dragged and then as pinned; then the rest as dragged, then as made.
-pub fn ordered(agents: List<Json>) -> List<Json> {
+/// An agent or a group chat in the sidebar's list.
+struct Item {
+    id: String,
+    /// The group chat's room, or the agent.
+    of: Json,
+    room: bool,
+}
+
+fn item_json(it: Item) -> Json {
+    if not it.room { return Obj.new().s("kind", String("agent")).s("id", it.id.copy()).done() }
+    return Obj.new().s("kind", String("room")).s("id", it.id.copy()).s("name", str_at(it.of.copy(), "name") ?? String()).s("color", str_at(it.of.copy(), "color") ?? String()).b("everyone", bool_at(it.of.copy(), "everyone") ?? false).done()
+}
+
+/// The agents and group chats in the person's order: pinned agents first, as
+/// dragged and then as pinned; then the rest, group chats never placed first,
+/// Everyone at the top, then as they were placed, then agents never placed, as
+/// they were made.
+fn ordered(rooms: List<Json>, agents: List<Json>) -> List<Item> {
+    var all = List<Item>()
     var keys = List<(i64, i64, i64, i64)>()
-    for (n, a) in agents.enumerate() {
-        let pinned = int_at(a.copy(), "pinned")
-        keys.push((if pinned == none { 1 } else { 0 }, int_at(a.copy(), "order") ?? i64.MAX, pinned ?? 0, i64.wrap(n)))
+    for c in rooms {
+        let r = at(c.copy(), "room")
+        let n = i64.wrap(all.len())
+        let everyone: i64 = if bool_at(r.copy(), "everyone") ?? false { 0 } else { 1 }
+        let key: (i64, i64, i64, i64) = if let o = int_at(r.copy(), "order") { (2, o, 0, n) } else { (1, everyone, 0, n) }
+        keys.push(key)
+        all.push(Item { id: str_at(c, "id") ?? String(), of: r, room: true })
+    }
+    for a in agents {
+        let n = i64.wrap(all.len())
+        let key: (i64, i64, i64, i64) = if let p = int_at(a.copy(), "pinned") { (0, int_at(a.copy(), "order") ?? i64.MAX, p, n) } else if let o = int_at(a.copy(), "order") { (2, o, 0, n) } else { (3, 0, 0, n) }
+        keys.push(key)
+        all.push(Item { id: str_at(a.copy(), "id") ?? String(), of: a.copy(), room: false })
     }
     keys.sort()
-    var out = List<Json>()
+    var out = List<Item>()
     for (_, _, _, n) in keys {
-        out.push(agents[usize.wrap(n)].copy())
+        out.push(all[usize.wrap(n)].copy())
     }
     return out
 }
 
-/// The group chats' section, then the agents' as `arrange` gives them.
-pub fn arrange_with(rooms: List<Json>, agents: List<Json>, groups: List<Json>, waiting: List<String>) -> Json {
-    var listed = List<Json>()
-    var rest = List<Json>()
-    for c in rooms {
-        let room = at(c.copy(), "room")
-        let everyone = bool_at(room.copy(), "everyone") ?? false
-        let one = Obj.new().s("id", str_at(c.copy(), "id") ?? String()).s("name", str_at(room.copy(), "name") ?? (str_at(c, "title") ?? String())).s("color", str_at(room, "color") ?? String()).b("everyone", everyone).done()
-        if everyone { listed.push(one) } else { rest.push(one) }
-    }
-    for r in rest { listed.push(r.copy()) }
-    var out = List<Json>()
-    out.push(Obj.new().s("kind", String("rooms")).j("rooms", Json.Array(listed)).j("agents", Json.Array(List<Json>())).done())
-    if let Json.Array(sections) = arrange(agents, groups, waiting) {
-        for s in sections { out.push(s.copy()) }
-    }
-    return Json.Array(out)
-}
-
-pub fn arrange(agents: List<Json>, groups: List<Json>, waiting: List<String>) -> Json {
+pub fn arrange(rooms: List<Json>, agents: List<Json>, groups: List<Json>, waiting: List<String>) -> Json {
     var asking = List<String>()
     var pinned = List<String>()
-    var loose = List<String>()
+    var loose = List<Json>()
     var hidden = List<String>()
+    var order = List<String>()
     var known = List<String>()
     for g in groups.copy() {
         known.push(str_at(g, "id") ?? String())
     }
-    var foldered = List<List<String>>()
+    var foldered = List<List<Json>>()
     for _ in groups.copy() {
-        foldered.push(List<String>())
+        foldered.push(List<Json>())
     }
-    for a in ordered(agents) {
-        let id = str_at(a.copy(), "id") ?? String()
-        let is_pinned = int_at(a.copy(), "pinned") != none and int_at(a.copy(), "hidden") == none
-        if is_pinned {
+    for it in ordered(rooms, agents) {
+        order.push(it.id.copy())
+        let a = it.of.copy()
+        let folder = known.position(|g| some(g.copy()) == str_at(a.copy(), "group"))
+        if it.room {
+            if let k = folder { foldered[k].push(item_json(it)) } else { loose.push(item_json(it)) }
+            continue
+        }
+        let id = it.id.copy()
+        if int_at(a.copy(), "pinned") != none and int_at(a.copy(), "hidden") == none {
             pinned.push(id)
         } else if waiting.contains(id.copy()) {
             asking.push(id)
         } else if int_at(a.copy(), "hidden") != none {
             hidden.push(id)
-        } else if let k = known.position(|g| some(g.copy()) == str_at(a.copy(), "group")) {
-            foldered[k].push(id)
+        } else if let k = folder {
+            foldered[k].push(item_json(it))
         } else {
-            loose.push(id)
+            loose.push(item_json(it))
         }
     }
     var out = List<Json>()
-    out.push(section("waiting", asking))
     out.push(section("pinned", pinned))
-    out.push(section("agents", loose))
+    out.push(section("waiting", asking))
+    out.push(Obj.new().s("kind", String("list")).j("items", Json.Array(loose)).done())
     for (k, g) in groups.enumerate() {
-        out.push(Obj.new().s("kind", String("group")).s("id", str_at(g.copy(), "id") ?? String()).s("name", str_at(g.copy(), "name") ?? String()).b("collapsed", bool_at(g.copy(), "collapsed") ?? false).j("agents", ids(foldered[k].copy())).done())
+        out.push(Obj.new().s("kind", String("group")).s("id", str_at(g.copy(), "id") ?? String()).s("name", str_at(g.copy(), "name") ?? String()).b("collapsed", bool_at(g.copy(), "collapsed") ?? false).j("items", Json.Array(foldered[k].copy())).done())
     }
     out.push(section("hidden", hidden))
+    out.push(Obj.new().s("kind", String("order")).j("items", ids(order)).done())
     return Json.Array(out)
 }
 
-// The ids in the section of `kind` (the first one, for a group).
+// The ids in the section of `kind` (the first one, for a group), agents or items.
 fn in_section(sections: Json, kind: str) -> List<String> {
     var out = List<String>()
     if let Json.Array(ss) = sections {
         for s in ss {
             if str_at(s.copy(), "kind") != some(String(kind)) { continue }
-            if let Json.Array(listed) = at(s, "agents") {
+            if let Json.Array(listed) = at(s.copy(), "agents") {
                 for id in listed {
                     if let Json.Str(t) = id { out.push(t.copy()) }
+                }
+            }
+            if let Json.Array(listed) = at(s, "items") {
+                for it in listed {
+                    if let Json.Str(t) = it { out.push(t.copy()) } else { out.push(str_at(it, "id") ?? String()) }
                 }
             }
             return out
@@ -137,6 +156,10 @@ fn in_section(sections: Json, kind: str) -> List<String> {
 
 fn agent(id: str) -> Obj {
     return Obj.new().s("id", String(id))
+}
+
+fn chat(id: str, r: own Obj) -> Json {
+    return Obj.new().s("id", String(id)).j("room", r.done()).done()
 }
 
 @test
@@ -150,18 +173,19 @@ fn each_agent_is_in_one_section_in_the_lists_order() {
         agent("a_6").s("group", String("g_1")).i("order", 1).done(),
     ]
     let groups: List<Json> = [Obj.new().s("id", String("g_1")).s("name", String("Work")).b("collapsed", true).done(), Obj.new().s("id", String("g_2")).s("name", String("Empty")).done()]
-    let s = arrange(agents, groups, List<String>())
+    let s = arrange(List<Json>(), agents, groups, List<String>())
     assert(in_section(s.copy(), "pinned") == [String("a_2")])
     // One in a folder that's gone is out of any.
-    assert(in_section(s.copy(), "agents") == [String("a_5"), String("a_1")])
+    assert(in_section(s.copy(), "list") == [String("a_5"), String("a_1")])
     assert(in_section(s.copy(), "group") == [String("a_6"), String("a_3")])
     assert(in_section(s.copy(), "hidden") == [String("a_4")])
     assert(in_section(s.copy(), "waiting").len() == 0)
+    assert(in_section(s.copy(), "order") == [String("a_2"), String("a_5"), String("a_6"), String("a_1"), String("a_3"), String("a_4")])
     let Json.Array(all) = s else return
-    assert(all.len() == 6)
+    assert(all.len() == 7)
     assert(str_at(all[3].copy(), "name") == some(String("Work")) and bool_at(all[3].copy(), "collapsed") == some(true))
     assert(str_at(all[4].copy(), "kind") == some(String("group")) and str_at(all[4].copy(), "id") == some(String("g_2")))
-    assert(str_at(all[5].copy(), "kind") == some(String("hidden")))
+    assert(str_at(all[5].copy(), "kind") == some(String("hidden")) and str_at(all[6].copy(), "kind") == some(String("order")))
 }
 
 @test
@@ -173,11 +197,13 @@ fn an_agent_waiting_on_the_person_comes_to_the_top_but_a_pinned_one() {
         agent("a_4").done(),
     ]
     let groups: List<Json> = [Obj.new().s("id", String("g_1")).s("name", String("Work")).done()]
-    let s = arrange(agents, groups, [String("a_1"), String("a_2"), String("a_3")])
+    let s = arrange(List<Json>(), agents, groups, [String("a_1"), String("a_2"), String("a_3")])
     assert(in_section(s.copy(), "waiting") == [String("a_1"), String("a_2")])
     assert(in_section(s.copy(), "pinned") == [String("a_3")])
     assert(in_section(s.copy(), "group").len() == 0 and in_section(s.copy(), "hidden").len() == 0)
-    assert(in_section(s, "agents") == [String("a_4")])
+    assert(in_section(s.copy(), "list") == [String("a_4")])
+    // It keeps its place in the order, to go back to once it's answered.
+    assert(in_section(s, "order") == [String("a_3"), String("a_1"), String("a_2"), String("a_4")])
 }
 
 @test
@@ -188,24 +214,41 @@ fn pinned_ones_come_first_as_dragged_then_as_pinned() {
         agent("a_3").i("order", 0).done(),
         agent("a_4").i("pinned", 100).done(),
     ]
-    var got = List<String>()
-    for a in ordered(agents) {
-        got.push(str_at(a, "id") ?? String())
-    }
-    assert(got == [String("a_4"), String("a_2"), String("a_3"), String("a_1")])
+    let s = arrange(List<Json>(), agents, List<Json>(), List<String>())
+    assert(in_section(s.copy(), "pinned") == [String("a_4"), String("a_2")])
+    assert(in_section(s, "order") == [String("a_4"), String("a_2"), String("a_3"), String("a_1")])
 }
 
 @test
-fn the_group_chats_come_first_everyone_before_the_rest() {
+fn group_chats_and_agents_are_one_list_in_the_persons_order() {
     let rooms: List<Json> = [
-        Obj.new().s("id", String("c_7")).j("room", Obj.new().s("name", String("Money")).s("color", String("amber")).done()).done(),
-        Obj.new().s("id", String("c_4")).j("room", Obj.new().s("name", String("Everyone")).b("everyone", true).done()).done(),
+        chat("c_7", Obj.new().s("name", String("Money")).s("color", String("amber"))),
+        chat("c_4", Obj.new().s("name", String("Everyone")).b("everyone", true)),
     ]
-    let s = arrange_with(rooms, [agent("a_1").done()], List<Json>(), List<String>())
-    let Json.Array(all) = s.copy() else return
-    assert(all.len() == 5 and str_at(all[0].copy(), "kind") == some(String("rooms")))
-    let Json.Array(listed) = at(all[0].copy(), "rooms") else return
-    assert(listed.len() == 2 and str_at(listed[0].copy(), "id") == some(String("c_4")) and bool_at(listed[0].copy(), "everyone") == some(true))
-    assert(str_at(listed[1].copy(), "name") == some(String("Money")) and str_at(listed[1].copy(), "color") == some(String("amber")))
-    assert(in_section(s, "agents") == [String("a_1")])
+    // Never placed: the group chats over the agents, Everyone first.
+    let s = arrange(rooms.copy(), [agent("a_1").done(), agent("a_2").done()], List<Json>(), List<String>())
+    assert(in_section(s.copy(), "list") == [String("c_4"), String("c_7"), String("a_1"), String("a_2")])
+    let Json.Array(all) = s else return
+    let Json.Array(items) = at(all[2].copy(), "items") else return
+    assert(str_at(items[0].copy(), "kind") == some(String("room")) and bool_at(items[0].copy(), "everyone") == some(true))
+    assert(str_at(items[1].copy(), "name") == some(String("Money")) and str_at(items[1].copy(), "color") == some(String("amber")))
+    assert(str_at(items[2].copy(), "kind") == some(String("agent")) and at(items[2].copy(), "name") == Json.Null)
+
+    // Placed, they mix; what was never placed comes as above.
+    let placed: List<Json> = [
+        chat("c_7", Obj.new().s("name", String("Money")).i("order", 1)),
+        chat("c_4", Obj.new().s("name", String("Everyone")).b("everyone", true).i("order", 2)),
+        chat("c_9", Obj.new().s("name", String("New"))),
+    ]
+    let mixed = arrange(placed, [agent("a_1").i("order", 0).done(), agent("a_2").done(), agent("a_3").i("order", 3).done()], List<Json>(), List<String>())
+    assert(in_section(mixed, "list") == [String("c_9"), String("a_1"), String("c_7"), String("c_4"), String("a_3"), String("a_2")])
+}
+
+@test
+fn a_group_chat_goes_in_a_folder_as_an_agent_does() {
+    let rooms: List<Json> = [chat("c_7", Obj.new().s("name", String("Money")).s("group", String("g_1")).i("order", 2))]
+    let groups: List<Json> = [Obj.new().s("id", String("g_1")).s("name", String("Work")).done()]
+    let s = arrange(rooms, [agent("a_1").s("group", String("g_1")).i("order", 5).done(), agent("a_2").done()], groups, List<String>())
+    assert(in_section(s.copy(), "group") == [String("c_7"), String("a_1")])
+    assert(in_section(s, "list") == [String("a_2")])
 }

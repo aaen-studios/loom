@@ -326,8 +326,7 @@ mod tests {
             url: url.into(),
             settings: Vec::new(),
             sign_in,
-            client_id: String::new(),
-            client_secret: None,
+            ..McpServer::default()
         };
         let local = server("", SignIn::No);
         assert_eq!(mcp_line(&local, None), ("npx acta-mcp".into(), None));

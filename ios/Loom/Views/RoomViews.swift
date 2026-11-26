@@ -1,7 +1,7 @@
 import SwiftUI
 
 // Group chats on the phone (PLAN.md, "Group chats"), as the desktop draws them
-// (desktop/src/room_view.rs): their rows atop the agent list, each with its members'
+// (desktop/src/room_view.rs): their rows in the agent list, each with its members'
 // threads woven together, the line over each reply that says how it came to its agent,
 // and the sheets that make one or change it.
 

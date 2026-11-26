@@ -19,7 +19,7 @@ module server.mcpregistry
 // A community entry's secrets are named after its server, `NAME.KEY`, so a
 // server from the registry never gets a secret the person keeps for another.
 import std.fs
-import std.http.{Header, get}
+import std.http.{Header, Request, get}
 import std.json.{Json, parse}
 import std.thread.{Task}
 import std.url
@@ -36,6 +36,9 @@ pub const MOST_LIMIT: i64 = 100
 pub const SHORTEST: usize = 3
 const WAIT_MS: u32 = 15000
 const MOST: usize = 4000000
+// How long a search waits for its servers' icons, and how big one may be.
+const ICON_WAIT_MS: u32 = 5000
+const ICON_LIMIT: usize = 65536
 const META: str = "io.modelcontextprotocol.registry/official"
 
 // --- Asking the registry ---
@@ -94,9 +97,65 @@ fn ask(job: Job) -> Done {
     if r.status == 404 { return Done { key: key, status: 404, value: Json.Null, error: String() } }
     if r.status != 200 { return Done { key: key, status: r.status, value: Json.Null, error: "it answered {r.status}" } }
     return match parse(String.from_utf8(r.body) ?? String()) {
-        ok(j) => Done { key: key, status: 200, value: j, error: String() },
+        ok(j) => Done { key: key.copy(), status: 200, value: if key.starts_with("search:") { with_icons(j) } else { j }, error: String() },
         err(_) => Done { key: key, status: 200, value: Json.Null, error: String("its answer wasn't JSON") },
     }
+}
+
+// --- Icons (LOO-375) ---
+
+// The first icon a server.json's `icons` gives as an SVG at an http(s)
+// address: Spools draws it as an entry's mark, as `acp.registry`'s icons are
+// drawn, in one colour.
+pub fn icon_src(s: Json) -> String? {
+    for icon in catalog.list(at(s, "icons")) {
+        let src = (str_at(icon.copy(), "src") ?? String()).trim().copy()
+        if not src.starts_with("https://") and not src.starts_with("http://") { continue }
+        let path = (src.find("?") ?? src.len())
+        let svg = str_at(icon, "mimeType") == some(String("image/svg+xml")) or src[..path].to_lower_root().ends_with(".svg")
+        if svg { return some(src) }
+    }
+    return none
+}
+
+// A search's answer with each server's icon on its item as `icon_svg`, fetched
+// here with the answer, all at once, so it's kept with it and a search typed
+// again fetches nothing. One that can't be fetched in time, is over
+// ICON_LIMIT or isn't an SVG is left out, and the entry has its initial.
+fn with_icons(answer: own Json) -> Json {
+    let servers = catalog.list(at(answer.copy(), "servers"))
+    if servers.is_empty() { return answer }
+    var asked = List<Request?>()
+    for item in servers.copy() {
+        asked.push(match icon_src(at(item, "server")) {
+            some(src) => some(get(src, [Header { name: String("User-Agent"), value: String("loom") }], ICON_WAIT_MS, ICON_LIMIT)),
+            none => none,
+        })
+    }
+    var out = List<Json>()
+    var n: usize = 0
+    for item in servers {
+        var with = item.copy()
+        if let given = asked[n] {
+            var req = given
+            if let svg = svg_of(mut req) { with = merge(with, Obj.new().s("icon_svg", svg).done()) }
+        }
+        out.push(with)
+        n += 1
+    }
+    return merge(answer, Obj.new().j("servers", Json.Array(out)).done())
+}
+
+// The SVG a request brought, if it brought one.
+fn svg_of(req: mut Request) -> String? {
+    let r = match req.wait() {
+        ok(r) => r,
+        err(_) => return none,
+    }
+    if r.status != 200 { return none }
+    let text = String.from_utf8(r.body.copy()) else return none
+    if not text.contains("<svg") { return none }
+    return some(text.trim().copy())
 }
 
 // --- What a server.json says ---
@@ -476,6 +535,7 @@ pub fn found(answer: Json, query: String) -> (List<Json>, List<String>) {
     var kept_ways = List<List<String>>()
     for item in catalog.list(at(answer, "servers")) {
         let s = at(item.copy(), "server")
+        let icon = str_at(item.copy(), "icon_svg")
         let meta = at(at(item, "_meta"), META)
         if str_at(meta.copy(), "status") == some(String("deleted")) { continue }
         let w = ways(s.copy())
@@ -488,7 +548,9 @@ pub fn found(answer: Json, query: String) -> (List<Json>, List<String>) {
             }
         }
         if is_curated { continue }
-        let e = entry_of(s, str_at(meta, "updatedAt") ?? String())
+        var e = entry_of(s, str_at(meta, "updatedAt") ?? String())
+        // Its icon, fetched with the answer (with_icons).
+        if let svg = icon { e = merge(e, Obj.new().s("icon_svg", svg).done()) }
         var twin = kept.len()
         var k: usize = 0
         while k < kept.len() {
@@ -571,6 +633,23 @@ fn names_a_registry_server() {
 }
 
 @test
+fn finds_a_servers_svg_icon() {
+    // The SVG, before its PNG.
+    assert(icon_src(sample_server("notion.json", "com.foreverworks/notion")) == some(String("https://raw.githubusercontent.com/foreverworks/mcps/main/servers/notion/icons/icon.svg")))
+    // An .svg address without its type, but not a PNG, a data: URI or none.
+    let only = |icons: str| icon_src(parse(String(icons))!)
+    assert(only(#"{"icons":[{"src":"https://x.example/a.SVG?v=2"}]}"#) == some(String("https://x.example/a.SVG?v=2")))
+    assert(only(#"{"icons":[{"src":"https://x.example/a.png","mimeType":"image/png"}]}"#) == none)
+    assert(only(#"{"icons":[{"src":"data:image/svg+xml;base64,PHN2Zy8+","mimeType":"image/svg+xml"}]}"#) == none)
+    assert(only("\{\}") == none)
+    // An icon fetched with a search's answer goes on its entry.
+    let item = Obj.new().j("server", sample_server("notion.json", "com.foreverworks/notion")).s("icon_svg", String("<svg/>")).done()
+    let (entries, _) = found(Obj.new().j("servers", Json.Array([item])).done(), String("notion"))
+    assert(str_at(entries[0].copy(), "icon_svg") == some(String("<svg/>")))
+    assert(str_at(catalog.listed(entries[0].copy(), List<String>(), List<String>(), (String(), String()), Json.Null), "icon_svg") == some(String("<svg/>")))
+}
+
+@test
 fn turns_remotes_into_servers() {
     // A remote with no headers: an address, and a sign-in, if any, found when it's connected.
     let plain = converted("notion.json", "com.insightfulpipe/notion")
@@ -604,7 +683,7 @@ fn turns_packages_into_servers() {
     // Arguments: given ones as they are, a needed one the person's field, a named one as its flag and value.
     let wirecat = converted("notion.json", "dev.wirecat/notion-cli")
     assert(made(wirecat.copy(), #"{"profiles":"work"}"#) == #"{"name":"notion-cli","command":"npx","args":["-y","@wirecat/notion-cli@0.9.0","mcp","serve","--profiles","work"],"env":{}}"#)
-    let shown = catalog.listed(wirecat.copy(), List<String>(), List<String>(), Json.Null)
+    let shown = catalog.listed(wirecat.copy(), List<String>(), List<String>(), (String(), String()), Json.Null)
     assert(str_at(shown.copy(), "command") == some(String("npx")) and "{at(shown, "args")}" == #"["-y","@wirecat/notion-cli@0.9.0","mcp","serve","--profiles","{profiles}"]"#)
     assert("{at(wirecat, "fields")}" == #"[{"name":"profiles","label":"profiles","placeholder":"personal","description":"The profiles this server serves: one name, a comma-separated list such as work,personal, or all for every profile on this computer"}]"#)
     // Variables it needs that aren't secret are fields; a secret one is a secret.

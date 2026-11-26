@@ -326,6 +326,7 @@ mod tests {
             sign_in: SignIn::No,
             client_id: String::new(),
             client_secret: None,
+            ..McpServer::default()
         }
     }
 
