@@ -36,6 +36,18 @@ calx tests/ios/live.calx
 
 [`tests/ios/live.calx`](../tests/ios/live.calx) starts an instance with the fake agent ([tests/README.md](../tests/README.md)), builds the app, and runs it in the simulator, headless: it joins with the QR code's text, a reply streams in, it answers a question, and it follows the instance when it moves. Each step is checked on the instance, and each screen is a screenshot in `build/ios/live/`. With no one to tap, a debug build takes these from its launch arguments, each doing what its screen's button does: `-link <qr>` joins, `-say <text>` sends to the agent `-open` opened, `-allow` answers its questions yes, `-signIn` taps Sign in on its sign-in cards, and `-callback <url>` hands the app what a browser brought back to the `loom:` redirect (`fromLaunch` in [`Session.swift`](Loom/App/Session.swift)).
 
+## Driving it
+
+[`LoomUITests/`](LoomUITests/) drives the app as a person does, with taps and swipes, on sample frames, in its own scheme, `LoomUI`: the emoji picker put away by a swipe down while its grid is at its top and by a tap in the chat, the keyboard glyph swapping the keyboard and the picker, and the long reply in the Builder's chat opened by Show more or a tap on its words and folded again by Show less. Each step keeps a screenshot in the result bundle.
+
+```sh
+calx scripts/ios.calx --sample
+xcodebuild test -project ios/Loom.xcodeproj -scheme LoomUI -destination 'platform=iOS Simulator,name=iPhone 17' -resultBundlePath build/ios/ui.xcresult
+xcrun xcresulttool export attachments --path build/ios/ui.xcresult --output-path build/ios/ui
+```
+
+The test runner needs what a Mac asks its owner for at the screen, which no one can answer over SSH, so on a Mac the tests run on over SSH, run these once first: `sudo DevToolsSecurity -enable` turns Developer mode on, without which `xcodebuild test` stops at "failed to bless service hub" before the runner ever connects to the simulator, and `sudo automationmodetool enable-automationmode-without-authentication` lets XCUITest turn Automation Mode on without a password. `DevToolsSecurity -status` and `automationmodetool` say how each stands.
+
 ## Files
 
 - [`Loom/Core/`](Loom/Core/): the C boundary. [`Core.swift`](Loom/Core/Core.swift) starts the core with its config (its cache in Application Support/Loom), sends it frames, and hands what it says to the main actor in batches. [`JSON.swift`](Loom/Core/JSON.swift) is the frames' JSON. [`SampleCore.swift`](Loom/Core/SampleCore.swift) stands in for the core without it.
