@@ -789,12 +789,14 @@ extension Model {
 
     /// The form's size: `size`, or none when it's picked again.
     func formSize(_ size: String) {
-        acta.form?.size = acta.form?.size == size ? nil : size
+        let had = acta.form?.size
+        acta.form?.size = had == size ? nil : size
     }
 
     /// The form's priority: `priority`, or none when it's picked again.
     func formPriority(_ priority: String) {
-        acta.form?.priority = acta.form?.priority == priority ? nil : priority
+        let had = acta.form?.priority
+        acta.form?.priority = had == priority ? nil : priority
     }
 
     /// The labels the form offers: the board's.

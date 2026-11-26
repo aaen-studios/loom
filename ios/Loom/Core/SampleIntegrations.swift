@@ -146,7 +146,9 @@ extension SampleCore {
             if case .object(let had) = m["cards"] { cards = had }
             cards[made["id"].text] = made
             m["cards"] = .object(cards)
-            m["made_cards"] = .array(m["made_cards"].array + [["id": made["id"], "board": made["board"]]])
+            let had: [JSON] = (m["made_cards"] ?? JSON.null).array
+            let pill: JSON = ["id": made["id"], "board": made["board"]]
+            m["made_cards"] = JSON.array(had + [pill])
             messages[c]![i] = .object(m)
             event("message.updated", ["conversation": JSON(c), "message": .object(m)])
         }

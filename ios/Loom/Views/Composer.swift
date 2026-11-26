@@ -10,7 +10,7 @@ import UniformTypeIdentifiers
 /// in the words, and over them its picture, its fan, its pill or its card.
 struct Composer: View {
     @Environment(Session.self) private var session
-    @Environment(.colorScheme) private var scheme
+    @Environment(\.colorScheme) private var scheme
     var agentName: String
     var sent: () -> Void
     @State private var box = ComposerBox()
@@ -939,7 +939,7 @@ struct PieceArt {
     private func drawCard(_ a: PieceAttachment, font: UIFont, most: CGFloat) -> Bool {
         let ref = String(a.piece.id.dropFirst(PieceKind.card.count))
         let preview = cards[ref]
-        let key = "(a.piece.id)|(String(describing: preview))|(most)|(dark)|(font.pointSize)"
+        let key = "\(a.piece.id)|\(String(describing: preview))|\(most)|\(dark)|\(font.pointSize)"
         if a.drawn == key { return false }
         a.drawn = key
         let made = cardPieceImage(ref: ref, preview: preview, font: font, most: most, dark: dark)

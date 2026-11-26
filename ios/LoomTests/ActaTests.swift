@@ -125,8 +125,8 @@ import Testing
         answer(m, asked.first, ["value": ["boards": [["board": "aaen-studios/loom", "prefix": "LOO", "name": "loom"]]]])
         #expect(m.boardPrefixes == ["LOO"])
         #expect(m.hasActa)
-        #expect(m.cardFetches(now: now + boardsFreshMs - 1).isEmpty)
-        #expect(m.cardFetches(now: now + boardsFreshMs).first?["name"] == "acta.boards", "and again ten minutes on")
+        #expect(m.cardFetches(now: nowMs()).isEmpty)
+        #expect(m.cardFetches(now: nowMs() + boardsFreshMs + 1000).first?["name"] == "acta.boards", "and again ten minutes on")
     }
 
     @Test func aMessagesCardsAreLookedAtOnceWhileItShows() {
