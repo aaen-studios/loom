@@ -2177,10 +2177,12 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Routines => {
                 let f = self.model.load_routines();
                 self.send(f);
-                // Its T3 servers, for "On an event".
+                // The person's Acta and T3 servers, for "On an event".
                 for f in self.model.load_mcp() {
                     self.send(f);
                 }
+                let f = self.model.ask_t3_servers();
+                self.send(f);
                 self.routine_open = None;
                 _ = self.model.load_routine_runs(None);
             }

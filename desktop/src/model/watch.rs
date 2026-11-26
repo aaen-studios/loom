@@ -553,8 +553,12 @@ impl Model {
     }
 
     /// The person's MCP servers an event can be on, by name: their Acta, or their T3
-    /// servers.
+    /// servers, as the instance last said them (`t3.servers`), or by their names until it
+    /// has.
     pub fn event_servers(&self, integration: &str) -> Vec<String> {
+        if integration == "t3" && !self.t3.servers.is_empty() {
+            return self.t3.servers.clone();
+        }
         self.mcp_servers
             .iter()
             .filter(|m| server_is(integration, &m.name, &m.url))
@@ -937,6 +941,25 @@ mod tests {
             "https://api.githubcopilot.com/mcp/"
         ));
         assert!(!server_is("t3", "t3", ""));
+    }
+
+    #[test]
+    fn t3s_servers_are_the_instances_once_it_said_them() {
+        let mut m = Model {
+            mcp_servers: vec![crate::model::McpServer::of(
+                &json!({"name": "t3", "url": "https://pc.tail1234.ts.net/mcp"}),
+            )],
+            ..Model::default()
+        };
+        // By its name, until the instance says which.
+        assert_eq!(m.event_servers("t3"), vec!["t3".to_string()]);
+        // Spools' T3 entry, under a name of its own.
+        m.t3.servers = vec!["t3-code".into(), "studio".into()];
+        assert_eq!(
+            m.event_servers("t3"),
+            vec!["t3-code".to_string(), "studio".to_string()]
+        );
+        assert!(m.event_servers("acta").is_empty());
     }
 
     #[test]
