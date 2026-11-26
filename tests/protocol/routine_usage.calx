@@ -1,0 +1,311 @@
+module tests.protocol.routine_usage
+
+// What routines cost their agent program (LOO-384, PLAN.md, "Routines"). The
+// agent runs on the fake agent with --record, which writes down every prompt it
+// gets: its session, how many turns came before it there, and how many
+// characters those sent and said. Casper's chat with the person is long, and
+// over it a script-like routine with nothing new, the same with something new,
+// a routine that posts in that chat, and one with a thread of its own run. It
+// says for each what reached the agent program, and checks that:
+//
+// - a gate that says nothing is new keeps the agent asleep: no turn, and a quiet
+//   run in the routine's history;
+// - a gate that says something wakes it with what the gate said, and one that
+//   fails or runs too long is a failed run, which the person hears of;
+// - no routine run is a turn of the chat's session, or carries anything of it: each
+//   is a fresh session, closed once the run ends, told how its last run went;
+// - what a routine posts still reaches the chat with a notification, and the chat's
+//   own session is told of it with the person's next message;
+// - a routine's own model and effort are its runs', and the chat keeps the agent's;
+// - routine.list says what each routine costs, and marks one that spends a lot on
+//   runs that find nothing.
+//
+// With --measure it only says the numbers, for the code before routines had
+// gates or sessions of their own.
+//
+//     calx tests/protocol/routine_usage.calx [--measure]
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+// How many messages the long chat has, and how long each is.
+const CHAT_TURNS: i64 = 20
+const LINE_CHARS: i64 = 4000
+
+// One prompt the fake agent got.
+struct Prompt {
+    session: String
+    turn: i64    // its place in its session: 1 for a fresh one
+    chars: i64    // what this prompt sent
+    history: i64    // what the turns before it in its session sent and said
+    model: String
+    effort: String
+    context: String    // its [loom: ...] blocks
+}
+
+// What the fake agent recorded after the first `skip` lines: its prompts, and the
+// sessions loom closed.
+fn recorded(path: String, skip: usize) -> (List<Prompt>, List<String>) ! Error {
+    var prompts = List<Prompt>()
+    var closed = List<String>()
+    let text = try fs.read_text(path) ?? String()
+    var n: usize = 0
+    for line in text.split("\n") {
+        if line.trim().len() == 0 { continue }
+        n += 1
+        if n <= skip { continue }
+        let j = try parse(line.copy())
+        if let c = str_at(j.copy(), "closed") {
+            closed.push(c)
+            continue
+        }
+        prompts.push(Prompt { session: str_at(j.copy(), "session") ?? String(), turn: int_at(j.copy(), "turn") ?? 0, chars: int_at(j.copy(), "chars") ?? 0, history: int_at(j.copy(), "history") ?? 0, model: str_at(j.copy(), "model") ?? String(), effort: str_at(j.copy(), "effort") ?? String(), context: str_at(j, "context") ?? String() })
+    }
+    return (prompts, closed)
+}
+
+// How many lines the record has now.
+fn lines_now(path: String) -> usize ! Error {
+    let text = try fs.read_text(path) ?? String()
+    var n: usize = 0
+    for line in text.split("\n") {
+        if line.trim().len() > 0 { n += 1 }
+    }
+    return n
+}
+
+// The next reply in `conversation`, as text.
+fn reply_in(app: mut Session, conversation: String) -> String ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: String, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, conversation)
+}
+
+// Whether a run that's `status` has ended.
+fn over(status: String) -> bool {
+    return status != "running" and status != "waiting" and status.len() > 0
+}
+
+// Runs routine `id` by hand and waits for that run to end: the routine as it is then.
+fn run_it(app: mut Session, id: String) -> Json ! Error {
+    let from = app.frames.len()
+    let ran = try app.cmd("q_run", "routine.run", Obj.new().s("id", id.copy()).done())
+    let run = str_at(at(ran.copy(), "value"), "run") ?? String()
+    if run.len() == 0 { fail "routine.run didn't run it: {ran}" }
+    var k = from
+    loop {
+        let f = if k < app.frames.len() { app.frames[k].copy() } else { try app.until("event", "routine.updated", 60000) }
+        k += 1
+        if str_at(f.copy(), "kind") != some(String("routine.updated")) { continue }
+        let r = at(f, "routine")
+        let last = at(r.copy(), "last")
+        if str_at(r.copy(), "id") == some(id.copy()) and str_at(last.copy(), "run") == some(run.copy()) and over(str_at(last, "status") ?? String()) { return r }
+    }
+}
+
+// routine.put: the routine made.
+fn make(app: mut Session, args: Json) -> Json ! Error {
+    let put = try app.cmd("q_put", "routine.put", args)
+    if bool_at(put.copy(), "ok") == some(false) { fail "routine.put was refused: {put}" }
+    return at(at(put, "value"), "routine")
+}
+
+fn id_of(r: Json) -> String {
+    return str_at(r, "id") ?? String()
+}
+
+// The routine run `run` of `id`, as routine.runs gives it.
+fn run_of(app: mut Session, id: String, run: String) -> Json ! Error {
+    if let Json.Array(runs) = at(at(try app.cmd("q_runs", "routine.runs", Obj.new().s("id", id).done()), "value"), "runs") {
+        for r in runs {
+            if str_at(r.copy(), "run") == some(run.copy()) { return r.copy() }
+        }
+    }
+    fail "routine.runs doesn't have {run}"
+}
+
+// What the prompts of one scenario carried, in a line.
+fn summed(what: str, prompts: List<Prompt>, chat_session: String) -> String {
+    if prompts.len() == 0 { return "{what}: 0 turns" }
+    var parts = List<String>()
+    for p in prompts {
+        let place = if p.session == chat_session { "the chat's session" } else { "a session of its own" }
+        parts.push("turn {p.turn} of {place}, carrying {p.history} chars of {p.turn - 1} earlier turns, sending {p.chars}")
+    }
+    return "{what}: {prompts.len()} turn(s): {parts.join("; ")}"
+}
+
+// A shell command that prints `text` and succeeds, one that prints nothing, one that
+// fails saying `why` on stderr, and one that takes about 3 s, on this system's shell.
+fn prints(text: str) -> String {
+    return "echo {text}"
+}
+
+fn fails(why: str) -> String {
+    return if env.os() == "windows" { "echo {why} 1>&2 & exit 3" } else { "echo {why} 1>&2; exit 3" }
+}
+
+fn slow() -> String {
+    return String(if env.os() == "windows" { "ping -n 4 127.0.0.1 >nul" } else { "sleep 3" })
+}
+
+fn measured(i: Instance, measure: bool) ! Error {
+    let record = "{i.data}/record.jsonl"
+    try i.add_fake(String("rec"), "--record={record}")
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Casper")).s("acp_agent", String("rec")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+
+    // A long chat: each message a line the fake agent says back.
+    var long = String()
+    for _ in 0i64..LINE_CHARS { long.push('x') }
+    for n in 0i64..CHAT_TURNS { _ = try say(mut app, chat.copy(), "m_{n}", long.copy()) }
+    let (before, _) = try recorded(record.copy(), 0)
+    let chat_session = before[before.len() - 1].session.copy()
+    let main_history = before[before.len() - 1].history
+    println("the chat: {CHAT_TURNS} turns in session {chat_session}, {main_history} chars before its last")
+
+    // 1. A script-like routine with nothing new: its gate prints nothing.
+    var mark = try lines_now(record.copy())
+    let watch = try make(mut app, Obj.new().s("name", String("Watch PR")).s("agent", agent.copy()).s("prompt", String("/shell \{\"command\":\"./check-pr.sh\"\}\n/tokens 1000\n/mcp routine_quiet \{\}")).b("webhook", true).j("gate", Obj.new().s("command", String("exit 0")).done()).done())
+    let watched = try run_it(mut app, id_of(watch.copy()))
+    let (nothing_new, _) = try recorded(record.copy(), mark)
+    println(summed("1. script-like, nothing new", nothing_new.copy(), chat_session.copy()))
+
+    // 2. The same with something new: its gate prints what changed.
+    mark = try lines_now(record.copy())
+    let version = try make(mut app, Obj.new().s("name", String("Version check")).s("agent", agent.copy()).s("prompt", String("/mcp routine_post \{\"text\": \"A new version came out.\"\}\n/tokens 1000")).b("webhook", true).j("gate", Obj.new().s("command", prints("1.21.5")).done()).done())
+    let from = app.frames.len()
+    let checked = try run_it(mut app, id_of(version.copy()))
+    let (something_new, _) = try recorded(record.copy(), mark)
+    println(summed("2. script-like, something new", something_new.copy(), chat_session.copy()))
+
+    // 3. One that posts in the long chat, with no gate.
+    mark = try lines_now(record.copy())
+    let mail = try make(mut app, Obj.new().s("name", String("Label mail")).s("agent", agent.copy()).s("prompt", String("/tokens 2000\nLabelled nothing.")).b("webhook", true).done())
+    _ = try run_it(mut app, id_of(mail.copy()))
+    let (in_chat, _) = try recorded(record.copy(), mark)
+    println(summed("3. post: chat, in the long chat", in_chat.copy(), chat_session.copy()))
+
+    // 4. One with a thread of its own, three times.
+    mark = try lines_now(record.copy())
+    let thread = try make(mut app, Obj.new().s("name", String("Sync")).s("agent", agent.copy()).s("prompt", String("/tokens 1000\nSynced it.")).s("post", String("thread")).b("webhook", true).done())
+    for _ in 0..3 { _ = try run_it(mut app, id_of(thread.copy())) }
+    let (threaded, closed) = try recorded(record.copy(), mark)
+    println(summed("4. post: thread, three runs", threaded.copy(), chat_session.copy()))
+    if measure {
+        app.close()
+        return
+    }
+
+    try check(nothing_new.len() == 0, "a gate that prints nothing keeps the agent asleep: no turn at all")
+    let quiet_run = try run_of(mut app, id_of(watch.copy()), str_at(at(watched.copy(), "last"), "run") ?? String())
+    try check(str_at(at(watched, "last"), "status") == some(String("quiet")) and str_at(quiet_run.copy(), "status") == some(String("quiet")) and bool_at(quiet_run, "woke") == some(false), "and the run is kept as a quiet one in its history, that never woke its agent")
+    try check(something_new.len() == 1 and something_new[0].session != chat_session and something_new[0].turn == 1 and something_new[0].history == 0, "a gate that prints something wakes the agent, in a fresh session that carries nothing of the chat")
+    try check(something_new[0].context.contains("1.21.5"), "and the agent is given what the gate printed")
+    var posted = false
+    var notified = false
+    for f in app.frames[from..] {
+        let kind = str_at(f.copy(), "kind") ?? String()
+        if kind == "message.created" and str_at(at(f.copy(), "message"), "conversation") == some(chat.copy()) and reply_text(at(f.copy(), "message")) == "A new version came out." { posted = true }
+        if kind == "notify" and str_at(f.copy(), "title") == some(String("Version check")) { notified = true }
+    }
+    try check(str_at(at(checked, "last"), "status") == some(String("done")) and posted and notified, "and what it posts is in the chat, with a notification")
+    try check(in_chat.len() == 1 and in_chat[0].session != chat_session and in_chat[0].turn == 1 and in_chat[0].history == 0, "a routine that posts in the chat runs in a session of its own, with none of the chat")
+    var sessions = List<String>()
+    for p in threaded {
+        if not sessions.contains(p.session.copy()) and p.turn == 1 and p.history == 0 { sessions.push(p.session.copy()) }
+    }
+    try check(threaded.len() == 3 and sessions.len() == 3, "a routine with a thread of its own runs in a fresh session each time, which doesn't grow")
+    var all_closed = true
+    for s in sessions {
+        if not closed.contains(s) { all_closed = false }
+    }
+    try check(all_closed, "and each run's session is closed once it ends")
+    try check(threaded[1].context.contains("Synced it."), "a run is told how the routine's last run went")
+
+    // The chat's own session hears what was posted, with the person's next message.
+    mark = try lines_now(record.copy())
+    _ = try say(mut app, chat.copy(), String("m_after"), String("What came out?"))
+    let (next, _) = try recorded(record.copy(), mark)
+    try check(next.len() == 1 and next[0].session == chat_session and next[0].context.contains("A new version came out.") and next[0].context.contains("Version check"), "the chat's next turn goes on in its own session, told what the routine posted there")
+    mark = try lines_now(record.copy())
+    _ = try say(mut app, chat.copy(), String("m_again"), String("And now?"))
+    let (again, _) = try recorded(record.copy(), mark)
+    try check(again.len() == 1 and not again[0].context.contains("A new version came out."), "once")
+
+    // Its own model and effort, from what the program offers; the chat keeps the agent's.
+    let bad = try app.cmd("q_bad", "routine.put", Obj.new().s("name", String("X")).s("agent", agent.copy()).s("prompt", String("x")).b("webhook", true).s("model", String("fake-9")).done())
+    try check(str_at(at(bad.copy(), "error"), "code") == some(String("bad_request")) and (str_at(at(bad, "error"), "message") ?? String()).contains("fake-2"), "a model the agent's program doesn't offer is refused, saying the ones it does")
+    let cheap = try make(mut app, Obj.new().s("name", String("Cheap")).s("agent", agent.copy()).s("prompt", String("/tokens 10\nOk.")).b("webhook", true).s("model", String("fake-2")).s("effort", String("low")).done())
+    try check(str_at(cheap.copy(), "model") == some(String("fake-2")) and str_at(cheap.copy(), "effort") == some(String("low")), "a routine keeps its own model and effort")
+    mark = try lines_now(record.copy())
+    _ = try run_it(mut app, id_of(cheap))
+    _ = try say(mut app, chat.copy(), String("m_model"), String("Hi."))
+    let (picked, _) = try recorded(record.copy(), mark)
+    try check(picked.len() == 2 and picked[0].model == "fake-2" and picked[0].effort == "low" and picked[1].session == chat_session and picked[1].model == "fake-1" and picked[1].effort == "medium", "and runs on them, while the chat stays on the agent's")
+
+    // A gate that fails, or runs too long, is a failed run the person hears of.
+    let broken = try make(mut app, Obj.new().s("name", String("Broken")).s("agent", agent.copy()).s("prompt", String("x")).b("webhook", true).j("gate", Obj.new().s("command", fails("no such board")).done()).done())
+    mark = try lines_now(record.copy())
+    let at_fail = app.frames.len()
+    let failed = try run_it(mut app, id_of(broken.copy()))
+    let failed_last = at(failed, "last")
+    try check(str_at(failed_last.copy(), "status") == some(String("failed")) and (str_at(failed_last, "error") ?? String()).contains("no such board"), "a gate that fails fails the run, with what it said")
+    var told = false
+    for f in app.frames[at_fail..] {
+        if str_at(f.copy(), "kind") == some(String("notify")) and str_at(f.copy(), "title") == some(String("Broken")) { told = true }
+    }
+    if not told { told = str_at(try app.until("event", "notify"), "title") == some(String("Broken")) }
+    try check(told, "and its person is told")
+    let stuck = try make(mut app, Obj.new().s("name", String("Stuck")).s("agent", agent.copy()).s("prompt", String("x")).b("webhook", true).j("gate", Obj.new().s("command", slow()).i("timeout", 1).done()).done())
+    let timed = at(try run_it(mut app, id_of(stuck)), "last")
+    try check(str_at(timed.copy(), "status") == some(String("failed")) and (str_at(timed, "error") ?? String()).contains("1 s"), "and so does one that runs past its timeout")
+    let (no_turns, _) = try recorded(record.copy(), mark)
+    try check(no_turns.len() == 0, "neither wakes the agent")
+
+    // What each costs, and one that spends a lot for nothing.
+    let costly = try make(mut app, Obj.new().s("name", String("Costly")).s("agent", agent.copy()).s("prompt", String("/tokens 400000\n/mcp routine_quiet \{\}")).b("webhook", true).done())
+    _ = try run_it(mut app, id_of(costly.copy()))
+    _ = try run_it(mut app, id_of(costly.copy()))
+    var costly_cost = Json.Null
+    var watch_cost = Json.Null
+    if let Json.Array(list) = at(at(try app.cmd("q_list", "routine.list", Obj.new().done()), "value"), "routines") {
+        for r in list {
+            if str_at(r.copy(), "id") == some(id_of(costly.copy())) { costly_cost = at(r.copy(), "cost") }
+            if str_at(r.copy(), "id") == some(id_of(watch.copy())) { watch_cost = at(r, "cost") }
+        }
+    }
+    try check(int_at(costly_cost.copy(), "run") == some(400000) and int_at(costly_cost.copy(), "day") == some(800000) and int_at(costly_cost.copy(), "runs") == some(2) and int_at(costly_cost.copy(), "quiet") == some(2) and bool_at(costly_cost, "wasted") == some(true), "routine.list says what a routine costs a run and a day, and marks one that spends a lot on runs that find nothing")
+    try check(int_at(watch_cost.copy(), "run") == some(0) and int_at(watch_cost.copy(), "runs") == some(1) and bool_at(watch_cost, "wasted") == some(false), "and a gated one that found nothing costs nothing")
+    app.close()
+}
+
+fn main() ! Error {
+    let measure = env.args().contains(String("--measure"))
+    let inst = try Instance.start()
+    var failure: String? = none
+    match measured(inst.copy(), measure) {
+        ok => {},
+        err(e) => failure = some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nroutine usage: all good")
+}

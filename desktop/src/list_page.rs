@@ -482,8 +482,22 @@ impl Loom {
         line: Option<String>,
         actions: Option<AnyElement>,
     ) -> AnyElement {
+        self.pane_head_noted(lead, title, line, None, actions)
+    }
+
+    /// The head of what's picked, as `pane_head` draws it, with a second line under its
+    /// first in an ink of its own: what a routine costs.
+    pub(super) fn pane_head_noted(
+        &self,
+        lead: Option<AnyElement>,
+        title: impl Into<SharedString>,
+        line: Option<String>,
+        note: Option<(String, Hsla)>,
+        actions: Option<AnyElement>,
+    ) -> AnyElement {
         let p = self.p;
         let line = line.filter(|l| !l.is_empty());
+        let note = note.filter(|(n, _)| !n.is_empty());
         div()
             .flex()
             .items_center()
@@ -511,6 +525,15 @@ impl Loom {
                                 .text_color(p.ink_3)
                                 .line_clamp(2)
                                 .child(l),
+                        )
+                    })
+                    .when_some(note, |d, (n, ink)| {
+                        d.child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(ink)
+                                .truncate()
+                                .child(n),
                         )
                     }),
             )
