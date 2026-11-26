@@ -155,12 +155,21 @@ impl RoutineDraft {
 }
 
 /// A server's list pages' forms: the item the form is filled in for now, with what it
-/// was filled in with, and each item's form as the person left it, changed and not
-/// saved.
+/// was filled in with, each item's form as the person left it, changed and not saved,
+/// and the saves the instance hasn't answered yet, by their command's id.
 #[derive(Default)]
 pub struct Drafts {
     open: Option<(Key, Form)>,
     kept: HashMap<Key, Form>,
+    saving: HashMap<String, Saving>,
+}
+
+/// A save on its way: the item's key it was filled in for, the key it's saved as (a
+/// rename changes it), and what was saved.
+struct Saving {
+    was: Key,
+    now: Key,
+    form: Form,
 }
 
 impl Drafts {
@@ -215,14 +224,49 @@ impl Drafts {
         self.open = None;
     }
 
-    /// The form was saved as `now`, by `key`, which a rename changes: no draft for it,
-    /// by its old key or its new one, and the form's filled in with what was saved.
-    pub fn saved(&mut self, key: Key, now: Form) {
-        if let Some((old, _)) = self.open.take() {
-            self.kept.remove(&old);
+    /// The open form is being saved as `now`, by `key` (which a rename changes), with
+    /// the command `id`: its draft and dot stay until the instance says it's saved.
+    pub fn saving(&mut self, id: String, key: Key, now: Form) {
+        let was = self.open_key().cloned().unwrap_or_else(|| key.clone());
+        self.saving.insert(
+            id,
+            Saving {
+                was,
+                now: key,
+                form: now,
+            },
+        );
+    }
+
+    /// The instance answered the command `id`, saved (`ok`) or refused. Saved, what was
+    /// saved is its item's own: its draft goes, unless it was changed again since, and
+    /// the form open on it is filled in with what was saved. Refused, the draft stays,
+    /// with its dot. Whether `id` was a save.
+    pub fn answered(&mut self, id: &str, ok: bool) -> bool {
+        let Some(s) = self.saving.remove(id) else {
+            return false;
+        };
+        if !ok {
+            return true;
         }
-        self.kept.remove(&key);
-        self.open = Some((key, now));
+        for key in [&s.was, &s.now] {
+            if self.kept.get(key) == Some(&s.form) {
+                self.kept.remove(key);
+            }
+        }
+        // Changed again since, and renamed: the change is the new name's.
+        if s.was != s.now {
+            if let Some(form) = self.kept.remove(&s.was) {
+                self.kept.insert(s.now.clone(), form);
+            }
+        }
+        if let Some((key, own)) = self.open.as_mut() {
+            if *key == s.was || *key == s.now {
+                *key = s.now;
+                *own = s.form;
+            }
+        }
+        true
     }
 
     /// The form's changes are thrown away (Cancel), or its item went (deleted, kept or
@@ -290,13 +334,87 @@ mod tests {
             mcp_form(Some(&acta))
         );
         assert!(!d.has(Page::Mcp, Some("acta")));
-        // Back to the first: its edit, and Save saves it.
+        // Back to the first: its edit, and Save saves it, once the instance says so.
         d.leave();
         let back = d.open(key(Page::Mcp, "github"), mcp_form(Some(&github)));
         assert_eq!(fields(&back), edited);
-        d.saved(key(Page::Mcp, "github"), back);
+        d.saving("app.mcp_put_7".into(), key(Page::Mcp, "github"), back);
+        assert!(d.has(Page::Mcp, Some("github")));
+        assert!(d.answered("app.mcp_put_7", true));
         assert!(!d.has(Page::Mcp, Some("github")));
         assert!(d.is_open(Page::Mcp, Some("github")));
+    }
+
+    #[test]
+    fn a_save_refused_keeps_its_draft() {
+        let github = server("github", "https://api.github.com/mcp");
+        let mut d = Drafts::default();
+        d.open(key(Page::Mcp, "github"), mcp_form(Some(&github)));
+        let mut edited = fields(&mcp_form(Some(&github)));
+        edited[1] = "not an address".into();
+        d.edit(Form::Fields(edited.clone()));
+        d.saving(
+            "app.mcp_put_3".into(),
+            key(Page::Mcp, "github"),
+            Form::Fields(edited),
+        );
+        assert!(d.answered("app.mcp_put_3", false));
+        assert!(d.has(Page::Mcp, Some("github")));
+        // Answered once: again is nothing, and another command's answer isn't a save's.
+        assert!(!d.answered("app.mcp_put_3", true));
+        assert!(!d.answered("app.mcp_list_4", true));
+        assert!(d.has(Page::Mcp, Some("github")));
+    }
+
+    #[test]
+    fn a_change_after_saving_stays_once_its_saved() {
+        let github = server("github", "https://api.github.com/mcp");
+        let own = mcp_form(Some(&github));
+        let mut d = Drafts::default();
+        d.open(key(Page::Mcp, "github"), own.clone());
+        let mut first = fields(&own);
+        first[1] = "https://api.github.com/mcp/v2".into();
+        d.edit(Form::Fields(first.clone()));
+        d.saving(
+            "app.mcp_put_1".into(),
+            key(Page::Mcp, "github"),
+            Form::Fields(first.clone()),
+        );
+        // Typed on while the instance answers.
+        let mut more = first.clone();
+        more[2] = "TOKEN=secret:GH".into();
+        d.edit(Form::Fields(more.clone()));
+        d.answered("app.mcp_put_1", true);
+        assert!(d.has(Page::Mcp, Some("github")));
+        // What was saved is what it's measured against now.
+        assert!(d.edit(Form::Fields(first)));
+        assert!(!d.has(Page::Mcp, Some("github")));
+    }
+
+    #[test]
+    fn a_save_answered_after_its_form_was_left_still_lets_its_draft_go() {
+        // A routine's Save closes its form; the instance answers after.
+        let r = Routine {
+            id: "r1".into(),
+            name: "Morning brief".into(),
+            agent: "a1".into(),
+            ..Routine::default()
+        };
+        let mut d = Drafts::default();
+        d.open(
+            key(Page::Routines, "r1"),
+            Form::Routine(Box::new(RoutineDraft::of(&r))),
+        );
+        let mut renamed = RoutineDraft::of(&r);
+        renamed.name = "Evening brief".into();
+        let form = Form::Routine(Box::new(renamed));
+        d.edit(form.clone());
+        d.saving("app.routine_put_2".into(), key(Page::Routines, "r1"), form);
+        d.leave();
+        assert!(d.has(Page::Routines, Some("r1")));
+        d.answered("app.routine_put_2", true);
+        assert!(!d.has(Page::Routines, Some("r1")));
+        assert!(d.open_key().is_none());
     }
 
     #[test]
@@ -363,10 +481,17 @@ mod tests {
         d.leave();
         assert!(d.has(Page::Mcp, None));
         assert_eq!(d.open((Page::Mcp, None), mcp_form(None)), typed);
-        d.saved(key(Page::Mcp, "acta"), typed.clone());
+        d.saving(
+            "app.mcp_put_5".into(),
+            key(Page::Mcp, "acta"),
+            typed.clone(),
+        );
+        d.answered("app.mcp_put_5", true);
         assert!(!d.has(Page::Mcp, None));
         assert!(!d.has(Page::Mcp, Some("acta")));
-        // What was saved is what it's filled in with now: no draft until it's changed.
+        // What was saved is what it's filled in with now, by its name: no draft until
+        // it's changed.
+        assert!(d.is_open(Page::Mcp, Some("acta")));
         assert!(!d.edit(typed));
     }
 
@@ -378,7 +503,12 @@ mod tests {
         let mut renamed = fields(&mcp_form(Some(&github)));
         renamed[0] = "gh".into();
         d.edit(Form::Fields(renamed.clone()));
-        d.saved(key(Page::Mcp, "gh"), Form::Fields(renamed));
+        d.saving(
+            "app.mcp_put_9".into(),
+            key(Page::Mcp, "gh"),
+            Form::Fields(renamed),
+        );
+        d.answered("app.mcp_put_9", true);
         assert!(!d.has(Page::Mcp, Some("github")));
         assert!(!d.has(Page::Mcp, Some("gh")));
         assert!(d.is_open(Page::Mcp, Some("gh")));

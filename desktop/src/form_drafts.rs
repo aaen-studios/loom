@@ -65,7 +65,7 @@ impl Loom {
     }
 
     /// What the form of `page` holds now.
-    fn form_now(&self, page: Page, cx: &App) -> Option<Form> {
+    pub(super) fn form_now(&self, page: Page, cx: &App) -> Option<Form> {
         let text = |s: &Entity<InputState>| s.read(cx).value().to_string();
         let area = |s: &Entity<TextareaState>| s.read(cx).value().to_string();
         Some(match page {
@@ -88,11 +88,11 @@ impl Loom {
                     area(&self.skill_body_in),
                 ],
                 "fix" => vec![area(&self.skill_body_in)],
-                _ => vec![text(&self.note_in)],
+                _ => vec![text(&self.proposal_note_in)],
             }),
             Page::Brains => drafts::brain_fields(
-                &text(&self.set_key_in),
-                &text(&self.set_value_in),
+                &text(&self.setting_key_in),
+                &text(&self.setting_value_in),
                 &text(&self.share_in),
             ),
             Page::Routines => {
@@ -147,13 +147,13 @@ impl Loom {
                         put_area(&self.skill_body_in, &at(&f, 2), window, cx);
                     }
                     Some("fix") => put_area(&self.skill_body_in, &at(&f, 0), window, cx),
-                    Some(_) => put(&self.note_in, &at(&f, 0), window, cx),
+                    Some(_) => put(&self.proposal_note_in, &at(&f, 0), window, cx),
                     None => {}
                 }
             }
             (Page::Brains, Form::Fields(f)) => {
-                put(&self.set_key_in, &at(&f, 0), window, cx);
-                put(&self.set_value_in, &at(&f, 1), window, cx);
+                put(&self.setting_key_in, &at(&f, 0), window, cx);
+                put(&self.setting_value_in, &at(&f, 1), window, cx);
                 put(&self.share_in, &at(&f, 2), window, cx);
             }
             (Page::Routines, Form::Routine(d)) => {
@@ -219,11 +219,18 @@ impl Loom {
         }
     }
 
-    /// The form of `page` was saved, as item `key`: no draft, and what it holds is what
-    /// it was filled in with now.
-    pub(super) fn form_saved(&mut self, page: Page, key: String, cx: &App) {
-        if let Some(now) = self.form_now(page, cx) {
-            self.model.drafts.saved((page, Some(key)), now);
+    /// The open form of `page`, holding `now` (read before the command changes anything),
+    /// is being saved as item `key`, or a new one for none, by the command `cmd`: its
+    /// draft and dot stay until the instance answers that it's saved.
+    pub(super) fn form_saving(
+        &mut self,
+        page: Page,
+        key: Option<String>,
+        cmd: &Value,
+        now: Option<Form>,
+    ) {
+        if let (Some(id), Some(now)) = (cmd.get("id").and_then(Value::as_str), now) {
+            self.model.drafts.saving(id.to_string(), (page, key), now);
         }
     }
 

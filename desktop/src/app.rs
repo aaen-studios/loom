@@ -551,7 +551,9 @@ pub struct Loom {
     panel_opening: Option<String>,
     /// What came through the open panel's door, waiting for the window's task.
     door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
+    /// A note to remember, on the Memory page, and a proposed note's text, each its own.
     note_in: Entity<InputState>,
+    proposal_note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     /// The instructions every agent follows, on the Defaults page.
     every_in: Entity<TextareaState>,
@@ -628,8 +630,13 @@ pub struct Loom {
     /// On the Brains page: none for the first, `Some(None)` for the ACP Registry, and
     /// `Some(Some(name))` for the program picked.
     program_open: Option<Option<String>>,
+    /// A secret to add, its name and value, on the Secrets page.
     set_key_in: Entity<InputState>,
     set_value_in: Entity<InputState>,
+    /// The open program's setting to add, its name and value: its own, not the Secrets
+    /// page's.
+    setting_key_in: Entity<InputState>,
+    setting_value_in: Entity<InputState>,
     /// The open program's share: tokens each person may use, and whether each month.
     share_in: Entity<InputState>,
     share_month: bool,
@@ -1169,6 +1176,7 @@ impl Loom {
         }
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
+        let proposal_note_in = input(window, cx, "Something to remember", false);
         let profile_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
@@ -1226,6 +1234,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let mcp_client_in = input(window, cx, "Only if its sign-in asks for one", false);
         let mcp_client_secret_in = input(window, cx, "secret:KEY, or the secret", true);
         let set_value_in = input(window, cx, "Its value", true);
+        let setting_key_in = input(window, cx, "ntnu-password", false);
+        let setting_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
@@ -1246,9 +1256,9 @@ ACTA_KEY=secret:ACTA_KEY",
             &mcp_client_secret_in,
             &skill_name_in,
             &skill_desc_in,
-            &note_in,
-            &set_key_in,
-            &set_value_in,
+            &proposal_note_in,
+            &setting_key_in,
+            &setting_value_in,
             &share_in,
             &routine_name_in,
         ] {
@@ -1675,6 +1685,7 @@ ACTA_KEY=secret:ACTA_KEY",
             panel_opening: None,
             door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
+            proposal_note_in,
             profile_in,
             every_in,
             routine_name_in,
@@ -1765,6 +1776,8 @@ ACTA_KEY=secret:ACTA_KEY",
             check_in,
             set_key_in,
             set_value_in,
+            setting_key_in,
+            setting_value_in,
             share_in,
             share_month: false,
             instructions_in,
@@ -13382,15 +13395,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let client = this.mcp_client_in.read(cx).value().to_string();
                 let secret = this.mcp_client_secret_in.read(cx).value().to_string();
+                let now = this.form_now(DraftPage::Mcp, cx);
                 let f = this.model.put_mcp(crate::model::with_client(
                     crate::model::server_args(&name, &line, &settings),
                     &client,
                     &secret,
                 ));
+                // Its draft stays until the instance says it's saved.
+                this.form_saving(DraftPage::Mcp, Some(name.clone()), &f, now);
                 this.send(f);
                 // Side by side, it stays picked, as it was saved.
-                this.mcp_open = split.then(|| Some(name.clone()));
-                this.form_saved(DraftPage::Mcp, name, cx);
+                this.mcp_open = split.then_some(Some(name));
                 cx.notify();
             }));
         let changing = open.is_some();
@@ -13668,11 +13683,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                     return;
                 }
+                let now = this.form_now(DraftPage::Skills, cx);
                 let f = this.model.save_skill(&name, &description, &text);
+                // Its draft stays until the instance says it's saved.
+                this.form_saving(DraftPage::Skills, Some(name.clone()), &f, now);
                 this.send(f);
                 // Side by side, it stays picked, as it was saved.
-                this.skill_open = split.then(|| Some(name.clone()));
-                this.form_saved(DraftPage::Skills, name, cx);
+                this.skill_open = split.then_some(Some(name));
                 cx.notify();
             }));
         let changing = open.is_some();
@@ -13888,12 +13905,16 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else if p.kind == "fix" {
                     p.body = this.skill_body_in.read(cx).value().to_string();
                 } else {
-                    p.text = this.note_in.read(cx).value().to_string();
+                    p.text = this.proposal_note_in.read(cx).value().to_string();
                 }
+                let now = this.form_now(DraftPage::Proposals, cx);
                 let f = this.model.keep_proposal(&p);
+                // Its draft stays until the instance says it's kept, and with its row
+                // again if it refuses.
+                this.form_saving(DraftPage::Proposals, Some(p.id.clone()), &f, now);
                 this.send(f);
+                this.leave_form(cx);
                 this.proposal_open = None;
-                this.model.drafts.discard();
                 cx.notify();
             }));
         let cancel = self
@@ -13968,7 +13989,7 @@ ACTA_KEY=secret:ACTA_KEY",
             rows.push(self.text_row("The skill, fixed", None, Textarea::new(&self.skill_body_in)));
             groups.push(self.group(None, rows));
         } else {
-            let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
+            let mut rows = vec![self.field_row("Note", Input::new(&self.proposal_note_in))];
             if !open.site.is_empty() || open.shared {
                 let mut how = Vec::new();
                 if !open.site.is_empty() {
@@ -16323,13 +16344,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::S))
                 .px(px(space::L))
                 .py(px(space::M))
-                .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_key_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_value_in)))
                 .child(
                     self.small_button(format!("set-{}", prog.name), "Add setting", false)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            let key = this.set_key_in.read(cx).value().to_string();
-                            let value = this.set_value_in.read(cx).value().to_string();
+                            let key = this.setting_key_in.read(cx).value().to_string();
+                            let value = this.setting_value_in.read(cx).value().to_string();
                             if key.trim().is_empty() {
                                 this.model.notices.push(
                                     "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
@@ -16339,7 +16360,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                             let f = this.model.set_setting(&program, &key, Some(&value));
                             this.send(f);
-                            for s in [&this.set_key_in, &this.set_value_in] {
+                            for s in [&this.setting_key_in, &this.setting_value_in] {
                                 s.update(cx, |s, cx| s.set_value("", window, cx));
                             }
                             cx.notify();

@@ -1303,10 +1303,14 @@ impl Loom {
                     webhook,
                     flow,
                 };
+                let now = this.form_now(DraftPage::Routines, cx);
                 let f = this.model.save_routine(&form);
+                // Its draft stays until the instance says it's saved; the form closes.
+                let key = (!editing.is_empty()).then(|| editing.clone());
+                this.form_saving(DraftPage::Routines, key, &f, now);
                 this.send(f);
+                this.leave_form(cx);
                 this.routine_open = None;
-                this.model.drafts.discard();
                 cx.notify();
             }));
         let cancel = self
