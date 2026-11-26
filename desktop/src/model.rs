@@ -3796,6 +3796,35 @@ pub const CARD_LINK: &str = "loom-card:";
 /// How the id of a card's piece in the composer starts, then what it names: the card's
 /// id, or its link.
 pub const CARD: &str = "loom-card:";
+/// The least room a card pill's cut title is left (`pill_fit`); with less, its pill
+/// shows its id alone.
+pub const PILL_TITLE_LEAST: f32 = 40.0;
+
+/// How wide a card's pill is on a line of a message's words (PLAN.md, "Cards in
+/// messages"), from its own width, its width with no title (`bare`), the room left on
+/// the line where it would start and the line's width. One that fits there keeps its
+/// width, and one that fits a whole line starts the next (None). Wider than a line, its
+/// title is cut to the room left; with no room there for some of its title, it starts
+/// the next line (None), where it's asked again with the whole line's room, and a line
+/// with no room for any of its title shows its id alone.
+pub fn pill_fit(natural: f32, bare: f32, room: f32, line: f32) -> Option<f32> {
+    if natural <= room {
+        Some(natural)
+    } else if natural <= line {
+        None
+    } else if pill_titled(room, bare) {
+        Some(room)
+    } else if room < line {
+        None
+    } else {
+        Some(bare)
+    }
+}
+
+/// Whether a card's pill cut to `width` keeps its title (`pill_fit`).
+pub fn pill_titled(width: f32, bare: f32) -> bool {
+    width >= bare + PILL_TITLE_LEAST
+}
 
 /// A card on one of the person's Acta boards that a message names, as the instance
 /// looked it up (protocol.md, "Messages and streaming"), or one that isn't there or that
@@ -4246,6 +4275,29 @@ mod card_tests {
         assert_eq!(canceled.link(), "https://acta.aaenz.no/w/b#X-1");
         let gone = card(json!({"id": "LOO-9", "board": "aaen-studios/loom", "missing": true}));
         assert!(gone.missing);
+    }
+
+    #[test]
+    fn a_pill_wider_than_its_line_has_its_title_cut() {
+        // A pill 380 wide, 100 with no title.
+        let fit = |room: f32, line: f32| pill_fit(380.0, 100.0, room, line);
+        // It fits where it is, or starts the next line whole.
+        assert_eq!(fit(400.0, 500.0), Some(380.0));
+        assert_eq!(fit(200.0, 500.0), None);
+        // Wider than its line: its title is cut to the room left there.
+        assert_eq!(fit(300.0, 320.0), Some(300.0));
+        assert_eq!(fit(320.0, 320.0), Some(320.0));
+        assert!(pill_titled(300.0, 100.0));
+        // Room there for less than a few letters of it: the next line, where its title
+        // is cut to the whole line.
+        assert!(!pill_titled(139.0, 100.0) && pill_titled(140.0, 100.0));
+        assert_eq!(fit(120.0, 320.0), None);
+        assert_eq!(fit(60.0, 320.0), None);
+        assert_eq!(fit(320.0, 320.0), Some(320.0));
+        // A line with no room for any of its title: its id alone, even past a line
+        // narrower than that.
+        assert_eq!(fit(130.0, 130.0), Some(100.0));
+        assert_eq!(fit(90.0, 90.0), Some(100.0));
     }
 
     #[test]

@@ -1099,7 +1099,7 @@ fn layout_measured_flow(
         return InlineFlowLayout::default();
     }
 
-    let objects = prepared_objects
+    let mut objects = prepared_objects
         .iter()
         .map(|object| object.clone().map(|object| object.fit_text(wrap_width)))
         .collect::<Vec<_>>();
@@ -1121,6 +1121,14 @@ fn layout_measured_flow(
             })
         })
         .collect::<Vec<_>>();
+    cut_wide_objects(
+        items,
+        &image_sizes,
+        &mut objects,
+        text_style,
+        wrap_width,
+        window,
+    );
     let line_ranges = line_ranges(
         items,
         &image_sizes,
@@ -1419,6 +1427,75 @@ fn code_background(
         ),
         style: Arc::new(style),
     })
+}
+
+/// loom: each object the line may cut (`InlineElement::cut_to_fit`) that's wider than
+/// the wrap takes the width its fit gives for the room left on the line it starts, or,
+/// when the fit says so, starts the next line at the width it gives for a whole line.
+/// In order, since one cut moves what comes after it.
+fn cut_wide_objects(
+    items: &[MeasureItem],
+    image_sizes: &[Option<Size<Pixels>>],
+    objects: &mut [Option<MeasuredInlineObject>],
+    text_style: &TextStyle,
+    wrap_width: Option<Pixels>,
+    window: &mut Window,
+) {
+    let Some(wrap) = wrap_width else {
+        return;
+    };
+    // A line it's cut to leaves room for a space after it, so the words after it break
+    // there, and a little more, as the wrapper's sums can run wider than the shaped words.
+    let space = window
+        .text_system()
+        .shape_line(
+            " ".into(),
+            text_style.font_size.to_pixels(window.rem_size()),
+            &[text_style.to_run(1)],
+            None,
+        )
+        .width;
+    let full = (wrap - space - px(2.)).max(px(1.));
+    let mut item_start = 0;
+    for (ix, item) in items.iter().enumerate() {
+        let at = item_start;
+        item_start += item.len();
+        let Some((natural, fit)) = objects[ix]
+            .as_ref()
+            .and_then(|o| Some((o.metrics.size.width, o.fit.clone()?)))
+        else {
+            continue;
+        };
+        if natural <= wrap {
+            continue;
+        }
+        // Where it starts: a sliver of it stays on its line unless that line is full.
+        if let Some(object) = objects[ix].as_mut() {
+            object.metrics.size.width = px(1.);
+        }
+        let lines = line_ranges(items, image_sizes, objects, text_style, wrap_width, window);
+        let room = match lines.iter().find(|line| line.start <= at && at < line.end) {
+            Some(line) if line.start < at => {
+                let spans = shaped_spans(
+                    items,
+                    image_sizes,
+                    objects,
+                    text_style,
+                    &(line.start..at),
+                    window,
+                );
+                (full - spans_width(&spans, line.start..at)).max(Pixels::ZERO)
+            }
+            _ => full,
+        };
+        let width = (fit.width)(natural, room, full)
+            .or_else(|| (fit.width)(natural, full, full))
+            .unwrap_or(full);
+        if let Some(object) = objects[ix].as_mut() {
+            object.metrics.size.width = width.max(px(1.));
+            object.cut = Some(natural);
+        }
+    }
 }
 
 fn line_ranges(

@@ -1907,6 +1907,7 @@ ACTA_KEY=secret:ACTA_KEY",
             place,
             notice: None,
         };
+        loom.model.keep_boards(&loom.prefs.card_boards);
         loom.fetch();
         window.focus(&loom.keys, cx);
         loom
@@ -2467,6 +2468,7 @@ ACTA_KEY=secret:ACTA_KEY",
         // The choice is the first server's.
         self.show_server("", cx);
         self.model = Model::new();
+        self.model.keep_boards(&self.prefs.card_boards);
         self.screen = Screen::Chat;
         self.menu = None;
         // The old core stops, and its instance with it, as it's dropped.
@@ -2633,6 +2635,7 @@ ACTA_KEY=secret:ACTA_KEY",
         std::mem::swap(&mut self.events, &mut a.events);
         std::mem::swap(&mut self.model, &mut a.model);
         std::mem::swap(&mut self.here, &mut a.dir);
+        self.model.keep_boards(&self.prefs.card_boards);
         keep_last_server(&self.here);
         // The one away notifies whatever the window does; the one here, only while it's
         // not looked at, and it's looked at now.
@@ -9094,10 +9097,10 @@ ACTA_KEY=secret:ACTA_KEY",
         let drawn = pieces.clone();
         Textarea::new(&self.composer)
             .appearance(false)
-            .token(move |t, _, _| {
+            .token(move |t, window, cx| {
                 // A selected piece has the selection's colour while the words beside it
                 // show theirs: the textarea leaves it to the piece (LOO-347).
-                composer_token(p, &drawn, t.token().id(), t.token().text(), t.selection())
+                composer_token(p, &drawn, t, window, cx)
             })
             .on_token_click(move |e, _, cx| {
                 let id = e.token().id().to_string();
@@ -22719,12 +22722,15 @@ fn card_id_text(id: &str, color: Hsla) -> Div {
 /// tile, its id in mono, its title cut to fit and a dot in its status's colour, on the
 /// bubble's fill with a line around it. Under the pointer its preview shows under it, and
 /// a click opens it in Acta. A card that isn't there, or that the person can't see, is
-/// its id alone, quiet; one still being looked up, its tile and its id.
+/// its id alone, quiet; one still being looked up, its tile and its id. `cut` is the
+/// width a line too narrow for it cut it to, and whether its title still shows there
+/// (`model::pill_fit`).
 fn card_pill(
     p: Palette,
     key: SharedString,
     id: &str,
     card: Option<&model::ActaCard>,
+    cut: Option<(f32, bool)>,
 ) -> AnyElement {
     if card.is_some_and(|c| c.missing) {
         return card_id_text(id, p.ink_3).into_any_element();
@@ -22733,6 +22739,7 @@ fn card_pill(
         .id(SharedString::from(format!("{key}-pill")))
         .h(px(control::PILL))
         .max_w(px(layout::PILL_TITLE + 110.0))
+        .when_some(cut, |d, (w, _)| d.w(px(w)))
         .pl(px(4.0))
         .pr(px(7.0))
         .flex()
@@ -22758,7 +22765,7 @@ fn card_pill(
         .when(card.struck(), |d| d.line_through())
         .child(card.title.clone());
     let pill = pill
-        .child(title)
+        .when(cut.is_none_or(|(_, titled)| titled), |d| d.child(title))
         .child(
             div()
                 .flex_none()
@@ -22772,9 +22779,47 @@ fn card_pill(
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
         .close_delay(Duration::from_millis(150))
+        // In a row narrower than it, under a message, it shrinks, its title cut.
+        .min_w_0()
         .trigger(pill)
         .content(move |_, _, _| card_preview(p, &card))
         .into_any_element()
+}
+
+/// A card's pill on a line `line` wide that isn't a message's words, the composer's:
+/// measured as it is, and when it's wider than the line, cut to it as a message's words
+/// cut it (`model::pill_fit`), there being nowhere else on the line for it to start.
+fn line_pill(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(c) = card.filter(|c| !c.missing) else {
+        return card_pill(p, key, id, card, None);
+    };
+    let mut measured = card_pill(p, key.clone(), id, card, None);
+    let natural = measured
+        .layout_as_root(
+            gpui::size(
+                gpui::AvailableSpace::MaxContent,
+                gpui::AvailableSpace::MaxContent,
+            ),
+            window,
+            cx,
+        )
+        .width
+        .as_f32();
+    let cut = (natural > line).then(|| {
+        let bare =
+            natural - (text_width(&c.title, size::SMALL, window).min(layout::PILL_TITLE) + 5.0);
+        let w = model::pill_fit(natural, bare, line, line).unwrap_or(line);
+        (w, model::pill_titled(w, bare))
+    });
+    card_pill(p, key, id, card, cut)
 }
 
 /// A card's preview, under its pill: its board and id, its title, chips for its status (in
@@ -22935,15 +22980,40 @@ impl MarkdownPlugin for CardPills {
     fn render_inline(
         &self,
         node: &MarkdownNode,
-        _context: &InlineRenderContext,
-        _window: &mut Window,
+        context: &InlineRenderContext,
+        window: &mut Window,
         _cx: &mut App,
     ) -> Option<InlineElement> {
         let id = node.data::<String>()?.clone();
         let (p, card) = CARD_TIPS.with(|t| t.borrow().get(&id).cloned())?;
         let key = SharedString::from(format!("card-{id}"));
+        // How much of it is its title, with the gap before it, for a line that cuts it.
+        let run = context.text_style().to_run(card.title.len());
+        let title = window
+            .text_system()
+            .shape_line(
+                SharedString::from(card.title.clone()),
+                px(size::SMALL),
+                &[run],
+                None,
+            )
+            .width
+            .as_f32()
+            .min(layout::PILL_TITLE)
+            + 5.0;
+        let pill = card_pill(p, key.clone(), &id, Some(&card), None);
         // Its text sits on the line's baseline.
-        Some(InlineElement::new(card_pill(p, key, &id, Some(&card))).with_baseline(px(15.5)))
+        Some(InlineElement::new(pill).with_baseline(px(15.5)).cut_to_fit(
+            move |natural, room, line| {
+                let bare = natural.as_f32() - title;
+                model::pill_fit(natural.as_f32(), bare, room.as_f32(), line.as_f32()).map(px)
+            },
+            move |natural, width| {
+                let w = width.as_f32();
+                let titled = model::pill_titled(w, natural.as_f32() - title);
+                card_pill(p, key.clone(), &id, Some(&card), Some((w, titled)))
+            },
+        ))
     }
 }
 
@@ -23213,24 +23283,44 @@ struct ComposerPieces {
 /// stands with others), or a link pasted as a preview as its site's icon and its page's
 /// title, or its site until that's known. The whole name or address shows on hover.
 /// While the selection takes it in, it has the selection's colour across the line's height,
-/// `selected`, as the words beside it do.
+/// as the words beside it do. None is wider than the composer's line: a card's pill has its
+/// title cut, as in a message (`line_pill`).
 fn composer_token(
+    p: Palette,
+    pieces: &ComposerPieces,
+    t: &gpui_kit::base::input::InlineTokenContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let line = t.available_width();
+    let (id, words) = (t.token().id(), t.token().text());
+    div()
+        .h_full()
+        .max_w(line)
+        .flex()
+        .items_center()
+        .when_some(t.selection(), |d, color| d.bg(color))
+        .child(composer_piece_of(
+            p,
+            pieces,
+            id,
+            words,
+            line.as_f32(),
+            window,
+            cx,
+        ))
+        .into_any_element()
+}
+
+fn composer_piece_of(
     p: Palette,
     pieces: &ComposerPieces,
     id: &str,
     words: &str,
-    selected: Option<Hsla>,
+    line: f32,
+    window: &mut Window,
+    cx: &mut App,
 ) -> AnyElement {
-    div()
-        .h_full()
-        .flex()
-        .items_center()
-        .when_some(selected, |d, color| d.bg(color))
-        .child(composer_piece_of(p, pieces, id, words))
-        .into_any_element()
-}
-
-fn composer_piece_of(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
     let row = |tip: String, tint: Hsla| {
         div()
             .id(SharedString::from(format!("piece-{id}")))
@@ -23267,12 +23357,8 @@ fn composer_piece_of(p: Palette, pieces: &ComposerPieces, id: &str, words: &str)
             .filter(|i| !i.is_empty())
             .or_else(|| model::card_link(r).map(|(_, i)| i))
             .unwrap_or_else(|| r.to_string());
-        return card_pill(
-            p,
-            SharedString::from(format!("piece-{id}")),
-            &card_id,
-            shown.as_ref(),
-        );
+        let key = SharedString::from(format!("piece-{id}"));
+        return line_pill(p, key, &card_id, shown.as_ref(), line, window, cx);
     }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {

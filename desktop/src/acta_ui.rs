@@ -121,6 +121,7 @@ pub(super) fn made_pills(p: Palette, m: &Message) -> Option<Div> {
             SharedString::from(format!("made-{}-{}", m.id, c.id)),
             &c.id,
             Some(c),
+            None,
         ));
     }
     Some(row)
@@ -791,6 +792,9 @@ impl Loom {
                 let description = fields.description.read(cx).value().to_string();
                 if let Some(f) = this.model.make_card(&title, &description) {
                     this.send(f);
+                    // The board it's made on comes first next time, after a restart too.
+                    this.prefs.card_boards = this.model.acta.used.clone();
+                    this.prefs.save(&data_dir());
                 }
                 cx.notify();
             }));

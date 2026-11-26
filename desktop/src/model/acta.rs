@@ -25,6 +25,8 @@ const DONE_MOST: u32 = 30;
 const OPEN_MOST: u32 = 200;
 /// The longest title the form fills in from a message's first line, in characters.
 const TITLE_MOST: usize = 120;
+/// How many of the boards cards were made on are kept, for the pickers' order.
+const USED_BOARDS: usize = 20;
 
 /// A status in words: "In progress".
 pub fn status_name(status: &str) -> &'static str {
@@ -682,7 +684,14 @@ impl Model {
         let board = f.board.clone();
         self.acta.used.retain(|b| *b != board);
         self.acta.used.insert(0, board);
+        self.acta.used.truncate(USED_BOARDS);
         Some(self.panel_cmd("card.create", args, Ask::Create))
+    }
+
+    /// Takes the boards cards were made on as this device kept them (`Prefs::card_boards`),
+    /// the last first, for the pickers' order (`board_choices`).
+    pub fn keep_boards(&mut self, kept: &[String]) {
+        self.acta.used = kept.iter().take(USED_BOARDS).cloned().collect();
     }
 
     // --- A board ---
@@ -1142,6 +1151,17 @@ mod tests {
         );
         assert_eq!(m.board_choices()[1].1, "loom");
         assert_eq!(m.board_choices()[0].1, "calcite");
+        // Kept on this device, the order comes back after a restart, and a board that's
+        // gone from the person's is left out.
+        let kept = m.acta.used.clone();
+        assert_eq!(kept, ["aaen-studios/calcite"]);
+        let mut again = acta_model();
+        again.keep_boards(&["w/gone".into(), kept[0].clone()]);
+        assert_eq!(again.board_choices()[0].0, "aaen-studios/calcite");
+        assert_eq!(again.board_choices().len(), 2);
+        let many: Vec<String> = (0..30).map(|n| format!("w/{n}")).collect();
+        again.keep_boards(&many);
+        assert_eq!(again.acta.used.len(), USED_BOARDS);
     }
 
     #[test]
