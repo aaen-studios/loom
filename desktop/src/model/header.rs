@@ -1,7 +1,9 @@
 //! How the chat's header fits its width (PLAN.md, "Design"): in a narrow window
 //! its chips give up what they can, one step at a time in a fixed order, before anything
 //! in it reaches the window's buttons. Once every step is taken, the head's name
-//! shortens to a few letters, then the permission's words, then the rest of the name.
+//! shortens to a few letters, then the permission's words, and a permission chip whose
+//! words are cut to nothing goes, giving the name back what it can. Then the rest of the
+//! name goes.
 
 use crate::tokens::space;
 
@@ -32,6 +34,8 @@ pub struct Sizes {
     /// How much the chevrons of the agent's menu and the permission chip take, with the
     /// gaps before them.
     pub chevrons: f32,
+    /// How much of `chevrons` is the permission chip's, which goes with the chip.
+    pub permission_chevron: f32,
 }
 
 /// A step a narrowing header takes, in the order it takes them (`ORDER`).
@@ -83,7 +87,8 @@ pub struct Fit {
     pub chevrons: bool,
     /// The most the head's name's words take, once they shorten.
     pub name: Option<f32>,
-    /// The most the permission's words take, once even they shorten.
+    /// The most the permission's words take, once even they shorten. `Some(0.0)`: they
+    /// are cut to nothing, and the chip goes with them (`Fit::permission_shown`).
     pub permission: Option<f32>,
 }
 
@@ -110,11 +115,28 @@ impl Fit {
         }
     }
 
+    /// Whether the permission chip shows: not once its words are cut to nothing, when it
+    /// would be an empty chip.
+    pub fn permission_shown(&self) -> bool {
+        self.permission != Some(0.0)
+    }
+
     /// How wide the header's things are, laid out this way.
     pub fn width(&self, s: &Sizes) -> f32 {
         let short = |words: f32, most: Option<f32>| most.map_or(0.0, |n| (words - n).max(0.0));
         let members = if self.members { 0.0 } else { s.members };
-        let chevrons = if self.chevrons { 0.0 } else { s.chevrons };
+        let shown = self.permission_shown();
+        // A chip that's gone took its chevron with it.
+        let chevrons = match (self.chevrons, shown) {
+            (true, _) => 0.0,
+            (false, true) => s.chevrons,
+            (false, false) => s.chevrons - s.permission_chevron,
+        };
+        let permission = if shown {
+            s.permission - short(s.permission_words, self.permission)
+        } else {
+            0.0
+        };
         let chips = [
             s.pins,
             if self.browser_word {
@@ -128,7 +150,7 @@ impl Fit {
                 Brain::Icon => s.brain.2,
             },
             s.context,
-            s.permission - short(s.permission_words, self.permission),
+            permission,
         ];
         let shown = chips.iter().filter(|w| **w > 0.0).count();
         let pull = if s.context > 0.0 { self.gap / 2.0 } else { 0.0 };
@@ -144,7 +166,7 @@ impl Fit {
             brain: s.brain.0 > 0.0 && self.brain != Brain::Whole,
             browser: s.browser.0 > s.browser.1 && !self.browser_word,
             head: shorter(s.name, self.name) || (s.members > 0.0 && !self.members),
-            permission: shorter(s.permission_words, self.permission),
+            permission: self.permission_shown() && shorter(s.permission_words, self.permission),
         }
     }
 }
@@ -169,7 +191,8 @@ pub const NAME_LEAST: f32 = 48.0;
 
 /// How the header fits `s.room`: whole while it can, then each step of `ORDER` in turn
 /// until it fits, then the name shortened down to `NAME_LEAST`, then the permission's
-/// words, and only then the rest of the name.
+/// words, and only then the rest of the name. A permission chip whose words are cut to
+/// nothing goes, and the name gets back what that gives, all of it once it fits.
 pub fn fit(s: &Sizes) -> Fit {
     let mut f = Fit::WHOLE;
     if f.width(s) <= s.room {
@@ -186,6 +209,13 @@ pub fn fit(s: &Sizes) -> Fit {
     let over = f.width(s) - s.room;
     if over > 0.0 && s.permission_words > 0.0 {
         f.permission = Some((s.permission_words - over).max(0.0));
+        if !f.permission_shown() {
+            f.name = None;
+            let over = f.width(s) - s.room;
+            if over > 0.0 {
+                f.name = Some((s.name - over).max(s.name.min(NAME_LEAST)));
+            }
+        }
     }
     let over = f.width(s) - s.room;
     if over > 0.0 {
@@ -213,6 +243,7 @@ mod tests {
             permission: 90.0,
             permission_words: 58.0,
             chevrons: 36.0,
+            permission_chevron: 16.0,
         }
     }
 
@@ -348,13 +379,17 @@ mod tests {
         let f = fit(&at);
         assert_eq!((f.name, f.permission), (Some(NAME_LEAST), Some(40.0)));
         assert_eq!(f.width(&at), at.room);
-        // The permission's 58 gone too, then 10 more off the name.
+        // The permission's 58 gone too, and with them its chip: its padding and the gap
+        // before it, 24, go back to the name, which is then 10 short of that.
         let at = Sizes {
             room: least - 52.0 - 58.0 - 10.0,
             ..s
         };
         let f = fit(&at);
-        assert_eq!((f.name, f.permission), (Some(NAME_LEAST - 10.0), Some(0.0)));
+        assert_eq!(
+            (f.name, f.permission),
+            (Some(NAME_LEAST + 24.0 - 10.0), Some(0.0))
+        );
         assert_eq!(f.width(&at), at.room);
         // With nothing left to give, they're as short as they go.
         let at = Sizes { room: 0.0, ..s };
@@ -387,6 +422,7 @@ mod tests {
             permission: 0.0,
             permission_words: 0.0,
             chevrons: 0.0,
+            permission_chevron: 0.0,
         }
     }
 
@@ -449,13 +485,49 @@ mod tests {
 
     #[test]
     fn the_narrowest_window_fits_an_agents_header_with_every_chip() {
-        // It fits by shortening the name to its least (77 off), the permission's words to
-        // nothing (115), and 8 more off the name.
+        // It fits by shortening the name to its least (77 off) and the permission's words
+        // to nothing (115). The empty chip goes, its padding and the gap before it, 24,
+        // and the name gets them back: 8 more than its least would have been, 64.
         let s = every_chip();
         let f = fit(&s);
         assert_eq!((f.brain, f.browser_word), (Brain::Icon, false));
-        assert_eq!((f.name, f.permission), (Some(NAME_LEAST - 8.0), Some(0.0)));
+        assert_eq!((f.name, f.permission), (Some(64.0), Some(0.0)));
+        assert!(!f.permission_shown());
         assert_eq!(f.width(&s), s.room);
+    }
+
+    #[test]
+    fn a_permission_chip_cut_to_nothing_goes() {
+        // A short name, kept whole, with "Asks first" given up to nothing: the empty chip
+        // goes, its chevron with it (gone already), and what's left is the head, the brain's
+        // icon and the ring, with two gaps less half of one.
+        let s = Sizes {
+            head: 70.0 + 40.0,
+            name: 40.0,
+            ..agent()
+        };
+        let least = *widths(&s).last().unwrap();
+        let s = Sizes {
+            room: least - 70.0,
+            ..s
+        };
+        let f = fit(&s);
+        assert_eq!((f.name, f.permission), (None, Some(0.0)));
+        assert!(!f.permission_shown());
+        assert_eq!(
+            f.width(&s),
+            110.0 - 20.0 + 28.0 + 26.0 + 2.0 * space::S - space::S / 2.0
+        );
+        assert!(f.width(&s) <= s.room);
+        // Neither the name nor the gone chip shows as cut.
+        assert!(!f.cut(&s).head);
+        assert!(!f.cut(&s).permission);
+        // Its words cut to a few letters, it stays.
+        let s = Sizes {
+            room: least - 20.0,
+            ..s
+        };
+        assert!(fit(&s).permission_shown());
     }
 
     #[test]
@@ -480,13 +552,13 @@ mod tests {
             ..agent()
         };
         assert_eq!(fit(&s).cut(&s), brain);
-        // With every chip, every control lost some.
+        // With every chip, every control lost some, and the permission chip went.
         let s = every_chip();
         let all = Cut {
             brain: true,
             browser: true,
             head: true,
-            permission: true,
+            permission: false,
         };
         assert_eq!(fit(&s).cut(&s), all);
         // A name shorter than the least is kept whole while the permission's words give.

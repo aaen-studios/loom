@@ -8574,46 +8574,49 @@ ACTA_KEY=secret:ACTA_KEY",
                 .when(browsing || watching, |d| d.child(globe))
                 .children(self.brain_chip(&agent, fit.brain, cut.brain, cx))
                 .children(context)
-                .child(
-                    div()
-                        .id("permission-menu")
-                        .role(Role::Button)
-                        .aria_label(format!("Permission: {permission}"))
-                        .occlude()
-                        .px(px(space::S))
-                        .py(px(space::XS))
-                        .rounded(px(radius::ROW))
-                        .text_size(px(size::CAPTION))
-                        .text_color(p.ink_2)
-                        .cursor_pointer()
-                        .soft_hover(transparent_black(), p.hover, None)
-                        .when(self.menu == Some(Menu::Permission), |d| d.bg(p.hover))
-                        .when(cut.permission, |d| d.tooltip(tip(permission)))
-                        .flex()
-                        .items_center()
-                        .gap(px(space::XS))
-                        .child(
-                            div()
-                                .when_some(fit.permission, |d, most| d.max_w(px(most)))
-                                .truncate()
-                                .child(permission),
-                        )
-                        .when(fit.chevrons, |d| {
-                            d.child(
-                                Icon::new(IconName::ChevronDown)
-                                    .xsmall()
-                                    .text_color(p.ink_3),
+                // Its words cut to nothing, the chip goes rather than stay empty.
+                .when(fit.permission_shown(), |d| {
+                    d.child(
+                        div()
+                            .id("permission-menu")
+                            .role(Role::Button)
+                            .aria_label(format!("Permission: {permission}"))
+                            .occlude()
+                            .px(px(space::S))
+                            .py(px(space::XS))
+                            .rounded(px(radius::ROW))
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_2)
+                            .cursor_pointer()
+                            .soft_hover(transparent_black(), p.hover, None)
+                            .when(self.menu == Some(Menu::Permission), |d| d.bg(p.hover))
+                            .when(cut.permission, |d| d.tooltip(tip(permission)))
+                            .flex()
+                            .items_center()
+                            .gap(px(space::XS))
+                            .child(
+                                div()
+                                    .when_some(fit.permission, |d, most| d.max_w(px(most)))
+                                    .truncate()
+                                    .child(permission),
                             )
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.menu = if this.menu == Some(Menu::Permission) {
-                                None
-                            } else {
-                                Some(Menu::Permission)
-                            };
-                            cx.notify();
-                        })),
-                ),
+                            .when(fit.chevrons, |d| {
+                                d.child(
+                                    Icon::new(IconName::ChevronDown)
+                                        .xsmall()
+                                        .text_color(p.ink_3),
+                                )
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.menu = if this.menu == Some(Menu::Permission) {
+                                    None
+                                } else {
+                                    Some(Menu::Permission)
+                                };
+                                cx.notify();
+                            })),
+                    )
+                }),
         )
     }
 
@@ -8688,6 +8691,7 @@ ACTA_KEY=secret:ACTA_KEY",
             permission: chip + permission_words + chevron,
             permission_words,
             chevrons: head_chevron + chevron,
+            permission_chevron: chevron,
         }
     }
 
