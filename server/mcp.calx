@@ -627,7 +627,12 @@ impl Code {
         } else {
             self.servers.insert(t.server.copy(), server)
         }
-        if act > 0 { _ = link.send("/api/mcp/done", Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy()).done()) }
+        if act > 0 {
+            var done = Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy())
+            // A thread started on T3: the instance wakes the agent when it finishes.
+            if why.len() == 0 and t.name == "t3_thread_launch" { done = done.s("server", t.server.copy()).j("launched", value.copy()) }
+            _ = link.send("/api/mcp/done", done.done())
+        }
         if why.len() > 0 { fail "{why}" }
         return value
     }
