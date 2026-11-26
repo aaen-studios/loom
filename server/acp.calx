@@ -195,12 +195,19 @@ pub fn session_meta() -> Json {
 
 const OPENCODE_CONFIG: str = "OPENCODE_CONFIG_CONTENT"
 
+const CACHE_HOUR: str = "ENABLE_PROMPT_CACHING_1H"
+
 // An agent program's environment (a JSON object), with OpenCode's config
 // allowing Code Mode's tools: added to the config the settings give, where
-// they give one, which keeps any rule of its own for them.
+// they give one, which keeps any rule of its own for them. And Claude Code
+// asked for a prompt cache that lasts an hour rather than five minutes (PLAN.md,
+// "One endless chat"), unless the settings say otherwise: most people come back
+// to a chat within the hour, and a turn then reads the cache instead of writing
+// the whole context to it again. Other programs don't read it.
 pub fn program_env(env: Json) -> Json {
     var vars = LinkedMap<String, Json>()
     if let Json.Object(m) = env { vars = m.copy() }
+    if not vars.contains(String(CACHE_HOUR)) and not vars.contains(String("FORCE_PROMPT_CACHING_5M")) { vars.insert(String(CACHE_HOUR), Json.Str(String("1"))) }
     var config = LinkedMap<String, Json>()
     if let given = str_at(Json.Object(vars.copy()), OPENCODE_CONFIG) {
         match parse(given) {
@@ -245,7 +252,11 @@ fn code_tools_are_allowed_in_each_program() {
     let all = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"permission":"ask"}"#)).done())
     assert(str_at(all, OPENCODE_CONFIG) == some(String(#"{"permission":{"*":"ask","loom_search_tools":"allow","loom_run_code":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow"}}"#)))
     let broken = program_env(Obj.new().s(OPENCODE_CONFIG, String("not json")).done())
-    assert(str_at(broken, OPENCODE_CONFIG) == some(String("not json")))
+    assert(str_at(broken.copy(), OPENCODE_CONFIG) == some(String("not json")))
+    // Claude Code keeps its prompt cache for an hour, unless the settings say otherwise.
+    assert(str_at(broken, CACHE_HOUR) == some(String("1")))
+    assert(str_at(program_env(Obj.new().s(CACHE_HOUR, String("0")).done()), CACHE_HOUR) == some(String("0")))
+    assert(str_at(program_env(Obj.new().s("FORCE_PROMPT_CACHING_5M", String("1")).done()), CACHE_HOUR) == none)
 }
 
 // Whether a permission mode asks before a script runs: only `ask`, which asks

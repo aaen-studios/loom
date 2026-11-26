@@ -107,21 +107,24 @@ struct ContextFill: Equatable, Sendable {
     var compacts = false
     /// In a group chat, the member whose session it is: the one that answered last.
     var agent: String?
+    /// What the chat costs, in tokens: its person's last turn there, and every turn there in
+    /// the last 24 hours. 0 for not known.
+    var turn = 0
+    var day = 0
 
-    /// How full a context may get before the chat's next message goes to a fresh session.
-    static let renewPercent = 80
-
-    init(used: Int, size: Int, compacted: Int? = nil, compacts: Bool = false, agent: String? = nil) {
+    init(used: Int, size: Int, compacted: Int? = nil, compacts: Bool = false, agent: String? = nil, turn: Int = 0, day: Int = 0) {
         self.used = used
         self.size = size
         self.compacted = compacted
         self.compacts = compacts
         self.agent = agent
+        self.turn = turn
+        self.day = day
     }
 
     init?(_ x: JSON) {
         guard let size = x["size"].int, size > 0 else { return nil }
-        self.init(used: x["used"].int ?? 0, size: size, compacted: x["compacted"].int, compacts: x["compacts"].bool ?? false, agent: x["agent"].string.flatMap { $0.isEmpty ? nil : $0 })
+        self.init(used: x["used"].int ?? 0, size: size, compacted: x["compacted"].int, compacts: x["compacts"].bool ?? false, agent: x["agent"].string.flatMap { $0.isEmpty ? nil : $0 }, turn: x["tokens"]["turn"].int ?? 0, day: x["tokens"]["day"].int ?? 0)
     }
 
     var percent: Int { size > 0 ? min(max(used, 0) * 100 / size, 100) : 0 }
@@ -129,7 +132,7 @@ struct ContextFill: Equatable, Sendable {
     /// How much of the ring is filled, from 0 to 1.
     var fraction: Double { size > 0 ? min(max(Double(used) / Double(size), 0), 1) : 0 }
 
-    /// Quiet, warm from 70% (before its fresh session at 80%), and red from 90%.
+    /// Quiet, warm from 70%, and red from 90%.
     enum Level { case quiet, warn, bad }
     var level: Level { percent >= 90 ? .bad : percent >= 70 ? .warn : .quiet }
 
@@ -139,11 +142,20 @@ struct ContextFill: Equatable, Sendable {
     /// Its tokens of its window, beside the card's title: "82k of 200k".
     var amount: String { "\(ContextFill.short(used)) of \(ContextFill.short(size))" }
 
-    /// The card's line under its bar, at `now` (Unix ms).
-    func line(now: Int) -> String {
-        let fresh = "fresh session starts at \(ContextFill.renewPercent)%"
-        guard let at = compacted else { return "A \(fresh)" }
-        return "Compacted \(ContextFill.ago(now - at)) · a \(fresh)"
+    /// The card's rows of what the chat costs, a title and its tokens each: "Last turn"
+    /// "410k", "Last 24 hours" "6.2M". None that isn't known.
+    var costs: [(String, String)] {
+        var rows: [(String, String)] = []
+        if turn > 0 { rows.append(("Last turn", ContextFill.short(turn))) }
+        if day > 0 { rows.append(("Last 24 hours", ContextFill.short(day))) }
+        return rows
+    }
+
+    /// The card's line over its buttons, at `now` (Unix ms): when the session was last
+    /// compacted, if it was.
+    func line(now: Int) -> String? {
+        guard let at = compacted else { return nil }
+        return "Compacted \(ContextFill.ago(now - at))"
     }
 
     /// A count of tokens as the ring says it: 900, 16k, 182k, 1M, 1.5M.
