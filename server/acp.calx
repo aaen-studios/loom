@@ -468,6 +468,17 @@ pub fn offered(config: Json) -> Json {
     return Json.Array(out)
 }
 
+// The id of a session's config option in `category`, such as "model" or
+// "thought_level" (the reasoning effort), when it has one.
+pub fn option_in(config: Json, category: str) -> String? {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_of(c.copy(), "category") == some(String(category)) { return str_of(c, "id") }
+        }
+    }
+    return none
+}
+
 // Whether option `id` of a session's configOptions offers `value`.
 pub fn offers(config: Json, id: String, value: String) -> bool {
     if let Json.Array(list) = config {

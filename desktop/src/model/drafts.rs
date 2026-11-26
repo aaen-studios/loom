@@ -79,13 +79,18 @@ pub fn brain_fields(key: &str, value: &str, tokens: &str) -> Form {
     Form::Fields(vec![key.into(), value.into(), tokens.into()])
 }
 
-/// A routine's form: its name, prompt and agent, its schedule as it's picked and its
-/// fields' text (how many hours or minutes apart, and the window it runs in), its
-/// switches, its flow: the steps it edits, each its agent and prompt, or one an
-/// agent made with steps side by side, kept as it is, and the event it runs on, as it's
-/// picked.
+/// A routine's form: its name, prompt and agent, its gate's command and seconds as
+/// typed, its model and effort as picked (empty for its agent's own), its schedule as
+/// it's picked and its fields' text (how many hours or minutes apart, and the window it
+/// runs in), its switches, its flow: the steps it edits, each its agent and prompt, or
+/// one an agent made with steps side by side, kept as it is, and the event it runs on,
+/// as it's picked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoutineDraft {
+    pub gate: String,
+    pub gate_seconds: String,
+    pub model: String,
+    pub effort: String,
     pub name: String,
     pub prompt: String,
     pub agent: Option<String>,
@@ -128,6 +133,14 @@ impl RoutineDraft {
             },
             flow_kept: if chain { Vec::new() } else { r.flow.clone() },
             event: r.event.clone().unwrap_or_default(),
+            gate: r.gate.clone(),
+            gate_seconds: if r.gate.is_empty() || r.gate_seconds <= 0 {
+                String::new()
+            } else {
+                r.gate_seconds.to_string()
+            },
+            model: r.model.clone(),
+            effort: r.effort.clone(),
             ..RoutineDraft::default()
         }
         .with_schedule(r.schedule.clone());
@@ -797,6 +810,25 @@ mod tests {
             ..r.clone()
         };
         assert_eq!(RoutineDraft::of(&both).schedule.repeat, "hours");
+        // Its gate, with its seconds, and its model and effort.
+        let gated = Routine {
+            gate: "./changed.sh".into(),
+            gate_seconds: 90,
+            model: "haiku".into(),
+            effort: "low".into(),
+            ..r.clone()
+        };
+        let d = RoutineDraft::of(&gated);
+        assert_eq!(
+            (
+                d.gate.as_str(),
+                d.gate_seconds.as_str(),
+                d.model.as_str(),
+                d.effort.as_str()
+            ),
+            ("./changed.sh", "90", "haiku", "low")
+        );
+        assert_eq!(RoutineDraft::of(&r).gate_seconds, "");
     }
 
     #[test]

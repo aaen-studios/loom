@@ -1,0 +1,258 @@
+module tests.protocol.wake_usage
+
+// What a watch's wake costs its agent program (LOO-384, PLAN.md, "Watching
+// outside events"), against the fake Acta (tests/fake_acta). The agent runs on
+// the fake agent with --record, which writes down every prompt it gets: its
+// session, how many turns came before it there, and how many characters those
+// sent and said. Casper's chat with the person is long, and a watch on a board
+// wakes Casper in it: once right after the chat's last turn, while its session's
+// prompt cache is warm, and once after it has gone quiet. It says for each what
+// reached the agent program, and checks that:
+//
+// - a wake while the chat's session is warm goes on in that session, which the
+//   prompt cache holds;
+// - a wake once it has gone quiet runs in a fresh session of its own, given what
+//   came and only the chat's newest messages, cut short, and closed once it ends;
+// - each time, the watch's line comes first in the chat, and the agent's answer
+//   follows it there;
+// - the chat's own session is told what the lone wake answered with the person's
+//   next message, once.
+//
+// With --measure it only says the numbers, for the code before a wake could run
+// in a session of its own.
+//
+//     calx tests/protocol/wake_usage.calx [--measure]
+import std.env
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+// How many messages the long chat has, and how long each is.
+const CHAT_TURNS: i64 = 20
+const LINE_CHARS: i64 = 4000
+
+// The instance's minute here, in ms: a chat's session is warm for 4 of them.
+const MINUTE_MS: i64 = 1000
+
+// One prompt the fake agent got.
+struct Prompt {
+    session: String
+    turn: i64    // its place in its session: 1 for a fresh one
+    chars: i64    // what this prompt sent
+    history: i64    // what the turns before it in its session sent and said
+    text: String    // the start of what it was asked
+    context: String    // its [loom: ...] blocks
+}
+
+// What the fake agent recorded after the first `skip` lines: its prompts, and the
+// sessions loom closed.
+fn recorded(path: String, skip: usize) -> (List<Prompt>, List<String>) ! Error {
+    var prompts = List<Prompt>()
+    var closed = List<String>()
+    let text = try fs.read_text(path) ?? String()
+    var n: usize = 0
+    for line in text.split("\n") {
+        if line.trim().len() == 0 { continue }
+        n += 1
+        if n <= skip { continue }
+        let j = try parse(line.copy())
+        if let c = str_at(j.copy(), "closed") {
+            closed.push(c)
+            continue
+        }
+        prompts.push(Prompt { session: str_at(j.copy(), "session") ?? String(), turn: int_at(j.copy(), "turn") ?? 0, chars: int_at(j.copy(), "chars") ?? 0, history: int_at(j.copy(), "history") ?? 0, text: str_at(j.copy(), "text") ?? String(), context: str_at(j, "context") ?? String() })
+    }
+    return (prompts, closed)
+}
+
+// How many lines the record has now.
+fn lines_now(path: String) -> usize ! Error {
+    let text = try fs.read_text(path) ?? String()
+    var n: usize = 0
+    for line in text.split("\n") {
+        if line.trim().len() > 0 { n += 1 }
+    }
+    return n
+}
+
+// Waits until the record has had no new line for `quiet_ms`: nothing has run in
+// any session for that long.
+fn until_quiet(path: String, quiet_ms: i64) ! Error {
+    var last = try lines_now(path.copy())
+    var since = unsafe { Instant.now() }
+    loop {
+        unsafe { sleep(200000000) }
+        let n = try lines_now(path.copy())
+        if n != last {
+            last = n
+            since = unsafe { Instant.now() }
+            continue
+        }
+        if i64.wrap(unsafe { Instant.now() }.nanos_since(since) / 1000000) >= quiet_ms { return }
+    }
+}
+
+// The prompts among `prompts` that were asked about `card`.
+fn about(prompts: List<Prompt>, card: str) -> List<Prompt> {
+    var out = List<Prompt>()
+    for p in prompts {
+        if p.text.contains(card) { out.push(p.copy()) }
+    }
+    return out
+}
+
+fn fetch_json(address: String) -> Json ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return try parse(String.from_utf8(r.body) ?? String())
+}
+
+// The next message in `conversation`, from the frames from `mark` on, read already
+// or still to come; `mark` moves past it.
+fn next_in(app: mut Session, mark: mut usize, conversation: String) -> Json ! Error {
+    loop {
+        while mark < app.frames.len() {
+            let f = app.frames[mark].copy()
+            mark += 1
+            if str_at(f.copy(), "kind") != some(String("message.created")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+        }
+        _ = try app.until("event", "", 60000)
+    }
+}
+
+// The next reply in `conversation`, as text.
+fn reply_in(app: mut Session, mark: mut usize, conversation: String) -> String ! Error {
+    loop {
+        let m = try next_in(mut app, mut mark, conversation.copy())
+        if str_at(m.copy(), "role") == some(String("agent")) { return reply_text(m) }
+    }
+}
+
+fn say(app: mut Session, mark: mut usize, conversation: String, cid: String, text: String) -> String ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", cid).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, mut mark, conversation)
+}
+
+// A card moves on the fake Acta: the watch's line in the chat, then the agent's
+// answer there, as the role of each and the answer's text.
+fn moved(app: mut Session, mark: mut usize, conversation: String, fake: String, card: str, status: str) -> (String, String, String) ! Error {
+    _ = try fetch_json("{fake}/test/status?task={card}&status={status}&by=Ola")
+    let first = try next_in(mut app, mut mark, conversation.copy())
+    let second = try next_in(mut app, mut mark, conversation)
+    return (str_at(first, "role") ?? String(), str_at(second.copy(), "role") ?? String(), reply_text(second))
+}
+
+// What a wake's prompts carried, in a line.
+fn summed(what: str, prompts: List<Prompt>, chat_session: String) -> String {
+    if prompts.len() == 0 { return "{what}: 0 turns" }
+    var parts = List<String>()
+    for p in prompts {
+        let place = if p.session == chat_session { "the chat's session" } else { "a session of its own" }
+        parts.push("turn {p.turn} of {place}, carrying {p.history} chars of {p.turn - 1} earlier turns, sending {p.chars}")
+    }
+    return "{what}: {prompts.len()} turn(s): {parts.join("; ")}"
+}
+
+fn measured(i: Instance, fake: String, measure: bool) ! Error {
+    let record = "{i.data}/record.jsonl"
+    try i.add_fake(String("rec"), "--record={record}")
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var mark = app.frames.len()
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Casper")).s("acp_agent", String("rec")).s("instructions", String("Test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    _ = try app.cmd("q_3", "mcp.put", Obj.new().s("name", String("acta")).s("url", "{fake}/api/mcp").j("headers", Obj.new().s("Authorization", String("Bearer acta-key")).done()).done())
+    let w = try app.cmd("q_4", "watch.put", Obj.new().j("target", Obj.new().s("board", String("aaen-studios/loom")).done()).s("conversation", chat.copy()).j("wake", Obj.new().s("agent", agent.copy()).done()).done())
+    if str_at(at(at(w.copy(), "value"), "watch"), "id") == none { fail "watch.put was refused: {w}" }
+
+    // A long chat: each message a line the fake agent says back.
+    var long = String()
+    for _ in 0i64..LINE_CHARS { long.push('x') }
+    for n in 0i64..CHAT_TURNS { _ = try say(mut app, mut mark, chat.copy(), "m_{n}", long.copy()) }
+    let (before, _) = try recorded(record.copy(), 0)
+    let chat_session = before[before.len() - 1].session.copy()
+    let main_history = before[before.len() - 1].history
+    println("the chat: {CHAT_TURNS} turns in session {chat_session}, {main_history} chars before its last")
+
+    // 1. Right after the chat's last turn, while its session is warm.
+    var from = try lines_now(record.copy())
+    let (warm_line, warm_role, warm_said) = try moved(mut app, mut mark, chat.copy(), fake.copy(), "LOO-206", "review")
+    let (warm_all, _) = try recorded(record.copy(), from)
+    let warm = about(warm_all, "LOO-206")
+    println(summed("1. a wake while the chat's session is warm", warm.copy(), chat_session.copy()))
+
+    // 2. Once nothing has run for longer than a session stays warm.
+    try until_quiet(record.copy(), 5 * MINUTE_MS + 500)
+    from = try lines_now(record.copy())
+    let (cold_line, cold_role, cold_said) = try moved(mut app, mut mark, chat.copy(), fake.copy(), "LOO-207", "in_progress")
+    try until_quiet(record.copy(), 1000)
+    let (cold_all, closed) = try recorded(record.copy(), from)
+    let cold = about(cold_all, "LOO-207")
+    println(summed("2. a wake once the chat has gone quiet", cold.copy(), chat_session.copy()))
+
+    // 3. The person writes next.
+    from = try lines_now(record.copy())
+    _ = try say(mut app, mut mark, chat.copy(), String("m_after"), String("What happened?"))
+    let (next, _) = try recorded(record.copy(), from)
+    println(summed("3. the person's next message", next.copy(), chat_session.copy()))
+    if measure {
+        app.close()
+        return
+    }
+
+    try check(warm_line == "loom" and warm_role == "agent" and warm_said.contains("LOO-206"), "a card moving is the watch's line in the chat, and the woken agent's answer follows it")
+    try check(warm.len() == 1 and warm[0].session == chat_session and warm[0].history >= main_history, "a wake while the chat's session is warm goes on in that session, which its prompt cache holds")
+    try check(cold_line == "loom" and cold_role == "agent" and cold_said.contains("LOO-207"), "once the chat has gone quiet, the line comes first and the answer follows it too")
+    try check(cold.len() == 1 and cold[0].session != chat_session and cold[0].turn == 1 and cold[0].history == 0, "but the wake runs in a fresh session of its own, which carries none of the chat's turns")
+    try check(cold[0].chars < 12000 and cold[0].context.contains("session of its own") and cold[0].context.contains("xxxx") and cold[0].text.contains("LOO-207"), "given what came and only the chat's newest messages, cut short")
+    try check(closed.contains(cold[0].session.copy()), "and its session is closed once it ends")
+    try check(next.len() == 1 and next[0].session == chat_session and next[0].context.contains("When a watch woke you") and next[0].context.contains("LOO-207"), "the chat's next turn goes on in its own session, told what the wake answered")
+    from = try lines_now(record.copy())
+    _ = try say(mut app, mut mark, chat.copy(), String("m_again"), String("And now?"))
+    let (again, _) = try recorded(record.copy(), from)
+    try check(again.len() == 1 and not again[0].context.contains("When a watch woke you"), "once")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_acta/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let said = child.wait_for_line(String("fake acta: "), 120000) else {
+        child.kill()
+        fail "the fake Acta didn't start"
+    }
+    return (child, said[said.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let measure = env.args().contains(String("--measure"))
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start_with([String("--test-acta"), "{fake}/api/mcp", String("--test-minute-ms"), "{MINUTE_MS}"]) {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    var failure: String? = none
+    if let err(e) = measured(inst.copy(), fake.copy(), measure) { failure = some("{e}") }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nwake usage: all good")
+}

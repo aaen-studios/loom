@@ -1303,6 +1303,71 @@ pub struct Routine {
     pub flow: Vec<FlowStep>,
     /// What outside loom it runs on, if anything (PLAN.md, "Watching outside events").
     pub event: Option<watch::RoutineEvent>,
+    /// Its gate (PLAN.md, "Routines"): a command that runs before its agent wakes, and
+    /// the seconds it may take. Empty for none.
+    pub gate: String,
+    pub gate_seconds: i64,
+    /// The model and effort its runs use, as values its agent's program takes. Empty for
+    /// its agent's own.
+    pub model: String,
+    pub effort: String,
+    /// What its runs cost over the last week.
+    pub cost: RoutineCost,
+}
+
+/// What a routine's runs cost over the last week (protocol.md, `routine.list`): tokens a
+/// run and a day, how many ran and how many of them were quiet, and whether it spends a
+/// lot for nothing, its runs mostly quiet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoutineCost {
+    pub run: i64,
+    pub day: i64,
+    pub runs: i64,
+    pub quiet: i64,
+    pub wasted: bool,
+}
+
+impl RoutineCost {
+    fn of(v: &Value) -> RoutineCost {
+        let n = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+        RoutineCost {
+            run: n("run"),
+            day: n("day"),
+            runs: n("runs"),
+            quiet: n("quiet"),
+            wasted: v.get("wasted").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+
+    /// What it costs, for its page's head: "1.4M tokens a run · 5.4M a day · mostly
+    /// quiet". Empty before it has run.
+    pub fn words(&self) -> String {
+        if self.runs == 0 {
+            return String::new();
+        }
+        let mut words = if self.day == 0 {
+            "No tokens this week".to_string()
+        } else {
+            format!(
+                "{} tokens a run · {} a day",
+                tokens_short(self.run),
+                tokens_short(self.day)
+            )
+        };
+        if self.quiet * 2 > self.runs {
+            words.push_str(" · mostly quiet");
+        }
+        words
+    }
+
+    /// Its row's line in the list, for one that spends a lot for nothing: "5.4M tokens a
+    /// day, mostly quiet". Empty for any other.
+    pub fn warning(&self) -> String {
+        if !self.wasted {
+            return String::new();
+        }
+        format!("{} tokens a day, mostly quiet", tokens_short(self.day))
+    }
 }
 
 /// A step of a routine's flow: its agent is asked `prompt` once the steps it comes
@@ -1553,6 +1618,15 @@ impl Routine {
                 .map(|a| a.iter().map(FlowStep::of).collect())
                 .unwrap_or_default(),
             event: watch::RoutineEvent::of(r.get("event").unwrap_or(&Value::Null)),
+            gate: r.get("gate").map(|g| s(g, "command")).unwrap_or_default(),
+            gate_seconds: r
+                .get("gate")
+                .and_then(|g| g.get("timeout"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            model: s(r, "model"),
+            effort: s(r, "effort"),
+            cost: RoutineCost::of(r.get("cost").unwrap_or(&Value::Null)),
         }
     }
 }
@@ -1574,6 +1648,8 @@ pub struct RoutineRun {
     pub hint: String,
     pub said: String,
     pub posted: Vec<String>,
+    /// Whether its gate found nothing new, so its agent wasn't woken.
+    pub gate_quiet: bool,
 }
 
 /// How a run ended, as the history colours it.
@@ -1608,6 +1684,8 @@ impl RoutineRun {
                         .collect()
                 })
                 .unwrap_or_default(),
+            gate_quiet: v.get("status").and_then(Value::as_str) == Some("quiet")
+                && v.get("woke").and_then(Value::as_bool) == Some(false),
         }
     }
 
@@ -1639,8 +1717,12 @@ impl RoutineRun {
     }
 
     /// Its line in the history: the first line of what it posted, or why it failed or
-    /// was skipped, or else of what its agent answered.
+    /// was skipped, or else of what its agent answered, or "Nothing new" for one whose
+    /// gate found nothing.
     pub fn line(&self) -> String {
+        if self.gate_quiet && self.said.trim().is_empty() {
+            return "Nothing new".into();
+        }
         let text = match self.mark() {
             RunMark::Failed | RunMark::Skipped if !self.error.is_empty() => self.error.clone(),
             _ => self
@@ -1698,6 +1780,14 @@ pub struct RoutineForm {
     pub flow: Option<Vec<FlowStep>>,
     /// Its event as `routine.put` takes it, null to take it off, or none to leave it.
     pub event: Option<Value>,
+    /// Its gate's command, and the seconds it may take (0 for the instance's default).
+    /// An empty command takes the gate off.
+    pub gate: String,
+    pub gate_seconds: i64,
+    /// Its runs' model and effort, values its agent's program takes; empty for its
+    /// agent's own.
+    pub model: String,
+    pub effort: String,
 }
 
 /// One entry of the activity log.
@@ -11203,6 +11293,14 @@ impl Model {
         if let Some(event) = &f.event {
             args["event"] = event.clone();
         }
+        let command = f.gate.trim();
+        args["gate"] = match (command.is_empty(), f.gate_seconds) {
+            (true, _) => Value::Null,
+            (false, s) if s > 0 => json!({"command": command, "timeout": s}),
+            (false, _) => json!({"command": command}),
+        };
+        args["model"] = json!(f.model);
+        args["effort"] = json!(f.effort);
         json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
     }
 
@@ -15987,6 +16085,96 @@ mod tests {
         assert_eq!(
             (going.mark(), going.took()),
             (RunMark::Going, String::new())
+        );
+        // A gate that found nothing new: quiet, and it says so.
+        let gated =
+            run(json!({"run": "r5", "at": 1000, "ended": 1500, "status": "quiet", "woke": false}));
+        assert_eq!(
+            (gated.mark(), gated.pill(), gated.line()),
+            (RunMark::Quiet, "Quiet", "Nothing new".into())
+        );
+        // One its agent was woken for, that posted nothing, says what it answered.
+        let woken =
+            run(json!({"run": "r6", "at": 1000, "status": "quiet", "said": "Still 1.21.4."}));
+        assert_eq!(woken.line(), "Still 1.21.4.");
+    }
+
+    #[test]
+    fn a_routines_gate_model_effort_and_cost_are_read_and_saved() {
+        let r = Routine::of(&json!({
+            "id": "rt_1", "name": "Watch PR", "agent": "a_1", "prompt": "Post what's new.",
+            "gate": {"command": "gh pr view 8006 | ./changed.sh", "timeout": 90},
+            "model": "haiku", "effort": "low",
+            "cost": {"run": 1_350_000, "day": 5_400_000, "runs": 28, "quiet": 27, "wasted": true}
+        }));
+        assert_eq!(
+            (
+                r.gate.as_str(),
+                r.gate_seconds,
+                r.model.as_str(),
+                r.effort.as_str()
+            ),
+            ("gh pr view 8006 | ./changed.sh", 90, "haiku", "low")
+        );
+        assert_eq!(
+            r.cost.words(),
+            "1.4M tokens a run · 5.4M a day · mostly quiet"
+        );
+        assert_eq!(r.cost.warning(), "5.4M tokens a day, mostly quiet");
+        let plain = Routine::of(
+            &json!({"id": "rt_2", "cost": {"run": 40_000, "day": 80_000, "runs": 2, "quiet": 0, "wasted": false}}),
+        );
+        assert_eq!(
+            (
+                plain.gate.as_str(),
+                plain.cost.words(),
+                plain.cost.warning()
+            ),
+            ("", "40k tokens a run · 80k a day".into(), String::new())
+        );
+        assert_eq!(Routine::of(&json!({"id": "rt_3"})).cost.words(), "");
+        let asleep = RoutineCost {
+            runs: 4,
+            quiet: 4,
+            ..RoutineCost::default()
+        };
+        assert_eq!(asleep.words(), "No tokens this week · mostly quiet");
+        let mut m = Model::new();
+        let form = RoutineForm {
+            name: "Watch PR".into(),
+            agent: "a_1".into(),
+            prompt: "Post what's new.".into(),
+            gate: " ./changed.sh ".into(),
+            gate_seconds: 90,
+            model: "haiku".into(),
+            effort: "low".into(),
+            ..RoutineForm::default()
+        };
+        let args = &m.save_routine(&form)["args"];
+        assert_eq!(
+            (&args["gate"], &args["model"], &args["effort"]),
+            (
+                &json!({"command": "./changed.sh", "timeout": 90}),
+                &json!("haiku"),
+                &json!("low")
+            )
+        );
+        // No command takes the gate off; no seconds leaves them to the instance; no
+        // model or effort is its agent's own.
+        let off = RoutineForm {
+            gate: " ".into(),
+            model: String::new(),
+            ..form.clone()
+        };
+        let args = &m.save_routine(&off)["args"];
+        assert_eq!((&args["gate"], &args["model"]), (&Value::Null, &json!("")));
+        let default_seconds = RoutineForm {
+            gate_seconds: 0,
+            ..form
+        };
+        assert_eq!(
+            m.save_routine(&default_seconds)["args"]["gate"],
+            json!({"command": "./changed.sh"})
         );
     }
 
