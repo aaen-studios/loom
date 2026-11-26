@@ -5,6 +5,7 @@ import SwiftUI
 /// title and a dot in its status's colour) or the thread's title, and what happened and
 /// who in quiet ink. Lines one after another sit tight (`stackedLines`).
 struct WatchLineRow: View {
+    @Environment(Session.self) private var session
     var line: WatchLine
 
     var body: some View {
@@ -12,8 +13,15 @@ struct WatchLineRow: View {
             LineMark(mark: line.mark)
             switch line.mark {
             case .board:
-                LineCardPill(id: line.card, title: line.title, status: line.status)
-                    .layoutPriority(-1)
+                // A tap opens the card as it is now.
+                Button {
+                    session.send(session.model.openCard(board: line.board, id: line.card))
+                } label: {
+                    LineCardPill(id: line.card, title: line.title, status: line.status)
+                }
+                .buttonStyle(.plain)
+                .disabled(line.board.isEmpty)
+                .layoutPriority(-1)
             case .strand:
                 Text(line.threadTitle)
                     .font(Fonts.small).foregroundStyle(P.ink2)
@@ -30,6 +38,10 @@ struct WatchLineRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(line.spoken)
+        .accessibilityAction {
+            guard line.mark == .board, !line.board.isEmpty else { return }
+            session.send(session.model.openCard(board: line.board, id: line.card))
+        }
     }
 }
 
@@ -49,7 +61,7 @@ private struct LineMark: View {
                         .foregroundStyle(Color(red: 0.96, green: 0.95, blue: 0.99))
                 )
         case .strand(let lie):
-            Strand(lie: lie).frame(width: 14, height: 10)
+            LineStrand(lie: lie).frame(width: 14, height: 10)
         case .none:
             Color.clear.frame(width: 14, height: 10)
         }
@@ -58,7 +70,7 @@ private struct LineMark: View {
 
 /// T3's strand: straight in the ok colour, or slack, its far end hanging lowest, in the
 /// bad colour once the run failed and quiet once it was stopped.
-private struct Strand: View {
+private struct LineStrand: View {
     var lie: WatchLine.Lie
 
     var body: some View {

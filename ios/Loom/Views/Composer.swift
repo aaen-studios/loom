@@ -10,6 +10,7 @@ import UniformTypeIdentifiers
 /// in the words, and over them its picture, its fan, its pill or its card.
 struct Composer: View {
     @Environment(Session.self) private var session
+    @Environment(\.colorScheme) private var scheme
     var agentName: String
     var sent: () -> Void
     @State private var box = ComposerBox()
@@ -76,6 +77,7 @@ struct Composer: View {
             }
             // Follows the @ being typed, and asks for the files that match it.
             if let q = mentionQuery(now) { session.send(model.findFiles(q.query)) }
+            trackCard()
             trackEmoji()
         }
         .onChange(of: model.emoji.replace) { _, now in
@@ -95,6 +97,7 @@ struct Composer: View {
             if model.writeNow { takeCursor() }
             box.opened = { piece in open(piece) }
             box.pasted = { url in session.send(model.previewLink(url)) }
+            box.cardPasted = { ref in session.send(model.previewCard(ref)) }
             // The keyboard coming back for the field takes the emoji picker's place.
             box.focused = { closeEmoji() }
             #if DEBUG
@@ -137,7 +140,9 @@ struct Composer: View {
         }
         Task {
             for path in values("-attach") { await attach(path: path, name: (path as NSString).lastPathComponent) }
-            for url in values("-paste") { box.view?.pasteLink(url) }
+            for url in values("-paste") {
+                if pastedCard(url) != nil { box.view?.pasteCard(url) } else { box.view?.pasteLink(url) }
+            }
             // What's typed, as the keyboard types it, and the emoji picker, with `-pick <n>`
             // its first n emoji picked once its groups have come, as n taps pick them.
             for text in values("-type") { box.view?.insertText(text) }
@@ -178,7 +183,7 @@ struct Composer: View {
                 }
                 .accessibilityLabel("Attach, skills and routines")
 
-                ComposerField(box: box, art: PieceArt(model: model))
+                ComposerField(box: box, art: PieceArt(model: model, dark: scheme == .dark))
                     .overlay(alignment: .topLeading) {
                         if box.typed.isEmpty {
                             Text("Reply to \(agentName)")
@@ -293,6 +298,16 @@ struct Composer: View {
         case .emoji:
             // Once the + sheet has gone.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { openEmoji() }
+        case .boards:
+            // The chat pushes the board's screen, once the + sheet has gone.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                for f in session.model.openBoard() { session.send(f) }
+            }
+        case .startT3:
+            // The chat opens the start sheet, once the + sheet has gone.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                session.send(session.model.openT3Form())
+            }
         }
     }
 
@@ -327,6 +342,17 @@ struct Composer: View {
     private func pickEmoji(_ item: EmojiItem) {
         box.put(emojiPiece(item.emoji), space: false)
         session.send(session.model.emoji.used(item.emoji))
+    }
+
+    /// A card's id typed for one of the person's boards, then a space or a mark that ends
+    /// a word, becomes its piece, its pill as the message will show it, and is looked up
+    /// (PLAN.md, "Cards in messages").
+    private func trackCard() {
+        let model = session.model
+        guard model.hasActa, box.view?.markedTextRange == nil, let before = box.beforeCaret(),
+              let typed = typedCard(before, prefixes: model.boardPrefixes) else { return }
+        session.send(model.previewCard(typed.id))
+        box.make(cardPiece(typed.id), from: typed.start, count: typed.id.count)
     }
 
     /// Follows what's typed for emoji (PLAN.md, "Emoji"): an emoji from the keyboard
@@ -381,7 +407,13 @@ struct Composer: View {
         case .file:
             session.send(model.openFileMention(piece.id))
         default:
-            if piece.id.hasPrefix(PieceKind.link), let url = URL(string: String(piece.id.dropFirst(PieceKind.link.count))) {
+            if piece.id.hasPrefix(PieceKind.card) {
+                // Its preview, once it's been looked up.
+                let ref = String(piece.id.dropFirst(PieceKind.card.count))
+                if case .ready(let c) = model.acta.previews[ref], !c.missing, !c.board.isEmpty {
+                    session.send(model.openCard(board: c.board, id: c.id))
+                }
+            } else if piece.id.hasPrefix(PieceKind.link), let url = URL(string: String(piece.id.dropFirst(PieceKind.link.count))) {
                 UIApplication.shared.open(url)
             } else if piece.id.hasPrefix(PieceKind.attach),
                       let a = model.attachments.first(where: { PieceKind.attach + $0.id == piece.id }),
@@ -472,6 +504,7 @@ final class ComposerBox {
     /// field take the keyboard.
     @ObservationIgnored var opened: (Piece) -> Void = { _ in }
     @ObservationIgnored var pasted: (String) -> Void = { _ in }
+    @ObservationIgnored var cardPasted: (String) -> Void = { _ in }
     @ObservationIgnored var focused: () -> Void = {}
     /// The pieces put in before the field was made.
     @ObservationIgnored private var waiting: [Piece] = []
@@ -513,6 +546,20 @@ final class ComposerBox {
         let made = NSMutableAttributedString(attributedString: v.piece(piece))
         if space { made.append(NSAttributedString(string: " ", attributes: v.typingAttributes)) }
         v.edit(range, made)
+    }
+
+    /// Makes the `count` characters from character `from` the piece, as an edit the undo
+    /// puts back, the caret staying after what followed them.
+    func make(_ piece: Piece, from: Int, count: Int) {
+        guard let v = view else { return }
+        let text = v.text ?? ""
+        let start = text.index(text.startIndex, offsetBy: min(from, text.count))
+        let at = NSRange(start..<start, in: text).location
+        let caret = v.selectedRange.location
+        guard at + count <= v.textStorage.length, caret >= at + count else { return }
+        let made = v.piece(piece)
+        v.edit(NSRange(location: at, length: count), made)
+        v.selectedRange = NSRange(location: min(caret - count + made.length, v.textStorage.length), length: 0)
     }
 
     /// The field's words up to the caret, each piece as U+FFFC.
@@ -610,6 +657,10 @@ final class PieceTextView: UITextView {
             edit(selectedRange, made)
             return
         }
+        if let text = board.string, let url = pastedCard(text) {
+            pasteCard(url)
+            return
+        }
         if let text = board.string, let url = pastedLink(text) {
             pasteLink(url)
             return
@@ -629,6 +680,22 @@ final class PieceTextView: UITextView {
             guard range.upperBound <= self.textStorage.length,
                   self.textStorage.attributedSubstring(from: range).string == url else { return }
             self.edit(range, self.piece(linkPiece(url)))
+        }
+    }
+
+    /// An Acta card's link pasted on its own: first as its address, then, as an edit of
+    /// its own, as its pill, as the desktop's composer makes it (PLAN.md, "Cards in
+    /// messages").
+    func pasteCard(_ url: String) {
+        let at = selectedRange.location
+        edit(selectedRange, NSAttributedString(string: url, attributes: typingAttributes))
+        box?.cardPasted(url)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let range = NSRange(location: at, length: (url as NSString).length)
+            guard range.upperBound <= self.textStorage.length,
+                  self.textStorage.attributedSubstring(from: range).string == url else { return }
+            self.edit(range, self.piece(cardPiece(url)))
         }
     }
 
@@ -751,11 +818,17 @@ struct PieceArt {
     var together: Set<String> = []
     /// Where the person's own emoji pictures are, by id.
     var emojiPaths: [String: String] = [:]
+    /// The cards pasted or typed, as they're looked up, by what names them.
+    var cards: [String: CardPreview] = [:]
+    /// Whether the app is dark, which a card's pill is drawn for.
+    var dark = false
 
     init() {}
 
-    @MainActor init(model: Model) {
+    @MainActor init(model: Model, dark: Bool = false) {
         emojiPaths = model.emoji.paths
+        cards = model.acta.previews
+        self.dark = dark
         for a in model.agents { agents[a.id] = (a.color, a.outline) }
         for a in model.attachments + model.dropped {
             files[PieceKind.attach + a.id] = (a.name, model.picturePath(a), isPicture(a.name))
@@ -776,6 +849,7 @@ struct PieceArt {
     func draw(_ a: PieceAttachment, font: UIFont, most: CGFloat = .greatestFiniteMagnitude) -> Bool {
         let p = a.piece
         if p.id.hasPrefix(PieceKind.emoji) { return drawEmoji(a, font: font) }
+        if p.id.hasPrefix(PieceKind.card) { return drawCard(a, font: font, most: most) }
         let ink = UIColor(P.ink)
         var icon: UIImage?
         var words = ""
@@ -857,6 +931,20 @@ struct PieceArt {
         }
         a.image = image
         a.bounds = CGRect(x: 0, y: font.descender, width: width, height: height)
+        return true
+    }
+
+    /// A card as its pill: its tile and id, and once it's looked up its title and dot.
+    @MainActor
+    private func drawCard(_ a: PieceAttachment, font: UIFont, most: CGFloat) -> Bool {
+        let ref = String(a.piece.id.dropFirst(PieceKind.card.count))
+        let preview = cards[ref]
+        let key = "\(a.piece.id)|\(String(describing: preview))|\(most)|\(dark)|\(font.pointSize)"
+        if a.drawn == key { return false }
+        a.drawn = key
+        let made = cardPieceImage(ref: ref, preview: preview, font: font, most: most, dark: dark)
+        a.image = made.image
+        a.bounds = made.bounds
         return true
     }
 

@@ -143,8 +143,8 @@ struct NewRoomSheet: View {
 }
 
 /// A group chat's settings: its name, members (not Everyone's, which are all the
-/// person's agents), who a message goes to when the router can't pick, its colour, and
-/// the corrections the router follows, each one swiped away to forget it.
+/// person's agents), who a message goes to when the router can't pick, its colour, the
+/// corrections the router follows, each one swiped away to forget it, and what it follows.
 struct RoomSettingsSheet: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -188,6 +188,12 @@ struct RoomSettingsSheet: View {
                             .swipeActions {
                                 Button("Forget", role: .destructive) { session.send(model.forget(c.id, in: r.id)) }
                             }
+                        }
+                    }
+                    // What posts its lines here, only when there's some.
+                    if !model.following(.room(r.id)).isEmpty {
+                        Section("Following") {
+                            FollowingRows(who: .room(r.id))
                         }
                     }
                     if let u = model.roomUsage, u.room == r.id {

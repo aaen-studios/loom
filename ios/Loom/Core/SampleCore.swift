@@ -14,7 +14,9 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var linkWaiting = false
     private var agents: [JSON]
     private var conversations: [JSON]
-    private var messages: [String: [JSON]]
+    var messages: [String: [JSON]]
+    /// What Acta, T3 and Spools keep as the person uses them (SampleIntegrations.swift).
+    var kept = SampleKept()
     private var runs: [JSON] = []
     private var tools: [JSON] = []
     private var approvals: [JSON] = []
@@ -33,6 +35,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         agents = s.agents
         conversations = s.conversations
         messages = s.messages
+        messages["c_2", default: []] += s.integrationMessages
         // A few of the Gardener's messages are pinned, as they would be on an instance.
         for (n, id) in ["msg_42", "msg_43", "msg_40", "msg_44"].enumerated() {
             guard let i = messages["c_4"]?.firstIndex(where: { $0["id"].text == id }), case .object(var m) = messages["c_4"]![i] else { continue }
@@ -51,11 +54,11 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         }
     }
 
-    private func tell(_ f: JSON) {
+    func tell(_ f: JSON) {
         if !stopped { inbox.push(f) }
     }
 
-    private func later(_ seconds: Double, _ work: @escaping @Sendable () -> Void) {
+    func later(_ seconds: Double, _ work: @escaping @Sendable () -> Void) {
         queue.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
@@ -66,7 +69,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         tell(["t": "synced", "seq": JSON(seq)])
     }
 
-    private func event(_ kind: String, _ fields: [String: JSON]) {
+    func event(_ kind: String, _ fields: [String: JSON]) {
         seq += 1
         var f = fields
         f["t"] = "event"
@@ -183,8 +186,6 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 ]]])
             case "device.revoke", "password.set":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
-            case "mcp.list":
-                tell(["t": "result", "id": f["id"], "ok": true, "value": ["servers": [["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed"]]]])
             case "mcp.sign_in", "mcp.signed_in":
                 later(0.4) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "sign_in_failed", "message": "Sample servers can't be signed in to."]])
@@ -239,7 +240,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 let picture = isPicture(name)
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["file": ["file": JSON(picture ? "sample-leaf" : "sample-\(name)"), "name": JSON(name), "mime": JSON(picture ? "image/png" : "text/markdown"), "size": 2_400]]])
             default:
-                break
+                // Acta, T3 and Spools, and the person's MCP servers.
+                _ = integrations(f)
             }
         case "emoji.typed", "emoji.find", "emoji.picker":
             tell(emoji(f))

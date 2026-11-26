@@ -11,6 +11,14 @@ enum PieceKind {
     /// An emoji, built-in or one of the person's own, which goes as itself: the
     /// character, or its token (PLAN.md, "Emoji").
     static let emoji = "loom:emoji/"
+    /// An Acta card, pasted as its link or typed as its id for one of the person's boards,
+    /// which goes as that (PLAN.md, "Cards in messages").
+    static let card = cardLink
+}
+
+/// An Acta card as a piece: what names it, its id or its link.
+func cardPiece(_ ref: String) -> Piece {
+    Piece(id: PieceKind.card + ref, text: ref)
 }
 
 /// A piece in the composer: an agent or a file mentioned (its `loom:` link), a file
@@ -48,7 +56,7 @@ func composerText(_ parts: [Either]) -> String {
         case .words(let w):
             out += plainLinks(w)
         case .piece(let p):
-            if p.id.hasPrefix(PieceKind.emoji) {
+            if p.id.hasPrefix(PieceKind.emoji) || p.id.hasPrefix(PieceKind.card) {
                 out += p.text
             } else if p.id.hasPrefix(PieceKind.attach) {
                 out += "[\(p.text)]"
@@ -98,7 +106,7 @@ func keptParts(_ parts: [Either]) -> [Either]? {
     var kept = false
     let out = parts.map { part -> Either in
         guard case .piece(let p) = part else { return part }
-        if p.id.hasPrefix(PieceKind.attach) || p.id.hasPrefix(PieceKind.link) { return .words(copiedText([part])) }
+        if p.id.hasPrefix(PieceKind.attach) || p.id.hasPrefix(PieceKind.link) || p.id.hasPrefix(PieceKind.card) { return .words(copiedText([part])) }
         kept = true
         return part
     }

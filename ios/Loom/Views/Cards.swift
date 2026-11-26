@@ -15,15 +15,18 @@ struct CardFrame<Content: View>: View {
     /// The agent's colour, for the thread beside the title, or none for no thread.
     var tint: Color?
     var waits = false
+    /// Its edge's colour, for a card that tints it by how it stands (a T3 thread's).
+    var edge: Color?
     var content: Content
 
-    init(_ title: String, sub: String = "", lead: AnyView? = nil, side: AnyView? = nil, tint: Color? = nil, waits: Bool = false, @ViewBuilder content: () -> Content) {
+    init(_ title: String, sub: String = "", lead: AnyView? = nil, side: AnyView? = nil, tint: Color? = nil, waits: Bool = false, edge: Color? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.sub = sub
         self.lead = lead
         self.side = side
         self.tint = tint
         self.waits = waits
+        self.edge = edge
         self.content = content()
     }
 
@@ -63,7 +66,7 @@ struct CardFrame<Content: View>: View {
         .padding(Tokens.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(P.cardFill, in: shape)
-        .overlay(shape.strokeBorder(waits ? (tint ?? P.cardEdge).opacity(0.4) : P.cardEdge, lineWidth: 1))
+        .overlay(shape.strokeBorder(edge ?? (waits ? (tint ?? P.cardEdge).opacity(0.4) : P.cardEdge), lineWidth: 1))
         .shadow(color: .black.opacity(0.07), radius: 14, y: 8)
     }
 }
@@ -87,13 +90,17 @@ struct CardMark: View {
 }
 
 /// A service's badge (`shared/badge.calx`): its initial on its colour. Something with a
-/// name and no badge of its own gets its initial on a quiet square.
+/// name and no badge of its own gets its initial on a quiet square. A server's own icon,
+/// once fetched and when it's a picture UIKit reads, takes the initial's place, and so
+/// does a Spools entry's mark (`mark`, bundled by scripts/ios.calx), in the initial's ink.
 struct BadgeView: View {
     @Environment(Session.self) private var session
     @Environment(\.colorScheme) private var scheme
     var badge: Badge?
     var name = ""
     var size: CGFloat = Tokens.Control.iconLarge
+    /// A Spools entry's id, whose mark it draws when there's no icon of its own.
+    var mark: String?
     /// An MCP server's own icon, read and decoded off the main thread.
     @State private var picture: UIImage?
 
@@ -110,18 +117,34 @@ struct BadgeView: View {
                 .background(shape.fill(P.cardInset).overlay(shape.strokeBorder(P.line, lineWidth: 1)))
                 .accessibilityHidden(true)
         } else {
-            initialView(shape)
-                .task(id: path) {
-                    guard let path, Pictures.kept(path) == nil else { return }
-                    picture = await Pictures.load(path)
+            Group {
+                if let glyph = mark.flatMap({ UIImage(named: "mark-\($0)") }) {
+                    face(shape) {
+                        Image(uiImage: glyph)
+                            .renderingMode(.template)
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: (size * 0.56).rounded(), height: (size * 0.56).rounded())
+                    }
+                } else {
+                    let initial = badge?.initial ?? name.first(where: { $0.isLetter || $0.isNumber }).map { String($0).uppercased() } ?? "?"
+                    face(shape) {
+                        Text(initial.isEmpty ? "?" : initial)
+                            .font(Fonts.ui((size * 0.44).rounded(), .semibold))
+                    }
                 }
+            }
+            .task(id: path) {
+                guard let path, Pictures.kept(path) == nil else { return }
+                picture = await Pictures.load(path)
+            }
         }
     }
 
-    private func initialView(_ shape: RoundedRectangle) -> some View {
-        let initial = badge?.initial ?? name.first(where: { $0.isLetter || $0.isNumber }).map { String($0).uppercased() } ?? "?"
-        return Text(initial.isEmpty ? "?" : initial)
-            .font(Fonts.ui((size * 0.44).rounded(), .semibold))
+    /// The initial or the mark on the badge's colour, in the ink that reads on it, or on a
+    /// quiet square for something with no badge.
+    private func face(_ shape: RoundedRectangle, @ViewBuilder _ content: () -> some View) -> some View {
+        content()
             .foregroundStyle(badge == nil ? P.ink2 : P.buttonInk)
             .frame(width: size, height: size)
             .background {
@@ -709,17 +732,20 @@ struct Knot: View {
     }
 }
 
-/// The agent's thread from loom's knot to a server's badge: slack and drifting while the
-/// server waits to be added, pulled straight, with a twang, once it's connected.
+/// The agent's thread from loom's knot to a server's badge, as the desktop's `span` and
+/// `tie` draw it (desktop/src/thread.rs): slack, hanging and drifting while the server
+/// waits to be added, pulled straight, with a twang, once it's connected. Spools' tie is
+/// `dashed` while it's slack, its dashes closing as it's pulled straight.
 struct SpanView: View {
     var taut: Bool
     var tint: Color
+    var dashed = false
     @State private var sag: Double = 1
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 1 / 30, paused: taut)) { context in
-            Span(sag: sag, phase: context.date.timeIntervalSinceReferenceDate)
-                .stroke(tint, style: StrokeStyle(lineWidth: Tokens.ThreadStroke.small, lineCap: .round))
+            Span(sag: sag, phase: context.date.timeIntervalSinceReferenceDate, dashed: dashed)
+                .fill(tint)
         }
         .frame(height: 24)
         .onAppear { sag = taut ? 0 : 1 }
@@ -729,25 +755,35 @@ struct SpanView: View {
         .accessibilityHidden(true)
     }
 
+    /// The thread's outline, `sag` of the way from straight to slack.
     private struct Span: Shape {
         var sag: Double
         var phase: Double
+        var dashed: Bool
         var animatableData: Double {
             get { sag }
             set { sag = newValue }
         }
 
+        /// How long a dash of a slack tie is, and its gap, in points.
+        static let dash = 4.0
+
         func path(in r: CGRect) -> Path {
             var p = Path()
-            let steps = max(Int(r.width / 3), 8)
+            let stroke = Tokens.ThreadStroke.small
+            let room = max(r.height / 2 - stroke, 1)
+            let steps = max(Int(r.width / 1.5), 32)
             for i in 0...steps {
                 let u = Double(i) / Double(steps)
-                let hang = sin(.pi * u) * 0.6
-                let drift = sin(2 * .pi * (u * 1.5 - phase * 0.2)) * 0.25 * sin(.pi * u)
-                let pt = CGPoint(x: r.minX + u * r.width, y: r.midY + (hang + drift) * sag * r.height / 2)
+                // It hangs in the middle and drifts, as a thread held loosely at both ends.
+                let hang = sin(.pi * u) * 0.75
+                let drift = sin(2 * .pi * (u * 1.2 - phase * 0.22)) * sin(.pi * u) * 0.3
+                let pt = CGPoint(x: r.minX + u * r.width, y: r.midY + (hang + drift) * sag * room)
                 if i == 0 { p.move(to: pt) } else { p.addLine(to: pt) }
             }
-            return p
+            let gap = Self.dash * max(sag, 0)
+            let dashes: [CGFloat] = dashed && gap > 0.25 ? [Self.dash, gap] : []
+            return p.strokedPath(StrokeStyle(lineWidth: stroke, lineCap: dashes.isEmpty ? .round : .butt, dash: dashes))
         }
     }
 }

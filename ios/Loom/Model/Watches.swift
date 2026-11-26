@@ -5,7 +5,8 @@ import Foundation
 struct WatchLine: Equatable, Sendable {
     /// `acta` or `t3`.
     var integration: String
-    /// From Acta: the card, its title, and what happened to it.
+    /// From Acta: the board, the card, its title, and what happened to it.
+    var board: String
     var card: String
     /// The card's title, or the thread's.
     var title: String
@@ -27,6 +28,7 @@ struct WatchLine: Equatable, Sendable {
 
     init(_ b: JSON) {
         integration = b["integration"].text
+        board = b["board"].text
         card = b["card"].text
         title = b["title"].text
         event = b["event"].text
@@ -104,6 +106,102 @@ extension Message {
     var watchLine: WatchLine? {
         role == "loom" ? blocks.first?.update : nil
     }
+}
+
+/// One of the person's watches, as `watch.list` gives it (desktop/src/model/watch.rs's
+/// `Watch`): what it's on, the chat its lines go in, and what it wakes.
+struct Watch: Equatable, Sendable {
+    /// "" while Follow's `watch.put` is under way.
+    var id: String
+    /// `acta` or `t3`.
+    var integration: String
+    var board: String
+    /// "" for the whole board.
+    var card: String
+    var thread = ""
+    var threadTitle = ""
+    /// The chat its lines go in, or "".
+    var conversation: String
+    /// What it wakes: an agent, a routine (the routine's own), or neither.
+    var wakeAgent = ""
+    var wakeRoutine = ""
+    /// Why it couldn't look, from its third failure in a row.
+    var error = ""
+
+    init?(_ v: JSON) {
+        guard !v["id"].text.isEmpty else { return nil }
+        id = v["id"].text
+        let i = v["integration"].text
+        integration = i.isEmpty ? "acta" : i
+        board = v["target"]["board"].text
+        card = v["target"]["card"].text
+        thread = v["target"]["thread"].text
+        threadTitle = v["target"]["title"].text
+        conversation = v["conversation"].text
+        wakeAgent = v["wake"]["agent"].text
+        wakeRoutine = v["wake"]["routine"].text
+        error = v["error"].text
+    }
+
+    /// Follow's, on Acta's `board` or its `card`, while `watch.put` makes it.
+    init(id: String, board: String, card: String, conversation: String) {
+        self.id = id
+        integration = "acta"
+        self.board = board
+        self.card = card
+        self.conversation = conversation
+    }
+
+    /// Whether it's the one Follow makes for `board`, or its `card`, in `conversation`: on
+    /// Acta, and no routine's.
+    func same(_ board: String, _ card: String, _ conversation: String) -> Bool {
+        integration == "acta" && wakeRoutine.isEmpty && self.board == board && self.card == card && self.conversation == conversation
+    }
+
+    /// What it's on, as its pill in Following.
+    var pill: FollowPill {
+        if integration == "t3" {
+            let t = threadTitle.trimmingCharacters(in: .whitespaces)
+            return .thread(t.isEmpty ? thread : t)
+        }
+        return card.isEmpty ? .board(board) : .card(id: card, board: board)
+    }
+}
+
+/// What a watch in Following is on.
+enum FollowPill: Equatable, Sendable {
+    /// A board, by its ref.
+    case board(String)
+    /// A card, by its id, on its board.
+    case card(id: String, board: String)
+    /// A T3 thread: its title, or its id when it has none.
+    case thread(String)
+
+    /// A card's page, which its pill is looked up by.
+    var link: String? {
+        guard case .card(let id, let board) = self else { return nil }
+        return "https://\(actaHost)/\(board)#\(id)"
+    }
+}
+
+/// One row of Following: the watch, its pill, and why it couldn't look, in a line.
+struct Followed: Equatable, Identifiable, Sendable {
+    var watch: String
+    var pill: FollowPill
+    var error: String?
+    var id: String { watch }
+
+    init(_ w: Watch) {
+        watch = w.id
+        pill = w.pill
+        error = w.error.split(separator: "\n").map { $0.trimmingCharacters(in: .whitespaces) }.first { !$0.isEmpty }
+    }
+}
+
+/// Whose Following it is: an agent's, or a group chat's.
+enum Follower: Equatable, Sendable {
+    case agent(String)
+    case room(String)
 }
 
 /// Whether a message the core gives is a watch's line, which the chat shows, unlike loom's

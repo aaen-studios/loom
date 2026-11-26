@@ -77,4 +77,105 @@ import Testing
         // The second of two, not the first, nor one after a reply or an hour on.
         #expect(stackedLines(m.shown) == ["m_2"])
     }
+
+    // MARK: Following
+
+    /// Answers `cmd` with `f`, as the core does.
+    func answer(_ m: Model, _ cmd: JSON?, _ f: [String: JSON]) {
+        var frame = f
+        frame["t"] = "result"
+        frame["id"] = cmd?["id"] ?? .null
+        frame["ok"] = JSON(f["error"] == nil)
+        m.take(.object(frame))
+    }
+
+    /// The person's watches, as `watch.list` gives them in the desktop's tests.
+    let watches: [String: JSON] = ["value": ["watches": [
+        ["id": "w_1", "integration": "acta", "server": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_1"],
+        ["id": "w_2", "integration": "acta", "server": "acta", "target": ["board": "aaen-studios/loom", "card": "LOO-206"], "conversation": "", "wake": ["agent": "a_1"],
+         "error": "Acta didn't answer.\nTried 3 times."],
+        ["id": "w_3", "integration": "t3", "server": "t3", "target": ["thread": "th_9", "title": "Fix the build"], "conversation": "c_9"],
+        ["id": "w_4", "integration": "acta", "server": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "", "wake": ["routine": "rt_1"]],
+        ["id": "w_5", "integration": "acta", "server": "acta", "target": ["board": "aaen-studios/clx"], "conversation": "c_2"],
+    ]]]
+
+    /// A model caught up, with Builder's and Scribe's chats and the group chat Money, and
+    /// the person's watches.
+    func withWatches() throws -> Model {
+        let m = caughtUp()
+        m.take(data("conversations", [
+            ["id": "c_1", "agent": "a_1", "title": ""],
+            ["id": "c_2", "agent": "a_2", "title": ""],
+            ["id": "c_9", "agent": "", "title": "Money", "room": ["name": "Money", "members": ["a_1", "a_2"]]],
+        ]))
+        m.take(["t": "synced", "seq": 2])
+        let list = try #require(m.cardFetches(now: nowMs()).first { $0["name"] == "watch.list" })
+        answer(m, list, watches)
+        return m
+    }
+
+    @Test func followingListsWhatAnAgentOrAGroupChatFollows() throws {
+        let m = try withWatches()
+        let mine = m.following(.agent("a_1"))
+        // Posting in its chat, or waking it; never the routine's, nor the group chat's.
+        #expect(mine.map(\.watch) == ["w_1", "w_2"])
+        #expect(mine[0].pill == .board("aaen-studios/loom"))
+        #expect(mine[1].pill == .card(id: "LOO-206", board: "aaen-studios/loom"))
+        #expect(mine[1].pill.link == "https://acta.aaenz.no/aaen-studios/loom#LOO-206")
+        // Why it couldn't look, in one line.
+        #expect(mine[1].error == "Acta didn't answer.")
+        #expect(mine[0].error == nil)
+        #expect(m.following(.room("c_9")).map(\.pill) == [.thread("Fix the build")])
+        #expect(m.following(.agent("a_2")).map(\.watch) == ["w_5"])
+        // An agent with none follows nothing.
+        #expect(m.following(.agent("a_9")).isEmpty)
+        // A thread with no title is its id.
+        #expect(Watch(["id": "w_8", "integration": "t3", "target": ["thread": "th_3", "title": " "]])?.pill == .thread("th_3"))
+    }
+
+    @Test func watchesFollowTheirEventsAndGoAtOnceWhenTakenAway() throws {
+        let m = try withWatches()
+        m.take(["t": "event", "kind": "watch.updated", "seq": 3,
+                "watch": ["id": "w_1", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_1", "error": "Signed out."]])
+        #expect(m.following(.agent("a_1")).first?.error == "Signed out.")
+        m.take(["t": "event", "kind": "watch.updated", "seq": 4,
+                "watch": ["id": "w_6", "integration": "acta", "target": ["board": "aaen-studios/loom", "card": "LOO-9"], "conversation": "c_1"]])
+        #expect(m.following(.agent("a_1")).count == 3)
+        m.take(["t": "event", "kind": "watch.removed", "seq": 5, "watch": "w_6"])
+        #expect(m.following(.agent("a_1")).count == 2)
+        // The × takes it away at once.
+        let f = try #require(m.stopFollowing("w_2"))
+        #expect(f["name"] == "watch.remove")
+        #expect(f["args"] == ["id": "w_2"])
+        #expect(m.following(.agent("a_1")).map(\.watch) == ["w_1"])
+        // Refused: said, and back as it was.
+        answer(m, f, ["error": ["code": "bad_request", "message": "A routine's."]])
+        #expect(m.notice == "A routine's.")
+        #expect(m.following(.agent("a_1")).map(\.watch) == ["w_1", "w_2"])
+        #expect(m.stopFollowing("w_9") == nil)
+    }
+
+    @Test func watchesAreAskedForOnceCaughtUpAndCardsFollowedOnceEach() throws {
+        let m = Model()
+        #expect(m.cardFetches(now: nowMs()).isEmpty)
+        m.synced = true
+        let first = try #require(m.cardFetches(now: nowMs()).first { $0["name"] == "watch.list" })
+        #expect(m.cardFetches(now: nowMs()).isEmpty)
+        // Each card followed is looked up once, for its pill.
+        answer(m, first, watches)
+        let looked = m.cardFetches(now: nowMs()).filter { $0["name"] == "card.preview" }
+        #expect(looked.map { $0["args"]["ref"].text } == ["https://acta.aaenz.no/aaen-studios/loom#LOO-206"])
+        #expect(m.cardFetches(now: nowMs()).isEmpty)
+        let pill = FollowPill.card(id: "LOO-206", board: "aaen-studios/loom")
+        #expect(m.followedCard(pill) == nil)
+        answer(m, looked.first, ["value": ["card": ["id": "LOO-206", "board": "aaen-studios/loom", "title": "Show agents' usage limits in the sidebar", "status": "review"]]])
+        #expect(m.followedCard(pill)?.title == "Show agents' usage limits in the sidebar")
+        // Catching up again, they're asked for again.
+        m.take(["t": "synced", "seq": 2])
+        #expect(m.cardFetches(now: nowMs()).contains { $0["name"] == "watch.list" })
+    }
+
+    @Test func aLinesCardIsOnItsBoard() {
+        #expect(WatchLine(moved).board == "aaen-studios/loom")
+    }
 }
