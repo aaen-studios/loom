@@ -728,9 +728,9 @@ enum Sample {
          "last": ["status": "done", "at": 1795165200000]],
         ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
          "last": ["status": "failed", "at": 1795100000000]],
-        // Off after five failures in a row, with its card in Scribe's chat.
-        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_2", "prompt": "", "schedule": ["daily": "09:00"], "on": false,
-         "failures": 5, "off_card": "msg_12", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795101000000]],
+        // Off after five failures in a row, with its card in Postmaster's chat.
+        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_3", "prompt": "", "schedule": ["daily": "09:00"], "on": false,
+         "failures": 5, "off_card": "msg_19", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795101000000]],
     ]
 
     static let recent: [JSON] = [
@@ -809,12 +809,12 @@ enum Sample {
             ["id": "msg_11", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_10", "at": 1795100030000,
              "blocks": [["kind": "text", "text": "In Swift:\n\n```swift\nfunc size(_ bytes: Int) -> String {\n    switch bytes {\n    case ..<1000: return \"\\(bytes) B\"\n    case ..<1_000_000: return \"\\(bytes / 1000) KB\"\n    default: return String(format: \"%.1f MB\", Double(bytes) / 1e6)\n    }\n}\n```\n\nIt counts in thousands, as Finder does."]],
              "sources": [["url": "https://support.apple.com/en-us/102119", "title": "How iOS and macOS report storage capacity", "site": "support.apple.com"]]],
-            // A routine that turned off on its own: its card, to turn it on.
-            ["id": "msg_12", "conversation": "c_2", "role": "loom", "at": 1795101000000,
-             "blocks": [["kind": "card", "card": ["id": "msg_12", "type": "routine_off", "title": "Running shoe prices", "routine": "rt_3",
-                                                  "why": "XXL's product page didn't load (503)", "failures": 5, "state": "off"]]]],
         ],
         "c_3": [
+            // A routine that turned off on its own: its card, to turn it on.
+            ["id": "msg_19", "conversation": "c_3", "role": "loom", "at": 1795101000000,
+             "blocks": [["kind": "card", "card": ["id": "msg_19", "type": "routine_off", "title": "Running shoe prices", "routine": "rt_3",
+                                                  "why": "XXL's product page didn't load (503)", "failures": 5, "state": "off"]]]],
             // A routine's prompt kept from before routines ran quietly: not shown.
             ["id": "msg_20", "conversation": "c_3", "role": "person", "from": "rt_1", "at": 1795170000000,
              "blocks": [["kind": "text", "text": "Read the new mail in every inbox and tell me what needs me."]]],
