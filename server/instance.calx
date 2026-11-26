@@ -51,6 +51,8 @@ import server.mcpregistry
 import server.mcptest
 import server.mcpcall
 import server.acta
+import server.t3
+import server.t3ws
 import server.links
 import server.oauth
 import server.move
@@ -521,6 +523,7 @@ pub struct Instance {
     acta_cards: Map<String, Json>    // "user\nID" -> the card as it was last looked up
     card_asks: Map<String, CardAsk>    // "user\nID" being looked up -> what waits on it
     watch: Watches    // what the person follows outside loom, and what that has under way (server/watches.calx)
+    t3: T3State    // T3 Code's threads on messages (PLAN.md, "T3 threads")
     oauth_to: Sender<oauth.Job>    // the thread that signs in to MCP servers and renews their tokens
     oauth_done: Receiver<oauth.Done>
     oauth_jobs: Map<i64, OauthJob>
@@ -665,6 +668,98 @@ struct Fill {
     submit: bool
 }
 
+// T3 Code's threads (PLAN.md, "T3 threads"): how long starting a T3 server's MCP
+// session, and a call to it, may each take; how long answering an approval over
+// its /ws may take; how often the threads on the messages a device shows are
+// looked up again; how old a card may be before a thread still going is looked
+// up again, before t3.thread asks again, and before one that ended is.
+const T3_MS: u64 = 15000
+const T3_WS_MS: u32 = 15000
+const T3_POLL_MS: i64 = 4000
+const T3_LIVE_MS: i64 = 3000
+const T3_FRESH_MS: i64 = 2000
+const T3_SETTLED_MS: i64 = 60000
+
+// One of the person's T3 servers the instance can call as them.
+struct T3Server {
+    name: String
+    spec: Json    // as ACP's session/new takes it, with its secrets and sign-in filled in
+    grant: Json    // their sign-in to it, or null
+    keyed: bool    // its headers have an Authorization of the person's own
+    origin: String    // where its app is: its MCP address without /mcp
+}
+
+// A thread being looked up: on which server, the servers still to try, what's
+// come so far, and the t3.thread commands waiting on it.
+struct T3Look {
+    server: String
+    rest: List<String>
+    env: String
+    read: Json    // its t3_thread_read, once it came
+    ask: Json    // the question or approval it waits on, once known
+    missed: i64    // the servers whose t3_thread_read said there's no such thread
+    waiters: List<Waiter>
+}
+
+// A thread the person starts from the form, while T3 launches it.
+struct T3Start {
+    waiter: Waiter
+    conversation: String
+    effort: String
+}
+
+// An approval being answered over T3's /ws.
+struct T3Approval {
+    waiter: Waiter
+    user: String
+    thread: String
+}
+
+// What the instance keeps of T3's threads. Keys are "user\nthread" but where they say.
+struct T3State {
+    known: Map<String, Json>    // the card as last looked up
+    looks: Map<String, T3Look>    // threads being looked up
+    shown: Map<String, List<String>>    // the messages that show each thread, by id
+    homes: Map<String, String>    // "user\nENV" -> the server whose threads are in that environment
+    projects: Map<String, (Json, i64)>    // "user/server" -> its projects ([{id, title}]) and when they came
+    projects_waiting: Map<String, List<String>>    // "user/server" -> the threads waiting on its projects
+    forms_waiting: Map<String, List<Waiter>>    // "user/server" -> the t3.form commands waiting on its projects
+    efforts: Map<String, String>    // the effort loom started a thread with
+    started: Map<String, List<t3.Ref>>    // a run -> the threads its tool calls started
+    viewing: Map<u32, (String, List<String>)>    // a device's socket -> its person and the messages with threads it shows
+    next_poll: i64
+    answering: Map<String, Waiter>    // questions being answered, by the call's extra
+    starting: Map<String, T3Start>    // threads being started, by the call's extra
+    approving: Map<i64, T3Approval>    // approvals being answered, by the job's id
+    ws_to: Sender<t3ws.Job>    // the thread that answers approvals over /ws (server/t3ws.calx)
+    ws_done: Receiver<t3ws.Done>
+}
+
+fn t3_state() -> T3State {
+    let (to, done) = t3ws.start()
+    return T3State { known: Map<String, Json>(), looks: Map<String, T3Look>(), shown: Map<String, List<String>>(), homes: Map<String, String>(), projects: Map<String, (Json, i64)>(), projects_waiting: Map<String, List<String>>(), forms_waiting: Map<String, List<Waiter>>(), efforts: Map<String, String>(), started: Map<String, List<t3.Ref>>(), viewing: Map<u32, (String, List<String>)>(), next_poll: 0, answering: Map<String, Waiter>(), starting: Map<String, T3Start>(), approving: Map<i64, T3Approval>(), ws_to: to, ws_done: done }
+}
+
+// Whether a thread's card was looked up long enough ago to be looked up again:
+// `ms` ago for one still going, and a minute for one that ended, as a thread that
+// ended can start again. One no server had is looked up again after five.
+fn t3_stale(card: Json, ms: i64) -> bool {
+    let age = now() - (int_at(card.copy(), "at") ?? 0)
+    if at(card.copy(), "missing") == Json.Bool(true) { return age >= T3_SETTLED_MS * 5 }
+    let state = str_at(card, "state") ?? String()
+    if state == "done" or state == "failed" { return age >= T3_SETTLED_MS }
+    return age >= ms
+}
+
+// The Authorization a T3 server's session is sent, which /ws takes too, or "".
+fn t3_auth(spec: Json) -> String {
+    if let Json.Array(headers) = at(spec, "headers") {
+        for h in headers {
+            if (str_at(h.copy(), "name") ?? String()).to_lower_root() == "authorization" { return str_at(h, "value") ?? String() }
+        }
+    }
+    return String()
+}
 // A command answered later: on a device's socket, or, with none, an agent's
 // run_command call, by its id in `calls`.
 struct Waiter {
@@ -2238,7 +2333,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), watch: new_watches(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3020,6 +3115,7 @@ impl Instance {
                     err(e) => eprintln("loom: calling an MCP server: {e}"),
                 }
             }
+            i.t3_tick()
             while let d = i.oauth_done.next() {
                 match i.oauth_finished(d) {
                     ok => {},
@@ -5259,8 +5355,10 @@ impl Instance {
                 _ = i.code_acts.remove(act)
                 i.settle(act, String(if bool_at(body.copy(), "ok") == some(true) { "done" } else { "failed" }), str_at(body.copy(), "why") ?? String())
                 // A thread it started on T3: a watch wakes it when the thread finishes.
-                if let (thread, title) = watches.launched_thread(at(body.copy(), "launched")) { try i.watch_launch(g, str_at(body, "server") ?? String(), thread, title) }
+                if let (thread, title) = watches.launched_thread(at(body.copy(), "launched")) { try i.watch_launch(g.copy(), str_at(body.copy(), "server") ?? String(), thread, title) }
             }
+            // A script's T3 call that started a thread: its card goes on the reply.
+            i.t3_from_script(g, at(body, "threads"))
             return some(json_response(200, Obj.new().done()))
         }
         // A server that answered 401 (PLAN.md, "Signing in to MCP servers"):
@@ -5530,6 +5628,13 @@ impl Instance {
             let action = Obj.new().s("name", String("server.offer")).j("args", offer.done()).done()
             let title = if code.len() > 0 { "Add the server {address} to your app, and sign in there" } else { "Add the server {address} to your app" }
             return try i.ask_person(req, g, title, "other", action)
+        }
+        // A T3 thread's question or approval (PLAN.md, "T3 threads"), answered when T3 has it.
+        if name == "t3_answer" {
+            let call = try i.store.new_id("t3")
+            i.hold_call(call.copy(), req)
+            i.t3_answer(Waiter { socket: none, id: call }, g.user.copy(), args)
+            return none
         }
         if name == "add_mcp_server" {
             return try i.propose_mcp(req, g, args)
@@ -6318,6 +6423,8 @@ impl Instance {
             try i.card_came(c, d)
         } else if c.kind.starts_with("watch") {
             try i.watch_called(c, d)
+        } else if c.kind.starts_with("t3_") {
+            try i.t3_called(c, d)
         }
     }
 
@@ -10924,7 +11031,8 @@ impl Instance {
         if replying != Json.Null { kept = kept.j("reply", replying.copy()) }
         // Each page it links to, by its title and its site's icon, and each card it names.
         let linked = try i.with_links(user.copy(), kept.done())
-        let message = i.with_cards(user.copy(), linked)
+        let carded = i.with_cards(user.copy(), linked)
+        let message = i.with_threads(user.copy(), carded, String())
         try i.store.put_message(user.copy(), message.copy())
         try i.event(user.copy(), "message.created", Obj.new().s("conversation", conversation_id).j("message", message).done())
         let from = try i.writing_from(user.copy(), device)
@@ -13190,6 +13298,8 @@ impl Instance {
         let kind = str_at(u.copy(), "sessionUpdate") ?? String()
         // A compaction is a line in the chat (note_session), not a step of the reply.
         if (kind == "tool_call" or kind == "tool_call_update") and compaction(u.copy()) { return }
+        // A T3 tool that started a thread puts its card on the reply (PLAN.md, "T3 threads").
+        if kind == "tool_call" or kind == "tool_call_update" { i.t3_tool_output(r.id.copy(), u.copy()) }
         if kind == "agent_message_chunk" or kind == "agent_thought_chunk" {
             let content = at(u, "content")
             if (str_at(content, "type") ?? String()) == "text" {
@@ -14307,7 +14417,9 @@ impl Instance {
             if mentions.len() > 0 { o = o.j("mentions", Json.Array(mentions)) }
             // And each page it links to, by its title and its site's icon, and each card it names.
             let linked = try i.with_links(r.user.copy(), o.done())
-            let message = i.with_cards(r.user.copy(), linked)
+            // And each T3 thread it names or its tool calls started (PLAN.md, "T3 threads").
+            let carded = i.with_cards(r.user.copy(), linked)
+            let message = i.with_threads(r.user.copy(), carded, r.id.copy())
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
             for (named, path, key) in pictures { i.picture_to.send(files.Picture { user: r.user.copy(), message: r.message.copy(), named: named.copy(), path: path.copy(), key: key.copy() }) }
@@ -14371,6 +14483,662 @@ impl Instance {
         return true
     }
 
+    // --- T3 Code's threads (PLAN.md, "T3 threads") ---
+
+    // The person's T3 servers the instance can call as them: those added from T3's
+    // entry in the catalog, or named t3 or t3-…, signed in or sending a key of their
+    // own. A sandboxed person's are reached only over https.
+    fn t3_servers(i: Instance, user: String) -> List<T3Server> {
+        var out = List<T3Server>()
+        let servers = match i.store.mcp_servers(user.copy()) {
+            ok(s) => s,
+            err(_) => return out,
+        }
+        for s in servers {
+            let name = str_at(s.copy(), "name") ?? String()
+            let from = match i.catalog_of(user.copy(), s.copy()) {
+                ok(f) => f,
+                err(_) => String(),
+            }
+            if from != "t3" and name != "t3" and not name.starts_with("t3-") { continue }
+            let address = str_at(s.copy(), "url") ?? String()
+            if address.len() == 0 { continue }
+            if i.sandboxed(user.copy()) and not address.starts_with("https://") { continue }
+            let keyed = own_auth(s.copy())
+            let grant = if keyed { Json.Null } else { i.grant_of(user.copy(), name.copy()) }
+            if not keyed and not oauth.signed_in(grant.copy()) { continue }
+            let spec = i.session_server(user.copy(), s, true) else continue
+            out.push(T3Server { name: name, spec: spec, grant: grant, keyed: keyed, origin: t3.origin_of(address) })
+        }
+        return out
+    }
+
+    fn t3_server(i: Instance, user: String, name: String) -> T3Server? {
+        for s in i.t3_servers(user) {
+            if s.name == name { return some(s.copy()) }
+        }
+        return none
+    }
+
+    // Calls `tool` of the person's T3 server `server` on the thread that calls MCP
+    // servers, for `kind` (OutCall): false when that server isn't one they can call.
+    fn t3_call(i: mut Instance, user: String, server: String, kind: str, id: own String, extra: own String, tool: str, arguments: own Json) -> bool {
+        let s = i.t3_server(user.copy(), server.copy()) else return false
+        i.next_job += 1
+        i.calls_out.insert(i.next_job, OutCall { user: user.copy(), server: server.copy(), own_auth: s.keyed, kind: String(kind), id: id, board: extra })
+        i.call_to.send(mcpcall.Job { id: i.next_job, key: "{user}/{server}", spec: s.spec, grant: s.grant, tool: String(tool), arguments: arguments, ms: T3_MS, fresh_ms: 0 })
+        return true
+    }
+
+    // The threads a message names in its own words (not a subagent's), each once,
+    // with those its reply's tool calls started first.
+    fn thread_refs(i: mut Instance, message: Json, run: String) -> List<t3.Ref> {
+        var out = List<t3.Ref>()
+        if run.len() > 0 {
+            if let started = i.t3.started.remove(run) { out = started }
+        }
+        if let Json.Array(blocks) = at(message, "blocks") {
+            for b in blocks {
+                if str_at(b.copy(), "kind") != some(String("text")) or at(b.copy(), "parent") != Json.Null { continue }
+                for r in t3.refs_in(str_at(b, "text") ?? String()) {
+                    var had = false
+                    for o in out {
+                        if o.thread == r.thread { had = true }
+                    }
+                    if not had and out.len() < t3.MOST { out.push(r.copy()) }
+                }
+            }
+        }
+        return out
+    }
+
+    // `message` with each thread it names that the instance knows, as `threads` by
+    // id, and those it started in `run`'s tool calls. One it doesn't know, or one
+    // that's still going and was looked up over a few seconds ago, is looked up,
+    // and comes with `message.updated`. With no T3 connected, nothing changes.
+    fn with_threads(i: mut Instance, user: String, message: Json, run: String) -> Json {
+        let refs = i.thread_refs(message.copy(), run)
+        if refs.len() == 0 or i.t3_servers(user.copy()).is_empty() { return message.copy() }
+        let id = str_at(message.copy(), "id") ?? String()
+        var had = at(message.copy(), "threads")
+        if had == Json.Null { had = Obj.new().done() }
+        var known = Obj.new()
+        var any = false
+        for r in refs {
+            let key = "{user}\n{r.thread}"
+            i.t3_shown_in(key.copy(), id.copy())
+            var card = had.get(r.thread.copy()) ?? Json.Null
+            if let c = i.t3.known.find(key.copy()) { card = c.copy() }
+            if card != Json.Null {
+                known.m.insert(r.thread.copy(), card.copy())
+                any = true
+                if not t3_stale(card.copy(), T3_LIVE_MS) { continue }
+            }
+            i.t3_look(user.copy(), r.thread.copy(), r.env.copy(), none)
+        }
+        if not any { return message.copy() }
+        return merge(message.copy(), Obj.new().j("threads", merge(had, known.done())).done())
+    }
+
+    // Keeps that message `id` shows the thread under `key`, so its card there changes
+    // with the thread.
+    fn t3_shown_in(i: mut Instance, key: String, id: String) {
+        if id.len() == 0 { return }
+        if let ms = mut i.t3.shown.find(key.copy()) {
+            if not ms.contains(id.copy()) {
+                if ms.len() >= 20 { _ = ms.remove(0) }
+                ms.push(id.copy())
+            }
+            return
+        }
+        i.t3.shown.insert(key.copy(), [id.copy()])
+    }
+
+    // Looks thread `thread` up as the person, unless that's under way, and gives it
+    // to the messages that show it, and to `w` when there is one, once it comes. The
+    // server whose threads are in its environment is asked first, then the rest.
+    fn t3_look(i: mut Instance, user: String, thread: String, env: String, w: own Waiter?) {
+        let key = "{user}\n{thread}"
+        if let l = mut i.t3.looks.find(key.copy()) {
+            if let waiter = w { l.waiters.push(waiter.copy()) }
+            return
+        }
+        var order = List<String>()
+        if let home = i.t3.homes.find("{user}\n{env}") { order.push(home.copy()) }
+        for s in i.t3_servers(user.copy()) {
+            if not order.contains(s.name.copy()) { order.push(s.name.copy()) }
+        }
+        var waiters = List<Waiter>()
+        if let waiter = w { waiters.push(waiter.copy()) }
+        if order.is_empty() {
+            for waiter in waiters { i.answer_cmd(waiter.copy(), Answer.Refused(String("not_found"), String("T3 isn't connected."))) }
+            return
+        }
+        let first = order.remove(0)
+        i.t3.looks.insert(key.copy(), T3Look { server: first.copy(), rest: order, env: env.copy(), read: Json.Null, ask: Json.Null, missed: 0, waiters: waiters })
+        i.t3_read(user, first, thread)
+    }
+
+    fn t3_read(i: mut Instance, user: String, server: String, thread: String) {
+        let args = Obj.new().s("threadId", thread.copy()).s("view", String("activity")).i("limit", 20).i("maxCharsPerItem", 400).done()
+        if i.t3_call(user.copy(), server, "t3_read", thread.copy(), String(), "t3_thread_read", args) { return }
+        if let err(e) = i.t3_settle(user, thread, Json.Null) { eprintln("loom: a T3 thread: {e}") }
+    }
+
+    // What a call to a T3 server came back with, by what it was for.
+    fn t3_called(i: mut Instance, c: OutCall, d: mcpcall.Done) ! Error {
+        let failed = d.error.len() > 0 or mcpcall.tool_failed(d.result.copy()) != none
+        let said = if d.error.len() > 0 { d.error.copy() } else { mcpcall.tool_failed(d.result.copy()) ?? String() }
+        let j = mcpcall.json_of(d.result.copy())
+        let key = "{c.user}\n{c.id}"
+        if c.kind == "t3_read" {
+            if not i.t3.looks.contains(key.copy()) { return }
+            if failed {
+                // The next of the person's T3 servers, or none of them has it.
+                var next = String()
+                if let l = mut i.t3.looks.find(key.copy()) {
+                    if d.error.len() == 0 { l.missed += 1 }
+                    if l.rest.len() > 0 {
+                        next = l.rest.remove(0)
+                        l.server = next.copy()
+                    }
+                }
+                if next.len() > 0 {
+                    i.t3_read(c.user, next, c.id)
+                    return
+                }
+                try i.t3_settle(c.user, c.id, Json.Null)
+                return
+            }
+            if let l = mut i.t3.looks.find(key.copy()) { l.read = j.copy() }
+            for r in t3.refs_in(str_at(at(j.copy(), "thread"), "link") ?? String()) { i.t3.homes.insert("{c.user}\n{r.env}", c.server.copy()) }
+            // Waiting on the person: which question, or else it's an approval.
+            if (int_at(at(j.copy(), "thread"), "pendingRequestCount") ?? 0) > 0 {
+                if i.t3_call(c.user.copy(), c.server.copy(), "t3_pending", c.id.copy(), String(), "t3_pending_request", Obj.new().s("action", String("list")).s("threadId", c.id.copy()).done()) { return }
+            }
+            try i.t3_with_project(c.user, c.server, c.id, Json.Null)
+            return
+        }
+        if c.kind == "t3_pending" {
+            var request = String()
+            if not failed {
+                if let Json.Array(ids) = at(j, "requestIds") {
+                    if ids.len() > 0 { request = ids[0].as_str() ?? String() }
+                }
+            }
+            if request.len() > 0 and i.t3_call(c.user.copy(), c.server.copy(), "t3_question", c.id.copy(), request.copy(), "t3_pending_request", Obj.new().s("action", String("read")).s("threadId", c.id.copy()).s("requestId", request).done()) { return }
+            // No question listed: it waits on an approval, which only its activity shows.
+            var read = Json.Null
+            if let l = i.t3.looks.find(key.copy()) { read = l.read.copy() }
+            try i.t3_with_project(c.user, c.server, c.id, t3.approval_of(read))
+            return
+        }
+        if c.kind == "t3_question" {
+            var q = if failed { Json.Null } else { t3.question_of(j) }
+            if q != Json.Null and str_at(q.copy(), "request") == some(String()) { q = Json.Null }
+            try i.t3_with_project(c.user, c.server, c.id, q)
+            return
+        }
+        if c.kind == "t3_projects" {
+            let k = "{c.user}/{c.server}"
+            var list = List<Json>()
+            if not failed {
+                for (id, title) in t3.projects_of(j) { list.push(Obj.new().s("id", id).s("title", title).done()) }
+            }
+            if not failed { i.t3.projects.insert(k.copy(), (Json.Array(list), now())) }
+            if let forms = i.t3.forms_waiting.remove(k.copy()) {
+                for w in forms { i.t3_form_answer(w.copy(), c.user.copy(), c.server.copy()) }
+            }
+            if let waiting = i.t3.projects_waiting.remove(k) {
+                for t in waiting { try i.t3_finish(c.user.copy(), t.copy()) }
+            }
+            return
+        }
+        if c.kind == "t3_respond" {
+            let w = i.t3.answering.remove(c.board.copy()) else return
+            if failed {
+                i.answer_cmd(w, Answer.Refused(String("unavailable"), "T3 didn't take the answer: {said}"))
+                return
+            }
+            i.answer_cmd(w, Answer.Value(Obj.new().done()))
+            // The thread goes on: its card follows.
+            i.t3_look(c.user, c.id, String(), none)
+            return
+        }
+        if c.kind == "t3_launch" {
+            let s = i.t3.starting.remove(c.board.copy()) else return
+            let r = t3.started_by("{j}") ?? t3.Ref { env: String(), thread: str_at(j.copy(), "threadId") ?? String() }
+            if failed or r.thread.len() == 0 {
+                i.answer_cmd(s.waiter, Answer.Refused(String("unavailable"), if said.len() > 0 { "T3 didn't start it: {said}" } else { String("T3 didn't start it.") }))
+                return
+            }
+            try i.t3_started_thread(c.user, s, c.server, r)
+        }
+    }
+
+    // The thread's card, once its project's name is known: from what T3 last listed,
+    // or once the server lists its projects (asked again every 10 minutes).
+    fn t3_with_project(i: mut Instance, user: String, server: String, thread: String, ask: Json) ! Error {
+        let key = "{user}\n{thread}"
+        if let l = mut i.t3.looks.find(key.copy()) { l.ask = ask.copy() }
+        let k = "{user}/{server}"
+        var fresh = false
+        if let (_, at_ms) = i.t3.projects.find(k.copy()) { fresh = now() - at_ms < 10 * i.minute_ms }
+        if fresh {
+            try i.t3_finish(user, thread)
+            return
+        }
+        if let waiting = mut i.t3.projects_waiting.find(k.copy()) {
+            waiting.push(thread.copy())
+            return
+        }
+        if not i.t3_call(user.copy(), server.copy(), "t3_projects", String(), String(), "t3_project_list", Obj.new().i("limit", 100).done()) {
+            try i.t3_finish(user, thread)
+            return
+        }
+        i.t3.projects_waiting.insert(k, [thread.copy()])
+    }
+
+    // The name of project `id` on the person's server, as it last listed them.
+    fn t3_project_name(i: Instance, user: String, server: String, id: String) -> String {
+        if let (list, _) = i.t3.projects.find("{user}/{server}") {
+            if let Json.Array(ps) = list.copy() {
+                for p in ps {
+                    if str_at(p.copy(), "id") == some(id.copy()) { return str_at(p, "title") ?? String() }
+                }
+            }
+        }
+        return String()
+    }
+
+    // A thread's lookup is over: its card, from what came.
+    fn t3_finish(i: mut Instance, user: String, thread: String) ! Error {
+        let key = "{user}\n{thread}"
+        var read = Json.Null
+        var ask = Json.Null
+        var server = String()
+        if let l = i.t3.looks.find(key.copy()) {
+            read = l.read.copy()
+            ask = l.ask.copy()
+            server = l.server.copy()
+        }
+        if read == Json.Null {
+            try i.t3_settle(user, thread, Json.Null)
+            return
+        }
+        var origin = String()
+        if let x = i.t3_server(user.copy(), server.copy()) { origin = x.origin.copy() }
+        let project = i.t3_project_name(user.copy(), server.copy(), str_at(at(read.copy(), "thread"), "projectId") ?? String())
+        var effort = String()
+        if let e = i.t3.efforts.find(key.copy()) { effort = e.copy() }
+        var card = t3.card_of(read, ask, server, origin, project, effort, now())
+        // An approval loom couldn't answer stays one the person answers in T3.
+        if let had = i.t3.known.find(key.copy()) {
+            let a = at(had.copy(), "ask")
+            if at(a.copy(), "in_t3") == Json.Bool(true) and str_at(a, "request") == str_at(at(card.copy(), "ask"), "request") { card = t3.in_t3(card) }
+        }
+        try i.t3_settle(user, thread, card)
+    }
+
+    // The thread's card came, or none could be had (`card` null): kept, given to
+    // each t3.thread waiting, and to each message that shows it and that it changes,
+    // which every device is told of. One none of the person's T3 servers has is kept
+    // as missing; when they didn't answer, what was known stays.
+    fn t3_settle(i: mut Instance, user: String, thread: String, card: Json) ! Error {
+        let key = "{user}\n{thread}"
+        let l = i.t3.looks.remove(key.copy())
+        var got = card.copy()
+        if got == Json.Null {
+            var missed = false
+            if let x = l.copy() { missed = x.missed > 0 and x.rest.is_empty() }
+            if missed { got = t3.missing(thread.copy(), now()) }
+        }
+        if let x = l {
+            for w in x.waiters {
+                if got != Json.Null {
+                    i.answer_cmd(w.copy(), Answer.Value(Obj.new().j("thread", got.copy()).done()))
+                } else {
+                    i.answer_cmd(w.copy(), Answer.Refused(String("unavailable"), String("T3 didn't answer.")))
+                }
+            }
+        }
+        if got == Json.Null { return }
+        i.t3.known.insert(key.copy(), got.copy())
+        try i.t3_show(user, key, thread, got)
+    }
+
+    // A thread's card on each message that shows it, where it changed: kept, and
+    // every device told.
+    fn t3_show(i: Instance, user: String, key: String, thread: String, card: Json) ! Error {
+        var shown = List<String>()
+        if let s = i.t3.shown.find(key) { shown = s.copy() }
+        for m in shown {
+            let message = try i.store.message(user.copy(), m.copy()) else continue
+            var had = at(message.copy(), "threads")
+            if had == Json.Null { had = Obj.new().done() }
+            if without(had.get(thread.copy()) ?? Json.Null, "at") == without(card.copy(), "at") { continue }
+            var one = Obj.new()
+            one.m.insert(thread.copy(), card.copy())
+            let changed = merge(message, Obj.new().j("threads", merge(had, one.done())).done())
+            try i.store.put_message(user.copy(), changed.copy())
+            try i.event(user.copy(), "message.updated", Obj.new().s("conversation", str_at(changed.copy(), "conversation") ?? String()).j("message", changed).done())
+        }
+    }
+
+    // What an agent's tool call gave back, once it's finished: a thread a T3 tool
+    // started or sent work to goes on its reply.
+    fn t3_tool_output(i: mut Instance, run: String, u: Json) {
+        let status = str_at(u.copy(), "status") ?? String()
+        if status != "completed" { return }
+        let found = t3.started_in(at(u, "content"))
+        if found.is_empty() { return }
+        i.t3_started_in_run(run, found)
+    }
+
+    fn t3_started_in_run(i: mut Instance, run: String, found: List<t3.Ref>) {
+        if run.len() == 0 { return }
+        var had = List<t3.Ref>()
+        if let h = i.t3.started.remove(run.copy()) { had = h }
+        for r in found {
+            var seen = false
+            for h in had {
+                if h.thread == r.thread { seen = true }
+            }
+            if not seen and had.len() < t3.MOST { had.push(r.copy()) }
+        }
+        i.t3.started.insert(run.copy(), had)
+    }
+
+    // A script's call in Code Mode that started threads (POST /api/mcp/done's
+    // `threads`, each {env, thread}): they go on the reply of the run it's in.
+    fn t3_from_script(i: mut Instance, g: Grant, threads: Json) {
+        var found = List<t3.Ref>()
+        if let Json.Array(xs) = threads {
+            for x in xs {
+                let thread = str_at(x.copy(), "thread") ?? String()
+                if thread.len() > 0 and found.len() < t3.MOST { found.push(t3.Ref { env: str_at(x, "env") ?? String(), thread: thread }) }
+            }
+        }
+        if found.is_empty() { return }
+        let run = i.calling_run(g)
+        i.t3_started_in_run(run, found)
+    }
+
+    // What the loop does for T3's threads: approvals that were answered, and every
+    // few seconds the threads still going on the messages a device shows.
+    fn t3_tick(i: mut Instance) {
+        while let d = i.t3.ws_done.next() {
+            match i.t3_approved(d) {
+                ok => {},
+                err(e) => eprintln("loom: answering a T3 approval: {e}"),
+            }
+        }
+        if i.t3.viewing.is_empty() or now() < i.t3.next_poll { return }
+        i.t3.next_poll = now() + T3_POLL_MS
+        i.t3_poll()
+    }
+
+    // Each thread still going on a message a device shows is looked up again. This
+    // is the one place threads are followed, which a watch on T3's events can take
+    // the place of.
+    fn t3_poll(i: mut Instance) {
+        var gone = List<u32>()
+        var want = List<(String, String, String)>()
+        for (socket, (user, messages)) in i.t3.viewing {
+            if not i.sessions.contains(socket) {
+                gone.push(socket)
+                continue
+            }
+            for m in messages {
+                let message = match i.store.message(user.copy(), m.copy()) {
+                    ok(some(x)) => x,
+                    _ => continue,
+                }
+                if let Json.Object(threads) = at(message, "threads") {
+                    for (thread, card) in threads {
+                        let key = "{user}\n{thread}"
+                        var now_card = card.copy()
+                        if let c = i.t3.known.find(key.copy()) { now_card = c.copy() }
+                        if not t3_stale(now_card, T3_LIVE_MS) { continue }
+                        want.push((user.copy(), thread.copy(), m.copy()))
+                    }
+                }
+            }
+        }
+        for s in gone { _ = i.t3.viewing.remove(s) }
+        for (user, thread, m) in want {
+            i.t3_shown_in("{user}\n{thread}", m)
+            i.t3_look(user, thread, String(), none)
+        }
+    }
+
+    // The commands for T3's threads, only from a device (protocol.md, "T3 threads").
+    fn t3_cmd(i: mut Instance, socket: u32, w: own Waiter, user: String, name: String, args: Json) ! Error {
+        if name == "t3.view" {
+            var ids = List<String>()
+            if let Json.Array(given) = at(args, "messages") {
+                for m in given {
+                    if let id = m.as_str() {
+                        if ids.len() < 50 { ids.push(id) }
+                    }
+                }
+            }
+            if ids.is_empty() {
+                _ = i.t3.viewing.remove(socket)
+            } else {
+                i.t3.viewing.insert(socket, (user.copy(), ids.copy()))
+                // Shown again: a card looked up a while ago is looked up now.
+                for m in ids {
+                    let message = try i.store.message(user.copy(), m.copy()) else continue
+                    if let Json.Object(threads) = at(message, "threads") {
+                        for (thread, card) in threads {
+                            let key = "{user}\n{thread}"
+                            i.t3_shown_in(key.copy(), m.copy())
+                            var now_card = card.copy()
+                            if let c = i.t3.known.find(key) { now_card = c.copy() }
+                            if t3_stale(now_card, T3_LIVE_MS) { i.t3_look(user.copy(), thread.copy(), String(), none) }
+                        }
+                    }
+                }
+            }
+            i.answer_cmd(w, Answer.Value(Obj.new().done()))
+            return
+        }
+        if name == "t3.thread" {
+            let thread = (str_at(args, "thread") ?? String()).trim().copy()
+            if thread.len() == 0 {
+                i.answer_cmd(w, Answer.Refused(String("bad_request"), String("Which thread?")))
+                return
+            }
+            var fresh = Json.Null
+            if let c = i.t3.known.find("{user}\n{thread}") {
+                if not t3_stale(c.copy(), T3_FRESH_MS) { fresh = c.copy() }
+            }
+            if fresh != Json.Null {
+                i.answer_cmd(w, Answer.Value(Obj.new().j("thread", fresh).done()))
+                return
+            }
+            i.t3_look(user, thread, String(), some(w))
+            return
+        }
+        if name == "t3.answer" {
+            i.t3_answer(w, user, args)
+            return
+        }
+        if name == "t3.form" {
+            let servers = i.t3_servers(user.copy())
+            if servers.is_empty() {
+                i.answer_cmd(w, Answer.Refused(String("not_found"), String("T3 isn't connected.")))
+                return
+            }
+            let wanted = str_at(args, "server") ?? String()
+            var server = servers[0].name.copy()
+            for s in servers {
+                if s.name == wanted { server = s.name.copy() }
+            }
+            let k = "{user}/{server}"
+            var fresh = false
+            if let (_, at_ms) = i.t3.projects.find(k.copy()) { fresh = now() - at_ms < 10 * i.minute_ms }
+            if fresh {
+                i.t3_form_answer(w, user, server)
+                return
+            }
+            if let waiting = mut i.t3.forms_waiting.find(k.copy()) {
+                waiting.push(w.copy())
+                return
+            }
+            // Its projects, asked for once for every form and card waiting on them.
+            let asking = i.t3.projects_waiting.contains(k.copy())
+            if not asking and not i.t3_call(user.copy(), server.copy(), "t3_projects", String(), String(), "t3_project_list", Obj.new().i("limit", 100).done()) {
+                i.t3_form_answer(w, user, server)
+                return
+            }
+            if not asking { i.t3.projects_waiting.insert(k.copy(), List<String>()) }
+            i.t3.forms_waiting.insert(k, [w])
+            return
+        }
+        if name == "t3.start" {
+            i.t3_start(w, user, args)
+            return
+        }
+        i.answer_cmd(w, Answer.Refused(String("unknown_command"), "There's no command {name}."))
+    }
+
+    // t3.form's answer: the person's T3 servers, the one picked, its projects as it
+    // last listed them, and each provider's models with their efforts.
+    fn t3_form_answer(i: mut Instance, w: own Waiter, user: String, server: String) {
+        var names = List<Json>()
+        for s in i.t3_servers(user.copy()) { names.push(Json.Str(s.name.copy())) }
+        var projects = Json.Array(List<Json>())
+        if let (list, _) = i.t3.projects.find("{user}/{server}") { projects = list.copy() }
+        i.answer_cmd(w, Answer.Value(Obj.new().j("servers", Json.Array(names)).s("server", server).j("projects", projects).j("providers", t3.providers()).done()))
+    }
+
+    // t3.start: a thread the person starts from the form, launched on their T3 as
+    // them. Its card lands in `conversation`, as a line from loom.
+    fn t3_start(i: mut Instance, w: own Waiter, user: String, args: Json) {
+        let servers = i.t3_servers(user.copy())
+        if servers.is_empty() {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("T3 isn't connected.")))
+            return
+        }
+        let wanted = str_at(args.copy(), "server") ?? String()
+        var server = servers[0].name.copy()
+        for s in servers {
+            if s.name == wanted { server = s.name.copy() }
+        }
+        let conversation = str_at(args.copy(), "conversation") ?? String()
+        let effort = str_at(args.copy(), "effort") ?? String()
+        let (launch, why) = t3.launch_args(str_at(args.copy(), "project") ?? String(), str_at(args.copy(), "provider") ?? String(), str_at(args.copy(), "model") ?? String(), effort.copy(), str_at(args, "task") ?? String())
+        if why.len() > 0 {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), why))
+            return
+        }
+        i.next_job += 1
+        let key = "start{i.next_job}"
+        i.t3.starting.insert(key.copy(), T3Start { waiter: w.copy(), conversation: conversation, effort: effort })
+        if not i.t3_call(user, server, "t3_launch", String(), key.copy(), "t3_thread_launch", launch) {
+            if let s = i.t3.starting.remove(key) { i.answer_cmd(s.waiter, Answer.Refused(String("not_found"), String("T3 isn't connected."))) }
+        }
+    }
+
+    // A thread the form started: its effort kept, and its card in the chat, as a
+    // line from loom, looked up at once.
+    fn t3_started_thread(i: mut Instance, user: String, s: T3Start, server: String, r: t3.Ref) ! Error {
+        let key = "{user}\n{r.thread}"
+        if s.effort.len() > 0 { i.t3.efforts.insert(key.copy(), s.effort.copy()) }
+        if r.env.len() > 0 { i.t3.homes.insert("{user}\n{r.env}", server.copy()) }
+        var message_id = String()
+        if s.conversation.len() > 0 and try i.store.conversation(user.copy(), s.conversation.copy()) != none {
+            message_id = try i.store.new_id("msg")
+            let mark = Obj.new().s("kind", String("mark")).s("mark", String("t3_thread")).s("thread", r.thread.copy()).done()
+            let message = Obj.new().s("id", message_id.copy()).s("conversation", s.conversation.copy()).s("role", String("loom")).i("at", now()).j("blocks", Json.Array([mark])).done()
+            try i.store.put_message(user.copy(), message.copy())
+            try i.event(user.copy(), "message.created", Obj.new().s("conversation", s.conversation.copy()).j("message", message).done())
+            i.t3_shown_in(key.copy(), message_id.copy())
+        }
+        i.answer_cmd(s.waiter.copy(), Answer.Value(Obj.new().s("thread", r.thread.copy()).s("message", message_id).done()))
+        i.t3_look(user, r.thread.copy(), r.env.copy(), none)
+    }
+
+    // t3.answer, and an agent's t3_answer: the question a thread waits on, answered
+    // with one of its choices through T3's MCP tools, or its approval answered over
+    // T3's /ws (`t3ws`). An approval T3 wouldn't take there is marked on its card as
+    // one the person answers in T3 itself, and the answer says `in_t3`.
+    fn t3_answer(i: mut Instance, w: own Waiter, user: String, args: Json) {
+        let thread = (str_at(args.copy(), "thread") ?? String()).trim().copy()
+        let key = "{user}\n{thread}"
+        var card = Json.Null
+        if let c = i.t3.known.find(key.copy()) { card = c.copy() }
+        let ask = at(card.copy(), "ask")
+        if thread.len() == 0 or ask == Json.Null {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("That thread isn't waiting on an answer.")))
+            return
+        }
+        let server = str_at(card.copy(), "server") ?? String()
+        let request = str_at(args.copy(), "request") ?? str_at(ask.copy(), "request") ?? String()
+        if str_at(ask.copy(), "kind") == some(String("question")) {
+            let answer = str_at(args.copy(), "answer") ?? String()
+            if answer.trim().len() == 0 {
+                i.answer_cmd(w, Answer.Refused(String("bad_request"), String("Give the answer.")))
+                return
+            }
+            var answers = Obj.new()
+            answers.m.insert(str_at(ask, "question") ?? String(), Json.Str(answer))
+            i.next_job += 1
+            let k = "answer{i.next_job}"
+            i.t3.answering.insert(k.copy(), w.copy())
+            let a = Obj.new().s("action", String("respond")).s("threadId", thread.copy()).s("requestId", request).j("answers", answers.done()).done()
+            if not i.t3_call(user, server, "t3_respond", thread, k.copy(), "t3_pending_request", a) {
+                if let held = i.t3.answering.remove(k) { i.answer_cmd(held, Answer.Refused(String("not_found"), String("T3 isn't connected."))) }
+            }
+            return
+        }
+        // An approval.
+        let decision = str_at(args, "decision") ?? String()
+        if decision != "accept" and decision != "decline" {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("decision is accept or decline.")))
+            return
+        }
+        let s = i.t3_server(user.copy(), server.copy()) else {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("T3 isn't connected.")))
+            return
+        }
+        let auth = t3_auth(s.spec.copy())
+        if request.len() == 0 or auth.len() == 0 or at(ask.copy(), "in_t3") == Json.Bool(true) {
+            if let err(e) = i.t3_in_t3(user, thread) { eprintln("loom: a T3 thread: {e}") }
+            i.answer_cmd(w, Answer.Value(Obj.new().b("in_t3", true).done()))
+            return
+        }
+        i.next_job += 1
+        i.t3.approving.insert(i.next_job, T3Approval { waiter: w.copy(), user: user.copy(), thread: thread.copy() })
+        i.t3.ws_to.send(t3ws.Job { id: i.next_job, origin: s.origin.copy(), auth: auth, thread: thread, request: request, decision: decision, ms: T3_WS_MS })
+    }
+
+    // An approval answered over /ws, or not: the answer, and the thread looked up again,
+    // or its card marked as one the person answers in T3.
+    fn t3_approved(i: mut Instance, d: t3ws.Done) ! Error {
+        let a = i.t3.approving.remove(d.id) else return
+        if d.error.len() > 0 {
+            eprintln("loom: a T3 approval over /ws: {d.error}")
+            try i.t3_in_t3(a.user.copy(), a.thread.copy())
+            i.answer_cmd(a.waiter, Answer.Value(Obj.new().b("in_t3", true).done()))
+            return
+        }
+        i.answer_cmd(a.waiter, Answer.Value(Obj.new().done()))
+        i.t3_look(a.user, a.thread, String(), none)
+    }
+
+    // The thread's card says its approval is answered in T3 itself.
+    fn t3_in_t3(i: mut Instance, user: String, thread: String) ! Error {
+        let key = "{user}\n{thread}"
+        var card = Json.Null
+        if let c = i.t3.known.find(key.copy()) { card = c.copy() }
+        if card == Json.Null { return }
+        let marked = t3.in_t3(card)
+        i.t3.known.insert(key.copy(), marked.copy())
+        try i.t3_show(user, key, thread, marked)
+    }
     // --- Commands ---
 
     fn cmd(i: mut Instance, s: ServerSocket, user: String, device: String, f: Json) ! Error {
@@ -14423,6 +15191,11 @@ impl Instance {
         if name == "catalog.list" or name == "catalog.connect" or name == "mcp.agents" {
             let answer = if name == "catalog.list" { try i.catalog_list(user) } else if name == "catalog.connect" { try i.catalog_connect(user, device, args) } else { try i.give_server(user, device, args) }
             i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
+            return
+        }
+        // T3 Code's threads (PLAN.md, "T3 threads"): only from a device.
+        if name.starts_with("t3.") {
+            try i.t3_cmd(s.id(), Waiter { socket: some(s), id: id }, user, name, args)
             return
         }
         if name == "chat.ask" {

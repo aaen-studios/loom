@@ -1,0 +1,138 @@
+module server.t3ws
+
+// Answering a T3 thread's approval (PLAN.md, "T3 threads"). T3's MCP tools
+// answer a thread's questions but not its approvals, so loom answers those as
+// T3's own app does, over its WebSocket API at /ws: a ticket from
+// `POST /api/auth/websocket-ticket` with the person's T3 sign-in, then, on
+// `/ws?wsTicket=…`, `orchestration.dispatchCommand` with a
+// `runtime-request.respond` command, as an Effect RPC request. It's T3's own
+// API, not one it documents, so when any step fails the card says Approve in
+// T3 instead. It runs on a thread of its own, so the instance's loop never
+// waits on T3.
+import std.http.{Header, post}
+import std.http.websocket.{Message, connect}
+import std.json.{Json, parse}
+import std.thread.{Task}
+import std.uuid.{Uuid}
+import shared.obj.{Obj, at, str_at}
+
+/// An approval to answer: on the T3 at `origin`, with `auth` as its
+/// Authorization header, request `request` of `thread`, with `decision`
+/// (`accept` or `decline`).
+pub struct Job {
+    pub id: i64
+    pub origin: String
+    pub auth: String
+    pub thread: String
+    pub request: String
+    pub decision: String
+    pub ms: u32    // how long each step may take
+}
+
+/// How it went: "" when T3 took the answer, or why not.
+pub struct Done {
+    pub id: i64
+    pub error: String
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        loop {
+            let job = self.jobs.wait() else break
+            let id = job.id
+            let error = match answer(job) {
+                ok => String(),
+                err(e) => "{e}",
+            }
+            self.done.send(Done { id: id, error: error })
+        }
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+/// The WebSocket address of a T3's /ws, with its ticket.
+pub fn ws_url(origin: String, ticket: String) -> String {
+    let base = if origin.starts_with("https://") { "wss://{origin[8..]}" } else if origin.starts_with("http://") { "ws://{origin[7..]}" } else { origin.copy() }
+    return "{base.trim_suffix("/")}/ws?wsTicket={ticket}"
+}
+
+/// The Effect RPC request that answers the approval, numbered `n`.
+pub fn request_of(n: i64, command: String, thread: String, request: String, decision: String) -> Json {
+    let payload = Obj.new().s("type", String("runtime-request.respond")).s("commandId", command).s("threadId", thread).s("requestId", request).s("decision", decision).done()
+    return Obj.new().s("_tag", String("Request")).s("id", "{n}").s("tag", String("orchestration.dispatchCommand")).j("payload", payload).j("headers", Json.Array(List<Json>())).done()
+}
+
+/// What a message from /ws says of request `n`: none when it isn't its end,
+/// "" when it succeeded, or why it failed.
+pub fn exit_of(message: Json, n: i64) -> String? {
+    // A frame may carry several messages.
+    if let Json.Array(xs) = message {
+        for x in xs {
+            if let said = exit_of(x.copy(), n) { return some(said) }
+        }
+        return none
+    }
+    if str_at(message.copy(), "_tag") != some(String("Exit")) or str_at(message.copy(), "requestId") != some("{n}") { return none }
+    let exit = at(message, "exit")
+    if str_at(exit.copy(), "_tag") == some(String("Success")) { return some(String()) }
+    let cause = at(exit, "cause")
+    let why = str_at(at(cause.copy(), "error"), "message") ?? str_at(cause.copy(), "message") ?? "{cause}"
+    return some("T3 refused it: {why}")
+}
+
+fn answer(job: Job) ! Error {
+    // A ticket for the socket, with the person's sign-in.
+    var headers = List<Header>()
+    headers.push(Header { name: String("Authorization"), value: job.auth.copy() })
+    headers.push(Header { name: String("Content-Type"), value: String("application/json") })
+    var req = post("{job.origin.trim_suffix("/")}/api/auth/websocket-ticket", headers, "\{\}".to_bytes(), job.ms, 65536)
+    let r = try req.wait()
+    if r.status != 200 { fail "T3 gave no ticket ({r.status})" }
+    let given = try parse(String.from_utf8(r.body) ?? String())
+    let ticket = str_at(given, "ticket") ?? String()
+    if ticket.len() == 0 { fail "T3 gave no ticket" }
+    let ws = try connect(ws_url(job.origin.copy(), ticket), List<Header>(), job.ms)
+    let n: i64 = 1
+    try ws.send_text("{request_of(n, "{Uuid.random()}", job.thread, job.request, job.decision)}")
+    var waited: u32 = 0
+    while waited < job.ms {
+        let m = try ws.receive(500)
+        waited += 500
+        let Message.Text(t) = m ?? Message.Text(String()) else continue
+        if t.len() == 0 { continue }
+        let j = match parse(t) {
+            ok(j) => j,
+            err(_) => continue,
+        }
+        if let said = exit_of(j, n) {
+            ws.close()
+            if said.len() > 0 { fail "{said}" }
+            return
+        }
+    }
+    ws.close()
+    fail "T3 didn't answer in time"
+}
+
+@test
+fn speaks_t3s_rpc() {
+    assert(ws_url(String("https://pc.example.ts.net"), String("tk")) == "wss://pc.example.ts.net/ws?wsTicket=tk")
+    assert(ws_url(String("http://127.0.0.1:3773/"), String("tk")) == "ws://127.0.0.1:3773/ws?wsTicket=tk")
+    let r = request_of(1, String("c1"), String("mcp:1"), String("ap1"), String("accept"))
+    assert("{r}" == #"{"_tag":"Request","id":"1","tag":"orchestration.dispatchCommand","payload":{"type":"runtime-request.respond","commandId":"c1","threadId":"mcp:1","requestId":"ap1","decision":"accept"},"headers":[]}"#)
+    assert(exit_of(parse(#"{"_tag":"Exit","requestId":"1","exit":{"_tag":"Success","value":{"sequence":4}}}"#)!, 1) == some(String()))
+    assert(exit_of(parse(#"[{"_tag":"Pong"},{"_tag":"Exit","requestId":"1","exit":{"_tag":"Failure","cause":{"_tag":"Fail","error":{"message":"No such request"}}}}]"#)!, 1) == some(String("T3 refused it: No such request")))
+    assert(exit_of(parse(#"{"_tag":"Exit","requestId":"2","exit":{"_tag":"Success"}}"#)!, 1) == none and exit_of(parse(#"{"_tag":"Chunk"}"#)!, 1) == none)
+}

@@ -1,0 +1,334 @@
+module tests.fake_t3.main
+
+// A fake T3 Code, for testing T3's threads in loom (PLAN.md, "T3 threads")
+// without the real one. It answers as T3 v0.1.12 does, as far as loom uses it:
+//
+//     POST /mcp      an MCP server over HTTP that answers 401 to a request without
+//                    `Authorization: Bearer t3-key`, with T3's tools:
+//                    t3_project_list    two projects, loom (p1) and calcite (p2)
+//                    t3_thread_read     a thread with its latest run and activity
+//                    t3_pending_request list, read and respond to a question
+//                    t3_thread_launch   a new thread, running
+//     POST /api/auth/websocket-ticket   a ticket for /ws, for the same token
+//     GET /ws?wsTicket=…                T3's WebSocket API, as Effect RPC: only
+//                    orchestration.dispatchCommand with runtime-request.respond,
+//                    which answers a thread's approval
+//
+// Its threads' links are in the environment `env-test`. It starts with one,
+// `mcp:fix`, "Fix the flaky sign-in test" in loom, running. It listens on
+// 127.0.0.1 and prints `fake t3: http://127.0.0.1:PORT` once it does. For tests:
+//
+//     GET /test/calls                    how many times each tool was called
+//     GET /test/set?thread=T&status=S    sets a thread's status (`completed`, `failed`, ...)
+//     GET /test/ask?thread=T&kind=K      makes it wait on a question or an approval
+//     GET /test/ws?refuse=1              /ws tickets are refused from now on
+//     GET /test/thread?thread=T          the thread as it is, with what it was told
+//
+//     calx tests/fake_t3/main.calx
+import std.http.server.{Request, Response, Server, ServerSocket}
+import std.io
+import std.json.{Json, parse}
+import std.url
+
+const ENV: str = "env-test"
+
+struct Fake {
+    threads: LinkedMap<String, Json>
+    calls: LinkedMap<String, i64>
+    next: i64
+    refuse_ws: bool
+}
+
+fn text(s: str) -> Json {
+    return Json.Str(String(s))
+}
+
+fn object(pairs: List<(str, Json)>) -> Json {
+    var m = LinkedMap<String, Json>()
+    for (k, v) in pairs {
+        m.insert(String(k), v.copy())
+    }
+    return Json.Object(m)
+}
+
+fn with(j: Json, key: str, v: Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = j {
+        for (k, x) in o {
+            m.insert(k.copy(), x.copy())
+        }
+    }
+    m.insert(String(key), v.copy())
+    return Json.Object(m)
+}
+
+fn str_of(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+fn json(status: u16, body: Json) -> Response {
+    return Response.new(status, String("application/json"), "{body}".to_bytes())
+}
+
+// A tool's answer as T3 gives it: its JSON as text.
+fn answer(j: Json) -> Json {
+    return object([("content", Json.Array([object([("type", text("text")), ("text", Json.Str("{j}"))])]))])
+}
+
+fn tool_error(why: own String) -> Json {
+    return object([("content", Json.Array([object([("type", text("text")), ("text", Json.Str(why))])])), ("isError", Json.Bool(true))])
+}
+
+fn link(id: String, title: String) -> String {
+    return "[{title}](t3-thread://v2/{ENV}/{id})"
+}
+
+// A thread as the fake keeps it: what t3_thread_read gives, and what it waits on.
+fn new_thread(id: String, title: String, project: str, model: str, status: str, step: str) -> Json {
+    let t = object([("threadId", Json.Str(id.copy())), ("projectId", text(project)), ("title", Json.Str(title.copy())), ("link", Json.Str(link(id, title))), ("status", text(status)), ("providerInstanceId", text("claudeAgent")), ("model", text(model)), ("pullRequests", Json.Array(List<Json>())), ("pendingRequestCount", Json.Int(0))])
+    let run = object([("status", text(status)), ("startedAt", text("2026-11-26T02:00:00.000Z")), ("completedAt", Json.Null)])
+    let item = object([("position", Json.Int(1)), ("type", text("command_execution")), ("status", text("completed")), ("title", Json.Null), ("text", Json.Str("$ {step}\nok"))])
+    return object([("thread", t), ("recentRuns", Json.Array([run])), ("items", Json.Array([item])), ("asks", Json.Null), ("told", Json.Array(List<Json>()))])
+}
+
+impl Fake {
+    fn count(self: mut Fake, key: own String) {
+        if let n = mut self.calls.find(key.copy()) {
+            n += 1
+            return
+        }
+        self.calls.insert(key, 1)
+    }
+
+    // What t3_thread_read gives of `t`: the thread, its runs and its activity.
+    fn read_of(t: Json) -> Json {
+        return object([("thread", t.get(String("thread")) ?? Json.Null), ("recentRuns", t.get(String("recentRuns")) ?? Json.Null), ("items", t.get(String("items")) ?? Json.Null), ("nextPosition", Json.Int(1)), ("hasMore", Json.Bool(false))])
+    }
+
+    fn set_status(self: mut Fake, id: String, status: String) {
+        let t = mut self.threads.find(id) else return
+        var th = t.get(String("thread")) ?? Json.Null
+        th = with(th, "status", Json.Str(status.copy()))
+        if status != "running" { th = with(th, "pendingRequestCount", Json.Int(0)) }
+        if status == "completed" { th = with(th, "pullRequests", Json.Array([object([("number", Json.Int(295)), ("url", text("https://github.com/aaen-studios/loom/pull/295")), ("state", text("open"))])])) }
+        var run = object([("status", Json.Str(status.copy())), ("startedAt", text("2026-11-26T02:00:00.000Z")), ("completedAt", if status == "running" { Json.Null } else { text("2026-11-26T02:18:00.000Z") })])
+        if status == "running" { run = with(run, "completedAt", Json.Null) }
+        var items = t.get(String("items")) ?? Json.Null
+        if status == "failed" {
+            if let Json.Array(xs) = items.copy() {
+                var more = xs.copy()
+                more.push(object([("position", Json.Int(2)), ("type", text("error")), ("status", text("failed")), ("title", text("Provider error")), ("text", text("Usage limit reached · resets 15:30"))]))
+                items = Json.Array(more)
+            }
+        }
+        t = with(with(with(with(t.copy(), "thread", th), "recentRuns", Json.Array([run])), "items", items), "asks", if status == "running" { t.get(String("asks")) ?? Json.Null } else { Json.Null })
+    }
+
+    fn ask(self: mut Fake, id: String, kind: String) {
+        let t = mut self.threads.find(id) else return
+        let th = with(t.get(String("thread")) ?? Json.Null, "pendingRequestCount", Json.Int(1))
+        var items = List<Json>()
+        if let Json.Array(xs) = t.get(String("items")) ?? Json.Null { items = xs.copy() }
+        var asks = Json.Null
+        if kind == "question" {
+            let q = object([("id", text("q1")), ("header", text("Port")), ("question", text("Keep the retry, or make the test wait for the port instead?")), ("options", Json.Array([object([("label", text("Wait for the port"))]), object([("label", text("Keep the retry"))])])), ("multiSelect", Json.Bool(false))])
+            asks = object([("kind", text("question")), ("requestId", text("req-q")), ("questions", Json.Array([q]))])
+        } else {
+            asks = object([("kind", text("approval")), ("requestId", text("req-a"))])
+            items.push(object([("position", Json.Int(3)), ("type", text("approval_request")), ("status", text("running")), ("requestId", text("req-a")), ("requestKind", text("command")), ("prompt", text("Run rm -rf build"))]))
+        }
+        t = with(with(with(t.copy(), "thread", th), "items", Json.Array(items)), "asks", asks)
+    }
+
+    // Takes an answer to what thread `id` waits on: it runs again.
+    fn answered(self: mut Fake, id: String, said: Json) -> bool {
+        let t = mut self.threads.find(id.copy()) else return false
+        if t.get(String("asks")) == some(Json.Null) { return false }
+        var told = List<Json>()
+        if let Json.Array(xs) = t.get(String("told")) ?? Json.Null { told = xs.copy() }
+        told.push(said.copy())
+        let th = with(t.get(String("thread")) ?? Json.Null, "pendingRequestCount", Json.Int(0))
+        t = with(with(with(t.copy(), "thread", th), "asks", Json.Null), "told", Json.Array(told))
+        return true
+    }
+
+    fn call(self: mut Fake, name: String, args: Json) -> Json {
+        self.count(name.copy())
+        if name == "t3_project_list" {
+            return answer(object([("projects", Json.Array([object([("id", text("p1")), ("title", text("loom")), ("archivedAt", Json.Null)]), object([("id", text("p2")), ("title", text("calcite")), ("archivedAt", Json.Null)])])), ("nextCursor", Json.Null)]))
+        }
+        if name == "t3_thread_read" {
+            let id = str_of(args.copy(), "threadId")
+            self.count("t3_thread_read {id}")
+            if let t = self.threads.find(id.copy()) { return answer(Fake.read_of(t.copy())) }
+            return tool_error("Thread not found: {id}")
+        }
+        if name == "t3_pending_request" {
+            let id = str_of(args.copy(), "threadId")
+            let action = str_of(args.copy(), "action")
+            var t = Json.Null
+            if let x = self.threads.find(id.copy()) { t = x.copy() }
+            let asks = t.get(String("asks")) ?? Json.Null
+            let is_question = str_of(asks.copy(), "kind") == "question"
+            if action == "list" {
+                var ids = List<Json>()
+                // Approvals aren't listed, as T3 says.
+                if is_question { ids.push(Json.Str(str_of(asks.copy(), "requestId"))) }
+                return answer(object([("requestIds", Json.Array(ids))]))
+            }
+            if action == "read" {
+                if not is_question or str_of(args.copy(), "requestId") != str_of(asks.copy(), "requestId") { return tool_error(String("No such pending question")) }
+                return answer(object([("requestId", Json.Str(str_of(asks.copy(), "requestId"))), ("questions", asks.get(String("questions")) ?? Json.Null)]))
+            }
+            if action == "respond" {
+                if not is_question or str_of(args.copy(), "requestId") != str_of(asks.copy(), "requestId") { return tool_error(String("No such pending question; this cannot approve a permission request")) }
+                _ = self.answered(id, args.get(String("answers")) ?? Json.Null)
+                return answer(object([("ok", Json.Bool(true))]))
+            }
+            return tool_error("No action {action}")
+        }
+        if name == "t3_thread_launch" {
+            self.next += 1
+            let id = "mcp:new{self.next}"
+            let title = str_of(args.copy(), "title")
+            let selection = args.get(String("modelSelection")) ?? Json.Null
+            var t = new_thread(id.copy(), title.copy(), "p1", "claude-opus-5-5", "running", "git status")
+            let model = str_of(selection.copy(), "model")
+            if model.len() > 0 { t = with(t.copy(), "thread", with(t.get(String("thread")) ?? Json.Null, "model", Json.Str(model))) }
+            t = with(with(t.copy(), "thread", with(t.get(String("thread")) ?? Json.Null, "projectId", Json.Str(str_of(args.copy(), "projectId")))), "launched", args.copy())
+            self.threads.insert(id.copy(), t)
+            return answer(object([("threadId", Json.Str(id.copy())), ("link", Json.Str(link(id, title))), ("status", text("starting"))]))
+        }
+        return tool_error("No tool {name}.")
+    }
+
+    fn mcp(self: mut Fake, req: Request) -> Response {
+        if (req.header(String("Authorization")) ?? String()) != "Bearer t3-key" {
+            return json(401, object([("error", text("invalid_token"))])).with_header(String("WWW-Authenticate"), String("Bearer resource_metadata=\"http://127.0.0.1/.well-known/oauth-protected-resource/mcp\""))
+        }
+        let m = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return Response.error(400),
+        }
+        let method = str_of(m.copy(), "method")
+        let id = m.get(String("id")) ?? Json.Null
+        if id == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
+        var result = object(List<(str, Json)>())
+        if method == "initialize" {
+            result = object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("t3")), ("version", text("0.1.12"))]))])
+        } else if method == "tools/list" {
+            var tools = List<Json>()
+            for n in ["t3_project_list", "t3_thread_read", "t3_pending_request", "t3_thread_launch"] {
+                tools.push(object([("name", text(n))]))
+            }
+            result = object([("tools", Json.Array(tools))])
+        } else if method == "tools/call" {
+            let params = m.get(String("params")) ?? Json.Null
+            result = self.call(str_of(params.copy(), "name"), params.get(String("arguments")) ?? Json.Null)
+        }
+        return json(200, object([("jsonrpc", text("2.0")), ("id", id), ("result", result)]))
+    }
+
+    // A message on /ws: an Effect RPC request, answered with its Exit.
+    fn rpc(self: mut Fake, s: ServerSocket, server: Server, t: String) {
+        let m = match parse(t) {
+            ok(j) => j,
+            err(_) => return,
+        }
+        if str_of(m.copy(), "_tag") != "Request" { return }
+        let n = str_of(m.copy(), "id")
+        let payload = m.get(String("payload")) ?? Json.Null
+        var ok_now = false
+        var why = String("Unknown command")
+        if str_of(m.copy(), "tag") == "orchestration.dispatchCommand" and str_of(payload.copy(), "type") == "runtime-request.respond" {
+            self.count(String("runtime-request.respond"))
+            let id = str_of(payload.copy(), "threadId")
+            var waits = false
+            if let th = self.threads.find(id.copy()) {
+                let asks = th.get(String("asks")) ?? Json.Null
+                waits = str_of(asks.copy(), "kind") == "approval" and str_of(asks, "requestId") == str_of(payload.copy(), "requestId")
+            }
+            if waits {
+                ok_now = self.answered(id, object([("decision", Json.Str(str_of(payload, "decision")))]))
+            } else {
+                why = String("No such request")
+            }
+        }
+        let exit = if ok_now { object([("_tag", text("Success")), ("value", object([("sequence", Json.Int(7))]))]) } else { object([("_tag", text("Failure")), ("cause", object([("_tag", text("Fail")), ("error", object([("message", Json.Str(why))]))]))]) }
+        _ = server.send_text(s, "{object([("_tag", text("Exit")), ("requestId", Json.Str(n)), ("exit", exit)])}")
+    }
+
+    fn handle(self: mut Fake, req: Request) -> Response {
+        if req.method == "POST" and req.path == "/mcp" { return self.mcp(req) }
+        if req.method == "POST" and req.path == "/api/auth/websocket-ticket" {
+            if self.refuse_ws or (req.header(String("Authorization")) ?? String()) != "Bearer t3-key" { return json(401, object([("error", text("unauthorized"))])) }
+            return json(200, object([("ticket", text("tk1")), ("expiresAt", text("2026-11-26T03:00:00.000Z"))]))
+        }
+        let q = url.form_decode(req.query.copy())
+        let id = param(q.copy(), "thread")
+        if req.path == "/test/calls" {
+            var m = LinkedMap<String, Json>()
+            for (k, n) in self.calls {
+                m.insert(k.copy(), Json.Int(n))
+            }
+            return json(200, Json.Object(m))
+        }
+        if req.path == "/test/set" {
+            self.set_status(id, param(q, "status"))
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/ask" {
+            self.ask(id, param(q, "kind"))
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/ws" {
+            self.refuse_ws = param(q, "refuse") == "1"
+            return json(200, object(List<(str, Json)>()))
+        }
+        if req.path == "/test/thread" {
+            if let t = self.threads.find(id) { return json(200, t.copy()) }
+            return json(200, Json.Null)
+        }
+        return Response.error(404)
+    }
+}
+
+// The query's value for `key`, or "".
+fn param(q: List<(String, String)>, key: str) -> String {
+    for (k, v) in q {
+        if k == key { return v.copy() }
+    }
+    return String()
+}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    let base = server.url().trim_suffix("/").copy()
+    var threads = LinkedMap<String, Json>()
+    threads.insert(String("mcp:fix"), new_thread(String("mcp:fix"), String("Fix the flaky sign-in test"), "p1", "claude-opus-5-5", "running", "calx tests/protocol/signin.calx"))
+    var fake = Fake { threads: threads, calls: LinkedMap<String, i64>(), next: 0, refuse_ws: false }
+    println("fake t3: {base}")
+    io.flush()
+    loop {
+        match server.next_event(1000) {
+            some(Request(req)) => {
+                if req.path == "/ws" {
+                    if req.query != "wsTicket=tk1" {
+                        server.respond(req, Response.error(401))
+                        continue
+                    }
+                    match server.upgrade(req.copy()) {
+                        ok(_) => {},
+                        err(e) => eprintln("fake t3: /ws: {e}"),
+                    }
+                    continue
+                }
+                let res = fake.handle(req.copy())
+                server.respond(req, res)
+            },
+            some(Message(s, Text(t))) => fake.rpc(s, server, t),
+            _ => {},
+        }
+    }
+}
