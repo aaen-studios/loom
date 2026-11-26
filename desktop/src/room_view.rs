@@ -547,7 +547,7 @@ impl Loom {
             .child(line("Router", u.router_today, u.router_month))
     }
 
-    fn member_chip(&self, id: String, a: &model::Agent, on: bool) -> Stateful<Div> {
+    pub(super) fn member_chip(&self, id: String, a: &model::Agent, on: bool) -> Stateful<Div> {
         let p = self.p;
         div()
             .id(SharedString::from(id))

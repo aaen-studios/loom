@@ -16,6 +16,7 @@ pub mod popup;
 mod rooms;
 pub mod t3;
 pub use popover::pop_under;
+pub mod spools;
 use rooms::Making;
 pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed, MAKE_WAIT};
 mod sidebar;
@@ -497,7 +498,7 @@ pub enum SignIn {
 }
 
 /// One of the person's MCP servers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct McpServer {
     pub name: String,
     /// The command line, for one the agent starts; empty for one over HTTP.
@@ -510,12 +511,36 @@ pub struct McpServer {
     /// by itself, and its secret when it names one of their keys.
     pub client_id: String,
     pub client_secret: Option<String>,
+    /// How it stands, as its last test found it (Spools' Installed list), and why,
+    /// for one failing.
+    pub status: McpStatus,
+    pub why: String,
+    /// The tools its last test found, while it's connected.
+    pub tools: Vec<String>,
+    /// The ids of the person's agents that have it.
+    pub agents: Vec<String>,
+    /// The id of the catalog entry it came from, or whose fixed address it has.
+    pub catalog: String,
+    /// Its badge, with the icons it gave of its own once it has.
+    pub badge: Option<Badge>,
 }
 
-#[derive(Clone, Debug)]
+/// How one of the person's MCP servers stands, as `mcp.list` says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum McpStatus {
+    Connected,
+    SignIn,
+    Failing,
+    #[default]
+    Untested,
+}
+
+/// A value in a server's env or headers: text, or one of the person's secrets by name,
+/// with any text sent before it, such as `Bearer `.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Setting {
     Text(String),
-    Secret(String),
+    Secret { name: String, prefix: String },
 }
 
 impl McpServer {
@@ -536,7 +561,10 @@ impl McpServer {
                 m.iter()
                     .map(|(k, v)| {
                         let value = match v.get("secret").and_then(Value::as_str) {
-                            Some(name) => Setting::Secret(name.to_string()),
+                            Some(name) => Setting::Secret {
+                                name: name.to_string(),
+                                prefix: s(v, "prefix"),
+                            },
                             None => Setting::Text(v.as_str().unwrap_or_default().to_string()),
                         };
                         (k.clone(), value)
@@ -553,6 +581,17 @@ impl McpServer {
             .pointer("/client_secret/secret")
             .and_then(Value::as_str)
             .map(|n| format!("secret:{n}"));
+        let names = |key: &str| -> Vec<String> {
+            v.get(key)
+                .and_then(Value::as_array)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         McpServer {
             name: s(v, "name"),
             command,
@@ -561,24 +600,59 @@ impl McpServer {
             sign_in,
             client_id: s(v, "client_id"),
             client_secret,
+            status: match s(v, "status").as_str() {
+                "connected" => McpStatus::Connected,
+                "sign_in" => McpStatus::SignIn,
+                "failing" => McpStatus::Failing,
+                _ => McpStatus::Untested,
+            },
+            why: s(v, "why"),
+            tools: names("tools"),
+            agents: names("agents"),
+            catalog: s(v, "catalog"),
+            badge: v.get("badge").and_then(Badge::of),
         }
     }
 
-    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a line.
+    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a
+    /// line, a secret's prefix before it, as `Authorization=Bearer secret:GITHUB_TOKEN`.
     pub fn settings_text(&self) -> String {
         self.settings
             .iter()
             .map(|(k, v)| match v {
                 Setting::Text(t) => format!("{k}={t}"),
-                Setting::Secret(n) => format!("{k}=secret:{n}"),
+                Setting::Secret { name, prefix } => format!("{k}={prefix}secret:{name}"),
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
 }
 
+/// A setting's value as the form has it: `secret:KEY`, with any prefix before it
+/// (`Bearer secret:KEY`), names one of the person's secrets; anything else is text.
+/// A prefix is the text before `secret:` and ends in a space, and a secret's name is
+/// letters, digits, `_`, `-` and `.`.
+fn setting_value(v: &str) -> Value {
+    if let Some(at) = v.rfind("secret:") {
+        let (prefix, name) = (&v[..at], v[at + "secret:".len()..].trim());
+        let named = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if named && (prefix.is_empty() || prefix.ends_with(char::is_whitespace)) {
+            return if prefix.is_empty() {
+                json!({"secret": name})
+            } else {
+                json!({"secret": name, "prefix": prefix})
+            };
+        }
+    }
+    json!(v)
+}
+
 /// The `mcp.put` arguments for a server as the form has it: a command line, or an http(s)
-/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line.
+/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line, a secret's
+/// prefix kept before it (`NAME=Bearer secret:KEY`).
 pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
     let mut pairs = serde_json::Map::new();
     for l in settings.lines() {
@@ -589,11 +663,7 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
         if k.is_empty() {
             continue;
         }
-        let value = match v.strip_prefix("secret:") {
-            Some(n) => json!({"secret": n.trim()}),
-            None => json!(v),
-        };
-        pairs.insert(k.to_string(), value);
+        pairs.insert(k.to_string(), setting_value(v));
     }
     let line = line.trim();
     if line.starts_with("http://") || line.starts_with("https://") {
@@ -919,6 +989,8 @@ pub enum PlusRow {
     Routine(Box<Routine>),
     /// The end of a list beside the menu: its settings page.
     Manage(PlusSub),
+    /// Opens Spools in Settings, for the agent.
+    Spools,
     /// Opens the form that starts a T3 thread (PLAN.md, "T3 threads").
     StartT3,
 }
@@ -984,6 +1056,7 @@ impl Model {
             let mut act = vec![
                 PlusRow::Open(PlusSub::Skills),
                 PlusRow::Open(PlusSub::Routines),
+                PlusRow::Spools,
             ];
             if !self.t3.servers.is_empty() {
                 act.push(PlusRow::StartT3);
@@ -1015,6 +1088,9 @@ impl Model {
             |r| (r.name.as_str(), ""),
             |r| PlusRow::Routine(Box::new(r)),
         ));
+        if plus_match(&q, "Spools", "integrations mcp").is_some() {
+            act.push(PlusRow::Spools);
+        }
         if !self.t3.servers.is_empty() && "start a t3 thread".contains(&q) {
             act.push(PlusRow::StartT3);
         }
@@ -6136,6 +6212,8 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<Secret>,
     mcp_stale: bool,
+    /// Spools, the integrations catalog, and connecting from it.
+    pub spools: spools::Spools,
     /// The settings list pages' forms, each item's as the person left it, changed and
     /// not saved (`drafts`).
     pub drafts: drafts::Drafts,
@@ -7185,6 +7263,7 @@ impl Model {
             "event" => self.event(f),
             "result" => self.result(f),
             "browser.state" => self.browser_state(f),
+            "connect" => self.connect_frame(f),
             "browser.frame" => {
                 // From an instance of protocol version 1, the JPEG in base64; later
                 // ones send it as a binary message (`take_page`).
@@ -7766,6 +7845,10 @@ impl Model {
         // A list page's Save: saved, its draft goes; refused, it stays, and the branch
         // for its command says why.
         self.drafts.answered(&id, f.get("error").is_none());
+        if id.starts_with("app.spools_") {
+            self.spools_result(&id, f);
+            return;
+        }
         // A group chat made here: the chat shows it.
         if id.starts_with("app.room_create") {
             self.room_create_answered(&id, f);
@@ -7909,6 +7992,10 @@ impl Model {
             return;
         }
         if let Some(name) = id.strip_prefix("app.mcp_test:") {
+            // The instance keeps what it found, which Spools' Installed list shows.
+            if self.spools.loaded {
+                self.mcp_stale = true;
+            }
             let found = match f.get("error") {
                 Some(e) if s(e, "code") == "sign_in_needed" => {
                     self.mcp_stale = true;
@@ -9792,7 +9879,19 @@ impl Model {
             _ => Vec::new(),
         });
         let sites = sites.chain(previews);
-        for icon in cards.chain(asks).flat_map(Badge::icons).chain(sites) {
+        // And the icons Spools shows: those the person's servers gave of their own.
+        let spools = self
+            .spools
+            .entries
+            .iter()
+            .filter_map(|e| e.badge.as_ref())
+            .chain(self.mcp_servers.iter().filter_map(|m| m.badge.as_ref()));
+        for icon in cards
+            .chain(asks)
+            .chain(spools)
+            .flat_map(Badge::icons)
+            .chain(sites)
+        {
             if !wanted.contains(icon) {
                 wanted.push(icon.clone());
             }
@@ -10289,13 +10388,18 @@ impl Model {
         )
     }
 
-    /// Asks for the person's MCP servers and their secrets' names.
+    /// Asks for the person's MCP servers and their secrets' names, and the catalog
+    /// once Spools has been opened, whose entries say which they have.
     pub fn load_mcp(&mut self) -> Vec<Value> {
         let (a, b) = (self.id("app.mcp_list"), self.id("app.secrets"));
-        vec![
+        let mut out = vec![
             json!({"t": "cmd", "id": a, "name": "mcp.list"}),
             json!({"t": "cmd", "id": b, "name": "secret.list"}),
-        ]
+        ];
+        if self.spools.loaded {
+            out.extend(self.load_catalog());
+        }
+        out
     }
 
     /// Starts the MCP server `name` on the instance and asks for its tools.
@@ -11925,6 +12029,67 @@ mod tests {
         assert!(kept.get("client_secret").is_none());
         let local = with_client(server_args("local", "npx thing", ""), "c1", "s");
         assert!(local.get("client_id").is_none());
+    }
+
+    #[test]
+    fn an_mcp_server_says_how_it_stands_for_the_installed_list() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+            {"name": "acta", "url": "https://acta.aaenz.no/api/mcp", "headers": {}, "status": "connected",
+             "tools": ["list_tasks"], "agents": ["a1", "a2"], "catalog": "acta"},
+            {"name": "t3", "url": "https://pc.ts.net/mcp", "headers": {}, "status": "failing", "why": "It didn't answer."},
+            {"name": "linear", "url": "https://mcp.linear.app/mcp", "headers": {}, "status": "sign_in"},
+            {"name": "local", "command": "npx", "args": ["thing"], "env": {}}
+        ]}}));
+        let acta = &m.mcp_servers[0];
+        assert_eq!(acta.status, McpStatus::Connected);
+        assert_eq!(acta.tools, ["list_tasks"]);
+        assert_eq!(acta.agents, ["a1", "a2"]);
+        assert_eq!(acta.catalog, "acta");
+        assert_eq!(
+            (m.mcp_servers[1].status, m.mcp_servers[1].why.as_str()),
+            (McpStatus::Failing, "It didn't answer.")
+        );
+        assert_eq!(m.mcp_servers[2].status, McpStatus::SignIn);
+        assert_eq!(m.mcp_servers[3].status, McpStatus::Untested);
+    }
+
+    #[test]
+    fn the_mcp_form_keeps_a_secrets_prefix() {
+        // LOO-364: a header that's `Bearer ` and a secret shows with its prefix, and
+        // saving the form sends it back as it was.
+        let mut m = Model::new();
+        m.take(
+            &json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+                {"name": "github", "url": "https://api.githubcopilot.com/mcp/", "headers": {
+                    "Authorization": {"secret": "GITHUB_TOKEN", "prefix": "Bearer "},
+                    "X-Plain": {"secret": "PLAIN"},
+                    "X-Text": "hello"
+                }}
+            ]}}),
+        );
+        let text = m.mcp_servers[0].settings_text();
+        assert!(text.contains("Authorization=Bearer secret:GITHUB_TOKEN"));
+        assert!(text.contains("X-Plain=secret:PLAIN"));
+        assert!(text.contains("X-Text=hello"));
+        let put = server_args("github", "https://api.githubcopilot.com/mcp/", &text);
+        assert_eq!(
+            put["headers"],
+            json!({
+                "Authorization": {"secret": "GITHUB_TOKEN", "prefix": "Bearer "},
+                "X-Plain": {"secret": "PLAIN"},
+                "X-Text": "hello"
+            })
+        );
+        // Text that only has secret: in it stays text.
+        let odd = server_args(
+            "x",
+            "npx x",
+            "URL=https://x.example/secret:y\nEMPTY=Bearer secret:\nNAME=my secret:has space",
+        );
+        assert_eq!(odd["env"]["URL"], "https://x.example/secret:y");
+        assert_eq!(odd["env"]["EMPTY"], "Bearer secret:");
+        assert_eq!(odd["env"]["NAME"], "my secret:has space");
     }
 
     #[test]
@@ -15295,11 +15460,15 @@ mod tests {
                 ],
                 vec![
                     PlusRow::Open(PlusSub::Skills),
-                    PlusRow::Open(PlusSub::Routines)
+                    PlusRow::Open(PlusSub::Routines),
+                    PlusRow::Spools
                 ],
             ]
         );
         assert!(m.plus_groups("", true)[0].contains(&PlusRow::PasteImage));
+        // Spools is found by its name, or what it's for.
+        assert_eq!(m.plus_groups("spo", false), vec![vec![PlusRow::Spools]]);
+        assert_eq!(m.plus_groups("mcp", false), vec![vec![PlusRow::Spools]]);
         // Typed, each group's rows that match: names that start with it first, then a
         // skill's when-to-use, and this agent's routines before another's.
         let found = m.plus_groups("rev", false);

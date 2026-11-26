@@ -96,6 +96,7 @@ list-row = 48        # a row of a list page's list
 grip = 14            # the corner that resizes the settings popup
 row-tall = 68        # a settings row with a picture, at least
 pill = 22            # a card's pill in a message
+tile = 76            # a tile in a grid, such as an integration in Spools
 
 # The iPhone app's type: the same scale, a little larger for a screen held in
 # the hand. Dynamic Type scales it from here.

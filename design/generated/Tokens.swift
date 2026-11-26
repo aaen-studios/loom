@@ -105,6 +105,7 @@ enum Tokens {
         static let grip: CGFloat = 14
         static let rowTall: CGFloat = 68
         static let pill: CGFloat = 22
+        static let tile: CGFloat = 76
     }
 
     enum PhoneSize {
