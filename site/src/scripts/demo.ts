@@ -37,6 +37,10 @@
 // comes with it, before its words (room_view.rs, route_line). Its row opens it by hand too. Its
 // header has its own pins and the context of the member that answered last.
 //
+// Each chat keeps its own draft: one opened by hand while the scene writes in another has its
+// own message box, and the words come back with their chat, though what they replied to
+// doesn't (app.rs, swap_draft).
+//
 // Then Moss's chat opens from its row, with "3 new" over the replies that came after the person
 // left, a table whose arrow copies it as Markdown, and the draft it wrote yesterday cut after ten
 // lines; Ctrl+F finds "Northwind" in it, newest first, stepping back to the draft, which opens
@@ -310,7 +314,9 @@ export function play(app: HTMLElement) {
 		if (chat === 'moss') return mossMsgs;
 		return app.classList.contains('in-thread') ? app.querySelector<HTMLElement>('.msgs.asked')! : msgs;
 	}
+	/** Replies to a message in the open chat; one in a chat that isn't open is left be. */
 	const replyTo = (row: HTMLElement, part?: string, ask = false) => {
+		if (chatOf(row) !== chat) return;
 		const agent = row.classList.contains('reply');
 		const who = whoOf(row);
 		replying = { row, who, words: (part ?? wordsOf(row)).replace(/\s+/g, ' ').trim(), part: !!part, ask: ask && !!part };
@@ -323,6 +329,22 @@ export function play(app: HTMLElement) {
 		replyBar.hidden = true;
 	};
 	app.querySelector('[data-reply-x]')!.addEventListener('click', unreply);
+
+	// Each chat keeps what's written and attached in it, and the emoji row over it, while
+	// another is open; the composer holds the open chat's (app.rs, swap_draft). What it
+	// replies to goes once the chat is left, as the app's does (model.rs, replying). The
+	// scene writes in the chat it's writing in, open or not.
+	type Draft = { typed: HTMLElement; attached: HTMLElement; row: HTMLElement | null };
+	const blank = (): Draft => ({ typed: typed.cloneNode() as HTMLElement, attached: attached.cloneNode() as HTMLElement, row: null });
+	const drafts: Record<Chat, Draft> = { juniper: { typed, attached, row: null }, shop: blank(), moss: blank() };
+	/** The composer with the open chat's draft in it. */
+	function drawDraft() {
+		const d = drafts[chat];
+		composer.querySelector('.typed')!.replaceWith(d.typed);
+		composer.querySelector('[data-attached]')!.replaceWith(d.attached);
+		for (const row of composer.querySelectorAll('.emoji-row')) if (row !== d.row) row.remove();
+		if (d.row && !d.row.isConnected) composer.append(d.row);
+	}
 	for (const b of app.querySelectorAll<HTMLButtonElement>('.msgs .reply-btn')) {
 		b.addEventListener('click', () => replyTo(b.closest<HTMLElement>('.row')!));
 	}
@@ -586,7 +608,9 @@ export function play(app: HTMLElement) {
 			for (const cut of mossMsgs.querySelectorAll<HTMLElement>('[data-cut]')) cut.dataset.open = '';
 		}
 		if (to !== 'juniper') app.classList.remove('in-thread');
+		unreply();
 		chat = to;
+		drawDraft();
 		app.classList.toggle('in-room', to === 'shop');
 		app.classList.toggle('in-moss', to === 'moss');
 		const agent = to === 'moss' ? { name: 'Moss', color: 'mint' } : { name: 'Juniper', color: 'sky' };
@@ -1252,10 +1276,10 @@ export function play(app: HTMLElement) {
 		app.classList.toggle('busy', m !== 'idle');
 	};
 
-	/** Words typed into the composer, after what's in it. */
-	async function type(text: string, id: number) {
+	/** Words typed into a chat's draft, after what's in it. */
+	async function type(text: string, id: number, into: Chat = 'juniper') {
 		const words = document.createTextNode('');
-		typed.append(words);
+		drafts[into].typed.append(words);
 		for (let i = 1; i <= text.length; i++) {
 			words.data = text.slice(0, i);
 			await wait(text[i - 1] === ' ' ? 70 : 38 + Math.random() * 40, id);
@@ -1267,9 +1291,10 @@ export function play(app: HTMLElement) {
 		if (template) row.append(tpl(template));
 	}
 
-	/** The person's message written: its words typed, and its link pasted and its file
-	 * attached where they go, each a piece in the words, the file with its pill over them. */
+	/** The person's message written in Juniper's chat: its words typed, and its link pasted and
+	 * its file attached where they go, each a piece in the words, the file with its pill over them. */
 	async function compose(id: number) {
+		const draft = drafts.juniper;
 		for (const part of SEND) {
 			if (typeof part === 'string') {
 				await type(part, id);
@@ -1277,37 +1302,43 @@ export function play(app: HTMLElement) {
 			}
 			await wait(300, id);
 			// The file comes from the + menu's Recent files: sent there before, it goes again
-			// without uploading.
-			if (part.piece === 'demo-file') await fromRecent(id);
-			typed.append(tpl(part.piece));
-			over(attached, part.over);
-			attached.hidden = attached.childElementCount === 0;
+			// without uploading. The menu shows only while Juniper's chat is open.
+			if (part.piece === 'demo-file' && chat === 'juniper') await fromRecent(id);
+			draft.typed.append(tpl(part.piece));
+			over(draft.attached, part.over);
+			draft.attached.hidden = draft.attached.childElementCount === 0;
 			await wait(450, id);
 		}
 	}
 
-	/** The + opened, Recent files lit, its list beside it, and notes-2.4.md taken from it. */
+	/** The + opened, Recent files lit, its list beside it, and notes-2.4.md taken from it;
+	 * it stops where it is if another chat opens meanwhile, which closes the menu. */
 	async function fromRecent(id: number) {
 		plusBtn.classList.add('pressed');
 		openPlus(true);
 		await wait(650, id);
 		plusBtn.classList.remove('pressed');
+		if (chat !== 'juniper') return;
 		const row = plus.querySelector<HTMLElement>('[data-opens="recent"]')!;
 		lightRow(row, plus);
 		openSub('recent');
 		await wait(700, id);
+		if (chat !== 'juniper') return;
 		const sub = subs.find((s) => s.dataset.plusSub === 'recent')!;
 		lightRow(sub.querySelector('[data-plus-item="notes-2.4.md"]'), sub);
 		await wait(600, id);
 		openPlus(false);
 	}
 
-	/** The composer empty again, once its message has gone. */
-	function cleared() {
-		typed.replaceChildren();
-		attached.replaceChildren();
-		attached.hidden = true;
-		unreply();
+	/** A chat's draft empty again, once its message has gone, and what it replied to with it. */
+	function cleared(of: Chat) {
+		const d = drafts[of];
+		d.typed.replaceChildren();
+		d.attached.replaceChildren();
+		d.attached.hidden = true;
+		d.row?.remove();
+		d.row = null;
+		if (replying && chatOf(replying.row) === of) unreply();
 	}
 
 	/** The person's message in the chat, as the composer showed it: what it replies to and its
@@ -1490,9 +1521,9 @@ export function play(app: HTMLElement) {
 	async function roomScene(id: number) {
 		inRoom(true);
 		await wait(1100, id);
-		await type(ROOM_ASK, id);
+		await type(ROOM_ASK, id, 'shop');
 		await wait(450, id);
-		cleared();
+		cleared('shop');
 		roomSent(true);
 		// About a second for the router's pick, on its warm session.
 		await wait(900, id);
@@ -1553,7 +1584,7 @@ export function play(app: HTMLElement) {
 	function fresh() {
 		openChat('juniper');
 		waitingOn('Juniper', false);
-		cleared();
+		for (const c of ['juniper', 'shop', 'moss'] as const) cleared(c);
 		context(82, 'juniper', `Compacted 2 h ago · ${FRESH_AT}`);
 		fills.shop = { used: 23, title: "Juniper's context", line: FRESH_ALONE, who: 'Juniper' };
 		fills.moss = { used: 24, title: 'Context', line: `Compacted 15 h ago · ${FRESH_AT}` };
@@ -1575,8 +1606,9 @@ export function play(app: HTMLElement) {
 		await wait(500, id);
 		await compose(id);
 		await wait(500, id);
-		const to = replying;
-		cleared();
+		// What it replies to, unless Juniper's chat was left meanwhile, which drops it.
+		const to = replying && chatOf(replying.row) === 'juniper' ? replying : null;
+		cleared('juniper');
 		msgs.append(sent(true, to));
 		await wait(450, id);
 		// Its quote goes back to the answer, and the reply comes while the chat is there: the
@@ -1680,14 +1712,17 @@ export function play(app: HTMLElement) {
 			fix.toggle(false);
 			await wait(1200, id);
 			await type(':tada', id);
+			const draft = drafts.juniper;
 			const row = tpl('demo-emoji-row');
-			composer.append(row);
+			draft.row = row;
+			if (chat === 'juniper') drawDraft();
 			await wait(1100, id);
 			row.remove();
-			typed.lastChild?.remove();
-			typed.append(tpl('demo-tada'));
+			draft.row = null;
+			draft.typed.lastChild?.remove();
+			draft.typed.append(tpl('demo-tada'));
 			await wait(700, id);
-			cleared();
+			cleared('juniper');
 			// The session is past 80%, so this message goes to a fresh one, given the newest of
 			// the chat, with loom's line where it starts (PLAN.md, "One endless chat").
 			loomLine('A fresh session starts here', msgs);
