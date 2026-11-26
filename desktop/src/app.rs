@@ -14,7 +14,10 @@ use gpui_kit::component::input::{
     MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
-use gpui_kit::component::text::{RangeHighlight, RenderedText, TextView, TextViewState};
+use gpui_kit::component::text::{
+    markdown_ast, InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode,
+    MarkdownParseContext, MarkdownPlugin, RangeHighlight, RenderedText, TextView, TextViewState,
+};
 use gpui_kit::component::{Icon, IconName, Sizable as _, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -46,10 +49,13 @@ mod room_view;
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
 use emoji_ui::{Greeting, RowKey};
+#[path = "form_drafts.rs"]
+mod form_drafts;
 #[path = "list_page.rs"]
 mod list_page;
 #[path = "routines.rs"]
 mod routines;
+use crate::model::drafts::Page as DraftPage;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
 
@@ -548,7 +554,9 @@ pub struct Loom {
     panel_opening: Option<String>,
     /// What came through the open panel's door, waiting for the window's task.
     door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
+    /// A note to remember, on the Memory page, and a proposed note's text, each its own.
     note_in: Entity<InputState>,
+    proposal_note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     /// The instructions every agent follows, on the Defaults page.
     every_in: Entity<TextareaState>,
@@ -625,8 +633,13 @@ pub struct Loom {
     /// On the Brains page: none for the first, `Some(None)` for the ACP Registry, and
     /// `Some(Some(name))` for the program picked.
     program_open: Option<Option<String>>,
+    /// A secret to add, its name and value, on the Secrets page.
     set_key_in: Entity<InputState>,
     set_value_in: Entity<InputState>,
+    /// The open program's setting to add, its name and value: its own, not the Secrets
+    /// page's.
+    setting_key_in: Entity<InputState>,
+    setting_value_in: Entity<InputState>,
     /// The open program's share: tokens each person may use, and whether each month.
     share_in: Entity<InputState>,
     share_month: bool,
@@ -914,6 +927,7 @@ impl Loom {
                     InputEvent::Change => {
                         this.track_mention(cx);
                         this.track_emoji(window, cx);
+                        this.track_cards(window, cx);
                         // A file whose piece was taken out goes with it, and comes back
                         // with an undo.
                         this.sync_attachments(cx);
@@ -1166,6 +1180,7 @@ impl Loom {
         }
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
+        let proposal_note_in = input(window, cx, "Something to remember", false);
         let profile_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
@@ -1223,6 +1238,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let mcp_client_in = input(window, cx, "Only if its sign-in asks for one", false);
         let mcp_client_secret_in = input(window, cx, "secret:KEY, or the secret", true);
         let set_value_in = input(window, cx, "Its value", true);
+        let setting_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
+        let setting_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
@@ -1235,6 +1252,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 .auto_grow(4, 14)
                 .placeholder("How should it work?")
         });
+        // The list pages' forms: each change is kept as its item's draft (form_drafts.rs).
+        for state in [
+            &mcp_name_in,
+            &mcp_cmd_in,
+            &mcp_client_in,
+            &mcp_client_secret_in,
+            &skill_name_in,
+            &skill_desc_in,
+            &proposal_note_in,
+            &setting_key_in,
+            &setting_value_in,
+            &share_in,
+            &routine_name_in,
+        ] {
+            form_drafts::watch(state, window, cx);
+        }
+        for state in [&mcp_settings_in, &skill_body_in, &routine_prompt_in] {
+            form_drafts::watch(state, window, cx);
+        }
         if let Ok(server) = std::env::var("LOOM_SERVER") {
             server_in.update(cx, |s, cx| s.set_value(server, window, cx));
         }
@@ -1653,6 +1689,7 @@ ACTA_KEY=secret:ACTA_KEY",
             panel_opening: None,
             door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
+            proposal_note_in,
             profile_in,
             every_in,
             routine_name_in,
@@ -1743,6 +1780,8 @@ ACTA_KEY=secret:ACTA_KEY",
             check_in,
             set_key_in,
             set_value_in,
+            setting_key_in,
+            setting_value_in,
             share_in,
             share_month: false,
             instructions_in,
@@ -2081,9 +2120,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
             }
         }
-        // A list page opens with its find field empty, on its first.
+        // A list page opens with its find field empty, on its first, and the form left
+        // open keeps its draft.
         self.list_ui.find_for = None;
-        self.list_ui.filled = None;
+        self.leave_form(cx);
         match screen {
             Screen::Server => {
                 let f = self.model.load_scripts();
@@ -2458,6 +2498,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(i) = self.away.iter().position(|a| a.dir == dir) else {
             return;
         };
+        // The form open is this server's, and keeps its draft with it.
+        self.leave_form(cx);
         let a = &mut self.away[i];
         std::mem::swap(&mut self.core, &mut a.core);
         std::mem::swap(&mut self.events, &mut a.events);
@@ -2788,6 +2830,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.core.send(&f.to_string());
         }
         for f in self.model.file_fetches() {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.card_fetches(model::now_ms()) {
             self.core.send(&f.to_string());
         }
     }
@@ -8563,6 +8608,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .collect(),
             together,
             previews: self.model.link_previews.clone(),
+            cards: self.model.card_previews.clone(),
             thumbs: self.model.files.clone(),
         });
         let this = cx.entity().downgrade();
@@ -8600,6 +8646,28 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         } else if let Some(url) = id.strip_prefix(model::LINK) {
             cx.open_url(url);
+        } else if let Some(r) = id.strip_prefix(model::CARD) {
+            // A card, in Acta.
+            if let Some(model::CardPreview::Ready(c)) = self.model.card_previews.get(r) {
+                cx.open_url(&c.link());
+            } else if r.starts_with("https://") {
+                cx.open_url(r);
+            }
+        }
+    }
+
+    /// A card id the person just finished typing, for one of their boards, becomes the
+    /// card's piece, as the sent message will show it (PLAN.md, "Cards in messages").
+    fn track_cards(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prefixes = self.model.board_prefixes();
+        if prefixes.is_empty() {
+            return;
+        }
+        let typed = self
+            .composer
+            .update(cx, |c, cx| put_typed_card(c, &prefixes, window, cx));
+        if let Some(f) = typed.and_then(|id| self.model.preview_card(&id)) {
+            self.send(f);
         }
     }
 
@@ -11001,7 +11069,19 @@ ACTA_KEY=secret:ACTA_KEY",
                                         .read_from_clipboard()
                                         .and_then(|item| item.text())
                                         .unwrap_or_default();
-                                    if let Some(url) = model::pasted_link(&text) {
+                                    // A card's link, with Acta connected, as its pill.
+                                    if let Some(url) = model::pasted_card(&text)
+                                        .filter(|_| !this.model.acta_boards.is_empty())
+                                    {
+                                        cx.stop_propagation();
+                                        let url = url.to_string();
+                                        this.composer
+                                            .update(cx, |c, cx| paste_card(c, &url, window, cx));
+                                        if let Some(f) = this.model.preview_card(&url) {
+                                            this.send(f);
+                                        }
+                                        cx.notify();
+                                    } else if let Some(url) = model::pasted_link(&text) {
                                         cx.stop_propagation();
                                         let url = url.to_string();
                                         this.composer
@@ -13258,33 +13338,16 @@ ACTA_KEY=secret:ACTA_KEY",
         }))
     }
 
-    /// Fills the MCP server form with server `m`'s, as it's picked.
+    /// Fills the MCP server form with server `m`'s, as it's picked, or with what the
+    /// person left in it.
     pub(super) fn fill_mcp(
         &mut self,
         m: &model::McpServer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line = if m.url.is_empty() {
-            m.command.clone()
-        } else {
-            m.url.clone()
-        };
-        self.mcp_name_in
-            .update(cx, |s, cx| s.set_value(m.name.clone(), window, cx));
-        self.mcp_cmd_in
-            .update(cx, |s, cx| s.set_value(line, window, cx));
-        self.mcp_settings_in
-            .update(cx, |s, cx| s.set_value(m.settings_text(), window, cx));
-        let (client, secret) = (
-            m.client_id.clone(),
-            m.client_secret.clone().unwrap_or_default(),
-        );
-        self.mcp_client_in
-            .update(cx, |s, cx| s.set_value(client, window, cx));
-        self.mcp_client_secret_in
-            .update(cx, |s, cx| s.set_value(secret, window, cx));
-        self.list_ui.filled = Some((Screen::Mcp, m.name.clone()));
+        let own = model::drafts::mcp_form(Some(m));
+        self.fill_form(DraftPage::Mcp, Some(m.name.clone()), own, window, cx);
     }
 
     /// The MCP servers page: the person's servers down the left, which each agent gets if
@@ -13293,18 +13356,9 @@ ACTA_KEY=secret:ACTA_KEY",
         let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
             this.small_button("new-mcp", "New server", primary)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    for s in [
-                        &this.mcp_name_in,
-                        &this.mcp_cmd_in,
-                        &this.mcp_client_in,
-                        &this.mcp_client_secret_in,
-                    ] {
-                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                    }
-                    this.mcp_settings_in
-                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    let own = model::drafts::mcp_form(None);
+                    this.fill_form(DraftPage::Mcp, None, own, window, cx);
                     this.mcp_open = Some(None);
-                    this.list_ui.filled = None;
                     cx.notify();
                 }))
         };
@@ -13360,12 +13414,13 @@ ACTA_KEY=secret:ACTA_KEY",
             return div().into_any_element();
         };
         let (line, dot) = popup::mcp_line(&m, self.model.mcp_tests.get(&m.name));
-        self.list_row(
+        self.list_row_unsaved(
             format!("mcp-{}", m.name),
             self.tile(Ico::Plug),
             m.name.clone(),
             line,
             dot,
+            self.unsaved(DraftPage::Mcp, &m.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13386,6 +13441,7 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Vec<AnyElement> {
         let open = m.map(|m| m.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-mcp", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13401,25 +13457,28 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let client = this.mcp_client_in.read(cx).value().to_string();
                 let secret = this.mcp_client_secret_in.read(cx).value().to_string();
+                let now = this.form_now(DraftPage::Mcp, cx);
                 let f = this.model.put_mcp(crate::model::with_client(
                     crate::model::server_args(&name, &line, &settings),
                     &client,
                     &secret,
                 ));
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Mcp, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.mcp_open = split.then(|| Some(name.clone()));
-                this.list_ui.filled = Some((Screen::Mcp, name));
+                this.mcp_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-mcp", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it was; else back to the list.
-                if split && changing {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it was; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !(split && changing) {
                     this.mcp_open = None;
                 }
                 cx.notify();
@@ -13430,7 +13489,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.delete_mcp(&name);
                     this.send(f);
                     this.mcp_open = None;
-                    this.list_ui.filled = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 }))
         });
@@ -13606,20 +13665,16 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("secrets-page", "Secrets", None, groups)
     }
 
-    /// Fills the skill form with skill `k`'s, as it's picked.
+    /// Fills the skill form with skill `k`'s, as it's picked, or with what the person
+    /// left in it.
     pub(super) fn fill_skill(
         &mut self,
         k: &model::Skill,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.skill_name_in
-            .update(cx, |s, cx| s.set_value(k.name.clone(), window, cx));
-        self.skill_desc_in
-            .update(cx, |s, cx| s.set_value(k.description.clone(), window, cx));
-        self.skill_body_in
-            .update(cx, |s, cx| s.set_value(k.body.clone(), window, cx));
-        self.list_ui.filled = Some((Screen::Skills, k.name.clone()));
+        let own = model::drafts::skill_form(Some(k));
+        self.fill_form(DraftPage::Skills, Some(k.name.clone()), own, window, cx);
     }
 
     /// The skills page: the person's skills down the left, which every agent reads when a
@@ -13678,6 +13733,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn skill_pane(&mut self, k: Option<&model::Skill>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let open = k.map(|k| k.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-skill", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13691,21 +13747,24 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                     return;
                 }
+                let now = this.form_now(DraftPage::Skills, cx);
                 let f = this.model.save_skill(&name, &description, &text);
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Skills, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.skill_open = split.then(|| Some(name.clone()));
-                this.list_ui.filled = Some((Screen::Skills, name));
+                this.skill_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-skill", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it was; else back to the list.
-                if split && changing {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it was; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !(split && changing) {
                     this.skill_open = None;
                 }
                 cx.notify();
@@ -13716,7 +13775,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.delete_skill(&name);
                     this.send(f);
                     this.skill_open = None;
-                    this.list_ui.filled = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 }))
         });
@@ -13747,13 +13806,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn new_skill_button(&self, cx: &mut Context<Self>) -> AnyElement {
         self.small_button("new-skill", "New skill", self.model.skills.is_empty())
             .on_click(cx.listener(|this, _, window, cx| {
-                for s in [&this.skill_name_in, &this.skill_desc_in] {
-                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                }
-                this.skill_body_in
-                    .update(cx, |s, cx| s.set_value("", window, cx));
+                let own = model::drafts::skill_form(None);
+                this.fill_form(DraftPage::Skills, None, own, window, cx);
                 this.skill_open = Some(None);
-                this.list_ui.filled = None;
                 cx.notify();
             }))
             .into_any_element()
@@ -13764,12 +13819,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(k) = self.model.skills.get(ix).cloned() else {
             return div().into_any_element();
         };
-        self.list_row(
+        self.list_row_unsaved(
             format!("skill-{}", k.name),
             self.tile(Ico::BookOpen),
             k.name.clone(),
             k.description.clone(),
             None,
+            self.unsaved(DraftPage::Skills, &k.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13781,31 +13837,16 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// Fills the proposal form with proposal `k`'s, as it's picked: a skill's name, when
-    /// it's for and how, a fix's skill fixed, or a note.
+    /// it's for and how, a fix's skill fixed, or a note; or with what the person left in
+    /// it.
     pub(super) fn fill_proposal(
         &mut self,
         k: &model::Proposal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if k.kind == "skill" {
-            let (name, description, body) = (k.name.clone(), k.description.clone(), k.body.clone());
-            self.skill_name_in
-                .update(cx, |s, cx| s.set_value(name, window, cx));
-            self.skill_desc_in
-                .update(cx, |s, cx| s.set_value(description, window, cx));
-            self.skill_body_in
-                .update(cx, |s, cx| s.set_value(body, window, cx));
-        } else if k.kind == "fix" {
-            let body = k.body.clone();
-            self.skill_body_in
-                .update(cx, |s, cx| s.set_value(body, window, cx));
-        } else {
-            let text = k.text.clone();
-            self.note_in
-                .update(cx, |s, cx| s.set_value(text, window, cx));
-        }
-        self.list_ui.filled = Some((Screen::Proposals, k.id.clone()));
+        let own = model::drafts::proposal_form(k);
+        self.fill_form(DraftPage::Proposals, Some(k.id.clone()), own, window, cx);
     }
 
     /// What a proposal is, as its row says it: "Skill from Juniper".
@@ -13887,12 +13928,13 @@ ACTA_KEY=secret:ACTA_KEY",
             Ico::Lightbulb
         };
         let line = self.proposal_line(&k);
-        self.list_row(
+        self.list_row_unsaved(
             format!("proposal-{}", k.id),
             self.tile(icon),
             k.title(),
             line,
             None,
+            self.unsaved(DraftPage::Proposals, &k.id),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13928,21 +13970,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else if p.kind == "fix" {
                     p.body = this.skill_body_in.read(cx).value().to_string();
                 } else {
-                    p.text = this.note_in.read(cx).value().to_string();
+                    p.text = this.proposal_note_in.read(cx).value().to_string();
                 }
+                let now = this.form_now(DraftPage::Proposals, cx);
                 let f = this.model.keep_proposal(&p);
+                // Its draft stays until the instance says it's kept, and with its row
+                // again if it refuses.
+                this.form_saving(DraftPage::Proposals, Some(p.id.clone()), &f, now);
                 this.send(f);
+                this.leave_form(cx);
                 this.proposal_open = None;
-                this.list_ui.filled = None;
                 cx.notify();
             }));
         let cancel = self
             .small_button("cancel-proposal", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it came; else back to the list.
-                if split {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it came; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !split {
                     this.proposal_open = None;
                 }
                 cx.notify();
@@ -13954,7 +14000,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = this.model.drop_proposal(&id);
                 this.send(f);
                 this.proposal_open = None;
-                this.list_ui.filled = None;
+                this.model.drafts.discard();
                 cx.notify();
             }));
         let icon = if skill || open.kind == "fix" {
@@ -14008,7 +14054,7 @@ ACTA_KEY=secret:ACTA_KEY",
             rows.push(self.text_row("The skill, fixed", None, Textarea::new(&self.skill_body_in)));
             groups.push(self.group(None, rows));
         } else {
-            let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
+            let mut rows = vec![self.field_row("Note", Input::new(&self.proposal_note_in))];
             if !open.site.is_empty() || open.shared {
                 let mut how = Vec::new();
                 if !open.site.is_empty() {
@@ -16270,22 +16316,28 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let (listed, shown, what, newer) = self.brain_about(&prog);
         let name = prog.name.clone();
-        self.list_row(
+        self.list_row_unsaved(
             format!("program-{}", prog.name),
             self.brain_tile(listed.as_ref(), control::LEAD),
             shown,
             what,
             newer.map(|_| popup::Dot::Warn),
+            self.unsaved(DraftPage::Brains, &prog.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             this.program_open = Some(Some(name.clone()));
-            for s in [&this.set_key_in, &this.set_value_in] {
-                s.update(cx, |s, cx| s.set_value("", window, cx));
-            }
+            this.fill_brain(&name, window, cx);
             cx.notify();
         }))
         .into_any_element()
+    }
+
+    /// Fills the brain form, its setting to add and its tokens to share, empty for brain
+    /// `name`, as it's picked, or with what the person left in it.
+    pub(super) fn fill_brain(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let own = model::drafts::brain_form();
+        self.fill_form(DraftPage::Brains, Some(name.to_string()), own, window, cx);
     }
 
     /// The ACP Registry, as the row under the brains: how many of its programs aren't
@@ -16315,6 +16367,7 @@ ACTA_KEY=secret:ACTA_KEY",
             picked,
         )
         .on_click(cx.listener(|this, _, _, cx| {
+            this.leave_form(cx);
             this.program_open = Some(None);
             cx.notify();
         }))
@@ -16356,13 +16409,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::S))
                 .px(px(space::L))
                 .py(px(space::M))
-                .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_key_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_value_in)))
                 .child(
                     self.small_button(format!("set-{}", prog.name), "Add setting", false)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            let key = this.set_key_in.read(cx).value().to_string();
-                            let value = this.set_value_in.read(cx).value().to_string();
+                            let key = this.setting_key_in.read(cx).value().to_string();
+                            let value = this.setting_value_in.read(cx).value().to_string();
                             if key.trim().is_empty() {
                                 this.model.notices.push(
                                     "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
@@ -16372,7 +16425,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                             let f = this.model.set_setting(&program, &key, Some(&value));
                             this.send(f);
-                            for s in [&this.set_key_in, &this.set_value_in] {
+                            for s in [&this.setting_key_in, &this.setting_value_in] {
                                 s.update(cx, |s, cx| s.set_value("", window, cx));
                             }
                             cx.notify();
@@ -16511,6 +16564,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.remove_program(&program);
                     this.send(f);
                     this.program_open = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 })),
         );
@@ -19295,6 +19349,7 @@ fn person(
         // A right-click on one of the person's own emoji: Copy name in its menu.
         None if url.starts_with(crate::emoji::OWN_LINK) => emoji_ui::own_clicked(&opener, url, cx),
         None if url.starts_with("loom:") => {}
+        None if open_card_link(url, cx) => {}
         None => cx.open_url(url),
     };
     // Its corners on the right smaller where it joins the person's messages either side.
@@ -22038,6 +22093,307 @@ fn site_icon(p: Palette, sha: Option<&str>, size: f32) -> AnyElement {
     }
 }
 
+// --- Cards from Acta (PLAN.md, "Cards in messages") ---
+
+thread_local! {
+    /// The cards the messages drawn name, by id, with the palette they're drawn in, for
+    /// their pills (`CardPills`), which draw outside the message.
+    static CARD_TIPS: RefCell<HashMap<String, (Palette, model::ActaCard)>> = RefCell::new(HashMap::new());
+}
+
+/// The board's tile before a card's id: Acta's purple, with its layers glyph, until Acta
+/// gives each board its own icon. An SVG file, written once.
+fn board_tile() -> Option<String> {
+    let tile = hex_of(rgb(color_dark::BOARD).into());
+    mention_svg(&format!("board-{tile}"), || {
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"42\" height=\"42\" viewBox=\"0 0 14 14\">\
+             <rect width=\"14\" height=\"14\" rx=\"3\" fill=\"#{tile}\"/>\
+             <g transform=\"translate(2 2) scale(0.4167)\" fill=\"none\" stroke=\"#f4f1fc\" \
+             stroke-width=\"2.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\
+             <path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"/>\
+             <path d=\"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12\"/>\
+             <path d=\"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17\"/></g></svg>"
+        )
+    })
+}
+
+fn board_icon(size: f32) -> AnyElement {
+    match board_tile() {
+        Some(path) => img(std::path::PathBuf::from(path))
+            .flex_none()
+            .size(px(size))
+            .into_any_element(),
+        None => div()
+            .flex_none()
+            .size(px(size))
+            .rounded(px(3.0))
+            .bg(rgb(color_dark::BOARD))
+            .into_any_element(),
+    }
+}
+
+/// The colour a card's status is drawn in (`model::CardInk`).
+fn card_ink(p: Palette, card: &model::ActaCard) -> Hsla {
+    match card.ink() {
+        model::CardInk::Quiet => p.ink_3,
+        model::CardInk::Sky => thread::color("sky", p.dark),
+        model::CardInk::Gold => thread::color("gold", p.dark),
+        model::CardInk::Ok => p.ok,
+    }
+}
+
+/// A card's id, in mono.
+fn card_id_text(id: &str, color: Hsla) -> Div {
+    div()
+        .flex_none()
+        .font_family(font::MONO)
+        .text_size(px(size::CAPTION))
+        .text_color(color)
+        .child(id.to_string())
+}
+
+/// A card's pill, in a message or the composer (PLAN.md, "Cards in messages"): its board's
+/// tile, its id in mono, its title cut to fit and a dot in its status's colour, on the
+/// bubble's fill with a line around it. Under the pointer its preview shows under it, and
+/// a click opens it in Acta. A card that isn't there, or that the person can't see, is
+/// its id alone, quiet; one still being looked up, its tile and its id.
+fn card_pill(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+) -> AnyElement {
+    if card.is_some_and(|c| c.missing) {
+        return card_id_text(id, p.ink_3).into_any_element();
+    }
+    let pill = div()
+        .id(SharedString::from(format!("{key}-pill")))
+        .h(px(control::PILL))
+        .max_w(px(layout::PILL_TITLE + 110.0))
+        .pl(px(4.0))
+        .pr(px(7.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .rounded(px(radius::ROW))
+        .border_1()
+        .border_color(p.line)
+        .bg(p.bubble)
+        .cursor_pointer()
+        .child(board_icon(14.0))
+        .child(card_id_text(id, p.ink_2));
+    let Some(card) = card.cloned() else {
+        return pill.into_any_element();
+    };
+    let url = card.link();
+    let title = div()
+        .min_w_0()
+        .max_w(px(layout::PILL_TITLE))
+        .truncate()
+        .text_size(px(size::SMALL))
+        .text_color(if card.struck() { p.ink_3 } else { p.ink })
+        .when(card.struck(), |d| d.line_through())
+        .child(card.title.clone());
+    let pill = pill
+        .child(title)
+        .child(
+            div()
+                .flex_none()
+                .size(px(7.0))
+                .rounded_full()
+                .bg(card_ink(p, &card)),
+        )
+        .on_click(move |_, _, cx| cx.open_url(&url));
+    gpui_kit::base::HoverCard::new(key)
+        .anchor(Anchor::TopLeft)
+        .open_delay(Duration::from_millis(350))
+        .close_delay(Duration::from_millis(150))
+        .trigger(pill)
+        .content(move |_, _, _| card_preview(p, &card))
+        .into_any_element()
+}
+
+/// A card's preview, under its pill: its board and id, its title, chips for its status (in
+/// its colour), assignee, size and labels, the start of its description, its subtasks done
+/// with a bar, and Open and Open in Acta.
+fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
+    let chip = |words: String, color: Hsla, edge: Hsla| {
+        div()
+            .h(px(20.0))
+            .px(px(8.0))
+            .flex()
+            .items_center()
+            .rounded(px(10.0))
+            .border_1()
+            .border_color(edge)
+            .text_size(px(size::CAPTION))
+            .text_color(color)
+            .whitespace_nowrap()
+            .child(words)
+    };
+    let ink = card_ink(p, card);
+    let mut chips = div().flex().flex_wrap().gap(px(6.0)).child(chip(
+        card.status_words(),
+        ink,
+        ink.opacity(0.6),
+    ));
+    for c in card.chips() {
+        chips = chips.child(chip(c, p.ink_2, p.line_strong));
+    }
+    let button = |name: &'static str, url: String| {
+        div()
+            .id(name)
+            .h(px(28.0))
+            .px(px(10.0))
+            .flex()
+            .items_center()
+            .rounded(px(radius::BUTTON))
+            .border_1()
+            .border_color(p.line_strong)
+            .text_size(px(size::CAPTION))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, None)
+            .child(name)
+            .on_click(move |_, _, cx| cx.open_url(&url))
+    };
+    // Both open it in Acta, until it has a preview beside the chat.
+    let url = card.link();
+    div().id("card-preview").pt(px(space::XS)).child(
+        div()
+            .w(px(layout::CARD_PREVIEW))
+            .p(px(space::M))
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line_strong)
+            .bg(p.raised)
+            .shadow(card_shadow(p))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(board_icon(14.0))
+                    .child(card.place()),
+            )
+            .child(
+                div()
+                    .text_size(px(size::BODY))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(if card.struck() { p.ink_3 } else { p.ink })
+                    .when(card.struck(), |d| d.line_through())
+                    .child(card.title.clone()),
+            )
+            .child(chips)
+            .when(!card.text.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_size(px(size::SMALL))
+                        .line_height(px(size::SMALL * line::BODY))
+                        .text_color(p.ink_2)
+                        .line_clamp(3)
+                        .child(card.text.clone()),
+                )
+            })
+            .when_some(card.subtasks_line(), |d, words| {
+                let part = card.subtasks_part();
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_3)
+                        .child(div().flex_none().child(words))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(4.0))
+                                .rounded_full()
+                                .bg(p.line_strong)
+                                .child(div().h_full().w(relative(part)).rounded_full().bg(p.ok)),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .pt(px(2.0))
+                    .flex()
+                    .gap(px(space::S))
+                    .child(button("Open", url.clone()))
+                    .child(button("Open in Acta", url)),
+            ),
+    )
+}
+
+/// Draws the card links `model::with_link_icons` puts in a message's words as the cards'
+/// pills.
+struct CardPills;
+
+impl MarkdownPlugin for CardPills {
+    fn name(&self) -> &str {
+        "loom-card"
+    }
+
+    fn parse(
+        &self,
+        node: &markdown_ast::Node,
+        cx: &MarkdownParseContext<'_>,
+    ) -> Option<MarkdownNode> {
+        let markdown_ast::Node::Link(link) = node else {
+            return None;
+        };
+        let id = link.url.strip_prefix(model::CARD_LINK)?.to_string();
+        Some(
+            MarkdownNode::new("loom-card", id.clone())
+                .text(id)
+                .markdown(cx.node_source(node).unwrap_or_default()),
+        )
+    }
+
+    fn render_inline(
+        &self,
+        node: &MarkdownNode,
+        _context: &InlineRenderContext,
+        _window: &mut Window,
+        _cx: &mut App,
+    ) -> Option<InlineElement> {
+        let id = node.data::<String>()?.clone();
+        let (p, card) = CARD_TIPS.with(|t| t.borrow().get(&id).cloned())?;
+        let key = SharedString::from(format!("card-{id}"));
+        // Its text sits on the line's baseline.
+        Some(InlineElement::new(card_pill(p, key, &id, Some(&card))).with_baseline(px(15.5)))
+    }
+}
+
+/// The Markdown a message's words are parsed with: its cards as pills. Made once, so a
+/// text's parse is kept from one frame to the next.
+fn card_extensions() -> MarkdownExtensions {
+    thread_local! {
+        static EXT: MarkdownExtensions = MarkdownExtensions::default().plugin(CardPills);
+    }
+    EXT.with(|e| e.clone())
+}
+
+/// Opens a card a message's words link to (`model::CARD_LINK`), in Acta. Gives whether
+/// `url` was one.
+fn open_card_link(url: &str, cx: &mut App) -> bool {
+    let Some(id) = url.strip_prefix(model::CARD_LINK) else {
+        return false;
+    };
+    if let Some((_, card)) = CARD_TIPS.with(|t| t.borrow().get(id).cloned()) {
+        cx.open_url(&card.link());
+    }
+    true
+}
+
 /// How a site icon's file is named in a message's Markdown (`linked_words`).
 const SITE_ICON: &str = "loom-icon:";
 
@@ -22073,10 +22429,19 @@ fn linked_words(p: Palette, text: &str, m: &Message) -> String {
             }
         }
     });
+    CARD_TIPS.with(|t| {
+        let mut t = t.borrow_mut();
+        for (id, c) in m.cards.iter() {
+            if t.get(id).is_none_or(|(tp, tc)| *tp != p || tc != c) {
+                t.insert(id.clone(), (p, c.clone()));
+            }
+        }
+    });
     model::with_link_icons(
         text,
         &model::Inline {
             links: &m.links,
+            cards: &m.cards,
             icon_src: &icon_src,
             agent: &agent,
             file_icon: &file_icon,
@@ -22169,6 +22534,42 @@ fn paste_link(
     let _ = c.replace_range_with_token(at..at + url.len(), InlineToken::new(id, text), window, cx);
 }
 
+/// Pastes a card's link as its pill (PLAN.md, "Cards in messages"), the way `paste_link`
+/// pastes a link.
+fn paste_card(
+    c: &mut TextareaState,
+    url: &str,
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) {
+    let at = c.selected_range().start;
+    c.replace(url.to_string(), window, cx);
+    let (id, text) = model::card_token(url);
+    let _ = c.replace_range_with_token(at..at + url.len(), InlineToken::new(id, text), window, cx);
+}
+
+/// Makes the card id just typed before the cursor, for one of the boards `prefixes`
+/// names, one piece (`model::typed_card`), and gives its id.
+fn put_typed_card(
+    c: &mut TextareaState,
+    prefixes: &[String],
+    window: &mut Window,
+    cx: &mut Context<TextareaState>,
+) -> Option<String> {
+    let text = c.value().to_string();
+    let before = &text[..c.cursor().min(text.len())];
+    let pieces: Vec<std::ops::Range<usize>> = c.tokens().iter().map(|t| t.range()).collect();
+    let (range, id) = model::typed_card(before, prefixes, &pieces)?;
+    let cursor = before.len();
+    let (token, words) = model::card_token(&id);
+    c.replace_range_with_token(range, InlineToken::new(token, words), window, cx)
+        .ok()?;
+    // The piece is as long as the id, so the cursor goes back where it was, after
+    // the space or stop typed after the id, which the replacing put it before.
+    c.set_selected_range(cursor..cursor, cx);
+    Some(id)
+}
+
 /// A picture attached in the composer, made small (`Loom::make_preview`): drawn as its
 /// own when it's alone, from `file` in a fan of two or more, and how big it is.
 #[derive(Clone)]
@@ -22222,6 +22623,8 @@ struct ComposerPieces {
     /// The files that stand side by side with another, by their token's id.
     together: HashSet<String>,
     previews: HashMap<String, model::Preview>,
+    /// The cards in it, by their id or link, as they're looked up.
+    cards: HashMap<String, model::CardPreview>,
     thumbs: Rc<HashMap<String, String>>,
 }
 
@@ -22250,6 +22653,29 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
     };
     if id.starts_with(emoji_ui::PIECE) {
         return emoji_ui::composer_piece(words);
+    }
+    // A card, as the sent message shows it: its pill once it's looked up.
+    if let Some(r) = id.strip_prefix(model::CARD) {
+        let shown = match pieces.cards.get(r) {
+            Some(model::CardPreview::Ready(c)) => Some(c.as_ref().clone()),
+            Some(model::CardPreview::Failed) => Some(model::ActaCard {
+                missing: true,
+                ..Default::default()
+            }),
+            _ => None,
+        };
+        let card_id = shown
+            .as_ref()
+            .map(|c| c.id.clone())
+            .filter(|i| !i.is_empty())
+            .or_else(|| model::card_link(r).map(|(_, i)| i))
+            .unwrap_or_else(|| r.to_string());
+        return card_pill(
+            p,
+            SharedString::from(format!("piece-{id}")),
+            &card_id,
+            shown.as_ref(),
+        );
     }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {
@@ -22486,43 +22912,46 @@ fn mention_file_icon(name: &str, color: &str) -> Option<String> {
     })
 }
 
-/// Draws the site icons `linked_words` put in, and a link's full address when the pointer
-/// is on it.
+/// Draws the site icons `linked_words` put in, its cards as pills, and a link's full
+/// address when the pointer is on it.
 fn with_links(v: TextView) -> TextView {
-    v.image_source(|uri| {
-        // An emoji: a built-in one drawn at its size, one of the person's own its picture.
-        if let Some(drawn) = crate::emoji::from_source(uri) {
-            return ImageSource::Render(drawn);
-        }
-        match uri
-            .strip_prefix(SITE_ICON)
-            .or_else(|| uri.strip_prefix(crate::emoji::OWN_SOURCE))
-        {
-            Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
-            None => uri.clone().into(),
-        }
-    })
-    .link_tooltip(|url, window, cx| {
-        if url.starts_with(crate::emoji::LINK) {
-            return emoji_ui::EmojiCard::view(url, window, cx);
-        }
-        // A file's whole name, which its link shows cut in the middle.
-        let file = model::mention_path(url).or_else(|| {
-            let sha = url.strip_prefix("loom-file:")?;
-            FILE_NAMES.with(|n| n.borrow().get(sha).cloned())
-        });
-        if url.starts_with("https://") || url.starts_with("http://") {
-            // Its preview, once it's looked up.
-            match LINK_TIPS.with(|t| t.borrow().get(url.as_ref()).cloned()) {
-                Some((p, l)) => link_tip(p, url, Some(&l), &badge_icon)(window, cx),
-                None => gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx),
+    v.markdown_extensions(card_extensions())
+        .image_source(|uri| {
+            // An emoji: a built-in one drawn at its size, one of the person's own its picture.
+            if let Some(drawn) = crate::emoji::from_source(uri) {
+                return ImageSource::Render(drawn);
             }
-        } else if let Some(name) = file {
-            gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
-        } else {
-            cx.new(|_| EmptyView).into()
-        }
-    })
+            match uri
+                .strip_prefix(SITE_ICON)
+                .or_else(|| uri.strip_prefix(crate::emoji::OWN_SOURCE))
+            {
+                Some(path) => ImageSource::from(std::path::PathBuf::from(path)),
+                None => uri.clone().into(),
+            }
+        })
+        .link_tooltip(|url, window, cx| {
+            if url.starts_with(crate::emoji::LINK) {
+                return emoji_ui::EmojiCard::view(url, window, cx);
+            }
+            // A file's whole name, which its link shows cut in the middle.
+            let file = model::mention_path(url).or_else(|| {
+                let sha = url.strip_prefix("loom-file:")?;
+                FILE_NAMES.with(|n| n.borrow().get(sha).cloned())
+            });
+            if url.starts_with("https://") || url.starts_with("http://") {
+                // Its preview, once it's looked up.
+                match LINK_TIPS.with(|t| t.borrow().get(url.as_ref()).cloned()) {
+                    Some((p, l)) => link_tip(p, url, Some(&l), &badge_icon)(window, cx),
+                    None => {
+                        gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+                    }
+                }
+            } else if let Some(name) = file {
+                gpui_kit::component::tooltip::Tooltip::new(name).build(window, cx)
+            } else {
+                cx.new(|_| EmptyView).into()
+            }
+        })
 }
 
 thread_local! {
@@ -22868,6 +23297,7 @@ impl ReplyDraw<'_> {
                             let _ = opener.update(cx, |loom, cx| loom.select(agent, cx));
                         } else if url.starts_with(crate::emoji::OWN_LINK) {
                             emoji_ui::own_clicked(&opener, url, cx);
+                        } else if open_card_link(url, cx) {
                         } else if !url.starts_with("loom:") {
                             cx.open_url(url);
                         }
@@ -26024,6 +26454,7 @@ mod row_tests {
             sources: Vec::new(),
             learned: Vec::new(),
             links: HashMap::new(),
+            cards: Default::default(),
             status: "done".into(),
         }
     }
@@ -27390,7 +27821,9 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
 #[cfg(test)]
 mod composer_tests {
     // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
-    use super::{composer_edit, composer_text, paste_link, ComposerEdit};
+    use super::{
+        composer_edit, composer_text, paste_card, paste_link, put_typed_card, ComposerEdit,
+    };
     use gpui::{
         div, AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render,
         Styled as _, TestAppContext, VisualTestContext, Window,
@@ -27522,6 +27955,54 @@ mod composer_tests {
             c.read_with(cx, |c, _| composer_text(c)),
             "See <https://a.example/x>"
         );
+    }
+
+    // A card's id typed for one of the person's boards becomes its piece once a space or
+    // a stop follows it, and what's typed next goes after that, as typed (LOO-342).
+    #[gpui::test]
+    fn a_typed_card_id_is_one_piece_and_typing_goes_on_after_it(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        let prefixes = vec!["LOO".to_string(), "CAL".to_string()];
+        let track = |c: &Entity<TextareaState>, cx: &mut VisualTestContext| {
+            cx.update(|window, cx| c.update(cx, |c, cx| put_typed_card(c, &prefixes, window, cx)))
+        };
+        cx.simulate_input("Is CAL-338");
+        assert_eq!(track(&c, cx), None);
+        cx.simulate_input(" ");
+        assert_eq!(track(&c, cx).as_deref(), Some("CAL-338"));
+        cx.simulate_input("waiting on UTF-8 and LOO-206,");
+        assert_eq!(track(&c, cx).as_deref(), Some("LOO-206"));
+        cx.simulate_input(" yes?");
+        assert_eq!(
+            shown(&c, cx),
+            (
+                "Is CAL-338 waiting on UTF-8 and LOO-206, yes?".into(),
+                vec!["loom-card:CAL-338".into(), "loom-card:LOO-206".into()]
+            )
+        );
+        // Sent as the ids, which the chat shows as the pills again.
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            "Is CAL-338 waiting on UTF-8 and LOO-206, yes?"
+        );
+    }
+
+    #[gpui::test]
+    fn a_pasted_card_link_is_one_piece_sent_as_its_address(cx: &mut TestAppContext) {
+        let (c, cx) = open(cx);
+        cx.simulate_input("See ");
+        let url = "https://acta.aaenz.no/aaen-studios/loom#LOO-206";
+        cx.update(|window, cx| c.update(cx, |c, cx| paste_card(c, url, window, cx)));
+        assert_eq!(
+            shown(&c, cx),
+            (format!("See {url}"), vec![format!("loom-card:{url}")])
+        );
+        assert_eq!(
+            c.read_with(cx, |c, _| composer_text(c)),
+            format!("See {url}")
+        );
+        cx.simulate_keystrokes("backspace");
+        assert_eq!(shown(&c, cx), ("See ".into(), vec![]));
     }
 }
 

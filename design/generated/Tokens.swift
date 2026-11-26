@@ -79,6 +79,8 @@ enum Tokens {
         static let pins: CGFloat = 460
         static let caret: CGFloat = 11
         static let contextCard: CGFloat = 300
+        static let pillTitle: CGFloat = 260
+        static let cardPreview: CGFloat = 330
         static let fieldLabel: CGFloat = 120
     }
 
@@ -102,6 +104,7 @@ enum Tokens {
         static let listRow: CGFloat = 48
         static let grip: CGFloat = 14
         static let rowTall: CGFloat = 68
+        static let pill: CGFloat = 22
     }
 
     enum PhoneSize {
@@ -138,6 +141,7 @@ enum Tokens {
         static let warn: UInt32 = 0xf2a77a
         static let find: UInt32 = 0x3b3417
         static let findCurrent: UInt32 = 0x94781a
+        static let board: UInt32 = 0x7d5fd6
     }
 
     enum ColorLight {
@@ -160,6 +164,7 @@ enum Tokens {
         static let warn: UInt32 = 0xc2621f
         static let find: UInt32 = 0xfbefb4
         static let findCurrent: UInt32 = 0xf2cc3d
+        static let board: UInt32 = 0x7d5fd6
     }
 
     enum ThreadColorDark {
