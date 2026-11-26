@@ -14,6 +14,7 @@ pub mod header;
 mod popover;
 pub mod popup;
 mod rooms;
+pub mod t3;
 pub use popover::pop_under;
 pub mod spools;
 use rooms::Making;
@@ -1039,6 +1040,8 @@ pub enum PlusRow {
     Manage(PlusSub),
     /// Opens Spools in Settings, for the agent.
     Spools,
+    /// Opens the form that starts a T3 thread (PLAN.md, "T3 threads").
+    StartT3,
 }
 
 impl PlusRow {
@@ -1099,14 +1102,15 @@ impl Model {
             }
             add.push(PlusRow::Open(PlusSub::Recent));
             add.push(PlusRow::Emoji);
-            return vec![
-                add,
-                vec![
-                    PlusRow::Open(PlusSub::Skills),
-                    PlusRow::Open(PlusSub::Routines),
-                    PlusRow::Spools,
-                ],
+            let mut act = vec![
+                PlusRow::Open(PlusSub::Skills),
+                PlusRow::Open(PlusSub::Routines),
+                PlusRow::Spools,
             ];
+            if !self.t3.servers.is_empty() {
+                act.push(PlusRow::StartT3);
+            }
+            return vec![add, act];
         }
         let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
             .into_iter()
@@ -1135,6 +1139,9 @@ impl Model {
         ));
         if plus_match(&q, "Spools", "integrations mcp").is_some() {
             act.push(PlusRow::Spools);
+        }
+        if !self.t3.servers.is_empty() && "start a t3 thread".contains(&q) {
+            act.push(PlusRow::StartT3);
         }
         vec![add, act]
             .into_iter()
@@ -1173,6 +1180,7 @@ impl Model {
             self.load_skills(),
             self.load_routines(),
             json!({"t": "cmd", "id": id, "name": "files.recent", "args": {"limit": 50}}),
+            self.ask_t3_servers(),
         ]
     }
 
@@ -2015,6 +2023,7 @@ fn mark_text(b: &Value, member: Option<&str>) -> String {
                 ),
             }
         }
+        "t3_thread" => "T3 thread started".into(),
         _ => String::new(),
     }
 }
@@ -2942,6 +2951,9 @@ pub struct Message {
     /// The Acta cards it names that the instance has looked up, by id. Shared, so a
     /// message stays small.
     pub cards: std::sync::Arc<HashMap<String, ActaCard>>,
+    /// The T3 threads it names or its agent's T3 tool calls started, as the instance
+    /// looked them up, in the order its words link them (PLAN.md, "T3 threads").
+    pub threads: std::sync::Arc<Vec<t3::ThreadCard>>,
     /// How an agent's turn ended (`done`, `cancelled`, `failed` or `limit`), or empty
     /// when the message doesn't say: a person's, one still being written, or one kept
     /// before messages said.
@@ -3238,19 +3250,22 @@ impl Message {
     /// the chat hasn't gone on, or an MCP server an agent proposed that's asking, being
     /// added or wants a sign-in.
     pub fn card_waits(&self, newest: bool) -> bool {
-        self.blocks
-            .iter()
-            .any(|b| match b.card.as_ref().map(|c| &c.body) {
-                Some(CardBody::Choices { .. }) => self.takes_answers(newest),
-                Some(CardBody::Form { answers, .. }) => {
-                    answers.is_none() && self.takes_answers(newest)
-                }
-                Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
-                Some(CardBody::McpAdd { state, .. }) => {
-                    matches!(state.as_str(), "asking" | "adding" | "sign_in")
-                }
-                _ => false,
-            })
+        // A T3 thread still going: its strand moves and its time counts.
+        self.threads.iter().any(t3::ThreadCard::moving)
+            || self
+                .blocks
+                .iter()
+                .any(|b| match b.card.as_ref().map(|c| &c.body) {
+                    Some(CardBody::Choices { .. }) => self.takes_answers(newest),
+                    Some(CardBody::Form { answers, .. }) => {
+                        answers.is_none() && self.takes_answers(newest)
+                    }
+                    Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
+                    Some(CardBody::McpAdd { state, .. }) => {
+                        matches!(state.as_str(), "asking" | "adding" | "sign_in")
+                    }
+                    _ => false,
+                })
     }
 
     /// A turn that didn't end by itself: stopped, failed, or out of tokens. Such a reply
@@ -4378,6 +4393,7 @@ mod card_tests {
                 sources: Vec::new(),
                 links: HashMap::new(),
                 cards: std::sync::Arc::new(cards),
+                threads: Default::default(),
                 status: String::new(),
                 reply: None,
                 routed: None,
@@ -6018,6 +6034,9 @@ pub struct Model {
     /// The messages of the shown chat whose cards were looked at since it showed
     /// (`card_fetches`).
     cards_looked: HashSet<String>,
+    /// T3's threads: which messages the instance follows, answers on their way, and the
+    /// start form (src/model/t3.rs).
+    pub t3: t3::T3,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     pub files: Rc<HashMap<String, String>>,
     /// file.get requests on their way: what they fetch, and whether to open it.
@@ -6972,6 +6991,7 @@ impl Model {
             learned: learned_of(m),
             links: links_of(m),
             cards: cards_of(m),
+            threads: t3::threads_of(m),
             status: s(m, "status"),
             routed: Routed::of(m),
             routine: s(m, "routine"),
@@ -7935,6 +7955,10 @@ impl Model {
         }
         // A card for the composer, the person's boards, or a refresh of cards.
         if self.take_card_answer(&id, f) {
+            return;
+        }
+        // A T3 thread's answer, the start form's, or the threads followed (src/model/t3.rs).
+        if self.take_t3_answer(&id, f) {
             return;
         }
         // A link pasted in the composer, looked up: its preview, or its site when the
@@ -9250,6 +9274,7 @@ impl Model {
                     learned: Vec::new(),
                     links: HashMap::new(),
                     cards: Default::default(),
+                    threads: Default::default(),
                     status: String::new(),
                     pinned: false,
                     reply: q.reply.clone(),
@@ -9308,6 +9333,7 @@ impl Model {
                 learned: Vec::new(),
                 links: HashMap::new(),
                 cards: Default::default(),
+                threads: Default::default(),
                 status: String::new(),
                 pinned: false,
                 reply: None,
@@ -12554,6 +12580,7 @@ mod tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             status: String::new(),
             pinned: false,
             reply: None,
@@ -13122,6 +13149,7 @@ mod tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             status: String::new(),
             pinned: false,
             reply: None,
@@ -13167,6 +13195,7 @@ mod tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             pinned: false,
             reply: None,
             status: status.into(),
