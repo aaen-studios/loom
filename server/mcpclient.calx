@@ -1,34 +1,68 @@
 module server.mcpclient
 
 // The person's MCP servers and their plugins' tool servers, as `loom mcp`
-// reaches them in Code Mode (PLAN.md, "Code Mode"): there, the agent program
-// isn't given them, so `loom mcp` is their client. A server with a command is
-// started as a child, speaking MCP's JSON-RPC a line at a time on its standard
-// input and output; one with a url is spoken to over MCP's Streamable HTTP.
-// Each is started the first time a script or a search needs the tools, and
-// kept until `loom mcp` ends.
+// reaches them in Code Mode (PLAN.md, "Code Mode"), and as the instance tries
+// them: there, the agent program isn't given them, so loom is their client. A
+// server with a command is started as a child, speaking MCP's JSON-RPC a line
+// at a time on its standard input and output; one with a url is spoken to over
+// MCP's Streamable HTTP. Each is started the first time a script or a search
+// needs the tools, and kept until `loom mcp` ends.
+//
+// MCP has two eras (PLAN.md, "MCP versions"). From 2026-07-28 (MODERN), every
+// request says its version, the client's name and what the client can do in
+// its `_meta`, over HTTP with headers that mirror its body, and there's no
+// initialize. Before, from 2024-11-05 to 2025-11-25 (LEGACY), a connection
+// starts with initialize, which settles the version. A server is asked
+// server/discover first, in MODERN, and one that answers as a server of the
+// modern era is spoken to in it; any other is initialized, as MCP's backward
+// compatibility says.
+import std.bytes
 import std.http.{Header, post}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio}
 import std.time.{Instant}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, int_at, merge, str_at}
 
-const PROTOCOL: str = "2025-06-18"
+// The versions of MCP loom speaks: MODERN, and the legacy era's, newest first.
+// LEGACY[0] is the one loom asks for in initialize.
+pub const MODERN: str = "2026-07-28"
+pub const LEGACY: [str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
 const START_MS: u64 = 60000
+// How long a server over stdio has to answer server/discover before it's sent
+// initialize too: one of the legacy era may say nothing to a request before
+// initialize. Its answer still counts when it comes later.
+const PROBE_MS: u64 = 5000
 // A call may take a while: a build, a search across a mailbox.
 pub const CALL_MS: u64 = 600000
 // What a request to a server over HTTP that answers 401 fails with.
 const SIGN_IN: str = "it asks for a sign-in"
 const ANSWER_MOST: usize = 67108864
+// The errors only a server of the modern era gives: its HTTP headers don't
+// match its body, it needs something of the client the request didn't
+// declare, or it doesn't speak the version asked for.
+const HEADER_MISMATCH: i64 = -32020
+const MISSING_CAPABILITY: i64 = -32021
+const UNSUPPORTED_VERSION: i64 = -32022
 
 pub struct Server {
     pub name: String
     child: Child?
+    spec: Json
     url: String
     headers: List<Header>
-    session: String    // Mcp-Session-Id, over HTTP
-    pub info: Json    // its serverInfo, as initialize gave it: its name, version and icons
+    session: String    // Mcp-Session-Id, over HTTP in the legacy era
+    pub version: String    // the version of MCP it's spoken to in
+    pub info: Json    // its serverInfo: its name, version and icons
+    params: Map<String, List<Param>>    // over HTTP in the modern era, each tool's x-mcp-header parameters
     next: i64
+}
+
+// A tool's parameter that a call over HTTP gives as a header too (2026-07-28,
+// `x-mcp-header`): `Mcp-Param-{header}`, with the value at `path` in its
+// arguments.
+struct Param {
+    header: String
+    path: List<String>
 }
 
 // [{name, value}], as the instance gives a server's env and headers.
@@ -42,72 +76,414 @@ fn pairs(list: Json) -> List<(String, String)> {
     return out
 }
 
+fn strings(list: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(xs) = list {
+        for x in xs {
+            if let s = x.as_str() { out.push(s) }
+        }
+    }
+    return out
+}
+
 fn millis_since(from: Instant) -> u64 {
     return unsafe { Instant.now() }.nanos_since(from) / 1000000
 }
 
+pub fn legacy(version: String) -> bool {
+    for v in LEGACY {
+        if version == v { return true }
+    }
+    return false
+}
+
+// Every version loom speaks, as a message names them.
+fn spoken() -> String {
+    var out = List<String>()
+    out.push(String(MODERN))
+    for v in LEGACY {
+        out.push(String(v))
+    }
+    return out.join(", ")
+}
+
+fn client_info() -> Json {
+    return Obj.new().s("name", String("loom")).s("version", String("1")).done()
+}
+
+fn message(id: i64, method: str, params: Json) -> Json {
+    return Obj.new().s("jsonrpc", String("2.0")).i("id", id).s("method", String(method)).j("params", params).done()
+}
+
+fn initialize_message(id: i64, version: String) -> Json {
+    return message(id, "initialize", Obj.new().s("protocolVersion", version).j("capabilities", Obj.new().done()).j("clientInfo", client_info()).done())
+}
+
+// `params` with what each request of the modern era says in its `_meta`: its
+// version, loom's name, and what loom can do for a server, which is nothing
+// (no sampling, elicitation or roots).
+pub fn with_meta(params: Json) -> Json {
+    let meta = Obj.new().s("io.modelcontextprotocol/protocolVersion", String(MODERN)).j("io.modelcontextprotocol/clientInfo", client_info()).j("io.modelcontextprotocol/clientCapabilities", Obj.new().done()).done()
+    return merge(params.copy(), Obj.new().j("_meta", merge(at(params, "_meta"), meta)).done())
+}
+
+// What a server's answer to server/discover says to speak to it in: MODERN,
+// for one that takes it; for a server of the modern era that doesn't, the
+// newest version it names of the legacy era's that loom speaks; and nothing,
+// for a server of the legacy era, whose answer is any other error or a result
+// that isn't a discovery's. A server of the modern era that names no version
+// loom speaks fails.
+pub fn version_from(name: String, answer: Json) -> String ! Error {
+    let result = at(answer.copy(), "result")
+    var named = strings(at(result.copy(), "supportedVersions"))
+    let e = at(answer, "error")
+    let code = int_at(e.copy(), "code") ?? 0
+    if code == MISSING_CAPABILITY or code == HEADER_MISMATCH {
+        fail "{name} answered server/discover with an error: {str_at(e, "message") ?? String("no message")}"
+    }
+    if code == UNSUPPORTED_VERSION {
+        named = strings(at(at(e, "data"), "supported"))
+    } else {
+        if named.len() == 0 { return String() }
+        if named.contains(String(MODERN)) {
+            try finished(name, "server/discover", result)
+            return String(MODERN)
+        }
+    }
+    for v in LEGACY {
+        if named.contains(String(v)) { return String(v) }
+    }
+    let theirs = if named.len() > 0 { named.join(", ") } else { String("none") }
+    fail "{name} speaks no version of MCP loom does ({spoken()}): it names {theirs}"
+}
+
+// The serverInfo of an answer to server/discover, in its `_meta`.
+fn server_info(answer: Json) -> Json {
+    return at(at(at(answer, "result"), "_meta"), "io.modelcontextprotocol/serverInfo")
+}
+
+// Whether a result is one loom can use. From 2026-07-28 a result says its
+// `resultType`: `complete` for a final one, and `input_required` for one that
+// asks the client for more first (sampling, elicitation, roots), which loom
+// doesn't give. A result from before says none, and is final.
+fn finished(name: String, method: str, result: Json) ! Error {
+    let kind = str_at(result, "resultType") ?? String("complete")
+    if kind == "complete" { return }
+    if kind == "input_required" { fail "{name} asked loom for more before it would answer {method}, which loom doesn't give" }
+    fail "{name} answered {method} with a result loom doesn't know ({kind})"
+}
+
+// Starts the program `spec` names, as the instance's /api/mcp/servers gives
+// it: {name, command, args, env}.
+fn spawn(name: String, spec: Json) -> Child ! Error {
+    let command = str_at(spec.copy(), "command") ?? String()
+    if command.len() == 0 { fail "{name} has neither a command nor a url" }
+    var args = List<String>()
+    if let Json.Array(given) = at(spec.copy(), "args") {
+        for a in given {
+            args.push(a.as_str() ?? String())
+        }
+    }
+    // Its own settings on top of this program's environment, as the agent
+    // program would start it, but without loom's token.
+    var c = Command.new(command).args(args).env_remove(String("LOOM_MCP_TOKEN")).env_remove(String("LOOM_URL")).env_remove(String("LOOM_CODE_MODE"))
+    for (k, v) in pairs(at(spec, "env")) {
+        c = c.env(k.copy(), v.copy())
+    }
+    return try c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).own_group().spawn()
+}
+
 // Starts the server `spec` says, as the instance's /api/mcp/servers gives it:
-// {name, command, args, env} or {name, url, headers}, and says initialize.
+// {name, command, args, env} or {name, url, headers}, and finds the version
+// of MCP to speak to it in.
 pub fn start(spec: Json) -> Server ! Error {
+    return try start_within(spec, START_MS)
+}
+
+// The same, waiting at most `ms` for each answer as it starts.
+pub fn start_within(spec: Json, ms: u64) -> Server ! Error {
     let name = str_at(spec.copy(), "name") ?? String()
-    var s = Server { name: name.copy(), child: none, url: String(), headers: List<Header>(), session: String(), info: Json.Null, next: 0 }
+    var s = Server { name: name.copy(), child: none, spec: spec.copy(), url: String(), headers: List<Header>(), session: String(), version: String(), info: Json.Null, params: Map<String, List<Param>>(), next: 0 }
     if let address = str_at(spec.copy(), "url") {
         s.url = address
-        for (k, v) in pairs(at(spec.copy(), "headers")) {
+        for (k, v) in pairs(at(spec, "headers")) {
             s.headers.push(Header { name: k.copy(), value: v.copy() })
         }
     } else {
-        let command = str_at(spec.copy(), "command") ?? String()
-        if command.len() == 0 { fail "{name} has neither a command nor a url" }
-        var args = List<String>()
-        if let Json.Array(given) = at(spec.copy(), "args") {
-            for a in given {
-                args.push(a.as_str() ?? String())
-            }
-        }
-        // Its own settings on top of this program's environment, as the agent
-        // program would start it, but without loom's token.
-        var c = Command.new(command).args(args).env_remove(String("LOOM_MCP_TOKEN")).env_remove(String("LOOM_URL")).env_remove(String("LOOM_CODE_MODE"))
-        for (k, v) in pairs(at(spec, "env")) {
-            c = c.env(k.copy(), v.copy())
-        }
-        s.child = some(try c.stdin(Stdio.Pipe).stdout(Stdio.Pipe).stderr(Stdio.Null).own_group().spawn())
+        s.child = some(try spawn(name, spec))
     }
-    let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
-    let began = try s.request("initialize", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done(), START_MS)
-    s.info = at(began, "serverInfo")
-    try s.notify("notifications/initialized")
+    if let err(e) = s.begin(ms) {
+        s.stop()
+        fail "{e}"
+    }
     return s
 }
 
+// A tool's x-mcp-header parameters (2026-07-28), from its inputSchema. A tool
+// whose annotations break MCP's rules isn't used: a header name that's empty,
+// isn't an HTTP token or is another's in another case, one on a parameter
+// that isn't a string, an integer or a boolean, or one reached other than
+// through `properties` alone.
+fn param_headers(schema: Json) -> List<Param> ! Error {
+    var out = List<Param>()
+    try find_params(schema, List<String>(), true, mut out)
+    var seen = List<String>()
+    for p in out {
+        let lower = p.header.to_lower_root()
+        if seen.contains(lower.copy()) { fail "x-mcp-header {p.header} is given twice" }
+        seen.push(lower)
+    }
+    return out
+}
+
+fn find_params(j: Json, path: List<String>, reachable: bool, out: mut List<Param>) ! Error {
+    if let Json.Array(items) = j.copy() {
+        for x in items {
+            try find_params(x.copy(), path.copy(), false, mut out)
+        }
+        return
+    }
+    let Json.Object(members) = j.copy() else return
+    if let named = j.get(String("x-mcp-header")) {
+        if not reachable or path.len() == 0 { fail "x-mcp-header {named} is on something not reached through properties alone" }
+        let header = named.as_str() ?? String()
+        if not is_token(header.copy()) { fail "x-mcp-header {named} isn't an HTTP header's name" }
+        if not primitive(at(j, "type")) { fail "x-mcp-header {header} is on a parameter that isn't a string, an integer or a boolean" }
+        out.push(Param { header: header, path: path.copy() })
+    }
+    for (k, v) in members {
+        if k == "x-mcp-header" { continue }
+        if k == "properties" and reachable {
+            if let Json.Object(props) = v.copy() {
+                for (name, sub) in props {
+                    var deeper = path.copy()
+                    deeper.push(name.copy())
+                    try find_params(sub.copy(), deeper, true, mut out)
+                }
+                continue
+            }
+        }
+        try find_params(v.copy(), path.copy(), false, mut out)
+    }
+}
+
+// Whether `text` is an HTTP token (RFC 9110, 5.6.2), as a header's name is.
+fn is_token(text: String) -> bool {
+    if text.len() == 0 { return false }
+    for r in text.runes() {
+        let letter = (r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9')
+        if not letter and "!#$%&'*+-.^_`|~".find("{r}") == none { return false }
+    }
+    return true
+}
+
+// Whether a parameter's `type` is a string, an integer or a boolean, or one
+// of those or null.
+fn primitive(kind: Json) -> bool {
+    if let s = kind.as_str() { return s == "string" or s == "integer" or s == "boolean" }
+    let Json.Array(kinds) = kind else return false
+    var one = false
+    for k in kinds {
+        let s = k.as_str() ?? String()
+        if s == "null" { continue }
+        if s != "string" and s != "integer" and s != "boolean" { return false }
+        one = true
+    }
+    return one
+}
+
+// A value as an HTTP header carries it: as it is when it's printable ASCII
+// with no space at either end, and otherwise as `=?base64?…?=`, its UTF-8 in
+// base64, as is a value that looks like that already.
+pub fn header_value(text: String) -> String {
+    var plain = not (text.starts_with("=?base64?") and text.ends_with("?=")) and not text.starts_with(" ") and not text.ends_with(" ")
+    for b in text.to_bytes() {
+        if b < 32 or b > 126 { plain = false }
+    }
+    if plain { return text.copy() }
+    return "=?base64?{bytes.base64(text.to_bytes())}?="
+}
+
+// The headers a call's arguments give for its tool's x-mcp-header
+// parameters: each value as text (a whole number in decimal, a boolean as
+// true or false), and none for one that's missing or null.
+fn param_values(params: List<Param>, arguments: Json) -> List<Header> {
+    var out = List<Header>()
+    for p in params {
+        var v = arguments.copy()
+        for key in p.path {
+            v = v.get(key.copy()) ?? Json.Null
+        }
+        let text = match v {
+            Json.Str(s) => s,
+            Json.Bool(b) => if b { String("true") } else { String("false") },
+            Json.Int(n) => "{n}",
+            _ => continue,
+        }
+        out.push(Header { name: "Mcp-Param-{p.header}", value: header_value(text) })
+    }
+    return out
+}
+
 impl Server {
-    // Every tool the server offers, a page at a time.
+    // Whether it's spoken to in the modern era's version.
+    fn modern(self) -> bool {
+        return self.version == MODERN
+    }
+
+    // Whether its requests mirror their body in headers: over HTTP, in the
+    // modern era.
+    fn headed(self) -> bool {
+        return self.url.len() > 0 and self.modern()
+    }
+
+    // Finds the version to speak to it in: it's asked server/discover in
+    // MODERN, and one that doesn't answer as a server of the modern era is
+    // initialized. It waits at most `ms` for each answer.
+    fn begin(self: mut Server, ms: u64) ! Error {
+        self.version = String(MODERN)
+        self.next += 1
+        let probe = self.next
+        let asked = message(probe, "server/discover", with_meta(Obj.new().done()))
+        var answer = Json.Null
+        if self.url.len() > 0 {
+            let (_, got, _) = try self.over_http(asked, probe, ms)
+            answer = got
+        } else {
+            try self.send_line(asked)
+            match self.answer_to([probe], if ms < PROBE_MS { ms } else { PROBE_MS }) {
+                ok(got) => {
+                    if let a = got {
+                        answer = a
+                    } else {
+                        try self.initialize_late(probe, ms)
+                        return
+                    }
+                },
+                err(e) => {
+                    // One of the legacy era may stop at a request before
+                    // initialize: it's started again and initialized.
+                    if not self.ended() { fail "{e}" }
+                    try self.restart()
+                    try self.initialize(String(LEGACY[0]), ms)
+                    return
+                },
+            }
+        }
+        let version = try version_from(self.name.copy(), answer.copy())
+        if version == MODERN {
+            self.info = server_info(answer)
+            return
+        }
+        try self.initialize(if version.len() > 0 { version } else { String(LEGACY[0]) }, ms)
+    }
+
+    // A server over stdio that hasn't answered server/discover in PROBE_MS
+    // is sent initialize as well, and the first answer that settles it
+    // decides: initialize's, from one of the legacy era that says nothing
+    // before it, or server/discover's, from one of the modern era that was
+    // slow to start (a package fetched first).
+    fn initialize_late(self: mut Server, probe: i64, ms: u64) ! Error {
+        self.next += 1
+        let init = self.next
+        try self.send_line(initialize_message(init, String(LEGACY[0])))
+        let began = unsafe { Instant.now() }
+        loop {
+            let spent = millis_since(began)
+            let left = if spent < ms { ms - spent } else { 0 }
+            let got = (try self.answer_to([probe, init], left)) ?? { fail "{self.name} didn't answer in {ms / 1000} seconds" }
+            if int_at(got.copy(), "id") == some(init) {
+                try self.initialized(got, ms)
+                return
+            }
+            if try version_from(self.name.copy(), got.copy()) == MODERN {
+                self.version = String(MODERN)
+                self.info = server_info(got)
+                return
+            }
+        }
+    }
+
+    // Says initialize, asking for `version`.
+    fn initialize(self: mut Server, version: String, ms: u64) ! Error {
+        self.version = version.copy()
+        self.next += 1
+        let id = self.next
+        let answer = try self.exchange(initialize_message(id, version), id, ms, "initialize")
+        try self.initialized(answer, ms)
+    }
+
+    // What initialize's answer settles: the version the server takes, which
+    // must be one loom speaks, and its serverInfo.
+    fn initialized(self: mut Server, answer: Json, ms: u64) ! Error {
+        if let e = answer.get(String("error")) {
+            fail "{self.name} answered initialize with an error: {str_at(e, "message") ?? String("no message")}"
+        }
+        let result = at(answer, "result")
+        let version = str_at(result.copy(), "protocolVersion") ?? String()
+        if not legacy(version.copy()) { fail "{self.name} speaks MCP {version}, which loom doesn't ({spoken()})" }
+        self.version = version
+        self.info = at(result, "serverInfo")
+        try self.notify_within("notifications/initialized", ms)
+    }
+
+    // Every tool the server offers, a page at a time. Over HTTP in the modern
+    // era, a tool whose x-mcp-header annotations break MCP's rules is left
+    // out, as MCP says, and said so on standard error.
     pub fn tools(self: mut Server) -> List<Json> ! Error {
         var out = List<Json>()
         var cursor = String()
+        self.params = Map<String, List<Param>>()
         loop {
             let params = if cursor.len() > 0 { Obj.new().s("cursor", cursor.copy()).done() } else { Obj.new().done() }
             let r = try self.request("tools/list", params, START_MS)
             if let Json.Array(page) = at(r.copy(), "tools") {
-                out.extend(page.copy())
+                for t in page {
+                    if not self.headed() {
+                        out.push(t.copy())
+                        continue
+                    }
+                    let name = str_at(t.copy(), "name") ?? String()
+                    match param_headers(at(t.copy(), "inputSchema")) {
+                        ok(found) => {
+                            self.params.insert(name, found)
+                            out.push(t.copy())
+                        },
+                        err(why) => eprintln("loom: {self.name}'s tool {name} is left out: {why}"),
+                    }
+                }
             }
             cursor = str_at(r, "nextCursor") ?? String()
             if cursor.len() == 0 or out.len() > 2000 { return out }
         }
     }
 
-    // Calls the tool `name`: its MCP result.
+    // Calls the tool `name`: its MCP result. A server of the modern era over
+    // HTTP that says the call's headers don't match its body has its tools
+    // listed again, for their parameters as they are now, and the call is
+    // made once more.
     pub fn call(self: mut Server, name: String, arguments: Json) -> Json ! Error {
-        return try self.request("tools/call", Obj.new().s("name", name).j("arguments", arguments).done(), CALL_MS)
+        return try self.call_within(name, arguments, CALL_MS)
+    }
+
+    // The same, waiting at most `ms` for its answer.
+    pub fn call_within(self: mut Server, name: String, arguments: Json, ms: u64) -> Json ! Error {
+        let params = Obj.new().s("name", name).j("arguments", arguments).done()
+        let answer = try self.ask("tools/call", params.copy(), ms)
+        if self.headed() and int_at(at(answer.copy(), "error"), "code") == some(HEADER_MISMATCH) {
+            _ = try self.tools()
+            return try self.result_of("tools/call", try self.ask("tools/call", params, ms))
+        }
+        return try self.result_of("tools/call", answer)
     }
 
     // Sends `token` as its bearer token from now on, in place of the one it had.
-    pub fn bearer(self: mut Server, token: String) {
+    pub fn bearer(self: mut Server, access: String) {
         var kept = List<Header>()
         for h in self.headers {
             if h.name.to_lower_root() != "authorization" { kept.push(h.copy()) }
         }
-        kept.push(Header { name: String("Authorization"), value: "Bearer {token}" })
+        kept.push(Header { name: String("Authorization"), value: "Bearer {access}" })
         self.headers = kept
     }
 
@@ -119,35 +495,79 @@ impl Server {
         }
     }
 
+    fn ended(self) -> bool {
+        if let c = self.child { return c.ended() }
+        return false
+    }
+
+    // Stops its program and starts it again.
+    fn restart(self: mut Server) ! Error {
+        if let c = self.child.take() {
+            var running = c
+            running.kill_tree()
+            _ = running.wait()
+        }
+        self.child = some(try spawn(self.name.copy(), self.spec.copy()))
+    }
+
     fn request(self: mut Server, method: str, params: Json, ms: u64) -> Json ! Error {
+        return try self.result_of(method, try self.ask(method, params, ms))
+    }
+
+    // Sends a request and gives its answer. In the modern era its `_meta`
+    // says the version and who's asking.
+    fn ask(self: mut Server, method: str, params: Json, ms: u64) -> Json ! Error {
         self.next += 1
         let id = self.next
-        let m = Obj.new().s("jsonrpc", String("2.0")).i("id", id).s("method", String(method)).j("params", params).done()
-        let answer = if self.url.len() > 0 { try self.over_http(m, id, ms) } else { try self.over_stdio(m, id, ms) }
+        let p = if self.modern() { with_meta(params) } else { params.copy() }
+        return try self.exchange(message(id, method, p), id, ms, method)
+    }
+
+    // The result in an answer, once it's one loom can use.
+    fn result_of(self, method: str, answer: Json) -> Json ! Error {
         if let e = answer.get(String("error")) {
             fail "{self.name} answered {method} with an error: {str_at(e, "message") ?? String("no message")}"
         }
-        return at(answer, "result")
+        let result = at(answer, "result")
+        try finished(self.name.copy(), method, result.copy())
+        return result
     }
 
-    fn notify(self: mut Server, method: str) ! Error {
+    // Sends `m` and gives the answer to it.
+    fn exchange(self: mut Server, m: Json, id: i64, ms: u64, method: str) -> Json ! Error {
+        if self.url.len() == 0 {
+            try self.send_line(m)
+            return (try self.answer_to([id], ms)) ?? { fail "{self.name} didn't answer in {ms / 1000} seconds" }
+        }
+        let (status, answer, text) = try self.over_http(m, id, ms)
+        if answer != Json.Null { return answer }
+        if status == 200 { fail "{self.name} gave no answer to {method}" }
+        fail "{self.name} answered {status}: {text.trim()}"
+    }
+
+    fn notify_within(self: mut Server, method: str, ms: u64) ! Error {
         let m = Obj.new().s("jsonrpc", String("2.0")).s("method", String(method)).done()
         if self.url.len() > 0 {
-            _ = try self.over_http(m, -1, START_MS)
+            _ = try self.over_http(m, -1, ms)
             return
         }
-        if let c = self.child { try c.write_text("{m}\n") }
+        try self.send_line(m)
     }
 
-    // A request over stdio: lines are read until the answer to `id` comes.
-    // What the server asks of loom (roots, sampling) it doesn't get.
-    fn over_stdio(self: Server, m: Json, id: i64, ms: u64) -> Json ! Error {
+    fn send_line(self, m: Json) ! Error {
         let c = self.child else { fail "{self.name} isn't running" }
         try c.write_text("{m}\n")
+    }
+
+    // The answer to one of `ids` among the lines the server writes, or none
+    // when none comes in `ms`. What a server of the legacy era asks of loom
+    // (roots, sampling) it doesn't get; one of the modern era asks nothing.
+    fn answer_to(self, ids: List<i64>, ms: u64) -> Json? ! Error {
+        let c = self.child else { fail "{self.name} isn't running" }
         let began = unsafe { Instant.now() }
         loop {
             let spent = millis_since(began)
-            if spent >= ms { fail "{self.name} didn't answer in {ms / 1000} seconds" }
+            if spent >= ms { return none }
             let line = c.read_line(ms - spent) else {
                 if c.ended() { fail "{self.name} stopped" }
                 continue
@@ -163,35 +583,67 @@ impl Server {
                     try c.write_text("{no}\n")
                     continue
                 }
-                if int_at(got.copy(), "id") == some(id) { return got }
+                if let n = int_at(got.copy(), "id") {
+                    if ids.contains(n) { return some(got) }
+                }
             }
         }
     }
 
-    // A request over Streamable HTTP. The answer is JSON, or an event stream
-    // with the answer among its events.
-    fn over_http(self: mut Server, m: Json, id: i64, ms: u64) -> Json ! Error {
+    // The headers a request of the modern era over HTTP mirrors from its
+    // body: Mcp-Method, Mcp-Name for one that names a tool, a prompt or a
+    // resource, and a tool's x-mcp-header parameters.
+    fn mirrored(self, m: Json) -> List<Header> {
+        let method = str_at(m.copy(), "method") ?? String()
+        var out = List<Header>()
+        out.push(Header { name: String("Mcp-Method"), value: method.copy() })
+        let params = at(m, "params")
+        let key = if method == "resources/read" { "uri" } else { "name" }
+        if method == "tools/call" or method == "prompts/get" or method == "resources/read" {
+            let named = str_at(params.copy(), key) ?? String()
+            out.push(Header { name: String("Mcp-Name"), value: header_value(named.copy()) })
+            if method == "tools/call" {
+                if let found = self.params.find(named) { out.extend(param_values(found.copy(), at(params, "arguments"))) }
+            }
+        }
+        return out
+    }
+
+    // A request over Streamable HTTP: its status, the JSON-RPC answer, or
+    // null when it gave none, and its body as text. The answer is JSON, or an
+    // event stream with the answer among its events, and a server of the
+    // modern era gives its errors with a 4xx status.
+    fn over_http(self: mut Server, m: Json, id: i64, ms: u64) -> (u32, Json, String) ! Error {
         var headers = self.headers.copy()
         headers.push(Header { name: String("Content-Type"), value: String("application/json") })
         headers.push(Header { name: String("Accept"), value: String("application/json, text/event-stream") })
-        headers.push(Header { name: String("MCP-Protocol-Version"), value: String(PROTOCOL) })
-        if self.session.len() > 0 { headers.push(Header { name: String("Mcp-Session-Id"), value: self.session.copy() }) }
+        headers.push(Header { name: String("MCP-Protocol-Version"), value: self.version.copy() })
+        if self.modern() {
+            headers.extend(self.mirrored(m.copy()))
+        } else if self.session.len() > 0 {
+            headers.push(Header { name: String("Mcp-Session-Id"), value: self.session.copy() })
+        }
         var req = post(self.url.copy(), headers, "{m}".to_bytes(), u32.wrap(ms), ANSWER_MOST)
         let r = try req.wait()
         var kind = String()
         for h in r.headers {
             let n = h.name.to_lower_root()
-            if n == "mcp-session-id" { self.session = h.value.copy() }
+            if n == "mcp-session-id" and not self.modern() { self.session = h.value.copy() }
             if n == "content-type" { kind = h.value.to_lower_root() }
         }
-        if id < 0 { return Json.Null }
+        if id < 0 { return (r.status, Json.Null, String()) }
         let text = String.from_utf8(r.body.copy()) ?? String()
         // A server that wants a sign-in, or a new token, says 401 (PLAN.md,
         // "Signing in to MCP servers").
         if r.status == 401 { fail "{self.name} answered 401: {SIGN_IN}" }
-        if r.status != 200 { fail "{self.name} answered {r.status}: {text.trim()}" }
-        if not kind.contains("text/event-stream") { return try parse(text) }
-        return answer_in_stream(text, id) ?? { fail "{self.name}'s event stream had no answer" }
+        var answer = Json.Null
+        if kind.contains("text/event-stream") {
+            answer = answer_in_stream(text.copy(), id) ?? Json.Null
+        } else if let ok(j) = parse(text.copy()) {
+            answer = j
+        }
+        if answer.get(String("result")) == none and answer.get(String("error")) == none { return (r.status, Json.Null, text) }
+        return (r.status, answer, text)
     }
 }
 
@@ -232,4 +684,103 @@ fn finds_the_answer_in_a_stream() {
     let got = answer_in_stream(stream.copy(), 3) ?? Json.Null
     assert("{got}" == #"{"jsonrpc":"2.0","id":3,"result":{}}"#)
     assert(answer_in_stream(stream, 4) == none)
+}
+
+fn json_of(text: str) -> Json {
+    return match parse(String(text)) {
+        ok(j) => j,
+        err(_) => Json.Null,
+    }
+}
+
+fn version_of(text: str) -> String {
+    return match version_from(String("s"), json_of(text)) {
+        ok(v) => v,
+        err(_) => String("failed"),
+    }
+}
+
+@test
+fn tells_the_eras_apart() {
+    // A server of the modern era, one that takes an older version too, and
+    // one that takes only versions of the legacy era.
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}"#) == MODERN)
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"result":{"supportedVersions":["2026-07-28","2025-06-18"],"capabilities":{}}}"#) == MODERN)
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"Unsupported protocol version","data":{"supported":["2027-03-01","2025-06-18"],"requested":"2026-07-28"}}}"#) == "2025-06-18")
+    // One that names no version loom speaks, or asks for more.
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32022,"message":"no","data":{"supported":["2027-03-01"]}}}"#) == "failed")
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","supportedVersions":["2026-07-28"]}}"#) == "failed")
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32021,"message":"Needs sampling"}}"#) == "failed")
+    // The legacy era: a method it doesn't know, a request before initialize,
+    // or a result that isn't a discovery's.
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#) == "")
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"Bad Request: Server not initialized"}}"#) == "")
+    assert(version_of(#"{"jsonrpc":"2.0","id":1,"result":{}}"#) == "")
+}
+
+@test
+fn says_its_version_in_meta() {
+    let p = with_meta(Obj.new().s("name", String("echo")).j("_meta", Obj.new().s("progressToken", String("t")).done()).done())
+    assert("{p}" == #"{"name":"echo","_meta":{"progressToken":"t","io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"loom","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}"#)
+}
+
+fn final(text: str) -> bool {
+    return match finished(String("s"), "tools/call", json_of(text)) {
+        ok => true,
+        err(_) => false,
+    }
+}
+
+@test
+fn takes_only_final_results() {
+    assert(final(#"{"content":[]}"#))
+    assert(final(#"{"resultType":"complete","content":[]}"#))
+    assert(not final(#"{"resultType":"input_required","inputRequests":{}}"#))
+    assert(not final(#"{"resultType":"later"}"#))
+}
+
+fn headers_of(schema: str) -> String {
+    return match param_headers(json_of(schema)) {
+        ok(found) => {
+            var out = List<String>()
+            for p in found {
+                out.push("{p.header}={p.path.join(".")}")
+            }
+            out.join(" ")
+        },
+        err(_) => String("invalid"),
+    }
+}
+
+@test
+fn reads_parameters_given_as_headers() {
+    assert(headers_of(#"{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"},"query":{"type":"string"}}}"#) == "Region=region")
+    assert(headers_of(#"{"type":"object","properties":{"where":{"type":"object","properties":{"zone":{"type":["integer","null"],"x-mcp-header":"Zone"}}},"dry":{"type":"boolean","x-mcp-header":"Dry-Run"}}}"#) == "Zone=where.zone Dry-Run=dry")
+    assert(headers_of(#"{"type":"object","properties":{"text":{"type":"string"}}}"#) == "")
+    // What makes a tool's annotations break MCP's rules.
+    assert(headers_of(#"{"type":"object","properties":{"n":{"type":"number","x-mcp-header":"N"}}}"#) == "invalid")
+    assert(headers_of(#"{"type":"object","properties":{"a":{"type":"string","x-mcp-header":"Same"},"b":{"type":"string","x-mcp-header":"same"}}}"#) == "invalid")
+    assert(headers_of(#"{"type":"object","properties":{"a":{"type":"string","x-mcp-header":"Bad Name"}}}"#) == "invalid")
+    assert(headers_of(#"{"type":"object","properties":{"a":{"type":"string","x-mcp-header":""}}}"#) == "invalid")
+    assert(headers_of(#"{"type":"object","properties":{"list":{"type":"array","items":{"type":"string","x-mcp-header":"Item"}}}}"#) == "invalid")
+    assert(headers_of(#"{"type":"object","properties":{"a":{"anyOf":[{"type":"string","x-mcp-header":"A"}]}}}"#) == "invalid")
+    assert(headers_of(#"{"type":"string","x-mcp-header":"Root"}"#) == "invalid")
+}
+
+@test
+fn writes_header_values_safely() {
+    assert(header_value(String("us-west1")) == "us-west1")
+    assert(header_value(String("Hello, 世界")) == "=?base64?SGVsbG8sIOS4lueVjA==?=")
+    assert(header_value(String(" padded ")) == "=?base64?IHBhZGRlZCA=?=")
+    assert(header_value(String("line1\nline2")) == "=?base64?bGluZTEKbGluZTI=?=")
+    assert(header_value(String("=?base64?literal?=")) == "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=")
+    let params = match param_headers(json_of(#"{"type":"object","properties":{"region":{"type":"string","x-mcp-header":"Region"},"n":{"type":"integer","x-mcp-header":"N"},"dry":{"type":"boolean","x-mcp-header":"Dry"},"gone":{"type":"string","x-mcp-header":"Gone"}}}"#)) {
+        ok(found) => found,
+        err(_) => List<Param>(),
+    }
+    var said = List<String>()
+    for h in param_values(params, json_of(#"{"region":"eu","n":-7,"dry":false,"gone":null}"#)) {
+        said.push("{h.name}: {h.value}")
+    }
+    assert(said.join("; ") == "Mcp-Param-Region: eu; Mcp-Param-N: -7; Mcp-Param-Dry: false")
 }

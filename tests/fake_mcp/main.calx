@@ -1,8 +1,9 @@
 module tests.fake_mcp.main
 
-// A fake MCP server, for testing Code Mode (PLAN.md, "Code Mode") without a
-// real one. It speaks MCP over standard input and output, one message a line,
-// and offers three tools:
+// A fake MCP server, for testing Code Mode (PLAN.md, "Code Mode") and the
+// versions of MCP loom speaks (PLAN.md, "MCP versions") without a real one. It
+// speaks MCP over standard input and output, one message a line, and offers
+// three tools:
 //
 //     echo {text}         gives {said: text} as structured content; only reads
 //     add {a, b}          gives a + b, whole numbers, as text; changes something, so it asks
@@ -11,15 +12,54 @@ module tests.fake_mcp.main
 //
 // Its serverInfo gives the icons FAKE_ICON names (`icons`).
 //
+// FAKE_ERA says which era of MCP it speaks. Unset, it's of the legacy era,
+// answering initialize in 2025-06-18 and any other request with `{}`, as it
+// always has. Set, it's one of these, and offers three tools more: `spoke`,
+// which says the version of MCP its call came in, `region {region}`, which
+// says the Mcp-Param-Region header it was given (`none` over stdio), and
+// `header_bad`, whose x-mcp-header breaks MCP's rules, so loom leaves it out
+// over HTTP in the modern era.
+//
+//     legacy   initialize, in the version asked for when it's 2025-11-25 to
+//              2024-11-05, or else 2025-11-25; server/discover is a method it
+//              doesn't know, and anything else before initialize an error
+//     old      the same, but only ever 2025-03-26
+//     odd      the same, but answering initialize in 2024-01-01, which isn't MCP's
+//     silent   legacy, saying nothing to a request before initialize
+//     exits    legacy, stopping at a request before initialize
+//     modern   only 2026-07-28: a request says its version in _meta, and
+//              initialize is a method it doesn't know
+//     dual     both, as each request comes
+//     newer    a version of the modern era loom doesn't speak, 2027-01-01, and
+//              2025-11-25 after initialize
+//     slow     modern, but it reads nothing for its first 6 seconds, as a
+//              server whose package is fetched first
+//
+// With --http it's a server over Streamable HTTP at /mcp instead, listening on
+// 127.0.0.1, and prints `fake mcp: URL` once it is. In the legacy era it gives
+// a session at initialize (Mcp-Session-Id) and wants it after; in the modern
+// era it checks a request's headers match its body (MCP-Protocol-Version,
+// Mcp-Method, Mcp-Name, and region's Mcp-Param-Region), answering 400 with
+// HeaderMismatch where they don't. GET /test/stats says how many initialize,
+// server/discover and mismatched requests it had; /test/rename names region's
+// header Zone from then on.
+//
 // It ends when its input does. It needs only the standard library, since loom
 // mcp starts it from an agent's folder.
 //
-//     calx tests/fake_mcp/main.calx
+//     calx tests/fake_mcp/main.calx [--http]
 import std.bytes
 import std.env
+import std.http.server.{Request, Response, Server}
 import std.image.{Color, Image, Kind}
 import std.io
 import std.json.{Json, parse}
+import std.process.{exit}
+import std.thread.{sleep}
+
+const MODERN: str = "2026-07-28"
+const LEGACY: [str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"]
+const NEWER: str = "2027-01-01"
 
 fn text(s: str) -> Json {
     return Json.Str(String(s))
@@ -33,27 +73,32 @@ fn object(pairs: List<(str, Json)>) -> Json {
     return Json.Object(m)
 }
 
-fn schema(props: List<(str, str, str)>, required: List<str>) -> Json {
-    var m = LinkedMap<String, Json>()
-    for (name, kind, about) in props {
-        m.insert(String(name), object([("type", text(kind)), ("description", text(about))]))
+fn strings(xs: List<String>) -> Json {
+    var out = List<Json>()
+    for x in xs {
+        out.push(Json.Str(x.copy()))
     }
+    return Json.Array(out)
+}
+
+fn str_of(j: Json, key: str) -> String {
+    return (j.get(String(key)) ?? Json.Null).as_str() ?? String()
+}
+
+fn prop(kind: str, about: str) -> Json {
+    return object([("type", text(kind)), ("description", text(about))])
+}
+
+fn schema(props: List<(str, Json)>, required: List<str>) -> Json {
     var names = List<Json>()
     for r in required {
         names.push(text(r))
     }
-    return object([("type", text("object")), ("properties", Json.Object(m)), ("required", Json.Array(names))])
+    return object([("type", text("object")), ("properties", object(props)), ("required", Json.Array(names))])
 }
 
 fn tool(name: str, about: str, input: Json, reads: bool) -> Json {
     return object([("name", text(name)), ("description", text(about)), ("inputSchema", input.copy()), ("annotations", object([("readOnlyHint", Json.Bool(reads))]))])
-}
-
-fn tools() -> Json {
-    let echo = tool("echo", "Says the text back.", schema([("text", "string", "What to say back.")], ["text"]), true)
-    let add = tool("add", "Adds two numbers, and keeps the sum.", schema([("a", "integer", "The first."), ("b", "integer", "The second.")], ["a", "b"]), false)
-    let key = tool("key_length", "Says how long the server's key is.", schema(List<(str, str, str)>(), List<str>()), true)
-    return object([("tools", Json.Array([echo, add, key]))])
 }
 
 fn content(said: String) -> Json {
@@ -65,24 +110,6 @@ fn number(j: Json) -> i64 {
         Json.Int(n) => n,
         _ => 0,
     }
-}
-
-fn call(params: Json) -> Json {
-    let name = (params.get(String("name")) ?? Json.Null).as_str() ?? String()
-    let args = params.get(String("arguments")) ?? Json.Null
-    if name == "echo" {
-        let said = (args.get(String("text")) ?? Json.Null).as_str() ?? String()
-        return object([("content", content(said.copy())), ("structuredContent", object([("said", Json.Str(said))]))])
-    }
-    if name == "add" {
-        let sum = number(args.get(String("a")) ?? Json.Null) + number(args.get(String("b")) ?? Json.Null)
-        return object([("content", content("{sum}"))])
-    }
-    if name == "key_length" {
-        let key = env.variable(String("FAKE_KEY")) ?? String()
-        return object([("content", content("{key.len()}"))])
-    }
-    return object([("content", content("no tool {name}")), ("isError", Json.Bool(true))])
 }
 
 // The picture an icon is, as a test makes it too: 64 pixels a side, in one colour.
@@ -119,26 +146,277 @@ fn icons() -> Json {
     return Json.Array(List<Json>())
 }
 
-fn main() {
+fn server_info() -> Json {
+    return object([("name", text("fake")), ("version", text("1")), ("icons", icons())])
+}
+
+fn result(id: own Json, r: own Json) -> Json {
+    return object([("jsonrpc", text("2.0")), ("id", id), ("result", r)])
+}
+
+fn error(id: own Json, code: i64, message: own String, data: own Json) -> Json {
+    var e: List<(str, Json)> = [("code", Json.Int(code)), ("message", Json.Str(message))]
+    if data != Json.Null { e.push(("data", data)) }
+    return object([("jsonrpc", text("2.0")), ("id", id), ("error", object(e))])
+}
+
+// `r` as a result of the modern era: final, from this server, and for a list
+// stale at once.
+fn modern(r: Json, list: bool) -> Json {
+    var m = LinkedMap<String, Json>()
+    m.insert(String("resultType"), text("complete"))
+    if let Json.Object(members) = r {
+        for (k, v) in members {
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    if list {
+        m.insert(String("ttlMs"), Json.Int(0))
+        m.insert(String("cacheScope"), text("private"))
+    }
+    m.insert(String("_meta"), object([("io.modelcontextprotocol/serverInfo", server_info())]))
+    return Json.Object(m)
+}
+
+// A header's value, as MCP's Base64 sentinel `=?base64?…?=` carries one that
+// isn't plain ASCII.
+fn decoded(value: String) -> String {
+    if not (value.starts_with("=?base64?") and value.ends_with("?=")) { return value.copy() }
+    let inner = value[9..value.len() - 2].copy()
+    return String.from_utf8(bytes.from_base64(inner) ?? List<u8>()) ?? String()
+}
+
+struct Fake {
+    era: String
+    spoken: String    // the version initialize settled, or nothing before it
+    zone: bool    // whether region's header is named Zone (/test/rename)
+    session: String    // over HTTP in the legacy era, the session initialize gave
+    minted: bool    // whether the answer being made gives a session
+    initialized: i64
+    discovered: i64
+    mismatched: i64
+}
+
+impl Fake {
+    // The versions of the modern era it speaks.
+    fn modern_versions(self) -> List<String> {
+        if self.era == "modern" or self.era == "slow" or self.era == "dual" { return [String(MODERN)] }
+        if self.era == "newer" { return [String(NEWER)] }
+        return List<String>()
+    }
+
+    // Whether it speaks the legacy era.
+    fn speaks_legacy(self) -> bool {
+        return self.era != "modern" and self.era != "slow"
+    }
+
+    // Every version it speaks, as its errors name them.
+    fn all_versions(self) -> List<String> {
+        var out = self.modern_versions()
+        if self.speaks_legacy() { out.push(String(LEGACY[0])) }
+        return out
+    }
+
+    fn header_name(self) -> String {
+        return if self.zone { String("Zone") } else { String("Region") }
+    }
+
+    fn tools(self) -> Json {
+        let echo = tool("echo", "Says the text back.", schema([("text", prop("string", "What to say back."))], ["text"]), true)
+        let add = tool("add", "Adds two numbers, and keeps the sum.", schema([("a", prop("integer", "The first.")), ("b", prop("integer", "The second."))], ["a", "b"]), false)
+        let key = tool("key_length", "Says how long the server's key is.", schema(List<(str, Json)>(), List<str>()), true)
+        var list = [echo, add, key].to_list()
+        if self.era.len() > 0 {
+            list.push(tool("spoke", "Says the version of MCP it was called in.", schema(List<(str, Json)>(), List<str>()), true))
+            let region = object([("type", text("string")), ("description", text("Where.")), ("x-mcp-header", Json.Str(self.header_name()))])
+            list.push(tool("region", "Says the region it was given as a header.", schema([("region", region)], ["region"]), true))
+            let bad = object([("type", text("number")), ("x-mcp-header", text("Amount"))])
+            list.push(tool("header_bad", "Has a header MCP doesn't allow.", schema([("amount", bad)], List<str>()), true))
+        }
+        return object([("tools", Json.Array(list))])
+    }
+
+    fn call(self, params: Json, version: String, heard: Map<String, String>) -> Json {
+        let name = str_of(params.copy(), "name")
+        let args = params.get(String("arguments")) ?? Json.Null
+        if name == "echo" {
+            let said = str_of(args, "text")
+            return object([("content", content(said.copy())), ("structuredContent", object([("said", Json.Str(said))]))])
+        }
+        if name == "add" {
+            let sum = number(args.get(String("a")) ?? Json.Null) + number(args.get(String("b")) ?? Json.Null)
+            return object([("content", content("{sum}"))])
+        }
+        if name == "key_length" {
+            let key = env.variable(String("FAKE_KEY")) ?? String()
+            return object([("content", content("{key.len()}"))])
+        }
+        if name == "spoke" { return object([("content", content(version))]) }
+        if name == "region" {
+            let header = "mcp-param-{self.header_name().to_lower_root()}"
+            let said = if let v = heard.find(header) { decoded(v.copy()) } else { String("none") }
+            return object([("content", content(said))])
+        }
+        return object([("content", content("no tool {name}")), ("isError", Json.Bool(true))])
+    }
+
+    // Why a request of the modern era over HTTP is refused for its headers,
+    // or nothing when they match its body.
+    fn mismatch(self, method: String, params: Json, version: String, heard: Map<String, String>) -> String {
+        let said_version = if let v = heard.find(String("mcp-protocol-version")) { v.copy() } else { String() }
+        if said_version != version { return "MCP-Protocol-Version {said_version} isn't {version}" }
+        let said_method = if let v = heard.find(String("mcp-method")) { v.copy() } else { String() }
+        if said_method != method { return "Mcp-Method {said_method} isn't {method}" }
+        if method != "tools/call" { return String() }
+        let name = str_of(params.copy(), "name")
+        let said_name = if let v = heard.find(String("mcp-name")) { decoded(v.copy()) } else { String() }
+        if said_name != name { return "Mcp-Name {said_name} isn't {name}" }
+        if name != "region" { return String() }
+        let value = str_of(params.get(String("arguments")) ?? Json.Null, "region")
+        let header = "mcp-param-{self.header_name().to_lower_root()}"
+        let said = if let v = heard.find(header.copy()) { decoded(v.copy()) } else { String() }
+        if said != value { return "{header} {said} isn't {value}" }
+        return String()
+    }
+
+    // The answer to `m`, with the HTTP status it goes with, or none for a
+    // notification. `heard` is its HTTP headers by lowercase name, over HTTP.
+    fn answer(self: mut Fake, m: Json, http: bool, heard: Map<String, String>) -> (u16, Json?) {
+        let id = m.get(String("id")) else return (202, none)
+        let method = str_of(m.copy(), "method")
+        let params = m.get(String("params")) ?? Json.Null
+        if self.era.len() == 0 {
+            // As it always was.
+            if method == "initialize" { return (200, some(result(id, object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", server_info())])))) }
+            if method == "tools/list" { return (200, some(result(id, self.tools()))) }
+            if method == "tools/call" { return (200, some(result(id, self.call(params, String("2025-06-18"), heard)))) }
+            return (200, some(result(id, object(List<(str, Json)>()))))
+        }
+        let meta = params.get(String("_meta")) ?? Json.Null
+        let asked = meta.get(String("io.modelcontextprotocol/protocolVersion"))
+        let versions = self.modern_versions()
+        if let named = asked {
+            if versions.len() > 0 { return self.answer_modern(id, method, params, named.as_str() ?? String(), http, heard) }
+        }
+        if method == "initialize" {
+            if not self.speaks_legacy() { return (if http { 400 } else { 200 }, some(error(id, -32601, "This server speaks MCP {MODERN} only, which has no initialize", Json.Null))) }
+            self.initialized += 1
+            let wanted = str_of(params, "protocolVersion")
+            var version = String(LEGACY[0])
+            for v in LEGACY {
+                if wanted == v { version = wanted.copy() }
+            }
+            if self.era == "old" { version = String("2025-03-26") }
+            if self.era == "odd" { version = String("2024-01-01") }
+            self.spoken = version.copy()
+            if http {
+                self.session = "s-{self.initialized}"
+                self.minted = true
+            }
+            return (200, some(result(id, object([("protocolVersion", Json.Str(version)), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", server_info())]))))
+        }
+        if versions.len() > 0 and not self.speaks_legacy() {
+            return (if http { 400 } else { 200 }, some(error(id, -32602, "A request says its version in _meta's io.modelcontextprotocol/protocolVersion", Json.Null)))
+        }
+        // The legacy era, before initialize or after.
+        var ready = not http and self.spoken.len() > 0
+        if let s = heard.find(String("mcp-session-id")) { ready = http and self.session.len() > 0 and s == self.session }
+        if not ready {
+            if http { return (400, some(error(id, -32000, String("Bad Request: Server not initialized"), Json.Null))) }
+            if method == "server/discover" {
+                if self.era == "silent" { return (200, none) }
+                if self.era == "exits" { exit(3) }
+                return (200, some(error(id, -32601, String("Method not found"), Json.Null)))
+            }
+            if self.era == "silent" { return (200, none) }
+            return (200, some(error(id, -32000, String("Server not initialized"), Json.Null)))
+        }
+        if method == "tools/list" { return (200, some(result(id, self.tools()))) }
+        if method == "tools/call" { return (200, some(result(id, self.call(params, self.spoken.copy(), heard)))) }
+        if method == "ping" { return (200, some(result(id, object(List<(str, Json)>())))) }
+        return (if http { 404 } else { 200 }, some(error(id, -32601, String("Method not found"), Json.Null)))
+    }
+
+    fn answer_modern(self: mut Fake, id: own Json, method: String, params: Json, version: String, http: bool, heard: Map<String, String>) -> (u16, Json?) {
+        let bad: u16 = if http { 400 } else { 200 }
+        if not self.modern_versions().contains(version.copy()) {
+            let data = object([("supported", strings(self.all_versions())), ("requested", Json.Str(version.copy()))])
+            return (bad, some(error(id, -32022, String("Unsupported protocol version"), data)))
+        }
+        if http {
+            let why = self.mismatch(method.copy(), params.copy(), version.copy(), heard.copy())
+            if why.len() > 0 {
+                self.mismatched += 1
+                return (400, some(error(id, -32020, "Header mismatch: {why}", Json.Null)))
+            }
+        }
+        if method == "server/discover" {
+            self.discovered += 1
+            return (200, some(result(id, modern(object([("supportedVersions", strings(self.all_versions())), ("capabilities", object([("tools", object(List<(str, Json)>()))]))]), true))))
+        }
+        if method == "tools/list" { return (200, some(result(id, modern(self.tools(), true)))) }
+        if method == "tools/call" { return (200, some(result(id, modern(self.call(params, version, heard), false)))) }
+        return (if http { 404 } else { 200 }, some(error(id, -32601, String("Method not found"), Json.Null)))
+    }
+
+    fn respond(self: mut Fake, req: Request) -> Response {
+        if req.path == "/test/stats" {
+            let stats = object([("initialized", Json.Int(self.initialized)), ("discovered", Json.Int(self.discovered)), ("mismatched", Json.Int(self.mismatched))])
+            return Response.new(200, String("application/json"), "{stats}".to_bytes())
+        }
+        if req.path == "/test/rename" {
+            self.zone = true
+            return Response.new(200, String("application/json"), "\{\}".to_bytes())
+        }
+        if req.path != "/mcp" { return Response.error(404) }
+        if req.method != "POST" { return Response.error(405) }
+        var heard = Map<String, String>()
+        for h in req.headers {
+            heard.insert(h.name.to_lower_root(), h.value.copy())
+        }
+        let m = match parse(req.text() ?? String()) {
+            ok(j) => j,
+            err(_) => return Response.error(400),
+        }
+        self.minted = false
+        let (status, said) = self.answer(m, true, heard)
+        let body = said else return Response.new(202, String("application/json"), List<u8>())
+        let res = Response.new(status, String("application/json"), "{body}".to_bytes())
+        if self.minted { return res.with_header(String("Mcp-Session-Id"), self.session.copy()) }
+        return res
+    }
+}
+
+fn serve_http(fake: mut Fake) ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    println("fake mcp: {server.url().trim_suffix("/")}/mcp")
+    io.flush()
+    loop {
+        if let req = server.next() {
+            let res = fake.respond(req.copy())
+            server.respond(req, res)
+        }
+    }
+}
+
+fn main() ! Error {
+    var fake = Fake { era: env.variable(String("FAKE_ERA")) ?? String(), spoken: String(), zone: false, session: String(), minted: false, initialized: 0, discovered: 0, mismatched: 0 }
+    if env.args().contains(String("--http")) {
+        try serve_http(mut fake)
+        return
+    }
+    if fake.era == "slow" { unsafe { sleep(6000000000) } }
     var input = io.Lines()
     while let line = input.next() {
         let m = match parse(line.copy()) {
             ok(j) => j,
             err(_) => continue,
         }
-        let id = m.get(String("id")) else continue
-        let method = (m.get(String("method")) ?? Json.Null).as_str() ?? String()
-        let params = m.get(String("params")) ?? Json.Null
-        let result = if method == "initialize" {
-            object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("fake")), ("version", text("1")), ("icons", icons())]))])
-        } else if method == "tools/list" {
-            tools()
-        } else if method == "tools/call" {
-            call(params)
-        } else {
-            object(List<(str, Json)>())
+        let (_, said) = fake.answer(m, false, Map<String, String>())
+        if let body = said {
+            println("{body}")
+            io.flush()
         }
-        println("{object([("jsonrpc", text("2.0")), ("id", id), ("result", result)])}")
-        io.flush()
     }
 }

@@ -38,6 +38,7 @@ struct AgentsView: View {
                         HStack {
                             GroupHead(title: "Group chats")
                             Button {
+                                model.startRoomForm()
                                 newRoom = true
                             } label: {
                                 Image(systemName: "plus").font(.system(size: 12, weight: .semibold)).foregroundStyle(P.ink3)
@@ -165,6 +166,10 @@ struct AgentsView: View {
             Warmup(agent: model.synced && path.isEmpty ? model.shownAgents.first?.id : nil)
         }
         .onAppear(perform: openFromLaunch)
+        // Back at the list, the chat is left, though its agent stays selected.
+        .onChange(of: path) { _, now in
+            if now.isEmpty { model.leaveChat() }
+        }
         // A tap on an agent a message mentions opens its chat, in place of this one.
         .onChange(of: model.openAgent) { _, id in
             guard let id else { return }
