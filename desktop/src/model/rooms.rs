@@ -337,6 +337,35 @@ mod tests {
     }
 
     #[test]
+    fn one_pick_of_another_agent_leaves_the_group_chat() {
+        let mut m = Model::new();
+        with_room(&mut m);
+        m.show_room("c_9");
+        assert_eq!(m.selected.as_deref(), Some("a_2"));
+        // Ledger isn't the member selected while the group chat is open: the one
+        // pick shows its own chat (LOO-351).
+        m.select(Some("a_1".into()));
+        assert_eq!(m.open_room, None);
+        assert_eq!(m.selected.as_deref(), Some("a_1"));
+        assert_eq!(m.conversation().as_deref(), Some("c_1"));
+        // And back into the group chat, then out to its selected member.
+        m.show_room("c_9");
+        assert_eq!(m.conversation().as_deref(), Some("c_9"));
+        m.select(Some("a_2".into()));
+        assert_eq!(m.open_room, None);
+        // From one group chat into another, the first is left.
+        m.take(&json!({"t": "core.data", "what": "conversations", "items": [
+            {"id": "c_1", "agent": "a_1", "title": "Chat"},
+            {"id": "c_9", "agent": "", "title": "Money", "room": {"name": "Money", "members": ["a_1", "a_2"], "default": "a_2"}},
+            {"id": "c_10", "agent": "", "title": "Code", "room": {"name": "Code", "members": ["a_1", "a_2"], "default": "a_1"}}
+        ]}));
+        m.show_room("c_9");
+        m.show_room("c_10");
+        assert_eq!(m.conversation().as_deref(), Some("c_10"));
+        assert_eq!(m.selected.as_deref(), Some("a_1"));
+    }
+
+    #[test]
     fn a_reply_goes_to_another_member_and_a_correction_is_forgotten() {
         let mut m = Model::new();
         with_room(&mut m);
