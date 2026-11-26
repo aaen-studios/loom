@@ -9,6 +9,8 @@ mod app;
 mod autoscroll;
 mod core;
 mod emoji;
+#[cfg(test)]
+mod key_select_tests;
 #[cfg(target_os = "macos")]
 mod mac;
 mod meter;

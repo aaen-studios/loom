@@ -49,11 +49,13 @@ struct RoomRow: View {
             RoomMark(colors: session.model.roomColors(room))
                 .frame(width: 26, height: 14)
                 .frame(width: 26, height: 22)
+            let unread = session.model.unread(room: room.id)
             Text(room.name)
-                .font(Fonts.ui(Tokens.PhoneSize.body, .medium))
+                .font(Fonts.ui(Tokens.PhoneSize.body, unread ? .semibold : .medium))
                 .foregroundStyle(P.ink)
                 .lineLimit(1)
             Spacer(minLength: 0)
+            if unread { UnreadDot() }
         }
         .padding(.vertical, Tokens.Space.m + 2)
         .accessibilityElement(children: .combine)

@@ -280,13 +280,21 @@ struct ChatView: View {
                                     Button {
                                         threadOpen = k
                                     } label: {
-                                        Label(k.label, systemImage: "bubble.left.and.bubble.right")
+                                        // One with a reply not read: its icon filled.
+                                        Label(k.label, systemImage: model.askUnread(thread: k.id) ? "bubble.left.and.bubble.right.fill" : "bubble.left.and.bubble.right")
                                     }
                                 }
                             }
                         }
                     } label: {
                         Image(systemName: "ellipsis")
+                            // A thread beside the chat with a reply not read: the asker's dot.
+                            .overlay(alignment: .topTrailing) {
+                                if let asker = model.askUnread(agentId) {
+                                    UnreadDot(color: model.agent(asker).map { P.thread($0.color) } ?? P.ink)
+                                        .offset(x: 6, y: -4)
+                                }
+                            }
                     }
                     .accessibilityLabel("More")
                 }

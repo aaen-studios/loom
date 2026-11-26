@@ -22,6 +22,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var approvals: [JSON] = []
     /// The agent list's folders.
     private var groups: [JSON] = Sample.groups
+    /// The person's routines, as Settings → Routines changes them.
+    private var routines: [JSON] = Sample.routines
     /// The person's own emoji, the ones deleted, and Recently used.
     private var own: [JSON] = Sample.own
     private var gone: [JSON] = []
@@ -78,6 +80,39 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         f["at"] = JSON(Sample.now())
         tell(.object(f))
         apply(kind, .object(f))
+    }
+
+    /// A routine made or changed from its page: what changed goes on it, as the instance
+    /// keeps it, and `routine.updated` says so.
+    private func putRoutine(_ f: JSON) {
+        let a = f["args"]
+        guard case .object(let args) = a else { return }
+        var id = a["id"].text
+        var r: [String: JSON] = [:]
+        if let old = routines.first(where: { $0["id"].text == id }), case .object(let o) = old {
+            r = o
+        } else {
+            next += 1
+            id = "rt_n\(next)"
+            r = ["id": JSON(id), "on": true, "last": .null, "cost": ["runs": 0]]
+        }
+        for (k, v) in args where !["id", "webhook"].contains(k) {
+            r[k] = k == "gate" && v.isNull ? .null : v
+        }
+        if a["webhook"].bool == true, r["hook"]?.text.isEmpty ?? true { r["hook"] = JSON("h_\(id)") }
+        if a["webhook"].bool == false { r["hook"] = .null }
+        if let s = args["schedule"] {
+            let times = s["times"].array.map(\.text).joined(separator: ", ")
+            r["when"] = s.isNull ? JSON("") : JSON(s["every"].int.map { "every \($0) minutes" } ?? "at \(times)")
+        }
+        let on = r["on"]?.bool ?? true
+        r["next"] = on && !(r["schedule"]?.isNull ?? true) ? JSON(Sample.now() + 2 * 3600 * 1000) : 0
+        if a["on"].bool == true { r["failures"] = 0 }
+        routines.removeAll { $0["id"].text == id }
+        routines.append(.object(r))
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["routine": .object(r)]])
+        event("routine.updated", ["routine": .object(r)])
+        if a["on"].bool == true { turnOn(id) }
     }
 
     private func apply(_ kind: String, _ e: JSON) {
@@ -208,7 +243,25 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             case "skill.list":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["skills": .array(Sample.skills)]])
             case "routine.list":
-                tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(Sample.routines)]])
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(routines)]])
+            case "routine.put":
+                putRoutine(f)
+            case "routine.delete":
+                let id = f["args"]["id"]
+                routines.removeAll { $0["id"] == id }
+                tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
+                event("routine.deleted", ["routine": id])
+            case "routine.runs":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["runs": .array(Sample.runs(of: f["args"]["id"].text))]])
+            case "routine.next":
+                // Every two hours from now, as the instance would work it out.
+                let hour = 3_600_000
+                let start = (Sample.now() / hour + 1) * hour
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["next": [JSON(start), JSON(start + 2 * hour), JSON(start + 4 * hour)], "when": "", "tz": "Europe/Oslo"]])
+            case "conversation.read":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["read": f["args"]["at"]]])
+            case "defaults.get":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["defaults": ["config": ["claude": ["thought_level": "medium"]], "permission": "ask"]]])
             case "files.recent":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(Sample.recent)]])
             case "link.preview":
@@ -232,8 +285,6 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["messages": .array(page), "count": JSON(all.count), "more": JSON(from + page.count < all.count)]])
             case "routine.run":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
-            case "routine.put":
-                turnOn(f)
             case "emoji.add", "emoji.rename", "emoji.delete", "emoji.restore":
                 ownEmoji(f)
             case "agent.file":
@@ -451,10 +502,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
 
     /// A routine turned on (`routine.put` with `on`), as the instance does: the card it
     /// left when it turned off says it's on, with message.updated.
-    private func turnOn(_ f: JSON) {
-        let routine = f["args"]["id"].text
-        tell(["t": "result", "id": f["id"], "ok": true, "value": ["routine": ["id": JSON(routine), "on": JSON(f["args"]["on"].bool ?? true)]]])
-        guard f["args"]["on"].bool == true else { return }
+    private func turnOn(_ routine: String) {
         for (c, list) in messages {
             for (i, m) in list.enumerated() {
                 guard m["role"].text == "loom", case .object(var o) = m, case .array(var blocks) = m["blocks"],
@@ -694,7 +742,15 @@ enum Sample {
 
     static let agents: [JSON] = [
         ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask", "pinned": 1795187000000,
-         "instructions": "Builds loom, runs its tests and writes the release notes."],
+         "instructions": "Builds loom, runs its tests and writes the release notes.",
+         // What its program offers to pick, as the instance gives it.
+         "options": [
+            ["id": "model", "name": "Model", "category": "model", "value": "default",
+             "options": [["value": "default", "name": "Default"], ["value": "opus", "name": "Opus"], ["value": "sonnet", "name": "Sonnet"], ["value": "haiku", "name": "Haiku"]]],
+            ["id": "thought_level", "name": "Effort", "category": "thought_level", "value": "high",
+             "options": [["value": "low", "name": "Low"], ["value": "medium", "name": "Medium"], ["value": "high", "name": "High"]]],
+         ],
+         "config": ["model": "sonnet"]],
         ["id": "a_2", "name": "Scribe", "color": "mint", "shape": "heart", "acp_agent": "claude", "permission": "auto",
          "instructions": "Keeps the notes: plans, meetings and the week's log."],
         ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask", "pinned": 1795187000001,
@@ -724,14 +780,44 @@ enum Sample {
     ]
 
     static let routines: [JSON] = [
-        ["id": "rt_1", "name": "Morning news", "agent": "a_3", "prompt": "", "schedule": ["daily": "08:00"], "on": true,
-         "last": ["status": "done", "at": 1795165200000]],
-        ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
-         "last": ["status": "failed", "at": 1795100000000]],
+        ["id": "rt_1", "name": "Morning news", "agent": "a_3", "prompt": "Read the news and tell me what matters today.", "schedule": ["times": ["08:00"]],
+         "when": "every day at 08:00", "on": true, "notify": true, "catch_up": true, "next": JSON(now() + 14 * 3600 * 1000),
+         "last": ["status": "done", "at": 1795165200000], "cost": ["run": 180_000, "day": 180_000, "runs": 7, "quiet": 1]],
+        ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "Check the soil sensors and say which pots need water.", "schedule": ["times": ["18:00"]],
+         "when": "every day at 18:00", "on": true, "next": JSON(now() + 4 * 3600 * 1000),
+         "last": ["status": "failed", "at": 1795100000000, "error": "The sensor hub didn't answer."]],
+        ["id": "rt_6", "name": "Shipped", "agent": "a_1", "prompt": "Write a short changelog line for the card that just shipped, and post it.", "schedule": .null, "hook": "h_6", "secret": "whsec_6f2c9a41d8e7",
+         "when": "when a card on aaen-studios/loom moves to Done", "on": true, "notify": true, "catch_up": true, "next": 0,
+         "event": ["integration": "acta", "server": "acta", "target": ["board": "aaen-studios/loom"], "kind": "moved", "to": "done"],
+         "gate": ["command": "./new-cards.sh", "timeout": 60], "model": "opus",
+         "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 1_400_000, "day": 5_400_000, "runs": 27, "quiet": 19]],
+        ["id": "rt_4", "name": "Inbox sweep", "agent": "a_3", "prompt": "Sort the inbox and flag what needs me.", "schedule": ["every": 30],
+         "when": "every 30 minutes", "on": true, "next": JSON(now() + 20 * 60 * 1000), "upcoming": [JSON(now() + 20 * 60 * 1000), JSON(now() + 50 * 60 * 1000), JSON(now() + 80 * 60 * 1000)],
+         "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 110_000, "day": 5_400_000, "runs": 336, "quiet": 320, "wasted": true]],
+        ["id": "rt_5", "name": "Release notes", "agent": "a_1", "prompt": "Write the release notes from the thread's changes.", "schedule": .null,
+         "when": "when the thread th_9 finishes", "on": false, "next": 0,
+         "event": ["integration": "t3", "server": "t3", "target": ["thread": "th_9"], "kind": "finished"]],
         // Off after five failures in a row, with its card in Builder's chat.
-        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_1", "prompt": "", "schedule": ["daily": "09:00"], "on": false,
+        ["id": "rt_3", "name": "Running shoe prices", "agent": "a_1", "prompt": "", "schedule": ["times": ["09:00"]], "when": "every day at 09:00", "on": false, "next": 0,
          "failures": 5, "off_card": "msg_14", "last": ["status": "failed", "error": "XXL's product page didn't load (503)", "at": 1795187129000]],
     ]
+
+    /// A routine's runs, newest first, as `routine.runs` gives them: posted, quiet with its
+    /// gate finding nothing, and one that failed with what to do.
+    static func runs(of routine: String) -> [JSON] {
+        let t = now()
+        let min = 60_000
+        return [
+            ["run": "rr_5", "routine": JSON(routine), "at": JSON(t - 40 * min), "started": JSON(t - 40 * min), "ended": JSON(t - 40 * min + 12_000), "status": "done",
+             "posted": ["Shipped LOO-383: a routine editor on the iPhone."], "said": "Posted the changelog line."],
+            ["run": "rr_4", "routine": JSON(routine), "at": JSON(t - 160 * min), "ended": JSON(t - 160 * min + 3000), "status": "quiet", "woke": false],
+            ["run": "rr_3", "routine": JSON(routine), "at": JSON(t - 290 * min), "started": JSON(t - 290 * min), "ended": JSON(t - 289 * min + 2000), "status": "failed",
+             "error": "Acta didn't answer in 30 s.", "hint": "Check that Acta is up, then Run now."],
+            ["run": "rr_2", "routine": JSON(routine), "at": JSON(t - 1300 * min), "started": JSON(t - 1300 * min), "ended": JSON(t - 1300 * min + 9000), "status": "done",
+             "posted": ["Shipped LOO-398: turn a routine back on from its chat."]],
+            ["run": "rr_1", "routine": JSON(routine), "at": JSON(t - 1400 * min), "ended": JSON(t - 1400 * min + 2000), "status": "quiet", "woke": false],
+        ]
+    }
 
     static let recent: [JSON] = [
         ["file": "sample-leaf", "name": "leaf.png", "mime": "image/png", "size": 48_213, "at": 1795180000000, "conversation": "c_4"],
@@ -740,16 +826,16 @@ enum Sample {
 
     static let conversations: [JSON] = [
         // Everyone, the group chat with all the person's agents (PLAN.md, "Group chats").
-        ["id": "c_6", "agent": "", "title": "Everyone", "at": 1795187400000,
+        ["id": "c_6", "agent": "", "title": "Everyone", "at": 1795187400000, "last": 1795187400000, "replied": 1795187400000, "read": 1795187000000,
          "room": ["name": "Everyone", "everyone": true, "members": ["a_1", "a_2", "a_3", "a_4"], "color": "", "default": "", "corrections": [["id": "k_1", "text": "Anything from the landlord?", "to": "a_3", "from": "a_2", "at": 1795187390000]]]],
         // Builder's thread with Gardener (`message_agent`), newer than the person's chat
         // with Gardener and never in its place.
-        ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000],
+        ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000, "last": 1795187300000, "replied": 1795187300000],
         // How full its session is, compacted two hours before its last message.
-        ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000, "context": ["used": 82_000, "size": 200_000, "compacted": 1795179931000, "compacts": true]],
-        ["id": "c_2", "agent": "a_2", "title": "", "at": 1795187131000],
-        ["id": "c_3", "agent": "a_3", "title": "", "at": 1795187131000],
-        ["id": "c_4", "agent": "a_4", "title": "", "at": 1795187131000],
+        ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000, "last": 1795187131000, "replied": 1795187131000, "read": 1795187131000, "context": ["used": 82_000, "size": 200_000, "compacted": 1795179931000, "compacts": true]],
+        ["id": "c_2", "agent": "a_2", "title": "", "at": 1795187131000, "last": 1795187131000, "replied": 1795187131000, "read": 1795187131000],
+        ["id": "c_3", "agent": "a_3", "title": "", "at": 1795187131000, "last": 1795187131000, "replied": 1795187131000, "read": 1795180000000],
+        ["id": "c_4", "agent": "a_4", "title": "", "at": 1795187131000, "last": 1795187131000, "replied": 1795187131000, "read": 1795187131000],
     ]
 
     static let devices: [JSON] = [

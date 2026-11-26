@@ -33,6 +33,10 @@ struct Agent: Identifiable, Equatable, Sendable {
     var instructions = ""
     /// What it's for, in one line: what a group chat's router reads to pick it.
     var forLine = ""
+    /// What its program offers to pick, such as its model and effort, and what the
+    /// person picked for it, by option id; the rest follow the defaults.
+    var options: [ConfigOption] = []
+    var config: [String: String] = [:]
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
@@ -80,6 +84,18 @@ struct Conversation: Equatable, Sendable {
     var room: Room?
     /// How full its session's context is, once its program has said.
     var context: ContextFill?
+    /// Where side questions about the agent's chat are asked.
+    var side = false
+    /// When its newest message is from, and when the newest the person has read there is
+    /// from, as the instance keeps it (protocol.md, "Unread"), once they've read one.
+    var last = 0
+    var read: Int?
+    /// When its newest agent's message is from, as the core keeps it: unread while it's
+    /// newer than `read`.
+    var replied = 0
+
+    /// Whether it's a thread beside its agent's chat: another agent's, or one an agent made.
+    var besideChat: Bool { !main && (askedBy != nil || madeBy != nil) }
 
     init(id: String, agent: String, isChat: Bool = true, main: Bool = false, askedBy: String? = nil, madeBy: String? = nil, title: String = "") {
         self.id = id
@@ -101,6 +117,10 @@ struct Conversation: Equatable, Sendable {
         room = c["room"].isNull ? nil : Room(id: id, c["room"])
         isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && madeBy == nil && room == nil
         context = ContextFill(c["context"])
+        side = c["side"].bool ?? false
+        last = c["last"].int ?? 0
+        read = c["read"].int
+        replied = c["replied"].int ?? 0
     }
 }
 
@@ -1678,6 +1698,21 @@ final class Model {
     /// files sent or received lately in their chats, newest first.
     var skills: [PlusSkill] = []
     var routines: [PlusRoutine] = []
+    /// The same routines whole, for Settings → Routines (Routines.swift), and whether
+    /// `routine.list` is to be asked again.
+    var routineList: [Routine] = []
+    var routinesStale = false
+    /// The person's default picks for each program's options (`defaults.get`'s `config`),
+    /// for a routine's model and effort.
+    var defaultPicks: JSON = .null
+    /// The open routine's runs, newest first, and which routine they're for; and when the
+    /// schedule on its page would run next (`routine.next`), for which schedule, and the
+    /// command that asked.
+    var routineRuns: [RoutineRun] = []
+    var routineRunsFor: String?
+    var scheduleNext: [Int] = []
+    var scheduleNextFor: JSON = .null
+    var scheduleNextAsk = ""
     var recentFiles: [RecentFile] = []
     /// The person's own emoji, the suggestion row and the picker (PLAN.md, "Emoji").
     let emoji = Emojis()
@@ -1816,6 +1851,67 @@ final class Model {
         foldFlips = []
         unreadFrom = first
         cardsChatOpened()
+    }
+
+    /// What the person has read in each conversation, as far as this phone knows: what the
+    /// instance keeps (`read`), and what it marked read since.
+    private var conversationRead: [String: Int] = [:]
+
+    /// Marks what's open read (protocol.md, "Unread"), as the desktop does, so its dots
+    /// clear: a group chat or a thread as it shows, or else each of the selected agent's
+    /// conversations but the threads beside its chat and group chats, each up to its
+    /// newest message, as they open and as messages come while they're open. Nothing while
+    /// the chat is left for the agents list. The frames to send, once each.
+    func readFrames() -> [JSON] {
+        guard synced, !away else { return [] }
+        let open: [Conversation]
+        if let c = room ?? thread {
+            open = conversations.filter { $0.id == c }
+        } else if let agent = selected {
+            open = conversations.filter { $0.agent == agent && !$0.side && !$0.besideChat && $0.room == nil }
+        } else {
+            open = []
+        }
+        var out: [JSON] = []
+        for c in open where c.last > max(conversationRead[c.id] ?? 0, c.read ?? 0) {
+            conversationRead[c.id] = c.last
+            out.append(["t": "cmd", "id": JSON(id("app.read")), "name": "conversation.read", "args": ["conversation": JSON(c.id), "at": JSON(c.last)]])
+        }
+        return out
+    }
+
+    /// Whether conversation `c` has a reply the person hasn't read (protocol.md, "Unread"):
+    /// its newest agent's message is newer than what's read, on the instance or here. None
+    /// is while the instance keeps no reads, as one from before them, or while it's open.
+    func hasUnread(_ c: Conversation) -> Bool {
+        guard readsKnown, !c.side else { return false }
+        if !away && (c.id == room || c.id == thread || (room == nil && thread == nil && c.agent == selected && !c.besideChat)) { return false }
+        return c.replied > max(c.read ?? 0, conversationRead[c.id] ?? 0)
+    }
+
+    /// Whether the instance keeps what's read: some conversation has `read`.
+    private var readsKnown: Bool { conversations.contains { $0.read != nil } }
+
+    /// Whether an agent has a reply unread in its chat, or its other conversations but the
+    /// threads beside its chat, for its dot in the list.
+    func unread(agent: String) -> Bool {
+        conversations.contains { $0.agent == agent && $0.room == nil && !$0.besideChat && hasUnread($0) }
+    }
+
+    /// Whether a group chat has a reply unread.
+    func unread(room id: String) -> Bool {
+        conversations.first { $0.id == id }.map(hasUnread) ?? false
+    }
+
+    /// The agent that asked in a thread beside `agent`'s chat that has a reply unread, for
+    /// a dot in its colour (or "" for a thread an agent made, or a plugin's): the newest.
+    func askUnread(_ agent: String) -> String? {
+        conversations.first { $0.agent == agent && $0.besideChat && hasUnread($0) }.map { $0.askedBy ?? $0.madeBy ?? "" }
+    }
+
+    /// Whether the thread beside a chat has a reply unread.
+    func askUnread(thread id: String) -> Bool {
+        conversations.first { $0.id == id }.map(hasUnread) ?? false
     }
 
     /// The chat is left for the agents list. Its agent stays selected, so its chat opens
@@ -2180,6 +2276,11 @@ final class Model {
         case "watch":
             // The person's watches, for Follow on a card's sheet and a board.
             takeWatchEvent(kind, f)
+        case "routine":
+            // A routine made, changed or deleted, here or elsewhere.
+            routinesStale = true
+        case "defaults":
+            if !f["defaults"].isNull { defaultPicks = f["defaults"]["config"] }
         default:
             break
         }
@@ -2217,7 +2318,9 @@ final class Model {
     }
 
     private func result(_ f: JSON) {
-        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) { return }
+        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) || routineResult(f) { return }
+        // What's marked read: quietly, as an instance from before it kept reads refuses it.
+        if f["id"].text.hasPrefix("app.read_") { return }
         if f["id"].text == "app.acp" {
             // Quietly: without the titles, programs show by their own names.
             var titles: [String: String] = [:]
@@ -2273,9 +2376,7 @@ final class Model {
         case let id where id.hasPrefix("app.plus_skills"):
             skills = f["value"]["skills"].array.map { PlusSkill(name: $0["name"].text, description: $0["description"].text) }
         case let id where id.hasPrefix("app.plus_routines"):
-            routines = f["value"]["routines"].array.map {
-                PlusRoutine(id: $0["id"].text, name: $0["name"].text, agent: $0["agent"].text, status: $0["last"]["status"].text, at: $0["last"]["at"].int ?? 0)
-            }
+            if error == nil { takeRoutines(f["value"]["routines"].array) }
         case let id where id.hasPrefix("app.recent_files"):
             recentFiles = f["value"]["files"].array.map { RecentFile(file: FileRef($0), at: $0["at"].int ?? 0) }
         case let id where id.hasPrefix("app.agent_file.pictures"):
@@ -2361,7 +2462,8 @@ final class Model {
             takeSidebar(items)
         case .agents:
             agents = listed(items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text)
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text,
+                      options: $0["options"].array.map(ConfigOption.init), config: stringsOf($0["config"]))
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -2556,6 +2658,12 @@ final class Model {
             secretsStale = false
             out.append(["t": "cmd", "id": JSON(id("app.secrets")), "name": "secret.list"])
         }
+        if routinesStale && synced {
+            routinesStale = false
+            out.append(["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]])
+            // And the open routine's runs, which a run that ended changed.
+            if let f = loadRoutineRuns(routineRunsFor) { out.append(f) }
+        }
         // The shown chat's pins, for the count on its header and the Pinned sheet: as many
         // as are loaded, and at least a page. Never a thread's.
         let chat = thread == nil ? conversation : nil
@@ -2594,6 +2702,7 @@ final class Model {
         // What the Acta cards and the T3 threads of the chat need asked.
         out += cardFetches(now: nowMs())
         out += t3Fetches()
+        out += readFrames()
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }

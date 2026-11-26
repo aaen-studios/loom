@@ -638,6 +638,8 @@ pub(super) struct InlineSelectionProjection {
     text: SharedString,
     layout: PaintedSelectionLayout,
     selection_bounds: Option<Bounds<Pixels>>,
+    /// loom: what a clip that cuts text off let show as it painted.
+    cut: Option<Bounds<Pixels>>,
 }
 
 impl InlineSelectionProjection {
@@ -653,8 +655,14 @@ impl InlineSelectionProjection {
         let Some(source) = self.source.upgrade() else {
             return;
         };
-        let selection =
-            project_selection(&self.text, &self.layout, self.selection_bounds, start, end);
+        let selection = project_selection(
+            &self.text,
+            &self.layout,
+            self.selection_bounds,
+            start,
+            end,
+            self.cut,
+        );
         if let Some(selection) = selection
             && let Ok(mut source) = source.lock()
         {
@@ -1052,6 +1060,7 @@ impl Inline {
                 self.selection_bounds,
                 selection_start,
                 selection_end,
+                GlobalState::global(cx).text_cut(),
             ),
         )
     }
@@ -1440,6 +1449,7 @@ impl Element for Inline {
                         text: self.text.clone(),
                         layout: copy_layout,
                         selection_bounds: self.selection_bounds,
+                        cut: GlobalState::global(cx).text_cut(),
                     }),
                     cx,
                 );
@@ -1819,6 +1829,7 @@ fn project_selection(
     selection_bounds: Option<Bounds<Pixels>>,
     selection_start: Point<Pixels>,
     selection_end: Point<Pixels>,
+    cut: Option<Bounds<Pixels>>,
 ) -> Option<Selection> {
     if text.is_empty() {
         return None;
@@ -1833,7 +1844,12 @@ fn project_selection(
     if rows_bottom <= band_top || rows_top > band_bottom {
         return None;
     }
-    if band_top < rows_top && band_bottom >= rows_bottom && text_layout.len() >= text.len() {
+    if band_top < rows_top
+        && band_bottom >= rows_bottom
+        && text_layout.len() >= text.len()
+        // loom: text a clip cuts off is left out, character by character.
+        && cut.is_none()
+    {
         return Some((0..text.len()).into());
     }
 
@@ -1848,6 +1864,10 @@ fn project_selection(
             && next_pos.y == pos.y
         {
             char_width = next_pos.x - pos.x;
+        }
+        // loom: a character a clip cuts off is no part of the selection.
+        if !crate::selection_cut::shows(cut, pos, char_width, line_height) {
+            continue;
         }
         let selection_pos = selection_bounds.map_or(pos, |bounds| point(pos.x, bounds.top()));
         let selection_height = selection_bounds.map_or(line_height, |bounds| bounds.size.height);

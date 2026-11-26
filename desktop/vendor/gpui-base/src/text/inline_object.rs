@@ -167,6 +167,8 @@ impl MeasuredInlineObject {
 pub(super) struct InlineObjectSelectionProjection {
     selected: std::sync::Weak<Mutex<bool>>,
     bounds: Bounds<Pixels>,
+    /// loom: what a clip that cuts text off let show as it painted.
+    cut: Option<Bounds<Pixels>>,
 }
 
 impl InlineObjectSelectionProjection {
@@ -174,7 +176,7 @@ impl InlineObjectSelectionProjection {
         if let Some(selected) = self.selected.upgrade()
             && let Ok(mut selected) = selected.lock()
         {
-            *selected = object_in_selection(self.bounds, start, end);
+            *selected = object_in_selection(self.bounds, start, end, self.cut);
         }
     }
 
@@ -191,14 +193,17 @@ fn object_in_selection(
     bounds: Bounds<Pixels>,
     start: gpui::Point<Pixels>,
     end: gpui::Point<Pixels>,
+    cut: Option<Bounds<Pixels>>,
 ) -> bool {
-    point_in_text_selection(
-        bounds.origin,
-        bounds.size.width,
-        start,
-        end,
-        bounds.size.height,
-    )
+    // loom: one a clip cuts off is no part of the selection.
+    crate::selection_cut::shows(cut, bounds.origin, bounds.size.width, bounds.size.height)
+        && point_in_text_selection(
+            bounds.origin,
+            bounds.size.width,
+            start,
+            end,
+            bounds.size.height,
+        )
 }
 
 /// Atomic selection wrapper that leaves child styling and interaction to GPUI.
@@ -370,7 +375,12 @@ impl Element for InlineObject {
                     || state
                         .painted_selection_points(cx)
                         .is_some_and(|(start, end)| {
-                            object_in_selection(self.selection_bounds, start, end)
+                            object_in_selection(
+                                self.selection_bounds,
+                                start,
+                                end,
+                                GlobalState::global(cx).text_cut(),
+                            )
                         }))
         });
         if let Ok(mut value) = self.selected.lock() {
@@ -419,6 +429,7 @@ impl Element for InlineObject {
                         InlineObjectSelectionProjection {
                             selected: Arc::downgrade(&self.selected),
                             bounds: self.selection_bounds,
+                            cut: GlobalState::global(cx).text_cut(),
                         },
                     ),
                     cx,
@@ -603,7 +614,12 @@ impl Element for EmojiPicture {
                     || state
                         .painted_selection_points(cx)
                         .is_some_and(|(start, end)| {
-                            object_in_selection(self.selection_bounds, start, end)
+                            object_in_selection(
+                                self.selection_bounds,
+                                start,
+                                end,
+                                GlobalState::global(cx).text_cut(),
+                            )
                         })
             });
         if let Ok(mut value) = self.selected.lock() {
@@ -620,6 +636,7 @@ impl Element for EmojiPicture {
                     InlineObjectSelectionProjection {
                         selected: Arc::downgrade(&self.selected),
                         bounds: self.selection_bounds,
+                        cut: GlobalState::global(cx).text_cut(),
                     },
                 ),
                 cx,

@@ -67,6 +67,8 @@ mod scrollable_mask;
 mod scrollbar;
 mod select;
 mod selectable_text;
+// loom: a clip that cuts text off on purpose.
+mod selection_cut;
 mod sheet;
 pub mod slider;
 mod state_style;
@@ -182,6 +184,7 @@ pub use scrollbar::{
 };
 pub use select::Select;
 pub use selectable_text::SelectableText;
+pub use selection_cut::cut_text_selection;
 pub use sheet::Sheet;
 pub use slider::{Slider, SliderIndicator, SliderThumb, SliderTrack};
 pub use state_style::StateStyle;
@@ -200,10 +203,10 @@ pub use text::{
     TextViewState, TextViewStyle, html, markdown, markdown_ast,
 };
 pub use text_selection::{
-    TextSelection, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,
-    TextSelectionEvent, TextSelectionHandle, TextSelectionLayer, TextSelectionProjection,
-    TextSelectionRegistration, TextSelectionRun, TextSelectionScopeId, TextSelectionSnapshot,
-    TextSelectionWindowPoints, TouchHandleLayout,
+    SelectionMotion, TextSelection, TextSelectionContentKey, TextSelectionCoverage,
+    TextSelectionEndpoint, TextSelectionEvent, TextSelectionHandle, TextSelectionLayer,
+    TextSelectionProjection, TextSelectionRegistration, TextSelectionRun, TextSelectionScopeId,
+    TextSelectionSnapshot, TextSelectionWindowPoints, TouchHandleLayout,
 };
 pub use theme::{PlotTheme, ResizableTheme, ScrollbarTheme, Theme, ThemeAppearance};
 pub use theme_tokens::{
