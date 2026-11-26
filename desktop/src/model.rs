@@ -1924,11 +1924,19 @@ pub fn tokens_short(n: i64) -> String {
     }
 }
 
-/// How full the open chat's session context is, as its agent program last said.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// How full the open chat's session context is, as its agent program last said
+/// (PLAN.md, "One endless chat"). Its program says only how many tokens are in it of
+/// its window, not what they are.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextFill {
     pub used: i64,
     pub size: i64,
+    /// When its program last compacted the session, in Unix ms.
+    pub compacted: Option<i64>,
+    /// Whether its program compacts a session when asked, for Compact now.
+    pub compacts: bool,
+    /// In a group chat, the member whose session it is: the one that answered last.
+    pub agent: Option<String>,
 }
 
 /// How full a context may get before the chat's next message goes to a fresh session
@@ -1936,7 +1944,23 @@ pub struct ContextFill {
 pub const CONTEXT_RENEW_PERCENT: i64 = 80;
 
 impl ContextFill {
-    pub fn percent(self) -> i64 {
+    pub fn of(x: &Value) -> Option<ContextFill> {
+        let n = |k: &str| x.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let fill = ContextFill {
+            used: n("used"),
+            size: n("size"),
+            compacted: x.get("compacted").and_then(Value::as_i64),
+            compacts: x.get("compacts").and_then(Value::as_bool).unwrap_or(false),
+            agent: x
+                .get("agent")
+                .and_then(Value::as_str)
+                .filter(|a| !a.is_empty())
+                .map(String::from),
+        };
+        (fill.size > 0).then_some(fill)
+    }
+
+    pub fn percent(&self) -> i64 {
         if self.size <= 0 {
             return 0;
         }
@@ -1944,21 +1968,49 @@ impl ContextFill {
     }
 
     /// How much of the ring is filled, from 0 to 1.
-    pub fn fraction(self) -> f32 {
+    pub fn fraction(&self) -> f32 {
         if self.size <= 0 {
             return 0.0;
         }
         (self.used.max(0) as f32 / self.size as f32).clamp(0.0, 1.0)
     }
 
-    /// What the ring says under the pointer.
-    pub fn tip(self) -> String {
+    /// What a screen reader says of the ring.
+    pub fn tip(&self) -> String {
         format!(
-            "Context {}%, {} of {}. A fresh session starts at {CONTEXT_RENEW_PERCENT}%.",
+            "Context {}%, {} of {}",
             self.percent(),
             tokens_short(self.used),
             tokens_short(self.size)
         )
+    }
+
+    /// Its tokens of its window, beside the card's title: "82k of 200k".
+    pub fn amount(&self) -> String {
+        format!("{} of {}", tokens_short(self.used), tokens_short(self.size))
+    }
+
+    /// The card's line under its bar, at `now` (Unix ms): when the session was last
+    /// compacted, if it was, and where a fresh one starts.
+    pub fn line(&self, now: i64) -> String {
+        let fresh = format!("fresh session starts at {CONTEXT_RENEW_PERCENT}%");
+        match self.compacted {
+            Some(at) => format!("Compacted {} · a {fresh}", ago(now - at)),
+            None => format!("A {fresh}"),
+        }
+    }
+}
+
+/// How long ago something was, `ms` before now, in a few words: "just now", "5 min
+/// ago", "2 h ago", "yesterday", "3 days ago".
+pub fn ago(ms: i64) -> String {
+    let minutes = ms.max(0) / 60_000;
+    match minutes {
+        0 => "just now".into(),
+        m if m < 60 => format!("{m} min ago"),
+        m if m < 24 * 60 => format!("{} h ago", m / 60),
+        m if m < 48 * 60 => "yesterday".into(),
+        m => format!("{} days ago", m / (24 * 60)),
     }
 }
 
@@ -5697,9 +5749,40 @@ impl Model {
         out
     }
 
-    /// How full the open chat's session context is, once its program has said.
+    /// How full the open chat's session context is, once its program has said. In a
+    /// group chat, the session of the member that answered last.
     pub fn context(&self) -> Option<ContextFill> {
-        self.contexts.get(&self.conversation()?).copied()
+        self.contexts.get(&self.conversation()?).cloned()
+    }
+
+    /// The context card's title: "Context", or in a group chat, whose it is.
+    pub fn context_title(&self, fill: &ContextFill) -> String {
+        match fill.agent.as_deref().and_then(|a| self.agent(a)) {
+            Some(a) if self.open_room.is_some() => format!("{}'s context", a.name),
+            _ => "Context".into(),
+        }
+    }
+
+    /// Compacts the open chat's session now, in a turn the person doesn't see: the
+    /// chat gets the compaction's line (PLAN.md, "One endless chat").
+    pub fn compact_now(&mut self) -> Option<Value> {
+        self.context_cmd("conversation.compact")
+    }
+
+    /// Starts the open chat's next turn in a fresh session, given the newest of the chat.
+    pub fn fresh_session(&mut self) -> Option<Value> {
+        self.context_cmd("conversation.fresh")
+    }
+
+    fn context_cmd(&mut self, name: &str) -> Option<Value> {
+        let conversation = self.conversation()?;
+        let fill = self.context()?;
+        let mut args = json!({"conversation": conversation});
+        if let Some(agent) = fill.agent.filter(|_| self.open_room.is_some()) {
+            args["agent"] = json!(agent);
+        }
+        let id = self.id("app.context");
+        Some(json!({"t": "cmd", "id": id, "name": name, "args": args}))
     }
 
     /// The conversation the chat shows: the open task's, or else the selected
@@ -6979,6 +7062,14 @@ impl Model {
             self.room_usage_came(f);
             return;
         }
+        // Compact now, or Start a fresh session: the chat shows what came of it, and
+        // a refusal, as while the agent is answering, is said.
+        if id.starts_with("app.context") {
+            if let Some(e) = f.get("error") {
+                self.notices.push(s(e, "message"));
+            }
+            return;
+        }
         // A folder made: the agent it was made for goes in, and the app has it named.
         if id.starts_with("app.folder_new") {
             if let Some(g) = f.pointer("/value/group/id").and_then(Value::as_str) {
@@ -8162,15 +8253,7 @@ impl Model {
                     .collect();
                 self.contexts = items
                     .iter()
-                    .filter_map(|c| {
-                        let x = c.get("context")?;
-                        let n = |k: &str| x.get(k).and_then(Value::as_i64).unwrap_or(0);
-                        let fill = ContextFill {
-                            used: n("used"),
-                            size: n("size"),
-                        };
-                        (fill.size > 0).then(|| (s(c, "id"), fill))
-                    })
+                    .filter_map(|c| Some((s(c, "id"), ContextFill::of(c.get("context")?)?)))
                     .collect();
                 self.conversations = items
                     .iter()
@@ -12673,15 +12756,18 @@ mod tests {
         m.select(Some("a_1".into()));
         let fill = m.context().expect("its program said");
         assert_eq!(fill.percent(), 56);
-        assert_eq!(
-            fill.tip(),
-            "Context 56%, 112k of 200k. A fresh session starts at 80%."
-        );
+        assert_eq!(fill.tip(), "Context 56%, 112k of 200k");
+        assert_eq!(fill.amount(), "112k of 200k");
+        assert_eq!(fill.line(0), "A fresh session starts at 80%");
+        assert_eq!(m.context_title(&fill), "Context");
         m.select(Some("a_2".into()));
         assert_eq!(m.context(), None, "nothing until its program says");
         let at = |used| ContextFill {
             used,
             size: 1_000_000,
+            compacted: None,
+            compacts: false,
+            agent: None,
         };
         assert_eq!(at(750_000).percent(), 75);
         assert_eq!(at(-5).fraction(), 0.0);
@@ -12690,6 +12776,38 @@ mod tests {
         assert_eq!(tokens_short(15_600), "16k");
         assert_eq!(tokens_short(1_000_000), "1M");
         assert_eq!(tokens_short(1_480_000), "1.5M");
+    }
+
+    #[test]
+    fn the_context_card_says_when_it_was_compacted_and_compacts_or_starts_fresh() {
+        let mut m = Model::new();
+        m.take(&conversations(json!([
+            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000, "compacted": 1_000, "compacts": true}},
+        ])));
+        m.select(Some("a_1".into()));
+        let fill = m.context().expect("its program said");
+        assert!(fill.compacts);
+        let hour = 3_600_000;
+        assert_eq!(
+            fill.line(1_000 + 2 * hour),
+            "Compacted 2 h ago · a fresh session starts at 80%"
+        );
+        assert_eq!(ago(30_000), "just now");
+        assert_eq!(ago(5 * 60_000), "5 min ago");
+        assert_eq!(ago(30 * hour), "yesterday");
+        assert_eq!(ago(80 * hour), "3 days ago");
+        let f = m.compact_now().expect("a chat with a context");
+        assert_eq!(f["name"], "conversation.compact");
+        assert_eq!(f["args"], json!({"conversation": "c_1"}));
+        let f = m.fresh_session().expect("a chat with a context");
+        assert_eq!(f["name"], "conversation.fresh");
+        // A refusal is said.
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "error": {"code": "busy", "message": "The agent is answering in it. Try again once the turn is over."}}));
+        assert_eq!(
+            m.notices.last().map(String::as_str),
+            Some("The agent is answering in it. Try again once the turn is over.")
+        );
     }
 
     #[test]

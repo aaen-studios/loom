@@ -642,6 +642,27 @@ mod tests {
     }
 
     #[test]
+    fn a_group_chat_s_context_is_the_member_s_that_answered_last() {
+        let mut m = Model::new();
+        with_room(&mut m);
+        let items = vec![
+            json!({"id": "c_1", "agent": "a_1", "title": "Chat"}),
+            json!({"id": "c_9", "agent": "", "title": "Money",
+                   "room": {"name": "Money", "members": ["a_1", "a_2"], "default": "a_2", "color": "amber"},
+                   "context": {"used": 40_000, "size": 200_000, "compacts": true, "agent": "a_1"}}),
+        ];
+        m.take(&json!({"t": "core.data", "what": "conversations", "items": items}));
+        m.show_room("c_9");
+        let fill = m.context().expect("a member's");
+        assert_eq!(m.context_title(&fill), "Ledger's context");
+        let f = m.compact_now().unwrap();
+        assert_eq!(f["args"], json!({"conversation": "c_9", "agent": "a_1"}));
+        let f = m.fresh_session().unwrap();
+        assert_eq!(f["name"], "conversation.fresh");
+        assert_eq!(f["args"]["agent"], "a_1");
+    }
+
+    #[test]
     fn a_reply_goes_to_another_member_and_a_correction_is_forgotten() {
         let mut m = Model::new();
         with_room(&mut m);

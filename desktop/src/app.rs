@@ -262,6 +262,25 @@ enum PinNote {
     Copied,
 }
 
+/// The context card under the header's ring: shown while the pointer is on the ring or
+/// on it, and kept by a click on the ring until a click outside, Esc or the ring again.
+#[derive(Clone, Default)]
+struct ContextCard {
+    /// The conversation it shows.
+    chat: Option<String>,
+    /// Kept open by a click, rather than shown under the pointer.
+    kept: bool,
+    on_ring: bool,
+    on_card: bool,
+    /// Counts each time the pointer leaves, so a close that waited for it to cross
+    /// from the ring to the card is let go once it's there.
+    left: u32,
+}
+
+/// How long the card waits, once the pointer leaves the ring or the card, for it to come
+/// to the other.
+const CONTEXT_LINGER_MS: u64 = 160;
+
 /// How long Unpinned, with its Undo, stays at the popover's foot, and Copied.
 const UNPIN_SECS: u64 = 6;
 const COPIED_MILLIS: u64 = 1600;
@@ -361,6 +380,10 @@ pub struct Loom {
     pins_closed_at: Option<Instant>,
     pins_scroll: ScrollHandle,
     pins_keys: FocusHandle,
+    /// The context card under the header's ring while it shows, and when a click outside
+    /// last closed it (PLAN.md, "One endless chat").
+    context_card: Option<ContextCard>,
+    context_closed_at: Option<Instant>,
     /// How tall the window was at its last draw, for the popover's most height.
     window_h: f32,
     /// When the picture viewer opened, which it fades in from.
@@ -1529,6 +1552,8 @@ ACTA_KEY=secret:ACTA_KEY",
             pins_closed_at: None,
             pins_scroll: ScrollHandle::new(),
             pins_keys: cx.focus_handle(),
+            context_card: None,
+            context_closed_at: None,
             window_h: 800.0,
             viewer_at: Instant::now(),
             zoom: None,
@@ -1729,6 +1754,8 @@ ACTA_KEY=secret:ACTA_KEY",
             self.browser_big = false;
         } else if self.pins.is_some() {
             self.close_pins(cx);
+        } else if self.context_card.is_some() {
+            self.close_context(cx);
         } else if self.menu.is_some() || self.ctx.is_some() {
             self.menu = None;
             self.ctx = None;
@@ -8076,13 +8103,18 @@ ACTA_KEY=secret:ACTA_KEY",
                 ),
             )
         });
-        // A group chat: its mark and name, which open its settings, and its pins.
+        // How full the agent's session context is, after its model.
+        let context = self.context_ring(cx);
+        // A group chat: its mark and name, which open its settings, its pins, and the
+        // context of the member that answered last.
         if let Some(room) = self.model.room_open().cloned() {
             return bar.child(self.room_head(&room, cx)).child(
                 div()
                     .flex()
                     .items_center()
-                    .when(pinned > 0 || pins_open, |d| d.child(pins)),
+                    .gap(px(space::L))
+                    .when(pinned > 0 || pins_open, |d| d.child(pins))
+                    .children(context),
             );
         }
         bar.child(
@@ -8142,6 +8174,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
                 .children(self.brain_chip(&agent, cx))
+                .children(context)
                 .child(
                     div()
                         .id("permission-menu")
@@ -11012,32 +11045,6 @@ ACTA_KEY=secret:ACTA_KEY",
                                             this.take_notice(cx);
                                         }
                                     })),
-                            )
-                        })
-                        // How full the agent's session context is, just before Send.
-                        .when_some(self.model.context(), |d, fill| {
-                            let ink = match meter::Level::of(fill.percent()) {
-                                meter::Level::Bad => p.bad,
-                                meter::Level::Warn => p.warn,
-                                meter::Level::Quiet => p.ink_2,
-                            };
-                            d.child(
-                                div()
-                                    .id("context")
-                                    .role(Role::Meter)
-                                    .aria_label(fill.tip())
-                                    .size(px(control::ICON_COMPOSER))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .tooltip(tip_text(fill.tip()))
-                                    .child(meter::ring(
-                                        control::CONTEXT_RING,
-                                        fill.fraction(),
-                                        ink,
-                                        p.line_strong,
-                                    )),
                             )
                         })
                         .child(
@@ -16970,6 +16977,308 @@ ACTA_KEY=secret:ACTA_KEY",
     fn close_pins(&mut self, cx: &mut Context<Self>) {
         if self.pins.take().is_some() {
             self.pins_closed_at = Some(Instant::now());
+        }
+        cx.notify();
+    }
+
+    /// The header's context ring, after the model: how full the agent's session context
+    /// is, warm from 70% and red from 90%, with its card under it while the pointer is
+    /// on it, or once it's clicked (PLAN.md, "One endless chat").
+    fn context_ring(&mut self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let chat = self.model.conversation();
+        let Some(fill) = self.model.context() else {
+            self.context_card = None;
+            return None;
+        };
+        // Another chat opened: the card was the last one's.
+        if self.context_card.as_ref().is_some_and(|c| c.chat != chat) {
+            self.context_card = None;
+        }
+        let p = self.p;
+        let ink = match meter::Level::of_context(fill.percent()) {
+            meter::Level::Bad => p.bad,
+            meter::Level::Warn => p.warn,
+            meter::Level::Quiet => p.ink_3,
+        };
+        let kept = self.context_card.as_ref().is_some_and(|c| c.kept);
+        let ring = div()
+            .id("context")
+            .role(Role::Button)
+            .aria_label(fill.tip())
+            .size(px(control::CONTEXT_BUTTON))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .soft_hover(
+                if kept { p.hover } else { transparent_black() },
+                p.hover,
+                None,
+            )
+            .when(kept, |d| d.bg(p.hover))
+            .child(meter::ring(
+                control::CONTEXT_RING,
+                fill.fraction(),
+                ink,
+                p.line_strong,
+            ))
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_context(cx)));
+        let card = self
+            .context_card
+            .is_some()
+            .then(|| self.context_card_view(&fill, ink, cx));
+        // The card hangs under the ring, centred on it, over the chat. The pointer on the
+        // ring is heard here: the ring's own hover is its soft hover's.
+        Some(
+            div()
+                .id("context-at")
+                .occlude()
+                .relative()
+                .ml(px(-space::S))
+                .on_hover(
+                    cx.listener(|this, over: &bool, _, cx| this.context_hover(true, *over, cx)),
+                )
+                .child(ring)
+                .when_some(card, |d, card| {
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_full()
+                            .left(px((control::CONTEXT_BUTTON - layout::CONTEXT_CARD) / 2.0))
+                            .child(
+                                deferred(
+                                    anchored()
+                                        .anchor(Anchor::TopLeft)
+                                        .snap_to_window_with_margin(px(space::S))
+                                        .child(
+                                            div()
+                                                .id("context-card-room")
+                                                .occlude()
+                                                .pt(px(space::XS))
+                                                .on_hover(cx.listener(
+                                                    |this, over: &bool, _, cx| {
+                                                        this.context_hover(false, *over, cx)
+                                                    },
+                                                ))
+                                                .child(card),
+                                        ),
+                                )
+                                .with_priority(1),
+                            ),
+                    )
+                }),
+        )
+    }
+
+    /// The context card: how many tokens the session holds of its window, as a bar, when
+    /// it was last compacted and where a fresh session starts, with Compact now (where its
+    /// program compacts when asked) and Start a fresh session.
+    fn context_card_view(
+        &self,
+        fill: &model::ContextFill,
+        ink: Hsla,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        let title = self.model.context_title(fill);
+        let now = chrono::Utc::now().timestamp_millis();
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .flex_1()
+                .min_w_0()
+                .h(px(control::BUTTON_SMALL))
+                .px(px(space::S))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(radius::BUTTON))
+                .border_1()
+                .border_color(p.line_strong)
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink)
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, None)
+                .child(label)
+        };
+        div()
+            .id("context-card")
+            .role(Role::Dialog)
+            .aria_label(title.clone())
+            .w(px(layout::CONTEXT_CARD))
+            .p(px(space::M))
+            .flex()
+            .flex_col()
+            .gap(px(10.0))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line_strong)
+            .bg(p.raised)
+            .shadow_lg()
+            .text_color(p.ink)
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if this.context_card.as_ref().is_some_and(|c| c.kept) {
+                    this.close_context(cx);
+                }
+            }))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::S))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(size::BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(crate::prefs::mono_font())
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_2)
+                            .child(fill.amount()),
+                    ),
+            )
+            .child(
+                div()
+                    .h(px(6.0))
+                    .w_full()
+                    .rounded_full()
+                    .bg(p.line_strong)
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(fill.fraction()))
+                            .rounded_full()
+                            .bg(ink),
+                    ),
+            )
+            .child(
+                div()
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child(fill.line(now)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(space::S))
+                    .when(fill.compacts, |d| {
+                        d.child(
+                            button("context-compact", "Compact now").on_click(cx.listener(
+                                |this, _, _, cx| {
+                                    if let Some(f) = this.model.compact_now() {
+                                        this.send(f);
+                                    }
+                                    this.close_context(cx);
+                                },
+                            )),
+                        )
+                    })
+                    .child(
+                        button("context-fresh", "Start a fresh session").on_click(cx.listener(
+                            |this, _, _, cx| {
+                                if let Some(f) = this.model.fresh_session() {
+                                    this.send(f);
+                                }
+                                this.close_context(cx);
+                            },
+                        )),
+                    ),
+            )
+    }
+
+    /// The pointer came onto the ring (`ring`) or the card, or left it. The card shows
+    /// while it's on either, unless another popover or menu has the pointer; once it's
+    /// off both a moment, a card that wasn't clicked goes.
+    fn context_hover(&mut self, ring: bool, over: bool, cx: &mut Context<Self>) {
+        if self.context_card.is_none() {
+            let taken = self.pins.is_some()
+                || self.menu.is_some()
+                || self.ctx.is_some()
+                || self.plus.is_some()
+                || self.popup.is_some();
+            if !over || !ring || taken {
+                return;
+            }
+            self.context_card = Some(ContextCard {
+                chat: self.model.conversation(),
+                ..ContextCard::default()
+            });
+        }
+        let Some(c) = self.context_card.as_mut() else {
+            return;
+        };
+        if ring {
+            c.on_ring = over;
+        } else {
+            c.on_card = over;
+        }
+        if !over {
+            c.left += 1;
+            let left = c.left;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(CONTEXT_LINGER_MS))
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    let gone = this
+                        .context_card
+                        .as_ref()
+                        .is_some_and(|c| !c.kept && !c.on_ring && !c.on_card && c.left == left);
+                    if gone {
+                        this.context_card = None;
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// A click on the ring keeps the card open, or closes one it kept.
+    fn toggle_context(&mut self, cx: &mut Context<Self>) {
+        if self.context_card.as_ref().is_some_and(|c| c.kept) {
+            self.close_context(cx);
+            return;
+        }
+        // The click outside that just closed it was on the ring, which leaves it closed.
+        if self
+            .context_closed_at
+            .is_some_and(|t| t.elapsed() < Duration::from_millis(300))
+        {
+            return;
+        }
+        self.menu = None;
+        self.ctx = None;
+        self.plus = None;
+        self.close_pins(cx);
+        let chat = self.model.conversation();
+        let c = self.context_card.get_or_insert_with(|| ContextCard {
+            chat,
+            on_ring: true,
+            ..ContextCard::default()
+        });
+        c.kept = true;
+        cx.notify();
+    }
+
+    fn close_context(&mut self, cx: &mut Context<Self>) {
+        if self.context_card.take().is_some_and(|c| c.kept) {
+            self.context_closed_at = Some(Instant::now());
         }
         cx.notify();
     }

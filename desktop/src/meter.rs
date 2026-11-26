@@ -1,11 +1,11 @@
-//! A small ring that fills as something is used: an agent's context by the composer's
-//! Send, and the plan's limits in the sidebar.
+//! A small ring that fills as something is used: an agent's context after the header's
+//! model, and the plan's limits in the sidebar.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 
 use gpui_kit::*;
 
-/// How full a meter reads: quiet, then orange from 75%, red from 90%.
+/// How full a meter reads: quiet, then warm, then red.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Level {
     Quiet,
@@ -14,12 +14,36 @@ pub enum Level {
 }
 
 impl Level {
+    /// A plan's limit: orange from 75%, red from 90%.
     pub fn of(percent: i64) -> Level {
         match percent {
             p if p >= 90 => Level::Bad,
             p if p >= 75 => Level::Warn,
             _ => Level::Quiet,
         }
+    }
+
+    /// An agent's context: warm from 70%, before its fresh session at 80%, and red from 90%.
+    pub fn of_context(percent: i64) -> Level {
+        match percent {
+            p if p >= 90 => Level::Bad,
+            p if p >= 70 => Level::Warn,
+            _ => Level::Quiet,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Level;
+
+    #[test]
+    fn a_context_warms_before_its_fresh_session_and_a_limit_later() {
+        assert_eq!(Level::of_context(69), Level::Quiet);
+        assert_eq!(Level::of_context(70), Level::Warn);
+        assert_eq!(Level::of_context(90), Level::Bad);
+        assert_eq!(Level::of(70), Level::Quiet);
+        assert_eq!(Level::of(75), Level::Warn);
     }
 }
 
