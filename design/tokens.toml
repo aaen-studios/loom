@@ -70,6 +70,8 @@ menu-wide = 240      # the composer's plus menu
 pins = 460           # the Pinned popover under the header
 caret = 11           # the nub on a popover's top edge that points at its button: a square this size, turned 45°
 context-card = 300   # the card under the header's context ring
+pill-title = 260     # a card pill's title, at most
+card-preview = 330   # a card's preview under its pill
 field-label = 120    # a label beside its field
 
 # How big the controls are.
@@ -93,6 +95,7 @@ row = 54             # a settings row, at least
 list-row = 48        # a row of a list page's list
 grip = 14            # the corner that resizes the settings popup
 row-tall = 68        # a settings row with a picture, at least
+pill = 22            # a card's pill in a message
 
 # The iPhone app's type: the same scale, a little larger for a screen held in
 # the hand. Dynamic Type scales it from here.
@@ -129,6 +132,7 @@ bad = "#ff7a6b"
 warn = "#f2a77a"     # what can change something, such as a question's "Can change"
 find = "#3b3417"     # a match found in a chat (Ctrl+F)
 find-current = "#94781a" # the match it's on
+board = "#7d5fd6"    # an Acta board's tile, until Acta gives each board its own icon
 
 [color.light]
 bg = "#ffffff"
@@ -150,6 +154,7 @@ bad = "#d4442f"
 warn = "#c2621f"
 find = "#fbefb4"
 find-current = "#f2cc3d"
+board = "#7d5fd6"
 
 # An agent's thread colour, picked when the agent is made. Twelve, chosen so
 # any two tell apart, in both themes.

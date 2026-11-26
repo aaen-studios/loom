@@ -2839,6 +2839,9 @@ pub struct Message {
     pub sources: Vec<Source>,
     /// The pages it links to that the instance has looked up, by address.
     pub links: HashMap<String, Link>,
+    /// The Acta cards it names that the instance has looked up, by id. Shared, so a
+    /// message stays small.
+    pub cards: std::sync::Arc<HashMap<String, ActaCard>>,
     /// How an agent's turn ended (`done`, `cancelled`, `failed` or `limit`), or empty
     /// when the message doesn't say: a person's, one still being written, or one kept
     /// before messages said.
@@ -3483,6 +3486,8 @@ pub fn pasted_link(text: &str) -> Option<&str> {
 pub struct Inline<'a> {
     /// The pages it links to that the instance has looked up.
     pub links: &'a HashMap<String, Link>,
+    /// The Acta cards it names that the instance has looked up, by id.
+    pub cards: &'a HashMap<String, ActaCard>,
     /// Where a fetched thumbnail is, by its file: a site's icon, or a picture's.
     pub icon_src: &'a dyn Fn(&str) -> Option<String>,
     /// For an agent it mentions, by id: its name's colour, as #rrggbb, and where its
@@ -3503,11 +3508,13 @@ pub struct Inline<'a> {
 ///   weathered;
 /// - a file it mentions, or one sent with it, with a tiny picture of it or its type's
 ///   icon before its name;
-/// - a skill picked from the + menu as its name, a little weathered.
+/// - a skill picked from the + menu as its name, a little weathered;
+/// - an Acta card it names, by its id or its link, as a link the chat draws as the
+///   card's pill (`card_mark`).
 ///
 /// Code stays as it is.
 pub fn with_link_icons(text: &str, inline: &Inline) -> String {
-    if inline.links.is_empty() && !text.contains("](loom") {
+    if inline.links.is_empty() && inline.cards.is_empty() && !text.contains("](loom") {
         return text.to_string();
     }
     let mut out = String::with_capacity(text.len() + 64);
@@ -3565,7 +3572,10 @@ fn line_links(line: &str, inline: &Inline) -> String {
         if rest.starts_with('[') {
             if let Some((len, words, url)) = md_link(rest) {
                 let whole = &rest[..len];
-                if url.starts_with("http://") || url.starts_with("https://") {
+                if let Some(id) = card_in(url, inline.cards) {
+                    // A link to a card the instance looked up: its pill.
+                    out.push_str(&card_mark(&id));
+                } else if url.starts_with("http://") || url.starts_with("https://") {
                     out.push_str(&icon(url));
                     out.push_str(whole);
                 } else if let Some(id) = url.strip_prefix("loom:agent/") {
@@ -3616,6 +3626,11 @@ fn line_links(line: &str, inline: &Inline) -> String {
                 .unwrap_or(rest.len());
             let url = rest[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'']);
             let url = if url.is_empty() { &rest[..end] } else { url };
+            if let Some(id) = card_in(url, inline.cards) {
+                out.push_str(&card_mark(&id));
+                rest = &rest[url.len()..];
+                continue;
+            }
             match links.get(url).filter(|l| !l.title.trim().is_empty()) {
                 Some(l) => {
                     let title = short_title(l.title.trim()).replace(['[', ']'], "");
@@ -3630,11 +3645,32 @@ fn line_links(line: &str, inline: &Inline) -> String {
             rest = &rest[url.len()..];
             continue;
         }
+        // A card's id at the start of a word, for a card the instance looked up: its pill.
+        if !inline.cards.is_empty() {
+            let before = line[..line.len() - rest.len()].chars().last();
+            if let Some(len) = card_id_len(rest).filter(|_| card_starts_after(before)) {
+                let id = &rest[..len];
+                if inline.cards.contains_key(id) && card_ends_before(&rest[len..]) {
+                    out.push_str(&card_mark(id));
+                    rest = &rest[len..];
+                    continue;
+                }
+            }
+        }
         let c = rest.chars().next().unwrap_or(' ');
         out.push(c);
         rest = &rest[c.len_utf8()..];
     }
     out
+}
+
+/// The card `url` links to, when it's a card's link and the instance looked it up.
+fn card_in(url: &str, cards: &HashMap<String, ActaCard>) -> Option<String> {
+    let (board, id) = card_link(url)?;
+    cards
+        .get(&id)
+        .filter(|c| c.board.is_empty() || c.board == board)
+        .map(|_| id)
 }
 
 /// Whether a file of this name is a picture, by its type.
@@ -3672,6 +3708,621 @@ fn md_link(s: &str) -> Option<(usize, &str, &str)> {
     (!url.is_empty()).then_some((close + 2 + end + 1, &s[1..close], url))
 }
 
+// --- Cards from Acta (PLAN.md, "Cards in messages") ---
+
+/// Where Acta is: its card links are on it.
+pub const ACTA: &str = "acta.aaenz.no";
+/// A card looked up longer ago than this is looked up again when its message shows.
+pub const CARD_FRESH_MS: i64 = 300_000;
+/// The person's boards are asked for again once they're this old.
+const BOARDS_FRESH_MS: i64 = 600_000;
+/// How a card's link in a message's Markdown starts, then the card's id (`with_link_icons`).
+pub const CARD_LINK: &str = "loom-card:";
+/// How the id of a card's piece in the composer starts, then what it names: the card's
+/// id, or its link.
+pub const CARD: &str = "loom-card:";
+
+/// A card on one of the person's Acta boards that a message names, as the instance
+/// looked it up (protocol.md, "Messages and streaming"), or one that isn't there or that
+/// the person can't see (`missing`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ActaCard {
+    pub id: String,
+    /// Its board, `workspace/board`, and the board's name.
+    pub board: String,
+    pub board_name: String,
+    pub title: String,
+    /// todo, in_progress, review, done or canceled.
+    pub status: String,
+    pub url: String,
+    pub assignee: String,
+    pub size: String,
+    pub labels: Vec<String>,
+    /// The start of its description, as plain words.
+    pub text: String,
+    pub subtasks: u32,
+    pub subtasks_done: u32,
+    pub missing: bool,
+    /// When it was looked up, in Unix ms.
+    pub at: i64,
+}
+
+/// The colour a card's status is drawn in: its dot, and its chip in the preview.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CardInk {
+    /// To do, or canceled: the quiet ink.
+    Quiet,
+    /// In progress.
+    Sky,
+    /// In review.
+    Gold,
+    /// Done.
+    Ok,
+}
+
+impl ActaCard {
+    pub fn of(v: &Value) -> ActaCard {
+        let n = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
+        ActaCard {
+            id: s(v, "id"),
+            board: s(v, "board"),
+            board_name: s(v, "board_name"),
+            title: s(v, "title"),
+            status: s(v, "status"),
+            url: s(v, "url"),
+            assignee: s(v, "assignee"),
+            size: s(v, "size"),
+            labels: v
+                .get("labels")
+                .and_then(Value::as_array)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
+            text: s(v, "text"),
+            subtasks: n("subtasks"),
+            subtasks_done: n("subtasks_done"),
+            missing: v.get("missing").and_then(Value::as_bool).unwrap_or(false),
+            at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+        }
+    }
+
+    pub fn ink(&self) -> CardInk {
+        match self.status.as_str() {
+            "in_progress" => CardInk::Sky,
+            "review" => CardInk::Gold,
+            "done" => CardInk::Ok,
+            _ => CardInk::Quiet,
+        }
+    }
+
+    /// A canceled card's title is struck through.
+    pub fn struck(&self) -> bool {
+        self.status == "canceled"
+    }
+
+    /// Its status in words, as its chip says it.
+    pub fn status_words(&self) -> String {
+        match self.status.as_str() {
+            "todo" | "" => "Todo".into(),
+            "in_progress" => "In progress".into(),
+            "review" => "Review".into(),
+            "done" => "Done".into(),
+            "canceled" => "Canceled".into(),
+            other => {
+                let words = other.replace('_', " ");
+                let mut c = words.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().chain(c).collect())
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    /// The preview's top line: its board and its id, `loom · LOO-206`.
+    pub fn place(&self) -> String {
+        let board = if self.board_name.is_empty() {
+            self.board.rsplit('/').next().unwrap_or_default()
+        } else {
+            &self.board_name
+        };
+        if board.is_empty() {
+            self.id.clone()
+        } else {
+            format!("{board} · {}", self.id)
+        }
+    }
+
+    /// The preview's chips after its status: its assignee, its size and its labels.
+    pub fn chips(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        if !self.assignee.is_empty() {
+            out.push(self.assignee.clone());
+        }
+        if !self.size.is_empty() {
+            out.push(self.size.to_uppercase());
+        }
+        out.extend(self.labels.iter().filter(|l| !l.is_empty()).cloned());
+        out
+    }
+
+    /// "Subtasks 3 of 5", for a card with subtasks.
+    pub fn subtasks_line(&self) -> Option<String> {
+        (self.subtasks > 0).then(|| format!("Subtasks {} of {}", self.subtasks_done, self.subtasks))
+    }
+
+    /// How much of its subtasks' bar is filled, from 0 to 1.
+    pub fn subtasks_part(&self) -> f32 {
+        if self.subtasks == 0 {
+            return 0.0;
+        }
+        (self.subtasks_done as f32 / self.subtasks as f32).clamp(0.0, 1.0)
+    }
+
+    /// Where it opens: its page in Acta.
+    pub fn link(&self) -> String {
+        if !self.url.is_empty() {
+            return self.url.clone();
+        }
+        format!("https://{ACTA}/{}#{}", self.board, self.id)
+    }
+
+    /// Looked up long enough ago to be looked up again when it shows.
+    pub fn stale(&self, now: i64) -> bool {
+        now - self.at >= CARD_FRESH_MS
+    }
+}
+
+fn cards_of(m: &Value) -> std::sync::Arc<HashMap<String, ActaCard>> {
+    let cards: HashMap<String, ActaCard> = m
+        .get("cards")
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .map(|(id, v)| (id.clone(), ActaCard::of(v)))
+                .collect()
+        })
+        .unwrap_or_default();
+    std::sync::Arc::new(cards)
+}
+
+/// How long the card id at the start of `s` is, `PREFIX-N` (an upper-case letter, up to
+/// nine more letters or digits, a hyphen and a number with no leading zero), as the
+/// instance reads one (server/acta.calx).
+fn card_id_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if !b.first()?.is_ascii_uppercase() {
+        return None;
+    }
+    let mut j = 1;
+    while j < b.len() && j < 10 && (b[j].is_ascii_uppercase() || b[j].is_ascii_digit()) {
+        j += 1;
+    }
+    if b.get(j) != Some(&b'-') {
+        return None;
+    }
+    j += 1;
+    let start = j;
+    if !b.get(j).is_some_and(|c| c.is_ascii_digit() && *c != b'0') {
+        return None;
+    }
+    while j < b.len() && j - start < 7 && b[j].is_ascii_digit() {
+        j += 1;
+    }
+    Some(j)
+}
+
+/// Whether `s` is a whole card id, such as `LOO-206`.
+pub fn is_card_id(s: &str) -> bool {
+    card_id_len(s) == Some(s.len())
+}
+
+/// The card a link points at, its board and its id: `https://acta.aaenz.no/<workspace>/<board>#ID`,
+/// or with `?task=ID` in its query.
+pub fn card_link(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix(&format!("https://{ACTA}/"))?;
+    let path_end = rest.find(['?', '#']).unwrap_or(rest.len());
+    let path = rest[..path_end].trim_end_matches('/');
+    let (workspace, board) = path.split_once('/')?;
+    if workspace.is_empty() || board.is_empty() || board.contains('/') {
+        return None;
+    }
+    let hash = rest
+        .find('#')
+        .map(|h| &rest[h + 1..])
+        .filter(|id| is_card_id(id));
+    let id = hash.or_else(|| {
+        let query = rest[path_end..].strip_prefix('?')?;
+        let query = query.split('#').next().unwrap_or("");
+        query
+            .split('&')
+            .find_map(|p| p.strip_prefix("task="))
+            .filter(|id| is_card_id(id))
+    })?;
+    Some((format!("{workspace}/{board}"), id.to_string()))
+}
+
+/// Whether a card id can start after `c`, the character before it: not inside a word, a
+/// path or an address.
+fn card_starts_after(c: Option<char>) -> bool {
+    !c.is_some_and(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '.' | '@'))
+}
+
+/// Whether a card id that ends before `rest` is a whole one: not a piece of `LOO-3-b`,
+/// `LOO-3.5` or `LOO-3_x`.
+fn card_ends_before(rest: &str) -> bool {
+    let mut c = rest.chars();
+    match c.next() {
+        None => true,
+        Some(x) if x.is_alphanumeric() || x == '_' => false,
+        Some('-' | '.') => !c.next().is_some_and(|y| y.is_alphanumeric() || y == '_'),
+        _ => true,
+    }
+}
+
+/// A message's card as its words show it: a link the chat draws as the card's pill.
+fn card_mark(id: &str) -> String {
+    format!("[{id}]({CARD_LINK}{id})")
+}
+
+/// A card's piece in the composer: its id and its text, the card's id or its link.
+pub fn card_token(r: &str) -> (String, String) {
+    (format!("{CARD}{r}"), r.to_string())
+}
+
+/// A card pasted in the composer, or typed for one of the person's boards, as it's
+/// looked up (`Model::preview_card`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum CardPreview {
+    Loading,
+    Ready(Box<ActaCard>),
+    /// It couldn't be looked up: it shows as its id.
+    Failed,
+}
+
+/// The card id the person just finished typing in the composer: what's before the
+/// cursor ends with a space or a mark that ends a word, after an id whose prefix is one of
+/// `prefixes`, which isn't in a piece already. Its range and the id.
+pub fn typed_card(
+    before: &str,
+    prefixes: &[String],
+    pieces: &[std::ops::Range<usize>],
+) -> Option<(std::ops::Range<usize>, String)> {
+    let last = before.chars().last()?;
+    if !(last.is_whitespace() || matches!(last, ',' | '.' | ';' | ':' | '!' | '?' | ')')) {
+        return None;
+    }
+    let end = before.len() - last.len_utf8();
+    let word = &before[..end];
+    let start = word
+        .rfind(|c: char| !(c.is_ascii_uppercase() || c.is_ascii_digit() || c == '-'))
+        .map_or(0, |k| {
+            k + word[k..].chars().next().map_or(1, char::len_utf8)
+        });
+    let id = &word[start..];
+    if !is_card_id(id) || !card_starts_after(word[..start].chars().last()) {
+        return None;
+    }
+    let prefix = id.split('-').next().unwrap_or("");
+    if !prefixes.iter().any(|p| p == prefix) {
+        return None;
+    }
+    let range = start..end;
+    if pieces
+        .iter()
+        .any(|p| p.start < range.end && range.start < p.end)
+    {
+        return None;
+    }
+    Some((range, id.to_string()))
+}
+
+/// The card link a whole paste is, when it's one and nothing else.
+pub fn pasted_card(text: &str) -> Option<&str> {
+    let url = pasted_link(text)?;
+    card_link(url).map(|_| url)
+}
+
+impl Model {
+    /// Looks up a card pasted or typed in the composer (`card.preview`), unless it has
+    /// been: `r` is its id or its link.
+    pub fn preview_card(&mut self, r: &str) -> Option<Value> {
+        if matches!(
+            self.card_previews.get(r),
+            Some(CardPreview::Loading | CardPreview::Ready(_))
+        ) {
+            return None;
+        }
+        self.card_previews
+            .insert(r.to_string(), CardPreview::Loading);
+        let id = format!("app.card:{r}#{}", self.next_id);
+        self.next_id += 1;
+        Some(json!({"t": "cmd", "id": id, "name": "card.preview", "args": {"ref": r}}))
+    }
+
+    /// The prefixes of the person's boards, which a typed card id becomes a piece for.
+    pub fn board_prefixes(&self) -> Vec<String> {
+        self.acta_boards.iter().map(|(p, _)| p.clone()).collect()
+    }
+
+    /// What the cards need asked of the instance (PLAN.md, "Cards in messages"): the
+    /// person's boards, every 10 minutes, for the composer's typed ids; and each message
+    /// of the shown chat, once it shows, whose cards were looked up over 5 minutes ago,
+    /// for their status as it is now.
+    pub fn card_fetches(&mut self, now: i64) -> Vec<Value> {
+        let mut out = Vec::new();
+        if !self.boards_asking && self.boards_at.is_none_or(|t| now - t >= BOARDS_FRESH_MS) {
+            self.boards_asking = true;
+            let id = self.id("app.acta_boards");
+            out.push(json!({"t": "cmd", "id": id, "name": "acta.boards", "args": {}}));
+        }
+        let mut stale = Vec::new();
+        for m in &self.messages {
+            if m.cards.is_empty() || !self.cards_looked.insert(m.id.clone()) {
+                continue;
+            }
+            if m.cards.values().any(|c| c.stale(now)) {
+                stale.push(m.id.clone());
+            }
+        }
+        for ids in stale.chunks(100) {
+            let id = self.id("app.cards_refresh");
+            out.push(
+                json!({"t": "cmd", "id": id, "name": "cards.refresh", "args": {"messages": ids}}),
+            );
+        }
+        out
+    }
+
+    /// The answers to what `card_fetches` and `preview_card` asked. Gives whether `id` was one.
+    fn take_card_answer(&mut self, id: &str, f: &Value) -> bool {
+        if id.starts_with("app.acta_boards") {
+            self.boards_asking = false;
+            self.boards_at = Some(now_ms());
+            if let Some(list) = f.pointer("/value/boards").and_then(Value::as_array) {
+                self.acta_boards = list
+                    .iter()
+                    .map(|b| (s(b, "prefix"), s(b, "board")))
+                    .filter(|(p, _)| !p.is_empty())
+                    .collect();
+            }
+            return true;
+        }
+        if let Some(r) = id.strip_prefix("app.card:") {
+            let r = r.rsplit_once('#').map_or(r, |(r, _)| r).to_string();
+            let preview = match f.pointer("/value/card") {
+                Some(v) if f.get("error").is_none() => {
+                    CardPreview::Ready(Box::new(ActaCard::of(v)))
+                }
+                _ => CardPreview::Failed,
+            };
+            self.card_previews.insert(r, preview);
+            return true;
+        }
+        id.starts_with("app.cards_refresh")
+    }
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+
+    fn card(v: Value) -> ActaCard {
+        ActaCard::of(&v)
+    }
+
+    fn loo_206() -> ActaCard {
+        card(json!({
+            "id": "LOO-206", "board": "aaen-studios/loom", "board_name": "loom",
+            "title": "Show agents' usage limits in the sidebar", "status": "in_progress",
+            "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "assignee": "Elliot",
+            "size": "m", "labels": ["desktop"], "text": "The plan's usage limits.",
+            "subtasks": 5, "subtasks_done": 3, "at": 1000
+        }))
+    }
+
+    #[test]
+    fn a_card_says_how_it_is_drawn() {
+        let c = loo_206();
+        assert_eq!(c.ink(), CardInk::Sky);
+        assert!(!c.struck());
+        assert_eq!(c.status_words(), "In progress");
+        assert_eq!(c.place(), "loom · LOO-206");
+        assert_eq!(c.chips(), vec!["Elliot", "M", "desktop"]);
+        assert_eq!(c.subtasks_line().as_deref(), Some("Subtasks 3 of 5"));
+        assert!((c.subtasks_part() - 0.6).abs() < 1e-6);
+        assert_eq!(c.link(), "https://acta.aaenz.no/aaen-studios/loom#LOO-206");
+        assert!(!c.stale(1000 + CARD_FRESH_MS - 1) && c.stale(1000 + CARD_FRESH_MS));
+        let ink = |status: &str| card(json!({"id": "X-1", "status": status})).ink();
+        assert_eq!(ink("todo"), CardInk::Quiet);
+        assert_eq!(ink("review"), CardInk::Gold);
+        assert_eq!(ink("done"), CardInk::Ok);
+        assert_eq!(ink("canceled"), CardInk::Quiet);
+        let canceled = card(json!({"id": "X-1", "board": "w/b", "status": "canceled"}));
+        assert!(canceled.struck());
+        assert_eq!(canceled.status_words(), "Canceled");
+        assert_eq!(canceled.place(), "b · X-1");
+        assert_eq!(canceled.subtasks_line(), None);
+        assert_eq!(canceled.link(), "https://acta.aaenz.no/w/b#X-1");
+        let gone = card(json!({"id": "LOO-9", "board": "aaen-studios/loom", "missing": true}));
+        assert!(gone.missing);
+    }
+
+    #[test]
+    fn reads_card_ids_and_links() {
+        assert!(is_card_id("LOO-206") && is_card_id("CLX-4"));
+        assert!(!is_card_id("LOO-0") && !is_card_id("loo-2") && !is_card_id("LOO-2a"));
+        let link = |u: &str| card_link(u).map(|(b, i)| format!("{b} {i}"));
+        assert_eq!(
+            link("https://acta.aaenz.no/aaen-studios/loom#LOO-342").as_deref(),
+            Some("aaen-studios/loom LOO-342")
+        );
+        assert_eq!(
+            link("https://acta.aaenz.no/aaen-studios/loom/?view=list&task=LOO-1").as_deref(),
+            Some("aaen-studios/loom LOO-1")
+        );
+        assert_eq!(link("https://acta.aaenz.no/aaen-studios/loom"), None);
+        assert_eq!(link("https://example.com/aaen-studios/loom#LOO-1"), None);
+        assert_eq!(
+            pasted_card(" https://acta.aaenz.no/aaen-studios/loom#LOO-342 "),
+            Some("https://acta.aaenz.no/aaen-studios/loom#LOO-342")
+        );
+        assert_eq!(pasted_card("https://acta.aaenz.no/docs"), None);
+    }
+
+    #[test]
+    fn a_message_shows_its_cards_as_pills() {
+        let mut cards = HashMap::new();
+        cards.insert("LOO-206".to_string(), loo_206());
+        let mut cal = loo_206();
+        cal.id = "CAL-338".into();
+        cal.board = "aaen-studios/calcite".into();
+        cards.insert("CAL-338".to_string(), cal);
+        let links = HashMap::new();
+        let none = |_: &str| None;
+        let file = |_: &str| String::new();
+        let inline = Inline {
+            links: &links,
+            cards: &cards,
+            icon_src: &none,
+            agent: &|_| None,
+            file_icon: &file,
+            file_thumb: &none,
+        };
+        let shown = |t: &str| with_link_icons(t, &inline);
+        assert_eq!(
+            shown("LOO-206 is nearly done, and so is https://acta.aaenz.no/aaen-studios/calcite#CAL-338."),
+            "[LOO-206](loom-card:LOO-206) is nearly done, and so is [CAL-338](loom-card:CAL-338)."
+        );
+        assert_eq!(
+            shown("See [the card](https://acta.aaenz.no/aaen-studios/loom#LOO-206) (LOO-206)"),
+            "See [LOO-206](loom-card:LOO-206) ([LOO-206](loom-card:LOO-206))"
+        );
+        // Ids it hasn't looked up, code, a plain address, and ids inside something longer.
+        assert_eq!(
+            shown("UTF-8, LOO-207, `LOO-206`, x-LOO-206, LOO-206-b and <https://acta.aaenz.no/aaen-studios/loom#LOO-206>"),
+            "UTF-8, LOO-207, `LOO-206`, x-LOO-206, LOO-206-b and [https://acta.aaenz.no/aaen-studios/loom#LOO-206](https://acta.aaenz.no/aaen-studios/loom#LOO-206)"
+        );
+        // A link to the same id on another board isn't that card.
+        assert_eq!(
+            shown("https://acta.aaenz.no/aaen-studios/other#LOO-206"),
+            "https://acta.aaenz.no/aaen-studios/other#LOO-206"
+        );
+    }
+
+    #[test]
+    fn a_typed_id_for_a_known_board_becomes_a_piece() {
+        let prefixes = vec!["LOO".to_string(), "CAL".to_string()];
+        let typed = |t: &str, pieces: &[std::ops::Range<usize>]| typed_card(t, &prefixes, pieces);
+        assert_eq!(
+            typed("see LOO-206 ", &[]),
+            Some((4..11, "LOO-206".to_string()))
+        );
+        assert_eq!(typed("CAL-338,", &[]), Some((0..7, "CAL-338".to_string())));
+        assert_eq!(typed("see LOO-206", &[]), None);
+        assert_eq!(typed("UTF-8 ", &[]), None);
+        assert_eq!(typed("xLOO-206 ", &[]), None);
+        assert_eq!(typed("CLX-450 ", &[]), None);
+        assert_eq!(typed("see LOO-206 ", std::slice::from_ref(&(4..11))), None);
+        let token = card_token("LOO-206");
+        assert_eq!(
+            token,
+            ("loom-card:LOO-206".to_string(), "LOO-206".to_string())
+        );
+        assert_eq!(
+            with_mention_links("see LOO-206 now", &[(4..11, token.0, token.1)]),
+            "see LOO-206 now"
+        );
+    }
+
+    #[test]
+    fn cards_are_asked_for_as_they_show() {
+        let mut m = Model::new();
+        let now = 10_000_000;
+        let asked = m.card_fetches(now);
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["name"], "acta.boards");
+        let id = asked[0]["id"].as_str().unwrap_or_default().to_string();
+        assert!(
+            m.card_fetches(now).is_empty(),
+            "the boards are asked for once at a time"
+        );
+        m.take(
+            &json!({"t": "result", "id": id, "ok": true, "value": {"boards": [
+                {"board": "aaen-studios/loom", "prefix": "LOO", "name": "loom"}
+            ]}}),
+        );
+        assert_eq!(m.board_prefixes(), vec!["LOO"]);
+        let message = |id: &str, at: i64| {
+            let mut c = loo_206();
+            c.at = at;
+            let mut cards = HashMap::new();
+            cards.insert(c.id.clone(), c);
+            Message {
+                id: id.into(),
+                role: "agent".into(),
+                at: 0,
+                blocks: Vec::new(),
+                live: false,
+                queued: false,
+                came: Came::Before,
+                from_agent: None,
+                routine: String::new(),
+                routine_name: String::new(),
+                deleted: false,
+                pinned: false,
+                mentions: Vec::new(),
+                sources: Vec::new(),
+                links: HashMap::new(),
+                cards: std::sync::Arc::new(cards),
+                status: String::new(),
+                reply: None,
+                routed: None,
+                learned: Vec::new(),
+            }
+        };
+        m.messages.push(message("m_old", now - CARD_FRESH_MS));
+        m.messages.push(message("m_new", now - 1000));
+        let refresh = m.card_fetches(now);
+        assert_eq!(refresh.len(), 1);
+        assert_eq!(refresh[0]["name"], "cards.refresh");
+        assert_eq!(refresh[0]["args"]["messages"], json!(["m_old"]));
+        assert!(
+            m.card_fetches(now).is_empty(),
+            "each message is looked at once while it shows"
+        );
+        m.select(Some("a_2".into()));
+        m.messages.push(message("m_old", now - CARD_FRESH_MS));
+        assert_eq!(
+            m.card_fetches(now).len(),
+            1,
+            "and again when its chat shows again"
+        );
+    }
+
+    #[test]
+    fn a_card_in_the_composer_is_looked_up_once() {
+        let mut m = Model::new();
+        let f = m.preview_card("LOO-206").expect("a card.preview");
+        assert_eq!(f["name"], "card.preview");
+        assert_eq!(f["args"]["ref"], "LOO-206");
+        assert_eq!(m.preview_card("LOO-206"), None);
+        let id = f["id"].as_str().unwrap_or_default().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {"card": {"id": "LOO-206", "title": "T", "status": "done"}}}));
+        let Some(CardPreview::Ready(c)) = m.card_previews.get("LOO-206") else {
+            panic!("no card");
+        };
+        assert_eq!(c.title, "T");
+        let g = m.preview_card("UTF-8").expect("a card.preview");
+        let gid = g["id"].as_str().unwrap_or_default().to_string();
+        m.take(&json!({"t": "result", "id": gid, "ok": false, "error": {"code": "not_found", "message": "No."}}));
+        assert_eq!(m.card_previews.get("UTF-8"), Some(&CardPreview::Failed));
+    }
+}
+
 // --- Mentions (PLAN.md, "Mentions") ---
 
 /// A mention as the composer holds it, an inline token: its id, the `loom:` link it
@@ -3702,7 +4353,8 @@ pub fn file_mention(agent: &str, path: &str, name: &str) -> (String, String) {
 /// - a mention as its Markdown link;
 /// - an attached file as its name in brackets, `[image.png]`, which the chat makes a
 ///   link to it (`link_files`);
-/// - a link pasted as a preview as its bare address.
+/// - a link pasted as a preview as its bare address;
+/// - an Acta card as its id, or its link as a bare address.
 ///
 /// An address typed or pasted as plain text goes as `<https://…>` (`plain_links`).
 pub fn with_mention_links(
@@ -3725,6 +4377,9 @@ pub fn with_mention_links(
             out.push_str(words);
         } else if let Some(url) = link.strip_prefix(LINK) {
             out.push_str(url);
+        } else if link.starts_with(CARD) {
+            // A card goes as its id or its link, which the instance looks up.
+            out.push_str(words);
         } else {
             out.push_str(&format!("[{}]({link})", words.replace(['[', ']'], "")));
         }
@@ -5250,6 +5905,17 @@ pub struct Model {
     pub dropped: Vec<Attachment>,
     /// The links pasted in the composer, by address, as they're looked up.
     pub link_previews: HashMap<String, Preview>,
+    /// The cards pasted or typed in the composer, by their id or link, as they're
+    /// looked up.
+    pub card_previews: HashMap<String, CardPreview>,
+    /// The person's Acta boards, each its prefix and its board, for the composer's typed
+    /// card ids; when they were last given, and whether they're being asked for.
+    pub acta_boards: Vec<(String, String)>,
+    boards_at: Option<i64>,
+    boards_asking: bool,
+    /// The messages of the shown chat whose cards were looked at since it showed
+    /// (`card_fetches`).
+    cards_looked: HashSet<String>,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     pub files: Rc<HashMap<String, String>>,
     /// file.get requests on their way: what they fetch, and whether to open it.
@@ -5917,6 +6583,7 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
+            self.cards_looked.clear();
             self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
@@ -5943,6 +6610,7 @@ impl Model {
             self.open_branch = branch;
             self.messages.clear();
             self.messages_for = None;
+            self.cards_looked.clear();
             self.first_page();
             self.dirty.insert(List::Messages);
             self.queue_stale = true;
@@ -6120,6 +6788,7 @@ impl Model {
             self.open_branch = None;
             self.messages.clear();
             self.messages_for = None;
+            self.cards_looked.clear();
             self.first_page();
             self.replying = None;
             self.dirty.insert(List::Messages);
@@ -6195,6 +6864,7 @@ impl Model {
             sources: sources_of(m),
             learned: learned_of(m),
             links: links_of(m),
+            cards: cards_of(m),
             status: s(m, "status"),
             routed: Routed::of(m),
             routine: s(m, "routine"),
@@ -7146,6 +7816,10 @@ impl Model {
                 self.secret_sending.remove(call);
                 self.secret_errors.insert(call.to_string(), s(e, "message"));
             }
+            return;
+        }
+        // A card for the composer, the person's boards, or a refresh of cards.
+        if self.take_card_answer(&id, f) {
             return;
         }
         // A link pasted in the composer, looked up: its preview, or its site when the
@@ -8454,6 +9128,7 @@ impl Model {
                     sources: Vec::new(),
                     learned: Vec::new(),
                     links: HashMap::new(),
+                    cards: Default::default(),
                     status: String::new(),
                     pinned: false,
                     reply: q.reply.clone(),
@@ -8511,6 +9186,7 @@ impl Model {
                 sources: Vec::new(),
                 learned: Vec::new(),
                 links: HashMap::new(),
+                cards: Default::default(),
                 status: String::new(),
                 pinned: false,
                 reply: None,
@@ -10866,6 +11542,7 @@ mod tests {
         let no_thumb = |_: &str| None::<String>;
         let mut inline = Inline {
             links: &links,
+            cards: &HashMap::new(),
             icon_src: &src,
             agent: &none,
             file_icon: &file,
@@ -10919,6 +11596,7 @@ mod tests {
             |url: &str| (url == "loom:file/a1/chart.png").then(|| "/thumbs/chart".to_string());
         let inline = Inline {
             links: &links,
+            cards: &HashMap::new(),
             icon_src: &src,
             agent: &agent,
             file_icon: &file,
@@ -11522,6 +12200,7 @@ mod tests {
             sources: Vec::new(),
             learned: Vec::new(),
             links: HashMap::new(),
+            cards: Default::default(),
             status: String::new(),
             pinned: false,
             reply: None,
@@ -12089,6 +12768,7 @@ mod tests {
             sources: Vec::new(),
             learned: Vec::new(),
             links: HashMap::new(),
+            cards: Default::default(),
             status: String::new(),
             pinned: false,
             reply: None,
@@ -12133,6 +12813,7 @@ mod tests {
             sources: Vec::new(),
             learned: Vec::new(),
             links: HashMap::new(),
+            cards: Default::default(),
             pinned: false,
             reply: None,
             status: status.into(),
