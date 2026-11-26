@@ -28,9 +28,11 @@ On the desktop, a chat opens on its newest 200 messages. Scroll near the top and
 
 ## How full the chat is
 
-The chat never ends, but the agent program's session under it does. The ring just before Send fills with the session's context, orange from 75% and red from 90%, and under the pointer it says how full it is: "Context 41%, 82k of 200k. A fresh session starts at 80%." Once it's 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost.
+The chat never ends, but the agent program's session under it does. The ring in the chat's header, right after the model, fills with the session's context, orange from 70% and red from 90%. Under the pointer it shows a card: **Context** with its tokens of the window ("82k of 200k"), a bar, when the program last compacted the session and that a fresh session starts at 80% ("Compacted 2 h ago · a fresh session starts at 80%"). **Compact now** has the program compact the session, where it can when asked, as Claude's can, and **Start a fresh session** sends your next message to a fresh one. A click on the ring keeps the card open until you click outside it, press Esc or click the ring again. In a group chat the ring and the card are for the agent that answered last, "Ledger's context".
 
-A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context itself, "Context compacted · 182k → 16k". In a group chat the line names the agent whose context it was: "Ledger's context compacted · 120k → 76k". The iPhone app doesn't show the ring or the lines yet.
+Once the session is 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost. A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context, "Context compacted · 182k → 16k". In a group chat the line names the agent whose session it was: "Ledger's fresh session starts here", "Ledger's context compacted · 120k → 76k".
+
+On the iPhone the ring is in the chat's header too, and a tap opens its card as a sheet, with the same Compact now and Start a fresh session. The iPhone doesn't show the lines across the chat yet.
 
 ## Branching
 

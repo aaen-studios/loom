@@ -772,10 +772,21 @@ fn seat_parts(seat: String) -> (String, String) {
     return (seat[..cut].copy(), seat[cut + 1..].copy())
 }
 
+// A `fresh` line's mark, where `seat` went on in a fresh session: in a group
+// chat with its member as `agent`, whom the line names.
+fn fresh_mark(seat: String) -> Json {
+    let (_, member) = seat_parts(seat)
+    var mark = Obj.new().s("kind", String("mark")).s("mark", String("fresh"))
+    if member.len() > 0 { mark = mark.s("agent", member) }
+    return mark.done()
+}
+
 @test
 fn a_seat_is_its_chat_and_in_a_group_chat_its_member() {
     assert(seat_parts(String("c_1/a_2")) == (String("c_1"), String("a_2")))
     assert(seat_parts(String("c_1")) == (String("c_1"), String()))
+    assert("{fresh_mark(String("c_1/a_2"))}" == #"{"kind":"mark","mark":"fresh","agent":"a_2"}"#)
+    assert("{fresh_mark(String("c_1"))}" == #"{"kind":"mark","mark":"fresh"}"#)
 }
 
 // One window of a plan's limits, from Claude Code's rate-limit info: how much of
@@ -11942,7 +11953,7 @@ impl Instance {
     // never compacted, and when the last one was nearly full, a line in the chat
     // says so (PLAN.md, "One endless chat"); one the person asked for has its line
     // already. In a group chat it's one member's seat that does, which the chat
-    // shows while that member answers there, and the chat has no line.
+    // shows while that member answers there, and its line names the member.
     fn went_fresh(i: Instance, user: String, conversation: String, seat: String, renew: Renew) ! Error {
         if try i.store.fresh_asked(user.copy(), seat.copy()) { try i.store.ask_fresh(user.copy(), seat.copy(), false) }
         let (_, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
@@ -11951,8 +11962,7 @@ impl Instance {
             try i.store.put_compacted(user.copy(), seat.copy(), 0)
             try i.show_context(user.copy(), seat.copy())
         }
-        if seat != conversation { return }
-        if let Renew.Full = renew { _ = try i.chat_line(user, conversation, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+        if let Renew.Full = renew { _ = try i.chat_line(user, conversation, fresh_mark(seat)) }
     }
 
     // A line across the chat from loom, not a message of anyone's: a `loom`
@@ -13916,14 +13926,15 @@ impl Instance {
             let (used, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
             if name == "conversation.fresh" {
                 // Its next turn starts a fresh session, given the newest of the chat;
-                // the apps show it from nothing now, under a line in the chat.
+                // the apps show it from nothing now, under a line in the chat, which
+                // in a group chat names the member.
                 try i.store.ask_fresh(user.copy(), seat.copy(), true)
                 if size > 0 {
                     try i.store.put_context(user.copy(), seat.copy(), 0, size)
                     try i.store.put_compacted(user.copy(), seat.copy(), 0)
                     try i.show_context(user.copy(), seat.copy())
                 }
-                if room == Json.Null { _ = try i.chat_line(user, id, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+                _ = try i.chat_line(user, id, fresh_mark(seat))
                 return Answer.Value(empty)
             }
             if used <= 0 or try i.store.fresh_asked(user.copy(), seat.copy()) { return Answer.Refused(String("bad_request"), String("There's nothing in its session to compact.")) }
