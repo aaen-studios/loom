@@ -1,0 +1,464 @@
+module server.catalog
+
+// The integrations catalog (PLAN.md, "The integrations catalog"): MCP servers
+// loom ships a list of, each with what it is, how it's reached, how it signs
+// in and the tools it offers, each marked as one that only reads or one that
+// changes something, which neither the MCP Registry nor a server says before
+// the person has signed in. `catalog.list` gives it to the apps, and
+// `catalog.connect` turns an entry, with what the person filled in, into a
+// server as `mcp.put` takes it (`spec_of`), then adds it, signs in and asks
+// which agents get it.
+//
+// The list is `DATA` below, JSON, and ships with each release: changing it is a
+// pull request. Each entry:
+//
+//     id, name, category (one of CATEGORIES), description (one line), maker,
+//     website?, logo? (a PNG's name, for later: none has one yet), server (the
+//     name it's added as), and how it's reached: `url` (an https address, with
+//     `{field}` for each field), or `package` ({registry: npm or pypi, name,
+//     version, args?}), which runs on the instance, with `env`? ({NAME: text}).
+//     fields? ([{name, label, placeholder?, kind?}]: `address` is an http(s)
+//     address with no / at its end), sign_in (`oauth`, `secret` or `none`),
+//     secrets? (for `secret`: [{name, label, placeholder?, in: header or env,
+//     key, prefix?}], each a secret of the person's by that name, sent as the
+//     header or variable `key`, after `prefix`), note? (one line, only where the
+//     person would go wrong without it), reads and changes (the tools' names),
+//     tools_from (where they were read) and tools_checked (false where the
+//     names couldn't be checked against the server or its own docs).
+import std.json.{Json, parse}
+import shared.badge
+import shared.obj.{Obj, at, bool_at, str_at}
+
+pub const CATEGORIES: [str; 7] = ["Work", "Code", "Mail & calendar", "Files", "Money", "Home", "Fun"]
+
+const DATA: str = #"
+    [
+      {
+        "id": "acta",
+        "name": "Acta",
+        "category": "Work",
+        "description": "Boards, tasks and comments in Acta.",
+        "maker": "Aaen Studios",
+        "website": "https://acta.aaenz.no",
+        "server": "acta",
+        "url": "https://acta.aaenz.no/api/mcp",
+        "sign_in": "oauth",
+        "reads": ["list_boards", "get_board", "list_tasks", "search_tasks", "get_task", "list_activity", "list_suggestions", "read_file"],
+        "changes": ["create_tasks", "update_task", "update_tasks", "sort_column", "add_comment", "edit_comment", "upload_file", "delete_task", "restore_task", "create_board", "update_board", "update_roadmap", "review_suggestion", "link_github", "unlink_github", "open_github_issue"],
+        "tools_from": "https://acta.aaenz.no/llms-full.txt",
+        "tools_checked": true
+      },
+      {
+        "id": "t3",
+        "name": "T3 Code",
+        "category": "Code",
+        "description": "Projects and coding threads in T3 Code.",
+        "maker": "T3 Tools",
+        "website": "https://github.com/pingdotgg/t3code",
+        "server": "t3",
+        "url": "{address}/mcp",
+        "fields": [{"name": "address", "label": "Address", "placeholder": "https://pc.tail1234.ts.net", "kind": "address"}],
+        "sign_in": "oauth",
+        "note": "Use an address your browser reaches too, such as Tailscale HTTPS: you sign in to T3 there.",
+        "reads": ["t3_project_list", "t3_project_read", "t3_thread_list", "t3_thread_read", "t3_thread_search", "t3_thread_wait"],
+        "changes": ["t3_thread_launch", "t3_thread_send", "t3_thread_interrupt", "t3_pending_request"],
+        "tools_from": "T3 Code's server, v0.1.12",
+        "tools_checked": false
+      },
+      {
+        "id": "github",
+        "name": "GitHub",
+        "category": "Code",
+        "description": "Repositories, issues and pull requests on GitHub.",
+        "maker": "GitHub",
+        "website": "https://github.com/github/github-mcp-server",
+        "server": "github",
+        "url": "https://api.githubcopilot.com/mcp/",
+        "sign_in": "secret",
+        "secrets": [{"name": "GITHUB_TOKEN", "label": "Personal access token", "placeholder": "github_pat_…", "in": "header", "key": "Authorization", "prefix": "Bearer "}],
+        "reads": ["get_me", "search_repositories", "get_file_contents", "list_branches", "list_commits", "get_commit", "search_code", "list_releases", "get_latest_release", "list_issues", "search_issues", "issue_read", "list_pull_requests", "search_pull_requests", "pull_request_read", "search_users"],
+        "changes": ["create_repository", "fork_repository", "create_branch", "create_or_update_file", "push_files", "delete_file", "issue_write", "add_issue_comment", "create_pull_request", "update_pull_request", "merge_pull_request", "pull_request_review_write"],
+        "tools_from": "https://github.com/github/github-mcp-server",
+        "tools_checked": true
+      },
+      {
+        "id": "notion",
+        "name": "Notion",
+        "category": "Work",
+        "description": "Pages, databases and comments in Notion.",
+        "maker": "Notion",
+        "website": "https://www.notion.com",
+        "server": "notion",
+        "url": "https://mcp.notion.com/mcp",
+        "sign_in": "oauth",
+        "reads": ["notion-search", "notion-fetch", "notion-get-self", "notion-get-users", "notion-get-teams", "notion-query-meeting-notes", "notion-query-data-sources", "notion-get-comments"],
+        "changes": ["notion-create-pages", "notion-update-page", "notion-move-pages", "notion-duplicate-page", "notion-delete-pages", "notion-create-database", "notion-update-data-source", "notion-create-view", "notion-update-view", "notion-create-comment"],
+        "tools_from": "https://developers.notion.com/guides/mcp/mcp-supported-tools",
+        "tools_checked": true
+      },
+      {
+        "id": "linear",
+        "name": "Linear",
+        "category": "Work",
+        "description": "Issues, projects and cycles in Linear.",
+        "maker": "Linear",
+        "website": "https://linear.app",
+        "server": "linear",
+        "url": "https://mcp.linear.app/mcp",
+        "sign_in": "oauth",
+        "reads": ["list_issues", "get_issue", "list_comments", "list_projects", "get_project", "list_teams", "get_team", "list_users", "get_user", "list_cycles", "list_documents", "get_document", "list_issue_statuses", "list_issue_labels", "search_documentation"],
+        "changes": ["save_issue", "create_comment", "save_project", "save_document"],
+        "tools_from": "https://linear.app/changelog",
+        "tools_checked": false
+      },
+      {
+        "id": "vercel",
+        "name": "Vercel",
+        "category": "Code",
+        "description": "Projects, deployments and their logs on Vercel.",
+        "maker": "Vercel",
+        "website": "https://vercel.com",
+        "server": "vercel",
+        "url": "https://mcp.vercel.com",
+        "sign_in": "oauth",
+        "reads": ["list_teams", "list_projects", "get_project", "list_deployments", "get_deployment", "get_deployment_build_logs", "get_runtime_logs", "get_runtime_errors", "web_fetch_vercel_url", "search_vercel_documentation"],
+        "changes": ["create_deployment", "deploy_to_vercel", "cancel_deployment", "create_project", "update_project", "get_access_to_vercel_url"],
+        "tools_from": "https://vercel.com/docs/agent-resources/vercel-mcp/tools",
+        "tools_checked": true
+      },
+      {
+        "id": "cloudflare",
+        "name": "Cloudflare",
+        "category": "Code",
+        "description": "Your Cloudflare account through its API, and Cloudflare's docs.",
+        "maker": "Cloudflare",
+        "website": "https://github.com/cloudflare/mcp",
+        "server": "cloudflare",
+        "url": "https://mcp.cloudflare.com/mcp",
+        "sign_in": "oauth",
+        "reads": ["docs", "search", "whoami"],
+        "changes": ["execute"],
+        "tools_from": "https://github.com/cloudflare/mcp",
+        "tools_checked": true
+      },
+      {
+        "id": "playwright",
+        "name": "Playwright",
+        "category": "Code",
+        "description": "Microsoft's Playwright browser, run on the instance.",
+        "maker": "Microsoft",
+        "website": "https://github.com/microsoft/playwright-mcp",
+        "server": "playwright",
+        "package": {"registry": "npm", "name": "@playwright/mcp", "version": "latest"},
+        "sign_in": "none",
+        "reads": ["browser_snapshot", "browser_take_screenshot", "browser_console_messages", "browser_network_requests", "browser_network_request", "browser_find"],
+        "changes": ["browser_navigate", "browser_navigate_back", "browser_click", "browser_type", "browser_press_key", "browser_hover", "browser_drag", "browser_select_option", "browser_fill_form", "browser_file_upload", "browser_handle_dialog", "browser_evaluate", "browser_resize", "browser_tabs", "browser_wait_for", "browser_close"],
+        "tools_from": "https://github.com/microsoft/playwright-mcp",
+        "tools_checked": true
+      },
+      {
+        "id": "home-assistant",
+        "name": "Home Assistant",
+        "category": "Home",
+        "description": "Lights, devices and what's on at home, through Home Assistant.",
+        "maker": "Open Home Foundation",
+        "website": "https://www.home-assistant.io/integrations/mcp_server/",
+        "server": "home-assistant",
+        "url": "{address}/api/mcp",
+        "fields": [{"name": "address", "label": "Address", "placeholder": "https://home.example.com", "kind": "address"}],
+        "sign_in": "secret",
+        "secrets": [{"name": "HOME_ASSISTANT_TOKEN", "label": "Long-lived access token", "in": "header", "key": "Authorization", "prefix": "Bearer "}],
+        "note": "Make the token on your profile's Security tab in Home Assistant.",
+        "reads": ["homeassistant__GetLiveContext"],
+        "changes": ["intent__HassTurnOn", "intent__HassTurnOff", "light__HassLightSet"],
+        "tools_from": "https://www.home-assistant.io/integrations/mcp_server/",
+        "tools_checked": false
+      }
+    ]
+    "#
+
+// Every entry, in the order the catalog shows them.
+pub fn entries() -> List<Json> {
+    return match parse(String(DATA)) {
+        ok(Json.Array(xs)) => xs,
+        _ => List<Json>(),
+    }
+}
+
+// The entry `id`, or none.
+pub fn find(id: String) -> Json? {
+    for e in entries() {
+        if str_at(e.copy(), "id") == some(id.copy()) { return some(e.copy()) }
+    }
+    return none
+}
+
+pub fn list(j: Json) -> List<Json> {
+    if let Json.Array(xs) = j { return xs.copy() }
+    return List<Json>()
+}
+
+fn names(j: Json) -> List<String> {
+    var out = List<String>()
+    for x in list(j) {
+        if let s = x.as_str() { out.push(s) }
+    }
+    return out
+}
+
+// Where an entry's server runs: `remote`, reached over HTTP, or `instance`, a
+// program the instance starts.
+pub fn runs(entry: Json) -> String {
+    return if at(entry, "package") == Json.Null { String("remote") } else { String("instance") }
+}
+
+// The names of the secrets an entry asks for.
+pub fn secret_names(entry: Json) -> List<String> {
+    var out = List<String>()
+    for s in list(at(entry, "secrets")) {
+        out.push(str_at(s, "name") ?? String())
+    }
+    return out
+}
+
+// What fills each `{field}`: the person's value, checked, or why it can't be.
+fn field_values(entry: Json, given: Json) -> (List<(String, String)>, String) {
+    var out = List<(String, String)>()
+    for f in list(at(entry.copy(), "fields")) {
+        let name = str_at(f.copy(), "name") ?? String()
+        let label = str_at(f.copy(), "label") ?? name.copy()
+        var value = ((given.get(name.copy()) ?? Json.Null).as_str() ?? String()).trim().copy()
+        if value.len() == 0 { return (List<(String, String)>(), "Fill in {label} first.") }
+        if value.contains(" ") or value.contains("\n") or value.contains("\{") or value.contains("\}") { return (List<(String, String)>(), "{label} can't have spaces or braces in it.") }
+        if str_at(f, "kind") == some(String("address")) {
+            if not value.starts_with("https://") and not value.starts_with("http://") { return (List<(String, String)>(), "{label} is an address starting with https:// or http://.") }
+            value = value.trim_suffix("/").copy()
+            let after = value.find("://") ?? 0
+            if value[after + 3..].contains("/") { return (List<(String, String)>(), "{label} is only the server's address, such as https://pc.tail1234.ts.net, with no path.") }
+        }
+        out.push((name, value))
+    }
+    return (out, String())
+}
+
+fn filled(text: String, values: List<(String, String)>) -> String {
+    var out = text.copy()
+    for (k, v) in values {
+        out = out.replace("\{{k}\}", v.copy())
+    }
+    return out
+}
+
+// A secret's place in a server's settings: {"secret": NAME}, with its prefix.
+fn secret_value(s: Json) -> Json {
+    var o = Obj.new().s("secret", str_at(s.copy(), "name") ?? String())
+    let prefix = str_at(s, "prefix") ?? String()
+    if prefix.len() > 0 { o = o.s("prefix", prefix) }
+    return o.done()
+}
+
+// The server an entry becomes, as mcp.put takes it, named `name`, or the
+// entry's own name when that's empty, with `fields` ({name: value}) filling
+// each `{field}`; or why it can't be.
+pub fn spec_of(entry: Json, fields: Json, name: String) -> (Json, String) {
+    let server = if name.trim().len() > 0 { name.trim().copy() } else { str_at(entry.copy(), "server") ?? String() }
+    let (values, why) = field_values(entry.copy(), fields)
+    if why.len() > 0 { return (Json.Null, why) }
+    var settings = Obj.new()
+    let place = if runs(entry.copy()) == "remote" { "header" } else { "env" }
+    if let Json.Object(env) = at(entry.copy(), "env") {
+        for (k, v) in env {
+            settings.m.insert(k.copy(), Json.Str(filled(v.as_str() ?? String(), values.copy())))
+        }
+    }
+    for s in list(at(entry.copy(), "secrets")) {
+        if str_at(s.copy(), "in") != some(String(place)) { return (Json.Null, "The secret {str_at(s, "name") ?? String()} goes in a {place}.") }
+        settings.m.insert(str_at(s.copy(), "key") ?? String(), secret_value(s))
+    }
+    if let address = str_at(entry.copy(), "url") {
+        let url = filled(address, values)
+        if url.contains("\{") or url.contains("\}") { return (Json.Null, "{url} has a field no one fills in.") }
+        return (Obj.new().s("name", server).s("url", url).j("headers", settings.done()).done(), String())
+    }
+    let package = at(entry, "package")
+    let id = str_at(package.copy(), "name") ?? String()
+    let version = str_at(package.copy(), "version") ?? String("latest")
+    let registry = str_at(package.copy(), "registry") ?? String()
+    var args = List<Json>()
+    var command = String()
+    if registry == "npm" {
+        command = String("npx")
+        args.push(Json.Str(String("-y")))
+        args.push(Json.Str("{id}@{version}"))
+    } else if registry == "pypi" {
+        command = String("uvx")
+        args.push(Json.Str(if version == "latest" { "{id}@latest" } else { "{id}=={version}" }))
+    } else {
+        return (Json.Null, "A {registry} package isn't one loom runs: only npm and pypi.")
+    }
+    for a in names(at(package, "args")) {
+        args.push(Json.Str(filled(a, values.copy())))
+    }
+    return (Obj.new().s("name", server).s("command", command).j("args", Json.Array(args)).j("env", settings.done()).done(), String())
+}
+
+// Whether the person's server `had` is what `spec` would add: the same address,
+// or the same program with the same arguments.
+pub fn same_server(had: Json, spec: Json) -> bool {
+    if str_at(had.copy(), "url") != none or str_at(spec.copy(), "url") != none { return str_at(had, "url") == str_at(spec, "url") }
+    return str_at(had.copy(), "command") == str_at(spec.copy(), "command") and at(had, "args") == at(spec, "args")
+}
+
+// Whether the person's server `server` is reached as `entry`'s would be, for one
+// added by hand that's the same: by its fixed address, or its program.
+pub fn matches(entry: Json, server: Json) -> bool {
+    if not list(at(entry.copy(), "fields")).is_empty() { return false }
+    let (spec, why) = spec_of(entry, Obj.new().done(), String())
+    return why.len() == 0 and same_server(server, spec)
+}
+
+// An entry as catalog.list gives it, with `have`, the names of the person's
+// secrets, `servers`, the names of their servers made from it, and `connecting`,
+// a connect under way for it, or null.
+pub fn listed(entry: Json, have: List<String>, servers: List<String>, connecting: Json) -> Json {
+    let e = entry.copy()
+    var o = Obj.new().s("id", str_at(e.copy(), "id") ?? String()).s("name", str_at(e.copy(), "name") ?? String()).s("category", str_at(e.copy(), "category") ?? String()).s("description", str_at(e.copy(), "description") ?? String()).s("maker", str_at(e.copy(), "maker") ?? String()).maybe("website", str_at(e.copy(), "website")).maybe("logo", str_at(e.copy(), "logo"))
+    o = o.j("badge", badge.badge(str_at(e.copy(), "server") ?? String(), String(), String())).s("server", str_at(e.copy(), "server") ?? String()).s("runs", runs(e.copy()))
+    if let address = str_at(e.copy(), "url") {
+        o = o.s("url", address)
+    } else {
+        let (spec, _) = spec_of(e.copy(), Json.Null, String())
+        o = o.s("command", str_at(spec.copy(), "command") ?? String()).j("args", at(spec, "args"))
+    }
+    var fields = List<Json>()
+    for f in list(at(e.copy(), "fields")) {
+        fields.push(Obj.new().s("name", str_at(f.copy(), "name") ?? String()).s("label", str_at(f.copy(), "label") ?? String()).maybe("placeholder", str_at(f, "placeholder")).done())
+    }
+    var secrets = List<Json>()
+    for s in list(at(e.copy(), "secrets")) {
+        let name = str_at(s.copy(), "name") ?? String()
+        secrets.push(Obj.new().s("name", name.copy()).s("label", str_at(s.copy(), "label") ?? String()).maybe("placeholder", str_at(s, "placeholder")).b("have", have.contains(name)).done())
+    }
+    var tools = List<Json>()
+    for (key, kind) in [("reads", "read"), ("changes", "change")] {
+        for n in names(at(e.copy(), key)) {
+            tools.push(Obj.new().s("name", n).s("kind", String(kind)).done())
+        }
+    }
+    var on = List<Json>()
+    for s in servers {
+        on.push(Json.Str(s.copy()))
+    }
+    o = o.j("fields", Json.Array(fields)).s("sign_in", str_at(e.copy(), "sign_in") ?? String()).j("secrets", Json.Array(secrets)).maybe("note", str_at(e.copy(), "note")).j("tools", Json.Array(tools)).s("tools_from", str_at(e.copy(), "tools_from") ?? String()).b("tools_checked", bool_at(e, "tools_checked") ?? false)
+    o = o.j("servers", Json.Array(on)).b("connected", not servers.is_empty())
+    if connecting != Json.Null { o = o.j("connecting", connecting) }
+    return o.done()
+}
+
+// The categories that have entries, in CATEGORIES' order.
+pub fn categories() -> List<String> {
+    var out = List<String>()
+    let all = entries()
+    for c in CATEGORIES {
+        for e in all.copy() {
+            if str_at(e, "category") == some(String(c)) {
+                out.push(String(c))
+                break
+            }
+        }
+    }
+    return out
+}
+
+fn good_name(name: String) -> bool {
+    if name.len() == 0 or name.len() > 64 { return false }
+    for r in name.runes() {
+        if not ((r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') or r == '-') { return false }
+    }
+    return true
+}
+
+@test
+fn every_entry_is_whole() {
+    let all = entries()
+    assert(all.len() >= 9)
+    assert(str_at(all[0].copy(), "id") == some(String("acta")))
+    var ids = List<String>()
+    for e in all {
+        let id = str_at(e.copy(), "id") ?? String()
+        assert(id.len() > 0 and not ids.contains(id.copy()))
+        ids.push(id.copy())
+        assert(good_name(str_at(e.copy(), "server") ?? String()))
+        let category = str_at(e.copy(), "category") ?? String()
+        var known = false
+        for c in CATEGORIES {
+            if category == c { known = true }
+        }
+        assert(known)
+        for key in ["name", "description", "maker", "tools_from"] {
+            assert((str_at(e.copy(), key) ?? String()).len() > 0)
+        }
+        let sign_in = str_at(e.copy(), "sign_in") ?? String()
+        assert(sign_in == "oauth" or sign_in == "secret" or sign_in == "none")
+        assert((sign_in == "secret") == not list(at(e.copy(), "secrets")).is_empty())
+        assert(names(at(e.copy(), "reads")).len() + names(at(e.copy(), "changes")).len() > 0)
+        assert(bool_at(e.copy(), "tools_checked") != none)
+        // Each converts, with a value for every field.
+        var given = Obj.new()
+        for f in list(at(e.copy(), "fields")) {
+            given.m.insert(str_at(f, "name") ?? String(), Json.Str(String("https://example.com")))
+        }
+        let (spec, why) = spec_of(e.copy(), given.done(), String())
+        assert(why.len() == 0)
+        let address = str_at(spec.copy(), "url") ?? String()
+        assert(address.starts_with("https://") or str_at(spec, "command") != none)
+    }
+    assert(categories() == [String("Work"), String("Code"), String("Home")])
+}
+
+@test
+fn turns_an_entry_into_a_server() {
+    let acta = find(String("acta"))!
+    let (a, _) = spec_of(acta.copy(), Json.Null, String())
+    assert("{a}" == #"{"name":"acta","url":"https://acta.aaenz.no/api/mcp","headers":{}}"#)
+    assert(runs(acta.copy()) == "remote" and matches(acta, a))
+    // A field fills the address, and the person can name it.
+    let t3 = find(String("t3"))!
+    let (t, _) = spec_of(t3.copy(), Obj.new().s("address", String(" https://pc.tail1234.ts.net/ ")).done(), String("t3-pc"))
+    assert("{t}" == #"{"name":"t3-pc","url":"https://pc.tail1234.ts.net/mcp","headers":{}}"#)
+    assert(not matches(t3.copy(), t))
+    for (bad, why) in [(#"{}"#, "Fill in Address first."), (#"{"address":"pc.local"}"#, "Address is an address starting with https:// or http://."), (#"{"address":"https://pc/x"}"#, "Address is only the server's address, such as https://pc.tail1234.ts.net, with no path."), (#"{"address":"https://{x}"}"#, "Address can't have spaces or braces in it.")] {
+        let (none_made, said) = spec_of(t3.copy(), parse(String(bad))!, String())
+        assert(none_made == Json.Null and said == why)
+    }
+    // A secret goes in its header, after its prefix.
+    let (g, _) = spec_of(find(String("github"))!, Json.Null, String())
+    assert("{g}" == #"{"name":"github","url":"https://api.githubcopilot.com/mcp/","headers":{"Authorization":{"secret":"GITHUB_TOKEN","prefix":"Bearer "}}}"#)
+    let (h, _) = spec_of(find(String("home-assistant"))!, Obj.new().s("address", String("http://homeassistant.local:8123")).done(), String())
+    assert("{h}" == #"{"name":"home-assistant","url":"http://homeassistant.local:8123/api/mcp","headers":{"Authorization":{"secret":"HOME_ASSISTANT_TOKEN","prefix":"Bearer "}}}"#)
+    // A package runs on the instance.
+    let playwright = find(String("playwright"))!
+    let (p, _) = spec_of(playwright.copy(), Json.Null, String())
+    assert("{p}" == #"{"name":"playwright","command":"npx","args":["-y","@playwright/mcp@latest"],"env":{}}"#)
+    assert(runs(playwright.copy()) == "instance" and matches(playwright, p))
+    let py = parse(String(#"{"id":"x","server":"x","package":{"registry":"pypi","name":"mcp-x","version":"1.2","args":["--key","{key}"]},"fields":[{"name":"key","label":"Key"}],"env":{"X_HOME":"{key}"},"secrets":[{"name":"X_TOKEN","in":"env","key":"X_TOKEN"}]}"#))!
+    let (q, _) = spec_of(py, Obj.new().s("key", String("k1")).done(), String())
+    assert("{q}" == #"{"name":"x","command":"uvx","args":["mcp-x==1.2","--key","k1"],"env":{"X_HOME":"k1","X_TOKEN":{"secret":"X_TOKEN"}}}"#)
+    let oci = parse(String(#"{"id":"o","server":"o","package":{"registry":"oci","name":"x"}}"#))!
+    let (_, no) = spec_of(oci, Json.Null, String())
+    assert(no == "A oci package isn't one loom runs: only npm and pypi.")
+}
+
+@test
+fn lists_an_entry() {
+    let github = find(String("github"))!
+    let l = listed(github, [String("GITHUB_TOKEN")], [String("github")], Json.Null)
+    assert(str_at(l.copy(), "runs") == some(String("remote")) and str_at(l.copy(), "sign_in") == some(String("secret")) and bool_at(l.copy(), "connected") == some(true))
+    assert("{at(l.copy(), "secrets")}" == #"[{"name":"GITHUB_TOKEN","label":"Personal access token","placeholder":"github_pat_…","have":true}]"#)
+    let tools = list(at(l.copy(), "tools"))
+    assert("{tools[0]}" == #"{"name":"get_me","kind":"read"}"#)
+    assert("{tools[tools.len() - 1]}" == #"{"name":"pull_request_review_write","kind":"change"}"#)
+    assert(at(l.copy(), "connecting") == Json.Null and "{at(l, "badge")}" == "{badge.badge(String("github"), String(), String())}")
+    let p = listed(find(String("playwright"))!, List<String>(), List<String>(), Json.Null)
+    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p, "connected") == some(false))
+}
