@@ -20,7 +20,7 @@ struct SampleKept {
         ["id": "w_4", "integration": "acta", "target": ["board": "aaen-studios/clx"], "conversation": "c_2",
          "error": "Acta says this key can't see aaen-studios/clx any more.\nIt was looked at 3 times."],
         ["id": "w_5", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "c_6"],
-        ["id": "w_6", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "", "wake": ["routine": "r_1"], "kind": "moved", "to": "done"],
+        ["id": "w_6", "integration": "acta", "target": ["board": "aaen-studios/loom"], "conversation": "", "wake": ["routine": "rt_3"], "kind": "moved", "to": "done"],
     ]
     var nextCard = 372
     var nextWatch = 7

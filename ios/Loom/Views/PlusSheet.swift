@@ -107,7 +107,7 @@ struct PlusSheet: View {
             switch which {
             case .recent: none("No files sent yet.")
             case .skills: none("No skills yet. Make one in loom on your computer.")
-            case .routines: none("No routines yet. Make one in loom on your computer.")
+            case .routines: none("No routines yet. Make one in Settings.")
             }
         }
         ForEach(Array(rows.enumerated()), id: \.offset) { _, row in

@@ -33,6 +33,10 @@ struct Agent: Identifiable, Equatable, Sendable {
     var instructions = ""
     /// What it's for, in one line: what a group chat's router reads to pick it.
     var forLine = ""
+    /// What its program offers to pick, such as its model and effort, and what the
+    /// person picked for it, by option id; the rest follow the defaults.
+    var options: [ConfigOption] = []
+    var config: [String: String] = [:]
 
     /// The points its thread follows in the list, or nil for the plain thread.
     var outline: [CGPoint]? {
@@ -1655,6 +1659,13 @@ final class Model {
     /// files sent or received lately in their chats, newest first.
     var skills: [PlusSkill] = []
     var routines: [PlusRoutine] = []
+    /// The same routines whole, for Settings → Routines (Routines.swift), and whether
+    /// `routine.list` is to be asked again.
+    var routineList: [Routine] = []
+    var routinesStale = false
+    /// The person's default picks for each program's options (`defaults.get`'s `config`),
+    /// for a routine's model and effort.
+    var defaultPicks: JSON = .null
     var recentFiles: [RecentFile] = []
     /// The person's own emoji, the suggestion row and the picker (PLAN.md, "Emoji").
     let emoji = Emojis()
@@ -2141,6 +2152,11 @@ final class Model {
         case "watch":
             // The person's watches, for Follow on a card's sheet and a board.
             takeWatchEvent(kind, f)
+        case "routine":
+            // A routine made, changed or deleted, here or elsewhere.
+            routinesStale = true
+        case "defaults":
+            if !f["defaults"].isNull { defaultPicks = f["defaults"]["config"] }
         default:
             break
         }
@@ -2178,7 +2194,7 @@ final class Model {
     }
 
     private func result(_ f: JSON) {
-        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) { return }
+        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) || routineResult(f) { return }
         if f["id"].text == "app.acp" {
             // Quietly: without the titles, programs show by their own names.
             var titles: [String: String] = [:]
@@ -2234,9 +2250,7 @@ final class Model {
         case let id where id.hasPrefix("app.plus_skills"):
             skills = f["value"]["skills"].array.map { PlusSkill(name: $0["name"].text, description: $0["description"].text) }
         case let id where id.hasPrefix("app.plus_routines"):
-            routines = f["value"]["routines"].array.map {
-                PlusRoutine(id: $0["id"].text, name: $0["name"].text, agent: $0["agent"].text, status: $0["last"]["status"].text, at: $0["last"]["at"].int ?? 0)
-            }
+            if error == nil { takeRoutines(f["value"]["routines"].array) }
         case let id where id.hasPrefix("app.recent_files"):
             recentFiles = f["value"]["files"].array.map { RecentFile(file: FileRef($0), at: $0["at"].int ?? 0) }
         case let id where id.hasPrefix("app.agent_file.pictures"):
@@ -2316,7 +2330,8 @@ final class Model {
             takeSidebar(items)
         case .agents:
             agents = listed(items.map {
-                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text)
+                Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text,
+                      options: $0["options"].array.map(ConfigOption.init), config: stringsOf($0["config"]))
             })
             if let s = selected, agent(s) == nil { select(nil) }
         case .conversations:
@@ -2509,6 +2524,10 @@ final class Model {
         if secretsStale {
             secretsStale = false
             out.append(["t": "cmd", "id": JSON(id("app.secrets")), "name": "secret.list"])
+        }
+        if routinesStale && synced {
+            routinesStale = false
+            out.append(["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]])
         }
         // The shown chat's pins, for the count on its header and the Pinned sheet: as many
         // as are loaded, and at least a page. Never a thread's.

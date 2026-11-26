@@ -22,6 +22,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var approvals: [JSON] = []
     /// The agent list's folders.
     private var groups: [JSON] = Sample.groups
+    /// The person's routines, as Settings → Routines changes them.
+    private var routines: [JSON] = Sample.routines
     /// The person's own emoji, the ones deleted, and Recently used.
     private var own: [JSON] = Sample.own
     private var gone: [JSON] = []
@@ -78,6 +80,37 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         f["at"] = JSON(Sample.now())
         tell(.object(f))
         apply(kind, .object(f))
+    }
+
+    /// A routine made or changed from its page: what changed goes on it, as the instance
+    /// keeps it, and `routine.updated` says so.
+    private func putRoutine(_ f: JSON) {
+        let a = f["args"]
+        guard case .object(let args) = a else { return }
+        var id = a["id"].text
+        var r: [String: JSON] = [:]
+        if let old = routines.first(where: { $0["id"].text == id }), case .object(let o) = old {
+            r = o
+        } else {
+            next += 1
+            id = "rt_n\(next)"
+            r = ["id": JSON(id), "on": true, "last": .null, "cost": ["runs": 0]]
+        }
+        for (k, v) in args where !["id", "webhook"].contains(k) {
+            r[k] = k == "gate" && v.isNull ? .null : v
+        }
+        if a["webhook"].bool == true, r["hook"]?.text.isEmpty ?? true { r["hook"] = "h_\(id)" }
+        if a["webhook"].bool == false { r["hook"] = .null }
+        if !a["schedule"].isNull {
+            r["when"] = a["schedule"]["every"].int.map { "every \($0) minutes" } ?? "at \(a["schedule"]["times"].array.map(\.text).joined(separator: ", "))"
+            r["next"] = JSON(Sample.now() + 2 * 3600 * 1000)
+        } else {
+            r["next"] = 0
+        }
+        routines.removeAll { $0["id"].text == id }
+        routines.append(.object(r))
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["routine": .object(r)]])
+        event("routine.updated", ["routine": .object(r)])
     }
 
     private func apply(_ kind: String, _ e: JSON) {
@@ -208,7 +241,16 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             case "skill.list":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["skills": .array(Sample.skills)]])
             case "routine.list":
-                tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(Sample.routines)]])
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(routines)]])
+            case "routine.put":
+                putRoutine(f)
+            case "routine.delete":
+                let id = f["args"]["id"]
+                routines.removeAll { $0["id"] == id }
+                tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
+                event("routine.deleted", ["routine": id])
+            case "defaults.get":
+                tell(["t": "result", "id": f["id"], "ok": true, "value": ["defaults": ["config": ["claude": ["thought_level": "medium"]], "permission": "ask"]]])
             case "files.recent":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["files": .array(Sample.recent)]])
             case "link.preview":
@@ -670,7 +712,15 @@ enum Sample {
 
     static let agents: [JSON] = [
         ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask", "pinned": 1795187000000,
-         "instructions": "Builds loom, runs its tests and writes the release notes."],
+         "instructions": "Builds loom, runs its tests and writes the release notes.",
+         // What its program offers to pick, as the instance gives it.
+         "options": [
+            ["id": "model", "name": "Model", "category": "model", "value": "default",
+             "options": [["value": "default", "name": "Default"], ["value": "opus", "name": "Opus"], ["value": "sonnet", "name": "Sonnet"], ["value": "haiku", "name": "Haiku"]]],
+            ["id": "thought_level", "name": "Effort", "category": "thought_level", "value": "high",
+             "options": [["value": "low", "name": "Low"], ["value": "medium", "name": "Medium"], ["value": "high", "name": "High"]]],
+         ],
+         "config": ["model": "sonnet"]],
         ["id": "a_2", "name": "Scribe", "color": "mint", "shape": "heart", "acp_agent": "claude", "permission": "auto",
          "instructions": "Keeps the notes: plans, meetings and the week's log."],
         ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask", "pinned": 1795187000001,
@@ -700,10 +750,23 @@ enum Sample {
     ]
 
     static let routines: [JSON] = [
-        ["id": "rt_1", "name": "Morning news", "agent": "a_3", "prompt": "", "schedule": ["daily": "08:00"], "on": true,
-         "last": ["status": "done", "at": 1795165200000]],
-        ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "", "schedule": ["daily": "18:00"], "on": true,
-         "last": ["status": "failed", "at": 1795100000000]],
+        ["id": "rt_1", "name": "Morning news", "agent": "a_3", "prompt": "Read the news and tell me what matters today.", "schedule": ["times": ["08:00"]],
+         "when": "every day at 08:00", "on": true, "notify": true, "catch_up": true, "next": JSON(now() + 14 * 3600 * 1000),
+         "last": ["status": "done", "at": 1795165200000], "cost": ["run": 180_000, "day": 180_000, "runs": 7, "quiet": 1]],
+        ["id": "rt_2", "name": "Water check", "agent": "a_4", "prompt": "Check the soil sensors and say which pots need water.", "schedule": ["times": ["18:00"]],
+         "when": "every day at 18:00", "on": true, "next": JSON(now() + 4 * 3600 * 1000),
+         "last": ["status": "failed", "at": 1795100000000, "error": "The sensor hub didn't answer."]],
+        ["id": "rt_3", "name": "Shipped", "agent": "a_1", "prompt": "Write a short changelog line for the card that just shipped, and post it.", "schedule": .null,
+         "when": "when a card on aaen-studios/loom moves to Done", "on": true, "notify": true, "catch_up": true, "next": 0,
+         "event": ["integration": "acta", "server": "acta", "target": ["board": "aaen-studios/loom"], "kind": "moved", "to": "done"],
+         "gate": ["command": "./new-cards.sh", "timeout": 60], "model": "opus",
+         "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 1_400_000, "day": 5_400_000, "runs": 27, "quiet": 19]],
+        ["id": "rt_4", "name": "Inbox sweep", "agent": "a_3", "prompt": "Sort the inbox and flag what needs me.", "schedule": ["every": 30],
+         "when": "every 30 minutes", "on": true, "next": JSON(now() + 20 * 60 * 1000),
+         "last": ["status": "quiet", "at": 1795165200000], "cost": ["run": 110_000, "day": 5_400_000, "runs": 336, "quiet": 320, "wasted": true]],
+        ["id": "rt_5", "name": "Release notes", "agent": "a_1", "prompt": "Write the release notes from the thread's changes.", "schedule": .null,
+         "when": "when the thread th_9 finishes", "on": false, "next": 0,
+         "event": ["integration": "t3", "server": "t3", "target": ["thread": "th_9"], "kind": "finished"]],
     ]
 
     static let recent: [JSON] = [
