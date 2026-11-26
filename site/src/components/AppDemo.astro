@@ -437,7 +437,7 @@ const BOARD_LAYERS = [
 												><span class="cp-chip cp-status">In progress</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
 											><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
 												>Subtasks 2 of 4<span class="cp-bar"><span style="width: 50%"></span></span></span
-											><span class="cp-buttons"><span class="cp-button">Open</span><span class="cp-button">Open in Acta</span></span></span
+											><span class="cp-buttons"><span class="cp-button" data-acta-open role="button">Open</span><span class="cp-button">Open in Acta</span></span></span
 										></span
 									> is due at 15:00, and <span class="mention" style="--from: var(--thread-apricot)"
 										><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
@@ -637,6 +637,58 @@ const BOARD_LAYERS = [
 	</div>
 	<!-- The notice at the window's foot, over everything, after a copy (app.rs, toast). -->
 	<div class="toast" data-toast role="status" hidden><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.check} /><span data-toast-words>Copied.</span></div>
+	<!-- A card's side preview beside the chat, from its pill or Open in its preview (PLAN.md,
+	     "Acta beside the chat"; acta_ui.rs, card_side): the status chip's menu moves it, and a
+	     tick ticks a subtask. -->
+	<aside class="acta-side" data-acta-side aria-label="SHOP-31" hidden>
+		<div class="as-head">
+			<svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
+				><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
+			>
+			<span class="as-place">shop · SHOP-31</span>
+			<button type="button" class="icon-btn as-close" data-acta-close aria-label="Close" title="Close"
+				><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></button
+			>
+		</div>
+		<div class="as-body">
+			<div class="as-title">Write the release notes for 2.4</div>
+			<div class="as-chips">
+				<span class="as-status-at">
+					<button type="button" class="as-chip as-status" data-acta-status aria-expanded="false" style="--status: var(--thread-sky)"
+						><span class="as-words">In progress</span><svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button
+					>
+					<span class="as-menu" data-acta-menu role="menu" hidden>
+						<button type="button" role="menuitem" data-status="todo" data-words="Todo" data-color="var(--ink-3)"><i style="background: var(--ink-3)"></i>Todo</button>
+						<button type="button" role="menuitem" class="on" data-status="in_progress" data-words="In progress" data-color="var(--thread-sky)"><i style="background: var(--thread-sky)"></i>In progress</button>
+						<button type="button" role="menuitem" data-status="review" data-words="Review" data-color="var(--thread-gold)"><i style="background: var(--thread-gold)"></i>Review</button>
+						<button type="button" role="menuitem" data-status="done" data-words="Done" data-color="var(--ok)"><i style="background: var(--ok)"></i>Done</button>
+						<button type="button" role="menuitem" data-status="canceled" data-words="Canceled" data-color="var(--ink-3)"><i style="background: var(--ink-3)"></i>Canceled</button>
+					</span>
+				</span>
+				<span class="as-chip">Sam</span><span class="as-chip">S</span><span class="as-chip">release</span><span class="as-chip">High</span>
+			</div>
+			<div class="as-text">
+				<p>What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</p>
+				<ul>
+					<li>Features and fixes from the merged pull requests</li>
+					<li>The store listing's <b>What's new</b></li>
+				</ul>
+			</div>
+			<div class="as-subtasks">
+				<div class="as-label" data-acta-count>Subtasks 2 of 4</div>
+				<button type="button" class="as-tick done" role="checkbox" aria-checked="true" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>List the merged pull requests</button>
+				<button type="button" class="as-tick done" role="checkbox" aria-checked="true" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Write the changelog</button>
+				<button type="button" class="as-tick" role="checkbox" aria-checked="false" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Add the billing fix</button>
+				<button type="button" class="as-tick" role="checkbox" aria-checked="false" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Update the store listing</button>
+			</div>
+			<div class="as-comments">
+				<div class="as-label">Comments</div>
+				<div class="as-comment"><div class="as-who">Sam · 25 Nov</div><p>The draft is in the release doc.</p></div>
+				<div class="as-comment"><div class="as-who">Juniper · 26 Nov</div><p>The billing fix is waiting on review, so it goes in last.</p></div>
+			</div>
+		</div>
+		<div class="as-foot"><span class="cp-button">Open in Acta</span><button type="button" class="cp-button as-follow" aria-pressed="false" data-acta-follow><svg class="i i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"></path><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"></path></svg><svg class="i i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span data-follow-words>Follow</span></button></div>
+	</aside>
 </div>
 
 <template id="demo-you">
@@ -2070,7 +2122,7 @@ const BOARD_LAYERS = [
 		flex-direction: column;
 		gap: var(--space-s);
 		box-sizing: border-box;
-		width: var(--layout-acta-preview);
+		width: var(--layout-card-preview);
 		max-width: calc(100vw - 64px);
 		padding: var(--space-m);
 		background: var(--raised);
@@ -2186,6 +2238,243 @@ const BOARD_LAYERS = [
 	}
 	.cp-button:hover {
 		background: var(--hover);
+	}
+	/* A card's side preview beside the chat (acta_ui.rs, card_side): the head with the
+	   board's tile, board · id in mono and close; the title as a heading, the chips, the
+	   description, the subtasks with their ticks and the last comments; Open in Acta and
+	   Follow at the foot. 36% of the window, as the app's panel beside the chat. */
+	.acta-side {
+		display: flex;
+		flex-direction: column;
+		width: 36%;
+		min-width: 300px;
+		max-width: 400px;
+		flex: none;
+		border-left: 1px solid var(--line);
+		background: var(--bg);
+	}
+	.acta-side[hidden] {
+		display: none;
+	}
+	.as-head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		height: var(--layout-titlebar);
+		padding: 0 var(--space-l);
+		flex: none;
+	}
+	.as-head .acta-tile {
+		width: 16px;
+		height: 16px;
+		margin: 0;
+	}
+	.as-place {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--mono);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.as-close {
+		width: var(--control-icon);
+		height: var(--control-icon);
+		color: var(--ink-3);
+		cursor: pointer;
+	}
+	.as-body {
+		flex: 1;
+		min-height: 0;
+		overflow-y: auto;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-l);
+		padding: var(--space-s) var(--space-l) var(--space-xl);
+	}
+	.as-title {
+		font-size: var(--size-heading);
+		line-height: 1.3;
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
+	}
+	.as-chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.as-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		height: 22px;
+		padding: 0 8px;
+		border: 1px solid var(--line-strong);
+		border-radius: 11px;
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.as-chip .i {
+		width: 12px;
+		height: 12px;
+	}
+	.as-status {
+		color: var(--status);
+		border-color: color-mix(in srgb, var(--status) 60%, transparent);
+		cursor: pointer;
+	}
+	.as-status-at {
+		position: relative;
+	}
+	.as-menu {
+		position: absolute;
+		left: 0;
+		top: 26px;
+		z-index: 7;
+		display: flex;
+		flex-direction: column;
+		width: 180px;
+		padding: var(--space-xs);
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.25);
+	}
+	.as-menu[hidden] {
+		display: none;
+	}
+	.as-menu button {
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		padding: 6px var(--space-m);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		text-align: left;
+		cursor: pointer;
+	}
+	.as-menu button:hover {
+		background: var(--hover);
+	}
+	.as-menu i {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+	}
+	.as-menu .on::after {
+		content: '✓';
+		margin-left: auto;
+		color: var(--ink-2);
+	}
+	.as-text {
+		font-size: var(--size-body);
+		line-height: var(--line-body);
+		color: var(--ink);
+	}
+	.as-text p,
+	.as-text ul {
+		margin: 0 0 8px;
+	}
+	.as-text ul {
+		padding-left: 20px;
+	}
+	.as-label {
+		padding-bottom: var(--space-xs);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink-2);
+	}
+	.as-subtasks,
+	.as-comments {
+		display: flex;
+		flex-direction: column;
+	}
+	.as-comments {
+		gap: var(--space-m);
+	}
+	.as-tick {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--space-s);
+		padding: 5px var(--space-xs);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		line-height: var(--line-body);
+		text-align: left;
+		color: var(--ink);
+		cursor: pointer;
+	}
+	.as-tick:hover {
+		background: var(--hover);
+	}
+	.as-box {
+		display: grid;
+		place-items: center;
+		width: 16px;
+		height: 16px;
+		margin-top: 2px;
+		flex: none;
+		box-sizing: border-box;
+		border: 1px solid var(--line-strong);
+		border-radius: 4px;
+		color: var(--bg);
+	}
+	.as-box .i {
+		width: 11px;
+		height: 11px;
+		visibility: hidden;
+	}
+	.as-tick.done {
+		color: var(--ink-3);
+	}
+	.as-tick.done .as-box {
+		background: var(--ok);
+		border-color: var(--ok);
+	}
+	.as-tick.done .as-box .i {
+		visibility: visible;
+	}
+	.as-who {
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.as-comment p {
+		margin: 2px 0 0;
+		font-size: var(--size-small);
+		line-height: var(--line-body);
+		color: var(--ink);
+	}
+	.as-foot {
+		display: flex;
+		gap: var(--space-s);
+		padding: var(--space-m) var(--space-l);
+		border-top: 1px solid var(--line);
+		flex: none;
+	}
+	.as-foot .cp-button {
+		height: var(--control-button);
+		padding: 0 var(--space-l);
+		font-size: var(--size-small);
+	}
+	/* Follow with its bell, and Following with a tick (acta_ui.rs, follow_button). */
+	.as-follow {
+		gap: 6px;
+		background: none;
+		font-family: inherit;
+	}
+	.as-follow .i {
+		width: 12px;
+		height: 12px;
+	}
+	.as-follow .i-check,
+	.as-follow[aria-pressed='true'] .i-bell {
+		display: none;
+	}
+	.as-follow[aria-pressed='true'] .i-check {
+		display: block;
 	}
 	@media (prefers-color-scheme: dark) {
 		:root:not([data-theme='light']) .acta-preview {
@@ -4350,6 +4639,18 @@ const BOARD_LAYERS = [
 		}
 		.approval {
 			padding-left: 0;
+		}
+		/* No room beside the chat: the side preview goes over it. */
+		.acta-side {
+			position: absolute;
+			top: 0;
+			right: 0;
+			bottom: 0;
+			z-index: 8;
+			width: 100%;
+			min-width: 0;
+			max-width: none;
+			border-left: 0;
 		}
 	}
 </style>

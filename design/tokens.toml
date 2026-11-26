@@ -72,6 +72,7 @@ caret = 11           # the nub on a popover's top edge that points at its button
 context-card = 300   # the card under the header's context ring
 pill-title = 260     # a card pill's title, at most
 card-preview = 330   # a card's preview under its pill
+board-column = 140   # a column of a board's view beside the chat, at the least
 field-label = 120    # a label beside its field
 
 # How big the controls are.

@@ -1,13 +1,17 @@
 module tests.fake_acta.main
 
-// A fake Acta, for testing the cards in messages (PLAN.md, "Cards in
-// messages") and the watches (PLAN.md, "Watching outside events") without the
-// real one: an MCP server over HTTP at /api/mcp that answers 401 to a request
-// without `Authorization: Bearer acta-key`, with three of Acta's tools, as
-// Acta answers them:
+// A fake Acta, for testing the cards in messages, Acta beside the chat and the
+// watches (PLAN.md, "Cards in messages", "Acta beside the chat" and "Watching
+// outside events") without the real one: an MCP server over HTTP at /api/mcp
+// that answers 401 to a request without `Authorization: Bearer acta-key`, with
+// seven of Acta's tools, as Acta answers them:
 //
 //     list_boards     two boards, aaen-studios/loom (LOO) and aaen-studios/calcite (CAL)
-//     get_task        LOO-206, LOO-351 and CAL-338; any other is the tool's error
+//     get_task        LOO-206, LOO-207, LOO-351 and CAL-338; any other is the tool's error
+//     get_board       a board's labels and people
+//     list_tasks      a board's tasks, open ones unless status says, by query and label
+//     update_task     a card's status, and its subtasks ticked or not
+//     create_tasks    new cards, numbered from 400 with the board's prefix; a label not on the board is the tool's error
 //     list_activity   a board's activity since a time, newest first, in Acta's words
 //
 // Beside it, a fake T3 at /t3/mcp, which wants `Bearer t3-key`, with three of
@@ -48,6 +52,53 @@ struct Fake {
     activity: List<Json>    // oldest first, each with its board
     last_ms: i64
     threads: LinkedMap<String, T3Thread>
+    next: i64    // the number of the next card create_tasks makes
+}
+
+// The labels each board has.
+fn labels_of(board: String) -> List<str> {
+    if board == "aaen-studios/calcite" { return ["engine", "perf"] }
+    return ["Feature", "Bug", "desktop", "server"]
+}
+
+// `j` with `key` set to `value`.
+fn with(j: Json, key: str, value: own Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = j {
+        for (k, v) in o {
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    m.insert(String(key), value)
+    return Json.Object(m)
+}
+
+fn strs_of(j: Json, key: str) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(xs) = j.get(String(key)) ?? Json.Null {
+        for x in xs {
+            if let s = x.as_str() { out.push(s) }
+        }
+    }
+    return out
+}
+
+// A task as list_tasks sums it up: its subtasks as "done/all".
+fn summed(t: Json) -> Json {
+    var done = 0
+    var all = 0
+    if let Json.Array(subs) = t.get(String("subtasks")) ?? Json.Null {
+        for s in subs {
+            all += 1
+            if (s.get(String("done")) ?? Json.Null).as_bool() == some(true) { done += 1 }
+        }
+    }
+    var m = LinkedMap<String, Json>()
+    for k in ["id", "title", "status", "priority", "assignee", "labels", "size"] {
+        if let v = t.get(String(k)) { m.insert(String(k), v.copy()) }
+    }
+    if all > 0 { m.insert(String("subtasks"), Json.Str("{done}/{all}")) }
+    return Json.Object(m)
 }
 
 fn text(s: str) -> Json {
@@ -197,6 +248,79 @@ impl Fake {
             }
             return answer(object([("board", Json.Str(board)), ("activity", Json.Array(out))]))
         }
+        let board = str_of(args.copy(), "board")
+        if name == "get_board" {
+            var labels = List<Json>()
+            for l in labels_of(board.copy()) {
+                labels.push(text(l))
+            }
+            return answer(object([("board", Json.Str(board.copy())), ("name", Json.Str(board[(board.find("/") ?? 0) + 1..].copy())), ("task_prefix", text(if board == "aaen-studios/calcite" { "CAL" } else { "LOO" })), ("labels", Json.Array(labels)), ("people", Json.Array([object([("name", text("Elliot")), ("role", text("owner"))])]))]))
+        }
+        if name == "list_tasks" {
+            var wanted = strs_of(args.copy(), "status")
+            if wanted.len() == 0 { wanted = [String("todo"), String("in_progress"), String("review")] }
+            let words = str_of(args.copy(), "query").to_lower_root()
+            let labelled = str_of(args.copy(), "label")
+            var out = List<Json>()
+            for (_, t) in self.tasks {
+                if not str_of(t.copy(), "url").contains("/{board}#") { continue }
+                if not wanted.contains(str_of(t.copy(), "status")) { continue }
+                if words.len() > 0 and not str_of(t.copy(), "title").to_lower_root().contains(words.copy()) { continue }
+                if labelled.len() > 0 and not strs_of(t.copy(), "labels").contains(labelled.copy()) { continue }
+                out.push(summed(t.copy()))
+            }
+            return answer(object([("board", Json.Str(board)), ("tasks", Json.Array(out.copy())), ("shown", Json.Int(i64.wrap(u64(out.len())))), ("total", Json.Int(i64.wrap(u64(out.len()))))]))
+        }
+        if name == "update_task" {
+            let id = str_of(args.copy(), "task")
+            let t = mut self.tasks.find(id.copy()) else return tool_error("There's no task {id} on that board.")
+            if not str_of(t.copy(), "url").contains("/{board}#") { return tool_error("There's no task {id} on that board.") }
+            if let status = (args.get(String("status")) ?? Json.Null).as_str() { t = with(t.copy(), "status", Json.Str(status)) }
+            let ticks = strs_of(args.copy(), "complete_subtasks")
+            let unticks = strs_of(args.copy(), "reopen_subtasks")
+            if ticks.len() > 0 or unticks.len() > 0 {
+                var subs = List<Json>()
+                if let Json.Array(had) = t.get(String("subtasks")) ?? Json.Null {
+                    for s in had {
+                        let sid = str_of(s.copy(), "id")
+                        if ticks.contains(sid.copy()) {
+                            subs.push(with(s.copy(), "done", Json.Bool(true)))
+                        } else if unticks.contains(sid) {
+                            subs.push(with(s.copy(), "done", Json.Bool(false)))
+                        } else {
+                            subs.push(s.copy())
+                        }
+                    }
+                }
+                t = with(t.copy(), "subtasks", Json.Array(subs))
+            }
+            return answer(object([("board", Json.Str(board)), ("task", object([("id", Json.Str(id))]))]))
+        }
+        if name == "create_tasks" {
+            var made = List<Json>()
+            if let Json.Array(asked) = args.get(String("tasks")) ?? Json.Null {
+                for a in asked {
+                    for l in strs_of(a.copy(), "labels") {
+                        var known = false
+                        for k in labels_of(board.copy()) {
+                            if l == k { known = true }
+                        }
+                        if not known { return tool_error("{l} isn't one of the board's labels.") }
+                    }
+                    let prefix = if board == "aaen-studios/calcite" { "CAL" } else { "LOO" }
+                    let id = "{prefix}-{self.next}"
+                    self.next += 1
+                    let title = str_of(a.copy(), "title")
+                    let address = "https://acta.aaenz.no/{board}#{id}"
+                    var t = with(a.copy(), "id", Json.Str(id.copy()))
+                    t = with(t, "status", text("todo"))
+                    t = with(t, "url", Json.Str(address.copy()))
+                    self.tasks.insert(id.copy(), t)
+                    made.push(object([("id", Json.Str(id)), ("title", Json.Str(title)), ("url", Json.Str(address))]))
+                }
+            }
+            return answer(object([("board", Json.Str(board)), ("created", Json.Array(made))]))
+        }
         return tool_error("No tool {name}.")
     }
 
@@ -259,7 +383,7 @@ impl Fake {
         if (m.get(String("id")) ?? Json.Null) == Json.Null { return Response.new(202, String("application/json"), List<u8>()) }
         if method == "initialize" { return mcp_result(m, object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text(if t3 { "t3" } else { "acta" })), ("version", text("1"))]))])) }
         if method == "tools/list" {
-            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("list_activity")]) }
+            let tools = if t3 { Json.Array([tool("t3_thread_launch"), tool("t3_thread_wait"), tool("t3_thread_read")]) } else { Json.Array([tool("list_boards"), tool("get_task"), tool("get_board"), tool("list_tasks"), tool("update_task"), tool("create_tasks"), tool("list_activity")]) }
             return mcp_result(m, object([("tools", tools)]))
         }
         if method == "tools/call" {
@@ -325,10 +449,16 @@ fn main() ! Error {
     server.log = false
     let base = server.url().trim_suffix("/").copy()
     var tasks = LinkedMap<String, Json>()
-    tasks.insert(String("LOO-206"), task("LOO-206", "aaen-studios/loom", "Show agents' usage limits in the sidebar", "in_progress", "m", ["desktop"], "The plan's usage limits that Claude reports, as small rings under the agents, with when each resets.\n\nHover shows the numbers.", [true, true, true, false, false]))
+    let usage = task("LOO-206", "aaen-studios/loom", "Show agents' usage limits in the sidebar", "in_progress", "m", ["desktop"], "The plan's usage limits that Claude reports, as small rings under the agents, with when each resets.\n\nHover shows the numbers.", [true, true, true, false, false])
+    var comments = List<Json>()
+    for (by, body) in [("Elliot", "Started on the rings."), ("Elliot", "Rings drawn, numbers next."), ("Claude Code", "Numbers show on hover."), ("Elliot", "Looks right. The 90% colour is next.")] {
+        comments.push(object([("id", Json.Str("c{comments.len()}")), ("by", text(by)), ("at", text("2026-11-25T10:00:00Z")), ("body", text(body))]))
+    }
+    tasks.insert(String("LOO-206"), with(usage, "comments", Json.Array(comments)))
+    tasks.insert(String("LOO-207"), task("LOO-207", "aaen-studios/loom", "Group chats in the sidebar", "todo", "s", ["desktop", "Feature"], "", List<bool>()))
     tasks.insert(String("LOO-351"), task("LOO-351", "aaen-studios/loom", "Leaving a group chat takes two clicks", "done", "s", List<str>(), "", List<bool>()))
     tasks.insert(String("CAL-338"), task("CAL-338", "aaen-studios/calcite", "Smooth chunk loading", "review", "l", ["engine", "perf"], "Chunks load without a hitch.", [true]))
-    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>(), activity: List<Json>(), last_ms: 0, threads: LinkedMap<String, T3Thread>() }
+    var fake = Fake { tasks: tasks, calls: LinkedMap<String, i64>(), activity: List<Json>(), last_ms: 0, threads: LinkedMap<String, T3Thread>(), next: 400 }
     println("fake acta: {base}")
     io.flush()
     loop {

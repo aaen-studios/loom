@@ -1,0 +1,311 @@
+module server.acta_panels
+
+// Acta beside the chat (PLAN.md, "Acta beside the chat"): a card's side
+// preview, making a card from a message, and a board's columns and list. The
+// instance calls Acta as the person through `server/mcpcall.calx`; this is
+// what it asks Acta for, checked, and what came back, made into what the apps
+// show.
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, merge, str_at}
+import server.acta
+
+// The most comments a card's preview has: its last ones.
+const COMMENTS_MOST: usize = 3
+// The most tasks one acta.tasks asks for, as list_tasks takes them.
+const TASKS_MOST: i64 = 200
+
+fn one_of(s: String, among: List<str>) -> bool {
+    for a in among {
+        if s == a { return true }
+    }
+    return false
+}
+
+fn statuses() -> List<str> {
+    return ["todo", "in_progress", "review", "done", "canceled"]
+}
+
+/// Whether `board` is a board's ref, `workspace/board`.
+pub fn is_board(board: String) -> bool {
+    let parts = board.split("/")
+    return parts.len() == 2 and parts[0].len() > 0 and parts[1].len() > 0 and not board.contains(" ")
+}
+
+// The strings of a list in `args` at `key`, or none when it isn't one.
+fn strings_at(args: Json, key: str) -> List<String>? {
+    let Json.Array(xs) = at(args, key) else return none
+    var out = List<String>()
+    for x in xs {
+        let s = x.as_str() else return none
+        out.push(s)
+    }
+    return some(out)
+}
+
+fn texts(xs: List<String>) -> Json {
+    var out = List<Json>()
+    for x in xs {
+        out.push(Json.Str(x.copy()))
+    }
+    return Json.Array(out)
+}
+
+/// list_tasks' arguments for acta.tasks: the board, and the statuses, words,
+/// label, assignee and how many it gives, each when asked.
+pub fn tasks_args(board: String, args: Json) -> Json ! Error {
+    var o = Obj.new().s("board", board)
+    if at(args.copy(), "status") != Json.Null {
+        let wanted = strings_at(args.copy(), "status") else fail "status is a list of statuses"
+        for s in wanted {
+            if not one_of(s.copy(), statuses()) { fail "{s} isn't a status" }
+        }
+        o = o.j("status", texts(wanted))
+    }
+    o = o.maybe("query", str_at(args.copy(), "query")).maybe("label", str_at(args.copy(), "label")).maybe("assignee", str_at(args.copy(), "assignee"))
+    if let n = at(args, "limit").as_i64() {
+        if n < 1 or n > TASKS_MOST { fail "limit is from 1 to {TASKS_MOST}" }
+        o = o.i("limit", n)
+    }
+    return o.done()
+}
+
+/// update_task's arguments for card.update: its status, or one of its subtasks
+/// ticked or not.
+pub fn update_args(board: String, id: String, args: Json) -> Json ! Error {
+    var o = Obj.new().s("board", board).s("task", id)
+    if let status = str_at(args.copy(), "status") {
+        if not one_of(status.copy(), statuses()) { fail "{status} isn't a status" }
+        return o.s("status", status).done()
+    }
+    let subtask = str_at(args.copy(), "subtask") else fail "card.update needs a status, or a subtask and done"
+    let done = at(args, "done").as_bool() else fail "card.update needs done with a subtask"
+    if subtask.len() == 0 { fail "subtask is empty" }
+    o = o.j(if done { "complete_subtasks" } else { "reopen_subtasks" }, texts([subtask]))
+    return o.done()
+}
+
+/// create_tasks' arguments for card.create: one card with its title, and its
+/// description, labels, size and priority, each when given.
+pub fn create_args(board: String, args: Json) -> Json ! Error {
+    let title = (str_at(args.copy(), "title") ?? String()).trim().copy()
+    if title.len() == 0 { fail "A card needs a title." }
+    if title.len() > 500 { fail "The title is longer than 500 bytes." }
+    var t = Obj.new().s("title", title)
+    let description = str_at(args.copy(), "description") ?? String()
+    if description.len() > 20000 { fail "The description is longer than 20,000 bytes." }
+    if description.trim().len() > 0 { t = t.s("description", description) }
+    if at(args.copy(), "labels") != Json.Null {
+        let labels = strings_at(args.copy(), "labels") else fail "labels is a list of the board's labels"
+        if labels.len() > 20 { fail "A card has 20 labels at most." }
+        if labels.len() > 0 { t = t.j("labels", texts(labels)) }
+    }
+    if let size = str_at(args.copy(), "size") {
+        if not one_of(size.copy(), ["xs", "s", "m", "l", "xl"]) { fail "{size} isn't a size" }
+        t = t.s("size", size)
+    }
+    if let priority = str_at(args, "priority") {
+        if not one_of(priority.copy(), ["urgent", "high", "medium", "low", "none"]) { fail "{priority} isn't a priority" }
+        t = t.s("priority", priority)
+    }
+    return Obj.new().s("board", board).j("tasks", Json.Array([t.done()])).done()
+}
+
+/// A board as acta.board gives it, from get_board's answer: its ref, name and
+/// prefix, its labels, and its people's names.
+pub fn board_of(got: Json) -> Json {
+    var labels = List<String>()
+    for l in strings_at(got.copy(), "labels") ?? List<String>() {
+        labels.push(l.copy())
+    }
+    var people = List<String>()
+    if let Json.Array(ps) = at(got.copy(), "people") {
+        for p in ps {
+            if let name = str_at(p, "name") { people.push(name) }
+        }
+    }
+    return Obj.new().s("board", str_at(got.copy(), "board") ?? String()).s("name", str_at(got.copy(), "name") ?? String()).s("prefix", str_at(got, "task_prefix") ?? String()).j("labels", texts(labels)).j("people", texts(people)).done()
+}
+
+// "3/5", as list_tasks gives a task's subtasks: done and in all.
+fn done_of(s: String) -> (i64, i64)? {
+    let slash = s.find("/") else return none
+    let done = i64.parse(s[..slash].copy()) else return none
+    let all = i64.parse(s[slash + 1..].copy()) else return none
+    return some((done, all))
+}
+
+/// A board's tasks as acta.tasks gives them, from list_tasks' answer, in its
+/// order: each `{id, title, status, assignee?, labels?, size?, priority?,
+/// subtasks?, subtasks_done?}`.
+pub fn tasks_of(listed: Json) -> Json {
+    var out = List<Json>()
+    if let Json.Array(tasks) = at(listed, "tasks") {
+        for t in tasks {
+            let id = str_at(t.copy(), "id") else continue
+            var o = Obj.new().s("id", id).s("title", str_at(t.copy(), "title") ?? String()).s("status", str_at(t.copy(), "status") ?? String("todo"))
+            o = o.maybe("assignee", str_at(t.copy(), "assignee")).maybe("size", str_at(t.copy(), "size")).maybe("priority", str_at(t.copy(), "priority"))
+            if let labels = strings_at(t.copy(), "labels") {
+                if labels.len() > 0 { o = o.j("labels", texts(labels)) }
+            }
+            if let (done, all) = done_of(str_at(t, "subtasks") ?? String()) {
+                if all > 0 { o = o.i("subtasks", all).i("subtasks_done", done) }
+            }
+            out.push(o.done())
+        }
+    }
+    return Json.Array(out)
+}
+
+/// A card as its side preview shows it, from get_task's answer: as a message
+/// keeps it (`acta.card_of`), with its whole description, its priority and
+/// project, its subtasks as a `checklist` of `{id, title, done}`, and its last
+/// three comments, oldest first, each `{by, at, body}`.
+pub fn detail_of(task: Json, board: String, name: String, at_ms: i64) -> Json {
+    let card = acta.card_of(task.copy(), board, name, at_ms)
+    var o = Obj.new().s("description", str_at(task.copy(), "description") ?? String())
+    o = o.maybe("priority", str_at(task.copy(), "priority")).maybe("project", str_at(task.copy(), "project"))
+    var checklist = List<Json>()
+    if let Json.Array(subtasks) = at(task.copy(), "subtasks") {
+        for s in subtasks {
+            let done = (s.get(String("done")) ?? Json.Null).as_bool() ?? false
+            checklist.push(Obj.new().s("id", str_at(s.copy(), "id") ?? String()).s("title", str_at(s, "title") ?? String()).b("done", done).done())
+        }
+    }
+    var comments = List<Json>()
+    if let Json.Array(all) = at(task, "comments") {
+        var n: usize = 0
+        for c in all {
+            n += 1
+            if n + COMMENTS_MOST <= all.len() { continue }
+            comments.push(Obj.new().s("by", str_at(c.copy(), "by") ?? String()).s("at", str_at(c.copy(), "at") ?? String()).s("body", str_at(c, "body") ?? String()).done())
+        }
+    }
+    return merge(card, o.j("checklist", Json.Array(checklist)).j("comments", Json.Array(comments)).done())
+}
+
+/// The card create_tasks made, as a message keeps it: from its answer's id,
+/// title and address, and what was asked for it (`create_args`), to do. None
+/// when the answer has no card.
+pub fn made_card(created: Json, asked: Json, board: String, name: String, at_ms: i64) -> Json? {
+    let Json.Array(made) = at(created, "created") else return none
+    if made.len() == 0 { return none }
+    let first = made[0].copy()
+    let id = str_at(first.copy(), "id") else return none
+    let Json.Array(tasks) = at(asked, "tasks") else return none
+    if tasks.len() == 0 { return none }
+    let t = tasks[0].copy()
+    var task = merge(t.copy(), Obj.new().s("id", id).s("status", String("todo")).done())
+    if let title = str_at(first.copy(), "title") { task = merge(task, Obj.new().s("title", title).done()) }
+    if let url = str_at(first, "url") { task = merge(task, Obj.new().s("url", url).done()) }
+    return some(acta.card_of(task, board, name, at_ms))
+}
+
+/// `message` with `card` made from it: in its `made_cards`, `{id, board}` each
+/// once, and in its `cards` by its id, so its pill shows under it and is looked
+/// up again as its other cards are.
+pub fn with_made(message: Json, card: Json) -> Json {
+    let id = str_at(card.copy(), "id") ?? String()
+    var made = List<Json>()
+    var had = false
+    if let Json.Array(before) = at(message.copy(), "made_cards") {
+        for m in before {
+            if str_at(m.copy(), "id") == some(id.copy()) { had = true }
+            made.push(m.copy())
+        }
+    }
+    if not had { made.push(Obj.new().s("id", id.copy()).s("board", str_at(card.copy(), "board") ?? String()).done()) }
+    var cards = at(message.copy(), "cards")
+    if cards == Json.Null { cards = Obj.new().done() }
+    var one = Obj.new()
+    one.m.insert(id, card.copy())
+    return merge(message, Obj.new().j("made_cards", Json.Array(made)).j("cards", merge(cards, one.done())).done())
+}
+
+/// The cards made from a message, as `acta.Ref`s on their boards.
+pub fn made_refs(message: Json) -> List<acta.Ref> {
+    var out = List<acta.Ref>()
+    if let Json.Array(made) = at(message, "made_cards") {
+        for m in made {
+            let id = str_at(m.copy(), "id") ?? String()
+            let board = str_at(m, "board") ?? String()
+            if acta.is_id(id.copy()) and is_board(board.copy()) { out.push(acta.Ref { id: id, board: board }) }
+        }
+    }
+    return out
+}
+
+// Whether tasks_args, update_args (`which` "update") or create_args ("create")
+// refuses `args`.
+fn refused(which: str, args: str) -> bool {
+    let a = parse(String(args))!
+    let b = String("aaen-studios/loom")
+    if which == "update" {
+        return match update_args(b, String("LOO-1"), a) {
+            ok(_) => false,
+            err(_) => true,
+        }
+    }
+    if which == "create" {
+        return match create_args(b, a) {
+            ok(_) => false,
+            err(_) => true,
+        }
+    }
+    return match tasks_args(b, a) {
+        ok(_) => false,
+        err(_) => true,
+    }
+}
+
+@test
+fn checks_what_is_asked() {
+    let b = String("aaen-studios/loom")
+    assert(is_board(b.copy()) and not is_board(String("loom")) and not is_board(String("a/b/c")) and not is_board(String("/b")))
+    assert("{tasks_args(b.copy(), parse(#"{"status":["todo","done"],"query":"pill","limit":30}"#)!)!}" == #"{"board":"aaen-studios/loom","status":["todo","done"],"query":"pill","limit":30}"#)
+    assert(refused("tasks", #"{"status":["later"]}"#) and refused("tasks", #"{"limit":500}"#))
+    assert("{update_args(b.copy(), String("LOO-1"), parse(#"{"status":"review"}"#)!)!}" == #"{"board":"aaen-studios/loom","task":"LOO-1","status":"review"}"#)
+    assert("{update_args(b.copy(), String("LOO-1"), parse(#"{"subtask":"s1","done":true}"#)!)!}" == #"{"board":"aaen-studios/loom","task":"LOO-1","complete_subtasks":["s1"]}"#)
+    assert("{update_args(b, String("LOO-1"), parse(#"{"subtask":"s1","done":false}"#)!)!}" == #"{"board":"aaen-studios/loom","task":"LOO-1","reopen_subtasks":["s1"]}"#)
+    assert(refused("update", #"{"status":"later"}"#) and refused("update", "\{\}") and refused("update", #"{"subtask":"s1"}"#))
+}
+
+@test
+fn checks_a_new_card() {
+    let b = String("aaen-studios/loom")
+    let made = create_args(b.copy(), parse(#"{"title":"  Make cards from messages ","description":"From a message.","labels":["desktop"],"size":"s","priority":"high"}"#)!)!
+    assert("{made}" == #"{"board":"aaen-studios/loom","tasks":[{"title":"Make cards from messages","description":"From a message.","labels":["desktop"],"size":"s","priority":"high"}]}"#)
+    assert("{create_args(b, parse(#"{"title":"Bare","description":"  ","labels":[]}"#)!)!}" == #"{"board":"aaen-studios/loom","tasks":[{"title":"Bare"}]}"#)
+    assert(refused("create", #"{"title":"  "}"#) and refused("create", #"{"title":"x","size":"xxl"}"#))
+    assert(refused("create", #"{"title":"x","priority":"soon"}"#) and refused("create", #"{"title":"x","labels":"desktop"}"#))
+    assert(not refused("create", #"{"title":"x","size":"xl","priority":"none"}"#))
+}
+
+@test
+fn reads_boards_tasks_and_cards() {
+    let board = board_of(parse(#"{"board":"aaen-studios/loom","name":"loom","task_prefix":"LOO","labels":["Feature","desktop"],"people":[{"name":"Elliot","role":"owner"}]}"#)!)
+    assert("{board}" == #"{"board":"aaen-studios/loom","name":"loom","prefix":"LOO","labels":["Feature","desktop"],"people":["Elliot"]}"#)
+    let tasks = tasks_of(parse(#"{"tasks":[{"id":"LOO-25","title":"Build the chat","status":"in_progress","assignee":"Elliot","labels":["desktop"],"size":"l","subtasks":"10/12"},{"id":"LOO-26","title":"Bare","status":"todo","labels":[]}],"shown":2,"total":2}"#)!)
+    assert("{tasks}" == #"[{"id":"LOO-25","title":"Build the chat","status":"in_progress","assignee":"Elliot","size":"l","labels":["desktop"],"subtasks":12,"subtasks_done":10},{"id":"LOO-26","title":"Bare","status":"todo"}]"#)
+    let task = parse(###"{"id":"LOO-206","title":"Usage","status":"todo","priority":"medium","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","description":"## Why\n\nRings.","subtasks":[{"id":"s1","title":"a","done":true},{"id":"s2","title":"b","done":false}],"comments":[{"by":"A","at":"1","body":"one"},{"by":"B","at":"2","body":"two"},{"by":"C","at":"3","body":"three"},{"by":"D","at":"4","body":"four"}]}"###)!
+    let detail = detail_of(task, String("aaen-studios/loom"), String("loom"), 9)
+    assert(str_at(detail.copy(), "description") == some(String("## Why\n\nRings.")) and str_at(detail.copy(), "priority") == some(String("medium")))
+    assert("{at(detail.copy(), "checklist")}" == #"[{"id":"s1","title":"a","done":true},{"id":"s2","title":"b","done":false}]"#)
+    assert("{at(detail.copy(), "comments")}" == #"[{"by":"B","at":"2","body":"two"},{"by":"C","at":"3","body":"three"},{"by":"D","at":"4","body":"four"}]"#)
+    assert(str_at(detail.copy(), "text") == some(String("Why Rings.")) and at(detail, "subtasks_done").as_i64() == some(1))
+}
+
+@test
+fn keeps_a_made_card_with_its_message() {
+    let asked = create_args(String("aaen-studios/loom"), parse(#"{"title":"Pills","description":"Show **cards**.","labels":["desktop"],"size":"m"}"#)!)!
+    let created = parse(#"{"board":"aaen-studios/loom","created":[{"id":"LOO-370","title":"Pills","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-370"}]}"#)!
+    let card = made_card(created, asked, String("aaen-studios/loom"), String("loom"), 5) ?? Json.Null
+    assert("{card}" == #"{"id":"LOO-370","board":"aaen-studios/loom","board_name":"loom","title":"Pills","status":"todo","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-370","size":"m","labels":["desktop"],"text":"Show cards.","at":5}"#)
+    assert(made_card(parse(#"{"created":[]}"#)!, Json.Null, String("a/b"), String("b"), 5) == none)
+    let message = parse(#"{"id":"m_1","cards":{"LOO-1":{"id":"LOO-1"}}}"#)!
+    let once = with_made(message, card.copy())
+    let twice = with_made(once.copy(), card)
+    assert("{at(twice.copy(), "made_cards")}" == #"[{"id":"LOO-370","board":"aaen-studios/loom"}]"#)
+    assert(at(twice.copy(), "cards").get(String("LOO-1")) != none and str_at(at(at(twice.copy(), "cards"), "LOO-370"), "title") == some(String("Pills")))
+    let refs = made_refs(twice)
+    assert(refs.len() == 1 and refs[0].id == "LOO-370" and refs[0].board == "aaen-studios/loom")
+}
