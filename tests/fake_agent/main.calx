@@ -130,13 +130,18 @@ module tests.fake_agent.main
 // start of its steps and of loom's notes)}, written before the prompt is
 // answered; and {"closed": SESSION} for each session/close.
 //
+// With --log=PATH, it adds a line to PATH when the program starts, "started",
+// and for each session it picks up again, "picked up SESSION", written before
+// it answers: what a test can wait for without sending it anything
+// (tests/protocol/prestart.calx).
+//
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
 // session/load and refuses every one. Without, it offers neither. With
 // --limited it answers every session/prompt with a usage-limit error, as a
 // program whose usage ran out does; with --broken it doesn't initialize.
 //
-//     calx tests/fake_agent/main.calx [--load | --resume | --forget | --limited | --broken] [--record=PATH]
+//     calx tests/fake_agent/main.calx [--load | --resume | --forget | --limited | --broken] [--record=PATH] [--log=PATH]
 import std.bytes
 import std.crypto.{random_bytes}
 import std.env
@@ -467,6 +472,8 @@ struct Agent {
     record: String
     // Each session's turns so far, and the characters they sent and said, for --record.
     history: Map<String, (i64, i64)>
+    // With --log=PATH, the file its start and each session it picks up are written to.
+    log: String
 }
 
 // The config options a session offers (ACP's session config options): a model
@@ -1287,6 +1294,12 @@ impl Agent {
         if let err(e) = fs.append_text(a.record.copy(), "{line}\n") { eprintln("fake agent: recording to {a.record}: {e}") }
     }
 
+    // With --log, writes `line` to its file.
+    fn write_log(a: Agent, line: String) {
+        if a.log.len() == 0 { return }
+        if let err(e) = fs.append_text(a.log.copy(), "{line}\n") { eprintln("fake agent: logging to {a.log}: {e}") }
+    }
+
     // Session `session`'s config values: its own, or the defaults (a session
     // picked up after the agent restarted).
     fn values(a: Agent, session: String) -> Map<String, String> {
@@ -1360,6 +1373,7 @@ impl Agent {
             }
             a.mcp.insert(session.copy(), params.get(String("mcpServers")) ?? Json.Null)
             a.meta.insert(session.copy(), params.get(String("_meta")) ?? Json.Null)
+            a.write_log("picked up {session}")
             // session/load plays the conversation back first; session/resume doesn't.
             if name == "session/load" { chunk(session.copy(), "agent_message_chunk", String("(the conversation so far)")) }
             var r = LinkedMap<String, Json>()
@@ -1520,14 +1534,18 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     var picks_up = String()
     var record = String()
+    var log = String()
     for arg in env.args() {
         if arg.starts_with("--record=") {
             record = arg[9..].copy()
+        } else if arg.starts_with("--log=") {
+            log = arg[6..].copy()
         } else if picks_up.len() == 0 {
             picks_up = arg.replace("--", "")
         }
     }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>(), record: record, history: Map<String, (i64, i64)>() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>(), record: record, history: Map<String, (i64, i64)>(), log: log }
+    a.write_log(String("started"))
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)
