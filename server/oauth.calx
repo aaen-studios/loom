@@ -1,7 +1,7 @@
 module server.oauth
 
 // Signing in to an MCP server that asks for it (PLAN.md, "Signing in to MCP
-// servers"), as MCP's authorization says (2025-06-18 and on): OAuth 2.1 with
+// servers"), as MCP's authorization says (2025-06-18 to 2026-07-28): OAuth 2.1 with
 // PKCE. A server that wants a sign-in answers 401 with a WWW-Authenticate
 // challenge. Its Protected Resource Metadata (RFC 9728) names its
 // authorization server, whose metadata (RFC 8414, or OpenID Connect's
@@ -27,10 +27,10 @@ import std.time.{Timestamp}
 import std.url
 import std.url.{Url}
 import shared.obj.{Obj, at, bool_at, int_at, merge, str_at}
+import server.mcpclient
 
 const WAIT: u32 = 30000
 const MOST: usize = 1048576
-const PROTOCOL: str = "2025-06-18"
 // A token is renewed this long before it ends at the most, or halfway
 // through its life when that's shorter.
 const EARLY_MS: i64 = 300000
@@ -156,13 +156,13 @@ fn object_at(address: String, https_only: bool) -> Json? ! Error {
     return none
 }
 
-// What the server answers an initialize without a token: its status, and
-// its WWW-Authenticate when it asks for a sign-in.
+// What the server answers a request without a token, server/discover as
+// loom first asks any server (server/mcpclient.calx): its status, and its
+// WWW-Authenticate when it asks for a sign-in.
 fn probe(address: String, https_only: bool) -> (u32, String) ! Error {
     try reachable(address.copy(), https_only)
-    let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
-    let m = Obj.new().s("jsonrpc", String("2.0")).i("id", 1).s("method", String("initialize")).j("params", Obj.new().s("protocolVersion", String(PROTOCOL)).j("capabilities", Obj.new().done()).j("clientInfo", info).done()).done()
-    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }, Header { name: String("Accept"), value: String("application/json, text/event-stream") }, Header { name: String("MCP-Protocol-Version"), value: String(PROTOCOL) }]
+    let m = Obj.new().s("jsonrpc", String("2.0")).i("id", 1).s("method", String("server/discover")).j("params", mcpclient.with_meta(Obj.new().done())).done()
+    let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }, Header { name: String("Accept"), value: String("application/json, text/event-stream") }, Header { name: String("MCP-Protocol-Version"), value: String(mcpclient.MODERN) }, Header { name: String("Mcp-Method"), value: String("server/discover") }]
     var req = post(address, headers, "{m}".to_bytes(), WAIT, MOST)
     let r = try req.wait()
     return (r.status, r.header(String("WWW-Authenticate")) ?? String())
