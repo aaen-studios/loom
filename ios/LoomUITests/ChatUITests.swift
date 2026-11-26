@@ -2,7 +2,8 @@ import XCTest
 
 /// The chat as a person uses it, on sample frames: the emoji picker in the keyboard's
 /// place (LOO-361) and a long message cut with Show more (LOO-357). Each step keeps a
-/// screenshot in the result bundle.
+/// screenshot in the result bundle, and in the folder `LOOM_UI_SHOTS` names, when it
+/// names one.
 @MainActor
 final class ChatUITests: XCTestCase {
     /// The app on sample frames, at the Builder's chat, whose reply with the release
@@ -12,23 +13,42 @@ final class ChatUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-sample", "-open", "a_1"]
         app.launch()
-        XCTAssertTrue(app.buttons["Emoji"].waitForExistence(timeout: 20), "the chat's composer")
+        XCTAssertTrue(smiley(app).waitForExistence(timeout: 20), "the chat's composer")
         return app
     }
 
+    /// The composer's smiley, found by its identifier, as the system keyboard has an Emoji
+    /// key too. Its label says what it brings up: `Emoji`, or `Keyboard` while the picker
+    /// is up.
+    private func smiley(_ app: XCUIApplication) -> XCUIElement {
+        app.buttons["smiley"]
+    }
+
+    /// Waits for the smiley to say it brings up `label`.
+    private func smiley(_ app: XCUIApplication, says label: String, timeout: TimeInterval = 5) -> Bool {
+        let says = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: smiley(app))
+        return XCTWaiter().wait(for: [says], timeout: timeout) == .completed
+    }
+
     private func shot(_ app: XCUIApplication, _ name: String) {
-        let a = XCTAttachment(screenshot: app.screenshot())
+        let picture = app.screenshot()
+        let a = XCTAttachment(screenshot: picture)
         a.name = name
         a.lifetime = .keepAlways
         add(a)
+        if let dir = ProcessInfo.processInfo.environment["LOOM_UI_SHOTS"], !dir.isEmpty {
+            let file = URL(fileURLWithPath: dir).appendingPathComponent(name.replacingOccurrences(of: " ", with: "-") + ".png")
+            try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+            try? picture.pngRepresentation.write(to: file)
+        }
     }
 
     /// Opens the emoji picker with the composer's smiley.
     private func openPicker(_ app: XCUIApplication) -> XCUIElement {
-        app.buttons["Emoji"].tap()
+        smiley(app).tap()
         let find = app.textFields["Find an emoji"]
         XCTAssertTrue(find.waitForExistence(timeout: 5), "the picker")
-        XCTAssertTrue(app.buttons["Keyboard"].exists, "the smiley is a keyboard while the picker is up")
+        XCTAssertTrue(smiley(app, says: "Keyboard"), "the smiley is a keyboard while the picker is up")
         return find
     }
 
@@ -38,13 +58,15 @@ final class ChatUITests: XCTestCase {
         let app = builder()
         let find = openPicker(app)
         shot(app, "picker up")
-        let cell = app.buttons[":grinning:"].firstMatch
-        XCTAssertTrue(cell.waitForExistence(timeout: 5))
-        let from = cell.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
-        from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: 220)))
-        XCTAssertTrue(find.waitForNonExistence(timeout: 5), "the picker went")
-        XCTAssertTrue(app.buttons["Emoji"].exists)
+        // From the grid's first row, under the search and the group tabs, down 150
+        // points: the picker is about as tall as the keyboard, so a swipe from lower down
+        // runs off the screen.
+        let from = find.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).withOffset(CGVector(dx: 0, dy: 100))
+        from.press(forDuration: 0.05, thenDragTo: from.withOffset(CGVector(dx: 0, dy: 150)))
+        let went = find.waitForNonExistence(timeout: 5)
         shot(app, "picker swiped away")
+        XCTAssertTrue(went, "the picker went")
+        XCTAssertTrue(smiley(app, says: "Emoji"))
     }
 
     func testATapInTheChatPutsThePickerAway() {
@@ -53,24 +75,26 @@ final class ChatUITests: XCTestCase {
         let words = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Did the build on main pass")).firstMatch
         XCTAssertTrue(words.waitForExistence(timeout: 5))
         words.tap()
-        XCTAssertTrue(find.waitForNonExistence(timeout: 5), "the picker went")
-        XCTAssertTrue(app.buttons["Emoji"].exists)
+        let went = find.waitForNonExistence(timeout: 5)
         shot(app, "picker tapped away")
+        XCTAssertTrue(went, "the picker went")
+        XCTAssertTrue(smiley(app, says: "Emoji"))
     }
 
     func testTheKeyboardGlyphSwapsTheKeyboardAndThePicker() {
         let app = builder()
         let find = openPicker(app)
         let field = app.textViews["Message"]
-        app.buttons["Keyboard"].tap()
+        smiley(app).tap()
         XCTAssertTrue(find.waitForNonExistence(timeout: 5), "the picker went for the keyboard")
-        XCTAssertTrue(app.buttons["Emoji"].waitForExistence(timeout: 2))
-        XCTAssertTrue(field.value(forKey: "hasKeyboardFocus") as? Bool ?? false, "the composer has the cursor")
+        XCTAssertTrue(smiley(app, says: "Emoji"))
         shot(app, "keyboard back")
-        app.buttons["Emoji"].tap()
-        XCTAssertTrue(find.waitForExistence(timeout: 5), "the picker came back")
-        XCTAssertTrue(app.buttons["Keyboard"].exists)
+        XCTAssertTrue(field.value(forKey: "hasKeyboardFocus") as? Bool ?? false, "the composer has the cursor")
+        smiley(app).tap()
+        let back = find.waitForExistence(timeout: 5)
         shot(app, "picker back")
+        XCTAssertTrue(back, "the picker came back")
+        XCTAssertTrue(smiley(app, says: "Keyboard"))
     }
 
     // MARK: A long message (LOO-357)
@@ -96,7 +120,8 @@ final class ChatUITests: XCTestCase {
         let words = app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "Routines run on webhooks")).firstMatch
         XCTAssertTrue(words.waitForExistence(timeout: 5))
         words.tap()
-        XCTAssertTrue(app.buttons["Show less"].firstMatch.waitForExistence(timeout: 5), "it opened")
+        let opened = app.buttons["Show less"].firstMatch.waitForExistence(timeout: 5)
         shot(app, "opened by a tap on its words")
+        XCTAssertTrue(opened, "it opened")
     }
 }
