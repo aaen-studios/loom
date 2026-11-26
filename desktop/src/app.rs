@@ -49,10 +49,13 @@ mod room_view;
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
 use emoji_ui::RowKey;
+#[path = "form_drafts.rs"]
+mod form_drafts;
 #[path = "list_page.rs"]
 mod list_page;
 #[path = "routines.rs"]
 mod routines;
+use crate::model::drafts::Page as DraftPage;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
 
@@ -551,7 +554,9 @@ pub struct Loom {
     panel_opening: Option<String>,
     /// What came through the open panel's door, waiting for the window's task.
     door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
+    /// A note to remember, on the Memory page, and a proposed note's text, each its own.
     note_in: Entity<InputState>,
+    proposal_note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     /// The instructions every agent follows, on the Defaults page.
     every_in: Entity<TextareaState>,
@@ -628,8 +633,13 @@ pub struct Loom {
     /// On the Brains page: none for the first, `Some(None)` for the ACP Registry, and
     /// `Some(Some(name))` for the program picked.
     program_open: Option<Option<String>>,
+    /// A secret to add, its name and value, on the Secrets page.
     set_key_in: Entity<InputState>,
     set_value_in: Entity<InputState>,
+    /// The open program's setting to add, its name and value: its own, not the Secrets
+    /// page's.
+    setting_key_in: Entity<InputState>,
+    setting_value_in: Entity<InputState>,
     /// The open program's share: tokens each person may use, and whether each month.
     share_in: Entity<InputState>,
     share_month: bool,
@@ -1170,6 +1180,7 @@ impl Loom {
         }
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
+        let proposal_note_in = input(window, cx, "Something to remember", false);
         let profile_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
@@ -1227,6 +1238,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let mcp_client_in = input(window, cx, "Only if its sign-in asks for one", false);
         let mcp_client_secret_in = input(window, cx, "secret:KEY, or the secret", true);
         let set_value_in = input(window, cx, "Its value", true);
+        let setting_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
+        let setting_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
@@ -1239,6 +1252,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 .auto_grow(4, 14)
                 .placeholder("How should it work?")
         });
+        // The list pages' forms: each change is kept as its item's draft (form_drafts.rs).
+        for state in [
+            &mcp_name_in,
+            &mcp_cmd_in,
+            &mcp_client_in,
+            &mcp_client_secret_in,
+            &skill_name_in,
+            &skill_desc_in,
+            &proposal_note_in,
+            &setting_key_in,
+            &setting_value_in,
+            &share_in,
+            &routine_name_in,
+        ] {
+            form_drafts::watch(state, window, cx);
+        }
+        for state in [&mcp_settings_in, &skill_body_in, &routine_prompt_in] {
+            form_drafts::watch(state, window, cx);
+        }
         if let Ok(server) = std::env::var("LOOM_SERVER") {
             server_in.update(cx, |s, cx| s.set_value(server, window, cx));
         }
@@ -1657,6 +1689,7 @@ ACTA_KEY=secret:ACTA_KEY",
             panel_opening: None,
             door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
+            proposal_note_in,
             profile_in,
             every_in,
             routine_name_in,
@@ -1747,6 +1780,8 @@ ACTA_KEY=secret:ACTA_KEY",
             check_in,
             set_key_in,
             set_value_in,
+            setting_key_in,
+            setting_value_in,
             share_in,
             share_month: false,
             instructions_in,
@@ -2085,9 +2120,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
             }
         }
-        // A list page opens with its find field empty, on its first.
+        // A list page opens with its find field empty, on its first, and the form left
+        // open keeps its draft.
         self.list_ui.find_for = None;
-        self.list_ui.filled = None;
+        self.leave_form(cx);
         match screen {
             Screen::Server => {
                 let f = self.model.load_scripts();
@@ -2462,6 +2498,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(i) = self.away.iter().position(|a| a.dir == dir) else {
             return;
         };
+        // The form open is this server's, and keeps its draft with it.
+        self.leave_form(cx);
         let a = &mut self.away[i];
         std::mem::swap(&mut self.core, &mut a.core);
         std::mem::swap(&mut self.events, &mut a.events);
@@ -13281,33 +13319,16 @@ ACTA_KEY=secret:ACTA_KEY",
         }))
     }
 
-    /// Fills the MCP server form with server `m`'s, as it's picked.
+    /// Fills the MCP server form with server `m`'s, as it's picked, or with what the
+    /// person left in it.
     pub(super) fn fill_mcp(
         &mut self,
         m: &model::McpServer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line = if m.url.is_empty() {
-            m.command.clone()
-        } else {
-            m.url.clone()
-        };
-        self.mcp_name_in
-            .update(cx, |s, cx| s.set_value(m.name.clone(), window, cx));
-        self.mcp_cmd_in
-            .update(cx, |s, cx| s.set_value(line, window, cx));
-        self.mcp_settings_in
-            .update(cx, |s, cx| s.set_value(m.settings_text(), window, cx));
-        let (client, secret) = (
-            m.client_id.clone(),
-            m.client_secret.clone().unwrap_or_default(),
-        );
-        self.mcp_client_in
-            .update(cx, |s, cx| s.set_value(client, window, cx));
-        self.mcp_client_secret_in
-            .update(cx, |s, cx| s.set_value(secret, window, cx));
-        self.list_ui.filled = Some((Screen::Mcp, m.name.clone()));
+        let own = model::drafts::mcp_form(Some(m));
+        self.fill_form(DraftPage::Mcp, Some(m.name.clone()), own, window, cx);
     }
 
     /// The MCP servers page: the person's servers down the left, which each agent gets if
@@ -13316,18 +13337,9 @@ ACTA_KEY=secret:ACTA_KEY",
         let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
             this.small_button("new-mcp", "New server", primary)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    for s in [
-                        &this.mcp_name_in,
-                        &this.mcp_cmd_in,
-                        &this.mcp_client_in,
-                        &this.mcp_client_secret_in,
-                    ] {
-                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                    }
-                    this.mcp_settings_in
-                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    let own = model::drafts::mcp_form(None);
+                    this.fill_form(DraftPage::Mcp, None, own, window, cx);
                     this.mcp_open = Some(None);
-                    this.list_ui.filled = None;
                     cx.notify();
                 }))
         };
@@ -13383,12 +13395,13 @@ ACTA_KEY=secret:ACTA_KEY",
             return div().into_any_element();
         };
         let (line, dot) = popup::mcp_line(&m, self.model.mcp_tests.get(&m.name));
-        self.list_row(
+        self.list_row_unsaved(
             format!("mcp-{}", m.name),
             self.tile(Ico::Plug),
             m.name.clone(),
             line,
             dot,
+            self.unsaved(DraftPage::Mcp, &m.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13409,6 +13422,7 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Vec<AnyElement> {
         let open = m.map(|m| m.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-mcp", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13424,25 +13438,28 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let client = this.mcp_client_in.read(cx).value().to_string();
                 let secret = this.mcp_client_secret_in.read(cx).value().to_string();
+                let now = this.form_now(DraftPage::Mcp, cx);
                 let f = this.model.put_mcp(crate::model::with_client(
                     crate::model::server_args(&name, &line, &settings),
                     &client,
                     &secret,
                 ));
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Mcp, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.mcp_open = split.then(|| Some(name.clone()));
-                this.list_ui.filled = Some((Screen::Mcp, name));
+                this.mcp_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-mcp", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it was; else back to the list.
-                if split && changing {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it was; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !(split && changing) {
                     this.mcp_open = None;
                 }
                 cx.notify();
@@ -13453,7 +13470,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.delete_mcp(&name);
                     this.send(f);
                     this.mcp_open = None;
-                    this.list_ui.filled = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 }))
         });
@@ -13629,20 +13646,16 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("secrets-page", "Secrets", None, groups)
     }
 
-    /// Fills the skill form with skill `k`'s, as it's picked.
+    /// Fills the skill form with skill `k`'s, as it's picked, or with what the person
+    /// left in it.
     pub(super) fn fill_skill(
         &mut self,
         k: &model::Skill,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.skill_name_in
-            .update(cx, |s, cx| s.set_value(k.name.clone(), window, cx));
-        self.skill_desc_in
-            .update(cx, |s, cx| s.set_value(k.description.clone(), window, cx));
-        self.skill_body_in
-            .update(cx, |s, cx| s.set_value(k.body.clone(), window, cx));
-        self.list_ui.filled = Some((Screen::Skills, k.name.clone()));
+        let own = model::drafts::skill_form(Some(k));
+        self.fill_form(DraftPage::Skills, Some(k.name.clone()), own, window, cx);
     }
 
     /// The skills page: the person's skills down the left, which every agent reads when a
@@ -13701,6 +13714,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn skill_pane(&mut self, k: Option<&model::Skill>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let open = k.map(|k| k.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-skill", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13714,21 +13728,24 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                     return;
                 }
+                let now = this.form_now(DraftPage::Skills, cx);
                 let f = this.model.save_skill(&name, &description, &text);
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Skills, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.skill_open = split.then(|| Some(name.clone()));
-                this.list_ui.filled = Some((Screen::Skills, name));
+                this.skill_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-skill", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it was; else back to the list.
-                if split && changing {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it was; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !(split && changing) {
                     this.skill_open = None;
                 }
                 cx.notify();
@@ -13739,7 +13756,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.delete_skill(&name);
                     this.send(f);
                     this.skill_open = None;
-                    this.list_ui.filled = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 }))
         });
@@ -13770,13 +13787,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn new_skill_button(&self, cx: &mut Context<Self>) -> AnyElement {
         self.small_button("new-skill", "New skill", self.model.skills.is_empty())
             .on_click(cx.listener(|this, _, window, cx| {
-                for s in [&this.skill_name_in, &this.skill_desc_in] {
-                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                }
-                this.skill_body_in
-                    .update(cx, |s, cx| s.set_value("", window, cx));
+                let own = model::drafts::skill_form(None);
+                this.fill_form(DraftPage::Skills, None, own, window, cx);
                 this.skill_open = Some(None);
-                this.list_ui.filled = None;
                 cx.notify();
             }))
             .into_any_element()
@@ -13787,12 +13800,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(k) = self.model.skills.get(ix).cloned() else {
             return div().into_any_element();
         };
-        self.list_row(
+        self.list_row_unsaved(
             format!("skill-{}", k.name),
             self.tile(Ico::BookOpen),
             k.name.clone(),
             k.description.clone(),
             None,
+            self.unsaved(DraftPage::Skills, &k.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13804,31 +13818,16 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// Fills the proposal form with proposal `k`'s, as it's picked: a skill's name, when
-    /// it's for and how, a fix's skill fixed, or a note.
+    /// it's for and how, a fix's skill fixed, or a note; or with what the person left in
+    /// it.
     pub(super) fn fill_proposal(
         &mut self,
         k: &model::Proposal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if k.kind == "skill" {
-            let (name, description, body) = (k.name.clone(), k.description.clone(), k.body.clone());
-            self.skill_name_in
-                .update(cx, |s, cx| s.set_value(name, window, cx));
-            self.skill_desc_in
-                .update(cx, |s, cx| s.set_value(description, window, cx));
-            self.skill_body_in
-                .update(cx, |s, cx| s.set_value(body, window, cx));
-        } else if k.kind == "fix" {
-            let body = k.body.clone();
-            self.skill_body_in
-                .update(cx, |s, cx| s.set_value(body, window, cx));
-        } else {
-            let text = k.text.clone();
-            self.note_in
-                .update(cx, |s, cx| s.set_value(text, window, cx));
-        }
-        self.list_ui.filled = Some((Screen::Proposals, k.id.clone()));
+        let own = model::drafts::proposal_form(k);
+        self.fill_form(DraftPage::Proposals, Some(k.id.clone()), own, window, cx);
     }
 
     /// What a proposal is, as its row says it: "Skill from Juniper".
@@ -13910,12 +13909,13 @@ ACTA_KEY=secret:ACTA_KEY",
             Ico::Lightbulb
         };
         let line = self.proposal_line(&k);
-        self.list_row(
+        self.list_row_unsaved(
             format!("proposal-{}", k.id),
             self.tile(icon),
             k.title(),
             line,
             None,
+            self.unsaved(DraftPage::Proposals, &k.id),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13951,21 +13951,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else if p.kind == "fix" {
                     p.body = this.skill_body_in.read(cx).value().to_string();
                 } else {
-                    p.text = this.note_in.read(cx).value().to_string();
+                    p.text = this.proposal_note_in.read(cx).value().to_string();
                 }
+                let now = this.form_now(DraftPage::Proposals, cx);
                 let f = this.model.keep_proposal(&p);
+                // Its draft stays until the instance says it's kept, and with its row
+                // again if it refuses.
+                this.form_saving(DraftPage::Proposals, Some(p.id.clone()), &f, now);
                 this.send(f);
+                this.leave_form(cx);
                 this.proposal_open = None;
-                this.list_ui.filled = None;
                 cx.notify();
             }));
         let cancel = self
             .small_button("cancel-proposal", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it came; else back to the list.
-                if split {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it came; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !split {
                     this.proposal_open = None;
                 }
                 cx.notify();
@@ -13977,7 +13981,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = this.model.drop_proposal(&id);
                 this.send(f);
                 this.proposal_open = None;
-                this.list_ui.filled = None;
+                this.model.drafts.discard();
                 cx.notify();
             }));
         let icon = if skill || open.kind == "fix" {
@@ -14031,7 +14035,7 @@ ACTA_KEY=secret:ACTA_KEY",
             rows.push(self.text_row("The skill, fixed", None, Textarea::new(&self.skill_body_in)));
             groups.push(self.group(None, rows));
         } else {
-            let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
+            let mut rows = vec![self.field_row("Note", Input::new(&self.proposal_note_in))];
             if !open.site.is_empty() || open.shared {
                 let mut how = Vec::new();
                 if !open.site.is_empty() {
@@ -16293,22 +16297,28 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let (listed, shown, what, newer) = self.brain_about(&prog);
         let name = prog.name.clone();
-        self.list_row(
+        self.list_row_unsaved(
             format!("program-{}", prog.name),
             self.brain_tile(listed.as_ref(), control::LEAD),
             shown,
             what,
             newer.map(|_| popup::Dot::Warn),
+            self.unsaved(DraftPage::Brains, &prog.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             this.program_open = Some(Some(name.clone()));
-            for s in [&this.set_key_in, &this.set_value_in] {
-                s.update(cx, |s, cx| s.set_value("", window, cx));
-            }
+            this.fill_brain(&name, window, cx);
             cx.notify();
         }))
         .into_any_element()
+    }
+
+    /// Fills the brain form, its setting to add and its tokens to share, empty for brain
+    /// `name`, as it's picked, or with what the person left in it.
+    pub(super) fn fill_brain(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let own = model::drafts::brain_form();
+        self.fill_form(DraftPage::Brains, Some(name.to_string()), own, window, cx);
     }
 
     /// The ACP Registry, as the row under the brains: how many of its programs aren't
@@ -16338,6 +16348,7 @@ ACTA_KEY=secret:ACTA_KEY",
             picked,
         )
         .on_click(cx.listener(|this, _, _, cx| {
+            this.leave_form(cx);
             this.program_open = Some(None);
             cx.notify();
         }))
@@ -16379,13 +16390,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::S))
                 .px(px(space::L))
                 .py(px(space::M))
-                .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_key_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_value_in)))
                 .child(
                     self.small_button(format!("set-{}", prog.name), "Add setting", false)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            let key = this.set_key_in.read(cx).value().to_string();
-                            let value = this.set_value_in.read(cx).value().to_string();
+                            let key = this.setting_key_in.read(cx).value().to_string();
+                            let value = this.setting_value_in.read(cx).value().to_string();
                             if key.trim().is_empty() {
                                 this.model.notices.push(
                                     "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
@@ -16395,7 +16406,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                             let f = this.model.set_setting(&program, &key, Some(&value));
                             this.send(f);
-                            for s in [&this.set_key_in, &this.set_value_in] {
+                            for s in [&this.setting_key_in, &this.setting_value_in] {
                                 s.update(cx, |s, cx| s.set_value("", window, cx));
                             }
                             cx.notify();
@@ -16534,6 +16545,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.remove_program(&program);
                     this.send(f);
                     this.program_open = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 })),
         );

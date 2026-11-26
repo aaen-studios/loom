@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod drafts;
 mod popover;
 pub mod popup;
 mod rooms;
@@ -6139,6 +6140,9 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<Secret>,
     mcp_stale: bool,
+    /// The settings list pages' forms, each item's as the person left it, changed and
+    /// not saved (`drafts`).
+    pub drafts: drafts::Drafts,
     /// The fields of secret cards the person unticked Save as on, as `call/field`; the
     /// cards whose answer went and hasn't come back; and what the instance said to one
     /// it refused.
@@ -7760,6 +7764,9 @@ impl Model {
 
     fn result(&mut self, f: &Value) {
         let id = s(f, "id");
+        // A list page's Save: saved, its draft goes; refused, it stays, and the branch
+        // for its command says why.
+        self.drafts.answered(&id, f.get("error").is_none());
         // A group chat made here: the chat shows it.
         if id.starts_with("app.room_create") {
             self.room_create_answered(&id, f);
@@ -11810,6 +11817,47 @@ mod tests {
         m.file_came(&json!({"id": id, "file": {"id": "f1", "name": "notes.txt", "size": 3}}));
         m.unpark_attachments(&parked);
         assert!(m.parked.is_empty() && m.attachments.len() == 1 && m.attachments[0].file.is_some());
+    }
+
+    #[test]
+    fn a_list_pages_draft_stays_until_the_instance_says_its_saved() {
+        use drafts::{Form, Page};
+        let mut m = Model::new();
+        let key = (Page::Mcp, Some("acta".to_string()));
+        let own = Form::Fields(vec![
+            "acta".into(),
+            "https://acta.example/mcp".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
+        let edited = Form::Fields(vec![
+            "acta".into(),
+            "https://acta.example/api/mcp".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
+        m.drafts.open(key.clone(), own);
+        m.drafts.edit(edited.clone());
+        // Refused: the draft stays, with its dot, and the window says why.
+        let f = m.put_mcp(json!({"name": "acta", "url": "https://acta.example/api/mcp"}));
+        let id = s(&f, "id");
+        m.drafts.saving(id.clone(), key.clone(), edited.clone());
+        assert!(m.drafts.has(Page::Mcp, Some("acta")));
+        m.take(&json!({"t": "result", "id": id, "ok": false, "error": {"code": "invalid", "message": "That address doesn't answer."}}));
+        assert!(m.drafts.has(Page::Mcp, Some("acta")));
+        assert_eq!(m.notices, vec!["That address doesn't answer.".to_string()]);
+        // Saved: it goes.
+        let f = m.put_mcp(json!({"name": "acta", "url": "https://acta.example/api/mcp"}));
+        let id = s(&f, "id");
+        m.drafts.saving(id.clone(), key, edited);
+        m.take(
+            &json!({"t": "result", "id": "app.mcp_list_99", "ok": true, "value": {"servers": []}}),
+        );
+        assert!(m.drafts.has(Page::Mcp, Some("acta")));
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {}}));
+        assert!(!m.drafts.has(Page::Mcp, Some("acta")));
     }
 
     #[test]
