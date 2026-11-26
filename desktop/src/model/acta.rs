@@ -275,6 +275,49 @@ enum Ask {
     Create,
     Board,
     Tasks { board: String, done: bool },
+    Watches,
+    Follow(Watch),
+    Unfollow(Watch),
+}
+
+/// A watch of the person's on an Acta board, or one card on it (PLAN.md, "Watching
+/// outside events"), as far as Follow needs it: what it follows and the chat it posts in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Watch {
+    /// "" while `watch.put` is under way.
+    pub id: String,
+    pub board: String,
+    /// "" for the whole board.
+    pub card: String,
+    pub conversation: String,
+}
+
+impl Watch {
+    /// A watch as the instance gives it, when it's on an Acta board and not a routine's.
+    pub fn of(w: &Value) -> Option<Watch> {
+        let integration = s(w, "integration");
+        if !(integration.is_empty() || integration == "acta") {
+            return None;
+        }
+        if w.pointer("/wake/routine").is_some() {
+            return None;
+        }
+        let target = w.get("target")?;
+        let board = s(target, "board");
+        if board.is_empty() || s(w, "id").is_empty() {
+            return None;
+        }
+        Some(Watch {
+            id: s(w, "id"),
+            board,
+            card: s(target, "card"),
+            conversation: s(w, "conversation"),
+        })
+    }
+
+    fn same(&self, board: &str, card: &str, conversation: &str) -> bool {
+        self.board == board && self.card == card && self.conversation == conversation
+    }
 }
 
 /// Acta beside the chat, in the model.
@@ -289,6 +332,9 @@ pub struct Acta {
     pub used: Vec<String>,
     /// The messages whose pills a change here redrew, for the instance to keep them so.
     pub again: Vec<String>,
+    /// The person's watches on Acta, once `watch.list` gave them, for Follow.
+    pub watches: Option<Vec<Watch>>,
+    watches_asked: bool,
     asks: HashMap<String, Ask>,
 }
 
@@ -766,6 +812,103 @@ impl Model {
         self.acta.panel = None;
     }
 
+    /// Shuts the menu open in Acta's panel, its status's or a board picker, as Esc does
+    /// before it closes the panel. Gives whether one was open.
+    pub fn shut_acta_menu(&mut self) -> bool {
+        match self.acta.panel.as_mut() {
+            Some(Panel::Card(c)) if c.status_menu => c.status_menu = false,
+            Some(Panel::Make(f)) if f.board_menu => f.board_menu = false,
+            Some(Panel::Board(b)) if b.board_menu => b.board_menu = false,
+            _ => return false,
+        }
+        true
+    }
+
+    // --- Following (PLAN.md, "Watching outside events") ---
+
+    /// `watch.list`, once, the first time a panel of Acta's is open, for Follow.
+    pub fn watches_fetch(&mut self) -> Option<Value> {
+        if self.acta.panel.is_none() || self.acta.watches_asked {
+            return None;
+        }
+        self.acta.watches_asked = true;
+        Some(self.panel_cmd("watch.list", json!({}), Ask::Watches))
+    }
+
+    /// Whether the person follows the board, or its card, in the chat shown: a watch on
+    /// it posts there. None until their watches are known, or with no chat shown.
+    pub fn following(&self, board: &str, card: Option<&str>) -> Option<bool> {
+        let watches = self.acta.watches.as_ref()?;
+        let chat = self.conversation()?;
+        let card = card.unwrap_or("");
+        Some(watches.iter().any(|w| w.same(board, card, &chat)))
+    }
+
+    /// Follow, or stop following, the board or its card in the chat shown: `watch.put`
+    /// with this chat for its lines, or `watch.remove`. It shows at once, and goes back
+    /// as it was when the instance refuses.
+    pub fn toggle_follow(&mut self, board: &str, card: Option<&str>) -> Option<Value> {
+        let following = self.following(board, card)?;
+        let chat = self.conversation()?;
+        let card = card.unwrap_or("").to_string();
+        let watches = self.acta.watches.as_mut()?;
+        if following {
+            let at = watches.iter().position(|w| w.same(board, &card, &chat))?;
+            // While its watch.put is under way, it stays.
+            if watches[at].id.is_empty() {
+                return None;
+            }
+            let w = watches.remove(at);
+            let id = w.id.clone();
+            return Some(self.panel_cmd("watch.remove", json!({"id": id}), Ask::Unfollow(w)));
+        }
+        let w = Watch {
+            id: String::new(),
+            board: board.to_string(),
+            card: card.clone(),
+            conversation: chat.clone(),
+        };
+        watches.push(w.clone());
+        let mut target = json!({"board": board});
+        if !card.is_empty() {
+            target["card"] = json!(card);
+        }
+        Some(self.panel_cmd(
+            "watch.put",
+            json!({"target": target, "conversation": chat}),
+            Ask::Follow(w),
+        ))
+    }
+
+    /// Shows Acta's words for a refused Follow on the panel open.
+    fn panel_error(&mut self, error: String) {
+        match self.acta.panel.as_mut() {
+            Some(Panel::Card(c)) => c.error = Some(error),
+            Some(Panel::Board(b)) => b.error = Some(error),
+            _ => {}
+        }
+    }
+
+    /// `watch.updated` and `watch.removed`, from this device or another.
+    pub(super) fn take_watch_event(&mut self, kind: &str, f: &Value) {
+        let Some(watches) = self.acta.watches.as_mut() else {
+            return;
+        };
+        if kind == "watch.removed" {
+            let id = s(f, "watch");
+            watches.retain(|w| w.id != id);
+            return;
+        }
+        let Some(w) = f.get("watch").and_then(Watch::of) else {
+            return;
+        };
+        // Made here: it takes the place of the one shown while it was made.
+        watches.retain(|x| {
+            x.id != w.id && !(x.id.is_empty() && x.same(&w.board, &w.card, &w.conversation))
+        });
+        watches.push(w);
+    }
+
     /// The answers to what Acta's panels asked. Gives whether `id` was one.
     pub(super) fn take_panel_answer(&mut self, id: &str, f: &Value) -> bool {
         let Some(ask) = self.acta.asks.remove(id) else {
@@ -862,6 +1005,44 @@ impl Model {
                     } else {
                         f.error = Some(error.unwrap_or_else(|| "Acta didn't answer.".into()));
                     }
+                }
+            }
+            Ask::Watches => {
+                let list = value.get("watches").and_then(Value::as_array);
+                match list.filter(|_| error.is_none()) {
+                    Some(list) => {
+                        self.acta.watches = Some(list.iter().filter_map(Watch::of).collect());
+                    }
+                    // Asked again with the next panel.
+                    None => self.acta.watches_asked = false,
+                }
+            }
+            Ask::Follow(asked) => {
+                let made = value
+                    .get("watch")
+                    .and_then(Watch::of)
+                    .filter(|_| error.is_none());
+                if let Some(watches) = self.acta.watches.as_mut() {
+                    let at = watches.iter().position(|w| w.id.is_empty() && *w == asked);
+                    // Its watch.updated, which comes first, may have put it in already.
+                    match (made, at) {
+                        (Some(w), Some(k)) => watches[k] = w,
+                        (None, Some(k)) => {
+                            watches.remove(k);
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(e) = error {
+                    self.panel_error(e);
+                }
+            }
+            Ask::Unfollow(w) => {
+                if let Some(e) = error {
+                    if let Some(watches) = self.acta.watches.as_mut() {
+                        watches.push(w);
+                    }
+                    self.panel_error(e);
                 }
             }
         }
@@ -993,6 +1174,11 @@ mod tests {
             f.error.as_deref(),
             Some("nope isn't one of the board's labels.")
         );
+        // Esc shuts the board picker first, and keeps the form.
+        m.toggle_board_menu();
+        assert!(m.shut_acta_menu());
+        assert!(!m.shut_acta_menu());
+        assert!(matches!(&m.acta.panel, Some(Panel::Make(f)) if !f.board_menu));
     }
 
     #[test]
@@ -1079,6 +1265,100 @@ mod tests {
             .card_fetches(crate::model::now_ms())
             .iter()
             .all(|f| f["name"] != "cards.refresh"));
+    }
+
+    #[test]
+    fn follow_makes_a_watch_for_the_chat_and_goes_back_when_refused() {
+        let mut m = acta_model();
+        m.open_room = Some("c_1".into());
+        // The watches are asked for once a panel is open, and once.
+        assert!(m.watches_fetch().is_none());
+        let _ = m.open_card("aaen-studios/loom", "LOO-206");
+        let list = m.watches_fetch().expect("watch.list");
+        assert_eq!(list["name"], "watch.list");
+        assert!(m.watches_fetch().is_none());
+        assert_eq!(m.following("aaen-studios/loom", Some("LOO-206")), None);
+        answer(
+            &mut m,
+            &list,
+            json!({"value": {"watches": [
+                {"id": "w_1", "integration": "acta", "target": {"board": "aaen-studios/loom"}, "conversation": "c_2"},
+                {"id": "w_2", "integration": "acta", "target": {"board": "aaen-studios/loom"}, "conversation": "", "wake": {"routine": "r_1"}},
+                {"id": "w_9", "integration": "t3", "target": {"thread": "th_1"}, "conversation": "c_1"}
+            ]}}),
+        );
+        // The board's watch posts in another chat, and a routine's isn't one to follow.
+        assert_eq!(m.following("aaen-studios/loom", None), Some(false));
+        assert_eq!(m.acta.watches.as_ref().unwrap().len(), 1);
+        let put = m
+            .toggle_follow("aaen-studios/loom", Some("LOO-206"))
+            .unwrap();
+        assert_eq!(put["name"], "watch.put");
+        assert_eq!(
+            put["args"],
+            json!({"target": {"board": "aaen-studios/loom", "card": "LOO-206"}, "conversation": "c_1"})
+        );
+        // Shown at once; pressed again while it's made, it stays.
+        assert_eq!(
+            m.following("aaen-studios/loom", Some("LOO-206")),
+            Some(true)
+        );
+        assert!(m
+            .toggle_follow("aaen-studios/loom", Some("LOO-206"))
+            .is_none());
+        // Its watch.updated comes first, then the answer: one watch.
+        let made = json!({"id": "w_3", "integration": "acta", "target": {"board": "aaen-studios/loom", "card": "LOO-206"}, "conversation": "c_1"});
+        m.take(&json!({"t": "event", "kind": "watch.updated", "watch": made}));
+        answer(&mut m, &put, json!({"value": {"watch": made}}));
+        let ids: Vec<String> = m
+            .acta
+            .watches
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|w| w.id.clone())
+            .collect();
+        assert_eq!(ids, ["w_1", "w_3"]);
+        // Following stops with watch.remove, and is back when that's refused.
+        let remove = m
+            .toggle_follow("aaen-studios/loom", Some("LOO-206"))
+            .unwrap();
+        assert_eq!(remove["name"], "watch.remove");
+        assert_eq!(remove["args"], json!({"id": "w_3"}));
+        assert_eq!(
+            m.following("aaen-studios/loom", Some("LOO-206")),
+            Some(false)
+        );
+        answer(
+            &mut m,
+            &remove,
+            json!({"error": {"code": "not_found", "message": "There's no watch w_3."}}),
+        );
+        assert_eq!(
+            m.following("aaen-studios/loom", Some("LOO-206")),
+            Some(true)
+        );
+        // Following the board, refused: back as it was, with why on the panel.
+        let put = m.toggle_follow("aaen-studios/loom", None).unwrap();
+        answer(
+            &mut m,
+            &put,
+            json!({"error": {"code": "not_found", "message": "Acta isn't connected."}}),
+        );
+        assert_eq!(m.following("aaen-studios/loom", None), Some(false));
+        let Some(Panel::Card(c)) = &m.acta.panel else {
+            panic!()
+        };
+        assert_eq!(c.error.as_deref(), Some("Acta isn't connected."));
+        // Taken away on another device.
+        m.take(&json!({"t": "event", "kind": "watch.removed", "watch": "w_3"}));
+        assert_eq!(
+            m.following("aaen-studios/loom", Some("LOO-206")),
+            Some(false)
+        );
+        // With no chat shown, there's nothing to follow in.
+        m.open_room = None;
+        assert_eq!(m.following("aaen-studios/loom", None), None);
     }
 
     #[test]

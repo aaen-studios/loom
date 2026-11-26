@@ -4142,7 +4142,7 @@ impl Model {
     /// of the shown chat, once it shows, whose cards were looked up over 5 minutes ago,
     /// for their status as it is now.
     pub fn card_fetches(&mut self, now: i64) -> Vec<Value> {
-        let mut out = Vec::new();
+        let mut out: Vec<Value> = self.watches_fetch().into_iter().collect();
         if !self.boards_asking && self.boards_at.is_none_or(|t| now - t >= BOARDS_FRESH_MS) {
             self.boards_asking = true;
             let id = self.id("app.acta_boards");
@@ -7428,6 +7428,8 @@ impl Model {
                     self.asks.retain(|a| a.id != id);
                 }
             }
+            // The person's watches, for Follow in Acta's panels.
+            "watch" => self.take_watch_event(&kind, f),
             "account" => {
                 if let Some(has) = f.get("has_password").and_then(Value::as_bool) {
                     self.has_password = Some(has);

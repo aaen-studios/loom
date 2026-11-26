@@ -160,6 +160,13 @@ export function play(app: HTMLElement) {
 			show(true);
 		});
 		side.querySelector('[data-acta-close]')!.addEventListener('click', () => show(false));
+		// Follow, and Following with its tick, which stops it.
+		const follow = side.querySelector<HTMLButtonElement>('[data-acta-follow]')!;
+		follow.addEventListener('click', () => {
+			const on = follow.getAttribute('aria-pressed') !== 'true';
+			follow.setAttribute('aria-pressed', String(on));
+			follow.querySelector('[data-follow-words]')!.textContent = on ? 'Following' : 'Follow';
+		});
 		const chip = side.querySelector<HTMLButtonElement>('[data-acta-status]')!;
 		const menu = side.querySelector<HTMLElement>('[data-acta-menu]')!;
 		const openMenu = (open: boolean) => {

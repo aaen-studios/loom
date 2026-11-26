@@ -527,7 +527,7 @@ const BOARD_LAYERS = [
 				<div class="as-comment"><div class="as-who">Juniper · 26 Nov</div><p>The billing fix is waiting on review, so it goes in last.</p></div>
 			</div>
 		</div>
-		<div class="as-foot"><span class="cp-button">Open in Acta</span></div>
+		<div class="as-foot"><span class="cp-button">Open in Acta</span><button type="button" class="cp-button as-follow" aria-pressed="false" data-acta-follow><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span data-follow-words>Follow</span></button></div>
 	</aside>
 </div>
 
@@ -1996,8 +1996,8 @@ const BOARD_LAYERS = [
 	}
 	/* A card's side preview beside the chat (acta_ui.rs, card_side): the head with the
 	   board's tile, board · id in mono and close; the title as a heading, the chips, the
-	   description, the subtasks with their ticks and the last comments; Open in Acta at the
-	   foot. 36% of the window, as the app's panel beside the chat. */
+	   description, the subtasks with their ticks and the last comments; Open in Acta and
+	   Follow at the foot. 36% of the window, as the app's panel beside the chat. */
 	.acta-side {
 		display: flex;
 		flex-direction: column;
@@ -2213,6 +2213,20 @@ const BOARD_LAYERS = [
 		height: var(--control-button);
 		padding: 0 var(--space-l);
 		font-size: var(--size-small);
+	}
+	/* Follow, and Following with its tick (acta_ui.rs, follow_button). */
+	.as-follow {
+		gap: 6px;
+		background: none;
+		font-family: inherit;
+	}
+	.as-follow .i {
+		display: none;
+		width: 12px;
+		height: 12px;
+	}
+	.as-follow[aria-pressed='true'] .i {
+		display: block;
 	}
 	@media (prefers-color-scheme: dark) {
 		:root:not([data-theme='light']) .acta-preview {

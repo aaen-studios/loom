@@ -1932,6 +1932,8 @@ ACTA_KEY=secret:ACTA_KEY",
             self.end_search(window, cx);
         } else if self.popup.is_some() {
             self.popup = None;
+        } else if self.side == Some(Screen::Acta) && self.model.shut_acta_menu() {
+            // A menu in Acta's panel shuts first.
         } else if self.side.is_some() && self.screen == Screen::Chat {
             self.close_side(cx);
         } else if self.model.conn == Some(Conn::SignedOut) {

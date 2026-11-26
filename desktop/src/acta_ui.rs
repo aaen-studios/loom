@@ -376,8 +376,52 @@ impl Loom {
             .child(
                 self.button("acta-open", "Open in Acta", false)
                     .on_click(move |_, _, cx| cx.open_url(&link)),
-            );
+            )
+            .children(self.follow_button("acta-follow-card", &c.board, Some(&c.id), cx));
         (head, body, Some(foot))
+    }
+
+    /// Follow, or Following with a tick, for a board or one card on it in the chat
+    /// shown: a watch whose lines come here. None until the person's watches are known.
+    fn follow_button(
+        &self,
+        id: &'static str,
+        board: &str,
+        card: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
+        let following = self.model.following(board, card)?;
+        let p = self.p;
+        let label = if following { "Following" } else { "Follow" };
+        let (board, card) = (board.to_string(), card.map(str::to_string));
+        Some(
+            div()
+                .id(id)
+                .role(Role::Button)
+                .aria_label(label)
+                .px(px(space::L))
+                .h(px(control::BUTTON))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(6.0))
+                .rounded(px(radius::BUTTON))
+                .border_1()
+                .border_color(p.line_strong)
+                .text_size(px(size::SMALL))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink)
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, None)
+                .when(following, |d| d.child(Icon::new(Ico::Check).xsmall()))
+                .child(label)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if let Some(f) = this.model.toggle_follow(&board, card.as_deref()) {
+                        this.send(f);
+                    }
+                    cx.notify();
+                })),
+        )
     }
 
     /// The side preview's chips: its status, which opens a menu to move it, its
@@ -802,6 +846,7 @@ impl Loom {
             .gap(px(space::M))
             .child(self.board_picker(&b.board, b.board_menu, false, cx))
             .child(div().flex_1())
+            .children(self.follow_button("acta-follow-board", &b.board, None, cx))
             .child(tabs);
         let content = match b.tab {
             BoardTab::Columns => self.board_columns(&b, cx),
