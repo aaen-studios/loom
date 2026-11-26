@@ -83,6 +83,7 @@ enum Tokens {
         static let cardPreview: CGFloat = 330
         static let boardColumn: CGFloat = 140
         static let fieldLabel: CGFloat = 120
+        static let limitWords: CGFloat = 88
     }
 
     enum Control {

@@ -7460,11 +7460,13 @@ ACTA_KEY=secret:ACTA_KEY",
             .flex()
             .flex_col()
             .gap(px(space::S))
+            // Three across, each row centred, so a fourth starts a second row centred too.
             .when(!tiles.is_empty(), |d| {
                 d.child(
                     div()
                         .flex()
                         .flex_wrap()
+                        .justify_center()
                         .gap(px(space::XS))
                         .px(px(space::S))
                         .children(tiles),
@@ -7576,7 +7578,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(self.update_pop(false, cx), |d, pop| d.child(pop))
-            .children(self.limit_boxes(cx))
             // The server, as its spool, on the left, and the settings on the right: each
             // opens the popup. While anything loom runs is behind, the update icon sits
             // just left of the gear.
@@ -7737,12 +7738,6 @@ ACTA_KEY=secret:ACTA_KEY",
             behind: behind.to_vec(),
             behind_all: self.hub().behind_all,
             update_open: !behind.is_empty() && self.update_pop_open(),
-            minute: if model.plan_limits().is_empty() {
-                0
-            } else {
-                chrono::Local::now().timestamp_millis() / 60_000
-            },
-            limits: model.plan_limits(),
         }
     }
 
@@ -7786,90 +7781,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 control::ICON_SMALL,
             ))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_bar(window, cx)))
-    }
-
-    /// The limits of the person's plans, over the server's row: a box for each program
-    /// that reports them and that their agents run on, with its icon and its plan's name,
-    /// then a line each for the session and the week, a ring with how much is used and
-    /// when it resets. A click opens the program under Brains. The rail leaves them out.
-    fn limit_boxes(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let p = self.p;
-        let now = chrono::Local::now();
-        let mut out = Vec::new();
-        for (name, limits) in self.model.plan_limits() {
-            let listed = self.model.program_listed(&name).cloned();
-            let plan = if limits.plan.is_empty() {
-                self.model.program_title(&name)
-            } else {
-                limits.plan.clone()
-            };
-            let mut lines = Vec::new();
-            for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
-                let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
-                    continue;
-                };
-                let ink = match meter::Level::of(w.used) {
-                    meter::Level::Bad => p.bad,
-                    meter::Level::Warn => p.warn,
-                    meter::Level::Quiet => p.ink_2,
-                };
-                lines.push(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .child(meter::ring(
-                            control::LIMIT_RING,
-                            w.fraction(),
-                            ink,
-                            p.line_strong,
-                        ))
-                        .child(div().flex_1().text_color(p.ink_2).child(label))
-                        .child(div().text_color(p.ink_3).child(w.words(now))),
-                );
-            }
-            let open = name.clone();
-            out.push(
-                div()
-                    .id(SharedString::from(format!("limits-{name}")))
-                    .role(Role::Button)
-                    .aria_label(format!("{plan} limits"))
-                    .mx(px(space::S))
-                    .mb(px(space::XS))
-                    .p(px(space::S))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::XS))
-                    .rounded(px(radius::BUTTON))
-                    .border_1()
-                    .border_color(p.line)
-                    .text_size(px(size::CAPTION))
-                    .cursor_pointer()
-                    .soft_hover(transparent_black(), p.hover, None)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .child(self.brain_icon(listed.as_ref(), control::LIMIT_RING))
-                            .child(
-                                div()
-                                    .text_size(px(size::SMALL))
-                                    .text_color(p.ink)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(plan),
-                            ),
-                    )
-                    .children(lines)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // Brains opens on its list, so the program's page after.
-                        this.open(Screen::Programs, cx);
-                        this.program_open = Some(Some(open.clone()));
-                    }))
-                    .into_any_element(),
-            );
-        }
-        out
     }
 
     /// The settings gear, which opens the popup on the page last open.
@@ -17147,16 +17058,78 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                 })),
         );
-        vec![
-            self.pane_head(
-                Some(self.brain_tile(listed.as_ref(), control::ICON_LARGE + 6.0)),
-                shown,
-                Some(what),
-                None,
-            ),
-            self.group(None, rows),
-            actions.into_any_element(),
-        ]
+        let mut pane = vec![self.pane_head(
+            Some(self.brain_tile(listed.as_ref(), control::ICON_LARGE + 6.0)),
+            shown,
+            Some(what),
+            None,
+        )];
+        pane.extend(self.program_plan(&prog.name));
+        pane.push(self.group(None, rows));
+        pane.push(actions.into_any_element());
+        pane
+    }
+
+    /// The plan the person is signed in to with a program, on its page under Brains:
+    /// Signed in with the plan's name, then the session and the week, each a bar with how
+    /// much is used and when it resets. None while it has reported no plan.
+    fn program_plan(&self, program: &str) -> Option<AnyElement> {
+        let limits = self.model.program_limits(program)?.clone();
+        let p = self.p;
+        let now = chrono::Local::now();
+        let mut rows = Vec::new();
+        if !limits.plan.is_empty() {
+            rows.push(
+                self.field_row(
+                    "Signed in",
+                    div()
+                        .text_size(px(size::BODY))
+                        .text_color(p.ink)
+                        .truncate()
+                        .child(limits.plan.clone()),
+                ),
+            );
+        }
+        for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
+            let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
+                continue;
+            };
+            let (bar, words) = self.limit_inks(w.used);
+            rows.push(
+                self.field_row(
+                    label,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(p.line_strong)
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(w.fraction()))
+                                        .rounded_full()
+                                        .bg(bar),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(layout::LIMIT_WORDS))
+                                .text_right()
+                                .text_size(px(size::CAPTION))
+                                .text_color(words)
+                                .child(w.words(now)),
+                        ),
+                ),
+            );
+        }
+        Some(self.group(None, rows))
     }
 
     /// The ACP Registry's programs that aren't on the instance, beside the list: as
@@ -18044,6 +18017,75 @@ ACTA_KEY=secret:ACTA_KEY",
                         )),
                     ),
             )
+            // The plan, under a hairline across the card.
+            .when_some(self.context_plan_view(fill), |d, plan| {
+                d.child(div().mx(px(-space::M)).h(px(1.0)).bg(p.line))
+                    .child(plan)
+            })
+    }
+
+    /// How a plan's limit is coloured at `used` percent: its ring or its bar, and its
+    /// words. Quiet, then orange from 75% and red from 90%.
+    fn limit_inks(&self, used: i64) -> (Hsla, Hsla) {
+        let p = self.p;
+        match meter::Level::of(used) {
+            meter::Level::Bad => (p.bad, p.bad),
+            meter::Level::Warn => (p.warn, p.warn),
+            meter::Level::Quiet => (p.ink_3, p.ink_3),
+        }
+    }
+
+    /// The plan of the program the open chat runs on, under the context card's Context
+    /// (`Model::context_plan`): the program's mark and the plan's name, then a line each
+    /// for the session and the week, a small ring with how much is used and when it
+    /// resets. None while the program has reported no plan.
+    fn context_plan_view(&self, fill: &model::ContextFill) -> Option<Div> {
+        let (program, limits) = self.model.context_plan(fill)?;
+        let p = self.p;
+        let now = chrono::Local::now();
+        let listed = self.model.program_listed(&program).cloned();
+        let plan = if limits.plan.is_empty() {
+            self.model.program_title(&program)
+        } else {
+            limits.plan.clone()
+        };
+        let mut out = div().flex().flex_col().gap(px(space::S)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(self.brain_icon(listed.as_ref(), control::LIMIT_RING))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(size::BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(plan),
+                ),
+        );
+        for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
+            let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
+                continue;
+            };
+            let (ring, words) = self.limit_inks(w.used);
+            out = out.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .text_size(px(size::CAPTION))
+                    .child(meter::ring(
+                        control::LIMIT_RING,
+                        w.fraction(),
+                        ring,
+                        p.line_strong,
+                    ))
+                    .child(div().flex_1().text_color(p.ink_2).child(label))
+                    .child(div().flex_none().text_color(words).child(w.words(now))),
+            );
+        }
+        Some(out)
     }
 
     /// The pointer came onto the ring (`ring`) or the card, or left it. The card shows
@@ -27427,9 +27469,6 @@ struct SidebarKey {
     behind: Vec<model::Behind>,
     behind_all: bool,
     update_open: bool,
-    /// The limits of the person's plans, and the minute, for the 0% once one resets.
-    limits: Vec<(String, model::PlanLimits)>,
-    minute: i64,
 }
 
 /// An agent, as the sidebar shows it.
