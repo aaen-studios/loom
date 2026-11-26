@@ -153,10 +153,11 @@ fn maybe(s: own String?) -> Value {
     return Value.Null
 }
 
-// Whether a conversation is its agent's chat, rather than a task's, a side
-// question's, a branch's, a routine's or another agent's (`asked_by`): 1 or 0.
+// Whether a conversation may be its agent's chat, rather than a task's, a side
+// question's, a branch's, a routine's, another agent's (`asked_by`) or a thread an
+// agent made (`made_by`): 1 or 0. Of those, the chat is the one marked `main`.
 fn chat_of(c: Json) -> i64 {
-    for key in ["task", "side", "branch_of", "routine", "asked_by", "room"] {
+    for key in ["task", "side", "branch_of", "routine", "asked_by", "made_by", "room"] {
         if at(c, key) != Json.Null { return 0 }
     }
     return 1
@@ -422,7 +423,8 @@ impl Cache {
             let id = str_at(c, "id") ?? String()
             if let old = try self.one("SELECT json FROM conversations WHERE id = ?", id.copy()) {
                 let merged = merge(old, c)
-                _ = try self.db.execute(String("UPDATE conversations SET json = ?, agent = ?, chat = ? WHERE id = ?"), [t("{merged}"), maybe(str_at(merged, "agent")), Value.Int(chat_of(merged)), t(id)])
+                _ = try self.db.execute(String("UPDATE conversations SET json = ?, agent = ?, chat = ? WHERE id = ?"), [t("{merged}"), maybe(str_at(merged, "agent")), Value.Int(chat_of(merged.copy())), t(id)])
+                try self.one_main(merged)
             }
         } else if kind == "conversation.deleted" {
             let id = str_at(e, "conversation") ?? String()
@@ -656,7 +658,15 @@ impl Cache {
     fn put_conversation(self, c: Json) ! Error {
         let id = str_at(c, "id") ?? String()
         let when = int_at(c, "at") ?? 0
-        _ = try self.db.execute(String("INSERT INTO conversations (id, json, last, agent, chat) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json, agent = excluded.agent, chat = excluded.chat"), [t(id), t("{c}"), Value.Int(when), maybe(str_at(c, "agent")), Value.Int(chat_of(c))])
+        _ = try self.db.execute(String("INSERT INTO conversations (id, json, last, agent, chat) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id) DO UPDATE SET json = excluded.json, agent = excluded.agent, chat = excluded.chat"), [t(id), t("{c}"), Value.Int(when), maybe(str_at(c.copy(), "agent")), Value.Int(chat_of(c.copy()))])
+        try self.one_main(c)
+    }
+
+    // An agent has one chat: once conversation `c` is marked its agent's (`main`), no
+    // other of that agent's is, though the event that says so hasn't come yet.
+    fn one_main(self, c: Json) ! Error {
+        if bool_at(c.copy(), "main") != some(true) { return }
+        _ = try self.db.execute(String("UPDATE conversations SET json = json_remove(json, '$.main') WHERE agent = ? AND id != ? AND json_extract(json, '$.main') = 1"), [maybe(str_at(c.copy(), "agent")), t(str_at(c, "id") ?? String())])
     }
 
     fn put_message(self, m: Json) ! Error {
@@ -798,10 +808,11 @@ impl Cache {
         return try self.one("SELECT json FROM agents WHERE id = ?", id.copy())
     }
 
-    /// The newest conversation with `agent`: the one the app shows as that agent's chat.
-    /// A task's conversation is the task's, not the chat.
+    /// `agent`'s chat with the person, the one the app shows as that agent's chat: the
+    /// conversation the instance marks `main`, however new any other is. An instance from
+    /// before `main` marks none, and its chat is then its newest that may be one.
     pub fn conversation_for(self, agent: String) -> String? ! Error {
-        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE agent = ? AND chat = 1 ORDER BY last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
+        let row = try self.db.query_one(String("SELECT id FROM conversations WHERE agent = ? AND chat = 1 ORDER BY coalesce(json_extract(json, '$.main'), 0) DESC, last DESC, rowid DESC LIMIT 1"), [t(agent.copy())])
         let r = row else return none
         return some(text(r[0]))
     }
@@ -946,6 +957,34 @@ fn another_agents_thread_isnt_the_agents_chat() ! Error {
     assert(try c.conversation_for(String("a_1")) == some(String("c_old")))
     _ = try c.apply(ev(4, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_old")).s("asked_by", String("a_3")).done()).done()))
     assert(try c.conversation_for(String("a_1")) == some(String("c_chat")))
+}
+
+@test
+fn the_chat_is_the_one_marked_main() ! Error {
+    let c = try Cache.open(String(":memory:"))
+    let chat = Obj.new().s("id", String("c_5")).s("agent", String("a_2")).s("title", String("")).b("main", true).i("at", 10).done()
+    // A conversation the agent made for itself, newer, with the newest message.
+    let made = Obj.new().s("id", String("c_22")).s("agent", String("a_2")).s("title", String("Plenpartner warm-up")).s("made_by", String("a_2")).i("at", 20).done()
+    _ = try c.apply(ev(1, "conversation.created", Obj.new().j("conversation", chat).done()))
+    _ = try c.apply(ev(2, "conversation.created", Obj.new().j("conversation", made).done()))
+    _ = try c.apply(ev(3, "message.created", Obj.new().j("message", Obj.new().s("id", String("msg_1")).s("conversation", String("c_22")).i("at", 30).done()).done()))
+    assert(try c.conversation_for(String("a_2")) == some(String("c_5")))
+    // An older chat, unmarked, newer than the marked one, isn't it either.
+    let older = Obj.new().s("id", String("c_9")).s("agent", String("a_2")).s("title", String("")).i("at", 40).done()
+    _ = try c.apply(ev(4, "conversation.created", Obj.new().j("conversation", older).done()))
+    assert(try c.conversation_for(String("a_2")) == some(String("c_5")))
+    // The person's new chat is, and the one before isn't, before the event that says so.
+    let fresh = Obj.new().s("id", String("c_30")).s("agent", String("a_2")).s("title", String("")).b("main", true).i("at", 5).done()
+    _ = try c.apply(ev(5, "conversation.created", Obj.new().j("conversation", fresh).done()))
+    assert(try c.conversation_for(String("a_2")) == some(String("c_30")))
+    // From an older instance, as a store migrates: the thread is marked, then the chat.
+    _ = try c.apply(ev(6, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", String("c_5")).b("main", true).done()).done()))
+    assert(try c.conversation_for(String("a_2")) == some(String("c_5")))
+    var mains = List<String>()
+    for k in try c.conversations() {
+        if bool_at(k.copy(), "main") == some(true) { mains.push(str_at(k, "id") ?? String()) }
+    }
+    assert(mains == [String("c_5")])
 }
 
 @test

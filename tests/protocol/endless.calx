@@ -141,7 +141,8 @@ fn run(i: Instance) ! Error {
     let later = try Session.connect(i.base.copy(), i.token.copy(), 0)
     var seen = String()
     for f in later.frames {
-        if str_at(f.copy(), "kind") == some(String("conversation.updated")) { seen = "{at(at(f, "conversation"), "context")}" }
+        // The last change to its context: the chat made after it says it isn't the chat.
+        if str_at(f.copy(), "kind") == some(String("conversation.updated")) and at(at(f.copy(), "conversation"), "context") != Json.Null { seen = "{at(at(f, "conversation"), "context")}" }
     }
     try check(seen.contains(#""used":0"#) and seen.contains(#""compacts":true"#), "a device that connects later has it")
     later.close()

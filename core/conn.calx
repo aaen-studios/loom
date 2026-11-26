@@ -1246,7 +1246,7 @@ impl Conn {
     /// A message the person wrote: kept in the outbox with a client id, and sent when the
     /// connection is up. The app hears `core.queued` at once, and the `ack` once it's stored.
     /// A send may name an `agent` instead of a `conversation`: it goes to that agent's
-    /// newest conversation, which the core makes first if there's none.
+    /// chat (Cache.conversation_for), which the core makes first if there's none.
     fn send(mut self, m: Json) {
         var cid = str_at(m.copy(), "cid") ?? String()
         if cid.len() == 0 {
