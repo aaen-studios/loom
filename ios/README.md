@@ -27,6 +27,15 @@ A build without the core (`--sample`, or `xcodegen` run by hand) runs on [`Sampl
 
 To run against an instance, set `LOOM_SERVER` in the scheme's environment, or type its address on the sign-in screen.
 
+## Testing it
+
+The app's unit tests, in [`LoomTests/`](LoomTests/), test what it works out without the core: where each emoji is in what Select text and the composer show, and what copying gives. They run in the app in the simulator:
+
+```sh
+calx scripts/ios.calx --sample
+xcodebuild test -project ios/Loom.xcodeproj -scheme Loom -destination 'platform=iOS Simulator,name=iPhone 17'
+```
+
 ## Testing it against an instance
 
 ```sh
