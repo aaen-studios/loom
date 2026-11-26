@@ -372,13 +372,16 @@ export function play(app: HTMLElement) {
 	// The header in a narrow window gives way as the app's does (desktop/src/model/header.rs),
 	// before it reaches the window's buttons: one step at a time, always in this order, until
 	// nothing in it runs past its end. Then the name shortens to about three letters, then the
-	// mode's words, and then the rest of the name (model::header::fit). Narrower than the app's
-	// window ever gets, as on a phone, the mode's chip goes once it has no words left, and then
-	// the thread beside the name, before the name gives any more. What it took from each shows
-	// whole under the pointer (model::header::Fit::cut).
+	// mode's words, and then the rest of the name (model::header::fit). Its words cut to
+	// nothing, the mode's chip goes, and the name gets back what that gives. Narrower than the
+	// app's window ever gets, as on a phone, the thread beside the name goes too, before the
+	// name gives any more. What it took from each shows whole under the pointer
+	// (model::header::Fit::cut). Widths are measured to the fraction of a pixel, so a name or
+	// words that fit are never cut.
 	const header = app.querySelector<HTMLElement>('[data-header]')!;
 	const steps = ['fit-effort', 'fit-members', 'fit-icon', 'fit-close', 'fit-chevrons'];
-	const phoneSteps = ['fit-mode', 'fit-thread'];
+	/** How far past its end the header may run and still fit: a rounding error, not a pixel. */
+	const SLACK = 0.01;
 	/** The least of its name a shortened head keeps while the mode's words can still give
 	 * (model::header::NAME_LEAST). */
 	const NAME_LEAST = 48;
@@ -386,6 +389,16 @@ export function play(app: HTMLElement) {
 	const modeChip = header.querySelector<HTMLElement>('.chip.mode')!;
 	const wordsIn = (el: Element | null) => el?.textContent?.replace(/\s+/g, ' ').trim() ?? '';
 	const shortened = (el: Element | null) => !!el && el.scrollWidth > el.clientWidth;
+	/** How wide `el`'s words are, to the fraction of a pixel. */
+	const widthOf = (el: HTMLElement) => {
+		const r = document.createRange();
+		r.selectNodeContents(el);
+		return r.getBoundingClientRect().width;
+	};
+	/** At most `most` of words `whole` wide, or all of them when that's room enough. */
+	const cap = (el: HTMLElement, whole: number, most: number) => {
+		el.style.maxWidth = most >= whole ? '' : `${most}px`;
+	};
 	const tipIf = (el: HTMLElement, cut: boolean, words: string) => {
 		if (cut) el.title = words;
 		else el.removeAttribute('title');
@@ -394,35 +407,41 @@ export function play(app: HTMLElement) {
 		const modeWords = modeChip.querySelector<HTMLElement>('.mode-words')!;
 		const headBtn = header.querySelector<HTMLElement>(app.classList.contains('in-room') ? '.room-btn' : '.agent-btn')!;
 		const name = headBtn.querySelector<HTMLElement>('.head-name')!;
-		header.classList.remove(...steps, ...phoneSteps);
+		header.classList.remove(...steps, 'fit-mode', 'fit-thread');
 		for (const el of header.querySelectorAll<HTMLElement>('.head-name, .mode-words')) el.style.maxWidth = '';
-		const over = () => header.scrollWidth - header.clientWidth;
+		// How far the chips run past the header's end, inside its padding.
+		const over = () => {
+			const end = header.getBoundingClientRect().right - parseFloat(getComputedStyle(header).paddingRight);
+			return header.lastElementChild!.getBoundingClientRect().right - end;
+		};
 		for (const step of steps) {
-			if (over() <= 0) break;
+			if (over() <= SLACK) break;
 			header.classList.add(step);
 		}
-		if (over() > 0) {
-			const whole = name.scrollWidth;
-			let most = Math.max(whole - over(), Math.min(whole, NAME_LEAST));
-			name.style.maxWidth = `${most}px`;
-			if (over() > 0 && modeWords.offsetParent) {
-				modeWords.style.maxWidth = `${Math.max(modeWords.scrollWidth - over(), 0)}px`;
-			}
-			// Each step it takes here gives the name back what it can: all of it once it fits.
-			for (const step of phoneSteps) {
-				if (over() <= 0) break;
-				header.classList.add(step);
+		if (over() > SLACK) {
+			const whole = widthOf(name);
+			// The name down to its least, or whole once it fits.
+			const shorten = () => {
 				name.style.maxWidth = '';
-				most = whole;
-				if (over() > 0) {
-					most = Math.max(whole - over(), Math.min(whole, NAME_LEAST));
-					name.style.maxWidth = `${most}px`;
+				const most = Math.max(whole - over(), Math.min(whole, NAME_LEAST));
+				cap(name, whole, most);
+				return most;
+			};
+			let most = shorten();
+			if (over() > SLACK && modeWords.offsetParent) {
+				const words = widthOf(modeWords);
+				const left = Math.max(words - over(), 0);
+				cap(modeWords, words, left);
+				if (left === 0) {
+					header.classList.add('fit-mode');
+					most = shorten();
 				}
 			}
-			if (over() > 0) {
-				most = Math.max(most - over(), 0);
-				name.style.maxWidth = `${most}px`;
+			if (over() > SLACK) {
+				header.classList.add('fit-thread');
+				most = shorten();
 			}
+			if (over() > SLACK) cap(name, whole, Math.max(most - over(), 0));
 		}
 		const brainWords = brainChip.querySelector('.brain-words');
 		tipIf(brainChip, header.classList.contains('fit-effort'), wordsIn(brainWords));
