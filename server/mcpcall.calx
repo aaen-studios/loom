@@ -1,0 +1,269 @@
+module server.mcpcall
+
+// Calling a tool of one of the person's MCP servers as the person, for the
+// instance itself rather than for an agent (PLAN.md, "Calling MCP servers as
+// the person"): a card's title and status for a pill in the chat, and next a
+// T3 thread's state. It runs on a thread of its own, so the instance's loop
+// never waits on a server.
+//
+// The worker keeps a session to each server it has called, by whose and which
+// server it is, and stops one left unused for five minutes. A server the
+// person signed in to is sent their access token: one that ends soon is
+// renewed first, and so is one the server answers 401 to, once, and the
+// renewed grant comes back for the instance to keep, as Test does
+// (`server/mcptest.calx`). A session that fails in any other way is started
+// again, once. Each call has a time it may take, and an answer to the same
+// call that's recent enough, as the job says, is given again without calling.
+import std.json.{Json, parse}
+import std.thread.{Task}
+import shared.obj.{str_at}
+import server.mcpclient
+import server.mcpclient.{Server}
+import server.oauth
+import server.oauth.{Refreshed}
+import server.store.{now}
+
+// A session unused this long is stopped.
+const IDLE_MS: i64 = 300000
+// How often the worker looks for sessions to stop, in nanoseconds.
+const SWEEP_NS: u64 = 60000000000
+// The most answers kept for `fresh_ms`.
+const KEPT_MOST: usize = 256
+
+pub struct Job {
+    pub id: i64
+    pub key: String    // whose server it is and which, which its session is kept by: "user/name"
+    pub spec: Json    // as ACP's session/new takes it, with its secrets filled in
+    pub grant: Json    // the person's sign-in to it, or null
+    pub tool: String
+    pub arguments: Json
+    pub ms: u64    // how long starting it and the call may each take
+    pub fresh_ms: i64    // an answer to the same call this recent is given again; 0 always calls
+}
+
+pub struct Done {
+    pub id: i64
+    pub result: Json    // the tool's MCP result, when it answered: `isError` is the tool's own failure
+    pub error: String    // why it didn't answer, or ""
+    pub sign_in: bool    // it answered 401, with no token, or none that it took
+    pub grant: Json    // the sign-in, renewed, or null when it wasn't
+    pub ended: bool    // the sign-in couldn't be renewed: the person signs in again
+}
+
+struct Session {
+    server: Server
+    spec: String    // the spec it started with, without its token
+    token: String
+    used: i64
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+    sessions: LinkedMap<String, Session>
+    kept: LinkedMap<String, (Json, i64)>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        loop {
+            let next = unsafe { w.jobs.wait_for(SWEEP_NS) }
+            w.sweep()
+            if let job = next {
+                let d = w.call(job)
+                w.done.send(d)
+                continue
+            }
+            // Nothing came: the queue may have closed, which `wait` tells at once.
+            let job = w.jobs.wait() else break
+            let d = w.call(job)
+            w.done.send(d)
+        }
+        w.stop_all()
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender(), sessions: LinkedMap<String, Session>(), kept: LinkedMap<String, (Json, i64)>() }) }
+    return (to, done)
+}
+
+// `spec` with `token` as its bearer token, in place of any Authorization it had.
+pub fn with_token(spec: Json, token: String) -> Json {
+    var headers = List<Json>()
+    if let Json.Array(given) = spec.get(String("headers")) ?? Json.Null {
+        for h in given {
+            if (str_at(h.copy(), "name") ?? String()).to_lower_root() != "authorization" { headers.push(h.copy()) }
+        }
+    }
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = spec {
+        for (k, v) in o {
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    var auth = LinkedMap<String, Json>()
+    auth.insert(String("name"), Json.Str(String("Authorization")))
+    auth.insert(String("value"), Json.Str("Bearer {token}"))
+    headers.push(Json.Object(auth))
+    m.insert(String("headers"), Json.Array(headers))
+    return Json.Object(m)
+}
+
+// The grant renewed with its refresh token: the new grant, or null with why
+// and whether the sign-in is over.
+pub fn renewed(grant: Json) -> (Json, String, bool) {
+    return match oauth.refresh(grant) {
+        Refreshed.Fresh(g) => (g, String(), false),
+        Refreshed.Ended(why) => (Json.Null, why, true),
+        Refreshed.Failed(why) => (Json.Null, why, false),
+    }
+}
+
+fn failed(id: i64, why: own String, sign_in: bool, grant: own Json, ended: bool) -> Done {
+    return Done { id: id, result: Json.Null, error: why, sign_in: sign_in, grant: grant, ended: ended }
+}
+
+impl Worker {
+    fn call(self: mut Worker, job: Job) -> Done {
+        let id = job.id
+        let asked = "{job.key}\n{job.tool}\n{job.arguments}"
+        if job.fresh_ms > 0 {
+            if let (result, at) = self.kept.find(asked.copy()) {
+                if now() - at < job.fresh_ms { return Done { id: id, result: result.copy(), error: String(), sign_in: false, grant: Json.Null, ended: false } }
+            }
+        }
+        var grant = job.grant.copy()
+        var fresh = Json.Null
+        // A token that's over, or nearly, is renewed before it's sent.
+        let due = oauth.due(grant.copy())
+        if oauth.signed_in(grant.copy()) and due > 0 and due <= now() {
+            let (g, why, ended) = renewed(grant.copy())
+            if g == Json.Null { return failed(id, "The sign-in couldn't be renewed: {why}", ended, Json.Null, ended) }
+            grant = g.copy()
+            fresh = g
+        }
+        let token = if oauth.signed_in(grant.copy()) { str_at(grant.copy(), "access") ?? String() } else { String() }
+        match self.ask(job.copy(), token.copy()) {
+            ok(r) => return self.answered(id, asked, r, fresh, job.fresh_ms),
+            err(e) => {
+                let why = "{e}"
+                if not mcpclient.asks_sign_in(why.copy()) {
+                    // Any other failure: a session that's gone stale on the server's side is
+                    // started again, once.
+                    self.drop_session(job.key.copy())
+                    return match self.ask(job.copy(), token) {
+                        ok(r) => self.answered(id, asked, r, fresh, job.fresh_ms),
+                        err(again) => failed(id, "{again}", false, fresh, false),
+                    }
+                }
+                if token.len() == 0 { return failed(id, why, true, fresh, false) }
+            },
+        }
+        // A 401 with a token: it's renewed, and the server asked again, once.
+        let (g, why, ended) = renewed(grant)
+        if g == Json.Null { return failed(id, "The sign-in couldn't be renewed: {why}", ended, Json.Null, ended) }
+        let renewed_token = str_at(g.copy(), "access") ?? String()
+        return match self.ask(job, renewed_token) {
+            ok(r) => self.answered(id, asked, r, g, 0),
+            err(e) => failed(id, "{e}", mcpclient.asks_sign_in("{e}"), g, false),
+        }
+    }
+
+    fn answered(self: mut Worker, id: i64, asked: own String, result: own Json, grant: own Json, fresh_ms: i64) -> Done {
+        if fresh_ms > 0 {
+            _ = self.kept.remove(asked.copy())
+            if self.kept.len() >= KEPT_MOST { _ = self.kept.pop_first() }
+            self.kept.insert(asked, (result.copy(), now()))
+        }
+        return Done { id: id, result: result, error: String(), sign_in: false, grant: grant, ended: false }
+    }
+
+    // Calls the job's tool on its session, started with `token` when it has none,
+    // or one for another spec.
+    fn ask(self: mut Worker, job: Job, token: String) -> Json ! Error {
+        let plain = "{job.spec}"
+        var had = false
+        if let s = self.sessions.find(job.key.copy()) { had = s.spec == plain }
+        if not had {
+            self.drop_session(job.key.copy())
+            let spec = if token.len() > 0 { with_token(job.spec.copy(), token.copy()) } else { job.spec.copy() }
+            let server = try mcpclient.start_within(spec, job.ms)
+            self.sessions.insert(job.key.copy(), Session { server: server, spec: plain, token: token.copy(), used: now() })
+        }
+        let s = mut self.sessions.find(job.key.copy()) else { fail "the session to {job.key} went" }
+        if s.token != token and token.len() > 0 {
+            s.server.bearer(token.copy())
+            s.token = token.copy()
+        }
+        s.used = now()
+        return try s.server.call_within(job.tool, job.arguments, job.ms)
+    }
+
+    fn drop_session(self: mut Worker, key: String) {
+        if let s = self.sessions.remove(key) { s.server.stop() }
+    }
+
+    // Stops the sessions left unused for IDLE_MS.
+    fn sweep(self: mut Worker) {
+        var idle = List<String>()
+        for (k, s) in self.sessions {
+            if now() - s.used >= IDLE_MS { idle.push(k.copy()) }
+        }
+        for k in idle { self.drop_session(k) }
+    }
+
+    fn stop_all(self: mut Worker) {
+        while let (_, s) = self.sessions.pop_first() { s.server.stop() }
+    }
+}
+
+// The JSON a tool answered with: its structured content, or the JSON its first
+// text says, or null when it said neither.
+pub fn json_of(result: Json) -> Json {
+    if let Json.Object(o) = result.get(String("structuredContent")) ?? Json.Null { return Json.Object(o) }
+    if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
+        for c in content {
+            if str_at(c.copy(), "type") != some(String("text")) { continue }
+            return match parse(str_at(c, "text") ?? String()) {
+                ok(j) => j,
+                err(_) => Json.Null,
+            }
+        }
+    }
+    return Json.Null
+}
+
+// Whether the tool said it failed (`isError`), and what it said.
+pub fn tool_failed(result: Json) -> String? {
+    if (result.get(String("isError")) ?? Json.Null).as_bool() != some(true) { return none }
+    var said = String()
+    if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
+        for c in content {
+            if let t = str_at(c, "text") { said = if said.len() > 0 { "{said} {t}" } else { t } }
+        }
+    }
+    return some(said)
+}
+
+@test
+fn reads_what_a_tool_answered() {
+    let structured = parse(#"{"structuredContent":{"id":"LOO-1"},"content":[{"type":"text","text":"{\"id\":\"LOO-2\"}"}]}"#)!
+    assert(str_at(json_of(structured), "id") == some(String("LOO-1")))
+    let text = parse(#"{"content":[{"type":"text","text":"{\"id\":\"LOO-2\"}"}]}"#)!
+    assert(str_at(json_of(text), "id") == some(String("LOO-2")))
+    let words = parse(#"{"content":[{"type":"text","text":"No task LOO-9 on that board"}],"isError":true}"#)!
+    assert(json_of(words.copy()) == Json.Null)
+    assert(tool_failed(words) == some(String("No task LOO-9 on that board")))
+    assert(tool_failed(text) == none)
+}
+
+@test
+fn a_token_takes_the_place_of_any_authorization() {
+    let spec = parse(#"{"type":"http","name":"acta","url":"https://a.example/mcp","headers":[{"name":"authorization","value":"Bearer old"},{"name":"X-Key","value":"k"}]}"#)!
+    assert("{with_token(spec, String("new"))}" == #"{"type":"http","name":"acta","url":"https://a.example/mcp","headers":[{"name":"X-Key","value":"k"},{"name":"Authorization","value":"Bearer new"}]}"#)
+}

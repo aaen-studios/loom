@@ -66,8 +66,21 @@ enum Tokens {
         static let settings: CGFloat = 600
         static let page: CGFloat = 520
         static let nav: CGFloat = 210
+        static let popupW: CGFloat = 1280
+        static let popupH: CGFloat = 900
+        static let popupLeastW: CGFloat = 900
+        static let popupLeastH: CGFloat = 640
+        static let list: CGFloat = 300
+        static let listLeast: CGFloat = 220
+        static let detailLeast: CGFloat = 380
+        static let cardLeast: CGFloat = 220
         static let menu: CGFloat = 230
         static let menuWide: CGFloat = 240
+        static let pins: CGFloat = 460
+        static let caret: CGFloat = 11
+        static let contextCard: CGFloat = 300
+        static let pillTitle: CGFloat = 260
+        static let cardPreview: CGFloat = 330
         static let fieldLabel: CGFloat = 120
     }
 
@@ -80,14 +93,18 @@ enum Tokens {
         static let icon: CGFloat = 28
         static let iconSmall: CGFloat = 26
         static let iconComposer: CGFloat = 32
-        static let contextRing: CGFloat = 16
+        static let contextRing: CGFloat = 14
+        static let contextButton: CGFloat = 26
         static let iconLarge: CGFloat = 34
         static let lead: CGFloat = 30
         static let server: CGFloat = 46
         static let limitRing: CGFloat = 14
         static let choice: CGFloat = 50
         static let row: CGFloat = 54
+        static let listRow: CGFloat = 48
+        static let grip: CGFloat = 14
         static let rowTall: CGFloat = 68
+        static let pill: CGFloat = 22
     }
 
     enum PhoneSize {
@@ -124,6 +141,7 @@ enum Tokens {
         static let warn: UInt32 = 0xf2a77a
         static let find: UInt32 = 0x3b3417
         static let findCurrent: UInt32 = 0x94781a
+        static let board: UInt32 = 0x7d5fd6
     }
 
     enum ColorLight {
@@ -146,6 +164,7 @@ enum Tokens {
         static let warn: UInt32 = 0xc2621f
         static let find: UInt32 = 0xfbefb4
         static let findCurrent: UInt32 = 0xf2cc3d
+        static let board: UInt32 = 0x7d5fd6
     }
 
     enum ThreadColorDark {

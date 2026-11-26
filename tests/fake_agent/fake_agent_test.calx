@@ -127,6 +127,20 @@ fn a_cancel_ends_a_slow_reply() ! Error {
 }
 
 @test
+fn a_session_offers_compact_and_a_bare_one_compacts_from_its_last_usage() ! Error {
+    let c = try start()
+    let offered = try expect(c, "available_commands_update")
+    assert(offered.contains("\"name\":\"compact\""))
+    try prompt(c, "/usage 800 1000\\n/compact")
+    let told = try expect(c, "preTokens")
+    assert(told.contains("\"preTokens\":800") and told.contains("\"postTokens\":80"), "got {told}")
+    let usage = try expect(c, "\"used\":80,")
+    assert(usage.contains("\"size\":1000"))
+    _ = try expect(c, "\"stopReason\":\"end_turn\"")
+    c.kill()
+}
+
+@test
 fn a_fail_answers_with_an_error() ! Error {
     let c = try start()
     try prompt(c, "/fail out of credits")

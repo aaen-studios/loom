@@ -65,7 +65,9 @@ module tests.fake_agent.main
 //                         window during the turn, reported as Claude's adapter reports
 //                         one to a client without ACP's compaction updates: a call
 //                         named compact, done, then its tokens in rawOutput, then
-//                         the usage
+//                         the usage. A bare /compact, as loom sends when its
+//                         person asks, compacts from the session's last /usage to
+//                         a tenth of it
 //     /next STEP          plays STEP at the start of its next turn, before what that
 //                         turn's prompt says, for a prompt of only "[loom: ...]"
 //                         blocks, which has no steps of its own; several go in order
@@ -95,7 +97,9 @@ module tests.fake_agent.main
 //                         at its first /mcpkeep, as a real agent keeps its servers
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
-// session/cancel arrives. Diagnostics go to standard error.
+// session/cancel arrives. Each session it starts or picks up offers /compact
+// (available_commands_update), as Claude's adapter's do. Diagnostics go to
+// standard error.
 //
 // A prompt with a `[loom: route]` block plays a group chat's router: it picks
 // the member a "ROUTE:NAME" in the message names, else the one a correction
@@ -103,6 +107,8 @@ module tests.fake_agent.main
 // shares one, else the one that answered last, else the first, and says
 // {"agent": NAME, "why": "fake pick"}, or with "WHY:UPTIME" in the message,
 // "why": "up MS ms", how long ago the program started; and reports 12 tokens.
+// With "USAGE:USED/SIZE" in the message, the router's session also reports its
+// context as USED tokens of a SIZE window (usage_update), as /usage does.
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
@@ -427,6 +433,8 @@ struct Agent {
     born: Instant    // when it started, for /uptime
     // Steps /next left for its next turn, oldest first.
     later: List<String>
+    // Each session's context as it last reported it, used of size, for a bare /compact.
+    usage: Map<String, (i64, i64)>
 }
 
 // The config options a session offers (ACP's session config options): a model
@@ -571,6 +579,18 @@ fn inside(u: own LinkedMap<String, Json>, parent: String) -> LinkedMap<String, J
     var out = u
     out.insert("_meta", Json.Object(meta))
     return out
+}
+
+// The slash commands a session offers, as Claude's adapter says them once a
+// session is ready: /compact, which a prompt of only that runs.
+fn offer_commands(session: String) {
+    var compact = LinkedMap<String, Json>()
+    compact.insert("name", js(String("compact")))
+    compact.insert("description", js(String("Compact the conversation")))
+    var u = LinkedMap<String, Json>()
+    u.insert("sessionUpdate", js(String("available_commands_update")))
+    u.insert("availableCommands", Json.Array([Json.Object(compact)]))
+    update(session, u)
 }
 
 // A compaction of the context from `before` tokens to `after` of a `size` window,
@@ -1091,12 +1111,19 @@ impl Agent {
                     u.insert("size", int(size))
                     update(session.copy(), u)
                     last_used = used
+                    a.usage.insert(session.copy(), (used, size))
                 },
                 Step.Compacted(used, size) => compacted = some((used, size)),
                 Step.Next(s) => a.later.push(s.copy()),
                 Step.Compact(before, after, size) => {
                     a.next_id += 1
-                    compaction(session.copy(), "compact_{a.next_id}", before, after, size)
+                    // A bare /compact, as loom sends when the person asks: from the
+                    // session's last usage to a tenth of it.
+                    let (was, window): (i64, i64) = a.usage.get(session.copy()) ?? (i64(0), i64(0))
+                    let bare = before == 0 and size == 0
+                    let (from, to, of) = if bare { (was, was / 10, window) } else { (before, after, size) }
+                    compaction(session.copy(), "compact_{a.next_id}", from, to, of)
+                    a.usage.insert(session.copy(), (to, of))
                 },
                 Step.Limits(words) => limits(session.copy(), words),
                 Step.Account(name) => account(name),
@@ -1213,8 +1240,9 @@ impl Agent {
             a.meta.insert(new_id.copy(), params.get(String("_meta")) ?? Json.Null)
             a.config.insert(new_id.copy(), config_default())
             r.insert("configOptions", config_options(config_default()))
-            r.insert("sessionId", js(new_id))
+            r.insert("sessionId", js(new_id.copy()))
             respond(id ?? Json.Null, Json.Object(r))
+            offer_commands(new_id)
         } else if name == "session/set_config_option" {
             let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
             let option = (params.get(String("configId")) ?? Json.Null).as_str() ?? String()
@@ -1240,8 +1268,9 @@ impl Agent {
             // session/load plays the conversation back first; session/resume doesn't.
             if name == "session/load" { chunk(session.copy(), "agent_message_chunk", String("(the conversation so far)")) }
             var r = LinkedMap<String, Json>()
-            r.insert("configOptions", config_options(a.values(session)))
+            r.insert("configOptions", config_options(a.values(session.copy())))
             respond(id ?? Json.Null, Json.Object(r))
+            offer_commands(session)
         } else if name == "session/prompt" and a.picks_up == "limited" {
             respond_error(id ?? Json.Null, -32000, String("You've hit your usage limit. Try again in 3 hours."))
         } else if name == "session/prompt" {
@@ -1287,7 +1316,8 @@ fn text_of(j: Json, key: str) -> String {
 // the message's; else a member whose "for" shares a word with it; else the
 // one that answered last, else the first member. As JSON, one line, why
 // "fake pick", or with "WHY:UPTIME" in the message, `up` ("up MS ms", how long
-// ago the program started). Each pick reports 12 tokens.
+// ago the program started). Each pick reports 12 tokens, and with
+// "USAGE:USED/SIZE" in the message, its session's context (/usage USED SIZE).
 fn route_pick(context: String, up: String) -> String {
     let start = context.find("[loom: route]") ?? 0
     let rest = context[start..].copy()
@@ -1322,7 +1352,14 @@ fn route_pick(context: String, up: String) -> String {
     var o = LinkedMap<String, Json>()
     o.insert("agent", js(pick))
     o.insert("why", js(if message.contains("WHY:UPTIME") { up.copy() } else { String("fake pick") }))
-    return "/say {Json.Object(o)}\n/tokens 12"
+    var steps = "/say {Json.Object(o)}\n/tokens 12"
+    // "USAGE:USED/SIZE": the router's session reports its context, as /usage does.
+    if let at = message.find("USAGE:") {
+        let after = message[at + 6..].copy()
+        let end = after.find(" ") ?? after.len()
+        steps.push_str("\n/usage {after[..end].replace("/", " ")}")
+    }
+    return steps
 }
 
 fn method(m: Json) -> String {
@@ -1335,7 +1372,7 @@ fn main() {
     _ = unsafe { Thread.spawn(reader) }
     let given = env.args()
     let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>() }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)
@@ -1378,6 +1415,15 @@ fn reads_a_subagents_steps() {
     assert(steps[0] == Step.Subagent(String("Explore the notes"), inner))
     assert(steps[1] == Step.Named(String("Save it")))
     assert(steps[2] == Step.AskOnly(String("rm x")))
+}
+
+@test
+fn the_router_picks_and_says_its_sessions_context_when_asked() {
+    let asked = #"{"message":"ROUTE:Ledger USAGE:900/1000 the bill","members":[{"name":"Ledger","for":"bills"}]}"#
+    let said = route_pick("[loom: route]\n\n{asked}", String("up 1 ms"))
+    assert(said.contains(#""agent":"Ledger""#) and said.ends_with("\n/tokens 12\n/usage 900 1000"))
+    let plain = #"{"message":"ROUTE:Ledger the bill","members":[{"name":"Ledger","for":"bills"}]}"#
+    assert(route_pick("[loom: route]\n\n{plain}", String("up 1 ms")).ends_with("\n/tokens 12"))
 }
 
 @test

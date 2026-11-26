@@ -98,6 +98,8 @@ struct Conversation: Equatable, Sendable {
     var title = ""
     /// For a group chat, its room (PLAN.md, "Group chats"). Never an agent's chat.
     var room: Room?
+    /// How full its session's context is, once its program has said.
+    var context: ContextFill?
 
     init(id: String, agent: String, isChat: Bool = true, askedBy: String? = nil, title: String = "") {
         self.id = id
@@ -114,6 +116,81 @@ struct Conversation: Equatable, Sendable {
         title = c["title"].text
         room = c["room"].isNull ? nil : Room(id: id, c["room"])
         isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && room == nil
+        context = ContextFill(c["context"])
+    }
+}
+
+/// How full a chat's session context is, as its agent program last said (PLAN.md, "One
+/// endless chat"), as desktop/src/model.rs has it. Its program says only how many tokens
+/// are in it of its window, not what they are.
+struct ContextFill: Equatable, Sendable {
+    var used: Int
+    var size: Int
+    /// When its program last compacted the session, in Unix ms.
+    var compacted: Int?
+    /// Whether its program compacts a session when asked, for Compact now.
+    var compacts = false
+    /// In a group chat, the member whose session it is: the one that answered last.
+    var agent: String?
+
+    /// How full a context may get before the chat's next message goes to a fresh session.
+    static let renewPercent = 80
+
+    init(used: Int, size: Int, compacted: Int? = nil, compacts: Bool = false, agent: String? = nil) {
+        self.used = used
+        self.size = size
+        self.compacted = compacted
+        self.compacts = compacts
+        self.agent = agent
+    }
+
+    init?(_ x: JSON) {
+        guard let size = x["size"].int, size > 0 else { return nil }
+        self.init(used: x["used"].int ?? 0, size: size, compacted: x["compacted"].int, compacts: x["compacts"].bool ?? false, agent: x["agent"].string.flatMap { $0.isEmpty ? nil : $0 })
+    }
+
+    var percent: Int { size > 0 ? min(max(used, 0) * 100 / size, 100) : 0 }
+
+    /// How much of the ring is filled, from 0 to 1.
+    var fraction: Double { size > 0 ? min(max(Double(used) / Double(size), 0), 1) : 0 }
+
+    /// Quiet, warm from 70% (before its fresh session at 80%), and red from 90%.
+    enum Level { case quiet, warn, bad }
+    var level: Level { percent >= 90 ? .bad : percent >= 70 ? .warn : .quiet }
+
+    /// What a screen reader says of the ring.
+    var tip: String { "Context \(percent)%, \(amount)" }
+
+    /// Its tokens of its window, beside the card's title: "82k of 200k".
+    var amount: String { "\(ContextFill.short(used)) of \(ContextFill.short(size))" }
+
+    /// The card's line under its bar, at `now` (Unix ms).
+    func line(now: Int) -> String {
+        let fresh = "fresh session starts at \(ContextFill.renewPercent)%"
+        guard let at = compacted else { return "A \(fresh)" }
+        return "Compacted \(ContextFill.ago(now - at)) · a \(fresh)"
+    }
+
+    /// A count of tokens as the ring says it: 900, 16k, 182k, 1M, 1.5M.
+    static func short(_ n: Int) -> String {
+        if n >= 1_000_000 {
+            let tenths = (n + 50_000) / 100_000
+            return tenths % 10 == 0 ? "\(tenths / 10)M" : "\(tenths / 10).\(tenths % 10)M"
+        }
+        return n >= 1000 ? "\((n + 500) / 1000)k" : "\(max(n, 0))"
+    }
+
+    /// How long ago something was, `ms` before now: "just now", "5 min ago", "2 h ago",
+    /// "yesterday", "3 days ago".
+    static func ago(_ ms: Int) -> String {
+        let minutes = max(ms, 0) / 60_000
+        switch minutes {
+        case 0: return "just now"
+        case ..<60: return "\(minutes) min ago"
+        case ..<(24 * 60): return "\(minutes / 60) h ago"
+        case ..<(48 * 60): return "yesterday"
+        default: return "\(minutes / (24 * 60)) days ago"
+        }
     }
 }
 
@@ -422,6 +499,26 @@ func insideACall(_ m: Message) -> [Bool] {
     return m.blocks.map { b in b.parent.map { calls.contains($0) } ?? false }
 }
 
+/// How a message in the open chat came to be there, which says whether a long one is cut
+/// (`folds`), as desktop/src/model.rs's `Came`.
+enum Came: Equatable, Sendable {
+    /// There when the chat opened, and read.
+    case before
+    /// Came while the person was elsewhere, and not read yet.
+    case unread
+    /// Came, or was written, while the chat is open, or is still being written.
+    case live
+}
+
+/// Whether a long message is cut after about ten lines, with Show more (PLAN.md, "Long
+/// messages and tables"), as desktop/src/model.rs's `folds`. One that was there and read
+/// when its chat opened is; one that came while it's open, or that came while the person
+/// was away and isn't read yet, shows whole. `flipped` is whether the person folded or
+/// opened it by hand since, which holds while the chat stays open.
+func folds(_ came: Came, flipped: Bool) -> Bool {
+    (came == .before) != flipped
+}
+
 struct Message: Identifiable, Equatable, Sendable {
     var id: String
     var role: String
@@ -453,6 +550,8 @@ struct Message: Identifiable, Equatable, Sendable {
     var routed: Routed?
     /// Deleted (PLAN.md, "Deleting a message"): a mark in its place, with no blocks.
     var deleted = false
+    /// How it came to the open chat, for whether a long one is cut (`Model.shown`).
+    var came = Came.before
 
     var isPerson: Bool { role == "person" }
 
@@ -1605,6 +1704,18 @@ final class Model {
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
     private var queued: [Queued] = []
+    /// The messages that came to the open chat, or were written in it, since it opened.
+    private var cameLive: Set<String> = []
+    /// The first reply that came to each agent's chat while it wasn't open, by agent.
+    private var firstUnread: [String: String] = [:]
+    /// The open chat's first reply that came while it was shut, while it stays open.
+    private var unreadFrom: String?
+    /// The chat was left for the agents list, where it stays selected: what comes to it
+    /// now is unread, and it opens again afresh (`leaveChat`).
+    private var away = false
+    /// The long messages in the open chat folded or opened by hand since it opened, by
+    /// their cut's key (`folds`).
+    private(set) var foldFlips: Set<String> = []
     var dirty: Set<CoreList> = []
     private var getting: [String: (key: String, open: Bool)] = [:]
     private var nextId = 0
@@ -1647,7 +1758,35 @@ final class Model {
         self.thread = thread
         messages = []
         messagesCame = false
+        chatOpened(unreadFrom: nil)
         dirty.insert(.messages)
+    }
+
+    /// A chat just opened: what it has is all there from before, read, and folded or
+    /// opened only as `folds` says, but for the replies from `unreadFrom` on.
+    func chatOpened(unreadFrom first: String?) {
+        cameLive = []
+        foldFlips = []
+        unreadFrom = first
+    }
+
+    /// The chat is left for the agents list. Its agent stays selected, so its chat opens
+    /// again at once, but as a chat opened again: afresh, with what came meanwhile unread.
+    func leaveChat() {
+        away = true
+    }
+
+    /// The group chat open opened again from the agents list: afresh.
+    func reopenRoom() {
+        guard away else { return }
+        away = false
+        chatOpened(unreadFrom: nil)
+    }
+
+    /// Folds a long message in the open chat, by its cut's key, or opens it: so it stays
+    /// while the chat is open (`folds`).
+    func flipFold(_ key: String) {
+        if foldFlips.remove(key) == nil { foldFlips.insert(key) }
     }
 
     /// The selected chat's messages, with the replies still being written at the end.
@@ -1690,6 +1829,14 @@ final class Model {
                 c.live = out[i].live
                 out[i].blocks[j].card = c
             }
+        }
+        // How each came, for whether a long one is cut (`folds`): one still being
+        // written, waiting to go, or come since the chat opened, while it's open; one
+        // from the first that came while the chat was shut on, unread.
+        let unread = unreadFrom.flatMap { first in messages.firstIndex { $0.id == first } }.map { Set(messages[$0...].map(\.id)) } ?? []
+        for i in out.indices {
+            let m = out[i]
+            out[i].came = m.live || m.queued || cameLive.contains(m.id) ? .live : unread.contains(m.id) ? .unread : .before
         }
         return out
     }
@@ -1767,8 +1914,14 @@ final class Model {
     // MARK: Taking frames from the core
 
     func select(_ agent: String?) {
+        let back = away
+        away = false
         // Picking an agent leaves a group chat, even for one of its members.
-        guard selected != agent || room != nil else { return }
+        guard selected != agent || room != nil else {
+            // Its chat opened again from the agents list: afresh (`leaveChat`).
+            if back { chatOpened(unreadFrom: agent.flatMap { firstUnread.removeValue(forKey: $0) }) }
+            return
+        }
         selected = agent
         room = nil
         thread = nil
@@ -1777,6 +1930,8 @@ final class Model {
         messagesMore = 0
         replying = nil
         jumpTo = nil
+        // The replies that came while its chat was shut are unread while it's open.
+        chatOpened(unreadFrom: agent.flatMap { firstUnread.removeValue(forKey: $0) })
         dirty.insert(.messages)
     }
 
@@ -1905,6 +2060,17 @@ final class Model {
             live[id] = nil
             if kind == "message.created" { queued.removeAll { $0.message == id } }
             if f["conversation"].string == conversation { dirty.insert(.messages) }
+            // For whether a long one is cut (`folds`). Catch-up is what came before.
+            if kind == "message.created" && synced {
+                let about = conversations.first { $0.id == f["conversation"].string }
+                if f["conversation"].string == conversation && !away {
+                    // Came while its chat is open: it shows whole.
+                    cameLive.insert(id)
+                } else if f["message"]["role"].text == "agent", let c = about, c.isChat, c.room == nil {
+                    // A reply in an agent's chat while it's shut: unread when it opens.
+                    if firstUnread[c.agent] == nil { firstUnread[c.agent] = id }
+                }
+            }
             // A pin put on or taken off, a pinned message changed, or one gone that may
             // have been pinned: the pins are asked for again.
             if f["conversation"].string == pinsFor,
@@ -2011,6 +2177,10 @@ final class Model {
             if let error { notice = error; makingRoom = nil } else { roomMade(f) }
         case let id where id.hasPrefix("app.room_summary:"):
             if error == nil { roomUsageCame(f) }
+        case let id where id.hasPrefix("app.context"):
+            // Compact now, or Start a fresh session: the chat shows what came of it, and
+            // a refusal, as while the agent is answering, is said.
+            if let error { notice = error }
         case let id where id.hasPrefix("app.preview:"):
             // A link pasted in the composer, looked up: its preview, or its site when
             // the lookup failed.
@@ -2946,5 +3116,34 @@ final class Model {
     func startFresh() -> JSON? {
         guard let agent = selected else { return nil }
         return ["t": "cmd", "id": JSON(id("app.fresh")), "name": "conversation.create", "args": ["agent": JSON(agent)]]
+    }
+
+    // MARK: The context of the chat's session (PLAN.md, "One endless chat")
+
+    /// How full the open chat's session context is, once its program has said. In a
+    /// group chat, the session of the member that answered last.
+    var context: ContextFill? {
+        guard let chat = conversation else { return nil }
+        return conversations.first { $0.id == chat }?.context
+    }
+
+    /// The context card's title: "Context", or in a group chat, whose it is.
+    func contextTitle(_ fill: ContextFill) -> String {
+        guard room != nil, let name = fill.agent.flatMap({ agent($0) })?.name else { return "Context" }
+        return "\(name)'s context"
+    }
+
+    /// Compacts the open chat's session now, in a turn the person doesn't see: the chat
+    /// gets the compaction's line.
+    func compactNow() -> JSON? { contextCommand("conversation.compact") }
+
+    /// Starts the open chat's next turn in a fresh session, given the newest of the chat.
+    func freshSession() -> JSON? { contextCommand("conversation.fresh") }
+
+    private func contextCommand(_ name: String) -> JSON? {
+        guard let chat = conversation, let fill = context else { return nil }
+        var args: [String: JSON] = ["conversation": JSON(chat)]
+        if room != nil, let agent = fill.agent { args["agent"] = JSON(agent) }
+        return ["t": "cmd", "id": JSON(id("app.context")), "name": JSON(name), "args": .object(args)]
     }
 }

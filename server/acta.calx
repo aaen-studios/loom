@@ -1,0 +1,327 @@
+module server.acta
+
+// Acta's cards in messages (PLAN.md, "Cards in messages"): the card ids and
+// card links a message has in its words, the person's boards as list_boards
+// gives them, and a card as get_task gives it, made into what the message
+// keeps for the apps' pills. The instance calls Acta as the person through
+// `server/mcpcall.calx`; this is only reading what was written and what came.
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, str_at}
+
+// Where Acta is, which its card links and its MCP server are at.
+pub const HOST: str = "acta.aaenz.no"
+// The longest a card's description is kept on a message.
+const TEXT_MOST: usize = 320
+// How many of its first lines are kept.
+const TEXT_LINES: usize = 3
+
+/// A card a message names: its id, and its board ("workspace/board") when a
+/// link named it, or "" for a bare id, whose board comes from its prefix.
+pub struct Ref {
+    pub id: String
+    pub board: String
+}
+
+/// One of the person's boards, as list_boards gives it.
+pub struct Board {
+    pub board: String    // "aaen-studios/loom"
+    pub prefix: String    // "LOO"
+    pub name: String    // "loom"
+}
+
+fn upper(c: u8) -> bool {
+    return c >= b'A' and c <= b'Z'
+}
+
+fn digit(c: u8) -> bool {
+    return c >= b'0' and c <= b'9'
+}
+
+fn word(c: u8) -> bool {
+    return upper(c) or digit(c) or (c >= b'a' and c <= b'z') or c == b'_'
+}
+
+fn url_end(c: u8) -> bool {
+    return c == b' ' or c == b'\t' or c == b'\r' or c == b'<' or c == b'>' or c == b'"' or c == b'`' or c == b')' or c == b']'
+}
+
+// The card id at byte `k` of `b`, `PREFIX-N` (an upper-case letter, then up to
+// nine letters or digits, a hyphen and a number with no leading zero), with
+// how long it is, or none.
+fn id_at(b: List<u8>, k: usize) -> usize? {
+    if k >= b.len() or not upper(b[k]) { return none }
+    var j = k + 1
+    while j < b.len() and (upper(b[j]) or digit(b[j])) and j - k < 10 { j += 1 }
+    if j >= b.len() or b[j] != b'-' { return none }
+    j += 1
+    let start = j
+    if j >= b.len() or not digit(b[j]) or b[j] == b'0' { return none }
+    while j < b.len() and digit(b[j]) and j - start < 7 { j += 1 }
+    return some(j - k)
+}
+
+/// Whether `s` is a whole card id.
+pub fn is_id(s: String) -> bool {
+    let b = s.to_bytes()
+    return id_at(b.copy(), 0) == some(b.len())
+}
+
+/// The prefix of a card id: `LOO` of `LOO-342`.
+pub fn prefix_of(id: String) -> String {
+    return id[..(id.find("-") ?? id.len())].copy()
+}
+
+/// The card a link points at: `https://acta.aaenz.no/<workspace>/<board>#ID`,
+/// or with `?task=ID` among its query's parts.
+pub fn link_ref(url: String) -> Ref? {
+    let lead = "https://{HOST}/"
+    if not url.starts_with(lead.copy()) { return none }
+    let rest = url[lead.len()..].copy()
+    let q = rest.find("?") ?? rest.len()
+    let h = rest.find("#") ?? rest.len()
+    let path_end = if q < h { q } else { h }
+    let path = rest[..path_end].trim_suffix("/").copy()
+    let parts = path.split("/")
+    if parts.len() != 2 or parts[0].len() == 0 or parts[1].len() == 0 { return none }
+    let board = "{parts[0]}/{parts[1]}"
+    var id = String()
+    if let hash = rest.find("#") { id = rest[hash + 1..].copy() }
+    if not is_id(id.copy()) and path_end < rest.len() and rest[path_end..].starts_with("?") {
+        let query_end = rest.find("#") ?? rest.len()
+        for part in rest[path_end + 1..query_end].split("&") {
+            if part.starts_with("task=") { id = part[5..].copy() }
+        }
+    }
+    if not is_id(id.copy()) { return none }
+    return some(Ref { id: id, board: board })
+}
+
+/// Whether `url` is a card's link.
+pub fn is_card_link(url: String) -> bool {
+    return match link_ref(url) {
+        some(_) => true,
+        none => false,
+    }
+}
+
+fn add(out: mut List<Ref>, r: own Ref) {
+    for had in out {
+        if had.id == r.id {
+            return
+        }
+    }
+    out.push(r)
+}
+
+/// The cards `text` names, in the order they come, each once: card links,
+/// and bare ids at the start of a word. Code, in backticks or a fenced block,
+/// isn't looked in.
+pub fn refs_in(text: String) -> List<Ref> {
+    var out = List<Ref>()
+    var fenced = false
+    for line in text.split("\n") {
+        let t = line.trim_start()
+        if t.starts_with("```") or t.starts_with("~~~") {
+            fenced = not fenced
+            continue
+        }
+        if fenced { continue }
+        let b = line.to_bytes()
+        var k: usize = 0
+        while k < b.len() {
+            let c = b[k]
+            if c == b'`' {
+                k += 1
+                while k < b.len() and b[k] != b'`' { k += 1 }
+                k += 1
+                continue
+            }
+            if c == b'h' and (line[k..].starts_with("https://") or line[k..].starts_with("http://")) {
+                var end = k
+                while end < b.len() and not url_end(b[end]) { end += 1 }
+                var url = line[k..end].copy()
+                while url.ends_with(".") or url.ends_with(",") or url.ends_with(";") or url.ends_with(":") or url.ends_with("!") or url.ends_with("?") or url.ends_with("'") {
+                    url = url[..url.len() - 1].copy()
+                }
+                if let r = link_ref(url) { add(mut out, r) }
+                k = end
+                continue
+            }
+            let starts = k == 0 or not (word(b[k - 1]) or b[k - 1] == b'-' or b[k - 1] == b'/' or b[k - 1] == b'.' or b[k - 1] == b'@')
+            if starts and upper(c) {
+                if let len = id_at(b.copy(), k) {
+                    let after = k + len
+                    // Not a piece of something longer: `LOO-3-b`, `LOO-3.5`, `LOO-3_x`.
+                    let longer = after < b.len() and (word(b[after]) or ((b[after] == b'-' or b[after] == b'.') and after + 1 < b.len() and word(b[after + 1])))
+                    if not longer { add(mut out, Ref { id: line[k..after].copy(), board: String() }) }
+                    k = after
+                    continue
+                }
+            }
+            k += 1
+        }
+    }
+    return out
+}
+
+/// The person's boards, from what list_boards answered.
+pub fn boards_of(listed: Json) -> List<Board> {
+    var out = List<Board>()
+    if let Json.Array(spaces) = at(listed, "workspaces") {
+        for w in spaces {
+            if let Json.Array(boards) = at(w, "boards") {
+                for b in boards {
+                    let board = str_at(b.copy(), "board") ?? String()
+                    let prefix = str_at(b.copy(), "task_prefix") ?? String()
+                    if board.len() == 0 or prefix.len() == 0 { continue }
+                    out.push(Board { board: board.copy(), prefix: prefix, name: str_at(b, "name") ?? board })
+                }
+            }
+        }
+    }
+    return out
+}
+
+/// The board a bare id's prefix is on, among the person's boards.
+pub fn board_for(boards: List<Board>, id: String) -> Board? {
+    let prefix = prefix_of(id)
+    for b in boards {
+        if b.prefix == prefix { return some(b.copy()) }
+    }
+    return none
+}
+
+/// What a board is called where a card shows it: its name, or its part after the
+/// workspace for one that isn't among the person's boards.
+pub fn board_name(boards: List<Board>, board: String) -> String {
+    for b in boards {
+        if b.board == board { return b.name.copy() }
+    }
+    return board[(board.find("/") ?? 0) + if board.contains("/") { 1usize } else { 0usize }..].copy()
+}
+
+// `s` cut to at most `most` bytes, at a word when there's one, with "…".
+fn cut(s: String, most: usize) -> String {
+    if s.len() <= most { return s.copy() }
+    var end: usize = 0
+    for r in s.runes() {
+        let n = "{r}".len()
+        if end + n > most { break }
+        end += n
+    }
+    var kept = s[..end].copy()
+    if let space = kept.find_last(" ") {
+        if space > most / 2 { kept = kept[..space].copy() }
+    }
+    return "{kept.trim_end()}…"
+}
+
+// A line of Markdown as plain words: without a heading's #, a list's mark, a
+// quote's >, emphasis and code marks, and a link as its words.
+fn plain(line: String) -> String {
+    var s = line.trim().copy()
+    while s.starts_with("#") or s.starts_with(">") { s = s[1..].trim_start().copy() }
+    if s.starts_with("- ") or s.starts_with("* ") or s.starts_with("+ ") { s = s[2..].copy() }
+    if s.starts_with("[ ] ") or s.starts_with("[x] ") { s = s[4..].copy() }
+    s = s.replace("**", "").replace("__", "").replace("`", "")
+    // [words](address) as its words.
+    var out = String()
+    var rest = s.copy()
+    loop {
+        let open = rest.find("[") else break
+        let close = rest[open..].find("](") else break
+        let end = rest[open + close..].find(")") else break
+        out.push_str(rest[..open].copy())
+        out.push_str(rest[open + 1..open + close].copy())
+        rest = rest[open + close + end + 1..].copy()
+    }
+    out.push_str(rest)
+    return out
+}
+
+/// The start of a card's description as its preview shows it: its first lines
+/// as plain words, in one run, cut short.
+pub fn summary(description: String) -> String {
+    var lines = List<String>()
+    for line in description.split("\n") {
+        let p = plain(line.copy())
+        if p.trim().len() == 0 { continue }
+        lines.push(p.trim().copy())
+        if lines.len() == TEXT_LINES { break }
+    }
+    return cut(lines.join(" "), TEXT_MOST)
+}
+
+/// What a message keeps of a card, from get_task's answer: its id, board and
+/// the board's name, title, status, address, assignee, size, labels, the
+/// start of its description, its subtasks done and in all, and when this was
+/// looked up.
+pub fn card_of(task: Json, board: String, name: String, at_ms: i64) -> Json {
+    let id = str_at(task.copy(), "id") ?? String()
+    var o = Obj.new().s("id", id.copy()).s("board", board.copy()).s("board_name", name).s("title", str_at(task.copy(), "title") ?? String()).s("status", str_at(task.copy(), "status") ?? String("todo"))
+    o = o.s("url", str_at(task.copy(), "url") ?? "https://{HOST}/{board}#{id}")
+    o = o.maybe("assignee", str_at(task.copy(), "assignee")).maybe("size", str_at(task.copy(), "size"))
+    if let Json.Array(labels) = at(task.copy(), "labels") {
+        if labels.len() > 0 { o = o.j("labels", Json.Array(labels.copy())) }
+    }
+    let text = summary(str_at(task.copy(), "description") ?? String())
+    if text.len() > 0 { o = o.s("text", text) }
+    if let Json.Array(subtasks) = at(task, "subtasks") {
+        if subtasks.len() > 0 {
+            var done: i64 = 0
+            for s in subtasks {
+                if (s.get(String("done")) ?? Json.Null).as_bool() == some(true) { done += 1 }
+            }
+            o = o.i("subtasks", i64.wrap(u64(subtasks.len()))).i("subtasks_done", done)
+        }
+    }
+    return o.i("at", at_ms).done()
+}
+
+/// What a message keeps of a card that isn't there, or that the person can't see.
+pub fn missing(id: String, board: String, at_ms: i64) -> Json {
+    return Obj.new().s("id", id).s("board", board).b("missing", true).i("at", at_ms).done()
+}
+
+@test
+fn finds_card_ids_and_links() {
+    let text = "LOO-206 is nearly done, see https://acta.aaenz.no/aaen-studios/calcite#CAL-338. Not `LOO-9`, UTF-8 or HTTP-2 here, nor loo-342-acta, LOO-3-b, x-LOO-4, LOO-05.\n```\nLOO-7\n```\n(LOO-351) and https://acta.aaenz.no/aaen-studios/loom?view=list&task=LOO-344 and LOO-206 again"
+    let refs = refs_in(String(text))
+    var shown = List<String>()
+    for r in refs {
+        shown.push("{r.id}@{r.board}")
+    }
+    assert(shown.join(" ") == "LOO-206@ CAL-338@aaen-studios/calcite UTF-8@ HTTP-2@ LOO-351@ LOO-344@aaen-studios/loom")
+}
+
+@test
+fn reads_card_links() {
+    let a = link_ref(String("https://acta.aaenz.no/aaen-studios/loom#LOO-342")) ?? Ref { id: String(), board: String() }
+    assert(a.id == "LOO-342" and a.board == "aaen-studios/loom")
+    let b = link_ref(String("https://acta.aaenz.no/aaen-studios/loom/?task=LOO-1")) ?? Ref { id: String(), board: String() }
+    assert(b.id == "LOO-1" and b.board == "aaen-studios/loom")
+    assert(link_ref(String("https://acta.aaenz.no/aaen-studios/loom")) == none)
+    assert(link_ref(String("https://acta.aaenz.no/docs#LOO-1")) == none)
+    assert(link_ref(String("https://example.com/aaen-studios/loom#LOO-1")) == none)
+    assert(is_id(String("CLX-450")) and not is_id(String("CLX-0")) and not is_id(String("clx-4")) and not is_id(String("CLX-4a")))
+}
+
+@test
+fn reads_boards_and_cards() {
+    let listed = parse(#"{"workspaces":[{"workspace":"aaen-studios","boards":[{"board":"aaen-studios/loom","name":"loom","task_prefix":"LOO"},{"board":"aaen-studios/clx","name":"calx","task_prefix":"CLX"}]}]}"#)!
+    let boards = boards_of(listed)
+    assert(boards.len() == 2)
+    assert((board_for(boards.copy(), String("CLX-450")) ?? boards[0].copy()).name == "calx")
+    assert(board_for(boards.copy(), String("UTF-8")) == none)
+    assert(board_name(boards.copy(), String("aaen-studios/clx")) == "calx" and board_name(boards, String("someone/else")) == "else")
+    let task = parse(###"{"id":"LOO-206","title":"Show agents' usage limits","status":"in_progress","assignee":"Elliot","size":"m","labels":["desktop"],"url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","description":"## Why\n\nThe plan's **usage limits** that [Claude](https://claude.ai) reports.\n- as rings\n- with when each resets\n- and more","subtasks":[{"title":"a","done":true},{"title":"b","done":false},{"title":"c","done":true}]}"###)!
+    let card = card_of(task, String("aaen-studios/loom"), String("loom"), 5)
+    assert("{card}" == #"{"id":"LOO-206","board":"aaen-studios/loom","board_name":"loom","title":"Show agents' usage limits","status":"in_progress","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","assignee":"Elliot","size":"m","labels":["desktop"],"text":"Why The plan's usage limits that Claude reports. as rings","subtasks":3,"subtasks_done":2,"at":5}"#)
+    assert("{missing(String("LOO-9"), String("aaen-studios/loom"), 7)}" == #"{"id":"LOO-9","board":"aaen-studios/loom","missing":true,"at":7}"#)
+}
+
+@test
+fn cuts_a_long_description() {
+    let long = summary(String("word ").repeat(100))
+    assert(long.len() <= 320 + 3 and long.ends_with("word…"))
+}

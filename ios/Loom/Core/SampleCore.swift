@@ -635,7 +635,8 @@ enum Sample {
         // Builder's thread with Gardener (`message_agent`), newer than the person's chat
         // with Gardener and never in its place.
         ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000],
-        ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000],
+        // How full its session is, compacted two hours before its last message.
+        ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000, "context": ["used": 82_000, "size": 200_000, "compacted": 1795179931000, "compacts": true]],
         ["id": "c_2", "agent": "a_2", "title": "", "at": 1795187131000],
         ["id": "c_3", "agent": "a_3", "title": "", "at": 1795187131000],
         ["id": "c_4", "agent": "a_4", "title": "", "at": 1795187131000],
@@ -667,7 +668,8 @@ enum Sample {
                 ["kind": "thought", "text": "The person wants notes for 0.3. I'll list the PRs merged since the v0.2 tag."],
                 ["kind": "tool", "call": "tc_1"],
                 ["kind": "card", "card": ["id": "card_1", "type": "checklist", "title": "Release 0.3", "items": [["text": "List the merged PRs", "done": true], ["text": "Write the notes", "done": true], ["text": "Tag v0.3", "done": false]]]],
-                ["kind": "text", "text": "Here they are, from the **12 PRs** merged since `v0.2`:\n\n## loom 0.3\n\n- Routines run on webhooks, signed as GitHub signs.\n- Agents get your MCP servers, with secrets sealed.\n- Screenshots and the clipboard as device tools.\n\nI kept them short. Want the full list too?"],
+                // Long enough to be cut, with Show more (PLAN.md, "Long messages and tables").
+                ["kind": "text", "text": "Here they are, from the **12 PRs** merged since `v0.2`:\n\n## loom 0.3\n\n- Routines run on webhooks, signed as GitHub signs.\n- Agents get your MCP servers, with secrets sealed.\n- Screenshots and the clipboard as device tools.\n- Group chats pick who answers, and say why.\n- Pinned messages, a page at a time.\n- Replies quote what they answer.\n- Emoji by name, and your own pictures.\n- Files an agent names open from the chat.\n- The iPhone joins with a QR code.\n- Questions wait on the lock screen.\n- A full session starts fresh with the newest of the chat.\n- The instance updates itself, if you let it.\n\nI kept them short. Want the full list too?"],
              ]],
             ["id": "msg_3", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187100000,
              "blocks": [["kind": "text", "text": "That's good. Did the build on main pass?"]],

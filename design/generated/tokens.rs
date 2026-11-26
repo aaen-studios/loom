@@ -57,8 +57,21 @@ pub mod layout {
     pub const SETTINGS: f32 = 600.0;
     pub const PAGE: f32 = 520.0;
     pub const NAV: f32 = 210.0;
+    pub const POPUP_W: f32 = 1280.0;
+    pub const POPUP_H: f32 = 900.0;
+    pub const POPUP_LEAST_W: f32 = 900.0;
+    pub const POPUP_LEAST_H: f32 = 640.0;
+    pub const LIST: f32 = 300.0;
+    pub const LIST_LEAST: f32 = 220.0;
+    pub const DETAIL_LEAST: f32 = 380.0;
+    pub const CARD_LEAST: f32 = 220.0;
     pub const MENU: f32 = 230.0;
     pub const MENU_WIDE: f32 = 240.0;
+    pub const PINS: f32 = 460.0;
+    pub const CARET: f32 = 11.0;
+    pub const CONTEXT_CARD: f32 = 300.0;
+    pub const PILL_TITLE: f32 = 260.0;
+    pub const CARD_PREVIEW: f32 = 330.0;
     pub const FIELD_LABEL: f32 = 120.0;
 }
 
@@ -71,14 +84,18 @@ pub mod control {
     pub const ICON: f32 = 28.0;
     pub const ICON_SMALL: f32 = 26.0;
     pub const ICON_COMPOSER: f32 = 32.0;
-    pub const CONTEXT_RING: f32 = 16.0;
+    pub const CONTEXT_RING: f32 = 14.0;
+    pub const CONTEXT_BUTTON: f32 = 26.0;
     pub const ICON_LARGE: f32 = 34.0;
     pub const LEAD: f32 = 30.0;
     pub const SERVER: f32 = 46.0;
     pub const LIMIT_RING: f32 = 14.0;
     pub const CHOICE: f32 = 50.0;
     pub const ROW: f32 = 54.0;
+    pub const LIST_ROW: f32 = 48.0;
+    pub const GRIP: f32 = 14.0;
     pub const ROW_TALL: f32 = 68.0;
+    pub const PILL: f32 = 22.0;
 }
 
 pub mod phone_size {
@@ -115,6 +132,7 @@ pub mod color_dark {
     pub const WARN: u32 = 0xf2a77a;
     pub const FIND: u32 = 0x3b3417;
     pub const FIND_CURRENT: u32 = 0x94781a;
+    pub const BOARD: u32 = 0x7d5fd6;
 }
 
 pub mod color_light {
@@ -137,6 +155,7 @@ pub mod color_light {
     pub const WARN: u32 = 0xc2621f;
     pub const FIND: u32 = 0xfbefb4;
     pub const FIND_CURRENT: u32 = 0xf2cc3d;
+    pub const BOARD: u32 = 0x7d5fd6;
 }
 
 pub mod thread_color_dark {

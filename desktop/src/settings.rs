@@ -76,6 +76,20 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
     ]
 }
 
+/// How a page lays out in the popup (PLAN.md, "The settings popup"): the pages of things
+/// to pick from as a list beside the one picked, Emoji's tiles across the whole width,
+/// and every other page as a column of rows.
+pub(super) fn page_kind(screen: Screen) -> crate::model::popup::Kind {
+    use crate::model::popup::Kind;
+    match screen {
+        Screen::Mcp | Screen::Programs | Screen::Skills | Screen::Proposals | Screen::Routines => {
+            Kind::List
+        }
+        Screen::Emoji => Kind::Grid,
+        _ => Kind::Column,
+    }
+}
+
 /// What each of the person's pages has on it, for search to find besides its name.
 fn page_words(screen: Screen) -> &'static str {
     match screen {
@@ -539,7 +553,27 @@ pub(super) fn notify_as(prefs: &Prefs, title: &str, body: &str, about: shell::Ab
 
 #[cfg(test)]
 mod tests {
-    use super::{settings_found, Screen};
+    use super::{page_kind, settings_found, settings_groups, Screen};
+    use crate::model::popup::Kind;
+
+    #[test]
+    fn pages_of_things_to_pick_from_are_lists() {
+        let kinds = |kind: Kind| -> Vec<&str> {
+            settings_groups()
+                .into_iter()
+                .flat_map(|(_, pages)| pages)
+                .filter(|(_, _, _, s)| page_kind(*s) == kind)
+                .map(|(_, _, label, _)| label)
+                .collect()
+        };
+        assert_eq!(
+            kinds(Kind::List),
+            ["Brains", "Skills", "Proposals", "MCP servers", "Routines"]
+        );
+        assert_eq!(kinds(Kind::Grid), ["Emoji"]);
+        assert!(kinds(Kind::Column).contains(&"Appearance"));
+        assert_eq!(page_kind(Screen::Server), Kind::Column);
+    }
 
     #[test]
     fn search_finds_a_page_by_what_is_on_it() {
