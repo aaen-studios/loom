@@ -24,7 +24,7 @@ import std.http.{Header, get}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio, exit}
 import std.thread.{sleep}
-import shared.obj.{Obj, at, int_at, str_at}
+import shared.obj.{Obj, at, int_at, merge, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, calx, check}
 
@@ -102,6 +102,26 @@ fn sign_in(app: mut Session, name: str, ids: (str, str)) -> Json ! Error {
     if not ok_of(began.copy()) { fail "mcp.sign_in {name} failed: {began}" }
     let link = try consent(str_at(at(began, "value"), "url") ?? String())
     return try app.cmd(second, "mcp.signed_in", Obj.new().s("query", query_of(link)).done())
+}
+
+// The fake's server that takes only its key, as mcp.put takes it, named `name`.
+fn keyed(fake: String, name: str) -> Json {
+    return Obj.new().s("name", String(name)).s("url", "{fake}/api/mcp").j("headers", Obj.new().s("Authorization", String("Bearer fake-key")).done()).done()
+}
+
+// The mcp_add card for `server` an agent's add_mcp_server put in its reply,
+// among the frames from `mark` on, or those still to come.
+fn mcp_add_card(app: mut Session, mark: usize, server: str) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            let c = at(f.copy(), "card")
+            if str_at(f, "t") == some(String("card")) and str_at(c.copy(), "type") == some(String("mcp_add")) and str_at(c.copy(), "server") == some(String(server)) { return c }
+        }
+        _ = try app.until("card", "", 120000)
+    }
 }
 
 fn wait_ms(ms: u64) {
@@ -219,11 +239,20 @@ fn run(i: Instance, fake: String) ! Error {
     // The chat from before still knows it as acta (LOO-378).
     _ = try fetch_text("{fake}/test/expire")
     let refreshed_before = try count(fake.copy(), "refreshed")
-    let old_name = try say(mut app, kept_chat, String("m_k2"), whoami)
+    let old_name = try say(mut app, kept_chat.copy(), String("m_k2"), whoami)
     try check(old_name.contains("ada") and try count(fake.copy(), "refreshed") == refreshed_before + 1, "a chat running from before reaches it by its old name, and its token is renewed under it")
     // A rollback to before the rename keeps the server by its new name.
     let rolled = try app.cmd("q_k3", "agent.rollback", Obj.new().s("agent", keeper.copy()).i("revision", 1).done())
     try check(ok_of(rolled.copy()) and "{at(at(at(rolled, "value"), "agent"), "mcp")}" == #"["tracker"]"#, "rolling the agent back to a revision from before keeps the server by its new name")
+    // A server it adds then has it look at its servers again, and the renamed
+    // one isn't started a second time by its new name (LOO-408).
+    let add_mark = app.frames.len()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_k3")).s("conversation", kept_chat.copy()).s("text", "/mcpkeep add_mcp_server {Obj.new().s("name", String("extra")).s("url", "{fake}/mcp2").done()}").done())
+    let add_card = try mcp_add_card(mut app, add_mark, "extra")
+    _ = try app.cmd("q_k4", "mcp.add_answer", Obj.new().s("call", str_at(add_card, "call") ?? String()).s("answer", String("cancel")).done())
+    _ = try reply_in(mut app, kept_chat.copy())
+    let searched_again = try say(mut app, kept_chat, String("m_k4"), String(#"/mcpkeep search_tools {"query":"whoami"}"#))
+    try check(searched_again.contains("mcp.acta.whoami(") and not searched_again.contains("mcp.tracker.whoami("), "a chat from before a rename that adds a server keeps the renamed one by the name it knows, and doesn't start it again by its new one")
 
     // --- A call that needs more scopes (step-up) ---
     let up_chat = str_at(at(try app.cmd("q_s1", "conversation.create", Obj.new().s("agent", keeper.copy()).done()), "value"), "conversation") ?? String()
@@ -245,6 +274,23 @@ fn run(i: Instance, fake: String) ! Error {
     try check(ok_of(stepped) and asked_scopes.split(" ").contains(String("admin")) and asked_scopes.split(" ").contains(String("offline_access")), "signing in again asks for the scopes it wanted too")
     let admin_call = try say(mut app, up_chat, String("m_s3"), as_admin)
     try check(admin_call.contains("ada, admin"), "and the call works in the same chat once the person has")
+
+    // --- A renamed server deleted (LOO-408) ---
+    // A chat that knows a server as lamp, which is renamed lantern and
+    // deleted, and then another server takes the name lantern: lamp no longer
+    // leads to it, so a rule on the new lantern's tool isn't one on lamp's.
+    _ = try app.cmd("q_d1", "mcp.put", keyed(fake.copy(), "lamp"))
+    let lighter = str_at(at(at(try app.cmd("q_d2", "agent.create", Obj.new().s("name", String("Lighter")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).j("mcp", Json.Array([Json.Str(String("lamp"))])).done()), "value"), "agent"), "id") ?? String()
+    let lamp_chat = str_at(at(try app.cmd("q_d3", "conversation.create", Obj.new().s("agent", lighter).done()), "value"), "conversation") ?? String()
+    let lights = "/mcpkeep run_code {Obj.new().s("code", String("return await mcp.lamp.lights();")).done()}"
+    let lit = try say(mut app, lamp_chat.copy(), String("m_d1"), lights.copy())
+    try check(lit.contains("ada"), "a chat calls a server it has")
+    _ = try app.cmd("q_d4", "mcp.put", merge(keyed(fake.copy(), "lantern"), Obj.new().s("was", String("lamp")).done()))
+    let deleted = try app.cmd("q_d5", "mcp.delete", Obj.new().s("name", String("lantern")).done())
+    _ = try app.cmd("q_d6", "mcp.put", keyed(fake.copy(), "lantern"))
+    _ = try app.cmd("q_d7", "rule.put", Obj.new().s("then", String("deny")).s("tool", String("lantern.lights")).done())
+    let still_lit = try say(mut app, lamp_chat, String("m_d2"), lights)
+    try check(ok_of(deleted) and still_lit.contains("ada"), "once a renamed server is deleted, its old name leads nowhere: a chat from before isn't taken to another server that has the name since")
 
     // --- A server that doesn't let apps sign up ---
     _ = try app.cmd("q_23", "mcp.put", Obj.new().s("name", String("fixed")).s("url", "{fake}/mcp2").done())

@@ -5490,11 +5490,20 @@ impl Instance {
             // What the icons kept of each are known by, so loom mcp fetches
             // them only when the server gives others.
             var known = LinkedMap<String, Json>()
+            // And the names each had before a rename, so a session from before
+            // it keeps the server under the name it knows it by (LOO-408).
+            var renamed = LinkedMap<String, Json>()
             for s in servers {
                 let name = str_at(s, "name") ?? String()
+                let old = i.old_names(g.user.copy(), name.copy())
+                if old.len() > 0 {
+                    var names = List<Json>()
+                    for o in old { names.push(Json.Str(o.copy())) }
+                    renamed.insert(name.copy(), Json.Array(names))
+                }
                 if let ok(some(had)) = i.store.mcp_icon(g.user.copy(), name.copy()) { known.insert(name, Json.Str(had.0.copy())) }
             }
-            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).done()))
+            return some(json_response(200, Obj.new().j("servers", Json.Array(servers)).j("icons", Json.Object(known)).j("renamed", Json.Object(renamed)).done()))
         }
         if req.path == "/api/mcp/deno" and req.method == "GET" {
             return try i.deno_for(req)
@@ -10577,6 +10586,28 @@ impl Instance {
             }
         }
         return name.copy()
+    }
+
+    // The names `user`'s MCP server `name` had before it was renamed, which
+    // server_now takes to it, nearest first: a chat running from before a
+    // rename knows it by one of them.
+    fn old_names(i: Instance, user: String, name: String) -> List<String> {
+        let renames = match i.store.mcp_renames(user) {
+            ok(r) => r,
+            _ => return List<String>(),
+        }
+        var out = List<String>()
+        var to_find = [name.copy()].to_list()
+        while to_find.len() > 0 {
+            let now_named = to_find.remove(0)
+            for (was, to) in renames.copy() {
+                if to == now_named and was != name and not out.contains(was.copy()) {
+                    out.push(was.copy())
+                    to_find.push(was.copy())
+                }
+            }
+        }
+        return out
     }
 
     // What a test of `user`'s server `server` found, kept for mcp.list's
@@ -17402,7 +17433,10 @@ impl Instance {
         }
         if name == "mcp.delete" {
             let server_name = str_at(args, "name") ?? String()
+            // The names it had before a rename lead nowhere now.
+            let old = i.old_names(user.copy(), server_name.copy())
             if not try i.store.delete_mcp_server(user.copy(), server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
+            for was in old { try i.store.delete_meta("mcp_renamed/{user}/{was}") }
             try i.store.delete_meta("mcp_catalog/{user}/{server_name}")
             try i.store.delete_meta("mcp_tested/{user}/{server_name}")
             try i.store.delete_meta("mcp_scopes/{user}/{server_name}")

@@ -348,18 +348,39 @@ impl Code {
             err(_) => return,
         }
         self.known_icons = at(given.copy(), "icons")
+        let renamed = at(given.copy(), "renamed")
         let Json.Array(specs) = at(given, "servers") else return
         var fresh = List<Json>()
         for spec in specs {
-            let name = str_at(spec.copy(), "name") ?? String()
-            if self.servers.contains(name.copy()) or self.signing.contains(name.copy()) { continue }
-            var known = false
-            for t in self.tools {
-                if t.server == name { known = true }
-            }
-            if not known { fresh.push(spec.copy()) }
+            // One renamed since this session started it is the one it has.
+            let name = self.known_as(str_at(spec.copy(), "name") ?? String(), renamed.copy())
+            if not self.knows(name) { fresh.push(spec.copy()) }
         }
         self.take_in(link, fresh)
+    }
+
+    // Whether this session has the server `name`: started, waiting for a
+    // sign-in, or with tools it found.
+    fn knows(self, name: String) -> bool {
+        if self.servers.contains(name.copy()) or self.signing.contains(name.copy()) { return true }
+        for t in self.tools {
+            if t.server == name { return true }
+        }
+        return false
+    }
+
+    // The name this session knows the server `name` by: its own, or one it
+    // had before a rename since the session started (`renamed`, from
+    // /api/mcp/servers), which the instance still takes to it.
+    fn known_as(self, name: String, renamed: Json) -> String {
+        if self.knows(name.copy()) { return name.copy() }
+        if let Json.Array(olds) = renamed.get(name.copy()) ?? Json.Null {
+            for old in olds {
+                let was = old.as_str() ?? String()
+                if was.len() > 0 and self.knows(was.copy()) { return was }
+            }
+        }
+        return name.copy()
     }
 
     // After a 401 (PLAN.md, "Signing in to MCP servers"): the instance
@@ -393,9 +414,10 @@ impl Code {
             err(_) => return,
         }
         self.known_icons = at(given.copy(), "icons")
+        let renamed = at(given.copy(), "renamed")
         let Json.Array(specs) = at(given, "servers") else return
         for spec in specs {
-            let name = str_at(spec.copy(), "name") ?? String()
+            let name = self.known_as(str_at(spec.copy(), "name") ?? String(), renamed.copy())
             if not self.signing.contains(name.copy()) or auth_of(spec.copy()).len() == 0 { continue }
             if let ok(got) = start_listed(spec.copy()) {
                 let (server, listed) = got
