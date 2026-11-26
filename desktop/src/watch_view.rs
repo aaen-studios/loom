@@ -85,9 +85,12 @@ pub(super) fn update_line(
         LineMark::None => div().w(px(MARK_W)).flex_none().into_any_element(),
     };
     let subject = match line.mark() {
+        // The pill without its tile, the mark already being it, and its dot the status
+        // the line is about; its preview is the card now.
         LineMark::Board => {
             let card = line.card_shown(m.cards.get(&line.card));
-            Some(card_pill(p, key, &line.card, Some(&card)))
+            let dot = ink_color(p, line.dot(&card));
+            Some(card_pill_in(p, key, &line.card, Some(&card), Some(dot)))
         }
         LineMark::Strand(_) => Some(
             div()

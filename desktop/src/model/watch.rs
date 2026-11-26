@@ -26,6 +26,8 @@ pub struct WatchLine {
     pub event: String,
     /// The status a card moved to.
     pub to: String,
+    /// The card's status when it happened, where the line says it.
+    pub status: String,
     /// What happened, in words: "moved to Done", "Thread finished".
     pub said: String,
     pub by: String,
@@ -69,6 +71,7 @@ impl WatchLine {
             title: s(b, "title"),
             event: s(b, "event"),
             to: s(b, "to"),
+            status: s(b, "status"),
             said: s(b, "said"),
             by: s(b, "by"),
             url: s(b, "url"),
@@ -135,6 +138,31 @@ impl WatchLine {
         }
     }
 
+    /// The status the line is about, which its pill's dot shows: where a move went, or
+    /// for a comment or a new card the card's status then, where the line says it. None
+    /// when it doesn't, for the card's status now.
+    pub fn status_then(&self) -> Option<&str> {
+        let then = if self.event == "moved" {
+            self.to.trim()
+        } else {
+            self.status.trim()
+        };
+        (!then.is_empty()).then_some(then)
+    }
+
+    /// Its pill's dot: the status the line is about, or else the card's now (`now`, the
+    /// card as its pill shows it). A message's pill shows the card's status now.
+    pub fn dot(&self, now: &ActaCard) -> super::CardInk {
+        match self.status_then() {
+            Some(status) => ActaCard {
+                status: status.to_string(),
+                ..ActaCard::default()
+            }
+            .ink(),
+            None => now.ink(),
+        }
+    }
+
     /// Its card as its pill shows it: as it was looked up (live), or else as the line
     /// says it, with the status it moved to.
     pub fn card_shown(&self, looked: Option<&ActaCard>) -> ActaCard {
@@ -146,11 +174,7 @@ impl WatchLine {
             board: self.board.clone(),
             board_name: self.board_name.clone(),
             title: self.title.clone(),
-            status: if self.event == "moved" {
-                self.to.clone()
-            } else {
-                String::new()
-            },
+            status: self.status_then().unwrap_or_default().to_string(),
             url: self.url.clone(),
             ..ActaCard::default()
         }
@@ -849,6 +873,43 @@ mod tests {
         m.line_cards(&mut shown);
         let l = line_of(&shown[0]).cloned().unwrap_or_default();
         assert_eq!(l.card_shown(shown[0].cards.get("LOO-2")).status, "review");
+    }
+
+    #[test]
+    fn a_lines_dot_is_the_status_it_is_about() {
+        use super::super::CardInk;
+        let done_now = ActaCard {
+            id: "LOO-206".into(),
+            status: "done".into(),
+            ..ActaCard::default()
+        };
+        // A move's is where it went, though the card has gone on since.
+        let to_review = block(
+            json!({"integration": "acta", "card": "LOO-206", "event": "moved", "to": "review"}),
+        );
+        assert_eq!(to_review.status_then(), Some("review"));
+        assert_eq!(to_review.dot(&done_now), CardInk::Gold);
+        assert_eq!(moved().dot(&ActaCard::default()), CardInk::Ok);
+        // A comment's or a new card's is its status then, where the line says it.
+        let commented = block(
+            json!({"integration": "acta", "card": "LOO-206", "event": "commented", "status": "in_progress"}),
+        );
+        assert_eq!(commented.dot(&done_now), CardInk::Sky);
+        let made = block(
+            json!({"integration": "acta", "card": "LOO-207", "event": "created", "status": "todo"}),
+        );
+        assert_eq!(made.dot(&done_now), CardInk::Quiet);
+        // And its status now where it doesn't.
+        let said_nothing =
+            block(json!({"integration": "acta", "card": "LOO-206", "event": "commented"}));
+        assert_eq!(said_nothing.status_then(), None);
+        assert_eq!(said_nothing.dot(&done_now), CardInk::Ok);
+        // The card the pill opens on is the card now: its preview says Done.
+        assert_eq!(to_review.card_shown(Some(&done_now)).status, "done");
+        // Until it's looked up, the pill is the card as the line says it.
+        assert_eq!(to_review.card_shown(None).status, "review");
+        assert_eq!(commented.card_shown(None).status, "in_progress");
+        assert_eq!(said_nothing.card_shown(None).status, "");
     }
 
     fn boards() -> Vec<(String, String)> {

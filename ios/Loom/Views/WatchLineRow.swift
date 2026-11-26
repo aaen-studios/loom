@@ -83,12 +83,13 @@ private struct Strand: View {
     }
 }
 
-/// A card as a line names it: its id in mono, its title cut to fit, and a dot in its
-/// status's colour, on the bubble's fill with a line around it.
+/// A card as a line names it, with no tile of its own (the line's mark is it): its id in
+/// mono, its title cut to fit, and a dot in the colour of the status the line is about,
+/// when it says one, on the bubble's fill with a line around it.
 private struct LineCardPill: View {
     var id: String
     var title: String
-    var status: String
+    var status: String?
 
     var body: some View {
         HStack(spacing: 5) {
@@ -98,7 +99,7 @@ private struct LineCardPill: View {
                 Text(title).font(Fonts.small).foregroundStyle(P.ink)
                     .lineLimit(1).truncationMode(.tail)
             }
-            Circle().fill(dot).frame(width: 7, height: 7)
+            if let status { Circle().fill(dot(status)).frame(width: 7, height: 7) }
         }
         .padding(.horizontal, 7)
         .frame(height: 22)
@@ -108,7 +109,7 @@ private struct LineCardPill: View {
 
     /// The dot's colour, as a card's status is drawn: in progress sky, review gold, done
     /// ok, and the rest quiet.
-    private var dot: Color {
+    private func dot(_ status: String) -> Color {
         switch status {
         case "in_progress": P.thread("sky")
         case "review": P.thread("gold")

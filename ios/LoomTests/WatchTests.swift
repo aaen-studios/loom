@@ -24,7 +24,21 @@ import Testing
         #expect(l.status == "done")
         let comment = WatchLine(["integration": "acta", "card": "LOO-351", "event": "commented", "said": "commented", "by": "Ola"])
         #expect(comment.words == "commented · Ola")
-        #expect(comment.status == "")
+    }
+
+    @Test func aLinesDotIsTheStatusItIsAbout() {
+        // A move's is where it went, whatever the card is now.
+        let toReview = WatchLine(["integration": "acta", "card": "LOO-206", "event": "moved", "to": "review", "status": "done"])
+        #expect(toReview.status == "review")
+        // A comment's or a new card's is the card's status then, where the line says it.
+        let commented = WatchLine(["integration": "acta", "card": "LOO-206", "event": "commented", "status": "in_progress"])
+        #expect(commented.status == "in_progress")
+        let made = WatchLine(["integration": "acta", "card": "LOO-207", "event": "created", "status": "todo"])
+        #expect(made.status == "todo")
+        // Where it doesn't, none: the phone doesn't look the card up, so its pill has no dot.
+        let saidNothing = WatchLine(["integration": "acta", "card": "LOO-351", "event": "commented"])
+        #expect(saidNothing.status == nil)
+        #expect(WatchLine(["integration": "acta", "card": "LOO-1", "event": "moved", "to": " "]).status == nil)
     }
 
     @Test func aThreadLineIsItsStrandAsTheRunEnded() {

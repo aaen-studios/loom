@@ -22372,7 +22372,12 @@ fn board_icon(size: f32) -> AnyElement {
 
 /// The colour a card's status is drawn in (`model::CardInk`).
 fn card_ink(p: Palette, card: &model::ActaCard) -> Hsla {
-    match card.ink() {
+    ink_color(p, card.ink())
+}
+
+/// A card status's colour.
+fn ink_color(p: Palette, ink: model::CardInk) -> Hsla {
+    match ink {
         model::CardInk::Quiet => p.ink_3,
         model::CardInk::Sky => thread::color("sky", p.dark),
         model::CardInk::Gold => thread::color("gold", p.dark),
@@ -22401,6 +22406,18 @@ fn card_pill(
     id: &str,
     card: Option<&model::ActaCard>,
 ) -> AnyElement {
+    card_pill_in(p, key, id, card, None)
+}
+
+/// `card_pill`, and in a watch's line (`line_dot`, watch_view.rs): without its tile, which
+/// the line's mark already is, and its dot in the colour of the status the line is about.
+fn card_pill_in(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line_dot: Option<Hsla>,
+) -> AnyElement {
     if card.is_some_and(|c| c.missing) {
         return card_id_text(id, p.ink_3).into_any_element();
     }
@@ -22409,7 +22426,7 @@ fn card_pill(
         .h(px(control::PILL))
         .min_w_0()
         .max_w(px(layout::PILL_TITLE + 110.0))
-        .pl(px(4.0))
+        .pl(px(if line_dot.is_some() { 7.0 } else { 4.0 }))
         .pr(px(7.0))
         .flex()
         .items_center()
@@ -22419,7 +22436,7 @@ fn card_pill(
         .border_color(p.line)
         .bg(p.bubble)
         .cursor_pointer()
-        .child(board_icon(14.0))
+        .when(line_dot.is_none(), |d| d.child(board_icon(14.0)))
         .child(card_id_text(id, p.ink_2));
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
@@ -22440,7 +22457,7 @@ fn card_pill(
                 .flex_none()
                 .size(px(7.0))
                 .rounded_full()
-                .bg(card_ink(p, &card)),
+                .bg(line_dot.unwrap_or_else(|| card_ink(p, &card))),
         )
         .on_click(move |_, _, cx| cx.open_url(&url));
     // In a row (a watch's line, Following), it gives way, its title cut shorter.

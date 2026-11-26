@@ -12,6 +12,8 @@ struct WatchLine: Equatable, Sendable {
     var event: String
     /// The status a card moved to.
     var to: String
+    /// The card's status when it happened, where the line says it.
+    var cardStatus: String
     /// What happened, in words: "moved to Done", "Thread finished".
     var said: String
     var by: String
@@ -29,6 +31,7 @@ struct WatchLine: Equatable, Sendable {
         title = b["title"].text
         event = b["event"].text
         to = b["to"].text
+        cardStatus = b["status"].text
         said = b["said"].text
         by = b["by"].text
         url = b["url"].text
@@ -87,8 +90,13 @@ struct WatchLine: Equatable, Sendable {
         }
     }
 
-    /// The status its card's dot shows: the one it moved to, or none.
-    var status: String { event == "moved" ? to : "" }
+    /// The status the line is about, which its card's dot shows: where a move went, or for
+    /// a comment or a new card the card's status then, where the line says it. Nil when it
+    /// doesn't: the phone doesn't look the card up, so the pill has no dot then.
+    var status: String? {
+        let then = (event == "moved" ? to : cardStatus).trimmingCharacters(in: .whitespaces)
+        return then.isEmpty ? nil : then
+    }
 }
 
 extension Message {

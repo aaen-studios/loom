@@ -626,7 +626,8 @@ const BOARD_LAYERS = [
 </template>
 <!-- A watch's line, once Sam moves the release notes' card to Done, as the app draws it
      (watch_view.rs, update_line): quiet and on the left, the board's tile in the reply
-     thread's place, the card's pill, and what happened and who in quiet ink. -->
+     thread's place, the card's pill without a tile of its own and its dot in the status the
+     line is about, and what happened and who in quiet ink. -->
 <template id="demo-watch-line">
 	<div class="row watch-line fresh" aria-label="SHOP-31 moved to Done · Sam">
 		<svg class="acta-tile line-mark" viewBox="0 0 14 14" aria-hidden="true"
@@ -635,8 +636,6 @@ const BOARD_LAYERS = [
 		<span class="line-what">
 			<span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--ok)"
 				><span class="acta-face"
-					><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-						><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
 					><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
 				><span class="acta-preview" role="tooltip"
 					><span class="cp-place"
@@ -3249,6 +3248,7 @@ const BOARD_LAYERS = [
 		min-width: 0;
 	}
 	.line-what .acta-face {
+		padding-left: 7px;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}

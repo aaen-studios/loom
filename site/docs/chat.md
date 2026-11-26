@@ -195,7 +195,7 @@ Each routine's **History**, on its page under **Routines**, says how every run e
 
 ## Following Acta and T3
 
-An agent can follow an Acta board, a card on one, or a T3 thread for you, and tell you in the chat when something happens there. Each change is a quiet line on the left: the board's purple tile, the card's pill and what happened and who, "moved to Done · Sam"; or for a thread, its strand and title and "Thread finished", the strand lying straight in green once it finished, sagging in red if it failed. Lines one after another sit close together. When the change wakes the agent, its reply comes after the line. On the iPhone the lines show the same way.
+An agent can follow an Acta board, a card on one, or a T3 thread for you, and tell you in the chat when something happens there. Each change is a quiet line on the left: the board's purple tile, the card's pill with its dot in the colour of the status the line is about (where it moved to, for a move), and what happened and who, "moved to Done · Sam"; or for a thread, its strand and title and "Thread finished", the strand lying straight in green once it finished, sagging in red if it failed. Lines one after another sit close together. When the change wakes the agent, its reply comes after the line. On the iPhone the lines show the same way.
 
 What an agent or a group chat follows is under **Following** in its settings: each as its pill, with a red dot and why when loom couldn't look, and an × to stop following it. It shows only when there's something followed.
 
