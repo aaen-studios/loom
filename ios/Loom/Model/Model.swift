@@ -1710,6 +1710,9 @@ final class Model {
     private var firstUnread: [String: String] = [:]
     /// The open chat's first reply that came while it was shut, while it stays open.
     private var unreadFrom: String?
+    /// The chat was left for the agents list, where it stays selected: what comes to it
+    /// now is unread, and it opens again afresh (`leaveChat`).
+    private var away = false
     /// The long messages in the open chat folded or opened by hand since it opened, by
     /// their cut's key (`folds`).
     private(set) var foldFlips: Set<String> = []
@@ -1765,6 +1768,19 @@ final class Model {
         cameLive = []
         foldFlips = []
         unreadFrom = first
+    }
+
+    /// The chat is left for the agents list. Its agent stays selected, so its chat opens
+    /// again at once, but as a chat opened again: afresh, with what came meanwhile unread.
+    func leaveChat() {
+        away = true
+    }
+
+    /// The group chat open opened again from the agents list: afresh.
+    func reopenRoom() {
+        guard away else { return }
+        away = false
+        chatOpened(unreadFrom: nil)
     }
 
     /// Folds a long message in the open chat, by its cut's key, or opens it: so it stays
@@ -1898,8 +1914,14 @@ final class Model {
     // MARK: Taking frames from the core
 
     func select(_ agent: String?) {
+        let back = away
+        away = false
         // Picking an agent leaves a group chat, even for one of its members.
-        guard selected != agent || room != nil else { return }
+        guard selected != agent || room != nil else {
+            // Its chat opened again from the agents list: afresh (`leaveChat`).
+            if back { chatOpened(unreadFrom: agent.flatMap { firstUnread.removeValue(forKey: $0) }) }
+            return
+        }
         selected = agent
         room = nil
         thread = nil
@@ -2041,7 +2063,7 @@ final class Model {
             // For whether a long one is cut (`folds`). Catch-up is what came before.
             if kind == "message.created" && synced {
                 let about = conversations.first { $0.id == f["conversation"].string }
-                if f["conversation"].string == conversation {
+                if f["conversation"].string == conversation && !away {
                     // Came while its chat is open: it shows whole.
                     cameLive.insert(id)
                 } else if f["message"]["role"].text == "agent", let c = about, c.isChat, c.room == nil {

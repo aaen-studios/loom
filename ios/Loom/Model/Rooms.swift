@@ -104,7 +104,12 @@ extension Model {
     /// Shows a group chat. Its default member, or else its first, is the agent the
     /// screen's agent parts are about meanwhile.
     func open(room id: String) {
-        guard let r = roomNamed(id), room != id else { return }
+        guard let r = roomNamed(id) else { return }
+        guard room != id else {
+            // Opened again from the agents list: afresh (`leaveChat`).
+            reopenRoom()
+            return
+        }
         let lead = [r.defaultAgent].first { agent($0) != nil } ?? r.members.first { agent($0) != nil }
         select(lead)
         room = id
