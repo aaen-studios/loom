@@ -57,6 +57,14 @@ pub mod layout {
     pub const SETTINGS: f32 = 600.0;
     pub const PAGE: f32 = 520.0;
     pub const NAV: f32 = 210.0;
+    pub const POPUP_W: f32 = 1280.0;
+    pub const POPUP_H: f32 = 900.0;
+    pub const POPUP_LEAST_W: f32 = 900.0;
+    pub const POPUP_LEAST_H: f32 = 640.0;
+    pub const LIST: f32 = 300.0;
+    pub const LIST_LEAST: f32 = 220.0;
+    pub const DETAIL_LEAST: f32 = 380.0;
+    pub const CARD_LEAST: f32 = 220.0;
     pub const MENU: f32 = 230.0;
     pub const MENU_WIDE: f32 = 240.0;
     pub const FIELD_LABEL: f32 = 120.0;
@@ -78,6 +86,8 @@ pub mod control {
     pub const LIMIT_RING: f32 = 14.0;
     pub const CHOICE: f32 = 50.0;
     pub const ROW: f32 = 54.0;
+    pub const LIST_ROW: f32 = 48.0;
+    pub const GRIP: f32 = 14.0;
     pub const ROW_TALL: f32 = 68.0;
 }
 

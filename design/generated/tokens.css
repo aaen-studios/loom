@@ -40,6 +40,14 @@
   --layout-settings: 600px;
   --layout-page: 520px;
   --layout-nav: 210px;
+  --layout-popup-w: 1280px;
+  --layout-popup-h: 900px;
+  --layout-popup-least-w: 900px;
+  --layout-popup-least-h: 640px;
+  --layout-list: 300px;
+  --layout-list-least: 220px;
+  --layout-detail-least: 380px;
+  --layout-card-least: 220px;
   --layout-menu: 230px;
   --layout-menu-wide: 240px;
   --layout-field-label: 120px;
@@ -58,6 +66,8 @@
   --control-limit-ring: 14px;
   --control-choice: 50px;
   --control-row: 54px;
+  --control-list-row: 48px;
+  --control-grip: 14px;
   --control-row-tall: 68px;
   --phone-size-caption: 12.5;
   --phone-size-small: 14;

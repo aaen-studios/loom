@@ -46,8 +46,12 @@ mod room_view;
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
 use emoji_ui::RowKey;
+#[path = "list_page.rs"]
+mod list_page;
 #[path = "routines.rs"]
 mod routines;
+use crate::model::popup::{self, Pane};
+use list_page::ListPage;
 
 /// What dropping a dragged agent on a row does.
 type DropAgent = Box<dyn Fn(&AgentDrag, &mut Window, &mut App) + 'static>;
@@ -414,6 +418,9 @@ pub struct Loom {
     side: Option<Screen>,
     /// The settings page the popup opened at last, to open at again.
     settings_last: Screen,
+    /// The popup's shape as it's drawn, its corner while it's dragged, and its list
+    /// pages' find field (list_page.rs).
+    list_ui: list_page::ListUi,
     /// The update icon's popup: the pointer is on the icon, or on the popup, and when it
     /// last left both, so the popup stays a moment for the pointer to cross the gap.
     update_over: (bool, bool),
@@ -584,8 +591,9 @@ pub struct Loom {
     check_by: &'static str,
     check_agent: String,
     check_in: Entity<InputState>,
-    /// The program whose settings form is open, on the programs page.
-    program_open: Option<String>,
+    /// On the Brains page: none for the first, `Some(None)` for the ACP Registry, and
+    /// `Some(Some(name))` for the program picked.
+    program_open: Option<Option<String>>,
     set_key_in: Entity<InputState>,
     set_value_in: Entity<InputState>,
     /// The open program's share: tokens each person may use, and whether each month.
@@ -1142,6 +1150,7 @@ impl Loom {
         let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_ui = routines::RoutineUi::new(window, cx);
+        let list_ui = list_page::ListUi::new(window, cx);
         let task_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 14)
@@ -1557,6 +1566,7 @@ ACTA_KEY=secret:ACTA_KEY",
             popup: None,
             side: None,
             settings_last: Screen::Profile,
+            list_ui,
             update_over: (false, false),
             update_left: None,
             rows: Rc::new(Vec::new()),
@@ -2035,6 +2045,9 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
             }
         }
+        // A list page opens with its find field empty, on its first.
+        self.list_ui.find_for = None;
+        self.list_ui.filled = None;
         match screen {
             Screen::Server => {
                 let f = self.model.load_scripts();
@@ -3658,15 +3671,22 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The popup over the window: its pages down the left, the open one on the right.
-    /// A click outside it, or Esc, closes it.
+    /// It opens at most of the window, or as big as the person last made it from its
+    /// corner (`model::popup::size`). A click outside it, or Esc, closes it.
     fn popup_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Div> {
         let open = self.popup?;
         let p = self.p;
         let server = is_server(open);
         let pages = self.popup_pages(server);
         let size = window.viewport_size();
-        let w = (size.width.as_f32() - 2.0 * space::XXL).clamp(320.0, 900.0);
-        let h = (size.height.as_f32() - 2.0 * space::XXL).clamp(320.0, 640.0);
+        let (w, h) = crate::model::popup::size(
+            (size.width.as_f32(), size.height.as_f32()),
+            self.prefs.popup_size,
+        );
+        self.list_ui.shape = Some(self.popup_shape(open, w));
+        if settings::page_kind(open) == crate::model::popup::Kind::List {
+            self.ready_list_page(open, window, cx);
+        }
         let mut nav = div()
             .w(px(layout::NAV))
             .flex_none()
@@ -3821,6 +3841,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 })),
             );
         }
+        // A grid page's column takes the page's whole width (`settings_page`).
+        self.list_ui.wide = settings::page_kind(open) == crate::model::popup::Kind::Grid;
         let page = match open {
             Screen::Server => self.server_page(cx),
             Screen::Profile => self.profile_page(cx),
@@ -3847,9 +3869,13 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
+        self.list_ui.wide = false;
+        let grip = self.popup_grip((w, h), cx);
+        let dragger = self.list_ui.drag.is_some().then(|| self.popup_dragger(cx));
         let card = div()
             .id("popup")
             .occlude()
+            .relative()
             .w(px(w))
             .h(px(h))
             .flex()
@@ -3890,7 +3916,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                 },
                             ))),
                     ),
-            );
+            )
+            // Its corner resizes it.
+            .child(grip)
+            .children(dragger);
         let mut scrim = p.bg;
         scrim.a = 0.7;
         Some(
@@ -7428,7 +7457,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .on_click(cx.listener(move |this, _, _, cx| {
                         // Brains opens on its list, so the program's page after.
                         this.open(Screen::Programs, cx);
-                        this.program_open = Some(open.clone());
+                        this.program_open = Some(Some(open.clone()));
                     }))
                     .into_any_element(),
             );
@@ -13184,70 +13213,38 @@ ACTA_KEY=secret:ACTA_KEY",
         }))
     }
 
-    /// The MCP servers page: the person's servers, which each agent gets if it has them,
-    /// and the keys their settings name.
+    /// Fills the MCP server form with server `m`'s, as it's picked.
+    pub(super) fn fill_mcp(
+        &mut self,
+        m: &model::McpServer,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let line = if m.url.is_empty() {
+            m.command.clone()
+        } else {
+            m.url.clone()
+        };
+        self.mcp_name_in
+            .update(cx, |s, cx| s.set_value(m.name.clone(), window, cx));
+        self.mcp_cmd_in
+            .update(cx, |s, cx| s.set_value(line, window, cx));
+        self.mcp_settings_in
+            .update(cx, |s, cx| s.set_value(m.settings_text(), window, cx));
+        let (client, secret) = (
+            m.client_id.clone(),
+            m.client_secret.clone().unwrap_or_default(),
+        );
+        self.mcp_client_in
+            .update(cx, |s, cx| s.set_value(client, window, cx));
+        self.mcp_client_secret_in
+            .update(cx, |s, cx| s.set_value(secret, window, cx));
+        self.list_ui.filled = Some((Screen::Mcp, m.name.clone()));
+    }
+
+    /// The MCP servers page: the person's servers down the left, which each agent gets if
+    /// it has them, and the one picked beside them, to test, sign in to and change.
     fn mcp_page(&mut self, cx: &mut Context<Self>) -> Div {
-        if let Some(open) = self.mcp_open.clone() {
-            let save = self
-                .small_button("save-mcp", "Save", true)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let name = this.mcp_name_in.read(cx).value().to_string();
-                    let line = this.mcp_cmd_in.read(cx).value().to_string();
-                    let settings = this.mcp_settings_in.read(cx).value().to_string();
-                    if name.trim().is_empty() || line.trim().is_empty() {
-                        this.model
-                            .notices
-                            .push("Needs a name, and a command or an address".into());
-                        cx.notify();
-                        return;
-                    }
-                    let client = this.mcp_client_in.read(cx).value().to_string();
-                    let secret = this.mcp_client_secret_in.read(cx).value().to_string();
-                    let f = this.model.put_mcp(crate::model::with_client(
-                        crate::model::server_args(&name, &line, &settings),
-                        &client,
-                        &secret,
-                    ));
-                    this.send(f);
-                    this.mcp_open = None;
-                    cx.notify();
-                }));
-            let cancel = self
-                .small_button("cancel-mcp", "Cancel", false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.mcp_open = None;
-                    cx.notify();
-                }));
-            let delete = open.clone().map(|name| {
-                self.small_button("delete-mcp", "Delete", false)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let f = this.model.delete_mcp(&name);
-                        this.send(f);
-                        this.mcp_open = None;
-                        cx.notify();
-                    }))
-            });
-            let mut fields = vec![
-                self.field_row("Name", Input::new(&self.mcp_name_in)),
-                self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
-                self.text_row("Settings", None, Textarea::new(&self.mcp_settings_in)),
-            ];
-            if self.mcp_cmd_in.read(cx).value().trim().starts_with("http") {
-                fields.push(self.field_row("Client ID", Input::new(&self.mcp_client_in)));
-                fields
-                    .push(self.field_row("Client secret", Input::new(&self.mcp_client_secret_in)));
-            }
-            let groups = vec![
-                self.group(None, fields),
-                self.form_actions(delete, cancel, save),
-            ];
-            let title = if open.is_some() {
-                "Change MCP server"
-            } else {
-                "New MCP server"
-            };
-            return self.settings_page("mcp-page", title, None, groups);
-        }
         let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
             this.small_button("new-mcp", "New server", primary)
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -13262,131 +13259,217 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.mcp_settings_in
                         .update(cx, |s, cx| s.set_value("", window, cx));
                     this.mcp_open = Some(None);
+                    this.list_ui.filled = None;
                     cx.notify();
                 }))
         };
         // The agents' browser isn't one of these: it's loom's own.
-        let mut groups = Vec::new();
         let servers = self.model.mcp_servers.clone();
-        if servers.is_empty() {
+        if servers.is_empty() && self.mcp_open.is_none() {
             let actions = new_server(self, cx, true).into_any_element();
-            groups.push(self.empty(Ico::Plug, "No MCP servers yet", None, Some(actions)));
-        } else {
-            let mut rows = Vec::new();
-            for m in servers {
-                let what = if m.url.is_empty() {
-                    m.command.clone()
-                } else {
-                    m.url.clone()
-                };
-                // Its last test, in place of what it runs, once there's been one, or
-                // whom it's signed in as.
-                let tested = self.model.mcp_tests.get(&m.name).cloned();
-                let signed = match &m.sign_in {
-                    SignIn::SignedIn(who) if who.is_empty() => Some("Signed in".to_string()),
-                    SignIn::SignedIn(who) => Some(format!("Signed in as {who}")),
-                    _ => None,
-                };
-                let sub = tested.as_ref().map(|t| t.said()).or(signed).unwrap_or(what);
-                let testing = tested == Some(crate::model::McpTest::Testing);
-                let test_name = m.name.clone();
-                let test = self
-                    .small_button(
-                        format!("test-mcp-{}", m.name),
-                        if testing { "Testing…" } else { "Test" },
-                        false,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
-                        if this.model.mcp_tests.get(&test_name)
-                            == Some(&crate::model::McpTest::Testing)
-                        {
-                            return;
-                        }
-                        let f = this.model.test_mcp(&test_name);
-                        this.send(f);
-                        cx.notify();
-                    }));
-                // Sign in, for a server that needs it, in place of the error; Sign out
-                // once signed in.
-                let needs = m.sign_in == SignIn::Needed
-                    || tested == Some(crate::model::McpTest::NeedsSignIn);
-                let account = match &m.sign_in {
-                    SignIn::SignedIn(_) => {
-                        let out_name = m.name.clone();
-                        Some(
-                            self.small_button(
-                                format!("sign-out-mcp-{}", m.name),
-                                "Sign out",
-                                false,
-                            )
-                            .on_click(cx.listener(
-                                move |this, _, _, cx| {
-                                    cx.stop_propagation();
-                                    let f = this.model.sign_out_mcp(&out_name);
-                                    this.send(f);
-                                    cx.notify();
-                                },
-                            )),
-                        )
-                    }
-                    _ if needs => Some(self.sign_in_button(&m.name, cx)),
-                    _ => None,
-                };
-                let actions = div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .children(account)
-                    .child(test);
-                let sub = if needs && tested.is_none() {
-                    "Needs you to sign in".to_string()
-                } else {
-                    sub
-                };
-                let row = self.row(
-                    Some(self.tile(Ico::Plug)),
-                    m.name.clone(),
-                    Some(sub),
-                    Some(actions.into_any_element()),
-                );
-                rows.push(
-                    self.link_row(SharedString::from(format!("mcp-{}", m.name)), row)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let (name, line, settings) = (
-                                m.name.clone(),
-                                if m.url.is_empty() {
-                                    m.command.clone()
-                                } else {
-                                    m.url.clone()
-                                },
-                                m.settings_text(),
-                            );
-                            this.mcp_name_in
-                                .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
-                            this.mcp_cmd_in
-                                .update(cx, |s, cx| s.set_value(line, window, cx));
-                            this.mcp_settings_in
-                                .update(cx, |s, cx| s.set_value(settings, window, cx));
-                            let (client, secret) = (
-                                m.client_id.clone(),
-                                m.client_secret.clone().unwrap_or_default(),
-                            );
-                            this.mcp_client_in
-                                .update(cx, |s, cx| s.set_value(client, window, cx));
-                            this.mcp_client_secret_in
-                                .update(cx, |s, cx| s.set_value(secret, window, cx));
-                            this.mcp_open = Some(Some(name));
-                            cx.notify();
-                        }))
-                        .into_any_element(),
-                );
-            }
-            groups.push(self.group(None, rows));
+            let groups = vec![self.empty(Ico::Plug, "No MCP servers yet", None, Some(actions))];
+            return self.settings_page("mcp-page", "MCP servers", None, groups);
         }
-        let action = (!self.model.mcp_servers.is_empty())
-            .then(|| new_server(self, cx, false).into_any_element());
-        self.settings_page("mcp-page", "MCP servers", action, groups)
+        let keys: Vec<&str> = servers.iter().map(|m| m.name.as_str()).collect();
+        let open = self.mcp_open.clone();
+        let shows = popup::shows(
+            self.list_split(),
+            open.as_ref().map(|o| o.as_deref()),
+            &keys,
+            false,
+        );
+        let query = self.list_query(cx);
+        let found = (0..servers.len())
+            .filter(|&i| popup::finds(&query, &servers[i].name))
+            .collect();
+        let (pane_key, pane) = match shows.pane {
+            Pane::Item(i) => (
+                servers[i].name.clone(),
+                self.mcp_pane(Some(&servers[i]), cx),
+            ),
+            Pane::New => ("new".to_string(), self.mcp_pane(None, cx)),
+            _ => (String::new(), Vec::new()),
+        };
+        let action = Some(new_server(self, cx, false).into_any_element());
+        self.list_detail(
+            ListPage {
+                id: "mcp-page",
+                title: "MCP servers",
+                action,
+                shows,
+                found,
+                row: Loom::mcp_row,
+                head: None,
+                foot: None,
+                pane_key,
+                pane,
+            },
+            cx,
+        )
+    }
+
+    /// One of the person's MCP servers, as a row of the list: how many tools its last
+    /// test found, or how it signs in, and a dot for how it is.
+    fn mcp_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(m) = self.model.mcp_servers.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let (line, dot) = popup::mcp_line(&m, self.model.mcp_tests.get(&m.name));
+        self.list_row(
+            format!("mcp-{}", m.name),
+            self.tile(Ico::Plug),
+            m.name.clone(),
+            line,
+            dot,
+            picked,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.mcp_open = Some(Some(m.name.clone()));
+            this.fill_mcp(&m, window, cx);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The MCP server picked, beside the list: its name, what its last test found or
+    /// whom it's signed in as, Test and its sign-in, and its form to change; or a new
+    /// one's form.
+    fn mcp_pane(
+        &mut self,
+        m: Option<&model::McpServer>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let open = m.map(|m| m.name.clone());
+        let split = self.list_split();
+        let save = self
+            .small_button("save-mcp", "Save", true)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let name = this.mcp_name_in.read(cx).value().to_string();
+                let line = this.mcp_cmd_in.read(cx).value().to_string();
+                let settings = this.mcp_settings_in.read(cx).value().to_string();
+                if name.trim().is_empty() || line.trim().is_empty() {
+                    this.model
+                        .notices
+                        .push("Needs a name, and a command or an address".into());
+                    cx.notify();
+                    return;
+                }
+                let client = this.mcp_client_in.read(cx).value().to_string();
+                let secret = this.mcp_client_secret_in.read(cx).value().to_string();
+                let f = this.model.put_mcp(crate::model::with_client(
+                    crate::model::server_args(&name, &line, &settings),
+                    &client,
+                    &secret,
+                ));
+                this.send(f);
+                // Side by side, it stays picked, as it was saved.
+                this.mcp_open = split.then(|| Some(name.clone()));
+                this.list_ui.filled = Some((Screen::Mcp, name));
+                cx.notify();
+            }));
+        let changing = open.is_some();
+        let cancel = self
+            .small_button("cancel-mcp", "Cancel", false)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // Side by side, its form goes back to how it was; else back to the list.
+                if split && changing {
+                    this.list_ui.filled = None;
+                } else {
+                    this.mcp_open = None;
+                }
+                cx.notify();
+            }));
+        let delete = open.clone().map(|name| {
+            self.small_button("delete-mcp", "Delete", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.delete_mcp(&name);
+                    this.send(f);
+                    this.mcp_open = None;
+                    this.list_ui.filled = None;
+                    cx.notify();
+                }))
+        });
+        let mut fields = vec![
+            self.field_row("Name", Input::new(&self.mcp_name_in)),
+            self.field_row("Command or URL", Input::new(&self.mcp_cmd_in)),
+            self.text_row("Settings", None, Textarea::new(&self.mcp_settings_in)),
+        ];
+        if self.mcp_cmd_in.read(cx).value().trim().starts_with("http") {
+            fields.push(self.field_row("Client ID", Input::new(&self.mcp_client_in)));
+            fields.push(self.field_row("Client secret", Input::new(&self.mcp_client_secret_in)));
+        }
+        let head = match m {
+            Some(m) => self.mcp_head(m, cx),
+            None => self.pane_head(None, "New MCP server", None, None),
+        };
+        vec![
+            head,
+            self.group(None, fields),
+            self.form_actions(delete, cancel, save),
+        ]
+    }
+
+    /// The head of the MCP server picked: its name, its last test, once there's been one,
+    /// or whom it's signed in as; and Test, with Sign in for a server that needs it, in
+    /// place of the error, or Sign out once signed in.
+    fn mcp_head(&mut self, m: &model::McpServer, cx: &mut Context<Self>) -> AnyElement {
+        let tested = self.model.mcp_tests.get(&m.name).cloned();
+        let signed = match &m.sign_in {
+            SignIn::SignedIn(who) if who.is_empty() => Some("Signed in".to_string()),
+            SignIn::SignedIn(who) => Some(format!("Signed in as {who}")),
+            _ => None,
+        };
+        let needs =
+            m.sign_in == SignIn::Needed || tested == Some(crate::model::McpTest::NeedsSignIn);
+        let line = if needs && tested.is_none() {
+            Some("Needs you to sign in".to_string())
+        } else {
+            tested.as_ref().map(|t| t.said()).or(signed)
+        };
+        let testing = tested == Some(crate::model::McpTest::Testing);
+        let test_name = m.name.clone();
+        let test = self
+            .small_button(
+                format!("test-mcp-{}", m.name),
+                if testing { "Testing…" } else { "Test" },
+                false,
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.model.mcp_tests.get(&test_name) == Some(&crate::model::McpTest::Testing) {
+                    return;
+                }
+                let f = this.model.test_mcp(&test_name);
+                this.send(f);
+                cx.notify();
+            }));
+        let account = match &m.sign_in {
+            SignIn::SignedIn(_) => {
+                let out_name = m.name.clone();
+                Some(
+                    self.small_button(format!("sign-out-mcp-{}", m.name), "Sign out", false)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let f = this.model.sign_out_mcp(&out_name);
+                            this.send(f);
+                            cx.notify();
+                        })),
+                )
+            }
+            _ if needs => Some(self.sign_in_button(&m.name, cx)),
+            _ => None,
+        };
+        let actions = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .children(account)
+            .child(test)
+            .into_any_element();
+        self.pane_head(
+            Some(self.big_tile(Ico::Plug, None)),
+            m.name.clone(),
+            line,
+            Some(actions),
+        )
     }
 
     /// The Secrets page: the person's secrets, sealed on the instance, of which only the
@@ -13478,88 +13561,141 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("secrets-page", "Secrets", None, groups)
     }
 
-    /// The skills page: the person's skills, which every agent reads when a task fits one,
-    /// and the form for a new or changed one.
+    /// Fills the skill form with skill `k`'s, as it's picked.
+    pub(super) fn fill_skill(
+        &mut self,
+        k: &model::Skill,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.skill_name_in
+            .update(cx, |s, cx| s.set_value(k.name.clone(), window, cx));
+        self.skill_desc_in
+            .update(cx, |s, cx| s.set_value(k.description.clone(), window, cx));
+        self.skill_body_in
+            .update(cx, |s, cx| s.set_value(k.body.clone(), window, cx));
+        self.list_ui.filled = Some((Screen::Skills, k.name.clone()));
+    }
+
+    /// The skills page: the person's skills down the left, which every agent reads when a
+    /// task fits one, and the one picked beside them to change, or a new one.
     fn skills_page(&mut self, cx: &mut Context<Self>) -> Div {
-        if let Some(open) = self.skill_open.clone() {
-            let save = self
-                .small_button("save-skill", "Save", true)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    let name = this.skill_name_in.read(cx).value().to_string();
-                    let description = this.skill_desc_in.read(cx).value().to_string();
-                    let text = this.skill_body_in.read(cx).value().to_string();
-                    if name.trim().is_empty() || description.trim().is_empty() {
-                        this.model
-                            .notices
-                            .push("Needs a name, and when it's for".into());
-                        cx.notify();
-                        return;
-                    }
-                    let f = this.model.save_skill(&name, &description, &text);
-                    this.send(f);
-                    this.skill_open = None;
-                    cx.notify();
-                }));
-            let cancel = self
-                .small_button("cancel-skill", "Cancel", false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.skill_open = None;
-                    cx.notify();
-                }));
-            let delete = open.clone().map(|name| {
-                self.small_button("delete-skill", "Delete", false)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let f = this.model.delete_skill(&name);
-                        this.send(f);
-                        this.skill_open = None;
-                        cx.notify();
-                    }))
-            });
-            let groups = vec![
-                self.group(
-                    None,
-                    vec![
-                        self.field_row("Name", Input::new(&self.skill_name_in)),
-                        self.field_row("When it's for", Input::new(&self.skill_desc_in)),
-                        self.text_row("How to do it", None, Textarea::new(&self.skill_body_in)),
-                    ],
-                ),
-                self.form_actions(delete, cancel, save),
-            ];
-            let title = if open.is_some() {
-                "Change skill"
-            } else {
-                "New skill"
-            };
-            return self.settings_page("skills-page", title, None, groups);
-        }
-        if self.model.skills.is_empty() {
+        let skills = self.model.skills.clone();
+        if skills.is_empty() && self.skill_open.is_none() {
             let action = self.new_skill_button(cx);
             let groups = vec![self.empty(Ico::BookOpen, "No skills yet", None, Some(action))];
             return self.settings_page("skills-page", "Skills", None, groups);
         }
-        // Its title over the skills, each a row of the one group, as a list.
-        let n = self.model.skills.len();
-        self.list_page(
-            "skills-page",
-            n + 1,
-            layout::SETTINGS,
-            |this, ix, cx| {
-                if ix == 0 {
-                    let action = Some(this.new_skill_button(cx));
-                    return this.list_head("Skills", action);
-                }
-                let n = this.model.skills.len();
-                match this.model.skills.get(ix - 1).cloned() {
-                    Some(k) => {
-                        let row = this.skill_row(k, cx);
-                        this.group_item(ix - 1, n, row)
-                    }
-                    None => div().into_any_element(),
-                }
+        let keys: Vec<&str> = skills.iter().map(|k| k.name.as_str()).collect();
+        let open = self.skill_open.clone();
+        let shows = popup::shows(
+            self.list_split(),
+            open.as_ref().map(|o| o.as_deref()),
+            &keys,
+            false,
+        );
+        let query = self.list_query(cx);
+        let found = (0..skills.len())
+            .filter(|&i| {
+                popup::finds(
+                    &query,
+                    &format!("{} {}", skills[i].name, skills[i].description),
+                )
+            })
+            .collect();
+        let (pane_key, pane) = match shows.pane {
+            Pane::Item(i) => (
+                skills[i].name.clone(),
+                self.skill_pane(Some(&skills[i]), cx),
+            ),
+            Pane::New => ("new".to_string(), self.skill_pane(None, cx)),
+            _ => (String::new(), Vec::new()),
+        };
+        let action = Some(self.new_skill_button(cx));
+        self.list_detail(
+            ListPage {
+                id: "skills-page",
+                title: "Skills",
+                action,
+                shows,
+                found,
+                row: Loom::skill_row,
+                head: None,
+                foot: None,
+                pane_key,
+                pane,
             },
             cx,
         )
+    }
+
+    /// The skill picked, beside the list, in its form to change; or a new one's form.
+    fn skill_pane(&mut self, k: Option<&model::Skill>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let open = k.map(|k| k.name.clone());
+        let split = self.list_split();
+        let save = self
+            .small_button("save-skill", "Save", true)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let name = this.skill_name_in.read(cx).value().to_string();
+                let description = this.skill_desc_in.read(cx).value().to_string();
+                let text = this.skill_body_in.read(cx).value().to_string();
+                if name.trim().is_empty() || description.trim().is_empty() {
+                    this.model
+                        .notices
+                        .push("Needs a name, and when it's for".into());
+                    cx.notify();
+                    return;
+                }
+                let f = this.model.save_skill(&name, &description, &text);
+                this.send(f);
+                // Side by side, it stays picked, as it was saved.
+                this.skill_open = split.then(|| Some(name.clone()));
+                this.list_ui.filled = Some((Screen::Skills, name));
+                cx.notify();
+            }));
+        let changing = open.is_some();
+        let cancel = self
+            .small_button("cancel-skill", "Cancel", false)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // Side by side, its form goes back to how it was; else back to the list.
+                if split && changing {
+                    this.list_ui.filled = None;
+                } else {
+                    this.skill_open = None;
+                }
+                cx.notify();
+            }));
+        let delete = open.clone().map(|name| {
+            self.small_button("delete-skill", "Delete", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.delete_skill(&name);
+                    this.send(f);
+                    this.skill_open = None;
+                    this.list_ui.filled = None;
+                    cx.notify();
+                }))
+        });
+        let head = match k {
+            Some(k) => self.pane_head(
+                Some(self.big_tile(Ico::BookOpen, None)),
+                k.name.clone(),
+                None,
+                None,
+            ),
+            None => self.pane_head(None, "New skill", None, None),
+        };
+        vec![
+            head,
+            self.group(
+                None,
+                vec![
+                    self.field_row("Name", Input::new(&self.skill_name_in)),
+                    self.field_row("When it's for", Input::new(&self.skill_desc_in)),
+                    self.text_row("How to do it", None, Textarea::new(&self.skill_body_in)),
+                ],
+            ),
+            self.form_actions(delete, cancel, save),
+        ]
     }
 
     /// The skills page's New skill, the page's own button while it has none.
@@ -13572,157 +13708,76 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.skill_body_in
                     .update(cx, |s, cx| s.set_value("", window, cx));
                 this.skill_open = Some(None);
+                this.list_ui.filled = None;
                 cx.notify();
             }))
             .into_any_element()
     }
 
-    /// One skill, as a row of the skills page, which opens it to change.
-    fn skill_row(&self, k: model::Skill, cx: &mut Context<Self>) -> AnyElement {
-        let row = self.row(
-            Some(self.tile(Ico::BookOpen)),
+    /// One skill, as a row of the list, with when it's for under its name.
+    fn skill_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(k) = self.model.skills.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        self.list_row(
+            format!("skill-{}", k.name),
+            self.tile(Ico::BookOpen),
             k.name.clone(),
-            Some(k.description.clone()),
+            k.description.clone(),
             None,
-        );
-        self.link_row(SharedString::from(format!("skill-{}", k.name)), row)
-            .on_click(cx.listener(move |this, _, window, cx| {
-                let (name, description, text) =
-                    (k.name.clone(), k.description.clone(), k.body.clone());
-                this.skill_name_in
-                    .update(cx, |s, cx| s.set_value(name.clone(), window, cx));
-                this.skill_desc_in
-                    .update(cx, |s, cx| s.set_value(description, window, cx));
-                this.skill_body_in
-                    .update(cx, |s, cx| s.set_value(text, window, cx));
-                this.skill_open = Some(Some(name));
-                cx.notify();
-            }))
-            .into_any_element()
+            picked,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.skill_open = Some(Some(k.name.clone()));
+            this.fill_skill(&k, window, cx);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// Fills the proposal form with proposal `k`'s, as it's picked: a skill's name, when
+    /// it's for and how, a fix's skill fixed, or a note.
+    pub(super) fn fill_proposal(
+        &mut self,
+        k: &model::Proposal,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if k.kind == "skill" {
+            let (name, description, body) = (k.name.clone(), k.description.clone(), k.body.clone());
+            self.skill_name_in
+                .update(cx, |s, cx| s.set_value(name, window, cx));
+            self.skill_desc_in
+                .update(cx, |s, cx| s.set_value(description, window, cx));
+            self.skill_body_in
+                .update(cx, |s, cx| s.set_value(body, window, cx));
+        } else if k.kind == "fix" {
+            let body = k.body.clone();
+            self.skill_body_in
+                .update(cx, |s, cx| s.set_value(body, window, cx));
+        } else {
+            let text = k.text.clone();
+            self.note_in
+                .update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+        self.list_ui.filled = Some((Screen::Proposals, k.id.clone()));
+    }
+
+    /// What a proposal is, as its row says it: "Skill from Juniper".
+    fn proposal_line(&self, k: &model::Proposal) -> String {
+        let kind = match k.kind.as_str() {
+            "skill" => "Skill",
+            "fix" => "Fix",
+            _ => "Note",
+        };
+        format!("{kind} from {}", self.who(&k.agent))
     }
 
     /// What waits for the person: notes and fixes to skills agents propose from their
     /// chats, when their permission mode asks, and skills written from a task the
-    /// person recorded in an agent's browser. Each is kept or dropped here, and one
-    /// opens to be read, and changed, before it's kept.
+    /// person recorded in an agent's browser. They're down the left, and the one picked
+    /// is beside them, to be read, and changed, before it's kept or dropped.
     fn proposals_page(&mut self, cx: &mut Context<Self>) -> Div {
-        if let Some(open) = self.proposal_open.clone() {
-            let skill = open.kind == "skill";
-            let keep = self
-                .small_button("keep-proposal", "Keep", true)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let Some(mut p) = this.proposal_open.take() else {
-                        return;
-                    };
-                    if p.kind == "skill" {
-                        p.name = this.skill_name_in.read(cx).value().to_string();
-                        p.description = this.skill_desc_in.read(cx).value().to_string();
-                        p.body = this.skill_body_in.read(cx).value().to_string();
-                        if p.name.trim().is_empty() || p.description.trim().is_empty() {
-                            this.model
-                                .notices
-                                .push("Needs a name, and when it's for".into());
-                            this.proposal_open = Some(p);
-                            cx.notify();
-                            return;
-                        }
-                    } else if p.kind == "fix" {
-                        p.body = this.skill_body_in.read(cx).value().to_string();
-                    } else {
-                        p.text = this.note_in.read(cx).value().to_string();
-                    }
-                    let f = this.model.keep_proposal(&p);
-                    this.send(f);
-                    cx.notify();
-                }));
-            let cancel = self
-                .small_button("cancel-proposal", "Cancel", false)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.proposal_open = None;
-                    cx.notify();
-                }));
-            let id = open.id.clone();
-            let drop = self
-                .small_button("drop-proposal", "Drop", false)
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let f = this.model.drop_proposal(&id);
-                    this.send(f);
-                    this.proposal_open = None;
-                    cx.notify();
-                }));
-            let p = self.p;
-            let from = format!(
-                "From {}{}",
-                self.who(&open.agent),
-                if open.why.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", open.why)
-                }
-            );
-            let mut groups = vec![self.group(None, vec![self.note_row(from, p.ink_2)])];
-            if skill {
-                groups.push(self.group(
-                    None,
-                    vec![
-                        self.field_row("Name", Input::new(&self.skill_name_in)),
-                        self.field_row("When it's for", Input::new(&self.skill_desc_in)),
-                        self.text_row("How to do it", None, Textarea::new(&self.skill_body_in)),
-                    ],
-                ));
-                if !open.steps.is_empty() {
-                    let steps = open
-                        .steps
-                        .iter()
-                        .enumerate()
-                        .map(|(k, line)| self.note_row(format!("{}. {line}", k + 1), p.ink_2))
-                        .collect();
-                    groups.push(self.group(Some("What you did"), steps));
-                }
-            } else if open.kind == "fix" {
-                let mut rows = Vec::new();
-                let failed = open.failed_line();
-                if !failed.is_empty() {
-                    rows.push(self.note_row(failed, p.ink_2));
-                }
-                if !open.lines.is_empty() {
-                    rows.push(
-                        div()
-                            .p(px(space::L))
-                            .child(learned::change_view(p, &open.lines, 1.0))
-                            .into_any_element(),
-                    );
-                }
-                rows.push(self.text_row(
-                    "The skill, fixed",
-                    None,
-                    Textarea::new(&self.skill_body_in),
-                ));
-                groups.push(self.group(None, rows));
-            } else {
-                let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
-                if !open.site.is_empty() || open.shared {
-                    let mut how = Vec::new();
-                    if !open.site.is_empty() {
-                        how.push(format!("Shown on {}", open.site));
-                    }
-                    if open.shared {
-                        how.push("every agent reads it".to_string());
-                    }
-                    rows.push(self.note_row(how.join(", "), p.ink_3));
-                }
-                groups.push(self.group(None, rows));
-            }
-            groups.push(self.form_actions(Some(drop), cancel, keep));
-            let title = if skill {
-                "Proposed skill"
-            } else if open.kind == "fix" {
-                "Proposed fix"
-            } else {
-                "Proposed note"
-            };
-            return self.settings_page("proposals-page", title, None, groups);
-        }
         // Asking the agent on screen to look over its chats for more.
         let ask = self.model.selected.clone().map(|agent| {
             let name = self.who(&agent);
@@ -13737,80 +13792,192 @@ ACTA_KEY=secret:ACTA_KEY",
                 }))
                 .into_any_element()
         });
-        if self.model.proposals.is_empty() {
+        let proposals = self.model.proposals.clone();
+        if proposals.is_empty() {
             let groups = vec![self.empty(Ico::Lightbulb, "Nothing to look at", None, ask)];
             return self.settings_page("proposals-page", "Proposals", None, groups);
         }
-        let mut rows = Vec::new();
-        for k in self.model.proposals.clone() {
-            let kind = match k.kind.as_str() {
-                "skill" => "Skill",
-                "fix" => "Fix",
-                _ => "Note",
-            };
-            let sub = format!("{kind} from {}", self.who(&k.agent));
-            let (keep_id, drop_id) = (k.clone(), k.id.clone());
-            let controls = div()
-                .flex()
-                .gap(px(space::S))
-                .child(
-                    self.small_button(SharedString::from(format!("drop-{}", k.id)), "Drop", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            let f = this.model.drop_proposal(&drop_id);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                )
-                .child(
-                    self.small_button(SharedString::from(format!("keep-{}", k.id)), "Keep", true)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
-                            let f = this.model.keep_proposal(&keep_id);
-                            this.send(f);
-                            cx.notify();
-                        })),
-                )
-                .into_any_element();
-            let icon = if k.kind == "skill" || k.kind == "fix" {
-                Ico::BookOpen
-            } else {
-                Ico::Lightbulb
-            };
-            let row = self.row(Some(self.tile(icon)), k.title(), Some(sub), Some(controls));
-            rows.push(
-                self.link_row(SharedString::from(format!("proposal-{}", k.id)), row)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if k.kind == "skill" {
-                            let (name, description, body) =
-                                (k.name.clone(), k.description.clone(), k.body.clone());
-                            this.skill_name_in
-                                .update(cx, |s, cx| s.set_value(name, window, cx));
-                            this.skill_desc_in
-                                .update(cx, |s, cx| s.set_value(description, window, cx));
-                            this.skill_body_in
-                                .update(cx, |s, cx| s.set_value(body, window, cx));
-                        } else if k.kind == "fix" {
-                            let body = k.body.clone();
-                            this.skill_body_in
-                                .update(cx, |s, cx| s.set_value(body, window, cx));
-                        } else {
-                            let text = k.text.clone();
-                            this.note_in
-                                .update(cx, |s, cx| s.set_value(text, window, cx));
-                        }
-                        this.proposal_open = Some(k.clone());
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-        }
-        self.settings_page(
-            "proposals-page",
-            "Proposals",
-            ask,
-            vec![self.group(None, rows)],
+        let keys: Vec<&str> = proposals.iter().map(|k| k.id.as_str()).collect();
+        let open = self.proposal_open.as_ref().map(|k| k.id.clone());
+        let shows = popup::shows(self.list_split(), open.as_deref().map(Some), &keys, false);
+        let query = self.list_query(cx);
+        let found = (0..proposals.len())
+            .filter(|&i| {
+                let k = &proposals[i];
+                popup::finds(&query, &format!("{} {}", k.title(), self.proposal_line(k)))
+            })
+            .collect();
+        let (pane_key, pane) = match shows.pane {
+            Pane::Item(i) => (
+                proposals[i].id.clone(),
+                self.proposal_pane(proposals[i].clone(), cx),
+            ),
+            _ => (String::new(), Vec::new()),
+        };
+        self.list_detail(
+            ListPage {
+                id: "proposals-page",
+                title: "Proposals",
+                action: ask,
+                shows,
+                found,
+                row: Loom::proposal_row,
+                head: None,
+                foot: None,
+                pane_key,
+                pane,
+            },
+            cx,
         )
+    }
+
+    /// One proposal, as a row of the list.
+    fn proposal_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(k) = self.model.proposals.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let icon = if k.kind == "skill" || k.kind == "fix" {
+            Ico::BookOpen
+        } else {
+            Ico::Lightbulb
+        };
+        let line = self.proposal_line(&k);
+        self.list_row(
+            format!("proposal-{}", k.id),
+            self.tile(icon),
+            k.title(),
+            line,
+            None,
+            picked,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.proposal_open = Some(k.clone());
+            this.fill_proposal(&k, window, cx);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The proposal picked, beside the list: what it is and from whom, and its form, to
+    /// be changed before it's kept, or dropped.
+    fn proposal_pane(&mut self, open: model::Proposal, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        let split = self.list_split();
+        let skill = open.kind == "skill";
+        let kept = open.clone();
+        let keep = self
+            .small_button("keep-proposal", "Keep", true)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let mut p = kept.clone();
+                if p.kind == "skill" {
+                    p.name = this.skill_name_in.read(cx).value().to_string();
+                    p.description = this.skill_desc_in.read(cx).value().to_string();
+                    p.body = this.skill_body_in.read(cx).value().to_string();
+                    if p.name.trim().is_empty() || p.description.trim().is_empty() {
+                        this.model
+                            .notices
+                            .push("Needs a name, and when it's for".into());
+                        cx.notify();
+                        return;
+                    }
+                } else if p.kind == "fix" {
+                    p.body = this.skill_body_in.read(cx).value().to_string();
+                } else {
+                    p.text = this.note_in.read(cx).value().to_string();
+                }
+                let f = this.model.keep_proposal(&p);
+                this.send(f);
+                this.proposal_open = None;
+                this.list_ui.filled = None;
+                cx.notify();
+            }));
+        let cancel = self
+            .small_button("cancel-proposal", "Cancel", false)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                // Side by side, its form goes back to how it came; else back to the list.
+                if split {
+                    this.list_ui.filled = None;
+                } else {
+                    this.proposal_open = None;
+                }
+                cx.notify();
+            }));
+        let id = open.id.clone();
+        let drop = self
+            .small_button("drop-proposal", "Drop", false)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                let f = this.model.drop_proposal(&id);
+                this.send(f);
+                this.proposal_open = None;
+                this.list_ui.filled = None;
+                cx.notify();
+            }));
+        let icon = if skill || open.kind == "fix" {
+            Ico::BookOpen
+        } else {
+            Ico::Lightbulb
+        };
+        let line = if open.why.is_empty() {
+            self.proposal_line(&open)
+        } else {
+            format!("{}: {}", self.proposal_line(&open), open.why)
+        };
+        let mut groups = vec![self.pane_head(
+            Some(self.big_tile(icon, None)),
+            open.title(),
+            Some(line),
+            None,
+        )];
+        if skill {
+            groups.push(self.group(
+                None,
+                vec![
+                    self.field_row("Name", Input::new(&self.skill_name_in)),
+                    self.field_row("When it's for", Input::new(&self.skill_desc_in)),
+                    self.text_row("How to do it", None, Textarea::new(&self.skill_body_in)),
+                ],
+            ));
+            if !open.steps.is_empty() {
+                let steps = open
+                    .steps
+                    .iter()
+                    .enumerate()
+                    .map(|(k, line)| self.note_row(format!("{}. {line}", k + 1), p.ink_2))
+                    .collect();
+                groups.push(self.group(Some("What you did"), steps));
+            }
+        } else if open.kind == "fix" {
+            let mut rows = Vec::new();
+            let failed = open.failed_line();
+            if !failed.is_empty() {
+                rows.push(self.note_row(failed, p.ink_2));
+            }
+            if !open.lines.is_empty() {
+                rows.push(
+                    div()
+                        .p(px(space::L))
+                        .child(learned::change_view(p, &open.lines, 1.0))
+                        .into_any_element(),
+                );
+            }
+            rows.push(self.text_row("The skill, fixed", None, Textarea::new(&self.skill_body_in)));
+            groups.push(self.group(None, rows));
+        } else {
+            let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
+            if !open.site.is_empty() || open.shared {
+                let mut how = Vec::new();
+                if !open.site.is_empty() {
+                    how.push(format!("Shown on {}", open.site));
+                }
+                if open.shared {
+                    how.push("every agent reads it".to_string());
+                }
+                rows.push(self.note_row(how.join(", "), p.ink_3));
+            }
+            groups.push(self.group(None, rows));
+        }
+        groups.push(self.form_actions(Some(drop), cancel, keep));
+        groups
     }
 
     /// Who an agent's id is, as the tables say it: its name, or "you" for the person.
@@ -15529,7 +15696,7 @@ ACTA_KEY=secret:ACTA_KEY",
     // and its control on the right, and nothing that says again what a name says.
 
     /// A settings page: its title, with its one action on the right, then its groups,
-    /// in a column that scrolls.
+    /// in a column that scrolls. A grid page's column takes the popup's whole width.
     fn settings_page(
         &self,
         id: &'static str,
@@ -15540,7 +15707,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let p = self.p;
         let column = div()
             .w_full()
-            .max_w(px(layout::SETTINGS))
+            .when(!self.list_ui.wide, |d| d.max_w(px(layout::SETTINGS)))
             .flex()
             .flex_col()
             .gap(px(space::XL))
@@ -15627,55 +15794,6 @@ ACTA_KEY=secret:ACTA_KEY",
         })
         .size_full();
         div().flex_1().min_h_0().child(rows)
-    }
-
-    /// A list page's head: its title, and its action beside it, as `settings_page` has
-    /// them over its groups.
-    fn list_head(&self, title: &str, action: Option<AnyElement>) -> AnyElement {
-        let p = self.p;
-        div()
-            .pb(px(space::XL))
-            .child(
-                div()
-                    .min_h(px(control::BUTTON))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(space::M))
-                    .child(
-                        div()
-                            .text_size(px(size::HEADING - 2.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(p.ink)
-                            .child(title.to_string()),
-                    )
-                    .children(action),
-            )
-            .into_any_element()
-    }
-
-    /// Row `i` of `n` in a group's box, on a list page: its piece of the box, as
-    /// `group` draws the whole box with a hairline between each row.
-    fn group_item(&self, i: usize, n: usize, row: AnyElement) -> AnyElement {
-        let p = self.p;
-        div()
-            .flex()
-            .flex_col()
-            .border_x_1()
-            .border_t_1()
-            .border_color(p.line)
-            .bg(self.card_fill())
-            .overflow_hidden()
-            .when(i == 0, |d| {
-                d.rounded_tl(px(radius::CARD)).rounded_tr(px(radius::CARD))
-            })
-            .when(i + 1 == n, |d| {
-                d.border_b_1()
-                    .rounded_bl(px(radius::CARD))
-                    .rounded_br(px(radius::CARD))
-            })
-            .child(row)
-            .into_any_element()
     }
 
     /// The fill of a group's box: a step off the page.
@@ -16020,287 +16138,353 @@ ACTA_KEY=secret:ACTA_KEY",
             .into_any_element()
     }
 
-    /// The Brains page: the agent programs on the instance, each an agent's brain, with
-    /// their settings and sharing, and the ACP Registry's to install.
+    /// A brain as its row and its pane name it: the registry's listing of it (or the
+    /// program's own), its name, what it is ("Version 1.2 · 1 setting"), and the newer
+    /// version the registry has, when it has one.
+    fn brain_about(
+        &self,
+        prog: &model::Program,
+    ) -> (Option<model::Listed>, String, String, Option<String>) {
+        let listed = self.model.program_listed(&prog.name).cloned();
+        let from_registry = (!prog.source.is_empty())
+            .then(|| self.model.registry.iter().find(|l| l.id == prog.source))
+            .flatten()
+            .cloned();
+        let newer = from_registry
+            .as_ref()
+            .filter(|l| l.version != prog.version)
+            .map(|l| l.version.clone());
+        let shown = from_registry
+            .as_ref()
+            .or(listed.as_ref())
+            .map_or_else(|| self.model.program_title(&prog.name), |l| l.name.clone());
+        let settings_words = match (&prog.share, prog.settings.len()) {
+            (Some(sh), _) => share_words(sh),
+            (None, 0) => "No settings".to_string(),
+            (None, 1) => "1 setting".to_string(),
+            (None, n) => format!("{n} settings"),
+        };
+        let what = if prog.source.is_empty() {
+            format!("Added on the instance · {settings_words}")
+        } else {
+            format!("Version {} · {settings_words}", prog.version)
+        };
+        (from_registry.or(listed), shown, what, newer)
+    }
+
+    /// The Brains page: the agent programs on the instance down the left, each an agent's
+    /// brain, and the one picked beside them, with its settings and sharing; and under
+    /// them the ACP Registry, whose programs show beside the list to install.
     fn programs_page(&mut self, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let mut groups = Vec::new();
-        let mut mine = Vec::new();
-        for prog in self.model.installed.clone() {
-            let open = self.program_open.as_deref() == Some(prog.name.as_str());
-            let listed = self.model.program_listed(&prog.name).cloned();
-            let from_registry = (!prog.source.is_empty())
-                .then(|| self.model.registry.iter().find(|l| l.id == prog.source))
-                .flatten()
-                .cloned();
-            let newer = from_registry
-                .as_ref()
-                .filter(|l| l.version != prog.version)
-                .map(|l| l.version.clone());
-            let shown = from_registry
-                .as_ref()
-                .or(listed.as_ref())
-                .map_or_else(|| self.model.program_title(&prog.name), |l| l.name.clone());
-            let settings_words = match (&prog.share, prog.settings.len()) {
-                (Some(sh), _) => share_words(sh),
-                (None, 0) => "No settings".to_string(),
-                (None, 1) => "1 setting".to_string(),
-                (None, n) => format!("{n} settings"),
-            };
-            let what = if prog.source.is_empty() {
-                format!("Added on the instance · {settings_words}")
-            } else {
-                format!("Version {} · {settings_words}", prog.version)
-            };
-            let name = prog.name.clone();
-            let chevron = div()
-                .text_color(p.ink_3)
-                .child(
-                    Icon::new(if open {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .small(),
-                )
-                .into_any_element();
-            let row = self.row(
-                Some(self.brain_tile(from_registry.as_ref().or(listed.as_ref()), 34.0)),
-                shown,
-                Some(what),
-                Some(chevron),
-            );
-            mine.push(
-                self.link_row(SharedString::from(format!("program-{}", prog.name)), row)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.program_open = if this.program_open.as_deref() == Some(name.as_str()) {
-                            None
-                        } else {
-                            Some(name.clone())
-                        };
-                        for s in [&this.set_key_in, &this.set_value_in] {
-                            s.update(cx, |s, cx| s.set_value("", window, cx));
-                        }
-                        cx.notify();
-                    }))
-                    .into_any_element(),
-            );
-            if !open {
-                continue;
+        let installed = self.model.installed.clone();
+        let keys: Vec<&str> = installed.iter().map(|p| p.name.as_str()).collect();
+        let open = self.program_open.clone();
+        let split = self.list_split();
+        let shows = popup::shows(split, open.as_ref().map(|o| o.as_deref()), &keys, false);
+        let query = self.list_query(cx);
+        let found = (0..installed.len())
+            .filter(|&i| popup::finds(&query, &self.brain_about(&installed[i]).1))
+            .collect();
+        // The registry, when it's picked, or side by side while there's no brain yet.
+        let registry = match shows.pane {
+            Pane::New => true,
+            Pane::Nothing => split,
+            _ => false,
+        };
+        let (pane_key, pane) = match shows.pane {
+            Pane::Item(i) => (
+                installed[i].name.clone(),
+                self.program_pane(&installed[i], cx),
+            ),
+            _ if registry => ("registry".to_string(), self.registry_pane(cx)),
+            _ => (String::new(), Vec::new()),
+        };
+        let foot = Some(self.registry_row(registry, cx));
+        self.list_detail(
+            ListPage {
+                id: "programs-page",
+                title: "Brains",
+                action: None,
+                shows,
+                found,
+                row: Loom::program_row,
+                head: None,
+                foot,
+                pane_key,
+                pane,
+            },
+            cx,
+        )
+    }
+
+    /// One of the brains on the instance, as a row of the list: what it is, and a dot
+    /// while the registry has a newer version.
+    fn program_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(prog) = self.model.installed.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let (listed, shown, what, newer) = self.brain_about(&prog);
+        let name = prog.name.clone();
+        self.list_row(
+            format!("program-{}", prog.name),
+            self.brain_tile(listed.as_ref(), control::LEAD),
+            shown,
+            what,
+            newer.map(|_| popup::Dot::Warn),
+            picked,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.program_open = Some(Some(name.clone()));
+            for s in [&this.set_key_in, &this.set_value_in] {
+                s.update(cx, |s, cx| s.set_value("", window, cx));
             }
-            // Its settings, which stay on the instance: only their names come here.
-            for key in prog.settings.clone() {
-                let (program, k) = (prog.name.clone(), key.clone());
-                mine.push(
-                    self.row(
-                        Some(div().w(px(34.0)).flex_none().into_any_element()),
-                        key.clone(),
-                        Some("••••••••".into()),
-                        Some(
-                            self.small_button(
-                                format!("unset-{}-{key}", prog.name),
-                                "Remove",
-                                false,
-                            )
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The ACP Registry, as the row under the brains: how many of its programs aren't
+    /// on the instance yet.
+    fn registry_row(&mut self, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let more = self
+            .model
+            .registry
+            .iter()
+            .filter(|l| {
+                l.installed.is_none() && !self.model.program_ids.values().any(|id| *id == l.id)
+            })
+            .count();
+        let line = if self.model.registry_loading {
+            "Reading…".to_string()
+        } else if self.model.registry.is_empty() {
+            String::new()
+        } else {
+            format!("{more} to install")
+        };
+        self.list_row(
+            "brains-registry",
+            self.tile(Ico::Package),
+            "ACP Registry",
+            line,
+            None,
+            picked,
+        )
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.program_open = Some(None);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The brain picked, beside the list: its name and what it is, its settings, which
+    /// stay on the instance, sharing them, who has it, and updating or removing it.
+    fn program_pane(&mut self, prog: &model::Program, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        let (listed, shown, what, newer) = self.brain_about(prog);
+        let mut rows = Vec::new();
+        // Its settings, which stay on the instance: only their names come here.
+        for key in prog.settings.clone() {
+            let (program, k) = (prog.name.clone(), key.clone());
+            rows.push(
+                self.row(
+                    None,
+                    key.clone(),
+                    Some("••••••••".into()),
+                    Some(
+                        self.small_button(format!("unset-{}-{key}", prog.name), "Remove", false)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 let f = this.model.set_setting(&program, &k, None);
                                 this.send(f);
                                 cx.notify();
                             }))
                             .into_any_element(),
-                        ),
-                    )
-                    .into_any_element(),
-                );
-            }
-            let program = prog.name.clone();
-            mine.push(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(space::S))
-                    .pl(px(space::L + 34.0 + space::M))
-                    .pr(px(space::L))
-                    .py(px(space::M))
-                    .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                    .child(div().flex_1().child(Input::new(&self.set_value_in)))
-                    .child(
-                        self.small_button(format!("set-{}", prog.name), "Add setting", false)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                let key = this.set_key_in.read(cx).value().to_string();
-                                let value = this.set_value_in.read(cx).value().to_string();
-                                if key.trim().is_empty() {
-                                    this.model.notices.push(
-                                        "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
-                                    );
-                                    cx.notify();
-                                    return;
-                                }
-                                let f = this.model.set_setting(&program, &key, Some(&value));
-                                this.send(f);
-                                for s in [&this.set_key_in, &this.set_value_in] {
-                                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                                }
-                                cx.notify();
-                            })),
-                    )
-                    .into_any_element(),
-            );
-            // Sharing its settings with the people invited, a number of tokens each.
-            let month = self.share_month;
-            let program = prog.name.clone();
-            let mut share = div()
-                .flex()
-                .items_center()
-                .gap(px(space::S))
-                .child(div().w(px(96.0)).child(Input::new(&self.share_in).small()))
-                .child(self.segments(vec![
-                    self.segment(format!("share-day-{}", prog.name), "a day", !month)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.share_month = false;
-                            cx.notify();
-                        })),
-                    self.segment(format!("share-month-{}", prog.name), "a month", month)
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.share_month = true;
-                            cx.notify();
-                        })),
-                ]))
-                .child(
-                    self.small_button(format!("share-{}", prog.name), "Share", false)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            let given = this.share_in.read(cx).value().replace([',', ' '], "");
-                            let Ok(tokens) = given.parse::<i64>() else {
-                                this.model.notices.push(
-                                    "Give the tokens each person may use, as a number.".into(),
-                                );
-                                cx.notify();
-                                return;
-                            };
-                            let per = if this.share_month { "month" } else { "day" };
-                            let f = this.model.share_program(&program, tokens, per);
-                            this.send(f);
-                            this.share_in
-                                .update(cx, |s, cx| s.set_value("", window, cx));
-                            cx.notify();
-                        })),
-                );
-            if prog.share.is_some() {
-                let program = prog.name.clone();
-                share = share.child(
-                    self.small_button(format!("unshare-{}", prog.name), "Stop", false)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            let f = this.model.share_program(&program, 0, "day");
-                            this.send(f);
-                            cx.notify();
-                        })),
-                );
-            }
-            mine.push(
-                self.row(
-                    Some(div().w(px(34.0)).flex_none().into_any_element()),
-                    "Share it",
-                    None,
-                    Some(share.into_any_element()),
+                    ),
                 )
                 .into_any_element(),
             );
-            // Who has it, and who gets the settings shared: the owner's to say.
-            let people: Vec<model::Person> = self
-                .model
-                .people
-                .iter()
-                .filter(|person| person.role != "owner")
-                .cloned()
-                .collect();
-            if self.model.programs_owner && !people.is_empty() {
+        }
+        let program = prog.name.clone();
+        rows.push(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .px(px(space::L))
+                .py(px(space::M))
+                .child(div().flex_1().child(Input::new(&self.set_key_in)))
+                .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                .child(
+                    self.small_button(format!("set-{}", prog.name), "Add setting", false)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            let key = this.set_key_in.read(cx).value().to_string();
+                            let value = this.set_value_in.read(cx).value().to_string();
+                            if key.trim().is_empty() {
+                                this.model.notices.push(
+                                    "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
+                                );
+                                cx.notify();
+                                return;
+                            }
+                            let f = this.model.set_setting(&program, &key, Some(&value));
+                            this.send(f);
+                            for s in [&this.set_key_in, &this.set_value_in] {
+                                s.update(cx, |s, cx| s.set_value("", window, cx));
+                            }
+                            cx.notify();
+                        })),
+                )
+                .into_any_element(),
+        );
+        // Sharing its settings with the people invited, a number of tokens each.
+        let month = self.share_month;
+        let program = prog.name.clone();
+        let mut share = div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .child(div().w(px(96.0)).child(Input::new(&self.share_in).small()))
+            .child(self.segments(vec![
+                self.segment(format!("share-day-{}", prog.name), "a day", !month)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.share_month = false;
+                        cx.notify();
+                    })),
+                self.segment(format!("share-month-{}", prog.name), "a month", month)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.share_month = true;
+                        cx.notify();
+                    })),
+            ]))
+            .child(
+                self.small_button(format!("share-{}", prog.name), "Share", false)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        let given = this.share_in.read(cx).value().replace([',', ' '], "");
+                        let Ok(tokens) = given.parse::<i64>() else {
+                            this.model
+                                .notices
+                                .push("Give the tokens each person may use, as a number.".into());
+                            cx.notify();
+                            return;
+                        };
+                        let per = if this.share_month { "month" } else { "day" };
+                        let f = this.model.share_program(&program, tokens, per);
+                        this.send(f);
+                        this.share_in
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        cx.notify();
+                    })),
+            );
+        if prog.share.is_some() {
+            let program = prog.name.clone();
+            share = share.child(
+                self.small_button(format!("unshare-{}", prog.name), "Stop", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let f = this.model.share_program(&program, 0, "day");
+                        this.send(f);
+                        cx.notify();
+                    })),
+            );
+        }
+        rows.push(
+            self.row(None, "Share it", None, Some(share.into_any_element()))
+                .into_any_element(),
+        );
+        // Who has it, and who gets the settings shared: the owner's to say.
+        let people: Vec<model::Person> = self
+            .model
+            .people
+            .iter()
+            .filter(|person| person.role != "owner")
+            .cloned()
+            .collect();
+        if self.model.programs_owner && !people.is_empty() {
+            let program = prog.name.clone();
+            let chips = self.member_chips(
+                &format!("has-{}", prog.name),
+                prog.members.clone(),
+                &people,
+                cx,
+                move |this, members| {
+                    let f = this.model.program_members(&program, members);
+                    this.send(f);
+                },
+            );
+            rows.push(
+                self.row(
+                    None,
+                    "Who has it",
+                    Some(who_words(prog.members.as_deref(), &people)),
+                    Some(chips.into_any_element()),
+                )
+                .into_any_element(),
+            );
+            if let Some(sh) = prog.share.clone() {
                 let program = prog.name.clone();
+                let given = sh.members.clone();
                 let chips = self.member_chips(
-                    &format!("has-{}", prog.name),
-                    prog.members.clone(),
+                    &format!("keys-{}", prog.name),
+                    given.clone(),
                     &people,
                     cx,
                     move |this, members| {
-                        let f = this.model.program_members(&program, members);
+                        let f = this.model.share_to(&program, &sh, members);
                         this.send(f);
                     },
                 );
-                mine.push(
+                rows.push(
                     self.row(
-                        Some(div().w(px(34.0)).flex_none().into_any_element()),
-                        "Who has it",
-                        Some(who_words(prog.members.as_deref(), &people)),
+                        None,
+                        "Who gets your settings",
+                        Some(who_words(given.as_deref(), &people)),
                         Some(chips.into_any_element()),
                     )
                     .into_any_element(),
                 );
-                if let Some(sh) = prog.share.clone() {
-                    let program = prog.name.clone();
-                    let given = sh.members.clone();
-                    let chips = self.member_chips(
-                        &format!("keys-{}", prog.name),
-                        given.clone(),
-                        &people,
-                        cx,
-                        move |this, members| {
-                            let f = this.model.share_to(&program, &sh, members);
-                            this.send(f);
-                        },
-                    );
-                    mine.push(
-                        self.row(
-                            Some(div().w(px(34.0)).flex_none().into_any_element()),
-                            "Who gets your settings",
-                            Some(who_words(given.as_deref(), &people)),
-                            Some(chips.into_any_element()),
-                        )
-                        .into_any_element(),
-                    );
-                }
             }
-            let mut actions = div().flex().gap(px(space::S));
-            if let Some(version) = newer {
-                let source = prog.source.clone();
-                actions = actions.child(
-                    self.small_button(
-                        format!("update-{}", prog.name),
-                        &format!("Update to {version}"),
-                        true,
-                    )
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let f = this.model.install(&source);
-                        this.send(f);
-                        cx.notify();
-                    })),
-                );
-            }
-            let program = prog.name.clone();
+        }
+        let mut actions = div().flex().justify_end().gap(px(space::S));
+        if let Some(version) = newer {
+            let source = prog.source.clone();
             actions = actions.child(
-                self.small_button(format!("remove-{}", prog.name), "Remove", false)
-                    .text_color(p.bad)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        let f = this.model.remove_program(&program);
-                        this.send(f);
-                        this.program_open = None;
-                        cx.notify();
-                    })),
-            );
-            mine.push(
-                div()
-                    .flex()
-                    .justify_end()
-                    .px(px(space::L))
-                    .py(px(space::M))
-                    .child(actions)
-                    .into_any_element(),
+                self.small_button(
+                    format!("update-{}", prog.name),
+                    &format!("Update to {version}"),
+                    true,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.install(&source);
+                    this.send(f);
+                    cx.notify();
+                })),
             );
         }
-        if mine.is_empty() {
-            groups.push(self.empty(Ico::Brain, "No brains yet", None, None));
-        } else {
-            groups.push(self.group(Some("Your brains"), mine));
-        }
-        // The registry's, not yet installed, as cards with their icons.
+        let program = prog.name.clone();
+        actions = actions.child(
+            self.small_button(format!("remove-{}", prog.name), "Remove", false)
+                .text_color(p.bad)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let f = this.model.remove_program(&program);
+                    this.send(f);
+                    this.program_open = None;
+                    cx.notify();
+                })),
+        );
+        vec![
+            self.pane_head(
+                Some(self.brain_tile(listed.as_ref(), control::ICON_LARGE + 6.0)),
+                shown,
+                Some(what),
+                None,
+            ),
+            self.group(None, rows),
+            actions.into_any_element(),
+        ]
+    }
+
+    /// The ACP Registry's programs that aren't on the instance, beside the list: as
+    /// cards with their icons, as many across as fit, each to install.
+    fn registry_pane(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
         let mut cards = Vec::new();
         for l in self.model.registry.clone() {
             if l.installed.is_some() || self.model.program_ids.values().any(|id| *id == l.id) {
@@ -16374,7 +16558,8 @@ ACTA_KEY=secret:ACTA_KEY",
                     .into_any_element(),
             );
         }
-        let get_more: AnyElement = if self.model.registry_loading {
+        let width = self.list_ui.shape.map_or(layout::SETTINGS, |s| s.pane);
+        let body: AnyElement = if self.model.registry_loading {
             self.group(
                 None,
                 vec![self.note_row("Reading the ACP Registry…", p.ink_3)],
@@ -16384,28 +16569,12 @@ ACTA_KEY=secret:ACTA_KEY",
         } else {
             div()
                 .grid()
-                .grid_cols(2)
+                .grid_cols(popup::columns(width, layout::CARD_LEAST, space::S) as u16)
                 .gap(px(space::S))
                 .children(cards)
                 .into_any_element()
         };
-        groups.push(
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(space::S))
-                .child(
-                    div()
-                        .px(px(space::XS))
-                        .text_size(px(size::CAPTION))
-                        .font_weight(FontWeight::MEDIUM)
-                        .text_color(p.ink_3)
-                        .child("ACP Registry"),
-                )
-                .child(get_more)
-                .into_any_element(),
-        );
-        self.settings_page("programs-page", "Brains", None, groups)
+        vec![self.pane_head(None, "ACP Registry", None, None), body]
     }
 
     /// The Agent defaults page: what every agent follows where it has nothing of its

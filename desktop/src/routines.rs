@@ -249,13 +249,12 @@ impl Loom {
         self.routine_schedule_changed(cx);
     }
 
-    /// The routines page: the week's calendar over the person's routines, and the page
-    /// of a new or changed one.
+    /// The routines page: the person's routines down the left, and beside them the
+    /// week's calendar until one is picked, then its page, or a new one's. Where they
+    /// show one at a time, the calendar is over the list.
     pub(super) fn routines_page(&mut self, cx: &mut Context<Self>) -> Div {
-        if self.routine_open.is_some() {
-            return self.routine_form(cx);
-        }
-        if self.model.routines.is_empty() {
+        let routines = self.model.routines.clone();
+        if routines.is_empty() && self.routine_open.is_none() {
             let groups = vec![self.empty(
                 Ico::Clock,
                 "No routines yet",
@@ -271,31 +270,65 @@ impl Loom {
                 self.send(f);
             }
         }
-        // Its title, the week, then the routines, each a row of the one group, as a list.
-        let n = self.model.routines.len();
-        self.list_page(
-            "routines-page",
-            n + 2,
-            layout::SETTINGS,
-            |this, ix, cx| {
-                if ix == 0 {
-                    let action = Some(this.new_routine_button(cx));
-                    return this.list_head("Routines", action);
-                }
-                if ix == 1 {
-                    return div()
-                        .pb(px(space::XL))
-                        .child(this.routine_week(cx))
-                        .into_any_element();
-                }
-                let n = this.model.routines.len();
-                match this.model.routines.get(ix - 2).cloned() {
-                    Some(r) => {
-                        let row = this.routine_row(r, cx);
-                        this.group_item(ix - 2, n, row)
-                    }
-                    None => div().into_any_element(),
-                }
+        let split = self.list_split();
+        let keys: Vec<&str> = routines.iter().map(|r| r.id.as_str()).collect();
+        let open = self.routine_open.clone();
+        let shows = popup::shows(split, open.as_ref().map(|o| o.as_deref()), &keys, true);
+        let query = self.list_query(cx);
+        let found = (0..routines.len())
+            .filter(|&i| {
+                let r = &routines[i];
+                let agent = self.model.agent(&r.agent).map(|a| a.name.clone());
+                let text = format!("{} {} {}", r.name, agent.unwrap_or_default(), r.when);
+                popup::finds(&query, &text)
+            })
+            .collect();
+        let (pane_key, pane) = match shows.pane {
+            Pane::Overview => ("week".to_string(), vec![self.routine_week(cx)]),
+            Pane::Item(i) => (routines[i].id.clone(), self.routine_form(cx)),
+            Pane::New => ("new".to_string(), self.routine_form(cx)),
+            Pane::Nothing => (String::new(), Vec::new()),
+        };
+        // Side by side, the calendar is the list's first row; one at a time, it's over
+        // the list.
+        let head = if split {
+            let lit = shows.pane == Pane::Overview;
+            Some(
+                self.list_row(
+                    "routines-week",
+                    self.tile(Ico::CalendarDays),
+                    "Calendar",
+                    String::new(),
+                    None,
+                    lit,
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.routine_open = None;
+                    cx.notify();
+                }))
+                .into_any_element(),
+            )
+        } else {
+            Some(
+                div()
+                    .p(px(space::S))
+                    .child(self.routine_week(cx))
+                    .into_any_element(),
+            )
+        };
+        let action = Some(self.new_routine_button(cx));
+        self.list_detail(
+            ListPage {
+                id: "routines-page",
+                title: "Routines",
+                action,
+                shows,
+                found,
+                row: Loom::routine_row,
+                head,
+                foot: None,
+                pane_key,
+                pane,
             },
             cx,
         )
@@ -561,9 +594,13 @@ impl Loom {
             .into_any_element()
     }
 
-    /// One routine, as a row of the routines page: when it runs next and how its last
-    /// run went, or its flow's steps while it runs, which opens it to change.
-    fn routine_row(&self, r: model::Routine, cx: &mut Context<Self>) -> AnyElement {
+    /// What a routine's row and its page's head say: its agent and tint, when it runs
+    /// next ("next at 08:00", or paused), how its last run went, unless it went well, and
+    /// its flow's steps while it runs, with whether it was stopped.
+    fn routine_words(
+        &self,
+        r: &model::Routine,
+    ) -> (String, Hsla, String, String, Option<(String, bool)>) {
         let p = self.p;
         let (agent, tint) = match self.model.agent(&r.agent) {
             Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
@@ -578,13 +615,11 @@ impl Loom {
         };
         let last = match r.last_status.as_str() {
             "" | "done" | "quiet" => String::new(),
-            "running" => " · running now".into(),
-            "waiting" => " · waiting for the chat".into(),
-            "skipped" => format!(" · skipped at {}", time_of(r.last_at)),
-            _ => format!(" · failed at {}: {}", time_of(r.last_at), r.last_error),
+            "running" => "running now".into(),
+            "waiting" => "waiting for the chat".into(),
+            "skipped" => format!("skipped at {}", time_of(r.last_at)),
+            _ => format!("failed at {}: {}", time_of(r.last_at), r.last_error),
         };
-        let mut sub = format!("{agent} · {} · {next}{last}", r.when);
-        // Its flow, while it runs: how far each step has got, and a Stop.
         let running = self
             .model
             .flows
@@ -599,15 +634,72 @@ impl Loom {
                     .collect();
                 (steps.join(" · "), f.stopped)
             });
+        (agent, tint, next, last, running)
+    }
+
+    /// A routine's clock, in its agent's colour while it's on.
+    fn routine_lead(&self, r: &model::Routine, tint: Hsla, big: bool) -> AnyElement {
+        let p = self.p;
+        let ink = if r.on { tint } else { p.ink_3 };
+        if big {
+            return self.big_tile(Ico::Clock, Some(ink));
+        }
+        div()
+            .size(px(control::LEAD))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .border_1()
+            .border_color(p.line)
+            .bg(p.bg)
+            .text_color(ink)
+            .child(Icon::new(Ico::Clock).small())
+            .into_any_element()
+    }
+
+    /// One routine, as a row of the list: how its last run went when it went wrong, or
+    /// when it runs next, and a dot for how it is; it opens its page.
+    fn routine_row(&mut self, ix: usize, picked: bool, cx: &mut Context<Self>) -> AnyElement {
+        let Some(r) = self.model.routines.get(ix).cloned() else {
+            return div().into_any_element();
+        };
+        let (_, tint, next, last, running) = self.routine_words(&r);
+        let line = match running {
+            Some(_) => "running now".to_string(),
+            None if !last.is_empty() => last,
+            None => next,
+        };
+        self.list_row(
+            format!("routine-{}", r.id),
+            self.routine_lead(&r, tint, false),
+            r.name.clone(),
+            line,
+            popup::routine_dot(&r),
+            picked,
+        )
+        .on_click(cx.listener(move |this, _, window, cx| this.open_routine(&r, window, cx)))
+        .into_any_element()
+    }
+
+    /// The head of a routine's page: its agent, when it runs and next, and how its last
+    /// run went, or its flow's steps while it runs, with a Stop; and the way to its
+    /// thread, for one that has one.
+    fn routine_head(&self, r: &model::Routine, cx: &mut Context<Self>) -> AnyElement {
+        let (agent, tint, next, last, running) = self.routine_words(r);
+        let mut line = format!("{agent} · {} · {next}", r.when);
+        if !last.is_empty() {
+            line = format!("{line} · {last}");
+        }
         let mut controls = div().flex().gap(px(space::XS));
         if let Some((text, stopped)) = running {
-            sub = text;
+            line = text;
             if !stopped {
                 let routine = r.id.clone();
                 controls = controls.child(
                     self.small_button(format!("stop-flow-{}", r.id), "Stop", false)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.stop_propagation();
                             let f = this.model.stop_flow(&routine);
                             this.send(f);
                             cx.notify();
@@ -622,35 +714,16 @@ impl Loom {
             controls = controls.child(
                 self.small_button(format!("thread-{}", r.id), "Thread", false)
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        cx.stop_propagation();
                         this.open_thread(&agent, &conversation, cx);
                     })),
             );
         }
-        let lead = div()
-            .size(px(control::LEAD))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::ROW))
-            .border_1()
-            .border_color(p.line)
-            .bg(p.bg)
-            .text_color(if r.on { tint } else { p.ink_3 })
-            .child(Icon::new(Ico::Clock).small())
-            .into_any_element();
-        self.row(
-            Some(lead),
+        self.pane_head(
+            Some(self.routine_lead(r, tint, true)),
             r.name.clone(),
-            Some(sub),
+            Some(line),
             Some(controls.into_any_element()),
         )
-        .id(SharedString::from(format!("routine-{}", r.id)))
-        .cursor_pointer()
-        .soft_hover(transparent_black(), p.hover, None)
-        .on_click(cx.listener(move |this, _, window, cx| this.open_routine(&r, window, cx)))
-        .into_any_element()
     }
 
     /// The routines page's New routine, the page's own button while it has none.
@@ -1084,11 +1157,20 @@ impl Loom {
         detail.into_any_element()
     }
 
-    /// The form for a new routine, or one being changed, with its history.
-    fn routine_form(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The page of the routine picked, beside the list, with its form and history, or a
+    /// new routine's form.
+    fn routine_form(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let p = self.p;
         let open = self.routine_open.clone().unwrap_or_default();
-        let mut groups = Vec::new();
+        let head = match open
+            .as_ref()
+            .and_then(|id| self.model.routines.iter().find(|r| &r.id == id))
+            .cloned()
+        {
+            Some(r) => self.routine_head(&r, cx),
+            None => self.pane_head(None, "New routine", None, None),
+        };
+        let mut groups = vec![head];
         let chips = self.agent_chips(
             "routine-agent",
             self.routine_agent.clone().as_deref(),
@@ -1303,12 +1385,7 @@ impl Loom {
                 .child(div().flex().gap(px(space::S)).child(cancel).child(save))
                 .into_any_element(),
         );
-        let title = if open.is_some() {
-            "Change routine"
-        } else {
-            "New routine"
-        };
-        self.settings_page("routines-page", title, None, groups)
+        groups
     }
 
     /// Fills the routine form's flow from `flow`: steps it edits when they go one after
