@@ -2,11 +2,12 @@ module tests.protocol.catalog_search
 
 // Spools' search (PLAN.md, "The integrations catalog"), against a fake MCP
 // Registry that answers with what the real one said (tests/mcp_registry/) and
-// two servers of the test's own. catalog.search gives the registry's servers
+// three servers of the test's own. catalog.search gives the registry's servers
 // as entries marked community, without the official Notion, which is the
 // curated one and listed by its id, and with a server under two names given
 // once; a search typed again is answered from what the instance kept. A
-// server's SVG icon comes with it, fetched with the answer and kept with it. A
+// server's SVG icon comes with it, fetched with the answer and kept with it,
+// and one with only PNGs has the best on its badge, as a file of the person's. A
 // connect of a registry server takes what it is from the registry, never from
 // the device: its address and its secret header, the person's key kept under
 // the server's own name; one loom can't connect, a version that isn't there
@@ -14,22 +15,29 @@ module tests.protocol.catalog_search
 // entries and why. An agent can't search.
 //
 //     calx tests/protocol/catalog_search.calx
+import std.bytes
 import std.fs
+import std.hash.{sha256}
 import std.http.{Header, get}
 import std.http.server.{Request, Response, Server}
+import std.image.{Color, Image, Kind}
 import std.json.{Json, parse}
 import std.process.{exit}
 import std.thread.{Task}
 import std.url
 import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session, reply_text}
-import tests.kit.{Instance, check}
+import server.files
+import tests.kit.{Instance, check, fetch}
 
 // A server of the test's own, reached at an https address where nothing
 // listens, with a key in a header, and an icon the fake registry serves (its
 // address, REGISTRY, is filled in when it starts), before a PNG.
 const LIGHTS: str = #"{"name":"io.github.loom-test/lights","description":"Lights for a test.","version":"1.2.0","icons":[{"src":"REGISTRY/test/lights.svg","mimeType":"image/svg+xml","sizes":["any"]},{"src":"REGISTRY/test/lights.png","mimeType":"image/png"}],"remotes":[{"type":"streamable-http","url":"https://127.0.0.1:9/mcp","headers":[{"name":"Authorization","value":"Bearer {lights_key}","isSecret":true,"isRequired":true}]}]}"#
 const LIGHTS_SVG: str = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="10" r="6"/></svg>"#
+// One whose only icons are PNGs, one for a dark background (LOO-379), and a
+// JPEG too small to pick.
+const LAMP: str = #"{"name":"io.github.loom-test/lamp","description":"A lamp for a test.","version":"0.2.0","icons":[{"src":"REGISTRY/test/lamp-16.jpg","mimeType":"image/jpeg","sizes":["16x16"]},{"src":"REGISTRY/test/lamp.png","mimeType":"image/png","sizes":["64x64"]},{"src":"REGISTRY/test/lamp-dark.png","mimeType":"image/png","sizes":["64x64"],"theme":"dark"}],"remotes":[{"type":"streamable-http","url":"https://127.0.0.1:9/lamp"}]}"#
 // And one that's only a Docker image.
 const DOCKER: str = #"{"name":"io.github.loom-test/lights-docker","description":"Lights in Docker.","version":"1.0.0","packages":[{"registryType":"oci","identifier":"ghcr.io/loom-test/lights:1.0.0","transport":{"type":"stdio"}}]}"#
 const KEY: str = "lights-key-value"
@@ -55,16 +63,20 @@ impl Task for Registry {
         var searches: i64 = 0
         var versions: i64 = 0
         var icons: i64 = 0
+        var pngs: i64 = 0
         var down = false
         loop {
             let req = r.server.next() else { continue }
             let path = req.path.copy()
             var res = Response.error(404)
             if path == "/test/stats" {
-                res = Response.new(200, String("application/json"), "{Obj.new().i("searches", searches).i("versions", versions).i("icons", icons).done()}".to_bytes())
+                res = Response.new(200, String("application/json"), "{Obj.new().i("searches", searches).i("versions", versions).i("icons", icons).i("pngs", pngs).done()}".to_bytes())
             } else if path == "/test/lights.svg" {
                 icons += 1
                 res = Response.new(200, String("image/svg+xml"), String(LIGHTS_SVG).to_bytes())
+            } else if path == "/test/lamp.png" or path == "/test/lamp-dark.png" {
+                pngs += 1
+                res = Response.new(200, String("image/png"), lamp_png(path == "/test/lamp-dark.png"))
             } else if path == "/test/down" or path == "/test/up" {
                 down = path == "/test/down"
                 res = Response.new(200, String("application/json"), "\{\}".to_bytes())
@@ -80,6 +92,17 @@ impl Task for Registry {
             r.server.respond(req, res)
         }
     }
+}
+
+// The lamp's icon, one colour, light or dark.
+fn lamp_png(dark: bool) -> List<u8> {
+    let c = if dark { Color.rgba(240, 240, 240, 255) } else { Color.rgba(220, 80, 40, 255) }
+    return Image.new(64, 64, Kind.Rgba, c).encode_png()
+}
+
+// The SHA-256 loom keeps it under, once it's made an icon (`files.icon_png`).
+fn lamp_sha(dark: bool) -> String ! Error {
+    return bytes.hex(sha256(try files.icon_png(lamp_png(dark))))
 }
 
 fn answer(status: u16, body: Json) -> Response {
@@ -127,6 +150,7 @@ fn fake_servers(base: String) -> List<Json> ! Error {
         out.extend(items(at(try parse(text.replace("https://raw.githubusercontent.com/", "{base}/test/raw/")), "servers")))
     }
     out.push(listed_server(try parse(String(LIGHTS).replace("REGISTRY", base.copy()))))
+    out.push(listed_server(try parse(String(LAMP).replace("REGISTRY", base.copy()))))
     out.push(listed_server(try parse(String(DOCKER))))
     return out
 }
@@ -215,6 +239,13 @@ fn run(i: Instance, registry: String) ! Error {
     try check(str_at(entry.copy(), "version") == some(String("1.2.0")) and str_at(entry.copy(), "server") == some(String("lights")) and bool_at(entry.copy(), "connected") == some(false), "the test's server is there, at its version, to be added as lights")
     try check(str_at(entry, "icon_svg") == some(String(LIGHTS_SVG)) and int_at(try stats(registry.copy()), "icons") == some(1), "with the icon its server.json gives as an SVG, fetched with the search")
     try check(str_at(entry_in(notion_again.copy(), "com.foreverworks/notion"), "icon_svg") == none and str_at(entry_in(notion_again, "ai.smithery/smithery-notion"), "icon_svg") == none, "one whose icon can't be fetched, and one with none, have no icon")
+    let lamp = entry_in(try app.cmd("q_lamp", "catalog.search", Obj.new().s("query", String("lamp")).done()), "io.github.loom-test/lamp")
+    let lamp_badge = at(lamp.copy(), "badge")
+    try check(str_at(lamp, "icon_svg") == none and str_at(lamp_badge.copy(), "icon") == some(try lamp_sha(false)) and str_at(lamp_badge.copy(), "icon_dark") == some(try lamp_sha(true)), "one whose only icons are PNGs has the best of them on its badge, and its dark one, each as a kept file's SHA-256")
+    let (status, mime, body) = try fetch(i.base.copy(), i.token.copy(), "/files/{str_at(lamp_badge, "icon") ?? String()}")
+    try check(status == 200 and mime == "image/png" and body == try files.icon_png(lamp_png(false)) and int_at(try stats(registry.copy()), "pngs") == some(2), "the icon is the person's file, which the apps fetch as a server's own, fetched once with the search")
+    _ = try app.cmd("q_lamp_again", "catalog.search", Obj.new().s("query", String("lamp")).done())
+    try check(int_at(try stats(registry.copy()), "pngs") == some(2), "and not fetched again for the same search")
     let no_key = try app.cmd("q_6", "catalog.connect", Obj.new().s("registry", String("io.github.loom-test/lights")).s("version", String("1.2.0")).done())
     try check(code_of(no_key.copy()) == "bad_request" and message_of(no_key) == "Fill in lights_key first.", "its key is asked for")
     let mark = app.frames.len()

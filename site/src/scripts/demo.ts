@@ -14,8 +14,8 @@
 // over the composer or open its menu (reply_bar, ctx_menu); the + opens its menu (plus_menu,
 // plus_sub); "From Biscuit" under Juniper opens Biscuit's thread with it (open_thread); a row
 // drags to a new place (droppable); and the sidebar collapses to the rail, as it is anyway in a
-// narrow window (rail.rs). The header gives way in a narrow window as the app's does
-// (model/header.rs).
+// narrow window (rail.rs), or with no room for the rail, as on a phone, opens over the chat from
+// the header. The header gives way in a narrow window as the app's does (model/header.rs).
 //
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
 import { threadOf, threadsIn, yarnsIn, type Mood, type Thread } from './thread';
@@ -801,16 +801,37 @@ export function play(app: HTMLElement) {
 		untarget();
 	});
 
-	// The sidebar: collapsed by its control, and a rail anyway in a narrow window.
+	// The sidebar: collapsed by its control, and a rail anyway in a narrow window. With no room
+	// for the rail, as on a phone, the header's control opens it whole over the chat, and a row
+	// that opens a chat, its own control, the shade over the chat or Esc closes it again.
 	const bar = app.querySelector<HTMLButtonElement>('[data-bar]')!;
+	const headBar = app.querySelector<HTMLButtonElement>('[data-head-bar]')!;
 	const narrow = matchMedia('(max-width: 860px)');
+	const phone = matchMedia('(max-width: 560px)');
 	let collapsed = false;
+	let overChat = false;
 	const rail = () => {
-		const railed = collapsed || narrow.matches;
+		const railed = !overChat && (collapsed || narrow.matches);
 		app.classList.toggle('railed', railed);
 		bar.setAttribute('aria-label', railed ? 'Open the sidebar' : 'Collapse the sidebar');
 	};
+	const drawer = (on: boolean) => {
+		overChat = on && phone.matches;
+		app.classList.toggle('drawer', overChat);
+		headBar.setAttribute('aria-expanded', String(overChat));
+		rail();
+	};
+	headBar.addEventListener('click', () => drawer(true));
+	app.querySelector('[data-shade]')!.addEventListener('click', () => drawer(false));
+	for (const row of app.querySelectorAll('[data-room="Shop"], .agent[data-agent="Juniper"], .agent[data-agent="Moss"], [data-ask]')) {
+		row.addEventListener('click', () => drawer(false));
+	}
+	document.addEventListener('keydown', (e) => {
+		if (overChat && e.key === 'Escape') drawer(false);
+	});
+	phone.addEventListener('change', () => drawer(false));
 	bar.addEventListener('click', () => {
+		if (overChat) return drawer(false);
 		collapsed = !app.classList.contains('railed');
 		// Opened in a narrow window, it stays open until it's collapsed again.
 		if (!collapsed && narrow.matches) {

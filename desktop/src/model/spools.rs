@@ -1290,7 +1290,7 @@ mod tests {
              "tools": [], "tools_checked": false, "servers": [], "connected": false,
              "community": true, "registry": "com.example/notes", "version": "1.2.0"},
             {"id": "registry:com.example/boxed", "name": "Boxed", "category": "", "description": "Notion in a box.",
-             "maker": "example.com", "server": "boxed", "runs": "remote", "fields": [], "sign_in": "none", "secrets": [],
+             "maker": "example.com", "badge": {"name": "boxed", "initial": "B", "color": "mint", "icon": "ef56"}, "server": "boxed", "runs": "remote", "fields": [], "sign_in": "none", "secrets": [],
              "tools": [], "tools_checked": false, "servers": [], "connected": false,
              "community": true, "registry": "com.example/boxed", "version": "0.1.0", "unsupported": "It only runs in Docker."}
         ], "curated": ["github"]})
@@ -1324,6 +1324,22 @@ mod tests {
         // Fewer letters again forget it.
         assert_eq!(m.spool_search("no"), None);
         assert_eq!(m.spools.search, Search::default());
+    }
+
+    #[test]
+    fn a_registry_servers_own_icon_is_fetched() {
+        let mut m = with_catalog();
+        let before: Vec<String> = m
+            .file_fetches()
+            .iter()
+            .filter_map(|f| f["file"].as_str().map(String::from))
+            .collect();
+        assert!(!before.contains(&"ef56".to_string()));
+        search(&mut m, "notion", searched());
+        let asked = m.file_fetches();
+        let files: Vec<&str> = asked.iter().filter_map(|f| f["file"].as_str()).collect();
+        assert_eq!(files, vec!["ef56"]);
+        assert!(asked.iter().all(|f| f["thumb"] == true));
     }
 
     #[test]

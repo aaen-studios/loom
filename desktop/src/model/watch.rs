@@ -755,6 +755,8 @@ mod tests {
             routine: None,
             program: None,
             asked_by: None,
+            main: false,
+            made_by: None,
             title: String::new(),
         }
     }

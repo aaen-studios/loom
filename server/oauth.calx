@@ -371,6 +371,17 @@ pub fn new_state() -> String {
     return bytes.hex(random_bytes(16))
 }
 
+// The scopes `had` and `more` name, each once, in that order, space-separated
+// as OAuth's `scope` is: a sign-in stepped up asks for both (2025-11-25).
+pub fn scopes_with(had: String, more: String) -> String {
+    var out = List<String>()
+    for s in "{had} {more}".split(" ") {
+        let one = s.trim().copy()
+        if one.len() > 0 and not out.contains(one.copy()) { out.push(one) }
+    }
+    return out.join(" ")
+}
+
 // The address the person's browser opens to sign in.
 pub fn authorize_url(grant: Json, sent: String, pkce_challenge: String) -> String {
     var pairs: List<(String, String)> = [(String("response_type"), String("code")), (String("client_id"), str_at(grant.copy(), "client_id") ?? String()), (String("redirect_uri"), str_at(grant.copy(), "redirect") ?? String()), (String("code_challenge"), pkce_challenge.copy()), (String("code_challenge_method"), String("S256")), (String("state"), sent.copy()), (String("resource"), str_at(grant.copy(), "resource") ?? String())]
@@ -617,6 +628,17 @@ fn reads_a_challenge() {
     let plain = challenge_params(String(#"Bearer error="invalid_token", error_description="No \"authorization\" provided""#))
     assert(param(plain, "error_description") == some(String(#"No "authorization" provided"#)))
     assert(challenge_params(String("Bearer")).len() == 0)
+}
+
+@test
+fn steps_a_sign_in_up_to_more_scopes() {
+    let failed = String(#"acta answered 403: it asks for a sign-in with more scopes: Bearer error="insufficient_scope", scope="tools admin""#)
+    let challenge = mcpclient.scope_challenge(failed) ?? String()
+    let said = challenge_params(challenge)
+    assert(param(said.copy(), "error") == some(String("insufficient_scope")) and param(said, "scope") == some(String("tools admin")))
+    assert(mcpclient.scope_challenge(String("acta answered 403: Forbidden")) == none)
+    assert(scopes_with(String("tools offline_access"), String("tools admin")) == "tools offline_access admin")
+    assert(scopes_with(String(), String(" admin  ")) == "admin")
 }
 
 @test

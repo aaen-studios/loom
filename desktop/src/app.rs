@@ -58,6 +58,8 @@ use emoji_ui::{Greeting, RowKey};
 mod form_drafts;
 #[path = "list_page.rs"]
 mod list_page;
+#[path = "routine_off_view.rs"]
+mod routine_off_view;
 #[path = "routines.rs"]
 mod routines;
 #[path = "spools.rs"]
@@ -10294,8 +10296,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.start_reply(&reply_id, None, false, window, cx);
                         })),
                 );
-                // The person's own emoji copy as their names.
-                let text = crate::emoji::as_names(&model::copy_text(&m, &self.model.tools));
+                // The person's own emoji copy as their names, but not in code.
+                let text = model::copy_text(&m, &self.model.tools);
                 if !text.is_empty() {
                     panel = panel.child(
                         self.menu_item("ctx-copy", Ico::Copy, "Copy", false)
@@ -11181,7 +11183,7 @@ ACTA_KEY=secret:ACTA_KEY",
         });
         // Another agent's thread is read only: where the composer would be, the way to
         // your own chat with the agent it's under.
-        let theirs = self.model.ask_open().is_some();
+        let theirs = self.model.ask_open().is_some_and(|k| !k.made);
         let strip = match (
             self.model.task_open().cloned(),
             agent.as_ref(),
@@ -13542,13 +13544,57 @@ ACTA_KEY=secret:ACTA_KEY",
                 cx.notify();
             }),
         );
+        // With what they cost a day, and a line for each that spends a lot for nothing,
+        // which opens it (LOO-391).
+        let (cost, wasted) = self
+            .model
+            .routines_cost(self.model.editing.as_deref().unwrap_or_default());
         let routines = self.stat_row(
             "edit-routines",
             "Routines",
-            count(summary.as_ref().map(|s| s.routines)),
+            match summary.as_ref().map(|s| s.routines) {
+                Some(n) if n > 0 && !cost.is_empty() => format!("{n} · {cost}"),
+                n => count(n),
+            },
             true,
             cx.listener(|this, _, _, cx| this.open(Screen::Routines, cx)),
         );
+        let wasted: Vec<Stateful<Div>> = wasted
+            .into_iter()
+            .map(|(r, line)| {
+                let p = self.p;
+                div()
+                    .id(SharedString::from(format!("edit-routine-{}", r.id)))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::M))
+                    .pl(px(space::S + space::M))
+                    .pr(px(space::S))
+                    .py(px(space::XS + 2.0))
+                    .rounded(px(radius::ROW))
+                    .text_size(px(size::CAPTION))
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(p.ink_2)
+                            .child(r.name.clone()),
+                    )
+                    .child(div().flex_none().text_color(p.warn).child(line))
+                    .child(
+                        Icon::new(IconName::ChevronRight)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open(Screen::Routines, cx);
+                        this.open_routine(&r, window, cx);
+                    }))
+            })
+            .collect();
         let usage = self.stat_row(
             "edit-usage",
             "Tokens",
@@ -13682,7 +13728,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(self.field("MCP servers", self.add_from_spools(servers, cx)))
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
-                    .child(rows(vec![activity, routines, usage]))
+                    .child(rows(
+                        [vec![activity, routines], wasted, vec![usage]]
+                            .into_iter()
+                            .flatten()
+                            .collect(),
+                    ))
                     .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))
@@ -16494,6 +16545,30 @@ ACTA_KEY=secret:ACTA_KEY",
             .when_some(control, |d, c| d.child(div().flex_none().child(c)))
     }
 
+    /// A row of a title and a wide control: beside it when both fit, under it when they
+    /// don't, so neither is cut.
+    fn wrapping_row(&self, title: impl Into<SharedString>, control: AnyElement) -> Div {
+        let p = self.p;
+        div()
+            .min_h(px(control::ROW))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .child(
+                div()
+                    .flex_grow(1.0)
+                    .flex_shrink_0()
+                    .whitespace_nowrap()
+                    .text_size(px(size::BODY))
+                    .text_color(p.ink)
+                    .child(title.into()),
+            )
+            .child(div().flex_none().child(control))
+    }
+
     /// A row of words alone, wrapping, such as a warning or how to use something.
     fn note_row(&self, text: impl Into<SharedString>, ink: Hsla) -> AnyElement {
         div()
@@ -16933,6 +17008,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let program = prog.name.clone();
         let mut share = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap(px(space::S))
             .child(div().w(px(96.0)).child(Input::new(&self.share_in).small()))
@@ -16978,8 +17054,9 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             );
         }
+        // Its control is wide: under its title when they don't fit side by side (LOO-401).
         rows.push(
-            self.row(None, "Share it", None, Some(share.into_any_element()))
+            self.wrapping_row("Share it", share.into_any_element())
                 .into_any_element(),
         );
         // Who has it, and who gets the settings shared: the owner's to say.
@@ -22620,6 +22697,7 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         | CardBody::SignIn { .. }
         | CardBody::McpAdd { .. }
         | CardBody::SecretAsk { .. }
+        | CardBody::RoutineOff { .. }
         | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
@@ -28327,6 +28405,13 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         _ => None,
     } {
         return watch_view::update_line(p, line.0, line.1, joined, column, time_line, i.line_cut);
+    }
+    // A routine that turned off on its own: its card, to turn it on (routine_off_view.rs).
+    if let Some((m, card)) = match &row {
+        Row::Message(m) => model::routine_off::card_of(m).map(|c| (m, c)),
+        _ => None,
+    } {
+        return routine_off_view::row(p, m, card, column, time_line, show.text_scale, this);
     }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.

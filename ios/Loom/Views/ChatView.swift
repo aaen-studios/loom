@@ -63,6 +63,9 @@ struct ChatView: View {
                             } else if isStartLine(m) {
                                 // The line a thread the person started lands in: its card.
                                 ThreadCards(message: m)
+                            } else if let card = m.routineOff {
+                                // A routine that turned off on its own: its card, to turn it on.
+                                RoutineOffRow(card: card)
                             } else if m.isPerson {
                                 PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
                             } else {
@@ -109,7 +112,7 @@ struct ChatView: View {
                             }
                             // A card on one of the person's Acta boards, made from its words
                             // (PLAN.md, "Acta beside the chat").
-                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) && m.watchLine == nil {
+                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) && m.routineOff == nil && m.watchLine == nil {
                                 Button {
                                     session.send(model.startCard(message: m.id, text: text))
                                 } label: {
@@ -175,9 +178,10 @@ struct ChatView: View {
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                // The composer writes to the agent's chat, so a thread is only read here,
-                // with the way back to that chat in the composer's place.
-                if thread == nil {
+                // The composer writes to the agent's chat, or a thread an agent made, so
+                // another agent's thread is only read here, with the way back to that chat
+                // in the composer's place.
+                if thread == nil || thread?.made == true {
                     Composer(agentName: room?.name ?? agent?.name ?? "the agent") {
                         withAnimation { proxy.scrollTo("end", anchor: .bottom) }
                     }
@@ -267,7 +271,8 @@ struct ChatView: View {
                                 Label("Following", systemImage: "bell")
                             }
                         }
-                        // Other agents' threads with it, each to read on a screen of its own.
+                        // Other agents' threads with it, and the ones agents made beside its chat,
+                        // each on a screen of its own.
                         let asks = model.asks(agentId)
                         if !asks.isEmpty {
                             Section {
