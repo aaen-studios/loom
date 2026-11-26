@@ -702,6 +702,18 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM meta WHERE key = ?"), [t(key)])
     }
 
+    // The renames of `user`'s MCP servers the instance keeps for chats running
+    // from before them (`mcp_renamed/USER/WAS`): each name a server had, and
+    // the one it was renamed to.
+    pub fn mcp_renames(self, user: String) -> List<(String, String)> ! Error {
+        let prefix = "mcp_renamed/{user}/"
+        var out = List<(String, String)>()
+        for r in try self.db.query(String("SELECT key, value FROM meta WHERE substr(key, 1, ?) = ?"), [Value.Int(i64.wrap(u64(prefix.len()))), t(prefix.copy())]) {
+            out.push((text(r[0].copy())[prefix.len()..].copy(), text(r[1].copy())))
+        }
+        return out
+    }
+
     // Work that lands together or not at all: a savepoint, in a transaction of its own
     // or in the one `hold` keeps. Gives whether it began the transaction, which
     // `commit` and `rollback` take; every error path after it calls `rollback`, so no

@@ -10324,11 +10324,13 @@ impl Model {
             _ => Vec::new(),
         });
         let sites = sites.chain(previews);
-        // And the icons Spools shows: those the person's servers gave of their own.
+        // And the icons Spools shows: those the person's servers gave of their own, and
+        // those the MCP Registry gave the servers its search found.
         let spools = self
             .spools
             .entries
             .iter()
+            .chain(&self.spools.search.entries)
             .filter_map(|e| e.badge.as_ref())
             .chain(self.mcp_servers.iter().filter_map(|m| m.badge.as_ref()));
         for icon in cards

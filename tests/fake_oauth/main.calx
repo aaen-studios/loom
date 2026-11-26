@@ -54,6 +54,7 @@ struct Code {
     challenge: String
     resource: String
     used: bool
+    scope: String    // the scopes the sign-in asked for
 }
 
 struct Token {
@@ -61,6 +62,7 @@ struct Token {
     resource: String
     ends: i64
     live: bool
+    scope: String
 }
 
 struct Fake {
@@ -79,6 +81,8 @@ struct Fake {
     document_id: String    // loom's Client ID Metadata Document's address, its client id at /as3
     document_redirects: List<String>    // the return addresses it names
     by_document: i64
+    insufficient: i64    // calls refused for want of scopes
+    last_scope: String    // the scopes the last sign-in asked for
 }
 
 // The key /api/mcp takes, as its Authorization header.
@@ -153,7 +157,11 @@ impl Fake {
         let auth = req.header(String("Authorization")) ?? String()
         let token = if auth.starts_with("Bearer ") { auth[7..].copy() } else { String() }
         var good = false
-        if let t = self.access.find(token.copy()) { good = t.live and t.ends > now() and t.resource == resource }
+        var scopes = String()
+        if let t = self.access.find(token.copy()) {
+            good = t.live and t.ends > now() and t.resource == resource
+            scopes = t.scope.copy()
+        }
         let keyed = req.path == "/api/mcp"
         if keyed { good = auth == KEY }
         if keyed and not good {
@@ -180,7 +188,16 @@ impl Fake {
             let whoami = object([("name", text(name)), ("description", text("Says who signed in.")), ("inputSchema", object([("type", text("object")), ("properties", object(List<(str, Json)>()))])), ("annotations", object([("readOnlyHint", Json.Bool(true))]))])
             result = object([("tools", Json.Array([whoami]))])
         } else if method == "tools/call" {
-            result = object([("content", Json.Array([object([("type", text("text")), ("text", text("ada"))])]))])
+            // `whoami {as: "admin"}` needs the scope admin, which a sign-in
+            // has only when it asked for it: without, it's 403 with the
+            // scopes it needs (step-up authorization).
+            let as_admin = str_of((m.get(String("params")) ?? Json.Null).get(String("arguments")) ?? Json.Null, "as") == "admin"
+            if as_admin and not scopes.split(" ").contains(String("admin")) {
+                self.insufficient += 1
+                let challenge = "Bearer error=\"insufficient_scope\", scope=\"tools admin\", resource_metadata=\"{self.base}/.well-known/oauth-protected-resource{req.path}\""
+                return oauth_error(403, "insufficient_scope", String("That needs the scope admin.")).with_header(String("WWW-Authenticate"), challenge)
+            }
+            result = object([("content", Json.Array([object([("type", text("text")), ("text", text(if as_admin { "ada, admin" } else { "ada" }))])]))])
         }
         return json(200, object([("jsonrpc", text("2.0")), ("id", id), ("result", result)]))
     }
@@ -252,7 +269,8 @@ impl Fake {
         let state = field(q.copy(), "state")
         if state.len() == 0 { return Response.error(400, String("no state")) }
         let code = fresh()
-        self.codes.insert(code.copy(), Code { client: client, redirect: redirect.copy(), challenge: field(q, "code_challenge"), resource: resource.copy(), used: false })
+        self.last_scope = field(q.copy(), "scope")
+        self.codes.insert(code.copy(), Code { client: client, redirect: redirect.copy(), challenge: field(q.copy(), "code_challenge"), resource: resource.copy(), used: false, scope: field(q.copy(), "scope") })
         let back = url.form_encode([(String("code"), code), (String("state"), state), (String("iss"), issuer.copy())])
         return Response.html("<p>Sign in to fake as ada?</p><a id=\"allow\" href=\"{redirect}?{back}\">Allow</a>")
     }
@@ -276,15 +294,15 @@ impl Fake {
         return some(id)
     }
 
-    fn tokens(self: mut Fake, client: String, resource: String) -> Response {
+    fn tokens(self: mut Fake, client: String, resource: String, scope: String) -> Response {
         let access = "at-{fresh()}"
         let refresh = "rt-{fresh()}"
-        self.access.insert(access.copy(), Token { client: client.copy(), resource: resource.copy(), ends: now() + self.life * 1000, live: true })
-        self.refreshes.insert(refresh.copy(), Token { client: client.copy(), resource: resource.copy(), ends: 0, live: true })
+        self.access.insert(access.copy(), Token { client: client.copy(), resource: resource.copy(), ends: now() + self.life * 1000, live: true, scope: scope.copy() })
+        self.refreshes.insert(refresh.copy(), Token { client: client.copy(), resource: resource.copy(), ends: 0, live: true, scope: scope.copy() })
         self.issued.push(access.copy())
         self.issued.push(refresh.copy())
         let claims = bytes.base64_url("{object([("email", text("ada@example.com"))])}".to_bytes())
-        return json(200, object([("access_token", Json.Str(access)), ("token_type", text("Bearer")), ("expires_in", Json.Int(self.life)), ("refresh_token", Json.Str(refresh)), ("scope", text("tools")), ("id_token", Json.Str("e30.{claims}.x"))]))
+        return json(200, object([("access_token", Json.Str(access)), ("token_type", text("Bearer")), ("expires_in", Json.Int(self.life)), ("refresh_token", Json.Str(refresh)), ("scope", Json.Str(scope.copy())), ("id_token", Json.Str("e30.{claims}.x"))]))
     }
 
     fn token(self: mut Fake, req: Request) -> Response {
@@ -294,6 +312,7 @@ impl Fake {
         if kind == "authorization_code" {
             let code = field(f.copy(), "code")
             var resource = String()
+            var scope = String()
             var problem = String()
             if let c = mut self.codes.find(code.copy()) {
                 let verifier = field(f.copy(), "code_verifier")
@@ -310,26 +329,29 @@ impl Fake {
                 }
                 c.used = true
                 resource = c.resource.copy()
+                scope = c.scope.copy()
             } else {
                 problem = String("there's no such code")
             }
             if problem.len() > 0 { return oauth_error(400, "invalid_grant", problem) }
-            return self.tokens(client, resource)
+            return self.tokens(client, resource, scope)
         }
         if kind == "refresh_token" {
             let old = field(f.copy(), "refresh_token")
             var resource = String()
+            var scope = String()
             var good = false
             if let t = mut self.refreshes.find(old.copy()) {
                 good = t.live and t.client == client
                 t.live = false
                 resource = t.resource.copy()
+                scope = t.scope.copy()
             }
             if not good { return oauth_error(400, "invalid_grant", String("That refresh token isn't live.")) }
             let asked = field(f, "resource")
             if asked.len() > 0 and asked != resource { return oauth_error(400, "invalid_target", String("That resource isn't the one signed in for.")) }
             self.refreshed += 1
-            return self.tokens(client, resource)
+            return self.tokens(client, resource, scope)
         }
         return oauth_error(400, "unsupported_grant_type", String("Only codes and refresh tokens."))
     }
@@ -378,7 +400,7 @@ impl Fake {
             for t in self.issued {
                 issued.push(Json.Str(t.copy()))
             }
-            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued)), ("signed_up", self.signed_up.copy()), ("by_document", Json.Int(self.by_document))]))
+            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued)), ("signed_up", self.signed_up.copy()), ("by_document", Json.Int(self.by_document)), ("insufficient", Json.Int(self.insufficient)), ("last_scope", Json.Str(self.last_scope.copy()))]))
         }
         if p == "/test/expire" {
             for t in mut self.access.values() {
@@ -416,7 +438,7 @@ fn main() ! Error {
             }
         }
     }
-    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>(), signed_up: Json.Null, document_id: document_id, document_redirects: document_redirects, by_document: 0 }
+    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>(), signed_up: Json.Null, document_id: document_id, document_redirects: document_redirects, by_document: 0, insufficient: 0, last_scope: String() }
     println("fake oauth: {base}")
     io.flush()
     loop {

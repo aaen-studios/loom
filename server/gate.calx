@@ -7,7 +7,7 @@ module server.gate
 // routes on to the instance, with their agent's token: GET /api/mcp/tools and
 // POST /api/mcp/call, and for Code Mode, GET /api/mcp/servers and
 // /api/mcp/deno and POST /api/mcp/allow, /api/mcp/done, /api/mcp/token,
-// /api/mcp/sign_in and /api/mcp/icon. Everything else it
+// /api/mcp/sign_in, /api/mcp/icon and /api/mcp/listed. Everything else it
 // turns away, so a sandbox never reaches the instance's sign-in, its sessions
 // or its files.
 import std.http.{Header, Request, get, post}
@@ -90,7 +90,7 @@ impl Task for Gate {
             match listening.next_event() {
                 some(Request(req)) => {
                     let reads = req.method == "GET" and (req.path == "/api/mcp/tools" or req.path == "/api/mcp/servers" or req.path == "/api/mcp/deno")
-                    let call = req.method == "POST" and (req.path == "/api/mcp/call" or req.path == "/api/mcp/allow" or req.path == "/api/mcp/done" or req.path == "/api/mcp/token" or req.path == "/api/mcp/sign_in" or req.path == "/api/mcp/icon")
+                    let call = req.method == "POST" and (req.path == "/api/mcp/call" or req.path == "/api/mcp/allow" or req.path == "/api/mcp/done" or req.path == "/api/mcp/token" or req.path == "/api/mcp/sign_in" or req.path == "/api/mcp/icon" or req.path == "/api/mcp/listed")
                     if not reads and not call {
                         listening.respond(req, refuse("From a sandbox, only loom's tools are reached."))
                         continue
