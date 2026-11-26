@@ -230,6 +230,38 @@ pub fn program_env(env: Json) -> Json {
     return Json.Object(vars)
 }
 
+// Whether a program is Claude Code's adapter, by its name, the registry agent it
+// was installed from, or its command line.
+pub fn runs_claude(name: String, command: String, args: List<String>, source: String) -> bool {
+    var said = "{name} {source} {command}"
+    for a in args { said.push_str(" {a}") }
+    return said.to_lower_root().contains("claude")
+}
+
+// Whether a program keeps its prompt cache an hour rather than five minutes,
+// from its settings `env` (PLAN.md, "Idle sessions"): Claude Code (`claude`),
+// which program_env asks for one unless the settings ask for five minutes, and
+// any program whose settings ask for one themselves.
+pub fn caches_an_hour(claude: bool, env: Json) -> bool {
+    if let asked = str_at(env.copy(), CACHE_HOUR) {
+        let v = asked.trim().to_lower_root()
+        return v.len() > 0 and v != "0" and v != "false"
+    }
+    return claude and str_at(env, "FORCE_PROMPT_CACHING_5M") == none
+}
+
+@test
+fn claude_code_keeps_its_cache_an_hour() {
+    assert(runs_claude(String("claude"), String("npx"), [String("@agentclientprotocol/claude-agent-acp")], String("")))
+    assert(runs_claude(String("work"), String("node"), List<String>(), String("claude-acp")))
+    assert(not runs_claude(String("codex"), String("npx"), [String("@zed-industries/codex-acp")], String("codex-acp")))
+    assert(caches_an_hour(true, Json.Null))
+    assert(not caches_an_hour(true, Obj.new().s("FORCE_PROMPT_CACHING_5M", String("1")).done()))
+    assert(not caches_an_hour(true, Obj.new().s(CACHE_HOUR, String("0")).done()))
+    assert(not caches_an_hour(false, Json.Null))
+    assert(caches_an_hour(false, Obj.new().s(CACHE_HOUR, String("1")).done()))
+}
+
 // Loom's tools an agent program is told not to ask about: Code Mode's, and
 // what an agent keeps from a chat, which loom keeps or asks about itself.
 fn allowed_tools() -> List<String> {
@@ -477,6 +509,17 @@ pub fn offered(config: Json) -> Json {
         }
     }
     return Json.Array(out)
+}
+
+// The id of a session's config option in `category`, such as "model" or
+// "thought_level" (the reasoning effort), when it has one.
+pub fn option_in(config: Json, category: str) -> String? {
+    if let Json.Array(list) = config {
+        for c in list {
+            if str_of(c.copy(), "category") == some(String(category)) { return str_of(c, "id") }
+        }
+    }
+    return none
 }
 
 // Whether option `id` of a session's configOptions offers `value`.

@@ -13,9 +13,6 @@ import std.json.{Json}
 import server.acp
 import shared.obj.{Obj, at, bool_at, str_at}
 
-// How long after a chat's last turn it has paused, in minutes: inside the five
-// minutes a prompt cache lasts, so looking back reads the chat from the cache.
-pub const PAUSE_MINUTES: i64 = 4
 // The most lines a fix's change shows, removed, added and around them.
 pub const LINES_MOST: usize = 400
 // The lines around each change in a fix, for where it is.

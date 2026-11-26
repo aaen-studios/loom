@@ -1,0 +1,98 @@
+module server.routine_gate
+
+// A routine's gate, run off the loop (PLAN.md, "Routines"): the command that
+// says whether anything is new before its agent wakes. Each runs on a thread
+// of its own, since one may take up to its timeout, and its end comes back to
+// the loop, which it wakes. What decides what the end means is
+// routines.gate_outcome.
+import std.env
+import std.net.{Waker as LoopWaker}
+import std.process.{Command, Stdio}
+import std.thread.{Task}
+
+// How much of what a gate prints is kept, in bytes: more than its agent is given.
+const KEPT_MOST: usize = 65536
+
+pub struct Job {
+    pub run: String    // the routine run it's for
+    pub program: String
+    pub args: List<String>
+    pub env: List<(String, String)>
+    pub dir: String
+    pub ms: u64
+}
+
+pub struct Done {
+    pub run: String
+    pub code: i64?    // how it exited, or none when it was killed
+    pub out: String
+    pub errors: String
+    pub timed_out: bool
+    pub broke: String    // why it didn't start, or ""
+}
+
+struct Runner {
+    job: Job
+    done: Sender<Done>
+    wake: LoopWaker
+}
+
+impl Task for Runner {
+    fn run(own self) {
+        var w = self
+        w.done.send(run_job(w.job.copy()))
+        w.wake.wake()
+    }
+}
+
+/// Runs `job` on a thread of its own, and sends how it ended to `done`, waking the loop.
+pub fn start(job: own Job, done: own Sender<Done>, wake: LoopWaker) {
+    _ = unsafe { Thread.spawn(Runner { job: job, done: done, wake: wake }) }
+}
+
+fn kept(text: String) -> String {
+    if text.len() <= KEPT_MOST { return text.copy() }
+    var out = String()
+    for r in text.runes() {
+        if out.len() >= KEPT_MOST { break }
+        out.push(r)
+    }
+    return out
+}
+
+/// Runs `job`'s command, killing it and what it started once its time is up.
+pub fn run_job(job: Job) -> Done {
+    var c = Command.new(job.program.copy()).args(job.args.copy()).dir(job.dir.copy()).stdin(Stdio.Null).stdout(Stdio.Pipe).stderr(Stdio.Pipe).own_group().ends_with_this()
+    for (k, v) in job.env { c = c.env(k.copy(), v.copy()) }
+    var child = match c.spawn() {
+        ok(ch) => ch,
+        err(e) => return Done { run: job.run.copy(), code: none, out: String(), errors: String(), timed_out: false, broke: "{e}" },
+    }
+    var timed_out = false
+    if child.wait_timeout(job.ms) == none {
+        child.kill_tree()
+        timed_out = true
+    }
+    let out = child.wait()
+    let code: i64? = match out.status.code {
+        some(n) => some(i64(n)),
+        none => none,
+    }
+    return Done { run: job.run.copy(), code: code, out: kept(out.text()), errors: kept(out.error_text()), timed_out: timed_out, broke: String() }
+}
+
+@test
+fn a_gate_says_what_it_printed_and_how_it_ended() {
+    let windows = env.os() == "windows"
+    let shell = if windows { String("cmd") } else { String("sh") }
+    let flag = if windows { String("/C") } else { String("-c") }
+    let said = run_job(Job { run: String("run_1"), program: shell.copy(), args: [flag.copy(), String("echo 1.21.5")], env: List<(String, String)>(), dir: String("."), ms: 20000 })
+    assert(said.run == "run_1" and said.code == some(0) and said.out.trim() == "1.21.5" and not said.timed_out and said.broke == "")
+    let failed = run_job(Job { run: String("run_2"), program: shell.copy(), args: [flag.copy(), String("exit 3")], env: List<(String, String)>(), dir: String("."), ms: 20000 })
+    assert(failed.code == some(3))
+    let slow = if windows { String("ping -n 6 127.0.0.1 >nul") } else { String("sleep 5") }
+    let stuck = run_job(Job { run: String("run_3"), program: shell.copy(), args: [flag.copy(), slow], env: List<(String, String)>(), dir: String("."), ms: 300 })
+    assert(stuck.timed_out)
+    let missing = run_job(Job { run: String("run_4"), program: String("no-such-program-anywhere"), args: List<String>(), env: List<(String, String)>(), dir: String("."), ms: 1000 })
+    assert(missing.broke.len() > 0)
+}

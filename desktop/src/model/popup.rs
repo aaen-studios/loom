@@ -168,12 +168,13 @@ pub fn mcp_line(m: &McpServer, test: Option<&McpTest>) -> (String, Option<Dot>) 
 }
 
 /// A routine's dot in the list: on, paused (none), or how its last run went wrong. One
-/// on an event is on with no next run.
+/// on an event is on with no next run, and one that spends a lot for nothing warns.
 pub fn routine_dot(r: &Routine) -> Option<Dot> {
     match r.last_status.as_str() {
         "failed" => Some(Dot::Bad),
         "running" | "waiting" => Some(Dot::Warn),
         _ if !r.on || (r.next == 0 && r.event.is_none()) => None,
+        _ if r.cost.wasted => Some(Dot::Warn),
         _ => Some(Dot::Ok),
     }
 }
@@ -388,6 +389,22 @@ mod tests {
             ..on.clone()
         };
         assert_eq!(routine_dot(&running), Some(Dot::Warn));
+        // One that spends a lot for nothing warns, unless it's paused.
+        let wasteful = Routine {
+            cost: crate::model::RoutineCost {
+                wasted: true,
+                ..Default::default()
+            },
+            ..on.clone()
+        };
+        assert_eq!(routine_dot(&wasteful), Some(Dot::Warn));
+        assert_eq!(
+            routine_dot(&Routine {
+                on: false,
+                ..wasteful
+            }),
+            None
+        );
         // On an event alone: no next run, and on all the same.
         let on_event = Routine {
             next: 0,

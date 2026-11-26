@@ -178,7 +178,9 @@ fn chat_of(app: mut Session, id: str, agent: String) -> String ! Error {
 // A person's messages in a short chat and a long one, then after the program
 // starts again on the same session, and after a compaction.
 fn messages_part(app: mut Session, m: mut Measured, record: String, agent: String) -> String ! Error {
-    _ = try app.cmd("q_p1", "profile.put", Obj.new().s("text", String("Elliot builds loom, a chat app for agents, in Calx. He lives in Oslo, works for Vanly until the end of the year, and likes short answers without filler. His main projects are loom, Calx and Acta.")).done())
+    _ = try app.cmd("q_p1", "profile.put", Obj.new().s("text", String("Ada builds a chat app for agents in Calx. Ada lives in Bergen, works at a studio until the end of the year, and likes short answers without filler. Ada's main projects: an app, a compiler, a bot.")).done())
+    // The fake agent keeps its prompt cache an hour, as Claude Code does.
+    _ = try app.cmd("q_p0", "acp.settings", Obj.new().s("name", String("fake")).j("env", Obj.new().s("ENABLE_PROMPT_CACHING_1H", String("1")).done()).done())
     _ = try app.cmd("q_p2", "defaults.put", Obj.new().s("instructions", String("Answer in English, in short paragraphs.")).done())
     let chat = try chat_of(mut app, "q_p3", agent)
     let from = turns(record.copy()).len()
@@ -302,7 +304,7 @@ fn swap_part(app: mut Session, m: mut Measured, record: String) ! Error {
     let agent = try agent_in(mut app, "q_c1", "Grower", List<String>())
     let chat = try chat_of(mut app, "q_c2", agent)
     let start = turns(record.copy()).len()
-    var summary = String("/next /say Summary: Elliot is planning a trip to Bergen in May.")
+    var summary = String("/next /say Summary: Ada is planning a trip to Tromsø in May.")
     for k in 0..6 { summary.push_str(" Day {k} has the morning train, a hike and dinner by the harbour.") }
     // Each turn adds 35k tokens, to 140k, with a pause after each while the cache is warm.
     var long_session = String()
@@ -346,7 +348,7 @@ fn swap_part(app: mut Session, m: mut Measured, record: String) ! Error {
     m.want(again_asked == 0, String("and not again when little was said since"))
     m.want(warm_session == long_session and long_session.len() > 0, String("a turn while the cache is warm stays in its session"))
     m.want(fresh and noted(swapped.copy(), "[loom: Your chat with your person goes on from"), String("the first turn after it's cold goes to a fresh session"))
-    m.want(cold.contains("Your summary of it, as you wrote it at") and cold.contains("Elliot is planning a trip to Bergen in May") and cold.contains("Turn 4 of a growing chat"), String("which is given the summary the pause wrote and the newest of the chat"))
+    m.want(cold.contains("Your summary of it, as you wrote it at") and cold.contains("Ada is planning a trip to Tromsø in May") and cold.contains("Turn 4 of a growing chat"), String("which is given the summary the pause wrote and the newest of the chat"))
     m.want(swapped.loom > 0 and swapped.loom < 30000, String("in under 30k chars"))
     m.want(lines == 0, String("with no line in the chat"))
 }
