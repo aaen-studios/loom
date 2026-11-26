@@ -107,6 +107,8 @@ module tests.fake_agent.main
 // shares one, else the one that answered last, else the first, and says
 // {"agent": NAME, "why": "fake pick"}, or with "WHY:UPTIME" in the message,
 // "why": "up MS ms", how long ago the program started; and reports 12 tokens.
+// With "USAGE:USED/SIZE" in the message, the router's session also reports its
+// context as USED tokens of a SIZE window (usage_update), as /usage does.
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
@@ -1314,7 +1316,8 @@ fn text_of(j: Json, key: str) -> String {
 // the message's; else a member whose "for" shares a word with it; else the
 // one that answered last, else the first member. As JSON, one line, why
 // "fake pick", or with "WHY:UPTIME" in the message, `up` ("up MS ms", how long
-// ago the program started). Each pick reports 12 tokens.
+// ago the program started). Each pick reports 12 tokens, and with
+// "USAGE:USED/SIZE" in the message, its session's context (/usage USED SIZE).
 fn route_pick(context: String, up: String) -> String {
     let start = context.find("[loom: route]") ?? 0
     let rest = context[start..].copy()
@@ -1349,7 +1352,14 @@ fn route_pick(context: String, up: String) -> String {
     var o = LinkedMap<String, Json>()
     o.insert("agent", js(pick))
     o.insert("why", js(if message.contains("WHY:UPTIME") { up.copy() } else { String("fake pick") }))
-    return "/say {Json.Object(o)}\n/tokens 12"
+    var steps = "/say {Json.Object(o)}\n/tokens 12"
+    // "USAGE:USED/SIZE": the router's session reports its context, as /usage does.
+    if let at = message.find("USAGE:") {
+        let after = message[at + 6..].copy()
+        let end = after.find(" ") ?? after.len()
+        steps.push_str("\n/usage {after[..end].replace("/", " ")}")
+    }
+    return steps
 }
 
 fn method(m: Json) -> String {
@@ -1405,6 +1415,15 @@ fn reads_a_subagents_steps() {
     assert(steps[0] == Step.Subagent(String("Explore the notes"), inner))
     assert(steps[1] == Step.Named(String("Save it")))
     assert(steps[2] == Step.AskOnly(String("rm x")))
+}
+
+@test
+fn the_router_picks_and_says_its_sessions_context_when_asked() {
+    let asked = #"{"message":"ROUTE:Ledger USAGE:900/1000 the bill","members":[{"name":"Ledger","for":"bills"}]}"#
+    let said = route_pick("[loom: route]\n\n{asked}", String("up 1 ms"))
+    assert(said.contains(#""agent":"Ledger""#) and said.ends_with("\n/tokens 12\n/usage 900 1000"))
+    let plain = #"{"message":"ROUTE:Ledger the bill","members":[{"name":"Ledger","for":"bills"}]}"#
+    assert(route_pick("[loom: route]\n\n{plain}", String("up 1 ms")).ends_with("\n/tokens 12"))
 }
 
 @test
