@@ -441,7 +441,8 @@ impl Model {
         }
     }
 
-    /// A group chat made from here: the chat shows it, and the panel its settings.
+    /// A group chat made from here: the chat shows it, and the panel its settings, with
+    /// its usage asked for so the Usage row is there without opening them again.
     pub(super) fn room_made(&mut self, id: &str, value: &Value) {
         if !self.making(id) {
             return;
@@ -458,6 +459,8 @@ impl Model {
             }
         }
         self.show_room(&conversation);
+        let f = self.ask_room_usage(&conversation);
+        self.to_send.push(f);
         self.dirty.insert(List::Conversations);
         self.dirty.insert(List::Sidebar);
     }
@@ -773,6 +776,50 @@ mod tests {
         let p = m.room_panel("Code");
         assert_eq!(p.room.map(|r| r.id), Some("c_12".to_string()));
         assert!(p.members_row);
+    }
+
+    // LOO-355: the new group chat's settings had no Usage row until they were opened
+    // again.
+    #[test]
+    fn a_group_chat_made_from_the_panel_asks_for_its_usage() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_0");
+        // Everyone's settings were open, with their usage.
+        let f = m.ask_room_usage("c_0");
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {
+            "tokens_today": 850, "tokens_month": 12400, "router_today": 60, "router_month": 900
+        }}));
+        assert!(m.open_room_usage().is_some());
+        m.start_room_form();
+        m.toggle_room_member("a_1");
+        m.toggle_room_member("a_3");
+        let f = m.make_form_room("Code").unwrap();
+        assert!(m.to_send.is_empty());
+        m.take(&json!({"t": "result", "id": f["id"], "ok": true, "value": {"conversation": {
+            "id": "c_12", "agent": "", "title": "Code",
+            "room": {"name": "Code", "members": ["a_1", "a_3"], "color": "", "default": "", "corrections": []}
+        }}}));
+        assert_eq!(
+            m.room_panel("Code").room.map(|r| r.id),
+            Some("c_12".to_string())
+        );
+        let asked: Vec<&Value> = m
+            .to_send
+            .iter()
+            .filter(|f| f["name"] == "room.summary")
+            .collect();
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0]["args"]["conversation"], "c_12");
+        // Not Everyone's meanwhile, and the new one's zeros once they come.
+        assert_eq!(m.open_room_usage(), None);
+        let id = asked[0]["id"].clone();
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {
+            "tokens_today": 0, "tokens_month": 0, "router_today": 0, "router_month": 0
+        }}));
+        let u = m.open_room_usage().unwrap();
+        assert_eq!(u.room, "c_12");
+        assert_eq!((u.tokens_today, u.router_month), (0, 0));
     }
 
     #[test]
