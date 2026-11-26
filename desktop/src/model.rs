@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 pub mod acta;
+pub mod context;
 pub mod drafts;
 pub mod header;
 mod popover;
@@ -2013,6 +2014,8 @@ pub struct Block {
     pub parent: Option<String>,
     /// A watch's line, a `loom` message's `update` block (`model/watch.rs`).
     pub update: Option<std::sync::Arc<watch::WatchLine>>,
+    /// A `loom` line's mark (`compacted`, `fresh`, `t3_thread`), or empty.
+    pub mark: String,
 }
 
 impl Block {
@@ -2025,6 +2028,7 @@ impl Block {
             card: None,
             parent: None,
             update: None,
+            mark: String::new(),
         }
     }
 
@@ -2054,6 +2058,11 @@ impl Block {
             },
             parent: b.get("parent").and_then(Value::as_str).map(str::to_string),
             update: (kind == "update").then(|| std::sync::Arc::new(watch::WatchLine::of(b))),
+            mark: if kind == "mark" {
+                s(b, "mark")
+            } else {
+                String::new()
+            },
             kind,
         }
     }

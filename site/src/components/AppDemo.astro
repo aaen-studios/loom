@@ -271,8 +271,9 @@ const BOARD_LAYERS = [
 					</span>
 					<!-- How full Juniper's session context is, after its model, with its card under it
 					     on hover, kept open by a click (app.rs, context_ring, context_card_view). Its
-					     program says only how many tokens are in it, not what they are. -->
-					<span class="context-at">
+					     program says only how many tokens are in it, not what they are. Hidden, as the app has it
+					     until Settings → Chat → Show context is on (model/context.rs). -->
+					<span class="context-at" hidden>
 						<button type="button" class="context" data-context aria-expanded="false" aria-label="Context 41%, 82k of 200k"
 							><svg viewBox="0 0 16 16"
 								><circle class="track" cx="8" cy="8" r="7" pathLength="100"></circle><circle
@@ -2840,6 +2841,9 @@ const BOARD_LAYERS = [
 	.context-at {
 		display: flex;
 		margin-left: -8px;
+	}
+	.context-at[hidden] {
+		display: none;
 	}
 	.context {
 		display: grid;

@@ -10,6 +10,7 @@ struct SettingsView: View {
     @AppStorage("loom.username") private var username = ""
     @AppStorage(Prefs.replies) private var replies = Prefs.bubbles
     @AppStorage(Prefs.vibrant) private var vibrant = false
+    @AppStorage(Prefs.showContext) private var showContext = false
     @State private var notifications: UNAuthorizationStatus = .notDetermined
     @State private var confirmSignOut = false
     /// Add a device, open at launch with `-addDevice`, for its screenshot.
@@ -89,6 +90,9 @@ struct SettingsView: View {
                     .tint(P.ink3)
                     Toggle(isOn: $vibrant) {
                         Text("Vibrant bubbles").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                    Toggle(isOn: $showContext) {
+                        Text("Show context").font(Fonts.body).foregroundStyle(P.ink)
                     }
                     NavigationLink {
                         EmojiSettingsView()

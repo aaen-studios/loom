@@ -3360,7 +3360,12 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        let mut rows: Vec<Row> = self.model.shown().into_iter().map(Row::Message).collect();
+        let mut rows: Vec<Row> = self
+            .model
+            .shown_with(self.prefs.show_context)
+            .into_iter()
+            .map(Row::Message)
+            .collect();
         rows.extend(self.model.shown_approvals().into_iter().map(Row::Approval));
         // What another chat's frames change leaves this one's rows as they were: the
         // list keeps them, so its cached drawing stays good. Compared from the end,
@@ -8635,7 +8640,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     0.0
                 }
         });
-        let context = if self.model.context().is_some() {
+        let context = if self.model.context_shown(self.prefs.show_context).is_some() {
             control::CONTEXT_BUTTON
         } else {
             0.0
@@ -17804,7 +17809,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// on it, or once it's clicked (PLAN.md, "One endless chat").
     fn context_ring(&mut self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let chat = self.model.conversation();
-        let Some(fill) = self.model.context() else {
+        let Some(fill) = self.model.context_shown(self.prefs.show_context) else {
             self.context_card = None;
             return None;
         };
@@ -27237,6 +27242,7 @@ mod row_tests {
             card: None,
             parent: None,
             update: None,
+            mark: String::new(),
         };
         let mut blocks = vec![block("text", text, None)];
         if let Some(c) = call {

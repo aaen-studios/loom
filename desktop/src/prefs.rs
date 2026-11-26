@@ -88,6 +88,9 @@ pub struct Prefs {
     pub auto_update: bool,
     /// Whether the sidebar shows the search box over the agents.
     pub search: bool,
+    /// Whether the chat shows its session's context: the header's ring and its card, and
+    /// the lines where it was compacted or a fresh session started (`crate::model::context`).
+    pub show_context: bool,
     /// Settings → Emoji: whether the composer shows the emoji button, whether moving
     /// emoji play only under the pointer, the skin tone (0 for none, 1 to 5 light to
     /// dark), and whether `:)` becomes 🙂.
@@ -127,6 +130,7 @@ impl Default for Prefs {
             awake: false,
             auto_update: false,
             search: false,
+            show_context: false,
             emoji_button: true,
             emoji_hover: false,
             skin_tone: 0,
@@ -216,6 +220,7 @@ impl Prefs {
             awake: b("awake", d.awake),
             auto_update: b("auto_update", d.auto_update),
             search: b("search", d.search),
+            show_context: b("show_context", d.show_context),
             emoji_button: b("emoji_button", d.emoji_button),
             emoji_hover: b("emoji_hover", d.emoji_hover),
             skin_tone: v
@@ -315,6 +320,7 @@ impl Prefs {
         m.insert("awake".into(), json!(self.awake));
         m.insert("auto_update".into(), json!(self.auto_update));
         m.insert("search".into(), json!(self.search));
+        m.insert("show_context".into(), json!(self.show_context));
         m.insert("emoji_button".into(), json!(self.emoji_button));
         m.insert("emoji_hover".into(), json!(self.emoji_hover));
         m.insert("skin_tone".into(), json!(self.skin_tone));
@@ -549,6 +555,18 @@ mod tests {
         assert!(!p.search && p.theme == Theme::Dark && !p.bubbles && !p.tray);
         let shown = Prefs::from_json(&serde_json::json!({"search": true}));
         assert!(shown.search);
+        assert_eq!(Prefs::from_json(&shown.to_json()), shown);
+    }
+
+    #[test]
+    fn context_is_hidden_until_the_person_shows_it() {
+        assert!(!Prefs::default().show_context);
+        // A prefs file kept before it could be shown loads with it hidden.
+        assert!(!Prefs::from_json(&json!({"theme": "dark"})).show_context);
+        let shown = Prefs {
+            show_context: true,
+            ..Prefs::default()
+        };
         assert_eq!(Prefs::from_json(&shown.to_json()), shown);
     }
 

@@ -100,7 +100,7 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Profile => "profile you name instructions what agents know",
         Screen::Appearance => "theme dark light mode system colours colors text size font fonts geist code monospace bigger smaller",
         Screen::ChatPrefs => {
-            "tool calls tools hidden folded thoughts thinking send enter ctrl composer replies messages bubbles plain style vibrant colour color search sidebar find width wide narrow comfortable full column"
+            "tool calls tools hidden folded thoughts thinking context ring compacted compaction fresh session send enter ctrl composer replies messages bubbles plain style vibrant colour color search sidebar find width wide narrow comfortable full column"
         }
         Screen::AppPrefs => {
             "start login startup tray close background awake sleep notifications sound preview updates version restart"
@@ -392,6 +392,14 @@ impl Loom {
                 .into_any_element(),
             self.row(None, "Thoughts", None, Some(thoughts))
                 .into_any_element(),
+            self.pref_switch(
+                "pref-context",
+                "Show context",
+                "",
+                self.prefs.show_context,
+                |p, v| p.show_context = v,
+                cx,
+            ),
         ];
         let composer = vec![self.pref_switch(
             "pref-ctrl-enter",
@@ -594,6 +602,7 @@ mod tests {
         };
         assert!(screens("dark") == vec![Screen::Appearance]);
         assert!(screens("Tool calls") == vec![Screen::ChatPrefs]);
+        assert!(screens("context compacted") == vec![Screen::ChatPrefs]);
         assert!(screens("brains") == vec![Screen::Programs]);
         assert!(screens("claude code") == vec![Screen::Programs]);
         assert!(screens("steer") == vec![Screen::Defaults]);
