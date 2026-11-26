@@ -381,7 +381,7 @@ impl Loom {
         (head, body, Some(foot))
     }
 
-    /// Follow, or Following with a tick, for a board or one card on it in the chat
+    /// Follow with a bell, or Following with a tick, for a board or one card on it in the chat
     /// shown: a watch whose lines come here. None until the person's watches are known.
     fn follow_button(
         &self,
@@ -413,7 +413,7 @@ impl Loom {
                 .text_color(p.ink)
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
-                .when(following, |d| d.child(Icon::new(Ico::Check).xsmall()))
+                .child(Icon::new(if following { Ico::Check } else { Ico::Bell }).xsmall())
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
                     if let Some(f) = this.model.toggle_follow(&board, card.as_deref()) {

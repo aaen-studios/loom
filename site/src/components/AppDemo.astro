@@ -527,7 +527,7 @@ const BOARD_LAYERS = [
 				<div class="as-comment"><div class="as-who">Juniper · 26 Nov</div><p>The billing fix is waiting on review, so it goes in last.</p></div>
 			</div>
 		</div>
-		<div class="as-foot"><span class="cp-button">Open in Acta</span><button type="button" class="cp-button as-follow" aria-pressed="false" data-acta-follow><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span data-follow-words>Follow</span></button></div>
+		<div class="as-foot"><span class="cp-button">Open in Acta</span><button type="button" class="cp-button as-follow" aria-pressed="false" data-acta-follow><svg class="i i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"></path><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"></path></svg><svg class="i i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span data-follow-words>Follow</span></button></div>
 	</aside>
 </div>
 
@@ -2214,18 +2214,21 @@ const BOARD_LAYERS = [
 		padding: 0 var(--space-l);
 		font-size: var(--size-small);
 	}
-	/* Follow, and Following with its tick (acta_ui.rs, follow_button). */
+	/* Follow with its bell, and Following with a tick (acta_ui.rs, follow_button). */
 	.as-follow {
 		gap: 6px;
 		background: none;
 		font-family: inherit;
 	}
 	.as-follow .i {
-		display: none;
 		width: 12px;
 		height: 12px;
 	}
-	.as-follow[aria-pressed='true'] .i {
+	.as-follow .i-check,
+	.as-follow[aria-pressed='true'] .i-bell {
+		display: none;
+	}
+	.as-follow[aria-pressed='true'] .i-check {
 		display: block;
 	}
 	@media (prefers-color-scheme: dark) {
