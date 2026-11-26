@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use super::watch::RoutineEvent;
 use super::{flow_is_chain, FlowStep, McpServer, Proposal, Routine, Schedule, Skill};
 
 /// A list page with a form for each of its items.
@@ -80,8 +81,9 @@ pub fn brain_fields(key: &str, value: &str, tokens: &str) -> Form {
 
 /// A routine's form: its name, prompt and agent, its schedule as it's picked and its
 /// fields' text (how many hours or minutes apart, and the window it runs in), its
-/// switches, and its flow: the steps it edits, each its agent and prompt, or one an
-/// agent made with steps side by side, kept as it is.
+/// switches, its flow: the steps it edits, each its agent and prompt, or one an
+/// agent made with steps side by side, kept as it is, and the event it runs on, as it's
+/// picked.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RoutineDraft {
     pub name: String,
@@ -99,13 +101,15 @@ pub struct RoutineDraft {
     pub webhook: bool,
     pub flow: Vec<(Option<String>, String)>,
     pub flow_kept: Vec<FlowStep>,
+    pub event: RoutineEvent,
 }
 
 impl RoutineDraft {
-    /// Routine `r`'s form as it opens.
+    /// Routine `r`'s form as it opens: one that runs on an event alone with "On an
+    /// event" picked.
     pub fn of(r: &Routine) -> RoutineDraft {
         let chain = flow_is_chain(&r.flow);
-        RoutineDraft {
+        let mut d = RoutineDraft {
             name: r.name.clone(),
             prompt: r.prompt.clone(),
             agent: Some(r.agent.clone()),
@@ -123,9 +127,14 @@ impl RoutineDraft {
                 Vec::new()
             },
             flow_kept: if chain { Vec::new() } else { r.flow.clone() },
+            event: r.event.clone().unwrap_or_default(),
             ..RoutineDraft::default()
         }
-        .with_schedule(r.schedule.clone())
+        .with_schedule(r.schedule.clone());
+        if r.event.is_some() && r.schedule.repeat.is_empty() {
+            d.schedule.repeat = "event".into();
+        }
+        d
     }
 
     /// A new routine's form, for `agent`: on, notifying and catching up, on a new
@@ -771,6 +780,23 @@ mod tests {
         let new = RoutineDraft::new(Some("a1".into()));
         assert_eq!((new.every.as_str(), new.minutes), ("2", false));
         assert!(new.on && new.notify && new.catch_up && !new.thread && !new.webhook);
+        assert_eq!(new.event, RoutineEvent::default());
+        // One on an event alone opens on "On an event", with its event.
+        let shipped = RoutineEvent::new_acta("aaen-studios/loom");
+        let on_event = Routine {
+            schedule: Schedule::of(&serde_json::Value::Null),
+            event: Some(shipped.clone()),
+            ..Routine::default()
+        };
+        let d = RoutineDraft::of(&on_event);
+        assert_eq!(d.schedule.repeat, "event");
+        assert_eq!(d.event, shipped);
+        // With a schedule too, it opens on its schedule, its event kept as it is.
+        let both = Routine {
+            event: Some(shipped.clone()),
+            ..r.clone()
+        };
+        assert_eq!(RoutineDraft::of(&both).schedule.repeat, "hours");
     }
 
     #[test]

@@ -31,6 +31,9 @@ pub(super) struct RoutineUi {
     pub run_open: Option<String>,
     /// The week the calendar shows, in weeks from this one.
     pub week: i64,
+    /// The event it runs on, for "On an event", as it's picked, and the T3 thread typed.
+    pub event: model::watch::RoutineEvent,
+    pub thread_in: Entity<InputState>,
 }
 
 impl RoutineUi {
@@ -42,6 +45,8 @@ impl RoutineUi {
         let from_in = field(window, cx, "08:00");
         let to_in = field(window, cx, "20:00");
         let time_in = field(window, cx, "HH:MM");
+        let thread_in = field(window, cx, "Thread id");
+        super::form_drafts::watch(&thread_in, window, cx);
         // A change to the hours or the window asks again when it runs next.
         for state in [&every_in, &from_in, &to_in] {
             cx.subscribe_in(
@@ -78,6 +83,8 @@ impl RoutineUi {
             adding_time: false,
             run_open: None,
             week: 0,
+            event: model::watch::RoutineEvent::default(),
+            thread_in,
         }
     }
 }
@@ -567,7 +574,13 @@ impl Loom {
             Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
             None => ("a deleted agent".to_string(), p.ink_3),
         };
-        let next = if !r.on || r.next == 0 {
+        // One on an event alone has no next run: it says its event.
+        let event_alone = r.event.is_some() && r.schedule.repeat.is_empty();
+        let next = if !r.on {
+            "paused".to_string()
+        } else if event_alone {
+            self.model.routine_when(r)
+        } else if r.next == 0 {
             "paused".to_string()
         } else if day_of(r.next) == "Today" {
             format!("next at {}", time_of(r.next))
@@ -650,7 +663,12 @@ impl Loom {
     /// thread, for one that has one.
     fn routine_head(&self, r: &model::Routine, cx: &mut Context<Self>) -> AnyElement {
         let (agent, tint, next, last, running) = self.routine_words(r);
-        let mut line = format!("{agent} · {} · {next}", r.when);
+        let when = self.model.routine_when(r);
+        let mut line = if when == next {
+            format!("{agent} · {when}")
+        } else {
+            format!("{agent} · {when} · {next}")
+        };
         if !last.is_empty() {
             line = format!("{line} · {last}");
         }
@@ -700,29 +718,53 @@ impl Loom {
     fn routine_when_group(&mut self, open: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
         let repeat = self.routine_ui.schedule.repeat.clone();
+        // On an event, once there's something to watch: an Acta board, or a T3 server.
+        let watchable = !self.model.acta_boards.is_empty()
+            || !self.model.event_servers("t3").is_empty()
+            || repeat == "event";
         let mut kinds = Vec::new();
         for (kind, label) in [
             ("hours", "Every few hours"),
             ("days", "On days"),
             ("webhook", "Webhook"),
+            ("event", "On an event"),
         ] {
+            if kind == "event" && !watchable {
+                continue;
+            }
             let on = repeat == kind || (kind == "webhook" && repeat.is_empty());
             kinds.push(
                 self.segment(format!("routine-repeat-{kind}"), label, on)
+                    // Four fit a settings panel's width when they sit closer.
+                    .when(watchable, |d| d.px(px(space::S)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.routine_ui.schedule.repeat = kind.into();
                         this.routine_ui.adding_time = false;
+                        if kind == "event" && this.routine_ui.event.integration.is_empty() {
+                            this.routine_ui.event = this.new_event("acta");
+                        }
                         this.routine_schedule_changed(cx);
                     })),
             );
         }
-        let mut rows = vec![self
-            .row(
-                None,
-                "Repeat",
-                None,
-                Some(self.segments(kinds).into_any_element()),
+        // Its choices go under "Repeat" when the panel's too narrow for both, and onto a
+        // second line when it's narrower still.
+        let mut rows = vec![div()
+            .min_h(px(control::ROW))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(space::S))
+            .child(
+                div()
+                    .text_size(px(size::BODY))
+                    .text_color(self.p.ink)
+                    .child("Repeat"),
             )
+            .child(self.segments(kinds).flex_wrap())
             .into_any_element()];
         if repeat == "hours" {
             let small = |state: &Entity<InputState>, w: f32| {
@@ -756,6 +798,9 @@ impl Loom {
                     .into_any_element(),
             );
         }
+        if repeat == "event" {
+            rows.extend(self.routine_event_rows(cx));
+        }
         if repeat == "hours" || repeat == "days" {
             rows.push(self.routine_days_row(cx));
         }
@@ -788,6 +833,165 @@ impl Loom {
             }
         }
         self.group(Some("When"), rows)
+    }
+
+    /// A new event for "On an event": on Acta, a card on the person's first board moving
+    /// to Done; on T3, the first T3 server's thread finishing. Acta when T3 is asked for
+    /// and there's none, and T3 when Acta is and the person has no boards.
+    fn new_event(&self, integration: &str) -> model::watch::RoutineEvent {
+        let boards = &self.model.acta_boards;
+        let t3 = self.model.event_servers("t3");
+        let on_t3 = (integration == "t3" && !t3.is_empty()) || boards.is_empty();
+        if on_t3 && !t3.is_empty() {
+            return model::watch::RoutineEvent::new_t3(&t3[0]);
+        }
+        model::watch::RoutineEvent::new_acta(boards.first().map_or("", |(_, b)| b.as_str()))
+    }
+
+    /// "On an event"'s rows: Acta or T3 when the person has both, which server when they
+    /// have several, and on Acta the board and what happens on it (a move to a status,
+    /// a new card or a comment), or on T3 the thread.
+    fn routine_event_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let e = self.routine_ui.event.clone();
+        let mut rows = Vec::new();
+        let boards = self.model.acta_boards.clone();
+        let t3 = self.model.event_servers("t3");
+        if !boards.is_empty() && !t3.is_empty() {
+            let mut kinds = Vec::new();
+            for (kind, label) in [("acta", "Acta"), ("t3", "T3")] {
+                kinds.push(
+                    self.segment(
+                        format!("routine-event-{kind}"),
+                        label,
+                        e.integration == kind,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.routine_ui.event.integration != kind {
+                            this.routine_ui.event = this.new_event(kind);
+                            this.keep_draft(cx);
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            rows.push(
+                self.row(
+                    None,
+                    "On",
+                    None,
+                    Some(self.segments(kinds).into_any_element()),
+                )
+                .into_any_element(),
+            );
+        }
+        // Which server, when there are several of its kind.
+        let servers = self.model.event_servers(&e.integration);
+        if servers.len() > 1 {
+            let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+            for name in servers {
+                let on = e.server == name
+                    || (e.server.is_empty() && e.integration == "acta" && name == "acta");
+                let picked = name.clone();
+                chips = chips.child(
+                    self.chip(
+                        SharedString::from(format!("routine-server-{name}")),
+                        &name,
+                        on,
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let picked = picked.clone();
+                        this.change_event(cx, |e| e.server = picked);
+                    })),
+                );
+            }
+            rows.push(self.field_row("Server", chips));
+        }
+        if e.integration == "t3" {
+            rows.push(self.field_row("Thread", Input::new(&self.routine_ui.thread_in)));
+            return rows;
+        }
+        // The board, from the person's own.
+        let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+        for (_, board) in boards {
+            let picked = board.clone();
+            chips = chips.child(
+                self.chip(
+                    SharedString::from(format!("routine-board-{board}")),
+                    &model::watch::board_label(&board),
+                    e.board == board,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let picked = picked.clone();
+                    this.change_event(cx, |e| {
+                        // One card's event is on its board: another board is any card's.
+                        if e.board != picked {
+                            e.card.clear();
+                        }
+                        e.board = picked;
+                    });
+                })),
+            );
+        }
+        rows.push(self.field_row("Board", chips));
+        // What happens on it: a move to a status, a new card, or a comment.
+        let mut kinds = Vec::new();
+        for (kind, label) in [
+            ("moved", "Moves to"),
+            ("created", "New card"),
+            ("commented", "Comment"),
+        ] {
+            kinds.push(
+                self.segment(format!("routine-event-kind-{kind}"), label, e.kind == kind)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_event(cx, |e| {
+                            e.kind = kind.into();
+                            if kind == "moved" && e.to.is_empty() {
+                                e.to = "done".into();
+                            }
+                        });
+                    })),
+            );
+        }
+        rows.push(
+            self.row(
+                None,
+                "Event",
+                None,
+                Some(self.segments(kinds).into_any_element()),
+            )
+            .into_any_element(),
+        );
+        if e.kind == "moved" {
+            let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+            for (key, label) in model::watch::STATUSES {
+                chips = chips.child(
+                    self.chip(
+                        SharedString::from(format!("routine-status-{key}")),
+                        label,
+                        e.to == key,
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_event(cx, |e| e.to = key.into());
+                    })),
+                );
+            }
+            rows.push(self.field_row("Status", chips));
+        }
+        rows
+    }
+
+    /// Changes the event "On an event" has picked, which the routine's draft keeps.
+    fn change_event(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut model::watch::RoutineEvent),
+    ) {
+        change(&mut self.routine_ui.event);
+        self.keep_draft(cx);
+        cx.notify();
     }
 
     /// The days a routine runs on, as seven round toggles, with "Weekdays" or "Every day"
@@ -1160,7 +1364,7 @@ impl Loom {
             ],
         ));
         groups.push(self.routine_when_group(open.as_deref(), cx));
-        let by_hook_alone = !matches!(self.routine_ui.schedule.repeat.as_str(), "hours" | "days");
+        let by_hook_alone = matches!(self.routine_ui.schedule.repeat.as_str(), "" | "webhook");
         let mut options = vec![
             self.switch_row("routine-on", "On", "", self.routine_on, cx, |this| {
                 this.routine_on = !this.routine_on
@@ -1190,7 +1394,8 @@ impl Loom {
                 |this| this.routine_thread = !this.routine_thread,
             ),
         ];
-        // On a schedule, it can run by webhook too; with Repeat on Webhook, that's all.
+        // On a schedule or an event, it can run by webhook too; with Repeat on Webhook,
+        // that's all.
         if !by_hook_alone {
             options.push(self.switch_row(
                 "routine-webhook",
@@ -1258,7 +1463,25 @@ impl Loom {
                     return;
                 };
                 let schedule = this.routine_schedule(cx).to_json();
-                let webhook = this.routine_webhook || schedule.is_null();
+                let repeat = this.routine_ui.schedule.repeat.clone();
+                let webhook = this.routine_webhook || matches!(repeat.as_str(), "" | "webhook");
+                // On an event: the one picked. Off one it ran on alone: taken away. One
+                // it runs on beside its schedule stays as it is.
+                let event = if repeat == "event" {
+                    let mut e = this.routine_ui.event.clone();
+                    e.thread = this.routine_ui.thread_in.read(cx).value().to_string();
+                    if let Some(why) = e.missing() {
+                        this.model.notices.push(why.into());
+                        cx.notify();
+                        return;
+                    }
+                    Some(e.to_json())
+                } else {
+                    let saved = this.model.routines.iter().find(|r| r.id == editing);
+                    saved
+                        .filter(|r| r.event.is_some() && r.schedule.repeat.is_empty())
+                        .map(|_| Value::Null)
+                };
                 // The flow, one step after another; one an agent made
                 // with steps side by side stays as it is.
                 let flow = if this.routine_flow_kept.is_empty() {
@@ -1302,6 +1525,7 @@ impl Loom {
                     .into(),
                     webhook,
                     flow,
+                    event,
                 };
                 let now = this.form_now(DraftPage::Routines, cx);
                 let f = this.model.save_routine(&form);
