@@ -36,6 +36,8 @@ const PROBE_MS: u64 = 5000
 pub const CALL_MS: u64 = 600000
 // What a request to a server over HTTP that answers 401 fails with.
 const SIGN_IN: str = "it asks for a sign-in"
+// And one that answers 403 for want of scopes, before its challenge.
+const MORE_SCOPES: str = "it asks for a sign-in with more scopes"
 const ANSWER_MOST: usize = 67108864
 // The errors only a server of the modern era gives: its HTTP headers don't
 // match its body, it needs something of the client the request didn't
@@ -55,6 +57,8 @@ pub struct Server {
     pub info: Json    // its serverInfo: its name, version and icons
     params: Map<String, List<Param>>    // over HTTP in the modern era, each tool's x-mcp-header parameters
     next: i64
+    changed: bool    // whether it said its tools changed since they were listed (notifications/tools/list_changed)
+    listen: i64    // over stdio in the modern era, the id of its subscriptions/listen for tool changes, or 0
 }
 
 // A tool's parameter that a call over HTTP gives as a header too (2026-07-28,
@@ -203,7 +207,7 @@ pub fn start(spec: Json) -> Server ! Error {
 // The same, waiting at most `ms` for each answer as it starts.
 pub fn start_within(spec: Json, ms: u64) -> Server ! Error {
     let name = str_at(spec.copy(), "name") ?? String()
-    var s = Server { name: name.copy(), child: none, spec: spec.copy(), url: String(), headers: List<Header>(), session: String(), version: String(), info: Json.Null, params: Map<String, List<Param>>(), next: 0 }
+    var s = Server { name: name.copy(), child: none, spec: spec.copy(), url: String(), headers: List<Header>(), session: String(), version: String(), info: Json.Null, params: Map<String, List<Param>>(), next: 0, changed: false, listen: 0 }
     if let address = str_at(spec.copy(), "url") {
         s.url = address
         for (k, v) in pairs(at(spec, "headers")) {
@@ -372,7 +376,8 @@ impl Server {
         }
         let version = try version_from(self.name.copy(), answer.copy())
         if version == MODERN {
-            self.info = server_info(answer)
+            self.info = server_info(answer.copy())
+            try self.listen_if_offered(answer)
             return
         }
         try self.initialize(if version.len() > 0 { version } else { String(LEGACY[0]) }, ms)
@@ -398,7 +403,8 @@ impl Server {
             }
             if try version_from(self.name.copy(), got.copy()) == MODERN {
                 self.version = String(MODERN)
-                self.info = server_info(got)
+                self.info = server_info(got.copy())
+                try self.listen_if_offered(got)
                 return
             }
         }
@@ -434,6 +440,8 @@ impl Server {
         var out = List<Json>()
         var cursor = String()
         self.params = Map<String, List<Param>>()
+        // A change it says of while they're listed is one more.
+        self.changed = false
         loop {
             let params = if cursor.len() > 0 { Obj.new().s("cursor", cursor.copy()).done() } else { Obj.new().done() }
             let r = try self.request("tools/list", params, START_MS)
@@ -475,6 +483,71 @@ impl Server {
             return try self.result_of("tools/call", try self.ask("tools/call", params, ms))
         }
         return try self.result_of("tools/call", answer)
+    }
+
+    // Whether its tools have changed since they were listed, as it said with
+    // notifications/tools/list_changed (PLAN.md, "MCP versions"): over stdio,
+    // what it has written since it was last read is read first, without
+    // waiting. `tools` lists them again.
+    pub fn tools_changed(self: mut Server) -> bool {
+        if self.child != none {
+            loop {
+                let c = self.child else break
+                let line = c.read_line(0) else break
+                if let err(e) = self.took(line) {
+                    eprintln("loom: {self.name}: {e}")
+                    break
+                }
+            }
+        }
+        return self.changed
+    }
+
+    // Over stdio in the modern era, a server whose discovery says its tools
+    // change is asked for a stream of those changes (subscriptions/listen),
+    // which is never answered while it's open: what comes on it is read with
+    // its other lines. Over HTTP the stream would be an answer that stays open,
+    // which loom can't read as it comes yet (CLX-459).
+    fn listen_if_offered(self: mut Server, discovery: Json) ! Error {
+        if self.url.len() > 0 { return }
+        let offered = at(at(at(discovery, "result"), "capabilities"), "tools").get(String("listChanged")) == some(Json.Bool(true))
+        if not offered { return }
+        self.next += 1
+        self.listen = self.next
+        try self.send_line(message(self.listen, "subscriptions/listen", with_meta(Obj.new().j("notifications", Obj.new().b("toolsListChanged", true).done()).done())))
+    }
+
+    // A notification it sent: a change to its tools is noted, in the modern
+    // era only on the stream asked for, which names it.
+    fn heard(self: mut Server, m: Json) {
+        if str_at(m.copy(), "method") != some(String("notifications/tools/list_changed")) { return }
+        if self.modern() {
+            if self.listen == 0 { return }
+            if let on = int_at(at(at(m, "params"), "_meta"), "io.modelcontextprotocol/subscriptionId") {
+                if on != self.listen { return }
+            }
+        }
+        self.changed = true
+    }
+
+    // One line it wrote: an answer, given back; a request of its own, which
+    // loom doesn't offer, answered so; or a notification, heard.
+    fn took(self: mut Server, line: String) -> Json? ! Error {
+        let got = match parse(line) {
+            ok(j) => j,
+            err(_) => return none,
+        }
+        let asked = str_at(got.copy(), "method")
+        if let rid = got.get(String("id")) {
+            if asked != none {
+                let no = Obj.new().s("jsonrpc", String("2.0")).j("id", rid).j("error", Obj.new().i("code", -32601).s("message", String("loom doesn't offer that")).done()).done()
+                try self.send_line(no)
+                return none
+            }
+            return some(got)
+        }
+        if asked != none { self.heard(got) }
+        return none
     }
 
     // Sends `token` as its bearer token from now on, in place of the one it had.
@@ -562,7 +635,8 @@ impl Server {
     // The answer to one of `ids` among the lines the server writes, or none
     // when none comes in `ms`. What a server of the legacy era asks of loom
     // (roots, sampling) it doesn't get; one of the modern era asks nothing.
-    fn answer_to(self, ids: List<i64>, ms: u64) -> Json? ! Error {
+    // A notification among them is heard (`took`).
+    fn answer_to(self: mut Server, ids: List<i64>, ms: u64) -> Json? ! Error {
         let c = self.child else { fail "{self.name} isn't running" }
         let began = unsafe { Instant.now() }
         loop {
@@ -572,20 +646,9 @@ impl Server {
                 if c.ended() { fail "{self.name} stopped" }
                 continue
             }
-            let got = match parse(line) {
-                ok(j) => j,
-                err(_) => continue,
-            }
-            let asked = str_at(got.copy(), "method")
-            if let rid = got.get(String("id")) {
-                if asked != none {
-                    let no = Obj.new().s("jsonrpc", String("2.0")).j("id", rid).j("error", Obj.new().i("code", -32601).s("message", String("loom doesn't offer that")).done()).done()
-                    try c.write_text("{no}\n")
-                    continue
-                }
-                if let n = int_at(got.copy(), "id") {
-                    if ids.contains(n) { return some(got) }
-                }
+            let got = (try self.took(line)) else continue
+            if let n = int_at(got.copy(), "id") {
+                if ids.contains(n) { return some(got) }
             }
         }
     }
@@ -636,8 +699,18 @@ impl Server {
         // A server that wants a sign-in, or a new token, says 401 (PLAN.md,
         // "Signing in to MCP servers").
         if r.status == 401 { fail "{self.name} answered 401: {SIGN_IN}" }
+        // One whose token hasn't the scopes a request needs says 403, with the
+        // scopes it wants (2025-11-25, step-up authorization).
+        if r.status == 403 {
+            let challenge = r.header(String("WWW-Authenticate")) ?? String()
+            if challenge.contains("insufficient_scope") { fail "{self.name} answered 403: {MORE_SCOPES}: {challenge}" }
+        }
         var answer = Json.Null
         if kind.contains("text/event-stream") {
+            // A notification it sent before its answer is heard too.
+            for j in stream_messages(text.copy()) {
+                if j.get(String("id")) == none and str_at(j.copy(), "method") != none { self.heard(j) }
+            }
             answer = answer_in_stream(text.copy(), id) ?? Json.Null
         } else if let ok(j) = parse(text.copy()) {
             answer = j
@@ -653,9 +726,18 @@ pub fn asks_sign_in(e: String) -> bool {
     return e.ends_with(": {SIGN_IN}")
 }
 
-// The message with `id` among a server-sent event stream's events: each
-// event's data lines, joined.
+// The message with `id` among a server-sent event stream's events.
 fn answer_in_stream(text: String, id: i64) -> Json? {
+    for j in stream_messages(text) {
+        if int_at(j.copy(), "id") == some(id) { return some(j.copy()) }
+    }
+    return none
+}
+
+// The messages in a server-sent event stream: each event's data lines,
+// joined, that are JSON.
+fn stream_messages(text: String) -> List<Json> {
+    var out = List<Json>()
     var data = List<String>()
     var lines = text.replace("\r\n", "\n").split("\n")
     lines.push(String())
@@ -667,11 +749,20 @@ fn answer_in_stream(text: String, id: i64) -> Json? {
         if line.len() > 0 or data.len() == 0 { continue }
         let event = data.join("\n")
         data = List<String>()
-        if let ok(j) = parse(event) {
-            if int_at(j.copy(), "id") == some(id) { return some(j) }
-        }
+        if let ok(j) = parse(event) { out.push(j) }
     }
-    return none
+    return out
+}
+
+// The challenge a server that answered 403 for want of scopes gave
+// (`WWW-Authenticate: Bearer error="insufficient_scope", scope="…"`), from
+// the error a request to it failed with, or none for any other error. The
+// instance asks the person to sign in again with them (PLAN.md, "Signing in
+// to MCP servers").
+pub fn scope_challenge(e: String) -> String? {
+    let marker = ": {MORE_SCOPES}: "
+    let at_marker = e.find(marker.copy()) else return none
+    return some(e[at_marker + marker.len()..].copy())
 }
 
 @test

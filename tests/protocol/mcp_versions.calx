@@ -13,14 +13,17 @@ module tests.protocol.mcp_versions
 // renamed is listed again and called once more. The instance tries a server of
 // the modern era as any other, and `loom mcp` answers an agent of the modern
 // era: server/discover, its tools and their calls with no initialize, and an
-// error naming its versions for one it doesn't speak.
+// error naming its versions for one it doesn't speak. A server whose tools
+// change has them listed again, over stdio in both eras, and an agent's
+// session and mcp.list get them.
 //
 //     calx tests/protocol/mcp_versions.calx
 import std.fs
 import std.http.{Header, get}
 import std.json.{Json, parse}
 import std.process.{Child, Command, Stdio, exit}
-import shared.obj.{Obj, at, int_at, str_at}
+import std.thread.{sleep}
+import shared.obj.{Obj, at, int_at, merge, str_at}
 import shared.client.{Session, reply_text}
 import server.mcpclient
 import server.mcpclient.{Server}
@@ -106,6 +109,29 @@ fn stats(address: String) -> Json ! Error {
     return try parse(String.from_utf8(r.body) ?? String())
 }
 
+// The fake in `era` with FAKE_GROW: its tools, listed again once `grow` has
+// it say they changed, and not before.
+fn growing(era: str) ! Error {
+    let env = Json.Array([Obj.new().s("name", String("FAKE_ERA")).s("value", String(era)).done(), Obj.new().s("name", String("FAKE_GROW")).s("value", String("1")).done()])
+    let spec = merge(try over_stdio(era), Obj.new().j("env", env).done())
+    var s = try mcpclient.start(spec)
+    let before = names(try s.tools())
+    let quiet = s.tools_changed()
+    let grew = try said(mut s, "grow", Obj.new().done())
+    var changed = s.tools_changed()
+    // Its notification comes after its answer, so it may not be there yet.
+    var tries = 0
+    while not changed and tries < 50 {
+        unsafe { sleep(20000000) }
+        changed = s.tools_changed()
+        tries += 1
+    }
+    let after = names(try s.tools())
+    let settled = not s.tools_changed()
+    s.stop()
+    if before.contains("grown") or quiet or grew != "grown" or not changed or not after.contains("grown") or not settled { fail "{era}: before {before}, changed {quiet} then {changed}, after {after}, settled {settled}" }
+}
+
 fn over_stdio_checks() ! Error {
     let modern = String(mcpclient.MODERN)
     let (v0, t0, _) = tried("")
@@ -128,6 +154,11 @@ fn over_stdio_checks() ! Error {
     try check(v7 == "2025-11-25" and s7 == "2025-11-25", "one of the modern era that speaks only a newer version, and 2025-11-25, is initialized in 2025-11-25")
     let (v8, _, s8) = tried("slow")
     try check(v8 == modern and s8 == modern, "one of the modern era that's slow to start is spoken to in 2026-07-28, when its late answer to server/discover comes")
+
+    for era in ["legacy", "modern"] {
+        try growing(era)
+    }
+    try check(true, "a server over stdio that says its tools changed has them listed again: one of the legacy era with notifications/tools/list_changed, and one of the modern era on the subscriptions/listen stream loom asked for")
 
     var s = try mcpclient.start(try over_stdio("modern"))
     try check(str_at(s.info.copy(), "name") == some(String("fake")), "a server of the modern era's serverInfo comes from server/discover's _meta")
@@ -188,7 +219,7 @@ fn http_modern(address: String) ! Error {
 // The agent's next reply in `conversation`, as text.
 fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {
-        let created = try app.until("event", "message.created")
+        let created = try app.until("event", "message.created", 120000)
         let m = at(created, "message")
         if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
     }
@@ -220,6 +251,24 @@ fn instance_checks(i: Instance) ! Error {
     try check(stale == "stale: -32022 {versions}", "a request in a version it doesn't speak is answered with the versions it does")
     let old = try say(mut app, chat, "m_5", String("/mcp list_agents"))
     try check(old.contains("Main"), "and a client of the legacy era is still answered after initialize")
+
+    // --- A server whose tools change while a session has it ---
+    let grows = Obj.new().s("name", String("growing")).s("command", calx()).j("args", Json.Array([Json.Str(try fake_main())])).j("env", Obj.new().s("FAKE_ERA", String("modern")).s("FAKE_GROW", String("1")).done()).done()
+    _ = try app.cmd("q_5", "mcp.put", grows)
+    let coder = str_at(at(at(try app.cmd("q_6", "agent.create", Obj.new().s("name", String("Coder")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("allow")).j("mcp", Json.Array([Json.Str(String("growing"))])).done()), "value"), "agent"), "id") ?? String()
+    let code_chat = str_at(at(try app.cmd("q_7", "conversation.create", Obj.new().s("agent", coder).done()), "value"), "conversation") ?? String()
+    let search = String(#"/mcpkeep search_tools {"query":"grown"}"#)
+    let first = try say(mut app, code_chat.copy(), "m_6", search.copy())
+    let grew = try say(mut app, code_chat.copy(), "m_7", "/mcpkeep run_code {Obj.new().s("code", String("return await mcp.growing.grow();")).done()}")
+    let again = try say(mut app, code_chat, "m_8", search)
+    try check(not first.contains("mcp.growing.grown(") and grew.contains("grown") and again.contains("mcp.growing.grown("), "an agent's session gets a server's new tools once it says they changed, without a new session")
+    var growing_listed = Json.Null
+    if let Json.Array(servers) = at(at(try app.cmd("q_8", "mcp.list", Obj.new().done()), "value"), "servers") {
+        for one in servers {
+            if str_at(one.copy(), "name") == some(String("growing")) { growing_listed = one.copy() }
+        }
+    }
+    try check("{at(growing_listed, "tools")}".contains("\"grown\""), "and mcp.list has them, for Spools")
     app.close()
 }
 

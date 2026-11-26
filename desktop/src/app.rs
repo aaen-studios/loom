@@ -11183,7 +11183,7 @@ ACTA_KEY=secret:ACTA_KEY",
         });
         // Another agent's thread is read only: where the composer would be, the way to
         // your own chat with the agent it's under.
-        let theirs = self.model.ask_open().is_some();
+        let theirs = self.model.ask_open().is_some_and(|k| !k.made);
         let strip = match (
             self.model.task_open().cloned(),
             agent.as_ref(),
