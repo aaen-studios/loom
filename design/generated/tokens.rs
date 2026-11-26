@@ -67,6 +67,8 @@ pub mod layout {
     pub const CARD_LEAST: f32 = 220.0;
     pub const MENU: f32 = 230.0;
     pub const MENU_WIDE: f32 = 240.0;
+    pub const PINS: f32 = 460.0;
+    pub const CARET: f32 = 11.0;
     pub const CONTEXT_CARD: f32 = 300.0;
     pub const FIELD_LABEL: f32 = 120.0;
 }

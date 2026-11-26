@@ -115,6 +115,13 @@ struct ChatView: View {
             }
             .defaultScrollAnchor(.bottom)
             .scrollDismissesKeyboard(.interactively)
+            // A tap in the chat puts the emoji picker away, as it goes on to what it hit.
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    withAnimation(EmojiPicker.swap) { model.emoji.shutPicker() }
+                },
+                including: model.emoji.up ? .all : .subviews
+            )
             .onScrollGeometryChange(for: Bool.self) { g in
                 g.contentOffset.y + g.containerSize.height >= g.contentSize.height - 80
             } action: { _, near in

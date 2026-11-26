@@ -89,8 +89,8 @@ final class Emojis {
     /// Frames to send once something the core said comes: an emoji to add once its
     /// picture went up.
     @ObservationIgnored private var outbox: [JSON] = []
-    /// The picker is up (`openPicker`, `shutPicker`).
-    @ObservationIgnored private var picking = false
+    /// The picker is up, in the keyboard's place (`openPicker`, `shutPicker`).
+    private(set) var up = false
     /// Recently used as the open picker first showed it, held until it shuts, so an emoji
     /// tapped doesn't move from under the finger. It opens with the new order next time.
     /// Nil until its groups come.
@@ -99,14 +99,14 @@ final class Emojis {
     /// The picker opens: its groups, unless they're here in this skin tone. Tapping in it
     /// keeps it up, and Recently used keeps the order it opened with until it shuts.
     func openPicker() -> JSON? {
-        picking = true
+        up = true
         let ask = picker()
         held = ask == nil ? recent : nil
         return ask
     }
 
     func shutPicker() {
-        picking = false
+        up = false
         held = nil
     }
 
@@ -116,7 +116,7 @@ final class Emojis {
     /// the groups now have it (in a new skin tone, say), and none tapped since. The first
     /// groups to come after it opens set that order.
     private func holdRecent() {
-        guard picking else { return }
+        guard up else { return }
         guard let held else {
             self.held = recent
             return

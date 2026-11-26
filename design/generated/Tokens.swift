@@ -76,6 +76,8 @@ enum Tokens {
         static let cardLeast: CGFloat = 220
         static let menu: CGFloat = 230
         static let menuWide: CGFloat = 240
+        static let pins: CGFloat = 460
+        static let caret: CGFloat = 11
         static let contextCard: CGFloat = 300
         static let fieldLabel: CGFloat = 120
     }

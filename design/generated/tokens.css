@@ -50,6 +50,8 @@
   --layout-card-least: 220px;
   --layout-menu: 230px;
   --layout-menu-wide: 240px;
+  --layout-pins: 460px;
+  --layout-caret: 11px;
   --layout-context-card: 300px;
   --layout-field-label: 120px;
   --control-button: 34px;
