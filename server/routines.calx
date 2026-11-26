@@ -522,22 +522,28 @@ pub fn gate_shell(command: String, windows: bool) -> (String, List<String>) {
     return (String("sh"), [String("-c"), command.copy()])
 }
 
-// The values an agent's program offers for its option in `category` ("model",
-// or "thought_level" for the effort), from what the agent learned of them
-// (`options`, as acp.offered gives them). Empty before it has started a session.
-pub fn offered_values(options: Json, category: str) -> List<String> {
-    var out = List<String>()
+// The value an agent's program offers for its option in `category` ("model",
+// or "thought_level" for the effort) that `typed` names, by the value or by
+// its name in any case ("Haiku 5.5"), from what the agent learned of them
+// (`options`, as acp.offered gives them); and the values it offers, by name,
+// empty before it has started a session.
+pub fn offered_value(options: Json, category: str, typed: String) -> (String?, List<String>) {
+    var found: String? = none
+    var names = List<String>()
     if let Json.Array(list) = options {
         for o in list {
             if str_at(o.copy(), "category") != some(String(category)) { continue }
             if let Json.Array(values) = at(o, "options") {
                 for v in values {
-                    if let s = str_at(v, "value") { out.push(s) }
+                    let value = str_at(v.copy(), "value") ?? String()
+                    let name = str_at(v, "name") ?? value.copy()
+                    if found == none and (value == typed or name.to_lower_root() == typed.to_lower_root()) { found = some(value.copy()) }
+                    names.push(name)
                 }
             }
         }
     }
-    return out
+    return (found, names)
 }
 
 // --- What a routine costs (PLAN.md, "Routines") ---
@@ -707,6 +713,19 @@ fn the_chat_is_told_what_routines_posted() {
     let told = posts_note([post, failed])
     assert(told.starts_with("[loom: Since your last turn here") and told.contains("From the routine \"Version check\", 1970-01-01 00:00 UTC:\n1.21.5 is out.") and told.ends_with("From a routine that failed, 1970-01-01 00:01 UTC:\nThe shop was down.]"))
     assert(posts_note(List<Json>()) == "")
+}
+
+@test
+fn a_model_is_named_by_its_value_or_its_name() {
+    let options = parse(#"[{"id":"model","category":"model","options":[{"value":"default","name":"Opus 5.5"},{"value":"haiku","name":"Haiku 5.5"}]},{"id":"effort","category":"thought_level","options":[{"value":"low","name":"Low"}]}]"#)!
+    let (by_name, names) = offered_value(options.copy(), "model", String("haiku 5.5"))
+    assert(by_name == some(String("haiku")) and names.join(", ") == "Opus 5.5, Haiku 5.5")
+    let (by_value, _) = offered_value(options.copy(), "thought_level", String("low"))
+    assert(by_value == some(String("low")))
+    let (missing, _) = offered_value(options, "model", String("Sonnet 5.5"))
+    assert(missing == none)
+    let (unknown, none_yet) = offered_value(Json.Null, "model", String("haiku"))
+    assert(unknown == none and none_yet.len() == 0)
 }
 
 @test

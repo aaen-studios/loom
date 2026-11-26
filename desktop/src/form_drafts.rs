@@ -121,6 +121,10 @@ impl Loom {
                         thread: text(&ui.thread_in),
                         ..ui.event.clone()
                     },
+                    gate: text(&ui.gate_in),
+                    gate_seconds: text(&ui.gate_seconds_in),
+                    model: ui.model.clone(),
+                    effort: ui.effort.clone(),
                 }))
             }
         })
@@ -173,8 +177,17 @@ impl Loom {
                     window,
                     cx,
                 );
+                put(&self.routine_ui.gate_in.clone(), &d.gate, window, cx);
+                put(
+                    &self.routine_ui.gate_seconds_in.clone(),
+                    &d.gate_seconds,
+                    window,
+                    cx,
+                );
                 let ui = &mut self.routine_ui;
                 ui.event = d.event;
+                ui.model = d.model;
+                ui.effort = d.effort;
                 ui.minutes = d.minutes;
                 ui.adding_time = false;
                 ui.run_open = None;

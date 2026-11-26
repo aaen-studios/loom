@@ -8683,14 +8683,23 @@ impl Instance {
         // a model and effort of its own, from those its agent's program offers.
         let (gate_kept, gate_why) = routines.read_gate(at(m.copy(), "gate"))
         if gate_why.len() > 0 { return Answer.Refused(String("bad_request"), gate_why) }
-        let model = (str_at(m.copy(), "model") ?? String()).trim().copy()
-        let effort = (str_at(m.copy(), "effort") ?? String()).trim().copy()
+        // Each is kept as the value the program takes, named by it or by its name;
+        // before the program has said what it offers, as it's given.
+        var model = (str_at(m.copy(), "model") ?? String()).trim().copy()
+        var effort = (str_at(m.copy(), "effort") ?? String()).trim().copy()
         let picks: List<(String, str, str)> = [(model.copy(), "model", "model"), (effort.copy(), "thought_level", "effort")]
+        var kept = List<String>()
         for (value, category, what) in picks {
-            if value.len() == 0 { continue }
-            let offered = routines.offered_values(at(agent.copy(), "options"), category)
-            if offered.len() > 0 and not offered.contains(value.copy()) { return Answer.Refused(String("bad_request"), "{str_at(agent.copy(), "name") ?? String("Its agent")}'s program has no {what} {value}. It offers {offered.join(", ")}.") }
+            let (found, offered) = routines.offered_value(at(agent.copy(), "options"), category, value.copy())
+            if value.len() == 0 or offered.len() == 0 {
+                kept.push(value.copy())
+                continue
+            }
+            let v = found else return Answer.Refused(String("bad_request"), "{str_at(agent.copy(), "name") ?? String("Its agent")}'s program has no {what} {value}. It offers {offered.join(", ")}.")
+            kept.push(v)
         }
+        model = kept[0].copy()
+        effort = kept[1].copy()
         // The flow after it (PLAN.md, "Routine flows"), its steps' agents found by name or id.
         var flow = at(m.copy(), "flow")
         if flow != Json.Null {

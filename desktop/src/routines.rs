@@ -34,6 +34,13 @@ pub(super) struct RoutineUi {
     /// The event it runs on, for "On an event", as it's picked, and the T3 thread typed.
     pub event: model::watch::RoutineEvent,
     pub thread_in: Entity<InputState>,
+    /// Its gate's command and the seconds it may take, as typed.
+    pub gate_in: Entity<InputState>,
+    pub gate_seconds_in: Entity<InputState>,
+    /// Its runs' model and effort as picked, values its agent's program takes; empty for
+    /// its agent's own.
+    pub model: String,
+    pub effort: String,
 }
 
 impl RoutineUi {
@@ -46,7 +53,11 @@ impl RoutineUi {
         let to_in = field(window, cx, "20:00");
         let time_in = field(window, cx, "HH:MM");
         let thread_in = field(window, cx, "Thread id");
-        super::form_drafts::watch(&thread_in, window, cx);
+        let gate_in = field(window, cx, "gh pr view 8006 --json state | ./changed.sh");
+        let gate_seconds_in = field(window, cx, "60");
+        for state in [&thread_in, &gate_in, &gate_seconds_in] {
+            super::form_drafts::watch(state, window, cx);
+        }
         // A change to the hours or the window asks again when it runs next.
         for state in [&every_in, &from_in, &to_in] {
             cx.subscribe_in(
@@ -85,6 +96,10 @@ impl RoutineUi {
             week: 0,
             event: model::watch::RoutineEvent::default(),
             thread_in,
+            gate_in,
+            gate_seconds_in,
+            model: String::new(),
+            effort: String::new(),
         }
     }
 }
@@ -643,6 +658,7 @@ impl Loom {
         let line = match running {
             Some(_) => "running now".to_string(),
             None if !last.is_empty() => last,
+            None if r.cost.wasted => r.cost.warning(),
             None => next,
         };
         self.list_row_unsaved(
@@ -698,10 +714,14 @@ impl Loom {
                     })),
             );
         }
-        self.pane_head(
+        // What it costs, in the warn ink while it spends a lot for nothing.
+        let p = self.p;
+        let ink = if r.cost.wasted { p.warn } else { p.ink_3 };
+        self.pane_head_noted(
             Some(self.routine_lead(r, tint, true)),
             r.name.clone(),
             Some(line),
+            Some((r.cost.words(), ink)),
             Some(controls.into_any_element()),
         )
     }
@@ -1323,6 +1343,84 @@ impl Loom {
         detail.into_any_element()
     }
 
+    /// The routine's gate (PLAN.md, "Routines"): the command, and the seconds it may take.
+    fn routine_gate_row(&self) -> AnyElement {
+        let p = self.p;
+        let ui = &self.routine_ui;
+        self.field_row(
+            "Gate",
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(font::MONO)
+                        .child(Input::new(&ui.gate_in)),
+                )
+                .child(
+                    div()
+                        .w(px(56.0))
+                        .flex_none()
+                        .child(Input::new(&ui.gate_seconds_in)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child("s"),
+                ),
+        )
+    }
+
+    /// The routine's model or effort (`effort`), as chips of what its agent's program
+    /// offers for `option`: its agent's own, `own`, marked default, which it follows
+    /// until another is picked.
+    fn routine_pick_row(
+        &self,
+        label: &str,
+        option: &model::ConfigOption,
+        own: String,
+        effort: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let picked = if effort {
+            &self.routine_ui.effort
+        } else {
+            &self.routine_ui.model
+        };
+        let on = if option.values.iter().any(|(v, _)| v == picked) {
+            picked.clone()
+        } else {
+            own.clone()
+        };
+        let mut row = div().flex().flex_wrap().gap(px(space::XS + 2.0));
+        for (value, name) in &option.values {
+            let is_own = *value == own;
+            let chosen = if is_own { String::new() } else { value.clone() };
+            row = row.child(
+                self.chip(
+                    format!("routine-{}-{value}", option.category),
+                    name,
+                    *value == on,
+                    is_own,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if effort {
+                        this.routine_ui.effort = chosen.clone();
+                    } else {
+                        this.routine_ui.model = chosen.clone();
+                    }
+                    cx.notify();
+                })),
+            );
+        }
+        self.field_row(label, row)
+    }
+
     /// The page of the routine picked, beside the list, with its form and history, or a
     /// new routine's form.
     fn routine_form(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1343,26 +1441,38 @@ impl Loom {
             cx,
             |this, id| this.routine_agent = Some(id),
         );
-        groups.push(self.group(
-            None,
-            vec![
-                self.field_row("Name", Input::new(&self.routine_name_in)),
-                self.field_row("Agent", chips),
-                div()
-                    .p(px(space::L))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S))
-                    .child(
-                        div()
-                            .text_size(px(size::BODY))
-                            .text_color(p.ink)
-                            .child("Prompt"),
-                    )
-                    .child(Textarea::new(&self.routine_prompt_in))
-                    .into_any_element(),
-            ],
-        ));
+        let mut first = vec![
+            self.field_row("Name", Input::new(&self.routine_name_in)),
+            self.field_row("Agent", chips),
+            div()
+                .p(px(space::L))
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .text_size(px(size::BODY))
+                        .text_color(p.ink)
+                        .child("Prompt"),
+                )
+                .child(Textarea::new(&self.routine_prompt_in))
+                .into_any_element(),
+            self.routine_gate_row(),
+        ];
+        // Its model and effort, from those its agent's program offers.
+        let agent = self
+            .routine_agent
+            .as_deref()
+            .and_then(|id| self.model.agent(id))
+            .cloned();
+        if let Some(a) = agent {
+            for option in a.picks() {
+                let effort = option.category == "thought_level";
+                let label = if effort { "Effort" } else { "Model" };
+                first.push(self.routine_pick_row(label, &option, a.chosen(&option.id), effort, cx));
+            }
+        }
+        groups.push(self.group(None, first));
         groups.push(self.routine_when_group(open.as_deref(), cx));
         let by_hook_alone = matches!(self.routine_ui.schedule.repeat.as_str(), "" | "webhook");
         let mut options = vec![
@@ -1508,12 +1618,42 @@ impl Loom {
                 } else {
                     None
                 };
+                let ui = &this.routine_ui;
+                let gate = ui.gate_in.read(cx).value().trim().to_string();
+                let seconds = ui.gate_seconds_in.read(cx).value().trim().to_string();
+                let gate_seconds = match seconds.parse::<i64>() {
+                    Ok(s) if s > 0 => s,
+                    _ if seconds.is_empty() || gate.is_empty() => 0,
+                    _ => {
+                        this.model
+                            .notices
+                            .push("Write the seconds its gate may take as a number.".into());
+                        cx.notify();
+                        return;
+                    }
+                };
+                // A model or effort the agent's program doesn't offer, as when the agent
+                // was changed, goes back to the agent's own.
+                let offered = |category: &str, value: &str| {
+                    let a = this.model.agent(&agent);
+                    let options = a.map(|a| a.picks()).unwrap_or_default();
+                    match options.iter().find(|o| o.category == category) {
+                        Some(o) if !o.values.iter().any(|(v, _)| v == value) => String::new(),
+                        _ => value.to_string(),
+                    }
+                };
+                let model_picked = offered("model", &ui.model);
+                let effort_picked = offered("thought_level", &ui.effort);
                 let form = model::RoutineForm {
                     id: editing.clone(),
                     name,
                     agent,
                     prompt,
                     schedule,
+                    gate,
+                    gate_seconds,
+                    model: model_picked,
+                    effort: effort_picked,
                     notify: this.routine_notify,
                     on: this.routine_on,
                     catch_up: this.routine_catch_up,
