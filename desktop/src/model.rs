@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 mod rooms;
-pub use rooms::{Room, RoomUsage, Routed};
+pub use rooms::{Room, RoomForm, RoomUsage, Routed};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -5268,6 +5268,8 @@ pub struct Model {
     making_room: Option<String>,
     /// Why the last group chat couldn't be made.
     pub room_error: Option<String>,
+    /// The form in the panel for group chats, for one being made.
+    pub room_form: RoomForm,
     /// What the open group chat used, as `room.summary` gives it, for its settings.
     pub room_usage: Option<RoomUsage>,
     /// How each reply still being written in a group chat came to its agent, by its

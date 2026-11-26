@@ -63,6 +63,54 @@ pub struct RoomUsage {
     pub router_month: i64,
 }
 
+/// The panel's form for a group chat being made: what the person picked so far. Its
+/// name is the panel's name field.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoomForm {
+    /// Making a new one, rather than changing the open one.
+    pub making: bool,
+    pub members: Vec<String>,
+    pub color: String,
+}
+
+/// What the panel for group chats shows: the form while one is made, never the open
+/// group chat's values, or the open one's settings after.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoomPanel {
+    /// The group chat it changes, or None while one is made.
+    pub room: Option<Room>,
+    /// The members row: there while one is made and for every group chat but
+    /// Everyone, whose members are all of the person's agents.
+    pub members_row: bool,
+    pub members: Vec<String>,
+    pub color: String,
+    /// What the one being made still needs before Make turns on, or None once it can
+    /// be made.
+    pub needs: Option<MakeNeeds>,
+}
+
+/// What a group chat being made still needs before Make turns on, the first in the
+/// form's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MakeNeeds {
+    /// A name.
+    Name,
+    /// Two members at least.
+    Members,
+}
+
+impl RoomPanel {
+    /// Making a new group chat, rather than changing the open one.
+    pub fn making(&self) -> bool {
+        self.room.is_none()
+    }
+
+    /// Make is on: a name and two members at least.
+    pub fn can_make(&self) -> bool {
+        self.making() && self.needs.is_none()
+    }
+}
+
 impl Room {
     pub fn of(id: &str, r: &Value) -> Room {
         Room {
@@ -186,6 +234,102 @@ impl Model {
             .unwrap_or_default()
     }
 
+    /// Starts the form that makes a group chat: no one in it, no colour, or the agent
+    /// whose chat is open already picked. The open group chat's values stay its own.
+    pub fn start_room_form(&mut self) {
+        self.room_error = None;
+        let from = match self.open_room {
+            Some(_) => None,
+            None => self.selected.clone().filter(|a| self.agent(a).is_some()),
+        };
+        self.room_form = RoomForm {
+            making: true,
+            members: from.into_iter().collect(),
+            color: String::new(),
+        };
+    }
+
+    /// The group chat the panel changes: the open one, unless one is being made.
+    pub fn room_changing(&self) -> Option<&Room> {
+        if self.room_form.making {
+            return None;
+        }
+        self.room_open()
+    }
+
+    /// What the panel for group chats shows, with `name` what its name field holds.
+    pub fn room_panel(&self, name: &str) -> RoomPanel {
+        if let Some(r) = self.room_changing() {
+            return RoomPanel {
+                room: Some(r.clone()),
+                members_row: !r.everyone,
+                members: r.members.clone(),
+                color: r.color.clone(),
+                needs: None,
+            };
+        }
+        let f = &self.room_form;
+        let needs = if name.trim().is_empty() {
+            Some(MakeNeeds::Name)
+        } else if f.members.len() < 2 {
+            Some(MakeNeeds::Members)
+        } else {
+            None
+        };
+        RoomPanel {
+            room: None,
+            members_row: true,
+            members: f.members.clone(),
+            color: f.color.clone(),
+            needs,
+        }
+    }
+
+    /// Puts `agent` in the group chat the panel shows, or takes it out: in the form
+    /// while one is made, or a room.update for the open one, which keeps two at least.
+    pub fn toggle_room_member(&mut self, agent: &str) -> Option<Value> {
+        let Some(r) = self.room_changing() else {
+            let ms = &mut self.room_form.members;
+            match ms.iter().position(|m| m == agent) {
+                Some(i) => {
+                    ms.remove(i);
+                }
+                None => ms.push(agent.to_string()),
+            }
+            return None;
+        };
+        let (room, mut members) = (r.id.clone(), r.members.clone());
+        match members.iter().position(|m| m == agent) {
+            // Two at least: the instance says so too.
+            Some(_) if members.len() <= 2 => return None,
+            Some(i) => {
+                members.remove(i);
+            }
+            None => members.push(agent.to_string()),
+        }
+        Some(self.update_room(&room, json!({"members": members})))
+    }
+
+    /// Sets the colour of the group chat the panel shows: the form's while one is
+    /// made, or a room.update for the open one.
+    pub fn set_room_color(&mut self, color: &str) -> Option<Value> {
+        let Some(room) = self.room_changing().map(|r| r.id.clone()) else {
+            self.room_form.color = color.to_string();
+            return None;
+        };
+        Some(self.update_room(&room, json!({"color": color})))
+    }
+
+    /// Makes the group chat in the form, named `name`, once Make is on. The form stays
+    /// until it's made, so a refusal shows under it.
+    pub fn make_form_room(&mut self, name: &str) -> Option<Value> {
+        if !self.room_panel(name).can_make() {
+            return None;
+        }
+        let (members, color) = (self.room_form.members.clone(), self.room_form.color.clone());
+        Some(self.make_room(name, &members, &color))
+    }
+
     /// Makes a group chat. The chat shows it once it's made.
     pub fn make_room(&mut self, name: &str, members: &[String], color: &str) -> Value {
         self.room_error = None;
@@ -194,12 +338,13 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "room.create", "args": {"name": name.trim(), "members": members, "color": color}})
     }
 
-    /// A group chat made from here: the chat shows it.
+    /// A group chat made from here: the chat shows it, and the panel its settings.
     pub(super) fn room_made(&mut self, id: &str, value: &Value) {
         if self.making_room.as_deref() != Some(id) {
             return;
         }
         self.making_room = None;
+        self.room_form = RoomForm::default();
         let Some(c) = value.get("conversation") else {
             return;
         };
@@ -391,6 +536,161 @@ mod tests {
         // Another group chat's isn't this one's.
         m.room_usage.as_mut().unwrap().room = "c_1".into();
         assert_eq!(m.open_room_usage(), None);
+    }
+
+    /// Three agents, Everyone, and the Money group chat with two of them.
+    fn with_everyone(m: &mut Model) {
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Ledger"}, {"id": "a_2", "name": "Hermes"}, {"id": "a_3", "name": "Casper"}
+        ]}));
+        let items = vec![
+            json!({"id": "c_1", "agent": "a_1", "title": "Chat"}),
+            json!({"id": "c_0", "agent": "", "title": "Everyone",
+                   "room": {"name": "Everyone", "members": ["a_1", "a_2", "a_3"], "default": "", "color": "", "everyone": true}}),
+            json!({"id": "c_9", "agent": "", "title": "Money",
+                   "room": {"name": "Money", "members": ["a_1", "a_2"], "default": "a_2", "color": "amber"}}),
+        ];
+        m.take(&json!({"t": "core.data", "what": "conversations", "items": items}));
+    }
+
+    /// The form as New group chat starts it: Members there, no one picked, no colour,
+    /// and Make off until it has a name.
+    fn assert_fresh_form(m: &Model) {
+        let p = m.room_panel("");
+        assert!(p.making());
+        assert_eq!(p.room, None);
+        assert!(p.members_row);
+        assert!(p.members.is_empty());
+        assert_eq!(p.color, "");
+        assert_eq!(p.needs, Some(MakeNeeds::Name));
+        assert!(!p.can_make());
+        assert_eq!(m.room_changing(), None);
+    }
+
+    #[test]
+    fn a_new_group_chat_opened_from_everyone_shows_members_and_makes_it() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_0");
+        // Everyone's own settings have no members row.
+        let p = m.room_panel("Everyone");
+        assert!(!p.making());
+        assert!(!p.members_row);
+        m.start_room_form();
+        assert_fresh_form(&m);
+        assert_eq!(m.room_panel("Code").needs, Some(MakeNeeds::Members));
+        assert_eq!(m.toggle_room_member("a_1"), None);
+        assert_eq!(m.toggle_room_member("a_3"), None);
+        assert_eq!(m.set_room_color("mint"), None);
+        // A name of spaces isn't one.
+        assert_eq!(m.room_panel("  ").needs, Some(MakeNeeds::Name));
+        assert_eq!(m.make_form_room("  "), None);
+        let p = m.room_panel(" Code ");
+        assert!(p.can_make());
+        assert_eq!(p.members, vec!["a_1".to_string(), "a_3".to_string()]);
+        assert_eq!(p.color, "mint");
+        let f = m.make_form_room(" Code ").unwrap();
+        assert_eq!(f["name"], "room.create");
+        assert_eq!(f["args"]["name"], "Code");
+        assert_eq!(f["args"]["members"], json!(["a_1", "a_3"]));
+        assert_eq!(f["args"]["color"], "mint");
+        // Until it's made the form stays, not Everyone's settings, so Save there can't
+        // rename Everyone and a refusal shows under the form.
+        assert!(m.room_panel("Code").making());
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {"conversation": {
+            "id": "c_12", "agent": "", "title": "Code",
+            "room": {"name": "Code", "members": ["a_1", "a_3"], "color": "mint", "default": "", "corrections": []}
+        }}}));
+        assert_eq!(m.open_room.as_deref(), Some("c_12"));
+        let p = m.room_panel("Code");
+        assert_eq!(p.room.map(|r| r.id), Some("c_12".to_string()));
+        assert!(p.members_row);
+    }
+
+    #[test]
+    fn a_refused_group_chat_keeps_its_form() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_0");
+        m.start_room_form();
+        m.toggle_room_member("a_1");
+        m.toggle_room_member("a_2");
+        let f = m.make_form_room("Code").unwrap();
+        let id = f["id"].as_str().unwrap().to_string();
+        m.take(&json!({"t": "result", "id": id, "ok": false, "error": {"message": "That name is taken"}}));
+        assert_eq!(m.room_error.as_deref(), Some("That name is taken"));
+        let p = m.room_panel("Code");
+        assert!(p.making());
+        assert!(p.can_make());
+        // Opening it again starts it afresh.
+        m.start_room_form();
+        assert_eq!(m.room_error, None);
+        assert_fresh_form(&m);
+    }
+
+    #[test]
+    fn a_new_group_chat_opened_from_another_group_chat_starts_empty() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_9");
+        // Money's settings are Money's.
+        let p = m.room_panel("Money");
+        assert!(p.members_row);
+        assert_eq!(p.members, vec!["a_1".to_string(), "a_2".to_string()]);
+        assert_eq!(p.color, "amber");
+        m.start_room_form();
+        // Not its members, its colour or its default member.
+        assert_fresh_form(&m);
+        m.toggle_room_member("a_2");
+        m.toggle_room_member("a_3");
+        // Picked again, one goes.
+        m.toggle_room_member("a_2");
+        assert_eq!(m.room_panel("Code").needs, Some(MakeNeeds::Members));
+        m.toggle_room_member("a_1");
+        assert!(m.room_panel("Code").can_make());
+        // The open group chat isn't changed meanwhile.
+        assert_eq!(
+            m.room("c_9").map(|r| r.members.clone()),
+            Some(vec!["a_1".to_string(), "a_2".to_string()])
+        );
+    }
+
+    #[test]
+    fn a_new_group_chat_opened_from_an_agent_s_chat_has_that_agent_picked() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.select(Some("a_2".into()));
+        m.start_room_form();
+        let p = m.room_panel("");
+        assert!(p.making());
+        assert!(p.members_row);
+        assert_eq!(p.members, vec!["a_2".to_string()]);
+        assert_eq!(p.color, "");
+        assert_eq!(m.room_panel("Code").needs, Some(MakeNeeds::Members));
+        m.toggle_room_member("a_3");
+        assert!(m.room_panel("Code").can_make());
+        let f = m.make_form_room("Code").unwrap();
+        assert_eq!(f["args"]["members"], json!(["a_2", "a_3"]));
+    }
+
+    #[test]
+    fn an_open_group_chat_s_settings_change_it_and_keep_two_members() {
+        let mut m = Model::new();
+        with_everyone(&mut m);
+        m.show_room("c_9");
+        // Two at least: taking one out of two sends nothing.
+        assert_eq!(m.toggle_room_member("a_1"), None);
+        let f = m.toggle_room_member("a_3").unwrap();
+        assert_eq!(f["name"], "room.update");
+        assert_eq!(f["args"]["conversation"], "c_9");
+        assert_eq!(f["args"]["members"], json!(["a_1", "a_2", "a_3"]));
+        let f = m.set_room_color("rose").unwrap();
+        assert_eq!(f["args"]["color"], "rose");
+        assert!(m.room_form.members.is_empty());
+        assert_eq!(m.room_form.color, "");
+        // There's nothing to make from its settings.
+        assert_eq!(m.make_form_room("Money"), None);
     }
 
     #[test]
