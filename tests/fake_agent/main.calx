@@ -43,6 +43,8 @@ module tests.fake_agent.main
 //                         "title" (or KIND); says "allowed" or "denied"
 //     /slow MS            waits MS between chunks from here on
 //     /sleep MS           waits MS, or until the turn is cancelled
+//     /nap MS             the same, but plays other sessions' prompts meanwhile, as a
+//                         program running sessions side by side does
 //     /stop REASON        ends the turn with that stopReason (max_tokens, ...)
 //     /tokens N           reports the turn used N tokens (ACP's usage: half input, half output)
 //     /fail MESSAGE       answers session/prompt with an error
@@ -182,6 +184,7 @@ pub enum Step {
     AskOpen(String)    // the rawInput as JSON
     Slow(u64)
     Sleep(u64)
+    Nap(u64)
     Stop(String)
     Tokens(i64)
     Fail(String)
@@ -268,6 +271,8 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Slow(u64.parse(rest) ?? 0))
         } else if word == "/sleep" {
             steps.push(Step.Sleep(u64.parse(rest) ?? 0))
+        } else if word == "/nap" {
+            steps.push(Step.Nap(u64.parse(rest) ?? 0))
         } else if word == "/tokens" {
             steps.push(Step.Tokens(i64.parse(rest) ?? 0))
         } else if word == "/stop" {
@@ -751,6 +756,26 @@ impl Agent {
         }
     }
 
+    // The same, for session `session`'s turn, but what another session asks
+    // meanwhile is played at once, as a program running sessions side by side
+    // does: a new session, its prompts and its close.
+    fn nap(a: mut Agent, ms: u64, session: String) -> bool {
+        let start = unsafe { Instant.now() }
+        loop {
+            let spent = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if spent >= ms { return false }
+            let m = a.next(ms - spent) else continue
+            let name = method(m.copy())
+            let of = ((m.get(String("params")) ?? Json.Null).get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+            if name == "session/cancel" and of == session { return true }
+            if of != session and (name == "session/new" or name == "session/prompt" or name == "session/close" or name == "session/set_config_option") {
+                a.handle(m)
+                continue
+            }
+            a.backlog.push(m)
+        }
+    }
+
     // Asks the client's permission for a tool call. Gives whether it was
     // allowed, or none if the turn was cancelled first.
     fn ask(a: mut Agent, session: String, tool: String, tool_kind: String, title: String, raw: Json) -> bool? {
@@ -1144,6 +1169,9 @@ impl Agent {
                 Step.Slow(ms) => slow = ms,
                 Step.Sleep(ms) => {
                     if a.idle(ms) { reason = String("cancelled") }
+                },
+                Step.Nap(ms) => {
+                    if a.nap(ms, session.copy()) { reason = String("cancelled") }
                 },
                 Step.Stop(r) => reason = r.copy(),
                 Step.Tokens(n) => tokens = n,

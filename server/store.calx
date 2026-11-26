@@ -3039,11 +3039,15 @@ impl Store {
 
     // What `user`'s routines cost, from their runs that ended since `since` (Unix ms):
     // each routine's id, with how many runs, how many of them were quiet, the
-    // tokens they used, and when the oldest was due. Only the newest runs of each
-    // are kept (ROUTINE_RUNS_KEPT). `only` is one routine's id, or "" for all of them.
+    // tokens they used, their flow's steps' among them, and when the oldest was
+    // due. Only the newest runs of each are kept (ROUTINE_RUNS_KEPT). `only` is
+    // one routine's id, or "" for all of them.
     pub fn routine_costs(self, user: String, since: i64, only: String) -> List<(String, i64, i64, i64, i64)> ! Error {
         var out = List<(String, i64, i64, i64, i64)>()
-        for r in try self.db.query(String("SELECT rr.routine, COUNT(*), SUM(CASE WHEN json_extract(rr.json, '$.status') = 'quiet' THEN 1 ELSE 0 END), COALESCE(SUM(u.tokens), 0), MIN(rr.at) FROM routine_runs rr LEFT JOIN (SELECT run, SUM(total) AS tokens FROM usage WHERE user = ?1 AND at >= ?2 GROUP BY run) u ON u.run = rr.id WHERE rr.user = ?1 AND rr.at >= ?2 AND (?3 = '' OR rr.routine = ?3) AND json_extract(rr.json, '$.status') IN ('done', 'quiet', 'failed', 'limit', 'cancelled') GROUP BY rr.routine"), [t(user), Value.Int(since), t(only)]) {
+        // Each routine run's own run, and the runs of the steps its flow went on to.
+        let owned = "SELECT rr.id AS of, rr.id AS run FROM routine_runs rr WHERE rr.user = ?1 AND rr.at >= ?2 UNION ALL SELECT rr.id, json_extract(s.value, '$.run') FROM routine_runs rr, json_each(rr.json, '$.steps') s WHERE rr.user = ?1 AND rr.at >= ?2 AND json_extract(s.value, '$.run') IS NOT NULL"
+        let spent = "SELECT o.of AS of, SUM(u.tokens) AS tokens FROM ({owned}) o JOIN (SELECT run, SUM(total) AS tokens FROM usage WHERE user = ?1 AND at >= ?2 GROUP BY run) u ON u.run = o.run GROUP BY o.of"
+        for r in try self.db.query("SELECT rr.routine, COUNT(*), SUM(CASE WHEN json_extract(rr.json, '$.status') = 'quiet' THEN 1 ELSE 0 END), COALESCE(SUM(sp.tokens), 0), MIN(rr.at) FROM routine_runs rr LEFT JOIN ({spent}) sp ON sp.of = rr.id WHERE rr.user = ?1 AND rr.at >= ?2 AND (?3 = '' OR rr.routine = ?3) AND json_extract(rr.json, '$.status') IN ('done', 'quiet', 'failed', 'limit', 'cancelled') GROUP BY rr.routine", [t(user), Value.Int(since), t(only)]) {
             out.push((text(r[0].copy()), int(r[1].copy()), int(r[2].copy()), int(r[3].copy()), int(r[4].copy())))
         }
         return out
