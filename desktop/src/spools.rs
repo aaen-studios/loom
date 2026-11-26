@@ -741,7 +741,8 @@ impl Loom {
                     .text_color(p.ink_2)
                     .child(e.description.clone()),
             )
-            .child(lines);
+            // One loom can't connect runs nowhere it can say; its why, below, says so.
+            .when(e.unsupported.is_empty(), |d| d.child(lines));
         if !e.tools.is_empty() {
             body = body.child(
                 div()
@@ -1244,7 +1245,7 @@ fn community_mark(p: Palette) -> Div {
         .py(px(1.0))
         .rounded_full()
         .border_1()
-        .border_color(p.line_strong)
+        .border_color(p.line)
         .text_size(px(size::CAPTION))
         .font_weight(FontWeight::MEDIUM)
         .text_color(p.ink_2)

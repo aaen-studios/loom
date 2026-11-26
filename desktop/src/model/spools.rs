@@ -197,6 +197,8 @@ impl Entry {
     pub fn sign_in_words(&self) -> String {
         match self.sign_in.as_str() {
             "oauth" => format!("With your {} account", self.name),
+            // A registry server's secrets are labelled by their own names.
+            "secret" if self.community => "With a key".into(),
             "secret" => match self.secrets.first() {
                 Some(k) if !k.label.is_empty() => {
                     let mut label = k.label.clone();
@@ -1342,6 +1344,7 @@ mod tests {
         assert!(shown.cards.is_empty() && !shown.nothing);
         let notes = m.entry("registry:com.example/notes").unwrap();
         assert!(notes.community && !notes.several());
+        assert_eq!(notes.sign_in_words(), "With a key");
         assert_eq!(notes.icon_svg.as_deref(), Some("<svg id=\"notes\"/>"));
         // A field or secret labelled by its own name has what it's for as its placeholder.
         assert_eq!(notes.fields[0].placeholder, "eu");
