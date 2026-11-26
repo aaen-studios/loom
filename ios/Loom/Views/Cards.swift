@@ -15,15 +15,18 @@ struct CardFrame<Content: View>: View {
     /// The agent's colour, for the thread beside the title, or none for no thread.
     var tint: Color?
     var waits = false
+    /// Its edge's colour, for a card that tints it by how it stands (a T3 thread's).
+    var edge: Color?
     var content: Content
 
-    init(_ title: String, sub: String = "", lead: AnyView? = nil, side: AnyView? = nil, tint: Color? = nil, waits: Bool = false, @ViewBuilder content: () -> Content) {
+    init(_ title: String, sub: String = "", lead: AnyView? = nil, side: AnyView? = nil, tint: Color? = nil, waits: Bool = false, edge: Color? = nil, @ViewBuilder content: () -> Content) {
         self.title = title
         self.sub = sub
         self.lead = lead
         self.side = side
         self.tint = tint
         self.waits = waits
+        self.edge = edge
         self.content = content()
     }
 
@@ -63,7 +66,7 @@ struct CardFrame<Content: View>: View {
         .padding(Tokens.Space.l)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(P.cardFill, in: shape)
-        .overlay(shape.strokeBorder(waits ? (tint ?? P.cardEdge).opacity(0.4) : P.cardEdge, lineWidth: 1))
+        .overlay(shape.strokeBorder(edge ?? (waits ? (tint ?? P.cardEdge).opacity(0.4) : P.cardEdge), lineWidth: 1))
         .shadow(color: .black.opacity(0.07), radius: 14, y: 8)
     }
 }

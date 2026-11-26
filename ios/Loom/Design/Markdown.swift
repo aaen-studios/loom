@@ -155,6 +155,13 @@ struct MarkdownView: View {
             let first = url != last
             last = url
             let address = url.absoluteString
+            // An Acta card the message names: its pill (PLAN.md, "Cards in messages").
+            if address.hasPrefix(cardLink) {
+                guard first else { continue }
+                let id = String(address.dropFirst(cardLink.count))
+                out = Text("\(out)\(Pill.text(links.cards[id], id: id, url: url))")
+                continue
+            }
             // One of the person's own: its picture, or its name until that's here.
             if address.hasPrefix(Emoji.link) {
                 guard first else { continue }
@@ -264,20 +271,24 @@ private struct PartView: View, Equatable {
         switch part {
         case .paragraph(let s):
             MarkdownView.text(s, links: links, side: side).font(font).foregroundStyle(ink).lineSpacing(4)
+                .pillFrames(s.contains(cardLink))
         case .heading(let level, let s):
             MarkdownView.text(s, links: links, side: side)
                 .font(Fonts.ui(level == 1 ? 21 : level == 2 ? 19 : 17, .semibold, relativeTo: .headline))
                 .foregroundStyle(P.ink)
                 .padding(.top, 4)
+                .pillFrames(s.contains(cardLink))
         case .item(let indent, let mark, let s):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Text(mark).font(font).foregroundStyle(P.ink3).frame(minWidth: 14, alignment: .trailing)
                 MarkdownView.text(s, links: links, side: side).font(font).foregroundStyle(ink).lineSpacing(4)
+                    .pillFrames(s.contains(cardLink))
             }
             .padding(.leading, CGFloat(indent) * 16)
         case .quote(let s):
             MarkdownView.text(s, links: links, side: side)
                 .font(font).foregroundStyle(P.ink2).lineSpacing(4)
+                .pillFrames(s.contains(cardLink))
                 .padding(.leading, 12)
                 .overlay(alignment: .leading) { Rectangle().fill(P.lineStrong).frame(width: 2) }
         case .code(let language, let s):

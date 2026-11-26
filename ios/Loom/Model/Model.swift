@@ -550,6 +550,12 @@ struct Message: Identifiable, Equatable, Sendable {
     var routed: Routed?
     /// Deleted (PLAN.md, "Deleting a message"): a mark in its place, with no blocks.
     var deleted = false
+    /// The Acta cards it names that the instance has looked up, by id, and those made
+    /// from it, in the order they were (PLAN.md, "Cards in messages").
+    var cards: [String: ActaCard] = [:]
+    var made: [String] = []
+    /// The T3 threads it names or started, in the order its words link them (T3.swift).
+    var threads: [ThreadCard] = []
     /// How it came to the open chat, for whether a long one is cut (`Model.shown`).
     var came = Came.before
 
@@ -1022,6 +1028,8 @@ struct Inline: Equatable, Sendable {
     var agents: [String: Agent] = [:]
     /// The pictures of the person's own emoji it has, by id, once fetched (PLAN.md, "Emoji").
     var emoji: [String: String] = [:]
+    /// The Acta cards it names, by id, which its words show as pills (Acta.swift).
+    var cards: [String: ActaCard] = [:]
 }
 
 struct Tool: Equatable, Sendable {
@@ -1506,6 +1514,10 @@ enum PlusRow: Equatable, Sendable {
     case file(RecentFile)
     case skill(PlusSkill)
     case routine(PlusRoutine)
+    /// A board of the person's Acta, with Acta connected (PLAN.md, "Acta beside the chat").
+    case boards
+    /// The sheet that starts a T3 thread, with T3 connected (PLAN.md, "T3 threads").
+    case startT3
 }
 
 /// A skill picked from the + menu as a mention: its name, going as `loom:skill/<name>`.
@@ -1655,6 +1667,13 @@ final class Model {
     var recentFiles: [RecentFile] = []
     /// The person's own emoji, the suggestion row and the picker (PLAN.md, "Emoji").
     let emoji = Emojis()
+    /// Acta's cards, their sheets and boards (Acta.swift), T3's threads and their start
+    /// sheet (T3.swift), and Spools (Spools.swift).
+    var acta = ActaState()
+    var t3 = T3State()
+    var spools = SpoolsState()
+    /// The person's MCP servers, as `mcp.list` last gave them, for Spools' Installed.
+    var mcpServers: [McpServer] = []
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     var files: [String: String] = [:]
     /// A file fetched to be opened, for the screen to show.
@@ -1694,14 +1713,14 @@ final class Model {
     /// address.
     var toSignIn: (server: String, url: URL)?
     /// Whether `mcp.list` is to be asked again.
-    private var mcpStale = false
+    var mcpStale = false
     /// The files the @ picker found: for which agent, for what, and the files.
     private var foundFiles: (agent: String, query: String, files: [FoundFile]) = ("", "", [])
     /// The `agent.files` asked for and not answered yet: its id, the agent and the query.
     private var filesAsking: (id: String, agent: String, query: String)?
     /// Frames the model has to send that no screen asked for, such as fetching a file a
     /// message mentions once the instance has it ready: sent with the next fetches.
-    private var pending: [JSON] = []
+    var pending: [JSON] = []
 
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
@@ -1770,6 +1789,7 @@ final class Model {
         cameLive = []
         foldFlips = []
         unreadFrom = first
+        cardsChatOpened()
     }
 
     /// The chat is left for the agents list. Its agent stays selected, so its chat opens
@@ -2030,6 +2050,9 @@ final class Model {
             live[message] = blocks
         case "event":
             event(f)
+        case "connect":
+            // A server connected from Spools moved to its next step (Spools.swift).
+            connectFrame(f)
         case "core.moved":
             // The instance moved, and the core followed it there (protocol.md, "moved").
             notice = "Your instance moved to \(f["address"].text). The app is connected there now."
@@ -2123,6 +2146,9 @@ final class Model {
             }
         case "account":
             if let has = f["has_password"].bool { hasPassword = has }
+        case "watch":
+            // The person's watches, for Follow on a card's sheet and a board.
+            takeWatchEvent(kind, f)
         default:
             break
         }
@@ -2160,7 +2186,7 @@ final class Model {
     }
 
     private func result(_ f: JSON) {
-        if mcpResult(f) { return }
+        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) { return }
         if f["id"].text == "app.acp" {
             // Quietly: without the titles, programs show by their own names.
             var titles: [String: String] = [:]
@@ -2334,8 +2360,9 @@ final class Model {
         case .messages:
             moreMessages = f["more"].bool ?? false
             messagesCame = true
-            // Loom's own lines across the chat (a compaction, a fresh session) are the desktop's.
-            messages = items.filter { !routinePrompt($0) && $0["role"].text != "loom" }.map(messageOf)
+            // Loom's own lines across the chat (a compaction, a fresh session) are the
+            // desktop's; the line a T3 thread started from loom lands in shows as its card.
+            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || !threadsOf($0).isEmpty) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.
@@ -2350,7 +2377,12 @@ final class Model {
 
     /// A stored message, as the instance keeps it.
     private func messageOf(_ m: JSON) -> Message {
-        Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull, routed: Routed.of(m), deleted: !m["deleted"].isNull)
+        var cards: [String: ActaCard] = [:]
+        if case .object(let o) = m["cards"] {
+            for (id, c) in o { cards[id] = ActaCard(c) }
+        }
+        return Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull, routed: Routed.of(m), deleted: !m["deleted"].isNull,
+                       cards: cards, made: m["made_cards"].array.map { $0["id"].text }.filter { cards[$0] != nil }, threads: threadsOf(m))
     }
 
     /// Takes the answer to one of the MCP commands the model sent, if it is one: the
@@ -2366,6 +2398,7 @@ final class Model {
                     signed[s["name"].text] = s["signed_in_as"].text
                 }
                 mcpSignedIn = signed
+                mcpServers = f["value"]["servers"].array.map(McpServer.init)
             }
             return true
         }
@@ -2519,6 +2552,11 @@ final class Model {
         // And those of pictures sent before and picked to go again, which the composer
         // has no file of its own to draw.
         wanted += attachments.filter { $0.path.isEmpty && isPicture($0.name) }.compactMap { $0.file?.file }
+        // And the icons Spools' entries and the person's servers gave of their own.
+        wanted += (spools.entries + spools.search.entries).compactMap(\.badge).flatMap(\.icons) + mcpServers.compactMap(\.badge).flatMap(\.icons)
+        // What the Acta cards and the T3 threads of the chat need asked.
+        out += cardFetches(now: nowMs())
+        out += t3Fetches()
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }
@@ -2679,6 +2717,7 @@ final class Model {
     /// fetched, and the agents it mentions.
     func inline(_ m: Message) -> Inline {
         var out = Inline()
+        out.cards = m.cards
         for (url, link) in m.links {
             if let icon = link.icon, let path = files["\(icon).thumb"] { out.icons[url] = path }
         }
@@ -2756,6 +2795,7 @@ final class Model {
             ["t": "cmd", "id": JSON(id("app.plus_skills")), "name": "skill.list", "args": [:]],
             ["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]],
             ["t": "cmd", "id": JSON(id("app.recent_files")), "name": "files.recent", "args": ["limit": 50]],
+            askT3Servers(),
         ]
     }
 
@@ -2766,7 +2806,10 @@ final class Model {
     func plusGroups(_ query: String) -> [[PlusRow]] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if q.isEmpty {
-            return [[.attach, .open(.recent), .emoji], [.open(.skills), .open(.routines)]]
+            var act: [PlusRow] = [.open(.skills), .open(.routines)]
+            if hasActa { act.append(.boards) }
+            if !t3.servers.isEmpty { act.append(.startT3) }
+            return [[.attach, .open(.recent), .emoji], act]
         }
         func found<T>(_ rows: [T], _ name: (T) -> (String, String), _ row: (T) -> PlusRow) -> [PlusRow] {
             let hits = rows.compactMap { r -> (Bool, T)? in
@@ -2779,8 +2822,10 @@ final class Model {
         var add: [PlusRow] = "attach files".contains(q) ? [.attach] : []
         if "emoji".contains(q) { add.append(.emoji) }
         add += found(recentFiles, { ($0.file.name, "") }, PlusRow.file)
-        let act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
+        var act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
             + found(plusRoutines, { ($0.name, "") }, PlusRow.routine)
+        if hasActa && "boards".contains(q) { act.append(.boards) }
+        if !t3.servers.isEmpty && "start a t3 thread".contains(q) { act.append(.startT3) }
         return [add, act].filter { !$0.isEmpty }
     }
 
