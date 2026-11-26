@@ -11,6 +11,8 @@ module tests.fake_agent.main
 //     /think TEXT         an agent_thought_chunk
 //     /plan A; B; C       a plan with those entries
 //     /tool TITLE         a tool call that runs and completes
+//     /toolout TITLE|OUT  a tool call (kind other) that completes with OUT, as
+//                         text, as what it gives back
 //     /ask TITLE          a command (kind execute) that asks permission first,
 //                         and runs or fails by the answer
 //     /read TITLE         the same for a tool that only reads (kind read)
@@ -158,6 +160,7 @@ pub enum Step {
     Think(String)
     Plan(List<String>)
     Tool(String)
+    ToolOut(String, String)    // a title, and what the call gives back
     Ask(String, String)
     Act(String, String)    // a kind, and the rawInput as JSON
     Shell(String)    // the rawInput as JSON
@@ -221,6 +224,9 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Plan(entries))
         } else if word == "/tool" {
             steps.push(Step.Tool(rest))
+        } else if word == "/toolout" {
+            let bar = rest.find("|") ?? rest.len()
+            steps.push(Step.ToolOut(rest[..bar].trim().copy(), if bar < rest.len() { rest[bar + 1..].trim().copy() } else { String() }))
         } else if word == "/ask" {
             steps.push(Step.Ask(String("execute"), rest))
         } else if word == "/act" {
@@ -1014,6 +1020,10 @@ impl Agent {
                     let tool = a.tool_call(session.copy(), String("execute"), title.copy())
                     tool_update(session.copy(), tool.copy(), "in_progress", String())
                     tool_update(session.copy(), tool, "completed", "ran: {title}")
+                },
+                Step.ToolOut(title, output) => {
+                    let tool = a.tool_call(session.copy(), String("other"), title.copy())
+                    tool_update(session.copy(), tool, "completed", output.copy())
                 },
                 Step.SelfPrompt => chunk(session.copy(), "user_message_chunk", String("Look into the spoons.")),
                 Step.Subagent(title, inner) => {

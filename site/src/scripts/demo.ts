@@ -7,7 +7,9 @@
 // that comes over them (Copy, Quote, Ask about this), does the same by hand. A message is typed,
 // with a link pasted and a file attached among its words, each a piece in them, the file with its
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
-// asks before it deploys and waits for the yes, then finishes. Once it's shipped, `:tada` typed
+// asks before it deploys and waits for the yes, then finishes, starting a T3 thread for the
+// release notes whose card works and then lies straight with its pull request (desktop/src/
+// t3_view.rs, thread_card). Once it's shipped, `:tada` typed
 // opens the emoji row over the composer, which puts 🎉 in the words as Twemoji's picture, and a
 // message of only it is big (emoji_ui.rs, emoji_row_view; PLAN.md, "Emoji"). While the turn runs, one quiet
 // line under the reply says the step it's on; once it's done, its last words are the answer and
@@ -49,7 +51,9 @@ const ANSWER = 'Main is green. The last run passed at 09:12, with all four jobs.
 const ASK = 'Run ./deploy.sh production';
 /** What loom knows the call does, as the core says it for a command (core/asks.calx). */
 const EFFECT = 'Runs a command';
-const SHIPPED = 'Shipped. 2.4.1 is live, and its health check answers.';
+const SHIPPED = 'Shipped. 2.4.1 is live, and its health check answers. I started a T3 thread for its release notes.';
+/** How long the T3 thread it starts has run, as its card says it, while it works and once it's done. */
+const T3_MINUTES = 6;
 const HELD = "Okay, I won't deploy. Main stays as it is.";
 /** What the person writes in the Shop group chat, which the router gives Biscuit, and its answer. */
 const ROOM_ASK = 'Did the October invoice go out?';
@@ -839,6 +843,22 @@ export function play(app: HTMLElement) {
 		say(n === 1 ? '1 step' : `${n} steps`);
 	}
 
+	/** The T3 thread the reply started, as its card under the reply (PLAN.md, "T3 threads"):
+	 * working, its strand waving in sky, or done, straight in the ok colour with its pull request. */
+	function t3Card(reply: HTMLElement, done: boolean) {
+		const card = tpl('demo-t3');
+		reply.querySelector(':scope > .body')!.append(card);
+		const strand = threadsIn(card)[0];
+		const side = card.querySelector<HTMLElement>('.t3-side')!;
+		const at = (minutes: number, finished: boolean) => {
+			side.textContent = `${minutes} m`;
+			card.classList.toggle('done', finished);
+			strand.set(finished ? 'idle' : 'writing');
+		};
+		at(done ? T3_MINUTES : 1, done);
+		return at;
+	}
+
 	/** The approval, answered by a click or, after a while, by itself. */
 	function approve(id: number) {
 		const row = tpl('demo-approval');
@@ -993,6 +1013,15 @@ export function play(app: HTMLElement) {
 			preview('Juniper', '', 'writing');
 			await stream(say, SHIPPED, id);
 			finish(reply, say, steps, SHIPPED);
+			// Its card follows the thread as it works, and lies straight once it's done.
+			const t3 = t3Card(reply, false);
+			toBottom();
+			for (let m = 2; m < T3_MINUTES; m++) {
+				await wait(650, id);
+				t3(m, false);
+			}
+			await wait(650, id);
+			t3(T3_MINUTES, true);
 		} else {
 			deploy('denied');
 			mood('writing', replyThread);
@@ -1068,6 +1097,7 @@ export function play(app: HTMLElement) {
 		finish(reply, say, steps, SHIPPED);
 		context(92);
 		msgs.append(you, reply, cheer(false));
+		t3Card(reply, true);
 		threadsIn(reply);
 		mood('idle');
 		for (const a of byAgent.keys()) preview(a, '', 'idle');
