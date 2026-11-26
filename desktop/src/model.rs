@@ -5972,8 +5972,11 @@ impl Model {
         } else {
             self.new_line = None;
         }
-        // Picking an agent leaves a group chat, even for one of its members.
-        if self.selected != agent || self.open_room.take().is_some() {
+        // Picking an agent leaves a group chat, whichever agent it is. The group chat
+        // is left first: while it's open, `selected` is one of its members (show_room),
+        // so any other agent differs and a `take()` after `||` would never run.
+        let left_room = self.open_room.take().is_some();
+        if self.selected != agent || left_room {
             self.selected = agent;
             self.find = None;
             self.open_task = None;
