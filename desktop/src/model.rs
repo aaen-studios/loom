@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 mod rooms;
-pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed};
+use rooms::Making;
+pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed, MAKE_WAIT};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -5294,8 +5295,9 @@ pub struct Model {
     room_order: Vec<String>,
     /// The group chat the chat shows, by conversation, instead of the agent's chat.
     pub open_room: Option<String>,
-    /// The room.create the app sent last, to show the group chat once it's made.
-    making_room: Option<String>,
+    /// The room.create the app sent last, to show the group chat once it's made, and
+    /// Make does nothing while it waits.
+    making_room: Option<Making>,
     /// Why the last group chat couldn't be made.
     pub room_error: Option<String>,
     /// The form in the panel for group chats, for one being made.
@@ -6227,6 +6229,8 @@ impl Model {
                 });
                 if state != "live" {
                     self.synced = false;
+                    // What was sent on the connection that went is never answered.
+                    self.room_create_lost(None);
                 }
                 if state == "signed_out" {
                     self.logging_in = false;
@@ -6417,6 +6421,9 @@ impl Model {
                     self.login_error = Some(s(f, "message"));
                 } else if code != "offline" {
                     self.notices.push(s(f, "message"));
+                } else {
+                    // A room.create that didn't go: Make is on again.
+                    self.room_create_lost(Some(&s(f, "for")));
                 }
             }
             _ => return false,
@@ -6965,13 +6972,7 @@ impl Model {
         let id = s(f, "id");
         // A group chat made here: the chat shows it.
         if id.starts_with("app.room_create") {
-            if let Some(v) = f.get("value") {
-                self.room_made(&id, v);
-            }
-            if let Some(e) = f.pointer("/error/message").and_then(Value::as_str) {
-                self.making_room = None;
-                self.room_error = Some(e.to_string());
-            }
+            self.room_create_answered(&id, f);
             return;
         }
         if id.starts_with("app.room_summary") {

@@ -768,11 +768,21 @@ impl Loom {
         cx.notify();
     }
 
-    /// Makes the group chat in the form: the chat shows it once it's made.
+    /// Makes the group chat in the form: the chat shows it once it's made. Make does
+    /// nothing while it waits, and turns on again if no answer comes in MAKE_WAIT.
     pub(super) fn make_room(&mut self, cx: &mut Context<Self>) {
         let name = self.room_name_in.read(cx).value().to_string();
         if let Some(f) = self.model.make_form_room(&name) {
             self.send(f);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(model::MAKE_WAIT).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.model.make_timed_out(Instant::now()) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
         cx.notify();
     }
