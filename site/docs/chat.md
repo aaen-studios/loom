@@ -30,7 +30,7 @@ On the desktop, a chat opens on its newest 200 messages. Scroll near the top and
 
 The chat never ends, but the agent program's session under it does. The ring just before Send fills with the session's context, orange from 75% and red from 90%, and under the pointer it says how full it is: "Context 41%, 82k of 200k. A fresh session starts at 80%." Once it's 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost.
 
-A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context itself, "Context compacted · 182k → 16k". The iPhone app doesn't show the ring or the lines yet.
+A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context itself, "Context compacted · 182k → 16k". In a group chat the line names the agent whose context it was: "Ledger's context compacted · 120k → 76k". The iPhone app doesn't show the ring or the lines yet.
 
 ## Branching
 
