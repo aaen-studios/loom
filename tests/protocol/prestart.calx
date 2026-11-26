@@ -5,58 +5,87 @@ module tests.protocol.prestart
 // last wrote in starts, and that chat's session is readied, picked up again
 // where the program can. The message that comes after goes straight to it.
 //
+// The fake agent writes down when its program starts and each session it picks
+// up (--log), and the test waits for that rather than for a time: beside other
+// tests a program can take seconds to start.
+//
 //     calx tests/protocol/prestart.calx
+import std.fs
 import std.process.{exit}
 import std.thread.{sleep}
+import std.time.{Instant}
 import shared.obj.{Obj, at, str_at}
 import shared.client.{Session, reply_text}
-import tests.kit.{Instance, check}
+import tests.kit.{Instance, calx, check, loom}
+
+// How long a program the server starts may take to start and pick its session up.
+const WAIT_MS: u64 = 120000
 
 fn say(app: mut Session, conversation: String, cid: str, text: str) -> String ! Error {
     try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", String(text)).done())
     return reply_text(try app.reply())
 }
 
-// How long ago the agent's program started, as it says.
-fn uptime(app: mut Session, conversation: String, cid: str) -> i64 ! Error {
-    let said = try say(mut app, conversation, cid, "/uptime")
-    if not said.starts_with("up ") { fail "the agent said {said}, not its uptime" }
-    return i64.parse(said[3..].trim_suffix(" ms").copy()) ?? -1
+// What the fake agent's log has: "started" for each program, "picked up SESSION"
+// for each session one picked up again.
+fn logged(path: String) -> List<String> {
+    let text = match fs.read_text(path) {
+        ok(some(t)) => t,
+        _ => String(),
+    }
+    var out = List<String>()
+    for line in text.split("\n") {
+        if line.trim().len() > 0 { out.push(line.trim().copy()) }
+    }
+    return out
 }
 
-// A chat with an agent on a program that picks its sessions up again. Gives
-// the conversation and its session.
-fn before(i: Instance) -> (String, String) ! Error {
-    try i.add_fake(String("fake-load"), String("--load"))
+// The log once it has `n` lines, or as it is after `WAIT_MS`.
+fn logged_when(path: String, n: usize) -> List<String> {
+    let start = unsafe { Instant.now() }
+    loop {
+        let lines = logged(path.copy())
+        if lines.len() >= n or unsafe { Instant.now() }.nanos_since(start) / 1000000 >= WAIT_MS { return lines }
+        unsafe { sleep(20000000) }
+    }
+}
+
+// A chat with an agent on a program that picks its sessions up again, logging to
+// `log`. Gives the conversation and its session's id.
+fn before(i: Instance, log: String) -> (String, String) ! Error {
+    let program = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try loom(i.data.copy(), [String("acp"), String("add"), String("fake-load"), calx(), program, String("--load"), "--log={log}"]).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
     var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Loader")).s("acp_agent", String("fake-load")).s("instructions", String("")).done())
     let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
     let c = try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done())
     let chat = str_at(at(c, "value"), "conversation") ?? String()
-    let first = try say(mut app, chat.copy(), "m_1", "/session")
-    try check(try uptime(mut app, chat.copy(), "m_2") < 5000, "the program starts with the first message")
+    let said = try say(mut app, chat.copy(), "m_1", "/session")
+    try check(logged(log) == [String("started")], "the program starts with the first message")
     app.close()
-    return (chat, first)
+    return (chat, said.trim_prefix("session ").copy())
 }
 
 // After a restart, nothing runs it until an app connects.
-fn after(i: Instance, chat: String, first: String) ! Error {
+fn after(i: Instance, chat: String, first: String, log: String) ! Error {
     var back = try Session.connect(i.base.copy(), i.token.copy(), 0)
-    unsafe { sleep(1500000000) }
-    let up = try uptime(mut back, chat.copy(), "m_3")
-    println("      it started {up} ms before the message")
-    try check(up >= 1000, "when an app connects, the program of the chat last written in starts")
-    let session = try say(mut back, chat, "m_4", "/session")
-    try check(session == first, "and the chat's session is picked up again before its message")
+    let lines = logged_when(log.copy(), 3)
+    try check(lines.len() >= 2 and lines[1] == "started", "when an app connects, the program of the chat last written in starts")
+    try check(lines.len() >= 3 and lines[2] == "picked up {first}", "and the chat's session is picked up again before its message")
+    let session = try say(mut back, chat, "m_2", "/session")
+    try check(session == "session {first}", "the message goes to that session")
+    try check(logged(log).len() == 3, "and to that program, with nothing started or picked up again")
     back.close()
 }
 
 fn main() ! Error {
     let inst = try Instance.start()
+    let log = "{inst.data}/fake-load.log"
     var failure: String? = none
     var chat = String()
     var first = String()
-    match before(inst.copy()) {
+    match before(inst.copy(), log.copy()) {
         ok((c, f)) => {
             chat = c
             first = f
@@ -65,7 +94,7 @@ fn main() ! Error {
     }
     let again = try inst.restart()
     if failure == none {
-        if let err(e) = after(again.copy(), chat, first) { failure = some("{e}") }
+        if let err(e) = after(again.copy(), chat, first, log) { failure = some("{e}") }
     }
     again.stop()
     if let f = failure {
