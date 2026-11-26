@@ -13,7 +13,7 @@ module tests.protocol.flows
 //     calx tests/protocol/flows.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, bool_at, str_at}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
 import shared.client.{Session}
 import tests.kit.{Instance, check}
 
@@ -148,7 +148,19 @@ fn run(i: Instance) ! Error {
         if agent == two { two_chats.push(chat.copy()) }
     }
     let said = try answers(mut app, "q_2a", id.copy())
-    try check(said.len() == 3 and said_by(said.copy(), "sum") == "summed up" and said_by(said.copy(), "note") == "noted" and two_chats.len() == 2 and two_chats[0] == two_chats[1], "two steps for one agent go one after the other, in its chat, and the routine's runs keep what each answered")
+    try check(said.len() == 3 and said_by(said.copy(), "sum") == "summed up" and said_by(said.copy(), "note") == "noted" and two_chats.len() == 2 and two_chats[0] == two_chats[1], "two steps for one agent both post to its chat, and the routine's runs keep what each answered")
+
+    // What a routine costs counts the tokens of the steps its runs went on to.
+    let costly = routine_id(try put_flow(mut app, "q_c1", "Costly", "One", "/tokens 100\ngo", [step("a", "Two", "/tokens 40\nx"), step_after("b", "Three", "/tokens 2\ny", ["a"])]))
+    _ = try app.cmd("q_c2", "routine.run", Obj.new().s("id", costly.copy()).done())
+    _ = try flow_of(mut app, costly.copy(), true)
+    var cost = Json.Null
+    if let Json.Array(all) = at(at(try app.cmd("q_c3", "routine.list", Obj.new().done()), "value"), "routines") {
+        for r in all {
+            if str_at(r.copy(), "id") == some(costly.copy()) { cost = at(r, "cost") }
+        }
+    }
+    try check(int_at(cost.copy(), "runs") == some(1) and int_at(cost, "run") == some(142), "a routine's cost counts its flow's steps' tokens with its own")
     let post_said = said_by(said, "post")
     try check(post_said.contains("This is step post of the person's routine flow \"Morning\"") and post_said.contains("From the routine \"Morning\" (One):\nmorning news") and post_said.contains("From step sum (Two):\nsummed up") and post_said.contains("From step note (Two):\nnoted") and post_said.contains("routine \"Morning\": step post of its flow") and post_said.contains("Your person sees nothing of this turn"), "a step is told what each step it comes after answered, that it's the routine's, and that it's quiet")
 

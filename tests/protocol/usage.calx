@@ -1,7 +1,7 @@
 module tests.protocol.usage
 
 // What loom sends an agent program on each turn, measured (LOO-384). The fake
-// agent, with FAKE_RECORD, keeps a line for each prompt it gets: its session,
+// agent, with --record, keeps a line for each prompt it gets: its session,
 // its characters, those of loom's "[loom: ...]" notes, and what it said back. So
 // this test counts what each kind of turn carries: what's sent, how many earlier
 // turns came with it in its session and their characters, as a real program
@@ -103,12 +103,11 @@ fn wait_ms(ms: u64) {
     unsafe { sleep(ms * 1000000) }
 }
 
-// An instance on `data` with the fake agent picking sessions up again, recording
-// to `record`, with `extra` options for `loom serve`.
-fn serve(data: String, record: String, extra: List<String>) -> (Child, String) ! Error {
+// An instance on `data`, with `extra` options for `loom serve`.
+fn serve(data: String, extra: List<String>) -> (Child, String) ! Error {
     var args: List<String> = [String("serve"), String("--port"), String("0"), String("--allow-root")]
     args.extend(extra)
-    let server = try loom(data, args).env(String("FAKE_RECORD"), record).own_group().stdout(Stdio.Pipe).spawn()
+    let server = try loom(data, args).own_group().stdout(Stdio.Pipe).spawn()
     let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
         server.kill_tree()
         fail "the server didn't start"
@@ -121,9 +120,9 @@ fn serve(data: String, record: String, extra: List<String>) -> (Child, String) !
 fn start_instance(record: String) -> Instance ! Error {
     let data = try fs.temp_dir()
     let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
-    let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent, String("--resume")]).output()
+    let added = try loom(data.copy(), [String("acp"), String("add"), String("fake"), calx(), agent, String("--resume"), "--record={record}"]).output()
     if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
-    let (server, base) = try serve(data.copy(), record, List<String>())
+    let (server, base) = try serve(data.copy(), List<String>())
     let code_line = server.wait_for_line(String("setup code:"), 10000) else {
         server.kill_tree()
         fail "the server didn't print a setup code"
@@ -138,11 +137,11 @@ fn start_instance(record: String) -> Instance ! Error {
 }
 
 // The instance killed, as a crash would, its agents with it, and started again.
-fn again(i: own Instance, record: String, extra: List<String>) -> Instance ! Error {
+fn again(i: own Instance, extra: List<String>) -> Instance ! Error {
     var old = i.server
     old.kill_tree()
     _ = old.wait()
-    let (server, base) = try serve(i.data.copy(), record, extra)
+    let (server, base) = try serve(i.data.copy(), extra)
     return Instance { server: server, data: i.data, base: base, token: i.token }
 }
 
@@ -359,7 +358,7 @@ fn measure(record: String, m: mut Measured, i: mut Instance) ! Error {
     let chat = try messages_part(mut app, mut m, record.copy(), agent.copy())
     app.close()
     // The instance and its agent programs start again: the session is picked up.
-    i = try again(i.copy(), record.copy(), [String("--test-minute-ms"), String(MINUTE_MS)])
+    i = try again(i.copy(), [String("--test-minute-ms"), String(MINUTE_MS)])
     app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     try after_restart_part(mut app, mut m, record.copy(), chat)
     try look_back_part(mut app, mut m, record.copy(), agent)

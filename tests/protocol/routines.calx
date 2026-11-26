@@ -9,8 +9,9 @@ module tests.protocol.routines
 // and what its agent answered. Paused, it waits; run by hand, it runs
 // once. A daily or weekday routine runs next at its time, in its time zone,
 // on the real clock. An agent makes routines with the schedule tool, lists them, and
-// deletes one only once the person says yes. A run in a busy chat waits, gives
-// way to the next, and is skipped after 10 minutes (a second here).
+// deletes one only once the person says yes. A run goes on beside a turn in
+// its chat, its post coming after the turn's reply, and a person's message
+// while a routine runs goes at once.
 //
 //     calx tests/protocol/routines.calx
 import std.json.{Json, parse}
@@ -203,23 +204,29 @@ fn run(i: Instance) -> i64 ! Error {
     let logged = "{at(try app.cmd("q_10", "activity.list", Obj.new().s("agent", agent).done()), "value")}"
     try check(logged.contains("Made the routine Pulse") and logged.contains("Ran the routine Pulse") and logged.contains("Deleted the routine Hourly"), "the activity log has the routines")
 
-    // A run that waits for its busy chat gives way to the routine's next run, and
-    // is skipped once it has waited 10 minutes, a second here.
-    let later = str_at(at(at(try app.cmd("q_w1", "routine.put", Obj.new().s("name", String("Later")).s("agent", String("Main")).s("prompt", String("later")).j("schedule", Obj.new().i("every", 600).done()).b("on", false).done()), "value"), "routine"), "id") ?? String()
-    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("/sleep 3000\nawake")).done())
+    // A run goes on beside a turn in its chat, in a session of its own: it
+    // doesn't wait for the turn, and what it posts goes in once the turn is over.
+    let beside = str_at(at(at(try app.cmd("q_w1", "routine.put", Obj.new().s("name", String("Beside")).s("agent", String("Main")).s("prompt", String("/mcp routine_post \{\"text\": \"beside\"\}")).j("schedule", Obj.new().i("every", 600).done()).b("on", false).done()), "value"), "routine"), "id") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", chat.copy()).s("text", String("/nap 3000\nawake")).done())
     _ = try app.until("event", "run.started")
-    let first_wait = at(try app.cmd("q_w2", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
-    let second_wait = at(try app.cmd("q_w3", "routine.run", Obj.new().s("id", later.copy()).done()), "value")
-    try check(bool_at(first_wait.copy(), "waiting") == some(true) and bool_at(second_wait.copy(), "waiting") == some(true), "run while the person's turn goes on, it waits")
-    let gave_way = try run_of(mut app, "q_w4", later.copy(), str_at(first_wait, "run") ?? String())
-    try check(str_at(gave_way.copy(), "status") == some(String("skipped")) and str_at(gave_way.copy(), "error") == some(String("It was run again before its chat was free.")), "a run that waited gives way to the next")
-    try check((str_at(gave_way, "hint") ?? String()).contains("thread of its own"), "and a skipped run says what to do about it")
-    let gave_up = try last_is(mut app, later.copy(), "skipped")
-    try check(str_at(at(gave_up, "last"), "error") == some(String("Its chat was busy for 10 minutes.")), "and one that waits too long is skipped")
-    let kept = try run_of(mut app, "q_w5", later.copy(), str_at(second_wait, "run") ?? String())
-    try check(str_at(kept.copy(), "status") == some(String("skipped")) and str_at(kept, "error") == some(String("Its chat was busy for 10 minutes.")), "and kept in its runs with why")
-    try check((try reply_in(mut app, chat.copy())) == "awake", "while the person's turn goes on as it was")
-    _ = try app.cmd("q_w6", "routine.delete", Obj.new().s("id", later).done())
+    let ran_beside = at(try app.cmd("q_w2", "routine.run", Obj.new().s("id", beside.copy()).done()), "value")
+    try check(at(ran_beside.copy(), "waiting") == Json.Null and (str_at(ran_beside.copy(), "run") ?? String()).len() > 0, "run while the person's turn goes on, it doesn't wait for it")
+    _ = try last_is(mut app, beside.copy(), "done")
+    let beside_run = try run_of(mut app, "q_w3", beside.copy(), str_at(ran_beside, "run") ?? String())
+    try check(at(beside_run, "posted") == Json.Array([Json.Str(String("beside"))]), "and ends before the turn does, having posted")
+    try check((try reply_in(mut app, chat.copy())) == "awake", "the person's turn goes on as it was, and its reply comes first")
+    try check((try reply_in(mut app, chat.copy())) == "beside", "then the routine's post, after the reply")
+    // A person's message while a routine runs goes at once, not behind it.
+    let slow = str_at(at(at(try app.cmd("q_w4", "routine.put", Obj.new().s("name", String("Slow")).s("agent", String("Main")).s("prompt", String("/nap 3000\nslow")).j("schedule", Obj.new().i("every", 600).done()).b("on", false).done()), "value"), "routine"), "id") ?? String()
+    let slow_run = str_at(at(try app.cmd("q_w5", "routine.run", Obj.new().s("id", slow.copy()).done()), "value"), "run") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_5")).s("conversation", chat.copy()).s("text", String("now")).done())
+    let ack = try app.until("ack", "")
+    try check(at(ack, "queued") == Json.Null, "a person's message while a routine runs isn't queued behind it")
+    try check((try reply_in(mut app, chat.copy())) == "now", "and is answered at once")
+    try check(str_at(try run_of(mut app, "q_w6", slow.copy(), slow_run.copy()), "status") == some(String("running")), "while the routine's run goes on")
+    try finished(mut app, slow_run)
+    _ = try app.cmd("q_w7", "routine.delete", Obj.new().s("id", beside).done())
+    _ = try app.cmd("q_w8", "routine.delete", Obj.new().s("id", slow).done())
 
     // Two more, for while the instance is off: one catches up, one doesn't.
     _ = try app.cmd("q_12", "routine.put", Obj.new().s("name", String("Quiet")).s("agent", String("Main")).s("prompt", String("quiet")).j("schedule", Obj.new().i("every", 5).done()).b("catch_up", false).done())

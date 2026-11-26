@@ -263,7 +263,7 @@ impl Model {
                 self.first_unread.get(a).cloned(),
             )
         });
-        self.select(lead);
+        self.select_keeping(lead);
         if let Some((a, unread, first)) = kept {
             if unread {
                 self.unread.insert(a.clone());
@@ -273,6 +273,8 @@ impl Model {
             }
         }
         self.unread.remove(id);
+        let at = self.conversation_last.get(id).copied().unwrap_or(0);
+        self.mark_read(id, at);
         self.open_room = Some(id.to_string());
         self.open_task = None;
         self.open_branch = None;

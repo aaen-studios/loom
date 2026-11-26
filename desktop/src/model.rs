@@ -6141,6 +6141,12 @@ pub struct Model {
     /// That time, by conversation id, so a message keeps the order without reading the
     /// list again.
     conversation_last: HashMap<String, i64>,
+    /// When the newest message the person has read in each conversation is from, as
+    /// the instance keeps it for every device (protocol.md, "Unread"), and what this
+    /// app has marked since.
+    conversation_read: HashMap<String, i64>,
+    /// The instance keeps what's read: some conversation came with `read`.
+    reads_known: bool,
     /// How full each conversation's session context is, as its program last said.
     contexts: HashMap<String, ContextFill>,
     /// The list has come, so a chat with no conversation is known to be empty.
@@ -6572,6 +6578,12 @@ impl Queued {
     }
 }
 
+/// A thread beside an agent's chat, which marks its own row rather than the
+/// agent's: another agent's with it, or one the agent made.
+fn thread_beside(c: &Conversation) -> bool {
+    !c.main && (c.asked_by.is_some() || c.made_by.is_some())
+}
+
 fn s(v: &Value, key: &str) -> String {
     v.get(key)
         .and_then(Value::as_str)
@@ -6958,6 +6970,8 @@ impl Model {
     pub fn show_branch(&mut self, branch: Option<String>) {
         if let Some(b) = &branch {
             self.asks_unread.remove(b);
+            let at = self.conversation_last.get(b).copied().unwrap_or(0);
+            self.mark_read(b, at);
         }
         if self.open_branch != branch {
             self.open_task = None;
@@ -7124,7 +7138,123 @@ impl Model {
         )
     }
 
+    /// The person has read `conversation` up to a message from `at`: the instance
+    /// keeps it for every device, once it's further than it had (protocol.md,
+    /// "Unread").
+    fn mark_read(&mut self, conversation: &str, at: i64) {
+        if at <= 0 || conversation.is_empty() {
+            return;
+        }
+        let had = self
+            .conversation_read
+            .entry(conversation.to_string())
+            .or_insert(0);
+        if at <= *had {
+            return;
+        }
+        *had = at;
+        let id = self.id("app.read");
+        self.to_send.push(json!({"t": "cmd", "id": id, "name": "conversation.read", "args": {"conversation": conversation, "at": at}}));
+    }
+
+    /// Opening an agent's chat reads every conversation of its that marks it unread:
+    /// all but the threads beside it (another agent's with it, or one it made),
+    /// group chats and side questions.
+    fn read_agent(&mut self, agent: &str) {
+        let read: Vec<(String, i64)> = self
+            .conversations
+            .iter()
+            .filter(|c| c.agent == agent && !c.side && !thread_beside(c))
+            .filter(|c| self.room(&c.id).is_none())
+            .map(|c| {
+                let last = self.conversation_last.get(&c.id).copied().unwrap_or(0);
+                (c.id.clone(), last)
+            })
+            .collect();
+        for (c, at) in read {
+            self.mark_read(&c, at);
+        }
+    }
+
+    /// What's open now is read: the group chat, the thread or branch, or the
+    /// selected agent's chats.
+    fn read_open(&mut self) {
+        let open = self.open_room.clone().or_else(|| self.open_branch.clone());
+        if let Some(c) = open {
+            let at = self.conversation_last.get(&c).copied().unwrap_or(0);
+            self.mark_read(&c, at);
+        } else if let Some(a) = self.selected.clone() {
+            self.read_agent(&a);
+        }
+    }
+
+    /// The dots, from what the instance keeps the person has read and when each
+    /// conversation's newest reply is from (`replied`, from the core), so they're
+    /// where they were after a restart and agree with the person's other devices.
+    /// What's open is read first. An instance that keeps no reads leaves the dots
+    /// as replies came.
+    fn take_reads(&mut self, items: &[Value]) {
+        let read: Vec<(String, i64)> = items
+            .iter()
+            .filter_map(|c| Some((s(c, "id"), c.get("read")?.as_i64()?)))
+            .collect();
+        self.reads_known |= !read.is_empty();
+        if !self.reads_known {
+            return;
+        }
+        // Kept here as the instance has it, or as this app marked it since, whichever
+        // is further: a mark on its way isn't undone by the list it crossed.
+        for (c, at) in read {
+            let had = self.conversation_read.entry(c).or_insert(0);
+            *had = (*had).max(at);
+        }
+        self.read_open();
+        let replied: HashMap<String, i64> = items
+            .iter()
+            .map(|c| {
+                (
+                    s(c, "id"),
+                    c.get("replied").and_then(Value::as_i64).unwrap_or(0),
+                )
+            })
+            .collect();
+        let mut unread = HashSet::new();
+        let mut asks = HashSet::new();
+        for c in self.conversations.iter().filter(|c| !c.side) {
+            let new = replied.get(&c.id).copied().unwrap_or(0)
+                > self.conversation_read.get(&c.id).copied().unwrap_or(0);
+            if !new {
+                continue;
+            }
+            if thread_beside(c) {
+                asks.insert(c.id.clone());
+            } else if self.room(&c.id).is_some() {
+                unread.insert(c.id.clone());
+            } else {
+                unread.insert(c.agent.clone());
+            }
+        }
+        // The open group chat's lead keeps the dot it had (show_room).
+        if let (Some(_), Some(lead)) = (&self.open_room, &self.selected) {
+            if self.unread.contains(lead) {
+                unread.insert(lead.clone());
+            }
+        }
+        self.first_unread.retain(|a, _| unread.contains(a));
+        self.unread = unread;
+        self.asks_unread = asks;
+    }
+
     pub fn select(&mut self, agent: Option<String>) {
+        if let Some(a) = &agent {
+            self.read_agent(a);
+        }
+        self.select_keeping(agent);
+    }
+
+    /// Selects `agent` as `select` does, but without marking its chats read on the
+    /// instance: a group chat selects its lead only for the screen's agent parts.
+    fn select_keeping(&mut self, agent: Option<String>) {
         if let Some(a) = &agent {
             self.unread.remove(a);
             // The "3 new" line goes above the first reply that came while the chat was
@@ -7714,6 +7844,11 @@ impl Model {
                 self.live.remove(&id);
                 let conversation = s(f, "conversation");
                 if Some(conversation.clone()) == self.conversation() {
+                    // What comes while it's open is read.
+                    if kind == "message.created" {
+                        let at = message.get("at").and_then(Value::as_i64).unwrap_or(0);
+                        self.mark_read(&conversation, at);
+                    }
                     // The event carries the message, or the id of one gone: it goes in
                     // its place, without asking the core for the whole page again.
                     if kind == "message.deleted" {
@@ -7752,8 +7887,7 @@ impl Model {
                 {
                     // A reply in another chat, as it comes; catch-up is what was seen before.
                     let about = self.conversations.iter().find(|c| c.id == conversation);
-                    let asked = about
-                        .is_some_and(|c| !c.main && (c.asked_by.is_some() || c.made_by.is_some()));
+                    let asked = about.is_some_and(thread_beside);
                     let agent = about
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| s(&message, "agent"));
@@ -8142,6 +8276,11 @@ impl Model {
         }
         if id.starts_with("app.room_summary") {
             self.room_usage_came(f);
+            return;
+        }
+        // What's read, kept on the instance: nothing to say of it, even from an
+        // instance that doesn't keep it.
+        if id.starts_with("app.read") {
             return;
         }
         if self.take_watch_answer(&id, f) {
@@ -9361,6 +9500,7 @@ impl Model {
                     })
                     .collect();
                 self.take_rooms(&items);
+                self.take_reads(&items);
                 if self.conversation() != before {
                     self.dirty.insert(List::Messages);
                 }
@@ -14085,6 +14225,100 @@ mod tests {
 
     fn conversations(items: Value) -> Value {
         json!({"t": "core.data", "what": "conversations", "items": items})
+    }
+
+    /// The conversation.read marks the model has to send, as (conversation, at).
+    fn reads(m: &Model) -> Vec<(String, i64)> {
+        m.to_send
+            .iter()
+            .filter(|f| f["name"] == "conversation.read")
+            .map(|f| {
+                (
+                    f["args"]["conversation"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
+                    f["args"]["at"].as_i64().unwrap_or(0),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_dots_come_back_after_a_restart_from_what_the_instance_keeps_read() {
+        let agents = json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Casper", "color": "violet"},
+            {"id": "a_2", "name": "Redstone", "color": "red"},
+            {"id": "a_3", "name": "Hermes", "color": "blue"}
+        ]});
+        let money = json!({"name": "Money", "members": ["a_1", "a_2"], "default": "a_2"});
+        let listed = |money_read: i64| {
+            conversations(json!([
+                {"id": "c_9", "agent": "", "title": "Money", "room": money, "last": 70, "replied": 70, "read": money_read},
+                {"id": "c_19", "agent": "a_2", "title": "From Casper", "asked_by": "a_1", "last": 60, "replied": 60},
+                {"id": "c_1", "agent": "a_1", "title": "", "last": 50, "replied": 50, "read": 10},
+                {"id": "c_2", "agent": "a_2", "title": "", "last": 40, "replied": 40, "read": 40},
+                {"id": "c_3", "agent": "a_3", "title": "", "last": 30, "replied": 30, "read": 20}
+            ]))
+        };
+        let mut m = Model::new();
+        m.take(&agents);
+        m.take(&listed(5));
+        assert_eq!(m.selected.as_deref(), Some("a_1"));
+        assert!(!m.unread.contains("a_1"), "the chat that's open is read");
+        assert_eq!(
+            reads(&m),
+            vec![("c_1".to_string(), 50)],
+            "and the instance is told"
+        );
+        assert!(
+            m.unread.contains("a_3"),
+            "a reply read nowhere yet has its dot"
+        );
+        assert!(!m.unread.contains("a_2"), "one read already has none");
+        assert!(m.room_unread("c_9"));
+        assert!(m.asks("a_2")[0].unread);
+        m.to_send.clear();
+        m.select(Some("a_3".into()));
+        assert_eq!(
+            reads(&m),
+            vec![("c_3".to_string(), 30)],
+            "opening a chat reads it"
+        );
+        // The person read the group chat on another device.
+        m.take(&listed(70));
+        assert!(!m.room_unread("c_9"), "its dot goes here too");
+        // What comes while the chat is open is read at once.
+        m.synced = true;
+        m.to_send.clear();
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_3", "message": {"id": "msg_5", "conversation": "c_3", "role": "agent", "agent": "a_3", "at": 80}}));
+        assert_eq!(reads(&m), vec![("c_3".to_string(), 80)]);
+        // An instance that keeps no reads leaves the dots as replies come.
+        let mut old = Model::new();
+        old.take(&agents);
+        old.take(&conversations(json!([
+            {"id": "c_3", "agent": "a_3", "title": "", "last": 30, "replied": 30}
+        ])));
+        assert!(old.unread.is_empty());
+    }
+
+    #[test]
+    fn opening_a_group_chat_reads_it_but_not_its_leads_chat() {
+        let agents = json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Casper", "color": "violet"},
+            {"id": "a_2", "name": "Redstone", "color": "red"}
+        ]});
+        let mut m = Model::new();
+        m.take(&agents);
+        m.take(&conversations(json!([
+            {"id": "c_9", "agent": "", "title": "Money", "room": {"name": "Money", "members": ["a_1", "a_2"], "default": "a_2"}, "last": 70, "replied": 70, "read": 5},
+            {"id": "c_2", "agent": "a_2", "title": "", "last": 40, "replied": 40, "read": 10},
+            {"id": "c_1", "agent": "a_1", "title": "", "last": 30, "replied": 30, "read": 30}
+        ])));
+        m.to_send.clear();
+        m.show_room("c_9");
+        assert_eq!(reads(&m), vec![("c_9".to_string(), 70)]);
+        assert!(m.unread.contains("a_2"), "its lead keeps its dot");
     }
 
     #[test]
