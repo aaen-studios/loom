@@ -3089,8 +3089,8 @@ pub struct ChangeLine {
 }
 
 /// What a reply shows under it of what its agent kept or proposed: a quiet line for the
-/// notes kept, one for each fix kept, a card for the notes waiting and one for each fix
-/// waiting, and a line for those put off (`Message::learned_view`).
+/// notes kept, one for each fix kept, a card for each fix waiting, and a line for those
+/// put off (`Message::learned_view`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LearnedView {
     /// The notes kept, or undone since, under one line that opens to list them.
@@ -3099,8 +3099,6 @@ pub struct LearnedView {
     pub notes_line: String,
     /// Each fix kept, or undone since, with its line: "Fixed the skill …".
     pub fixes: Vec<(Learned, String)>,
-    /// The notes that wait for the person, on one card.
-    pub asks: Vec<Learned>,
     /// Each fix that waits for the person, on a card of its own.
     pub fix_asks: Vec<Learned>,
     /// How many were put off, and wait on the Proposals page.
@@ -3484,7 +3482,6 @@ impl Message {
                     v.fixes.push((l.clone(), line));
                 }
                 (_, _, true) if l.later => v.later += 1,
-                ("note", _, true) => v.asks.push(l.clone()),
                 ("fix", _, true) => v.fix_asks.push(l.clone()),
                 _ => {}
             }
@@ -4872,13 +4869,15 @@ pub enum Part {
 }
 
 /// What Copy puts on the clipboard for a message: the words it shows, a paragraph each.
-/// For a reply that's its answer, not what it said on the way, folded under it.
+/// For a reply that's its answer, not what it said on the way, folded under it. The
+/// person's own emoji are their `:name:`, but in code they stay as written, as copying a
+/// selection gives them (LOO-373).
 pub fn copy_text(m: &Message, tools: &Tools) -> String {
     let shows = Shows {
         tools: false,
         thoughts: false,
     };
-    parts(m, tools, shows)
+    let words = parts(m, tools, shows)
         .iter()
         .filter_map(|part| match part {
             Part::Bubbles(run) => Some(run),
@@ -4887,7 +4886,8 @@ pub fn copy_text(m: &Message, tools: &Tools) -> String {
         .flatten()
         .map(|&i| m.blocks[i].text.trim())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    crate::emoji::names_outside_code(&words)
 }
 
 /// Whether `selected`, words selected in the chat, are all in `m`, as it shows them: a
@@ -11108,34 +11108,6 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "proposal.undo", "args": {"id": proposal}})
     }
 
-    /// The frames that answer the card of notes under reply `m`: Keep keeps the ticked
-    /// ones and drops the rest, and Not now puts them all off to the Proposals page.
-    /// `unticked` holds the ones the person unticked.
-    pub fn answer_learned(
-        &mut self,
-        m: &Message,
-        keep: bool,
-        unticked: &HashSet<String>,
-    ) -> Vec<Value> {
-        let asks = m.learned_view().asks;
-        if !keep {
-            let id = self.id("app.proposal_later");
-            let ids: Vec<&str> = asks.iter().map(|l| l.id.as_str()).collect();
-            return vec![
-                json!({"t": "cmd", "id": id, "name": "proposal.later", "args": {"ids": ids}}),
-            ];
-        }
-        let mut out = Vec::new();
-        for l in &asks {
-            if unticked.contains(&l.id) {
-                out.push(self.drop_proposal(&l.id));
-            } else {
-                out.push(self.keep_proposal(&l.proposal()));
-            }
-        }
-        out
-    }
-
     /// Asks an agent to look over its past chats and propose skills and notes, as a task.
     pub fn ask_proposals(&mut self, agent: &str) -> Value {
         let id = self.id("app.proposal_ask");
@@ -13808,6 +13780,20 @@ mod tests {
             "done",
         );
         assert_eq!(copy_text(&reply, &Tools::default()), "Here it is.");
+        // The person's own emoji copy as their names, but in code as written, as a
+        // selection copies them (LOO-373).
+        let emoji = Message {
+            role: "person".into(),
+            ..turn(
+                &["text:so <:party_cat:e_3> and `<:party_cat:e_3>`"],
+                false,
+                "",
+            )
+        };
+        assert_eq!(
+            copy_text(&emoji, &Tools::default()),
+            "so :party_cat: and `<:party_cat:e_3>`"
+        );
     }
 
     #[test]
@@ -14833,10 +14819,10 @@ mod tests {
             "Failed at \u{201c}Press Publish\u{201d}: There's no Publish button."
         );
         assert_eq!(v.fixes[0].0.lines[1].op, "+");
-        let asks: Vec<&str> = v.asks.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(asks, ["prop_4", "prop_5"]);
-        assert_eq!(v.asks[0].for_whom("Juniper"), "For Juniper");
-        assert_eq!(v.asks[1].for_whom("Juniper"), "For all agents");
+        // A note waiting from before every note was kept at once shows nothing: the
+        // instance keeps it when it starts (LOO-399).
+        assert!(v.notes.iter().all(|l| l.status != "waiting"));
+        assert_eq!(v.notes[0].for_whom("Juniper"), "For Juniper");
         assert_eq!(v.fix_asks.len(), 1);
         assert_eq!(v.later, 1);
         // All of them undone, the line says so.
@@ -14849,21 +14835,9 @@ mod tests {
     }
 
     #[test]
-    fn the_card_keeps_the_ticked_drops_the_rest_or_puts_them_off() {
+    fn a_fix_on_its_card_is_kept_as_the_person_changed_it_and_undone() {
         let mut m = Model::new();
         let msg = m.message_of(&learned_reply());
-        let unticked: HashSet<String> = ["prop_5".to_string()].into_iter().collect();
-        let frames = m.answer_learned(&msg, true, &unticked);
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0]["name"], "proposal.keep");
-        assert_eq!(frames[0]["args"]["id"], "prop_4");
-        assert_eq!(frames[0]["args"]["note"]["text"], "Ann works at NTNU.");
-        assert_eq!(frames[1]["name"], "proposal.drop");
-        assert_eq!(frames[1]["args"]["id"], "prop_5");
-        let later = m.answer_learned(&msg, false, &HashSet::new());
-        assert_eq!(later[0]["name"], "proposal.later");
-        assert_eq!(later[0]["args"]["ids"], json!(["prop_4", "prop_5"]));
-        // A fix is kept as the person changed it, and undone.
         let mut fix = msg.learned_view().fix_asks[0].proposal();
         fix.body = "changed".into();
         let keep = m.keep_proposal(&fix);

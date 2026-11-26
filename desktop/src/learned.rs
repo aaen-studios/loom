@@ -1,18 +1,14 @@
 //! What an agent kept or proposed from a reply, under it (PLAN.md, "Sharing and
 //! learning"): a quiet line for what was kept, which opens to list it with Forget or
-//! Undo, and a card for what waits for the person. The model says which goes where
+//! Undo, and a card for a fix that waits for the person. The model says which goes where
 //! (`Message::learned_view`); this only draws it.
 
 use super::*;
 use crate::model::{ChangeLine, Learned};
 
-/// The key that opens a quiet line's list, or unticks a note on the card.
+/// The key that opens a quiet line's list.
 fn open_key(m: &Message, what: &str) -> String {
     format!("learned/{}/{what}", m.id)
-}
-
-fn untick_key(id: &str) -> String {
-    format!("untick/{id}")
 }
 
 /// What reply `m` has under it, if anything.
@@ -92,19 +88,6 @@ pub(super) fn learned_under(
                     let _ = opener.update(cx, |loom, cx| loom.open(Screen::Proposals, cx));
                 }),
         );
-    }
-    if !v.asks.is_empty() {
-        any = true;
-        out = out.child(notes_card(
-            p,
-            m,
-            &v.asks,
-            name,
-            tint,
-            open,
-            scale,
-            this.clone(),
-        ));
     }
     for l in &v.fix_asks {
         any = true;
@@ -306,109 +289,6 @@ pub(super) fn change_view(p: Palette, lines: &[ChangeLine], scale: f32) -> Div {
     out
 }
 
-/// The card of notes that wait for the person: "Juniper would remember", a ticked list
-/// with who each is for, and Not now and Keep N.
-#[allow(clippy::too_many_arguments)]
-fn notes_card(
-    p: Palette,
-    m: &Message,
-    asks: &[Learned],
-    name: &str,
-    tint: Hsla,
-    open: &HashSet<String>,
-    scale: f32,
-    this: WeakEntity<Loom>,
-) -> Div {
-    let key = open_key(m, "card");
-    let ticked = asks
-        .iter()
-        .filter(|l| !open.contains(&untick_key(&l.id)))
-        .count();
-    let mut list = div().flex().flex_col().gap(px(space::S));
-    for l in asks {
-        let on = !open.contains(&untick_key(&l.id));
-        let k = untick_key(&l.id);
-        let toggle = this.clone();
-        let mark = div()
-            .size(px(16.0))
-            .mt(px(2.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(4.0))
-            .border_1();
-        list = list.child(
-            div()
-                .id(SharedString::from(format!("tick-{}", l.id)))
-                .role(Role::CheckBox)
-                .aria_label(l.text.clone())
-                .flex()
-                .items_start()
-                .gap(px(space::S + 2.0))
-                .cursor_pointer()
-                .child(if on {
-                    mark.border_color(tint)
-                        .bg(tint)
-                        .text_color(motion::ink_on(tint, p.button_ink, p.button))
-                        .child(Icon::new(Ico::Check).xsmall())
-                } else {
-                    mark.border_color(p.line_strong)
-                })
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .child(
-                            div()
-                                .text_size(px(size::SMALL * scale))
-                                .text_color(if on { p.ink } else { p.ink_3 })
-                                .child(l.text.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(size::CAPTION))
-                                .text_color(p.ink_3)
-                                .child(l.for_whom(name)),
-                        ),
-                )
-                .on_click(move |_, _, cx| {
-                    let _ = toggle.update(cx, |loom, cx| loom.toggle_thought(k.clone(), cx));
-                }),
-        );
-    }
-    let keep_label = if ticked == 0 {
-        "Drop them".to_string()
-    } else {
-        format!("Keep {ticked}")
-    };
-    let (keeper, later) = (this.clone(), this.clone());
-    let (kept_m, later_m) = (m.clone(), m.clone());
-    CardFrame::new()
-        .lead(card_icon(p, Ico::Brain, tint))
-        .title(format!("{name} would remember"))
-        .mark(card_mark(&key, true, tint))
-        .row(list)
-        .action(
-            card_button(p, format!("keep-learned-{}", m.id), &keep_label, true).on_click(
-                move |_, _, cx| {
-                    let _ = keeper.update(cx, |loom, cx| loom.answer_learned(&kept_m, true, cx));
-                },
-            ),
-        )
-        .action(
-            card_button(p, format!("later-learned-{}", m.id), "Not now", false).on_click(
-                move |_, _, cx| {
-                    let _ = later.update(cx, |loom, cx| loom.answer_learned(&later_m, false, cx));
-                },
-            ),
-        )
-        .waits(tint)
-        .draw(p, scale)
-}
-
 /// The card of a fix that waits for the person: why the skill failed, its change, and
 /// Keep the fix, Change it and Drop.
 fn fix_card(
@@ -478,23 +358,6 @@ impl Loom {
     pub(super) fn undo_learned(&mut self, id: &str, cx: &mut Context<Self>) {
         let f = self.model.undo_proposal(id);
         self.send(f);
-        cx.notify();
-    }
-
-    /// Answers the card of notes under reply `m`: Keep, the ticked ones, or Not now.
-    fn answer_learned(&mut self, m: &Message, keep: bool, cx: &mut Context<Self>) {
-        let unticked: HashSet<String> = m
-            .learned
-            .iter()
-            .map(|l| l.id.clone())
-            .filter(|id| self.open_thoughts.contains(&untick_key(id)))
-            .collect();
-        for f in self.model.answer_learned(m, keep, &unticked) {
-            self.send(f);
-        }
-        for id in unticked {
-            self.open_thoughts.remove(&untick_key(&id));
-        }
         cx.notify();
     }
 

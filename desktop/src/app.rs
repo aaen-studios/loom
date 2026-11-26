@@ -10294,8 +10294,8 @@ ACTA_KEY=secret:ACTA_KEY",
                             this.start_reply(&reply_id, None, false, window, cx);
                         })),
                 );
-                // The person's own emoji copy as their names.
-                let text = crate::emoji::as_names(&model::copy_text(&m, &self.model.tools));
+                // The person's own emoji copy as their names, but not in code.
+                let text = model::copy_text(&m, &self.model.tools);
                 if !text.is_empty() {
                     panel = panel.child(
                         self.menu_item("ctx-copy", Ico::Copy, "Copy", false)
