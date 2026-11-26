@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName as Ico;
-use gpui_kit::base::TextSelection;
+use gpui_kit::base::{cut_text_selection, TextSelection};
 use gpui_kit::component::input::{
     Copy as CopyText, Cut as CutText, Enter, Escape, IndentInline, InlineToken, Input,
     InputContent, InputEvent, InputState, MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea,
@@ -19589,20 +19589,133 @@ fn quote_view(
             )
         })
         .when(!shown.is_empty(), |d| {
+            d.child(quote_words(
+                p,
+                &shown,
+                if r.deleted { p.ink_3 } else { p.ink_2 },
+                &key,
+            ))
+        })
+        // A drag over its words selects them instead (LOO-410).
+        .on_click(move |e, _, cx| {
+            if quote_click_jumps(e) {
+                let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
+            }
+        })
+}
+
+thread_local! {
+    /// How wide each quote's words are laid out on their one line, by message, and
+    /// whether they ran past their pill when it was last laid out (`quote_words`).
+    static QUOTE_WIDE: RefCell<HashMap<String, (f32, bool)>> = RefCell::new(HashMap::new());
+}
+
+/// How wide the fade is at the end of a quote whose words run past its pill.
+const QUOTE_FADE: f32 = 28.0;
+
+/// A quote's words, in `ink`, on one line that can be selected, as a message's words
+/// can. Where they run past the pill, they fade out at its end rather than end in "…",
+/// and only what shows is selected or copied (LOO-410). `key` is the message's id.
+fn quote_words(p: Palette, shown: &str, ink: Hsla, key: &str) -> AnyElement {
+    let long = QUOTE_WIDE.with(|w| w.borrow().get(key).is_some_and(|(_, long)| *long));
+    let view = motion::scope();
+    let (laid, measured) = (key.to_string(), key.to_string());
+    // The whole line at its own width, measured as it's laid out.
+    let whole = div()
+        .flex_none()
+        .relative()
+        .child(KeptText::new(
+            SharedString::from(format!("quote-{key}")),
+            crate::emoji::pictured(&model::plain_md(shown), size::SMALL),
+            |v| v.selectable(true),
+        ))
+        .child(
+            canvas(
+                move |b, _, _| {
+                    QUOTE_WIDE.with(|w| {
+                        let mut w = w.borrow_mut();
+                        if w.len() > 4000 {
+                            w.clear();
+                        }
+                        let long = w.get(&laid).is_some_and(|(_, long)| *long);
+                        w.insert(laid.clone(), (b.size.width.as_f32(), long));
+                    })
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        );
+    // The fade takes the colour under the pill, as its hover has it.
+    let hover = motion::hover_key(SharedString::from(format!("quote-{key}")));
+    let under = motion::mix(
+        p.bg,
+        p.hover,
+        motion::level(&hover, motion::hovered(&hover), motion::HOVER),
+    );
+    let shows = div()
+        .relative()
+        .min_w_0()
+        .overflow_hidden()
+        .text_color(ink)
+        .child(whole)
+        .child(
+            // Laid out after the whole line, so its width is known here.
+            canvas(
+                move |b, _, cx| {
+                    let room = b.size.width.as_f32();
+                    let flipped = QUOTE_WIDE.with(|w| {
+                        let mut w = w.borrow_mut();
+                        let Some((wide, long)) = w.get_mut(&measured) else {
+                            return false;
+                        };
+                        let now = *wide > room + 0.5;
+                        std::mem::replace(long, now) != now
+                    });
+                    if flipped {
+                        if let Some(v) = view {
+                            cx.notify(v);
+                        }
+                    }
+                },
+                |_, _, _, _| {},
+            )
+            .absolute()
+            .top_0()
+            .left_0()
+            .size_full(),
+        )
+        .when(long, |d| {
             d.child(
                 div()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(if r.deleted { p.ink_3 } else { p.ink_2 })
-                    .child(emoji_ui::inline_words(
-                        &shown,
-                        (size::SMALL * crate::emoji::IN_TEXT).round(),
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .right_0()
+                    .w(px(QUOTE_FADE))
+                    .bg(linear_gradient(
+                        90.0,
+                        linear_color_stop(under.opacity(0.0), 0.0),
+                        linear_color_stop(under, 1.0),
                     )),
             )
-        })
-        .on_click(move |_, _, cx| {
-            let _ = this.update(cx, |loom, cx| loom.jump_to(&to, cx));
-        })
+        });
+    cut_text_selection(shows).into_any_element()
+}
+
+/// Whether a click on a quote jumps to what it quotes: not when the pointer moved while
+/// it was down, which is a drag over its words to select them, nor for the second click
+/// of a double click, which selects a word.
+fn quote_click_jumps(e: &ClickEvent) -> bool {
+    match e {
+        ClickEvent::Mouse(m) => {
+            let moved = m.up.position - m.down.position;
+            m.up.click_count < 2 && moved.x.abs() < px(3.0) && moved.y.abs() < px(3.0)
+        }
+        _ => true,
+    }
 }
 
 thread_local! {
@@ -19657,7 +19770,7 @@ fn pin_cut(
     .top_0()
     .left_0()
     .size_full();
-    div()
+    let shown = div()
         .relative()
         .flex()
         .flex_col()
@@ -19677,8 +19790,13 @@ fn pin_cut(
                         linear_color_stop(fill, 1.0),
                     )),
             )
-        })
-        .into_any_element()
+        });
+    // What the cut hides is no part of a selection (LOO-412).
+    if cut {
+        cut_text_selection(shown).into_any_element()
+    } else {
+        shown.into_any_element()
+    }
 }
 
 /// A quote over the person's message, with its spine: a short line from the quote's
@@ -19796,32 +19914,36 @@ fn cut_long(
         .size_full(),
     );
     let cut = long && !open;
+    let shown = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .when(cut, |d| d.max_h(px(limit)).overflow_hidden())
+        .child(whole)
+        .when(cut, |d| {
+            d.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .bottom_0()
+                    .h(px(line_h * 2.0))
+                    .bg(linear_gradient(
+                        180.0,
+                        linear_color_stop(bg.opacity(0.0), 0.0),
+                        linear_color_stop(bg, 1.0),
+                    )),
+            )
+        });
     div()
         .flex()
         .flex_col()
-        .child(
-            div()
-                .relative()
-                .flex()
-                .flex_col()
-                .when(cut, |d| d.max_h(px(limit)).overflow_hidden())
-                .child(whole)
-                .when(cut, |d| {
-                    d.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .h(px(line_h * 2.0))
-                            .bg(linear_gradient(
-                                180.0,
-                                linear_color_stop(bg.opacity(0.0), 0.0),
-                                linear_color_stop(bg, 1.0),
-                            )),
-                    )
-                }),
-        )
+        // What the cut hides is no part of a selection (LOO-412).
+        .child(if cut {
+            cut_text_selection(shown).into_any_element()
+        } else {
+            shown.into_any_element()
+        })
         .when(long, |d| {
             d.child(
                 div().flex().child(
@@ -25671,6 +25793,164 @@ mod bubble_tests {
         }
     }
 }
+// A quote's words can be selected (LOO-410): a drag over them selects and copies what
+// shows of them, and only a click without one jumps to the original.
+#[cfg(test)]
+mod quote_tests {
+    use super::{quote_click_jumps, quote_words, Palette};
+    use crate::tokens::size;
+    use gpui::{
+        canvas, div, point, px, Bounds, ClickEvent, Context, IntoElement, Modifiers, MouseButton,
+        MouseClickEvent, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels,
+        Render, Styled as _, TestAppContext, VisualTestContext, Window,
+    };
+    use gpui_kit::base::{TextSelection, TextSelectionLayer};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    /// One quote's words, on a pill `wide` across, as `quote_view` draws them.
+    struct Quote {
+        words: &'static str,
+        wide: f32,
+        drawn: Rc<Cell<Bounds<Pixels>>>,
+    }
+
+    impl Render for Quote {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let p = Palette::new(true);
+            let drawn = self.drawn.clone();
+            div().child(TextSelectionLayer).child(
+                div()
+                    .relative()
+                    .max_w(px(self.wide))
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .text_size(px(size::SMALL))
+                    .whitespace_nowrap()
+                    .child(quote_words(p, self.words, p.ink_2, "m1"))
+                    .child(
+                        canvas(move |b, _, _| drawn.set(b), |_, _, _, _| {})
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                    ),
+            )
+        }
+    }
+
+    fn open<'a>(
+        words: &'static str,
+        wide: f32,
+        cx: &'a mut TestAppContext,
+    ) -> (Bounds<Pixels>, &'a mut VisualTestContext) {
+        cx.update(gpui_kit::init);
+        let drawn = Rc::new(Cell::new(Bounds::default()));
+        let (_, cx) = cx.add_window_view({
+            let drawn = drawn.clone();
+            move |_, _| Quote { words, wide, drawn }
+        });
+        cx.run_until_parked();
+        // Twice: the second time, it knows whether its words ran past the pill.
+        for _ in 0..2 {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.run_until_parked();
+        }
+        (drawn.get(), cx)
+    }
+
+    /// What a drag across the whole pill, and past its end, selects and copies, trimmed:
+    /// past the end, it takes the line's end too, as it does in a message.
+    fn dragged(at: Bounds<Pixels>, cx: &mut VisualTestContext) -> (String, Option<String>) {
+        let y = at.origin.y + at.size.height / 2.0;
+        let (from, to) = (
+            point(at.origin.x + px(1.0), y),
+            point(at.right() + px(40.0), y),
+        );
+        cx.simulate_event(MouseDownEvent {
+            position: from,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.simulate_event(MouseMoveEvent {
+            position: to,
+            modifiers: Modifiers::default(),
+            pressed_button: Some(MouseButton::Left),
+        });
+        cx.simulate_event(MouseUpEvent {
+            position: to,
+            modifiers: Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 1,
+        });
+        cx.run_until_parked();
+        let selected = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            TextSelection::selected_text(window, cx).trim().to_string()
+        });
+        cx.simulate_keystrokes("secondary-c");
+        let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+        (selected, copied.map(|c| c.trim().to_string()))
+    }
+
+    #[gpui::test]
+    fn a_drag_over_a_short_quote_takes_all_its_words(cx: &mut TestAppContext) {
+        let (at, cx) = open("“short words”", 400.0, cx);
+        let (selected, copied) = dragged(at, cx);
+        assert_eq!(selected, "“short words”");
+        assert_eq!(copied.as_deref(), Some("“short words”"));
+    }
+
+    #[gpui::test]
+    fn a_drag_over_a_long_quote_takes_only_what_shows(cx: &mut TestAppContext) {
+        let words = "the line wraps a few times in the chat, as a real answer does when it \
+                     explains something at length";
+        let (at, cx) = open(words, 160.0, cx);
+        assert!(at.size.width <= px(160.0), "{at:?}");
+        let (selected, copied) = dragged(at, cx);
+        assert!(selected.len() > 10, "{selected:?}");
+        assert!(selected.len() < 40, "{selected:?}");
+        assert!(words.starts_with(&selected), "{selected:?}");
+        assert_eq!(copied, Some(selected));
+    }
+
+    #[gpui::test]
+    fn its_marks_show_as_written(cx: &mut TestAppContext) {
+        let (at, cx) = open("2 * 3 = **6** <b> # [x](y)", 400.0, cx);
+        assert_eq!(dragged(at, cx).0, "2 * 3 = **6** <b> # [x](y)");
+    }
+
+    fn click(down: (f32, f32), up: (f32, f32), count: usize) -> ClickEvent {
+        ClickEvent::Mouse(MouseClickEvent {
+            down: MouseDownEvent {
+                position: point(px(down.0), px(down.1)),
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count: count,
+                first_mouse: false,
+            },
+            up: MouseUpEvent {
+                position: point(px(up.0), px(up.1)),
+                modifiers: Modifiers::default(),
+                button: MouseButton::Left,
+                click_count: count,
+            },
+        })
+    }
+
+    #[test]
+    fn only_a_click_that_selects_nothing_jumps() {
+        assert!(quote_click_jumps(&click((10., 5.), (10., 5.), 1)));
+        assert!(quote_click_jumps(&click((10., 5.), (11., 6.), 1)));
+        assert!(!quote_click_jumps(&click((10., 5.), (60., 5.), 1)));
+        assert!(!quote_click_jumps(&click((10., 5.), (10., 5.), 2)));
+        assert!(quote_click_jumps(&ClickEvent::default()));
+    }
+}
+
 #[cfg(test)]
 mod command_tests {
     #[test]

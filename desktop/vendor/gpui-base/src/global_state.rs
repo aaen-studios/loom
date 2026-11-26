@@ -29,6 +29,9 @@ pub struct GlobalState {
     text_view_state_stack: RefCell<Vec<Entity<TextViewState>>>,
     /// The table cells being prepainted or painted, innermost last.
     table_cell_stack: RefCell<Vec<Bounds<Pixels>>>,
+    /// loom: the clips that cut text off on purpose being prepainted or
+    /// painted, innermost last (`crate::cut_text_selection`).
+    text_cut_stack: RefCell<Vec<Bounds<Pixels>>>,
     /// When a finger last went down. A tap reaches controls as a mouse press;
     /// this is how they tell it from one.
     last_touch: Option<Instant>,
@@ -44,6 +47,7 @@ impl GlobalState {
             suppress_text_selection: false,
             text_view_state_stack: RefCell::new(Vec::new()),
             table_cell_stack: RefCell::new(Vec::new()),
+            text_cut_stack: RefCell::new(Vec::new()),
             last_touch: None,
         }
     }
@@ -124,6 +128,26 @@ impl GlobalState {
     /// The table cell being prepainted or painted, if any.
     pub(crate) fn table_cell(&self) -> Option<Bounds<Pixels>> {
         self.table_cell_stack.borrow().last().copied()
+    }
+
+    /// loom: enters a clip that cuts text off on purpose.
+    pub(crate) fn push_text_cut(&self, bounds: Bounds<Pixels>) {
+        let mut stack = self.text_cut_stack.borrow_mut();
+        // Inside another, only what both show shows.
+        let bounds = stack
+            .last()
+            .map_or(bounds, |outer| outer.intersect(&bounds));
+        stack.push(bounds);
+    }
+
+    pub(crate) fn pop_text_cut(&self) {
+        self.text_cut_stack.borrow_mut().pop();
+    }
+
+    /// loom: what the clips that cut text off being prepainted or painted let
+    /// show, if any: text outside it is no part of a selection.
+    pub(crate) fn text_cut(&self) -> Option<Bounds<Pixels>> {
+        self.text_cut_stack.borrow().last().copied()
     }
 
     #[doc(hidden)]

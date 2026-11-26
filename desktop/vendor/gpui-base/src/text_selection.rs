@@ -21,6 +21,11 @@ use crate::touch_selection::{
 };
 use crate::{AutoScroll, GlobalState};
 
+// loom: Shift with an arrow, Home or End moves the selection's end.
+#[path = "key_selection.rs"]
+mod key_selection;
+pub use key_selection::SelectionMotion;
+
 /// An opaque selection layer identifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct TextSelectionScopeId(u64);
@@ -226,6 +231,8 @@ pub struct TextSelectionRegistration {
     self_scroll: bool,
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
     rendered: Option<WeakEntity<RenderedMarker>>,
+    /// loom: what a clip that cuts the text off lets show (`crate::cut_text_selection`).
+    cut: Option<Bounds<Pixels>>,
 }
 
 impl TextSelectionRegistration {
@@ -242,7 +249,15 @@ impl TextSelectionRegistration {
             self_scroll: false,
             selection_edges: None,
             rendered: None,
+            cut: None,
         }
+    }
+
+    /// loom: what a clip that cuts the text off on purpose lets show, if one
+    /// does: text outside it is out of reach of the selection's keys.
+    pub fn with_cut(mut self, cut: Option<Bounds<Pixels>>) -> Self {
+        self.cut = cut;
+        self
     }
 
     /// Ties this registration to the retained state of the element reporting
@@ -1043,6 +1058,26 @@ impl TextSelectionHandle {
         });
     }
 
+    /// loom: moves the window selection's cursor by `motion`, as Shift with an
+    /// arrow, Home or End does. Returns whether there was a selection, or a
+    /// place clicked in text, to move.
+    pub fn move_by_key(&self, motion: SelectionMotion, window: &Window, cx: &mut App) -> bool {
+        let Some(state) = self.window_selection(cx) else {
+            return false;
+        };
+        state.update(cx, |state, cx| state.move_by_key(motion, window, cx))
+    }
+
+    /// loom: selects all of this participant's text through the window
+    /// selection, so that a key can then move its end. Returns whether it had
+    /// text to select.
+    pub fn select_whole(&self, cx: &mut App) -> bool {
+        let Some(state) = self.window_selection(cx) else {
+            return false;
+        };
+        state.update(cx, |state, cx| state.select_whole(&self.0, cx))
+    }
+
     /// Subscribes to participant selection notifications.
     pub fn subscribe(
         &self,
@@ -1363,6 +1398,8 @@ struct WindowSelectionState {
     cursor: Option<SelectionEndpoint>,
     pending_extension_anchor: Option<SelectionEndpoint>,
     unit: Option<SelectionUnit>,
+    /// loom: where a key last put the cursor (`key_selection`).
+    key_caret: Option<key_selection::KeyCaret>,
     is_selecting: bool,
     did_hit_text: bool,
     frame_generation: Cell<u64>,
@@ -1777,6 +1814,7 @@ impl WindowSelectionState {
         self.cursor = None;
         self.pending_extension_anchor = None;
         self.unit = None;
+        self.key_caret = None;
         self.is_selecting = false;
         self.did_hit_text = false;
         if self.touch.reset() {
@@ -1904,6 +1942,7 @@ impl WindowSelectionState {
         self.cursor = None;
         self.pending_extension_anchor = None;
         self.unit = unit;
+        self.key_caret = None;
         self.is_selecting = false;
         self.did_hit_text = false;
         if self.touch.reset() {
