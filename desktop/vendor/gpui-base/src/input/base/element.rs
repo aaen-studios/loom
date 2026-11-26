@@ -2276,6 +2276,7 @@ impl<M: InputModeKind> TextElement<M> {
         } else {
             spans.partition_point(|s| s.range().end <= start)
         };
+        let shown = state.selection_shown(window, cx);
         let contexts: Vec<_> = spans[first..]
             .iter()
             .take_while(|s| all || s.range().start <= end)
@@ -2286,7 +2287,7 @@ impl<M: InputModeKind> TextElement<M> {
                         cache.key.as_ref() != Some(&key) || !cache.widths.contains_key(span.token())
                     })
             })
-            .map(|span| state.token_context(span, line_height, width))
+            .map(|span| state.token_context(span, line_height, width, shown))
             .collect();
         let mut elements = std::collections::HashMap::new();
         let mut measured = Vec::new();
@@ -2581,6 +2582,7 @@ impl<M: InputModeKind> TextElement<M> {
             .as_ref()
             .and_then(|c| c.key.as_ref())
             .map_or(bounds.size.width, |k| k.2);
+        let shown = state.selection_shown(window, cx);
         let mut placements = Vec::new();
         let mut y = layout.visible_top;
         for (ix, &row) in layout.visible_buffer_lines.iter().enumerate() {
@@ -2593,7 +2595,7 @@ impl<M: InputModeKind> TextElement<M> {
                     layout.lines[ix].position_for_index(span.range().start - start, layout, false)
                 {
                     placements.push((
-                        state.token_context(span, layout.line_height, width),
+                        state.token_context(span, layout.line_height, width, shown),
                         bounds.origin + position + point(layout.line_number_width, y),
                     ));
                 }

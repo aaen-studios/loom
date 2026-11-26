@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState,
-    MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
+    Copy as CopyText, Cut as CutText, Enter, Escape, IndentInline, InlineToken, Input,
+    InputContent, InputEvent, InputState, MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea,
+    TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{
@@ -1882,6 +1883,16 @@ ACTA_KEY=secret:ACTA_KEY",
         self.bar.width(window, self.beside())
     }
 
+    /// How wide the sidebar is drawn now, easing between whole and the rail.
+    fn sidebar_now(&self, railed: bool) -> f32 {
+        let k = motion::level(
+            &SharedString::from("sidebar-rail"),
+            railed,
+            crate::rail::SLIDE,
+        );
+        layout::SIDEBAR + (layout::RAIL - layout::SIDEBAR) * k
+    }
+
     /// The person's collapse or open, from the sidebar's control or Ctrl+B.
     fn toggle_bar(&mut self, window: &Window, cx: &mut Context<Self>) {
         let w = window.viewport_size().width.as_f32();
@@ -3120,6 +3131,18 @@ ACTA_KEY=secret:ACTA_KEY",
             }
         })
         .detach();
+    }
+
+    /// Ctrl+C or Ctrl+X in the composer, with one of the person's own emoji in what's
+    /// selected: it's copied as `:name:`, with its token kept for a paste back into the
+    /// composer (`emoji::copied`). Gives whether it copied, so other words copy as they do.
+    fn copy_composer(&mut self, cx: &mut Context<Self>) -> bool {
+        let selected = self.composer.read(cx).selected_value().to_string();
+        let (text, Some(kept)) = crate::emoji::copied(&selected) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, kept));
+        true
     }
 
     /// Ctrl+V in the composer: an image, or files copied in Explorer, become attachments.
@@ -7277,12 +7300,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// moves.
     fn sidebar(&mut self, railed: bool, listening: bool, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let k = motion::level(
-            &SharedString::from("sidebar-rail"),
-            railed,
-            crate::rail::SLIDE,
-        );
-        let width = layout::SIDEBAR + (layout::RAIL - layout::SIDEBAR) * k;
+        let width = self.sidebar_now(railed);
         // What's in it is a view of its own, drawn again only when what it shows changes
         // (`SidebarKey`), its threads move or a hover in it fades: a frame that only
         // changes the chat, such as a reply streaming, uses it as it was.
@@ -8089,15 +8107,21 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    fn header(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The chat's header, `room` wide inside its padding (`header_room`). As the window
+    /// narrows, its chips give up what they can in a fixed order (`model::header`), so
+    /// nothing in it runs under the window's buttons.
+    fn header(&mut self, room: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         // The window's own title bar: it drags the window, and the system's buttons sit at its end.
+        // What's in it never reaches past it, whatever it measured.
         let bar = div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .items_center()
             .justify_between()
+            .overflow_hidden()
             .px(px(space::L));
         let Some(agent) = self
             .model
@@ -8117,6 +8141,26 @@ ACTA_KEY=secret:ACTA_KEY",
         let watching =
             self.browser_docked && self.model.watching.as_deref() == Some(agent.id.as_str());
         let tint = thread::color(&agent.color, p.dark);
+        // The chat's pins, while it has some, or they're open in the popover under it:
+        // how many the instance says, or of the messages here until it has.
+        let pinned = self
+            .model
+            .pins_count
+            .max(self.model.messages.iter().filter(|m| m.pinned).count());
+        let pins_open = self.pins.is_some();
+        let group = self.model.room_open().cloned();
+        let sizes = self.header_sizes(
+            room,
+            &agent,
+            group.as_ref(),
+            (pinned > 0 || pins_open).then_some(pinned),
+            browsing || watching,
+            window,
+        );
+        let fit = model::header::fit(&sizes);
+        // What a narrow header took from a control shows whole under the pointer.
+        let cut = fit.cut(&sizes);
+        let bar = bar.gap(px(fit.gap));
         let globe = div()
             .id("browser-toggle")
             .role(Role::Button)
@@ -8142,7 +8186,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 None,
             )
             .child(Icon::new(Ico::Globe).small())
-            .child("Browser")
+            .when(fit.browser_word, |d| d.child("Browser"))
+            .when(cut.browser, |d| d.tooltip(tip("Browser")))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let id = this.model.selected.clone();
                 if this.model.watching == id && this.browser_docked {
@@ -8152,13 +8197,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.watch(id, cx);
                 }
             }));
-        // The chat's pins, while it has some, or they're open in the popover under it:
-        // how many the instance says, or of the messages here until it has.
-        let pinned = self
-            .model
-            .pins_count
-            .max(self.model.messages.iter().filter(|m| m.pinned).count());
-        let pins_open = self.pins.is_some();
         let pop = self
             .pins_pop(cx)
             .and_then(|pop| self.pins_placed(pop, cx.reduce_motion()));
@@ -8218,16 +8256,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 .size_full(),
             )
             .children(pop);
-        // How full the agent's session context is, after its model.
-        let context = self.context_ring(cx);
+        // How full the agent's session context is, after its model, half a gap closer to it.
+        let context = self.context_ring(cx).map(|c| c.ml(px(-fit.gap / 2.0)));
         // A group chat: its mark and name, which open its settings, its pins, and the
         // context of the member that answered last.
-        if let Some(room) = self.model.room_open().cloned() {
-            return bar.child(self.room_head(&room, cx)).child(
+        if let Some(room) = group {
+            return bar.child(self.room_head(&room, &fit, cut.head, cx)).child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(space::L))
+                    .gap(px(fit.gap))
                     .when(pinned > 0 || pins_open, |d| d.child(pins))
                     .children(context),
             );
@@ -8238,6 +8277,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .role(Role::Button)
                 .aria_label(agent.name.clone())
                 .occlude()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(space::S))
@@ -8250,6 +8290,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.menu == Some(Menu::Agent) && self.menu_at.is_none(),
                     |d| d.bg(p.hover),
                 )
+                .when(cut.head, |d| d.tooltip(tip_text(agent.name.clone())))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu_at = None;
                     this.menu_folders = false;
@@ -8264,31 +8305,37 @@ ACTA_KEY=secret:ACTA_KEY",
                     "head",
                     self.model.mood(&agent.id),
                     thread::color(&agent.color, p.dark),
-                    26.0,
+                    HEAD_MARK,
                     10.0,
                     self.model.finished_at(&agent.id),
                 ))
                 .child(
                     div()
+                        .min_w_0()
+                        .when_some(fit.name, |d, most| d.max_w(px(most)))
+                        .truncate()
                         .text_size(px(size::BODY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(p.ink)
                         .child(agent.name.clone()),
                 )
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .xsmall()
-                        .text_color(p.ink_3),
-                ),
+                .when(fit.chevrons, |d| {
+                    d.child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                }),
         )
         .child(
             div()
+                .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(space::L))
+                .gap(px(fit.gap))
                 .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
-                .children(self.brain_chip(&agent, cx))
+                .children(self.brain_chip(&agent, fit.brain, cut.brain, cx))
                 .children(context)
                 .child(
                     div()
@@ -8304,15 +8351,23 @@ ACTA_KEY=secret:ACTA_KEY",
                         .cursor_pointer()
                         .soft_hover(transparent_black(), p.hover, None)
                         .when(self.menu == Some(Menu::Permission), |d| d.bg(p.hover))
+                        .when(cut.permission, |d| d.tooltip(tip(permission)))
                         .flex()
                         .items_center()
                         .gap(px(space::XS))
-                        .child(permission)
                         .child(
-                            Icon::new(IconName::ChevronDown)
-                                .xsmall()
-                                .text_color(p.ink_3),
+                            div()
+                                .when_some(fit.permission, |d, most| d.max_w(px(most)))
+                                .truncate()
+                                .child(permission),
                         )
+                        .when(fit.chevrons, |d| {
+                            d.child(
+                                Icon::new(IconName::ChevronDown)
+                                    .xsmall()
+                                    .text_color(p.ink_3),
+                            )
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.menu = if this.menu == Some(Menu::Permission) {
                                 None
@@ -8323,6 +8378,103 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 ),
         )
+    }
+
+    /// How wide what the header holds is, in each of its forms, for `model::header::fit`:
+    /// the agent's menu or the group chat's head, its pins (`pins`, how many, while
+    /// they show), the browser chip, the brain chip, the context ring and the permission
+    /// chip, as `header` lays them out. Words are measured in the app's font.
+    fn header_sizes(
+        &self,
+        room: f32,
+        agent: &model::Agent,
+        group: Option<&model::Room>,
+        pins: Option<usize>,
+        browser: bool,
+        window: &Window,
+    ) -> model::header::Sizes {
+        let words = |text: &str| ui_text_width(text, size::CAPTION, FontWeight::NORMAL, window);
+        // A chip's padding, and its chevron with the gap before it.
+        let chip = 2.0 * space::S;
+        let chevron = space::XS + CHEVRON;
+        let pins = pins.map_or(0.0, |n| {
+            chip + ICON_GLYPH
+                + if n > 0 {
+                    space::XS + words(&n.to_string())
+                } else {
+                    0.0
+                }
+        });
+        let context = if self.model.context().is_some() {
+            control::CONTEXT_BUTTON
+        } else {
+            0.0
+        };
+        if let Some(r) = group {
+            let (head, name, members) = self.room_head_widths(r, window);
+            return model::header::Sizes {
+                room,
+                head,
+                name,
+                members,
+                pins,
+                context,
+                ..Default::default()
+            };
+        }
+        let name = ui_text_width(&agent.name, size::BODY, FontWeight::MEDIUM, window);
+        let head_chevron = space::S + CHEVRON;
+        let browser = if browser {
+            (
+                chip + ICON_GLYPH + space::XS + words("Browser"),
+                chip + ICON_GLYPH,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let brain = agent.picked().map_or((0.0, 0.0, 0.0), |picked| {
+            let icon = chip + BRAIN_ICON;
+            let with = |text: &str| icon + BRAIN_GAP + words(text) + BRAIN_GAP + CHEVRON;
+            let model = agent.picked_model().map_or(icon, |m| with(&m));
+            (with(&picked), model, icon)
+        });
+        let permission_words = words(model::mode_name(agent.mode()));
+        model::header::Sizes {
+            room,
+            head: chip + HEAD_MARK + space::S + name + head_chevron,
+            name,
+            members: 0.0,
+            pins,
+            browser,
+            brain,
+            context,
+            permission: chip + permission_words + chevron,
+            permission_words,
+            chevrons: head_chevron + chevron,
+        }
+    }
+
+    /// How wide the header's room is inside its padding, in a window `w` wide: the
+    /// column beside the sidebar as it's drawn now, less the window's buttons, or on a
+    /// Mac beside the rail, its traffic lights and the control after them.
+    fn header_room(&self, w: f32, railed: bool, window: &Window) -> f32 {
+        let column = w - self.sidebar_now(railed);
+        let buttons = if cfg!(target_os = "macos") {
+            0.0
+        } else {
+            WINDOW_BUTTONS
+        };
+        // Where it starts: on a Mac beside the rail, past the lights, the control that
+        // opens the sidebar and its own short padding (`render`).
+        let start = if railed && self.lights {
+            LIGHTS_PAD + control::ICON_SMALL + space::XS
+        } else if cfg!(target_os = "macos") && window.is_fullscreen() {
+            // GPUI Kit's bar pads its start in full screen.
+            0.75 * window.rem_size().as_f32() + space::L
+        } else {
+            space::L
+        };
+        (column - buttons - start - space::L).max(0.0)
     }
 
     /// A menu entry: its icon and its title.
@@ -8637,7 +8789,11 @@ ACTA_KEY=secret:ACTA_KEY",
         let drawn = pieces.clone();
         Textarea::new(&self.composer)
             .appearance(false)
-            .token(move |t, _, _| composer_token(p, &drawn, t.token().id(), t.token().text()))
+            .token(move |t, _, _| {
+                // A selected piece has the selection's colour while the words beside it
+                // show theirs: the textarea leaves it to the piece (LOO-347).
+                composer_token(p, &drawn, t.token().id(), t.token().text(), t.selection())
+            })
             .on_token_click(move |e, _, cx| {
                 let id = e.token().id().to_string();
                 let _ = this.update(cx, |loom, cx| loom.open_piece(&id, cx));
@@ -9618,11 +9774,24 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The header's brain chip: the program's icon and what the agent is set to on it,
-    /// such as "Opus 5.5 · Medium". It opens one menu just under it, with each setting
-    /// the program offers (its model, then its effort) under its name.
-    fn brain_chip(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// such as "Opus 5.5 · Medium", or as a narrow header shows it (`model::header`):
+    /// "Opus 5.5", or the icon alone, with its words whole under the pointer then (`cut`).
+    /// It opens one menu just under it, with each setting the program offers (its model,
+    /// then its effort) under its name.
+    fn brain_chip(
+        &self,
+        agent: &model::Agent,
+        shows: model::header::Brain,
+        cut: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
         let p = self.p;
         let picked = agent.picked()?;
+        let words = match shows {
+            model::header::Brain::Whole => Some(picked.clone()),
+            model::header::Brain::Model => agent.picked_model(),
+            model::header::Brain::Icon => None,
+        };
         let listed = self.model.program_listed(&agent.program).cloned();
         let open = self.menu == Some(Menu::Model);
         let menu = open.then(|| self.brain_menu(agent, cx));
@@ -9633,6 +9802,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .aria_label(format!("Brain: {picked}"))
                 .relative()
                 .occlude()
+                .flex_none()
                 .px(px(space::S))
                 .py(px(space::XS))
                 .rounded(px(radius::ROW))
@@ -9641,16 +9811,18 @@ ACTA_KEY=secret:ACTA_KEY",
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
                 .when(open, |d| d.bg(p.hover))
+                .when(cut, |d| d.tooltip(tip_text(picked.clone())))
                 .flex()
                 .items_center()
-                .gap(px(space::XS + 2.0))
-                .child(self.brain_icon(listed.as_ref(), 12.0))
-                .child(picked)
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .xsmall()
-                        .text_color(p.ink_3),
-                )
+                .gap(px(BRAIN_GAP))
+                .child(self.brain_icon(listed.as_ref(), BRAIN_ICON))
+                .when_some(words, |d, words| {
+                    d.child(words).child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu = if this.menu == Some(Menu::Model) {
                         None
@@ -11087,16 +11259,39 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_size(px(size::COMPOSER))
                                 // Before the textarea's own Paste, which would
                                 // paste a copied file as its path.
+                                // Copying gives the person's own emoji as :name:, with
+                                // their tokens kept for a paste back in here (LOO-347).
+                                .capture_action(cx.listener(|this, _: &CopyText, _, cx| {
+                                    if this.copy_composer(cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .capture_action(cx.listener(|this, _: &CutText, window, cx| {
+                                    if this.copy_composer(cx) {
+                                        cx.stop_propagation();
+                                        this.composer.update(cx, |c, cx| c.replace("", window, cx));
+                                    }
+                                }))
                                 .capture_action(cx.listener(|this, _: &Paste, window, cx| {
                                     if this.paste_files(cx) {
                                         cx.stop_propagation();
                                         return;
                                     }
-                                    // A link alone pastes as its preview.
-                                    let text = cx
-                                        .read_from_clipboard()
+                                    let item = cx.read_from_clipboard();
+                                    let text = item
+                                        .as_ref()
                                         .and_then(|item| item.text())
                                         .unwrap_or_default();
+                                    // What was copied from here, with its emoji.
+                                    let kept = item.as_ref().and_then(|item| item.metadata());
+                                    if let Some(words) =
+                                        crate::emoji::pasted(&text, kept.map(String::as_str))
+                                    {
+                                        cx.stop_propagation();
+                                        this.composer
+                                            .update(cx, |c, cx| c.replace(words, window, cx));
+                                        return;
+                                    }
                                     // A card's link, with Acta connected, as its pill.
                                     if let Some(url) = model::pasted_card(&text)
                                         .filter(|_| !this.model.acta_boards.is_empty())
@@ -15560,7 +15755,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let control = |id: &'static str, icon: Ico, area: WindowControlArea, close: bool| {
             div()
                 .id(id)
-                .w(px(34.0))
+                .w(px(WINDOW_BUTTON))
                 .h(px(28.0))
                 .flex()
                 .items_center()
@@ -15611,9 +15806,10 @@ ACTA_KEY=secret:ACTA_KEY",
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(2.0))
+                    .gap(px(WINDOW_BUTTON_GAP))
                     .px(px(space::S))
                     .child(control(
                         "win-min",
@@ -17317,13 +17513,14 @@ ACTA_KEY=secret:ACTA_KEY",
             .is_some()
             .then(|| self.context_card_view(&fill, ink, cx));
         // The card hangs under the ring, centred on it, over the chat. The pointer on the
-        // ring is heard here: the ring's own hover is its soft hover's.
+        // ring is heard here: the ring's own hover is its soft hover's. The header sets
+        // how close it sits to the chip before it.
         Some(
             div()
                 .id("context-at")
                 .occlude()
                 .relative()
-                .ml(px(-space::S))
+                .flex_none()
                 .on_hover(
                     cx.listener(|this, over: &bool, _, cx| this.context_hover(true, *over, cx)),
                 )
@@ -22654,7 +22851,25 @@ struct ComposerPieces {
 /// tiny picture or icon and its name cut in the middle (only the tiny picture when it
 /// stands with others), or a link pasted as a preview as its site's icon and its page's
 /// title, or its site until that's known. The whole name or address shows on hover.
-fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
+/// While the selection takes it in, it has the selection's colour across the line's height,
+/// `selected`, as the words beside it do.
+fn composer_token(
+    p: Palette,
+    pieces: &ComposerPieces,
+    id: &str,
+    words: &str,
+    selected: Option<Hsla>,
+) -> AnyElement {
+    div()
+        .h_full()
+        .flex()
+        .items_center()
+        .when_some(selected, |d, color| d.bg(color))
+        .child(composer_piece_of(p, pieces, id, words))
+        .into_any_element()
+}
+
+fn composer_piece_of(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
     let row = |tip: String, tint: Hsla| {
         div()
             .id(SharedString::from(format!("piece-{id}")))
@@ -25463,19 +25678,19 @@ impl Render for Loom {
         // Beside the rail, a Mac's traffic lights reach past it, so the title bar has the
         // control that opens the sidebar after them, its icon where the knot is in the
         // whole sidebar, and then the header.
+        let room = self.header_room(ww, railed, window);
         let header = if railed && self.lights {
-            let inset = (control::ICON_SMALL - ICON_GLYPH) / 2.0;
             div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .flex()
                 .items_center()
-                .pl(px(LIGHTS_END - inset - layout::RAIL))
+                .pl(px(LIGHTS_PAD))
                 .child(self.bar_button(true, cx))
-                .child(self.header(cx).pl(px(space::XS)))
+                .child(self.header(room, window, cx).pl(px(space::XS)))
         } else {
-            self.header(cx)
+            self.header(room, window, cx)
         };
         // Drawn last, over the sheet that takes the pointer while it's open.
         // From a right-click in the sidebar, it opens at the pointer instead.
@@ -26077,6 +26292,22 @@ pub(crate) const LIGHTS: (f32, f32) = (16.0, 17.0);
 const LIGHTS_END: f32 = LIGHTS.0 + 60.0 + LIGHTS.0;
 /// How wide a small icon is drawn, in its button.
 const ICON_GLYPH: f32 = 14.0;
+/// Beside the rail on a Mac, the room before the control that opens the sidebar, so its
+/// icon is where the knot is in the whole sidebar.
+const LIGHTS_PAD: f32 = LIGHTS_END - (control::ICON_SMALL - ICON_GLYPH) / 2.0 - layout::RAIL;
+/// How wide an extra-small icon is drawn, as a chevron.
+const CHEVRON: f32 = 12.0;
+/// The mark at the start of the chat's header: the agent's thread, or the group chat's
+/// weave.
+const HEAD_MARK: f32 = 26.0;
+/// The brain chip's program icon, and the gap between the chip's things.
+const BRAIN_ICON: f32 = 12.0;
+const BRAIN_GAP: f32 = space::XS + 2.0;
+/// Loom's own minimise, maximise and close, where it draws them (not on a Mac): each
+/// this wide, 2 apart, with `space::S` either side of the three.
+const WINDOW_BUTTON: f32 = 34.0;
+const WINDOW_BUTTON_GAP: f32 = 2.0;
+const WINDOW_BUTTONS: f32 = 3.0 * WINDOW_BUTTON + 2.0 * WINDOW_BUTTON_GAP + 2.0 * space::S;
 
 /// Whether a Mac's traffic lights are gone from the window's corner: full screen, where
 /// they leave with the title bar.
@@ -26826,6 +27057,26 @@ fn when_at(gutter: f32, time: f32, person: bool, bubble: Option<f32>, content: f
     } else {
         WhenAt::Corner
     }
+}
+
+/// How wide `text` is on one line at `size` and `weight` in the app's font, measured
+/// before anything is laid out, as the header's chips are (`Loom::header_sizes`).
+fn ui_text_width(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
+    let mut f = font(crate::prefs::ui_font());
+    f.weight = weight;
+    let run = TextRun {
+        len: text.len(),
+        font: f,
+        color: black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(SharedString::from(text.to_string()), px(size), &[run], None)
+        .width
+        .as_f32()
 }
 
 /// How wide `text` is on one line at `size`, in the window's font.
@@ -28024,6 +28275,91 @@ mod composer_tests {
         );
         cx.simulate_keystrokes("backspace");
         assert_eq!(shown(&c, cx), ("See ".into(), vec![]));
+    }
+}
+
+// A reply's words lay out at the chat's width after a resize (LOO-366): a bubble sized by
+// its words, as a reply's is (`ReplyDraw::bubbles`), isn't held to the width they were
+// wrapped at in an earlier, narrower frame (vendor/README.md, gpui-pre).
+#[cfg(test)]
+mod wrap_tests {
+    // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
+    use gpui::{
+        canvas, div, px, relative, AppContext as _, Context, Entity, IntoElement,
+        ParentElement as _, Render, Styled as _, TestAppContext, Window,
+    };
+    use gpui_kit::component::text::{TextView, TextViewState};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    const WORDS: &str = "Here is a longer reply so the chat has something to wrap. It goes on \
+        for a while about weaving, threads, looms and the patterns they make, so that at any \
+        width it spans several lines.";
+
+    struct Host {
+        words: Entity<TextViewState>,
+        width: f32,
+        bubble: Rc<Cell<f32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let bubble = self.bubble.clone();
+            div().w(px(self.width)).child(
+                div().flex().child(
+                    div()
+                        .relative()
+                        .max_w(relative(0.94))
+                        .px(px(16.0))
+                        .child(div().flex().flex_col().child(TextView::new(&self.words)))
+                        .child(
+                            canvas(
+                                move |b, _, _| bubble.set(b.size.width.as_f32()),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        ),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_bubble_wrapped_narrow_takes_the_width_it_has_again(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let bubble = Rc::new(Cell::new(0.0));
+        let (host, cx) = cx.add_window_view({
+            let bubble = bubble.clone();
+            move |_, cx| Host {
+                words: cx.new(|cx| TextViewState::markdown(WORDS, cx)),
+                width: 600.0,
+                bubble,
+            }
+        });
+        let at = |width: f32, cx: &mut gpui::VisualTestContext| {
+            host.update(cx, |h, cx| {
+                h.width = width;
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            bubble.get()
+        };
+        // As wide as the row lets it be, its words being longer than that on one line.
+        let wide = at(600.0, cx);
+        assert!((wide - 0.94 * 600.0).abs() < 1.0, "{wide}");
+        // Narrow, then wide again: as wide as before, not the narrow width's.
+        let narrow = at(120.0, cx);
+        assert!(narrow < 0.94 * 120.0 + 1.0, "{narrow}");
+        for _ in 0..2 {
+            let again = at(600.0, cx);
+            assert!(
+                (again - wide).abs() < 1.0,
+                "{again} after {narrow}, {wide} before"
+            );
+        }
     }
 }
 

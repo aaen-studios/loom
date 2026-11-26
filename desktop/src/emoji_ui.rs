@@ -1647,6 +1647,7 @@ mod tests {
         assert_eq!(found, vec!["😭", "👍"]);
         // One that's a piece already isn't again.
         let at = text.find('👍').unwrap();
-        assert_eq!(unpieced(text, &[at..at + '👍'.len_utf8()]).len(), 1);
+        let piece = at..at + '👍'.len_utf8();
+        assert_eq!(unpieced(text, std::slice::from_ref(&piece)).len(), 1);
     }
 }

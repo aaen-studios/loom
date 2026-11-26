@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 pub mod drafts;
+pub mod header;
 mod popover;
 pub mod popup;
 mod rooms;
@@ -272,26 +273,39 @@ impl Agent {
         out
     }
     /// What the header's brain chip says, as "Opus · High"; None when there's nothing
-    /// What the header's chips say together, as "Opus · High"; None when there's nothing
     /// to pick.
     pub fn picked(&self) -> Option<String> {
-        let names: Vec<String> = self
-            .picks()
-            .iter()
-            .map(|o| {
-                let v = self.chosen(&o.id);
-                o.values
-                    .iter()
-                    .find(|(value, _)| *value == v)
-                    .map_or(v, |(_, name)| name.clone())
-            })
-            .filter(|n| !n.is_empty())
-            .collect();
+        let names: Vec<String> = self.picked_names().into_iter().map(|(_, n)| n).collect();
         if names.is_empty() {
             None
         } else {
             Some(names.join(" · "))
         }
+    }
+
+    /// What the brain chip says once a narrow header drops its effort: the model alone
+    /// (`model::header`). None when the program has no model to pick.
+    pub fn picked_model(&self) -> Option<String> {
+        self.picked_names()
+            .into_iter()
+            .find_map(|(category, name)| (category == "model").then_some(name))
+    }
+
+    /// The name of the value each of `picks` is on, the model first, with its category.
+    fn picked_names(&self) -> Vec<(String, String)> {
+        self.picks()
+            .iter()
+            .map(|o| {
+                let v = self.chosen(&o.id);
+                let name = o
+                    .values
+                    .iter()
+                    .find(|(value, _)| *value == v)
+                    .map_or(v, |(_, name)| name.clone());
+                (o.category.clone(), name)
+            })
+            .filter(|(_, n)| !n.is_empty())
+            .collect()
     }
 }
 
@@ -4697,11 +4711,13 @@ pub fn selected_in(m: &Message, selected: &str) -> bool {
     if picked.is_empty() {
         return false;
     }
+    // An emoji is selected as it copies: one of the person's own the chat draws as its
+    // name, and one in code or not drawn yet as written (LOO-347).
     let shown = m
         .blocks
         .iter()
         .filter(|b| b.kind == "text" && b.parent.is_none())
-        .map(|b| spoken(&b.text))
+        .map(|b| spoken(&crate::emoji::as_copied(&b.text)))
         .collect::<Vec<_>>()
         .join(" ");
     squash(&shown).contains(&picked)
@@ -12342,6 +12358,40 @@ mod tests {
         assert!(!m.reply_to("msg_9", None, false));
     }
 
+    // LOO-347: words selected with emoji in them are the message's, one of the person's
+    // own selected as its name.
+    #[test]
+    fn words_selected_with_emoji_are_the_messages() {
+        let mut e = crate::emoji::Emojis::default();
+        for (id, name) in [("e_3", "party_cat"), ("e_9", "gone")] {
+            e.own.push(crate::emoji::Custom {
+                id: id.into(),
+                name: name.into(),
+                file: "ab".into(),
+                animated: false,
+            });
+        }
+        e.paths.insert("e_3".into(), "/f/e_3".into());
+        crate::emoji::sync_own(&e);
+        let mut m = in_chat();
+        m.take(
+            &json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "items": [
+                {"id": "msg_1", "role": "person", "from": "d_1", "at": 1, "blocks": [
+                    {"kind": "text", "text": "Word 😭 word <:party_cat:e_3> 👨‍👩‍👧 wad"}
+                ]},
+                {"id": "msg_2", "role": "person", "from": "d_1", "at": 2, "blocks": [
+                    {"kind": "text", "text": "a <:gone:e_9> b `<:party_cat:e_3>` c"}
+                ]}
+            ]}),
+        );
+        assert!(model_selected(&m, "msg_1", "Word 😭 word"));
+        assert!(model_selected(&m, "msg_1", "😭 word :party_cat: 👨‍👩‍👧 wad"));
+        assert!(!model_selected(&m, "msg_1", "<:party_cat:e_3> wad x"));
+        // Not drawn yet, or in code: as written, as it's shown and copied.
+        assert!(model_selected(&m, "msg_2", "a <:gone:e_9> b"));
+        assert!(model_selected(&m, "msg_2", "b <:party_cat:e_3> c"));
+    }
+
     fn model_selected(m: &Model, id: &str, words: &str) -> bool {
         m.messages
             .iter()
@@ -15175,11 +15225,22 @@ mod tests {
         let ids: Vec<String> = a.picks().iter().map(|o| o.id.clone()).collect();
         assert_eq!(ids, ["model", "effort"]);
         assert_eq!(a.picked().as_deref(), Some("Opus · High"));
+        // A narrow header's brain chip drops the effort.
+        assert_eq!(a.picked_model().as_deref(), Some("Opus"));
         let f = m.set_config("a_1", "model", "sonnet").unwrap();
         assert_eq!(f["args"]["config"]["model"], "sonnet");
         assert_eq!(
             m.agent("a_1").unwrap().picked().as_deref(),
             Some("Sonnet · High")
+        );
+        // A program with an effort and no model has nothing to show once that's dropped.
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main", "options": [
+            {"id": "effort", "name": "Effort", "category": "thought_level", "value": "medium", "options": [{"value": "medium", "name": "Medium"}]}
+        ]}]}));
+        let a = m.agent("a_1").unwrap();
+        assert_eq!(
+            (a.picked().as_deref(), a.picked_model()),
+            (Some("Medium"), None)
         );
         // A program that offers nothing to pick shows no picker.
         m.take(

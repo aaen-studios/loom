@@ -1,6 +1,6 @@
 //! Presentation callbacks and measured geometry. None of this enters document history.
 use super::{InlineToken, InlineTokenSpan, InputBaseState, InputModeKind, rope_ext::RopeExt as _};
-use gpui::{AnyElement, App, Bounds, ClickEvent, Font, IntoElement, Pixels, Window};
+use gpui::{AnyElement, App, Bounds, ClickEvent, Font, Hsla, IntoElement, Pixels, Window};
 use std::{collections::HashMap, ops::Range, rc::Rc};
 
 /// Read-only context for a single inline renderer. Width is the full available row.
@@ -8,6 +8,9 @@ use std::{collections::HashMap, ops::Range, rc::Rc};
 pub struct InlineTokenContext {
     span: InlineTokenSpan,
     selected: bool,
+    // loom: the colour the input paints its selection with, while a selection it shows
+    // takes this token in (`selection`).
+    selection: Option<Hsla>,
     disabled: bool,
     readonly: bool,
     line_height: Pixels,
@@ -22,6 +25,14 @@ impl InlineTokenContext {
     }
     pub fn is_selected(&self) -> bool {
         self.selected
+    }
+    /// loom: the colour the input paints its selection with, while the selection takes
+    /// this token in and the input shows it (its window is active and it has focus, or
+    /// its selection popup does).
+    /// The input leaves a token's background to its renderer, so a renderer that paints
+    /// this matches the words beside it.
+    pub fn selection(&self) -> Option<Hsla> {
+        self.selection
     }
     pub fn is_disabled(&self) -> bool {
         self.disabled
@@ -216,17 +227,26 @@ impl<M: InputModeKind> InputBaseState<M> {
             && self.mask_pattern.is_none()
             && !self.token_spans().is_empty()
     }
+    /// loom: whether the input paints its selection now. It lays the selection out while
+    /// it or its selection popup has focus, and paints it while its window is active.
+    pub(super) fn selection_shown(&self, window: &Window, cx: &App) -> bool {
+        window.is_window_active() && self.has_selection_focus(window, cx)
+    }
+    /// `shown`: whether the input paints its selection now (`selection_shown`).
     pub(super) fn token_context(
         &self,
         span: &InlineTokenSpan,
         line_height: Pixels,
         width: Pixels,
+        shown: bool,
     ) -> InlineTokenContext {
         let range = span.range();
         let selection = self.selected_range();
+        let selected = selection.start < range.end && range.start < selection.end;
         InlineTokenContext {
             span: span.clone(),
-            selected: selection.start < range.end && range.start < selection.end,
+            selected,
+            selection: (selected && shown).then_some(self.editor_style.selection),
             disabled: self.disabled,
             readonly: self.readonly,
             line_height,
