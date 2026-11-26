@@ -202,6 +202,15 @@ fn run(i: Instance, fake: String) ! Error {
     _ = try fetch_json("{fake}/test/set?thread=mcp:new1&status=failed")
     let f = try card_when(mut app, line_id.copy(), "mcp:new1", failed)
     try check(str_at(f.copy(), "reason") == some(String("Usage limit reached · resets 15:30")) and str_at(f, "step") == none, "a failed thread comes with why")
+    let retried = try app.cmd("q_16", "t3.retry", Obj.new().s("thread", String("mcp:new1")).done())
+    try check(at(retried, "ok") == Json.Bool(true), "t3.retry asks a failed thread to try again")
+    let again = try card_when(mut app, line_id.copy(), "mcp:new1", working)
+    let told_retry = try fetch_json("{fake}/test/thread?thread=mcp:new1")
+    try check(str_at(again, "state") == some(String("working")) and "{at(told_retry, "told")}" == #"["Try again."]"#, "with t3_thread_send, and its card works again")
+    let not_failed = try app.cmd("q_17", "t3.retry", Obj.new().s("thread", String("mcp:fix")).done())
+    try check(str_at(at(not_failed, "error"), "code") == some(String("not_found")), "and refuses one that hasn't failed")
+    let servers = try app.cmd("q_18", "t3.servers", Obj.new().done())
+    try check("{at(at(servers, "value"), "servers")}" == #"["t3"]"#, "t3.servers names the person's T3 servers")
 
     // --- One no server has ---
     let gone = try app.cmd("q_13", "t3.thread", Obj.new().s("thread", String("mcp:nothing")).done())

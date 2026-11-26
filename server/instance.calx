@@ -14694,10 +14694,11 @@ impl Instance {
             }
             return
         }
-        if c.kind == "t3_respond" {
+        if c.kind == "t3_respond" or c.kind == "t3_retry" {
             let w = i.t3.answering.remove(c.board.copy()) else return
             if failed {
-                i.answer_cmd(w, Answer.Refused(String("unavailable"), "T3 didn't take the answer: {said}"))
+                let what = if c.kind == "t3_retry" { "T3 didn't try again" } else { "T3 didn't take the answer" }
+                i.answer_cmd(w, Answer.Refused(String("unavailable"), "{what}: {said}"))
                 return
             }
             i.answer_cmd(w, Answer.Value(Obj.new().done()))
@@ -14934,6 +14935,10 @@ impl Instance {
                         for (thread, card) in threads {
                             let key = "{user}\n{thread}"
                             i.t3_shown_in(key.copy(), m.copy())
+                            // T3 doesn't keep a thread's effort: the card it was started
+                            // with does, past a restart.
+                            let effort = str_at(card.copy(), "effort") ?? String()
+                            if effort.len() > 0 and not i.t3.efforts.contains(key.copy()) { i.t3.efforts.insert(key.copy(), effort) }
                             var now_card = card.copy()
                             if let c = i.t3.known.find(key) { now_card = c.copy() }
                             if t3_stale(now_card, T3_LIVE_MS) { i.t3_look(user.copy(), thread.copy(), String(), none) }
@@ -15001,7 +15006,39 @@ impl Instance {
             i.t3_start(w, user, args)
             return
         }
+        if name == "t3.retry" {
+            i.t3_retry(w, user, args)
+            return
+        }
+        if name == "t3.servers" {
+            var names = List<Json>()
+            for s in i.t3_servers(user.copy()) { names.push(Json.Str(s.name.copy())) }
+            i.answer_cmd(w, Answer.Value(Obj.new().j("servers", Json.Array(names)).done()))
+            return
+        }
         i.answer_cmd(w, Answer.Refused(String("unknown_command"), "There's no command {name}."))
+    }
+
+    // t3.retry: a thread that failed, asked as the person to try again.
+    fn t3_retry(i: mut Instance, w: own Waiter, user: String, args: Json) {
+        let thread = (str_at(args, "thread") ?? String()).trim().copy()
+        var server = String()
+        var failed = false
+        if let c = i.t3.known.find("{user}\n{thread}") {
+            server = str_at(c.copy(), "server") ?? String()
+            failed = str_at(c.copy(), "state") == some(String("failed"))
+        }
+        if thread.len() == 0 or not failed {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("That thread hasn't failed.")))
+            return
+        }
+        i.next_job += 1
+        let k = "retry{i.next_job}"
+        i.t3.answering.insert(k.copy(), w.copy())
+        let a = Obj.new().s("threadId", thread.copy()).s("message", String("Try again.")).done()
+        if not i.t3_call(user, server, "t3_retry", thread, k.copy(), "t3_thread_send", a) {
+            if let held = i.t3.answering.remove(k) { i.answer_cmd(held, Answer.Refused(String("not_found"), String("T3 isn't connected."))) }
+        }
     }
 
     // t3.form's answer: the person's T3 servers, the one picked, its projects as it

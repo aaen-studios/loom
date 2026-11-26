@@ -9,6 +9,7 @@ module tests.fake_t3.main
 //                    t3_thread_read     a thread with its latest run and activity
 //                    t3_pending_request list, read and respond to a question
 //                    t3_thread_launch   a new thread, running
+//                    t3_thread_send     a message to a thread, which runs again
 //     POST /api/auth/websocket-ticket   a ticket for /ws, for the same token
 //     GET /ws?wsTicket=…                T3's WebSocket API, as Effect RPC: only
 //                    orchestration.dispatchCommand with runtime-request.respond,
@@ -199,6 +200,17 @@ impl Fake {
             self.threads.insert(id.copy(), t)
             return answer(object([("threadId", Json.Str(id.copy())), ("link", Json.Str(link(id, title))), ("status", text("starting"))]))
         }
+        if name == "t3_thread_send" {
+            let id = str_of(args.copy(), "threadId")
+            if not self.threads.contains(id.copy()) { return tool_error("Thread not found: {id}") }
+            self.set_status(id.copy(), String("running"))
+            let t = mut self.threads.find(id.copy()) else return tool_error("Thread not found: {id}")
+            var told = List<Json>()
+            if let Json.Array(xs) = t.get(String("told")) ?? Json.Null { told = xs.copy() }
+            told.push(Json.Str(str_of(args.copy(), "message")))
+            t = with(t.copy(), "told", Json.Array(told))
+            return answer(object([("threadId", Json.Str(id)), ("status", text("running"))]))
+        }
         return tool_error("No tool {name}.")
     }
 
@@ -218,7 +230,7 @@ impl Fake {
             result = object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("t3")), ("version", text("0.1.12"))]))])
         } else if method == "tools/list" {
             var tools = List<Json>()
-            for n in ["t3_project_list", "t3_thread_read", "t3_pending_request", "t3_thread_launch"] {
+            for n in ["t3_project_list", "t3_thread_read", "t3_pending_request", "t3_thread_launch", "t3_thread_send"] {
                 tools.push(object([("name", text(n))]))
             }
             result = object([("tools", Json.Array(tools))])
