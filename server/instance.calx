@@ -765,6 +765,30 @@ fn compaction(u: Json) -> bool {
     return str_at(at(at(u, "_meta"), "claudeCode"), "toolName") == some(String("compact"))
 }
 
+// The chat a seat (Run.seat) is in, and in a group chat the member whose seat it
+// is, from CONVERSATION/AGENT; "" for an agent's own chat, whose seat is the chat.
+fn seat_parts(seat: String) -> (String, String) {
+    let cut = seat.find("/") else return (seat.copy(), String())
+    return (seat[..cut].copy(), seat[cut + 1..].copy())
+}
+
+// A `fresh` line's mark, where `seat` went on in a fresh session: in a group
+// chat with its member as `agent`, whom the line names.
+fn fresh_mark(seat: String) -> Json {
+    let (_, member) = seat_parts(seat)
+    var mark = Obj.new().s("kind", String("mark")).s("mark", String("fresh"))
+    if member.len() > 0 { mark = mark.s("agent", member) }
+    return mark.done()
+}
+
+@test
+fn a_seat_is_its_chat_and_in_a_group_chat_its_member() {
+    assert(seat_parts(String("c_1/a_2")) == (String("c_1"), String("a_2")))
+    assert(seat_parts(String("c_1")) == (String("c_1"), String()))
+    assert("{fresh_mark(String("c_1/a_2"))}" == #"{"kind":"mark","mark":"fresh","agent":"a_2"}"#)
+    assert("{fresh_mark(String("c_1"))}" == #"{"kind":"mark","mark":"fresh"}"#)
+}
+
 // One window of a plan's limits, from Claude Code's rate-limit info: how much of
 // it is used, in percent (its `utilization` is 0 to 1), and when it resets, in Unix
 // ms (its `resetsAt` is in seconds). None without both.
@@ -11869,13 +11893,14 @@ impl Instance {
         }
     }
 
-    // The conversation an ACP session of `p`'s is the session of.
+    // What an ACP session of `p`'s is kept under: its chat, or in a group chat
+    // its member's seat there (Run.seat). The router's session is no chat's.
     fn session_chat(i: Instance, p: Proc, session: String) -> String? {
-        for (conversation, s) in p.sessions {
-            if s == session { return some(conversation.copy()) }
+        for (seat, s) in p.sessions {
+            if s == session { return if seat == ROUTE_SEAT { none } else { some(seat.copy()) } }
         }
         if let run = i.run_for_session(session) {
-            if let r = i.runs.find(run) { return some(r.conversation.copy()) }
+            if let r = i.runs.find(run) { return some(r.seat.copy()) }
         }
         return none
     }
@@ -11900,12 +11925,11 @@ impl Instance {
     // member's, `CONVERSATION/AGENT`, which the chat shows when it's the one
     // shown already, when the member is answering there now, or when none is.
     fn show_context(i: Instance, user: String, seat: String) ! Error {
-        let cut = seat.find("/") else {
-            try i.tell_context(user, seat)
+        let (conversation, member) = seat_parts(seat.copy())
+        if member.len() == 0 {
+            try i.tell_context(user, conversation)
             return
         }
-        let conversation = seat[..cut].copy()
-        let member = seat[cut + 1..].copy()
         let shown = try i.store.context_agent(user.copy(), conversation.copy())
         if shown.len() > 0 and shown != member and not i.answers_in(user.copy(), conversation.copy(), member.copy()) { return }
         try i.store.show_seat_context(user.copy(), conversation.copy(), seat, member)
@@ -11929,7 +11953,7 @@ impl Instance {
     // never compacted, and when the last one was nearly full, a line in the chat
     // says so (PLAN.md, "One endless chat"); one the person asked for has its line
     // already. In a group chat it's one member's seat that does, which the chat
-    // shows while that member answers there, and the chat has no line.
+    // shows while that member answers there, and its line names the member.
     fn went_fresh(i: Instance, user: String, conversation: String, seat: String, renew: Renew) ! Error {
         if try i.store.fresh_asked(user.copy(), seat.copy()) { try i.store.ask_fresh(user.copy(), seat.copy(), false) }
         let (_, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
@@ -11938,8 +11962,7 @@ impl Instance {
             try i.store.put_compacted(user.copy(), seat.copy(), 0)
             try i.show_context(user.copy(), seat.copy())
         }
-        if seat != conversation { return }
-        if let Renew.Full = renew { _ = try i.chat_line(user, conversation, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+        if let Renew.Full = renew { _ = try i.chat_line(user, conversation, fresh_mark(seat)) }
     }
 
     // A line across the chat from loom, not a message of anyone's: a `loom`
@@ -11955,7 +11978,9 @@ impl Instance {
     // A compaction its program reported (`compaction`): once it's done, a line
     // in its chat says so, with the tokens its context held before and after
     // where the program says, filled in as a later report adds them. One that
-    // failed leaves no line.
+    // failed leaves no line. A group chat member's session is its seat there:
+    // the line goes in the group chat with the member's `agent`, and when it
+    // was compacted is kept with the seat.
     fn compacted(i: Instance, p: mut Proc, session: String, u: Json) ! Error {
         let call = str_at(u.copy(), "toolCallId") ?? String()
         let status = str_at(u.copy(), "status") ?? String()
@@ -11968,12 +11993,14 @@ impl Instance {
         }
         let line: String? = if let v = p.compactions.find(call.copy()) { some(v.copy()) } else { none }
         if line == none and status != "completed" and before == 0 { return }
-        let conversation = i.session_chat(p, session.copy()) else return
+        let seat = i.session_chat(p, session.copy()) else return
+        let (conversation, member) = seat_parts(seat.copy())
         if line == none and before == 0 {
             let (used, _): (i64, i64) = i.context.get(session) ?? (i64(0), i64(0))
             before = used
         }
         var mark = Obj.new().s("kind", String("mark")).s("mark", String("compacted"))
+        if member.len() > 0 { mark = mark.s("agent", member) }
         if before > 0 { mark = mark.i("before", before) }
         if after > 0 { mark = mark.i("after", after) }
         match line {
@@ -11990,8 +12017,8 @@ impl Instance {
                 // The tokens after can come in a later report.
                 if after == 0 { p.compactions.insert(call, id) }
                 // The apps say when it was last compacted.
-                try i.store.put_compacted(p.user.copy(), conversation.copy(), now())
-                try i.show_context(p.user.copy(), conversation)
+                try i.store.put_compacted(p.user.copy(), seat.copy(), now())
+                try i.show_context(p.user.copy(), seat)
             },
         }
     }
@@ -13899,14 +13926,15 @@ impl Instance {
             let (used, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
             if name == "conversation.fresh" {
                 // Its next turn starts a fresh session, given the newest of the chat;
-                // the apps show it from nothing now, under a line in the chat.
+                // the apps show it from nothing now, under a line in the chat, which
+                // in a group chat names the member.
                 try i.store.ask_fresh(user.copy(), seat.copy(), true)
                 if size > 0 {
                     try i.store.put_context(user.copy(), seat.copy(), 0, size)
                     try i.store.put_compacted(user.copy(), seat.copy(), 0)
                     try i.show_context(user.copy(), seat.copy())
                 }
-                if room == Json.Null { _ = try i.chat_line(user, id, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+                _ = try i.chat_line(user, id, fresh_mark(seat))
                 return Answer.Value(empty)
             }
             if used <= 0 or try i.store.fresh_asked(user.copy(), seat.copy()) { return Answer.Refused(String("bad_request"), String("There's nothing in its session to compact.")) }

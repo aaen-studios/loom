@@ -1873,7 +1873,7 @@ impl Block {
             text: if kind == "plan" {
                 plan_text(b)
             } else if kind == "mark" {
-                mark_text(b)
+                mark_text(b, None)
             } else {
                 s(b, "text")
             },
@@ -1893,15 +1893,23 @@ impl Block {
 /// What a line across the chat from loom says (a `loom` message's `mark` block): where
 /// the program compacted the context, with its tokens before and after where it said,
 /// or where loom started a fresh session for a full one (PLAN.md, "One endless chat").
-fn mark_text(b: &Value) -> String {
+/// In a group chat either is a member's session, `member`, named by the line.
+fn mark_text(b: &Value, member: Option<&str>) -> String {
     match s(b, "mark").as_str() {
-        "fresh" => "A fresh session starts here".into(),
+        "fresh" => match member {
+            Some(name) => format!("{name}'s fresh session starts here"),
+            None => "A fresh session starts here".into(),
+        },
         "compacted" => {
+            let what = match member {
+                Some(name) => format!("{name}'s context compacted"),
+                None => "Context compacted".into(),
+            };
             let n = |k: &str| b.get(k).and_then(Value::as_i64).unwrap_or(0);
             match (n("before"), n("after")) {
-                (0, _) | (_, 0) => "Context compacted".into(),
+                (0, _) | (_, 0) => what,
                 (before, after) => format!(
-                    "Context compacted · {} → {}",
+                    "{what} · {} → {}",
                     tokens_short(before),
                     tokens_short(after)
                 ),
@@ -6177,7 +6185,7 @@ impl Model {
             id: s(m, "id"),
             role: s(m, "role"),
             at: m.get("at").and_then(Value::as_i64).unwrap_or(0),
-            blocks: blocks_of(m),
+            blocks: self.marks_named(m, blocks_of(m)),
             live: false,
             queued: false,
             came: Came::Before,
@@ -6203,6 +6211,23 @@ impl Model {
                         .unwrap_or_else(|| "Another agent".into())
                 }),
         }
+    }
+
+    /// A line from loom for one member of a group chat (its mark's `agent`) names the
+    /// member, by its name now: "Ledger's context compacted · 120k → 76k", "Ledger's
+    /// fresh session starts here".
+    fn marks_named(&self, m: &Value, mut blocks: Vec<Block>) -> Vec<Block> {
+        let raw = m.get("blocks").and_then(Value::as_array);
+        for (b, v) in blocks.iter_mut().zip(raw.into_iter().flatten()) {
+            let agent = v.get("agent").and_then(Value::as_str);
+            if let Some(a) = agent
+                .filter(|_| b.kind == "mark")
+                .and_then(|id| self.agent(id))
+            {
+                b.text = mark_text(v, Some(&a.name));
+            }
+        }
+        blocks
     }
 
     /// Another chat opened: its pins are asked for again.
@@ -12877,6 +12902,45 @@ mod tests {
         };
         let f = flow(&[Some(&mark), Some(&reply)], |_| 0);
         assert!(!f[0].head && f[1].head);
+    }
+
+    #[test]
+    fn a_group_chat_members_line_names_the_member() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Ledger", "acp_agent": "claude"},
+        ]}));
+        let line = |mark: Value| {
+            m.message_of(&json!({"id": "m_1", "role": "loom", "at": 1, "blocks": [mark]}))
+                .blocks[0]
+                .text
+                .clone()
+        };
+        assert_eq!(
+            line(
+                json!({"kind": "mark", "mark": "compacted", "agent": "a_1", "before": 120_000, "after": 76_000})
+            ),
+            "Ledger's context compacted · 120k → 76k"
+        );
+        assert_eq!(
+            line(json!({"kind": "mark", "mark": "compacted", "agent": "a_1", "before": 120_000})),
+            "Ledger's context compacted"
+        );
+        assert_eq!(
+            line(json!({"kind": "mark", "mark": "fresh", "agent": "a_1"})),
+            "Ledger's fresh session starts here"
+        );
+        // A member that's gone since: the line as an agent's own chat has it.
+        assert_eq!(
+            line(
+                json!({"kind": "mark", "mark": "compacted", "agent": "a_9", "before": 120_000, "after": 76_000})
+            ),
+            "Context compacted · 120k → 76k"
+        );
+        assert_eq!(
+            line(json!({"kind": "mark", "mark": "fresh", "agent": "a_9"})),
+            "A fresh session starts here"
+        );
     }
 
     #[test]
