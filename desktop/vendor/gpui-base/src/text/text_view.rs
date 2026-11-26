@@ -9,13 +9,14 @@ use gpui::{
 };
 
 use crate::StyledExt;
+use crate::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::text::TextViewFormat;
 use crate::text::markdown_ext::{MarkdownExtensions, MarkdownNode, MarkdownPlugin};
 use crate::text::node::{CodeBlock, TableData};
 use crate::text::range_highlight::{PendingReveal, RevealProgress};
 use crate::text::state::{LineSpan, SelectionFormat, TextViewState};
 use crate::text::stream_fade::TextViewMotion;
-use crate::{GlobalState, TextSelection, text::TextViewStyle};
+use crate::{GlobalState, SelectionMotion, TextSelection, text::TextViewStyle};
 
 /// Type for code block actions generator function.
 pub(crate) type CodeBlockActionsFn =
@@ -970,6 +971,35 @@ impl Element for TextView {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             })
             .on_action(window.listener_for(&state, TextViewState::on_action_select_all))
+            // loom: Shift with an arrow, Home or End moves the selection's end.
+            .map(|this| {
+                let key = |motion: SelectionMotion| {
+                    let state = state.clone();
+                    move |window: &mut Window, cx: &mut App| {
+                        if !TextViewState::select_by_key(&state, motion, cx) {
+                            cx.propagate();
+                            return;
+                        }
+                        window.refresh();
+                    }
+                };
+                let (left, right) = (key(SelectionMotion::Left), key(SelectionMotion::Right));
+                let (up, down) = (key(SelectionMotion::Up), key(SelectionMotion::Down));
+                let (start, end) = (
+                    key(SelectionMotion::LineStart),
+                    key(SelectionMotion::LineEnd),
+                );
+                this.on_action(move |_: &SelectLeft, window, cx| left(window, cx))
+                    .on_action(move |_: &SelectRight, window, cx| right(window, cx))
+                    .on_action(move |_: &SelectUp, window, cx| up(window, cx))
+                    .on_action(move |_: &SelectDown, window, cx| down(window, cx))
+                    .on_action(move |_: &crate::input::SelectToStartOfLine, window, cx| {
+                        start(window, cx)
+                    })
+                    .on_action(move |_: &crate::input::SelectToEndOfLine, window, cx| {
+                        end(window, cx)
+                    })
+            })
             .map(|this| {
                 if self.scrollable {
                     this.child(crate::ScrollBounce::new(
@@ -4951,6 +4981,219 @@ mod tests {
             press(before, 1, true, cx);
             release(before, 1, cx);
             assert_eq!(selected(&state, cx), "alpha beta");
+        }
+
+        // loom: Shift with an arrow, Home or End moves the selection's end
+        // (`crate::key_selection`).
+        fn click(at: gpui::Point<Pixels>, cx: &mut VisualTestContext) {
+            press(at, 1, false, cx);
+            release(at, 1, cx);
+            cx.run_until_parked();
+        }
+
+        fn keys(keys: &str, state: &Entity<TextViewState>, cx: &mut VisualTestContext) -> String {
+            cx.simulate_keystrokes(keys);
+            selected(state, cx)
+        }
+
+        #[gpui::test]
+        fn shift_arrows_move_the_end_of_a_drag(cx: &mut TestAppContext) {
+            let text = "alpha beta gamma";
+            let (state, cx) = setup(text, cx);
+            press(position(&state, text, 0, cx), 1, false, cx);
+            // Just inside the "a" that ends "alpha": the drag stops before it.
+            let end = position(&state, text, 4, cx);
+            drag(end, cx);
+            release(end, 1, cx);
+            cx.run_until_parked();
+            assert_eq!(selected(&state, cx), "alph");
+            assert_eq!(keys("shift-right", &state, cx), "alpha");
+            // (The copy is trimmed: the space after it isn't seen.)
+            assert_eq!(keys("shift-right shift-right", &state, cx), "alpha b");
+            assert_eq!(keys("shift-left shift-left", &state, cx), "alpha");
+            assert_eq!(keys("shift-end", &state, cx), text);
+            assert_eq!(keys("shift-left", &state, cx), "alpha beta gamm");
+            assert_eq!(keys("shift-home", &state, cx), "");
+        }
+
+        #[gpui::test]
+        fn a_click_then_shift_arrows_select_from_it(cx: &mut TestAppContext) {
+            let text = "alpha beta gamma";
+            let (state, cx) = setup(text, cx);
+            // Just inside the "b": the selection starts before it.
+            click(position(&state, text, 6, cx), cx);
+            assert_eq!(selected(&state, cx), "");
+            assert_eq!(
+                keys(
+                    "shift-right shift-right shift-right shift-right",
+                    &state,
+                    cx
+                ),
+                "beta"
+            );
+            assert_eq!(keys("shift-home", &state, cx), "alpha");
+            assert_eq!(keys("shift-end", &state, cx), "beta gamma");
+        }
+
+        #[gpui::test]
+        fn shift_arrows_cross_paragraphs_a_character_at_a_time(cx: &mut TestAppContext) {
+            let (state, cx) = setup("first one\n\nsecond one", cx);
+            click(position(&state, "first one", 6, cx), cx);
+            assert_eq!(keys("shift-end", &state, cx), "one");
+            // One step on takes in the next paragraph's first character.
+            assert_eq!(keys("shift-right", &state, cx), "one\ns");
+            assert_eq!(keys("shift-left", &state, cx), "one");
+            assert_eq!(keys("shift-left", &state, cx), "on");
+        }
+
+        #[gpui::test]
+        fn shift_up_and_down_keep_their_place_across(cx: &mut TestAppContext) {
+            let (state, cx) = setup("abc one\n\nabc two\n\nabc six", cx);
+            click(position(&state, "abc two", 4, cx), cx);
+            assert_eq!(keys("shift-down", &state, cx), "two\nabc");
+            assert_eq!(keys("shift-up", &state, cx), "");
+            assert_eq!(keys("shift-up", &state, cx), "one\nabc");
+            // Past the first row, the start; past the last, the end.
+            assert_eq!(keys("shift-up", &state, cx), "abc one\nabc");
+            assert_eq!(
+                keys("shift-down shift-down shift-down shift-down", &state, cx),
+                "two\nabc six"
+            );
+        }
+
+        #[gpui::test]
+        fn shift_home_and_end_keep_to_a_wrapped_row(cx: &mut TestAppContext) {
+            let text = "one two three four five six seven eight nine ten eleven twelve \
+                thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty";
+            let (state, cx) = setup(text, cx);
+            click(position(&state, text, 0, cx), cx);
+            let row = keys("shift-end", &state, cx);
+            assert!(
+                text.starts_with(&row) && row.len() < text.len() - 10,
+                "{row}"
+            );
+            // At a row's end, End again stays.
+            assert_eq!(keys("shift-end", &state, cx), row);
+            // On past the wrap, to the next row's first character.
+            let on = keys("shift-right", &state, cx);
+            assert!(
+                on.len() > row.len() && text.starts_with(&on),
+                "{on} after {row}"
+            );
+            // Home on that row goes back to its start, not the row above.
+            let second = &text[on.len() - 1..];
+            assert!(!second.starts_with(' '), "{second}");
+            assert_eq!(keys("shift-home", &state, cx), row.trim_end());
+            assert_eq!(keys("shift-home", &state, cx), row.trim_end());
+        }
+
+        #[gpui::test]
+        fn shift_home_and_end_take_a_row_laid_out_in_pieces(cx: &mut TestAppContext) {
+            let (state, cx) = setup(
+                "first words and `code` here then more and more words until the row \
+                wraps over with `more code` again and the end",
+                cx,
+            );
+            click(position(&state, " again and the end", 5, cx), cx);
+            let to_start = keys("shift-home", &state, cx);
+            assert!(to_start.ends_with(" agai"), "{to_start}");
+            assert!(!to_start.starts_with("first"), "{to_start}");
+            assert_eq!(keys("shift-end", &state, cx), "n and the end");
+        }
+
+        struct Clipped {
+            text_view: Entity<TextViewState>,
+        }
+
+        impl Render for Clipped {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .w(px(400.))
+                    .child(crate::TextSelectionLayer)
+                    .child(
+                        div()
+                            .h(px(40.))
+                            .overflow_hidden()
+                            .child(TextView::new(&self.text_view).selectable(true)),
+                    )
+                    .child(div().h(px(200.)))
+            }
+        }
+
+        /// Text cut off, as under a message's Show more, lies over what's drawn
+        /// below it: keys keep the selection's end to the text that shows.
+        #[gpui::test]
+        fn shift_arrows_keep_to_the_text_that_shows(cx: &mut TestAppContext) {
+            cx.update(crate::init);
+            let (root, cx) = cx.add_window_view(|_, cx| Clipped {
+                text_view: cx.new(|cx| TextViewState::markdown("one\n\ntwo\n\nthree\n\nfour", cx)),
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            let state = root.read_with(cx, |root, _| root.text_view.clone());
+            click(position(&state, "one", 0, cx), cx);
+            // Only "one" shows in the clip.
+            assert_eq!(keys("shift-down shift-down", &state, cx), "one");
+            assert_eq!(keys("shift-right shift-right", &state, cx), "one");
+            // A select-all takes the whole text, and a key then keeps to what shows.
+            assert_eq!(keys("ctrl-a", &state, cx), "one\ntwo\nthree\nfour");
+            assert_eq!(keys("shift-left", &state, cx), "on");
+        }
+
+        #[gpui::test]
+        fn select_all_then_shift_left_takes_from_its_end(cx: &mut TestAppContext) {
+            let text = "alpha beta";
+            let (state, cx) = setup(text, cx);
+            click(position(&state, text, 2, cx), cx);
+            assert_eq!(keys("ctrl-a", &state, cx), text);
+            assert_eq!(keys("shift-left", &state, cx), "alpha bet");
+        }
+
+        #[gpui::test]
+        fn a_double_click_word_grows_by_a_character(cx: &mut TestAppContext) {
+            let text = "alpha beta gamma";
+            let (state, cx) = setup(text, cx);
+            let word = position(&state, text, 7, cx);
+            press(word, 1, false, cx);
+            release(word, 1, cx);
+            press(word, 2, false, cx);
+            release(word, 2, cx);
+            cx.run_until_parked();
+            assert_eq!(selected(&state, cx), "beta");
+            assert_eq!(keys("shift-right shift-right", &state, cx), "beta g");
+            assert_eq!(keys("shift-left shift-left shift-left", &state, cx), "bet");
+        }
+
+        #[gpui::test]
+        fn shift_right_steps_over_an_emoji_picture_whole(cx: &mut TestAppContext) {
+            let sob = format!("[{}](loom:emoji/1f62d)", emoji("😭", "loom-emoji:1f62d@36"));
+            let (state, cx) = setup(&format!("Word {sob} word"), cx);
+            click(position(&state, "Word ", 0, cx), cx);
+            assert_eq!(keys("shift-end", &state, cx), "Word 😭 word");
+            assert_eq!(keys("shift-home", &state, cx), "");
+            let five = "shift-right shift-right shift-right shift-right shift-right";
+            assert_eq!(keys(five, &state, cx), "Word");
+            assert_eq!(keys("shift-right", &state, cx), "Word 😭");
+            assert_eq!(keys("shift-right shift-right", &state, cx), "Word 😭 w");
+            assert_eq!(keys("shift-left shift-left", &state, cx), "Word 😭");
+            assert_eq!(keys("shift-left", &state, cx), "Word");
+        }
+
+        #[gpui::test]
+        fn ctrl_c_copies_a_keyboard_selection(cx: &mut TestAppContext) {
+            let text = "alpha beta gamma";
+            let (state, cx) = setup(text, cx);
+            click(position(&state, text, 6, cx), cx);
+            cx.simulate_keystrokes("shift-end ctrl-c");
+            let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+            assert_eq!(copied.as_deref(), Some("beta gamma"));
+        }
+
+        #[gpui::test]
+        fn shift_arrows_with_nothing_selected_do_nothing(cx: &mut TestAppContext) {
+            let (state, cx) = setup("alpha beta", cx);
+            cx.simulate_keystrokes("shift-right shift-end");
+            assert_eq!(selected(&state, cx), "");
         }
     }
 

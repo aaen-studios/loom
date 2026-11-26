@@ -413,6 +413,16 @@ impl TextViewSelectionAdapter {
         Some((points.anchor(), points.cursor()))
     }
 
+    /// loom: see [`TextSelectionHandle::move_by_key`].
+    pub(super) fn move_by_key(&self, motion: crate::SelectionMotion, cx: &mut App) -> bool {
+        self.selection.move_by_key(motion, cx)
+    }
+
+    /// loom: see [`TextSelectionHandle::select_whole`].
+    pub(super) fn select_whole(&self, cx: &mut App) -> bool {
+        self.selection.select_whole(cx)
+    }
+
     pub(super) fn set_local_selection(&self, active: bool, cx: &mut App) {
         self.selection.set_local_selection(active, cx);
     }

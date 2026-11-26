@@ -18,7 +18,8 @@ use gpui::{
 };
 
 use crate::{
-    AutoScroll, ElementExt, TextSelection,
+    AutoScroll, ElementExt, SelectionMotion, TextSelection,
+    actions::{SelectDown, SelectLeft, SelectRight, SelectUp},
     async_util::{Receiver, Sender, unbounded},
     input::{self, SelectAll},
     text::{
@@ -57,6 +58,18 @@ pub(crate) fn init(cx: &mut App) {
         KeyBinding::new("cmd-a", input::SelectAll, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-a", input::SelectAll, Some(CONTEXT)),
+        // loom: Shift with an arrow, Home or End moves the selection's end, as
+        // in a text field (`TextViewState::select_by_key`).
+        KeyBinding::new("shift-left", SelectLeft, Some(CONTEXT)),
+        KeyBinding::new("shift-right", SelectRight, Some(CONTEXT)),
+        KeyBinding::new("shift-up", SelectUp, Some(CONTEXT)),
+        KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
+        KeyBinding::new("shift-home", input::SelectToStartOfLine, Some(CONTEXT)),
+        KeyBinding::new("shift-end", input::SelectToEndOfLine, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("shift-cmd-left", input::SelectToStartOfLine, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("shift-cmd-right", input::SelectToEndOfLine, Some(CONTEXT)),
     ]);
 }
 
@@ -1037,6 +1050,44 @@ impl TextViewState {
         }
 
         self.select_all(cx);
+    }
+
+    /// loom: Shift with an arrow, Home or End in the view: moves the end of
+    /// its selection by `motion`. A select-all, or the word or line a double or
+    /// triple click selected, which the view holds itself, becomes the window's
+    /// selection first, whose end the key then moves. Returns whether there was
+    /// a selection, or a place clicked in its text, to move.
+    pub(super) fn select_by_key(
+        state: &gpui::Entity<Self>,
+        motion: SelectionMotion,
+        cx: &mut App,
+    ) -> bool {
+        let (selectable, whole, selection) = {
+            let state = state.read(cx);
+            (
+                state.selectable,
+                state.select_all,
+                state.selection_adapter.clone(),
+            )
+        };
+        if !selectable {
+            return false;
+        }
+        if whole {
+            if !selection.select_whole(cx) {
+                return false;
+            }
+            state.update(cx, |state, cx| {
+                state.select_all = false;
+                state.selection_adapter.set_local_selection(false, cx);
+            });
+        }
+        state.update(cx, |state, cx| state.end_multi_click_selection(cx));
+        let moved = selection.move_by_key(motion, cx);
+        if moved {
+            state.update(cx, |_, cx| cx.notify());
+        }
+        moved
     }
 
     pub(crate) fn is_selectable(&self) -> bool {
