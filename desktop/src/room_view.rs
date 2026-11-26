@@ -5,15 +5,6 @@
 
 use super::*;
 
-/// The panel's form for a group chat being made.
-#[derive(Clone, Default)]
-pub(super) struct RoomForm {
-    /// Making a new one, rather than changing the open one.
-    pub making: bool,
-    pub members: Vec<String>,
-    pub color: String,
-}
-
 /// The name and colour a reply in a group chat is drawn with: its own agent's.
 pub(super) fn reply_look(p: Palette, m: &Message) -> Option<(String, Hsla)> {
     let r = m.routed.as_ref()?;
@@ -93,7 +84,7 @@ impl Loom {
         self.menu = None;
         self.model.show_room(&id);
         if self.side == Some(Screen::Room) {
-            self.room_form = RoomForm::default();
+            self.model.room_form = model::RoomForm::default();
             self.fill_room_form(cx);
             let f = self.model.ask_room_usage(&id);
             self.send(f);
@@ -104,14 +95,13 @@ impl Loom {
         cx.notify();
     }
 
-    /// Opens the panel that makes a group chat, with no one in it yet.
+    /// Opens the panel that makes a group chat: no one in it yet, or the agent whose
+    /// chat is open.
     pub(super) fn new_room(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.ctx = None;
-        self.model.room_error = None;
-        self.room_form = RoomForm {
-            making: true,
-            ..RoomForm::default()
-        };
+        self.model.start_room_form();
+        // The open group chat's name, if it was still to go in, isn't the new one's.
+        self.room_name_fill = None;
         self.room_name_in
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.show_side(Screen::Room, cx);
@@ -121,7 +111,7 @@ impl Loom {
     /// Opens the open group chat's settings beside it.
     pub(super) fn room_settings(&mut self, cx: &mut Context<Self>) {
         self.ctx = None;
-        self.room_form = RoomForm::default();
+        self.model.room_form = model::RoomForm::default();
         self.fill_room_form(cx);
         if let Some(id) = self.model.open_room.clone() {
             let f = self.model.ask_room_usage(&id);
@@ -379,8 +369,11 @@ impl Loom {
             self.room_name_in
                 .update(cx, |s, cx| s.set_value(name, window, cx));
         }
-        let room = self.model.room_open().cloned();
-        let making = self.room_form.making || room.is_none();
+        // What it shows, and whether Make is on, is the model's: the form's own values
+        // while one is made, never the open group chat's.
+        let name = self.room_name_in.read(cx).value().to_string();
+        let panel = self.model.room_panel(&name);
+        let making = panel.making();
         let mut page = div()
             .w_full()
             .max_w(px(layout::PAGE))
@@ -399,18 +392,12 @@ impl Loom {
                 )
             });
         page = page.child(self.field("Name", name_row));
-        let everyone = room.as_ref().is_some_and(|r| r.everyone);
-        let members: Vec<String> = if making {
-            self.room_form.members.clone()
-        } else {
-            room.as_ref().map(|r| r.members.clone()).unwrap_or_default()
-        };
         // Its members: every one of the person's agents, each on or off. Everyone's
-        // are all of them, always.
-        if !everyone {
+        // are all of them, always. While one is made, the label counts the picked.
+        if panel.members_row {
             let mut chips = div().flex().flex_wrap().gap(px(space::S));
             for a in self.model.agents.iter() {
-                let on = members.contains(&a.id);
+                let on = panel.members.contains(&a.id);
                 let id = a.id.clone();
                 chips = chips.child(
                     self.member_chip(format!("room-member-{}", a.id), a, on)
@@ -419,21 +406,17 @@ impl Loom {
                         })),
                 );
             }
-            page = page.child(self.field("Members", chips));
+            page = page.child(match &panel.members_count {
+                Some(c) => self.counted_field("Members", c, chips),
+                None => self.field("Members", chips),
+            });
         }
         // Its colour, or none.
-        let color = if making {
-            self.room_form.color.clone()
-        } else {
-            room.as_ref().map(|r| r.color.clone()).unwrap_or_default()
-        };
-        page = page.child(self.field("Colour", self.room_swatches(&color, cx)));
+        page = page.child(self.field("Colour", self.room_swatches(&panel.color, cx)));
         if making {
-            let can = !self.room_name_in.read(cx).value().trim().is_empty()
-                && self.room_form.members.len() >= 2;
             let make = self
                 .button("room-make", "Make", true)
-                .when(!can, |d| d.opacity(0.5))
+                .when(!panel.can_make(), |d| d.opacity(0.5))
                 .on_click(cx.listener(|this, _, _, cx| this.make_room(cx)));
             let cancel = self
                 .button("room-cancel", "Cancel", false)
@@ -447,7 +430,7 @@ impl Loom {
                         .child(e),
                 );
             }
-        } else if let Some(r) = room {
+        } else if let Some(r) = panel.room {
             page = page
                 .child(self.field("When it can't pick", self.default_chips(&r, cx)))
                 .child(self.field("Corrections", self.corrections(&r, cx)));
@@ -468,6 +451,40 @@ impl Loom {
                 .pb(px(space::XXL))
                 .child(page),
         )
+    }
+
+    /// A field whose label has a count after it, as `field` draws its label: ink-3
+    /// until it's met, then the ok colour.
+    fn counted_field(
+        &self,
+        label: &str,
+        count: &model::MembersCount,
+        input: impl IntoElement,
+    ) -> Div {
+        let p = self.p;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(space::XS + 2.0))
+            .child(
+                div()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .child(
+                        div()
+                            .text_color(p.ink_2)
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_color(if count.met { p.ok } else { p.ink_3 })
+                            .child(count.text.clone()),
+                    ),
+            )
+            .child(input)
     }
 
     /// What the group chat used: its members' turns, then the router's picks.
@@ -698,43 +715,14 @@ impl Loom {
     }
 
     fn toggle_member(&mut self, agent: &str, cx: &mut Context<Self>) {
-        if self.room_form.making || self.model.room_open().is_none() {
-            let ms = &mut self.room_form.members;
-            if let Some(i) = ms.iter().position(|m| m == agent) {
-                ms.remove(i);
-            } else {
-                ms.push(agent.to_string());
-            }
-            cx.notify();
-            return;
+        if let Some(f) = self.model.toggle_room_member(agent) {
+            self.send(f);
         }
-        let Some(r) = self.model.room_open().cloned() else {
-            return;
-        };
-        let mut members = r.members.clone();
-        if let Some(i) = members.iter().position(|m| m == agent) {
-            // Two at least: the instance says so too.
-            if members.len() <= 2 {
-                return;
-            }
-            members.remove(i);
-        } else {
-            members.push(agent.to_string());
-        }
-        let f = self
-            .model
-            .update_room(&r.id, serde_json::json!({"members": members}));
-        self.send(f);
         cx.notify();
     }
 
     fn set_room_color(&mut self, color: &str, cx: &mut Context<Self>) {
-        if self.room_form.making || self.model.room_open().is_none() {
-            self.room_form.color = color.to_string();
-        } else if let Some(r) = self.model.open_room.clone() {
-            let f = self
-                .model
-                .update_room(&r, serde_json::json!({"color": color}));
+        if let Some(f) = self.model.set_room_color(color) {
             self.send(f);
         }
         cx.notify();
@@ -742,7 +730,7 @@ impl Loom {
 
     fn rename_room(&mut self, cx: &mut Context<Self>) {
         let name = self.room_name_in.read(cx).value().trim().to_string();
-        let Some(r) = self.model.open_room.clone() else {
+        let Some(r) = self.model.room_changing().map(|r| r.id.clone()) else {
             return;
         };
         if name.is_empty() {
@@ -755,28 +743,31 @@ impl Loom {
         cx.notify();
     }
 
-    /// Makes the group chat in the form: the chat shows it once it's made.
+    /// Makes the group chat in the form: the chat shows it once it's made. Make does
+    /// nothing while it waits, and turns on again if no answer comes in MAKE_WAIT.
     pub(super) fn make_room(&mut self, cx: &mut Context<Self>) {
-        let name = self.room_name_in.read(cx).value().trim().to_string();
-        if name.is_empty() || self.room_form.members.len() < 2 {
-            return;
+        let name = self.room_name_in.read(cx).value().to_string();
+        if let Some(f) = self.model.make_form_room(&name) {
+            self.send(f);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(model::MAKE_WAIT).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.model.make_timed_out(Instant::now()) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
-        let f = self.model.make_room(
-            &name,
-            &self.room_form.members.clone(),
-            &self.room_form.color.clone(),
-        );
-        self.send(f);
-        self.room_form.making = false;
         cx.notify();
     }
 
     /// Enter in the name field: makes the group chat, or keeps the new name.
     pub(super) fn room_name_entered(&mut self, cx: &mut Context<Self>) {
-        if self.room_form.making || self.model.room_open().is_none() {
-            self.make_room(cx);
-        } else {
+        if self.model.room_changing().is_some() {
             self.rename_room(cx);
+        } else {
+            self.make_room(cx);
         }
     }
 }

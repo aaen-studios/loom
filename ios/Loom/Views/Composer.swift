@@ -225,11 +225,10 @@ struct Composer: View {
         .sheet(isPresented: $plusOpen) {
             PlusSheet(take: take, searchFirst: plusSearch)
         }
-        .sheet(isPresented: $emojiOpen) {
-            EmojiPicker { item in
-                pickEmoji(item)
-                emojiOpen = false
-            }
+        // It stays up while emoji are tapped, one after another; a swipe down or a tap
+        // outside it shuts it.
+        .sheet(isPresented: $emojiOpen, onDismiss: { session.model.emoji.shutPicker() }) {
+            EmojiPicker { pickEmoji($0) }
         }
         // `-plus` at launch opens the sheet, for screenshots (ios/README.md).
         .onAppear {
@@ -278,11 +277,12 @@ struct Composer: View {
     private func openEmoji() {
         let model = session.model
         model.emoji.tone = skinTone
-        session.send(model.emoji.picker())
+        session.send(model.emoji.openPicker())
         emojiOpen = true
     }
 
-    /// An emoji picked in the picker goes where the person was writing.
+    /// An emoji picked in the picker goes where the person was writing, and the caret
+    /// goes on past it, for the next.
     private func pickEmoji(_ item: EmojiItem) {
         box.put(emojiPiece(item.emoji), space: false)
         session.send(session.model.emoji.used(item.emoji))

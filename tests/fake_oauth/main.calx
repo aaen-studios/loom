@@ -11,16 +11,19 @@ module tests.fake_oauth.main
 //               well-known place, and whose authorization server, /as2, lets no
 //               app sign up: only the client `fixed-client`, with the secret
 //               `fixed-secret`, sent with HTTP Basic
+//     /api/mcp  one that signs no one in, and takes only the key `Bearer
+//               fake-key` (KEY), as a server with a token the person made does
 //
-// Both offer one tool, `whoami`, to a request with a live access token for
-// them, and answer 401 to any other. Signing in checks what OAuth 2.1 and MCP
+// The first two offer one tool, `whoami`, to a request with a live access
+// token for them, and answer 401 to any other; the third offers `lights`. Signing in checks what OAuth 2.1 and MCP
 // ask: a known client and its redirect, a PKCE challenge (S256) that the code's
 // verifier matches, the server as `resource`, a code used once. Its consent
 // page is a link to the redirect, for a test to follow as the person's
 // browser would. Tokens last an hour, or what /test/life?s=N says for those
 // issued after it; a refresh token is used once and replaced.
 //
-// For tests: GET /test/stats gives what happened, with every token issued;
+// For tests: GET /test/stats gives what happened, with every token issued and
+// the last app that signed up's `grant_types` and `application_type`;
 // /test/expire ends every access token there is; /test/life?s=N.
 //
 //     calx tests/fake_oauth/main.calx
@@ -65,7 +68,11 @@ struct Fake {
     revoked: i64
     unauthorized: i64
     issued: List<String>
+    signed_up: Json    // what the last app that signed up asked for
 }
+
+// The key /api/mcp takes, as its Authorization header.
+const KEY: str = "Bearer fake-key"
 
 fn now() -> i64 {
     return unsafe { Timestamp.now() }.unix_ms
@@ -137,6 +144,12 @@ impl Fake {
         let token = if auth.starts_with("Bearer ") { auth[7..].copy() } else { String() }
         var good = false
         if let t = self.access.find(token.copy()) { good = t.live and t.ends > now() and t.resource == resource }
+        let keyed = req.path == "/api/mcp"
+        if keyed { good = auth == KEY }
+        if keyed and not good {
+            self.unauthorized += 1
+            return oauth_error(401, "invalid_token", String("That key isn't right."))
+        }
         if not good {
             self.unauthorized += 1
             let challenge = if req.path == "/mcp" { "Bearer realm=\"fake\", resource_metadata=\"{self.base}/.well-known/oauth-protected-resource/mcp\"" } else { String("Bearer realm=\"fake\"") }
@@ -153,7 +166,8 @@ impl Fake {
         if method == "initialize" {
             result = object([("protocolVersion", text("2025-06-18")), ("capabilities", object([("tools", object(List<(str, Json)>()))])), ("serverInfo", object([("name", text("fake-oauth")), ("version", text("1"))]))])
         } else if method == "tools/list" {
-            let whoami = object([("name", text("whoami")), ("description", text("Says who signed in.")), ("inputSchema", object([("type", text("object")), ("properties", object(List<(str, Json)>()))])), ("annotations", object([("readOnlyHint", Json.Bool(true))]))])
+            let name = if keyed { "lights" } else { "whoami" }
+            let whoami = object([("name", text(name)), ("description", text("Says who signed in.")), ("inputSchema", object([("type", text("object")), ("properties", object(List<(str, Json)>()))])), ("annotations", object([("readOnlyHint", Json.Bool(true))]))])
             result = object([("tools", Json.Array([whoami]))])
         } else if method == "tools/call" {
             result = object([("content", Json.Array([object([("type", text("text")), ("text", text("ada"))])]))])
@@ -175,6 +189,7 @@ impl Fake {
         m.insert(String("code_challenge_methods_supported"), strings(["S256"]))
         m.insert(String("scopes_supported"), strings(["tools", "offline_access"]))
         if sign_up {
+            m.insert(String("grant_types_supported"), strings(["authorization_code", "refresh_token"]))
             m.insert(String("registration_endpoint"), Json.Str("{issuer}/register"))
             m.insert(String("revocation_endpoint"), Json.Str("{issuer}/revoke"))
             m.insert(String("token_endpoint_auth_methods_supported"), strings(["none"]))
@@ -201,6 +216,7 @@ impl Fake {
         let id = "client-{fresh()}"
         self.clients.insert(id.copy(), Client { secret: String(), redirects: redirects.copy() })
         self.registered += 1
+        self.signed_up = object([("grant_types", body.get(String("grant_types")) ?? Json.Null), ("application_type", body.get(String("application_type")) ?? Json.Null)])
         var uris = List<Json>()
         for r in redirects {
             uris.push(Json.Str(r.copy()))
@@ -325,7 +341,7 @@ impl Fake {
     fn handle(self: mut Fake, req: Request) -> Response {
         let p = req.path.copy()
         let issuer2 = "{self.base}/as2"
-        if req.method == "POST" and (p == "/mcp" or p == "/mcp2") { return self.mcp(req) }
+        if req.method == "POST" and (p == "/mcp" or p == "/mcp2" or p == "/api/mcp") { return self.mcp(req) }
         if p == "/.well-known/oauth-protected-resource/mcp" { return self.resource_metadata("/mcp", self.base.copy()) }
         if p == "/.well-known/oauth-protected-resource/mcp2" { return self.resource_metadata("/mcp2", issuer2) }
         if p == "/.well-known/oauth-authorization-server" { return Fake.server_metadata(self.base.copy(), true) }
@@ -341,7 +357,7 @@ impl Fake {
             for t in self.issued {
                 issued.push(Json.Str(t.copy()))
             }
-            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued))]))
+            return json(200, object([("registered", Json.Int(self.registered)), ("refreshed", Json.Int(self.refreshed)), ("revoked", Json.Int(self.revoked)), ("unauthorized", Json.Int(self.unauthorized)), ("issued", Json.Array(issued)), ("signed_up", self.signed_up.copy())]))
         }
         if p == "/test/expire" {
             for t in mut self.access.values() {
@@ -363,7 +379,7 @@ fn main() ! Error {
     let base = server.url().trim_suffix("/").copy()
     var clients = Map<String, Client>()
     clients.insert(String("fixed-client"), Client { secret: String("fixed-secret"), redirects: List<String>() })
-    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>() }
+    var fake = Fake { base: base.copy(), clients: clients, codes: Map<String, Code>(), access: Map<String, Token>(), refreshes: Map<String, Token>(), life: 3600, registered: 0, refreshed: 0, revoked: 0, unauthorized: 0, issued: List<String>(), signed_up: Json.Null }
     println("fake oauth: {base}")
     io.flush()
     loop {

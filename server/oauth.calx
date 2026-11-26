@@ -242,7 +242,24 @@ pub fn discover(address: String, https_only: bool) -> Json ! Error {
         scope = if scope.len() > 0 { "{scope} offline_access" } else { String("offline_access") }
     }
     let methods = strings(at(server.copy(), "token_endpoint_auth_methods_supported")).join(" ")
-    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).b("https_only", https_only).done()
+    let grants = strings(at(server.copy(), "grant_types_supported")).join(" ")
+    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).s("grants", grants).b("https_only", https_only).done()
+}
+
+// The grant types loom asks for when it signs up: a code, and refresh tokens
+// unless the authorization server lists the ones it takes (`grants`, space
+// separated) and refresh tokens aren't among them, as Acta's and T3's aren't.
+fn grant_types(grants: String) -> List<String> {
+    let listed = grants.split(" ")
+    if grants.trim().len() > 0 and not listed.contains(String("refresh_token")) { return [String("authorization_code")] }
+    return [String("authorization_code"), String("refresh_token")]
+}
+
+// What kind of app loom signs up as, for `redirect`: `native` for a loopback or
+// an app's own scheme, as a desktop app and the iPhone come back to, and `web`
+// for an https address.
+fn application_type(redirect: String) -> String {
+    return if redirect.starts_with("https://") { String("web") } else { String("native") }
 }
 
 // How a client with a secret sends it to the token endpoint: in the form,
@@ -258,8 +275,9 @@ fn method_for(methods: String, secret: String) -> String {
 fn sign_up(grant: Json, redirect: String) -> Json ! Error {
     let endpoint = str_at(grant.copy(), "register") ?? String()
     try reachable(endpoint.copy(), bool_at(grant.copy(), "https_only") ?? false)
-    let kinds = Json.Array([Json.Str(String("authorization_code")), Json.Str(String("refresh_token"))])
-    let body = Obj.new().s("client_name", String("loom")).j("redirect_uris", Json.Array([Json.Str(redirect.copy())])).j("grant_types", kinds).j("response_types", Json.Array([Json.Str(String("code"))])).s("token_endpoint_auth_method", String("none")).done()
+    var kinds = List<Json>()
+    for k in grant_types(str_at(grant.copy(), "grants") ?? String()) { kinds.push(Json.Str(k.copy())) }
+    let body = Obj.new().s("client_name", String("loom")).j("redirect_uris", Json.Array([Json.Str(redirect.copy())])).j("grant_types", Json.Array(kinds)).j("response_types", Json.Array([Json.Str(String("code"))])).s("token_endpoint_auth_method", String("none")).s("application_type", application_type(redirect.copy())).done()
     let headers: List<Header> = [Header { name: String("Content-Type"), value: String("application/json") }, Header { name: String("Accept"), value: String("application/json") }]
     var req = post(endpoint, headers, "{body}".to_bytes(), WAIT, MOST)
     let r = try req.wait()
@@ -627,6 +645,15 @@ fn reads_tokens() {
         err(_) => true,
     }
     assert(mac)
+}
+
+@test
+fn signs_up_for_what_the_server_takes() {
+    assert(grant_types(String("authorization_code")) == [String("authorization_code")])
+    assert(grant_types(String("authorization_code refresh_token urn:ietf:params:oauth:grant-type:jwt-bearer")) == [String("authorization_code"), String("refresh_token")])
+    assert(grant_types(String()) == [String("authorization_code"), String("refresh_token")])
+    assert(application_type(String("http://127.0.0.1:47251/callback")) == "native" and application_type(String("loom:/callback")) == "native")
+    assert(application_type(String("https://app.example/callback")) == "web")
 }
 
 @test

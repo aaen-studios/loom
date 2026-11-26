@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod popup;
 mod rooms;
-pub use rooms::{Room, RoomUsage, Routed};
+use rooms::Making;
+pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed, MAKE_WAIT};
 mod sidebar;
 pub use sidebar::{Drop, Section, SideItem, SidePart};
 
@@ -2707,6 +2709,8 @@ pub struct Message {
     pub live: bool,
     /// Written here and waiting in the outbox.
     pub queued: bool,
+    /// How it came to the open chat, for whether a long one is cut (`Model::shown`).
+    pub came: Came,
     /// For a message another agent sent with message_agent, that agent's name.
     pub from_agent: Option<String>,
     /// For what a routine's agent posted with routine_post, the routine's id, and its
@@ -3947,6 +3951,29 @@ fn table_divider(line: &str) -> bool {
     })
 }
 
+/// How a message in the open chat came to be there, which says whether a long one is cut
+/// (`folds`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Came {
+    /// There when the chat opened, and read.
+    #[default]
+    Before,
+    /// Came while the person was elsewhere, and not read yet: under the "3 new" line.
+    Unread,
+    /// Came, or was written, while the chat is open, or is still being written.
+    Live,
+}
+
+/// Whether a long message is cut after about ten lines, with Show more (PLAN.md, "Long
+/// messages and tables"). One that was there and read when its chat opened is; one that
+/// came while it's open, or that came while the person was away and isn't read yet,
+/// shows whole. `flipped` is whether the person folded or opened it by hand since, which
+/// holds while the chat stays open. While the find box is on a match in it, it shows
+/// whole.
+pub fn folds(came: Came, flipped: bool, found: bool) -> bool {
+    !found && ((came == Came::Before) != flipped)
+}
+
 /// A reply's words in pieces: each Markdown table (a header, its divider and the rows
 /// under them) on its own, outside code blocks, with its cells as plain words; and the
 /// words between them. One piece, the words, when there's no table.
@@ -5068,6 +5095,11 @@ pub struct Model {
     /// The message the open chat's "3 new" line is above, and how many came, while that
     /// chat stays open.
     pub new_line: Option<(String, usize)>,
+    /// The messages that came to the open chat, or were written in it, since it opened.
+    came_live: HashSet<String>,
+    /// The long messages in the open chat folded or opened by hand since it opened, by
+    /// their cut's key (`folds`).
+    fold_flips: HashSet<String>,
     /// Finding in the open chat, while the find box is open (Ctrl+F).
     pub find: Option<Find>,
     /// Replies being written, by message id: their blocks so far.
@@ -5216,10 +5248,13 @@ pub struct Model {
     side_order: Vec<String>,
     /// The group chat the chat shows, by conversation, instead of the agent's chat.
     pub open_room: Option<String>,
-    /// The room.create the app sent last, to show the group chat once it's made.
-    making_room: Option<String>,
+    /// The room.create the app sent last, to show the group chat once it's made, and
+    /// Make does nothing while it waits.
+    making_room: Option<Making>,
     /// Why the last group chat couldn't be made.
     pub room_error: Option<String>,
+    /// The form in the panel for group chats, for one being made.
+    pub room_form: RoomForm,
     /// What the open group chat used, as `room.summary` gives it, for its settings.
     pub room_usage: Option<RoomUsage>,
     /// How each reply still being written in a group chat came to its agent, by its
@@ -5924,8 +5959,11 @@ impl Model {
         } else {
             self.new_line = None;
         }
-        // Picking an agent leaves a group chat, even for one of its members.
-        if self.selected != agent || self.open_room.take().is_some() {
+        // Picking an agent leaves a group chat, whichever agent it is. The group chat
+        // is left first: while it's open, `selected` is one of its members (show_room),
+        // so any other agent differs and a `take()` after `||` would never run.
+        let left_room = self.open_room.take().is_some();
+        if self.selected != agent || left_room {
             self.selected = agent;
             self.find = None;
             self.open_task = None;
@@ -6000,6 +6038,7 @@ impl Model {
             blocks: blocks_of(m),
             live: false,
             queued: false,
+            came: Came::Before,
             pinned: m.get("pinned").is_some_and(|p| !p.is_null()),
             reply: ReplyTo::of(m),
             mentions: mentions_of(m),
@@ -6143,6 +6182,8 @@ impl Model {
                 });
                 if state != "live" {
                     self.synced = false;
+                    // What was sent on the connection that went is never answered.
+                    self.room_create_lost(None);
                 }
                 if state == "signed_out" {
                     self.logging_in = false;
@@ -6333,6 +6374,9 @@ impl Model {
                     self.login_error = Some(s(f, "message"));
                 } else if code != "offline" {
                     self.notices.push(s(f, "message"));
+                } else {
+                    // A room.create that didn't go: Make is on again.
+                    self.room_create_lost(Some(&s(f, "for")));
                 }
             }
             _ => return false,
@@ -6484,6 +6528,11 @@ impl Model {
                         } else if kind == "message.created" {
                             self.messages.push(m);
                             self.place_queued();
+                        }
+                        // Came while the chat is open: a long one shows whole. Catch-up
+                        // is what came before.
+                        if kind == "message.created" && self.synced {
+                            self.came_live.insert(id.clone());
                         }
                         // The tool calls it names.
                         self.dirty.insert(List::Tools);
@@ -6878,13 +6927,7 @@ impl Model {
         let id = s(f, "id");
         // A group chat made here: the chat shows it.
         if id.starts_with("app.room_create") {
-            if let Some(v) = f.get("value") {
-                self.room_made(&id, v);
-            }
-            if let Some(e) = f.pointer("/error/message").and_then(Value::as_str) {
-                self.making_room = None;
-                self.room_error = Some(e.to_string());
-            }
+            self.room_create_answered(&id, f);
             return;
         }
         if id.starts_with("app.room_summary") {
@@ -8217,6 +8260,7 @@ impl Model {
                     blocks,
                     live: false,
                     queued: true,
+                    came: Came::Before,
                     from_agent: None,
                     routed: None,
                     routine: String::new(),
@@ -8273,6 +8317,7 @@ impl Model {
                 blocks,
                 live: true,
                 queued: false,
+                came: Came::Before,
                 from_agent: None,
                 routed: self.routed_live.get(&r.message).cloned(),
                 routine: String::new(),
@@ -8376,6 +8421,29 @@ impl Model {
                     _ => {}
                 }
             }
+        }
+        // How each came, for whether a long one is cut (`folds`): one still being
+        // written, waiting to go, or come since the chat opened, while it's open; one
+        // from the "3 new" line on, unread.
+        let unread: HashSet<&str> = self
+            .new_line
+            .as_ref()
+            .and_then(|(first, _)| self.messages.iter().position(|m| &m.id == first))
+            .map(|from| {
+                self.messages[from..]
+                    .iter()
+                    .map(|m| m.id.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for m in &mut out {
+            m.came = if m.live || m.queued || self.came_live.contains(&m.id) {
+                Came::Live
+            } else if unread.contains(m.id.as_str()) {
+                Came::Unread
+            } else {
+                Came::Before
+            };
         }
         out
     }
@@ -8694,11 +8762,27 @@ impl Model {
         true
     }
 
-    /// A chat just opened shows its newest page, with nothing on its way.
+    /// A chat just opened shows its newest page, with nothing on its way. What it has is
+    /// all there from before, read, and folded or opened only as `folds` says.
     fn first_page(&mut self) {
         self.more_messages = false;
         self.messages_more = 0;
         self.reaching = false;
+        self.came_live.clear();
+        self.fold_flips.clear();
+    }
+
+    /// Folds a long message in the open chat, by its cut's key, or opens it: so it stays
+    /// while the chat is open (`folds`).
+    pub fn flip_fold(&mut self, key: &str) {
+        if !self.fold_flips.remove(key) {
+            self.fold_flips.insert(key.to_string());
+        }
+    }
+
+    /// The long messages in the open chat folded or opened by hand since it opened.
+    pub fn fold_flips(&self) -> &HashSet<String> {
+        &self.fold_flips
     }
 
     /// Whether older messages asked for with `load_further_back` are still to come.
@@ -11177,6 +11261,7 @@ mod tests {
             blocks: Vec::new(),
             live,
             queued: false,
+            came: Came::Before,
             from_agent: None,
             routed: None,
             routine: String::new(),
@@ -11743,6 +11828,7 @@ mod tests {
             blocks,
             live: false,
             queued: false,
+            came: Came::Before,
             from_agent: None,
             routed: None,
             routine: String::new(),
@@ -11786,6 +11872,7 @@ mod tests {
             blocks,
             live,
             queued: false,
+            came: Came::Before,
             from_agent: None,
             routed: None,
             routine: String::new(),
@@ -12314,6 +12401,7 @@ mod tests {
             at(reply(), start + 42 * MIN),
             Message {
                 queued: true,
+                came: Came::Before,
                 ..at(person("text:Waiting"), 0)
             },
             at(person("text:Five"), 1000 * MIN + 5 * MIN),
@@ -13555,6 +13643,161 @@ mod tests {
         assert_eq!(m.new_line, Some(("msg_1".into(), 2)));
         m.select(Some("a_1".into()));
         assert_eq!(m.new_line, None);
+    }
+
+    // LOO-350: a long message is cut only when it was there, and read, when its chat
+    // opened.
+    #[test]
+    fn a_long_message_is_cut_only_when_it_was_there_and_read_before() {
+        use Came::*;
+        // There when the chat opened: cut; opened by hand, whole.
+        assert!(folds(Before, false, false));
+        assert!(!folds(Before, true, false));
+        // Came while the chat is open, or unread: whole; folded by hand, cut.
+        assert!(!folds(Live, false, false));
+        assert!(!folds(Unread, false, false));
+        assert!(folds(Live, true, false));
+        assert!(folds(Unread, true, false));
+        // The find box on a match in it opens it, however it came.
+        assert!(!folds(Before, false, true));
+        assert!(!folds(Live, true, true));
+    }
+
+    /// A model with agent a_1's chat c_1 and a_2's c_2, a_1's open, caught up.
+    fn two_chats() -> Model {
+        let mut m = Model::new();
+        m.conversations = ["1", "2"]
+            .iter()
+            .map(|n| Conversation {
+                id: format!("c_{n}"),
+                agent: format!("a_{n}"),
+                task: None,
+                side: false,
+                branch_of: None,
+                branch_at: None,
+                routine: None,
+                program: None,
+                asked_by: None,
+                title: String::new(),
+            })
+            .collect();
+        m.select(Some("a_1".into()));
+        m.synced = true;
+        m
+    }
+
+    fn came(m: &Model) -> Vec<(String, Came)> {
+        m.shown().into_iter().map(|x| (x.id, x.came)).collect()
+    }
+
+    fn created(conversation: &str, id: &str, role: &str) -> Value {
+        json!({"t": "event", "kind": "message.created", "conversation": conversation, "message": {"id": id, "conversation": conversation, "role": role, "agent": "a_1", "at": 9, "blocks": [{"kind": "text", "text": "Words"}]}})
+    }
+
+    fn page(conversation: &str, ids: &[&str]) -> Value {
+        let items: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({"id": id, "role": "agent", "at": 1, "blocks": [{"kind": "text", "text": "Words"}]}))
+            .collect();
+        json!({"t": "core.data", "id": format!("app.messages:{conversation}"), "what": "messages", "items": items})
+    }
+
+    #[test]
+    fn what_comes_while_a_chat_is_open_is_live_and_what_was_there_came_before() {
+        use Came::*;
+        let mut m = two_chats();
+        // What was there when it opened.
+        m.take(&page("c_1", &["msg_1"]));
+        assert_eq!(came(&m), vec![("msg_1".into(), Before)]);
+        // A reply being written, as it streams in, and once it's come.
+        m.runs = vec![Run {
+            id: "run_1".into(),
+            conversation: "c_1".into(),
+            agent: "a_1".into(),
+            message: "msg_2".into(),
+            quiet: false,
+        }];
+        m.take(&json!({"t": "delta", "run": "run_1", "message": "msg_2", "block": 0, "kind": "text", "pos": 0, "text": "Long words"}));
+        assert_eq!(came(&m)[1], ("msg_2".into(), Live));
+        m.take(&created("c_1", "msg_2", "agent"));
+        m.runs.clear();
+        assert_eq!(came(&m)[1], ("msg_2".into(), Live));
+        // The person's own, waiting to go, and once it's stored.
+        m.send("Thanks").unwrap();
+        assert_eq!(came(&m).last().unwrap().1, Live);
+        m.take(&created("c_1", "msg_3", "person"));
+        assert_eq!(
+            came(&m),
+            vec![
+                ("msg_1".into(), Before),
+                ("msg_2".into(), Live),
+                ("msg_3".into(), Live)
+            ]
+        );
+        // The page read again keeps them so, while the chat stays open, and so does
+        // picking the same chat again.
+        m.take(&page("c_1", &["msg_1", "msg_2", "msg_3"]));
+        m.select(Some("a_1".into()));
+        assert_eq!(came(&m)[1], ("msg_2".into(), Live));
+        // Away and back, it opens again: what came last time came before now.
+        m.select(Some("a_2".into()));
+        m.select(Some("a_1".into()));
+        m.take(&page("c_1", &["msg_1", "msg_2", "msg_3"]));
+        assert!(came(&m).iter().all(|(_, c)| *c == Before));
+        // What catching up brings came before, too.
+        m.synced = false;
+        m.take(&created("c_1", "msg_4", "agent"));
+        assert_eq!(came(&m)[3], ("msg_4".into(), Before));
+    }
+
+    #[test]
+    fn replies_that_came_while_away_are_unread_until_the_chat_opens_again() {
+        use Came::*;
+        let mut m = two_chats();
+        m.take(&page("c_1", &["msg_1"]));
+        m.select(Some("a_2".into()));
+        m.take(&created("c_1", "msg_2", "agent"));
+        m.take(&created("c_1", "msg_3", "agent"));
+        m.select(Some("a_1".into()));
+        m.take(&page("c_1", &["msg_1", "msg_2", "msg_3"]));
+        assert_eq!(
+            came(&m),
+            vec![
+                ("msg_1".into(), Before),
+                ("msg_2".into(), Unread),
+                ("msg_3".into(), Unread)
+            ]
+        );
+        // One that comes now is live; opened again later, they were all read before.
+        m.take(&created("c_1", "msg_4", "agent"));
+        assert_eq!(came(&m)[3], ("msg_4".into(), Live));
+        m.select(Some("a_2".into()));
+        m.select(Some("a_1".into()));
+        m.take(&page("c_1", &["msg_1", "msg_2", "msg_3", "msg_4"]));
+        assert!(came(&m).iter().all(|(_, c)| *c == Before));
+    }
+
+    #[test]
+    fn a_message_folded_or_opened_by_hand_stays_so_while_the_chat_is_open() {
+        let mut m = two_chats();
+        m.take(&page("c_1", &["msg_1"]));
+        m.flip_fold("more-msg_1/0");
+        assert!(m.fold_flips().contains("more-msg_1/0"));
+        // Through what comes meanwhile, and the same chat picked again.
+        m.take(&created("c_1", "msg_2", "agent"));
+        m.select(Some("a_1".into()));
+        assert!(m.fold_flips().contains("more-msg_1/0"));
+        // Flipped back, as it was.
+        m.flip_fold("more-msg_1/0");
+        assert!(m.fold_flips().is_empty());
+        // Gone once the chat is left, for a task's, a branch's, or another agent's.
+        m.flip_fold("more-msg_1/0");
+        m.show_branch(Some("c_5".into()));
+        assert!(m.fold_flips().is_empty());
+        m.show_branch(None);
+        m.flip_fold("more-msg_2/0");
+        m.select(Some("a_2".into()));
+        assert!(m.fold_flips().is_empty());
     }
 
     #[test]

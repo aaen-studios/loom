@@ -29,6 +29,15 @@ export async function brains(ids) {
 	);
 }
 
+/**
+ * How many agent programs the registry has, for the Brains panel's "to install".
+ * @returns {Promise<number>}
+ */
+export async function count() {
+	cached ??= load();
+	return (await cached).length;
+}
+
 async function load() {
 	try {
 		const res = await fetch(REGISTRY, { headers: { 'User-Agent': 'loom-site' } });

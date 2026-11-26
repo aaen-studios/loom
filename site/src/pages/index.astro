@@ -7,14 +7,16 @@ import Command from '../components/Command.astro';
 import Get from '../components/Get.astro';
 import Knot from '../components/Knot.astro';
 import { INSTALL } from '../lib/site.mjs';
-import { brains } from '../lib/registry.mjs';
+import { brains, count } from '../lib/registry.mjs';
 
-// The Brains page as the app draws it (desktop/src/app.rs, programs_page), with the ACP Registry's
-// own names, versions, descriptions and icons. When the panel comes into view, the first card
-// installs and joins Your brains, and the next card in the registry takes its place.
+// The Brains page as the app draws it (desktop/src/app.rs, programs_page, and list_page.rs): the
+// brains down the left and the ACP Registry, picked, beside them, with the registry's own names,
+// versions, descriptions and icons. When the panel comes into view, the first card installs and
+// joins the brains, and the next card in the registry takes its place.
 const MINE = ['claude-acp', 'codex-acp'];
 const CARDS = ['opencode', 'gemini', 'github-copilot-cli', 'goose', 'cursor'];
 const listed = await brains([...MINE, ...CARDS]);
+const toInstall = Math.max(0, (await count()) - MINE.length);
 const mine = listed.filter((b) => MINE.includes(b.id)).map((b) => ({ ...b, settings: b.id === 'claude-acp' ? '1 setting' : 'No settings' }));
 const cards = listed.filter((b) => CARDS.includes(b.id));
 
@@ -116,42 +118,58 @@ const faq = {
 			<div class="visual" data-reveal>
 				<div class="page brains" aria-label="The Brains page in loom's settings">
 					<div class="page-head"><span class="page-title">Brains</span></div>
-					<div class="group">
-						<div class="group-label">Your brains</div>
-						<div class="box mine">
-							{
-								mine.map((b) => (
-									<div class="row">
-										<span class="tile" style={`--icon: url(${b.icon})`} />
-										<span class="row-text">
-											<span class="row-title">{b.name}</span>
-											<span class="row-sub">Version {b.version} · {b.settings}</span>
-										</span>
-										<svg class="chevron" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
-											<path d="M9 6l6 6-6 6" />
-										</svg>
-									</div>
-								))
-							}
-						</div>
+					<div class="find">
+						<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+						<span>Find a brain</span>
 					</div>
-					<div class="group">
-						<div class="group-label">ACP Registry</div>
-						<div class="cards">
-							{
-								cards.map((b, i) => (
-									<div class="card" data-brain={b.id} data-name={b.name} data-version={b.version} data-icon={b.icon} hidden={i >= 4}>
-										<div class="card-top">
-											<span class="tile big" style={`--icon: url(${b.icon})`} />
-											<span class="btn-small">Install</span>
+					<div class="split-box">
+						<div class="list">
+							<div class="list-rows mine">
+								{
+									mine.map((b) => (
+										<div class="list-row">
+											<span class="tile" style={`--icon: url(${b.icon})`} />
+											<span class="row-text">
+												<span class="row-title">{b.name}</span>
+												<span class="row-sub">Version {b.version} · {b.settings}</span>
+											</span>
 										</div>
-										<span class="card-text">
-											<span class="row-title">{b.name}</span>
-											<span class="card-sub">{b.description}</span>
-										</span>
-									</div>
-								))
-							}
+									))
+								}
+							</div>
+							<div class="list-foot">
+								<div class="list-row picked">
+									<span class="tile glyph">
+										<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"></path><path d="M12 22V12"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="m7.5 4.27 9 5.15"></path></svg>
+									</span>
+									<span class="row-text">
+										<span class="row-title">ACP Registry</span>
+										<span class="row-sub" data-more={toInstall}>{toInstall} to install</span>
+									</span>
+								</div>
+							</div>
+						</div>
+						<div class="pane">
+							<div class="pane-head">
+								<span class="back" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></span>
+								<span class="pane-title">ACP Registry</span>
+							</div>
+							<div class="cards">
+								{
+									cards.map((b, i) => (
+										<div class="card" data-brain={b.id} data-name={b.name} data-version={b.version} data-icon={b.icon} hidden={i >= 3}>
+											<div class="card-top">
+												<span class="tile big" style={`--icon: url(${b.icon})`} />
+												<span class="btn-small">Install</span>
+											</div>
+											<span class="card-text">
+												<span class="row-title">{b.name}</span>
+												<span class="card-sub">{b.description}</span>
+											</span>
+										</div>
+									))
+								}
+							</div>
 						</div>
 					</div>
 				</div>
@@ -474,14 +492,6 @@ const faq = {
 		-webkit-mask: var(--icon) center / contain no-repeat;
 		mask: var(--icon) center / contain no-repeat;
 	}
-	.chevron {
-		flex: none;
-		fill: none;
-		stroke: var(--ink-3);
-		stroke-width: 2;
-		stroke-linecap: round;
-		stroke-linejoin: round;
-	}
 	.cards {
 		display: grid;
 		grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -559,8 +569,130 @@ const faq = {
 		color: var(--ink-3);
 		white-space: nowrap;
 	}
-	/* The brain that installed comes into Your brains, and the cards move up into its place. */
-	.row.arrived {
+	/* Brains as the app lays out a list page (desktop/src/list_page.rs): the find field, then a box with
+	   the brains down its left and the ACP Registry, picked, beside them; one at a time where it's
+	   narrow, as in a small window. */
+	.brains {
+		gap: var(--space-m);
+	}
+	.find {
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		height: var(--control-button-small);
+		padding: 0 10px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-input);
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.brains .i {
+		width: 16px;
+		height: 16px;
+		flex: none;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.find .i {
+		width: 14px;
+		height: 14px;
+	}
+	.split-box {
+		display: grid;
+		grid-template-columns: minmax(0, 38%) minmax(0, 1fr);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		overflow: hidden;
+	}
+	.list {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		border-right: 1px solid var(--line);
+	}
+	.list-rows {
+		flex: 1;
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		align-content: start;
+		padding: var(--space-xs);
+	}
+	.list-foot {
+		padding: var(--space-xs);
+		border-top: 1px solid var(--line);
+	}
+	.list-row {
+		height: var(--control-list-row);
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		padding: 0 var(--space-s);
+		border-radius: var(--radius-row);
+	}
+	.list-row.picked {
+		background: var(--active);
+	}
+	.list-row .tile {
+		--size: var(--control-lead);
+	}
+	.list-row .row-title {
+		font-size: 13.5px;
+	}
+	.list-row .row-title,
+	.list-row .row-sub {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.tile.glyph {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: var(--ink-2);
+	}
+	.tile.glyph::after {
+		display: none;
+	}
+	.pane {
+		min-width: 0;
+		display: grid;
+		align-content: start;
+		gap: var(--space-l);
+		padding: var(--space-l);
+	}
+	.pane-head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		min-height: var(--control-icon);
+	}
+	.pane-title {
+		font-size: calc(var(--size-body) + 2px);
+		font-weight: var(--weight-semibold);
+	}
+	.back {
+		display: none;
+		color: var(--ink-2);
+	}
+	.brains .cards {
+		grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--layout-card-least)), 1fr));
+	}
+	@media (max-width: 560px) {
+		.split-box {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.list {
+			display: none;
+		}
+		.back {
+			display: flex;
+		}
+	}
+	/* The brain that installed comes into the list, and the cards move up into its place. */
+	.list-row.arrived {
 		animation: arrive 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
 	@keyframes arrive {
@@ -872,11 +1004,13 @@ const faq = {
 
 	const ease = 'cubic-bezier(0.2, 0.7, 0.3, 1)';
 
-	// Brains: the first card installs and joins Your brains, as the app lists it once it's in, and the
-	// cards move up into its place, the next in the registry coming in last.
+	// Brains: the first card installs and joins the brains down the left, as the app lists it once it's
+	// in, one fewer to install, and the cards move up into its place, the next in the registry coming
+	// in last.
 	const brains = document.querySelector<HTMLElement>('.brains');
 	whenShown(brains?.closest('[data-reveal]') ?? null, async () => {
 		const mine = brains?.querySelector('.mine');
+		const more = brains?.querySelector<HTMLElement>('[data-more]');
 		const all = [...(brains?.querySelectorAll<HTMLElement>('.card') ?? [])];
 		const card = all[0];
 		const next = all.find((c) => c.hidden);
@@ -904,6 +1038,11 @@ const faq = {
 		const before = new Map(others.map((c) => [c, c.getBoundingClientRect()]));
 		card.remove();
 		mine.append(row);
+		if (more) {
+			const left = Math.max(0, Number(more.dataset.more) - 1);
+			more.dataset.more = String(left);
+			more.textContent = `${left} to install`;
+		}
 		if (next) next.hidden = false;
 		for (const c of others) {
 			const a = before.get(c);

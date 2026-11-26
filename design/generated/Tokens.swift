@@ -66,6 +66,14 @@ enum Tokens {
         static let settings: CGFloat = 600
         static let page: CGFloat = 520
         static let nav: CGFloat = 210
+        static let popupW: CGFloat = 1280
+        static let popupH: CGFloat = 900
+        static let popupLeastW: CGFloat = 900
+        static let popupLeastH: CGFloat = 640
+        static let list: CGFloat = 300
+        static let listLeast: CGFloat = 220
+        static let detailLeast: CGFloat = 380
+        static let cardLeast: CGFloat = 220
         static let menu: CGFloat = 230
         static let menuWide: CGFloat = 240
         static let fieldLabel: CGFloat = 120
@@ -87,6 +95,8 @@ enum Tokens {
         static let limitRing: CGFloat = 14
         static let choice: CGFloat = 50
         static let row: CGFloat = 54
+        static let listRow: CGFloat = 48
+        static let grip: CGFloat = 14
         static let rowTall: CGFloat = 68
     }
 
