@@ -269,7 +269,7 @@ final class Emojis {
 /// the person's own by its id.
 func sameEmoji(_ a: EmojiItem, _ b: EmojiItem) -> Bool {
     if a.custom != nil || b.custom != nil { return a.custom == b.custom }
-    let untoned = { (s: String) in s.unicodeScalars.filter { !(0x1F3FB...0x1F3FF).contains($0.value) && $0.value != 0xFE0F } }
+    let untoned = { (s: String) in s.unicodeScalars.map(\.value).filter { !(0x1F3FB...0x1F3FF).contains($0) && $0 != 0xFE0F } }
     return untoned(a.emoji) == untoned(b.emoji)
 }
 
