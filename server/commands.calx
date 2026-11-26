@@ -182,7 +182,7 @@ fn reading_runs_and_harm_asks() {
     assert(access(String("acp.install")) == Access.Asks(String("other")))
     assert(access(String("instance.move")) == Access.Asks(String("move")))
     assert(access(String("something.new")) == Access.Asks(String("other")))
-    for never in ["secret.put", "secret.sites", "mcp.sign_in", "mcp.signed_in", "mcp.add_answer", "catalog.list", "catalog.connect", "mcp.agents", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
+    for never in ["secret.put", "secret.sites", "mcp.sign_in", "mcp.signed_in", "mcp.add_answer", "catalog.list", "catalog.search", "catalog.connect", "mcp.agents", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
         if let Access.Never(_) = access(String(never)) {} else { panic("an agent could run {never}") }
     }
     for c in COMMANDS {

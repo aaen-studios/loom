@@ -46,6 +46,7 @@ import server.backup
 import server.browser
 import server.push
 import server.installer
+import server.mcpregistry
 import server.importer
 import server.stage
 import server.move
@@ -60,7 +61,8 @@ fn usage() -> String {
 usage: loom <command>
 
   serve                     run the instance (--port, default 8790; --host, default 127.0.0.1;
-                            --registry, the ACP Registry's address, for a mirror of it). It won't run
+                            --registry, the ACP Registry's address, and --mcp-registry, the MCP
+                            Registry's, for a mirror of either). It won't run
                             as root or an elevated Administrator, whose rights its agents would get,
                             unless given --allow-root. --backups DIR writes a backup there each day, as
                             export does, and keeps the newest 7 (--backups-keep N). --lan, on a PC, lets
@@ -139,6 +141,7 @@ struct Args {
     fast_hashes: bool
     keep_events: i64?
     registry: String
+    mcp_registry: String
     minute_ms: i64
     allow_root: bool
     json: bool
@@ -166,7 +169,7 @@ struct Args {
 }
 
 fn read_args(given: List<String>) -> Args ! Error {
-    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String(), env: List<String>(), from_user: String(), from_home: String(), carry_provider: false, https_port: 0, no_tailscale: false, import_from: String() }
+    var a = Args { words: List<String>(), data: String("loom-data"), port: 8790, host: String("127.0.0.1"), fast_hashes: false, keep_events: none, registry: String(installer.REGISTRY), mcp_registry: String(mcpregistry.REGISTRY), minute_ms: 60000, allow_root: false, json: false, domain: String(), apns: String(), backups: String(), backups_keep: 7, backup_every_ms: 86400000, lan: false, sandboxes: String(), sandbox_image: String(), no_sandboxes: false, url: String(), token: String(), conversation: String(), release: String(), release_key: String(), env: List<String>(), from_user: String(), from_home: String(), carry_provider: false, https_port: 0, no_tailscale: false, import_from: String() }
     var i: usize = 0
     while i < given.len() {
         let w = given[i].copy()
@@ -196,10 +199,10 @@ fn read_args(given: List<String>) -> Args ! Error {
             i += 1
             continue
         }
-        // Where the ACP Registry is: a mirror of it, or a test's.
-        if w == "--registry" {
+        // Where the ACP Registry and the MCP Registry are: a mirror, or a test's.
+        if w == "--registry" or w == "--mcp-registry" {
             if i + 1 >= given.len() { fail "{w} needs an address" }
-            a.registry = given[i + 1].copy()
+            if w == "--registry" { a.registry = given[i + 1].copy() } else { a.mcp_registry = given[i + 1].copy().trim_suffix("/").copy() }
             i += 2
             continue
         }
@@ -363,7 +366,7 @@ fn serve(a: Args) ! Error {
         exit(2)
     }
     let source = if a.release.len() > 0 { update.Source { manifest: a.release.copy(), key: a.release_key.copy() } } else { update.Source.official() }
-    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false, mcp: String() }
+    let config = Config { data: a.data.copy(), port: a.port, host: a.host.copy(), hasher: hasher(a.copy()), events: event_life(a.copy()), registry: a.registry.copy(), mcp_registry: a.mcp_registry.copy(), minute_ms: a.minute_ms, apns: a.apns.copy(), version: String(VERSION), lan: a.lan, sandboxes: a.sandboxes.copy(), sandbox_image: a.sandbox_image.copy(), release: source, in_app: false, mcp: String() }
     var i = try open_waiting(config)
     if a.backups.len() > 0 {
         // Backups inside the instance's folder would go into the next one.

@@ -1,0 +1,662 @@
+module server.mcpregistry
+
+// Spools' search (PLAN.md, "The integrations catalog"): the official MCP
+// Registry, https://registry.modelcontextprotocol.io, searched by a server's
+// name, and each server.json it gives (schema 2025-12-11, a server's name,
+// what it is, its remotes and its packages) turned into an entry as
+// catalog.calx's are, marked `community`, so `catalog.connect` takes it as it
+// takes a curated one. The registry is asked on a thread of its own (`start`),
+// since an answer can take seconds and the instance's loop never waits.
+//
+// What loom connects: a remote over Streamable HTTP at an https address, its
+// `{variables}` the person's fields and its secret headers their secrets, or an
+// npm or PyPI package that speaks stdio, run with `npx -y id@version` or `uvx
+// id==version`, its secret variables their secrets and the other variables and
+// arguments it needs their fields. A remote over the older HTTP with SSE, a
+// Docker image, a NuGet package or an MCP bundle can't be connected, and the
+// entry says so (`unsupported`).
+//
+// A community entry's secrets are named after its server, `NAME.KEY`, so a
+// server from the registry never gets a secret the person keeps for another.
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.thread.{Task}
+import std.url
+import shared.obj.{Obj, at, bool_at, merge, str_at}
+import server.catalog
+
+pub const REGISTRY: str = "https://registry.modelcontextprotocol.io"
+// How long the instance uses an answer again before asking the registry again.
+pub const FRESH_MS: i64 = 300000
+// How many servers a search gives, unless it asks for fewer, and at the most.
+pub const LIMIT: i64 = 30
+pub const MOST_LIMIT: i64 = 100
+// The fewest letters the registry searches for.
+pub const SHORTEST: usize = 3
+const WAIT_MS: u32 = 15000
+const MOST: usize = 4000000
+const META: str = "io.modelcontextprotocol.registry/official"
+
+// --- Asking the registry ---
+
+// The servers whose names have `query` in them, at their latest versions.
+pub fn search_url(base: String, query: String, limit: i64) -> String {
+    return "{base}/v0.1/servers?search={url.encode(query, safe: "")}&version=latest&limit={limit}"
+}
+
+// One server at one version, or `latest`.
+pub fn version_url(base: String, name: String, version: String) -> String {
+    return "{base}/v0.1/servers/{url.encode(name, safe: "")}/versions/{url.encode(version, safe: "")}"
+}
+
+pub struct Job {
+    pub key: String    // what the answer is kept by
+    pub url: String
+}
+
+pub struct Done {
+    pub key: String
+    pub status: u32    // the registry's, or 0 when it didn't answer
+    pub value: Json    // its answer, when it was JSON
+    pub error: String    // why there's no answer, or ""
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            w.done.send(ask(job))
+        }
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+fn ask(job: Job) -> Done {
+    let key = job.key.copy()
+    var req = get(job.url, [Header { name: String("Accept"), value: String("application/json") }, Header { name: String("User-Agent"), value: String("loom") }], WAIT_MS, MOST)
+    let r = match req.wait() {
+        ok(got) => got,
+        err(e) => return Done { key: key, status: 0, value: Json.Null, error: "{e}" },
+    }
+    if r.status == 404 { return Done { key: key, status: 404, value: Json.Null, error: String() } }
+    if r.status != 200 { return Done { key: key, status: r.status, value: Json.Null, error: "it answered {r.status}" } }
+    return match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => Done { key: key, status: 200, value: j, error: String() },
+        err(_) => Done { key: key, status: 200, value: Json.Null, error: String("its answer wasn't JSON") },
+    }
+}
+
+// --- What a server.json says ---
+
+fn texts(j: Json) -> List<String> {
+    var out = List<String>()
+    for x in catalog.list(j) {
+        if let s = x.as_str() { out.push(s) }
+    }
+    return out
+}
+
+// The `{name}`s in `text`, each once, in order.
+pub fn variables_in(text: String) -> List<String> {
+    var out = List<String>()
+    var rest = text.copy()
+    while let open = rest.find("\{") {
+        let after = rest[open + 1..].copy()
+        if let close = after.find("\}") {
+            let name = after[..close].copy()
+            if name.len() > 0 and not out.contains(name.copy()) { out.push(name) }
+            rest = after[close + 1..].copy()
+        } else {
+            rest = String()
+        }
+    }
+    return out
+}
+
+// `text` in lowercase, with each run of anything but letters and digits as one
+// hyphen, and none at either end.
+fn slug(text: String) -> String {
+    var out = String()
+    var dash = false
+    for r in text.to_lower_root().runes() {
+        if (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') {
+            if dash and out.len() > 0 { out.push('-') }
+            out.push(r)
+            dash = false
+        } else {
+            dash = true
+        }
+    }
+    return out
+}
+
+// The name a registry server is added as: the last part of its name, without
+// `mcp` and `server` around it, or its publisher's when that's all there is,
+// as an MCP server's name in loom is (lowercase letters, digits and hyphens).
+pub fn server_name(name: String) -> String {
+    let slash = name.find("/") ?? name.len()
+    let space = name[..slash].copy()
+    let last = if slash < name.len() { name[slash + 1..].copy() } else { String() }
+    var n = slug(last)
+    for prefix in ["mcp-server-", "server-mcp-", "mcp-"] {
+        n = n.trim_prefix(prefix).copy()
+    }
+    for suffix in ["-mcp-server", "-server-mcp", "-mcp", "-server"] {
+        n = n.trim_suffix(suffix).copy()
+    }
+    if n.len() == 0 or n == "mcp" or n == "server" {
+        let dot = space.find_last(".") ?? 0
+        n = slug(if dot > 0 { space[dot + 1..].copy() } else { space.copy() })
+    }
+    if n.len() > 40 { n = n[..40].trim_suffix("-").copy() }
+    if n.len() == 0 or n == "loom" { return String("server") }
+    return n
+}
+
+// Who publishes it, from the namespace the registry checked: a GitHub
+// account's name, or a domain the right way round.
+pub fn maker_of(name: String) -> String {
+    let slash = name.find("/") ?? name.len()
+    let space = name[..slash].copy()
+    if space.starts_with("io.github.") { return space["io.github.".len()..].copy() }
+    var labels = space.split(".")
+    labels.reverse()
+    return labels.join(".")
+}
+
+fn title_of(s: Json) -> String {
+    let title = (str_at(s.copy(), "title") ?? String()).trim().copy()
+    if title.len() > 0 { return title }
+    let name = str_at(s, "name") ?? String()
+    let slash = name.find("/") ?? 0
+    return if slash > 0 { name[slash + 1..].copy() } else { name }
+}
+
+fn website_of(s: Json) -> String? {
+    for address in [str_at(s.copy(), "websiteUrl") ?? String(), str_at(at(s.copy(), "repository"), "url") ?? String()] {
+        if address.starts_with("https://") { return some(address.copy()) }
+    }
+    return none
+}
+
+// One line of what an input is, when the registry gives one.
+fn described(input: Json) -> String? {
+    let d = (str_at(input, "description") ?? String()).trim().copy()
+    return if d.len() > 0 { some(d) } else { none }
+}
+
+// The person's secret a community server's `key` is kept as: `server.KEY`,
+// in the letters a secret's name may have.
+pub fn secret_name(server: String, key: String) -> String {
+    var k = String()
+    for r in key.runes() {
+        let fine = (r >= 'a' and r <= 'z') or (r >= 'A' and r <= 'Z') or (r >= '0' and r <= '9') or r == '_' or r == '-' or r == '.'
+        k.push(if fine { r } else { '_' })
+    }
+    if k.len() > 40 { k = k[..40].copy() }
+    var s = server.copy()
+    if s.len() + 1 + k.len() > 64 { s = s[..63 - k.len()].copy() }
+    return "{s}.{k}"
+}
+
+// The ways a server is reached, for telling two entries are the same server:
+// its remotes' addresses and its packages, as `npm:name`.
+pub fn ways(s: Json) -> List<String> {
+    var out = List<String>()
+    for r in catalog.list(at(s.copy(), "remotes")) {
+        let address = (str_at(r, "url") ?? String()).to_lower_root().trim_suffix("/").copy()
+        if address.len() > 0 and not address.contains("\{") and not out.contains(address.copy()) { out.push(address) }
+    }
+    for p in catalog.list(at(s, "packages")) {
+        let id = (str_at(p.copy(), "identifier") ?? String()).to_lower_root()
+        let way = "{str_at(p, "registryType") ?? String()}:{id}"
+        if id.len() > 0 and not out.contains(way.copy()) { out.push(way) }
+    }
+    return out
+}
+
+fn overlap(a: List<String>, b: List<String>) -> bool {
+    for x in a {
+        if b.contains(x.copy()) { return true }
+    }
+    return false
+}
+
+// The first remote loom speaks to: Streamable HTTP, at an https address.
+fn usable_remote(s: Json) -> Json? {
+    for r in catalog.list(at(s, "remotes")) {
+        if str_at(r.copy(), "type") == some(String("streamable-http")) and (str_at(r.copy(), "url") ?? String()).starts_with("https://") { return some(r.copy()) }
+    }
+    return none
+}
+
+// The first package loom runs: from npm or PyPI, speaking stdio.
+fn usable_package(s: Json) -> Json? {
+    for p in catalog.list(at(s, "packages")) {
+        let kind = str_at(p.copy(), "registryType") ?? String()
+        let transport = str_at(at(p.copy(), "transport"), "type") ?? String("stdio")
+        if (kind == "npm" or kind == "pypi") and transport == "stdio" and (str_at(p.copy(), "identifier") ?? String()).len() > 0 { return some(p.copy()) }
+    }
+    return none
+}
+
+// "a", "a or b", "a, b or c".
+fn either(xs: List<String>) -> String {
+    if xs.len() <= 1 { return xs.join("") }
+    return "{xs[..xs.len() - 1].copy().join(", ")} or {xs[xs.len() - 1]}"
+}
+
+// Why a server with nothing loom speaks to or runs can't be connected.
+fn unsupported_why(s: Json) -> String {
+    var kinds = List<String>()
+    for r in catalog.list(at(s.copy(), "remotes")) {
+        let kind = if str_at(r.copy(), "type") == some(String("sse")) { String("a server over HTTP with SSE, the older transport") } else { String("a server at a plain http:// address") }
+        if not kinds.contains(kind.copy()) { kinds.push(kind) }
+    }
+    for p in catalog.list(at(s, "packages")) {
+        let t = str_at(p.copy(), "registryType") ?? String()
+        let kind = if t == "oci" { String("a Docker image") } else if t == "nuget" { String("a NuGet package") } else if t == "mcpb" { String("an MCP bundle") } else if t == "npm" or t == "pypi" { String("a package that serves over HTTP itself") } else { "a {t} package" }
+        if not kinds.contains(kind.copy()) { kinds.push(kind) }
+    }
+    if kinds.is_empty() { return String("It doesn't say how it's reached or run.") }
+    return "It's only {either(kinds)}. Loom connects to servers over Streamable HTTP, and runs npm and PyPI packages that speak stdio."
+}
+
+// --- Turning a server.json into an entry ---
+
+// What an entry is being made of: the person's fields and secrets, the
+// headers or variables it's given, and why it can't be connected, if it can't.
+struct Making {
+    server: String
+    fields: List<Json>
+    secrets: List<Json>
+    settings: LinkedMap<String, Json>
+    why: String
+}
+
+impl Making {
+    // A field `name` the person fills in, from an input's placeholder,
+    // default, choices and description.
+    fn field(self: mut Making, name: String, input: Json) {
+        for f in self.fields.copy() {
+            if str_at(f, "name") == some(name.copy()) { return }
+        }
+        if bool_at(input.copy(), "isSecret") == some(true) {
+            self.why = "It takes a secret, {name}, as part of other text, which loom keeps only in a header or a variable of its own."
+            return
+        }
+        var o = Obj.new().s("name", name.copy()).s("label", name).maybe("placeholder", str_at(input.copy(), "placeholder")).maybe("default", str_at(input.copy(), "default")).maybe("description", described(input.copy()))
+        let choices = texts(at(input, "choices"))
+        if not choices.is_empty() {
+            var list = List<Json>()
+            for c in choices { list.push(Json.Str(c.copy())) }
+            o = o.j("choices", Json.Array(list))
+        }
+        self.fields.push(o.done())
+    }
+
+    // The fields for the `{variables}` in `text`: each `variables` names, or,
+    // with `all`, each there is, as an address needs.
+    fn template(self: mut Making, text: String, variables: Json, all: bool) {
+        for v in variables_in(text) {
+            let input = variables.get(v.copy()) ?? Json.Null
+            if input == Json.Null and not all { continue }
+            self.field(v, input)
+        }
+    }
+
+    // A header or variable `key` that's secret: the person's secret, after the
+    // text before it when its value is `Bearer {token}`. A value with no
+    // `{variable}` isn't secret from anyone, since the registry shows it.
+    fn secret(self: mut Making, key: String, input: Json, place: str) {
+        let value = str_at(input.copy(), "value") ?? String()
+        var prefix = String()
+        var label = key.copy()
+        if value.len() > 0 {
+            let vars = variables_in(value.copy())
+            if vars.is_empty() {
+                self.settings.insert(key.copy(), Json.Str(value))
+                return
+            }
+            let last = "\{{vars[0]}\}"
+            if vars.len() > 1 or not value.ends_with(last.copy()) {
+                self.why = "Its {key} has a secret inside other text, which loom doesn't send."
+                return
+            }
+            prefix = value[..value.len() - last.len()].copy()
+            label = vars[0].copy()
+        }
+        var o = Obj.new().s("name", secret_name(self.server.copy(), label.copy())).s("label", label).s("in", String(place)).s("key", key).maybe("placeholder", str_at(input.copy(), "placeholder")).maybe("description", described(input.copy()))
+        if prefix.len() > 0 { o = o.s("prefix", prefix) }
+        if bool_at(input, "isRequired") != some(true) { o = o.b("optional", true) }
+        self.secrets.push(o.done())
+    }
+
+    // A header or variable `key` that isn't secret: its value, with a field for
+    // each of its `{variables}`, or a field of its own when it has none and is
+    // needed. One it can do without is left to the server.
+    fn setting(self: mut Making, key: String, input: Json) {
+        let value = str_at(input.copy(), "value") ?? String()
+        if value.len() > 0 {
+            self.template(value.copy(), at(input, "variables"), false)
+            self.settings.insert(key.copy(), Json.Str(value))
+            return
+        }
+        if bool_at(input.copy(), "isRequired") != some(true) { return }
+        self.field(key.copy(), input)
+        self.settings.insert(key.copy(), Json.Str("\{{key}\}"))
+    }
+
+    // A package's arguments, as text: each one given, each the person must
+    // fill in as `{field}`, and a named one as its flag, then its value.
+    fn arguments(self: mut Making, given: Json) -> List<Json> {
+        var out = List<Json>()
+        for a in catalog.list(given) {
+            let value = str_at(a.copy(), "value") ?? String()
+            let needed = bool_at(a.copy(), "isRequired") == some(true)
+            if bool_at(a.copy(), "isSecret") == some(true) {
+                self.why = String("It takes a secret on its command line, which loom doesn't put there.")
+                continue
+            }
+            if str_at(a.copy(), "type") == some(String("named")) {
+                let flag = str_at(a.copy(), "name") ?? String()
+                if flag.len() == 0 { continue }
+                if value.len() > 0 {
+                    self.template(value.copy(), at(a, "variables"), false)
+                    out.push(Json.Str(flag))
+                    out.push(Json.Str(value))
+                } else if needed {
+                    var field = flag.copy()
+                    while field.starts_with("-") { field = field[1..].copy() }
+                    self.field(field.copy(), a)
+                    out.push(Json.Str(flag))
+                    out.push(Json.Str("\{{field}\}"))
+                }
+                continue
+            }
+            if value.len() > 0 {
+                self.template(value.copy(), at(a, "variables"), false)
+                out.push(Json.Str(value))
+            } else if needed {
+                let hint = str_at(a.copy(), "valueHint") ?? String()
+                if hint.len() == 0 {
+                    self.why = String("It needs an argument it doesn't name.")
+                    continue
+                }
+                self.field(hint.copy(), a)
+                out.push(Json.Str("\{{hint}\}"))
+            }
+        }
+        return out
+    }
+}
+
+// What `s`, a server.json, is in Spools: an entry as catalog.calx's are,
+// marked `community`, with `registry` (its name), `version` and `updated`
+// (when the registry last changed it), reached by its first remote loom
+// speaks to, or else its first package loom runs; or, with neither, with
+// `unsupported`, why it can't be connected. The registry says nothing of its
+// tools, so it has none, and nothing of its sign-in: a remote with no secrets
+// signs in with `unknown`, which shows once it's connected.
+pub fn entry_of(s: Json, updated: String) -> Json {
+    let name = str_at(s.copy(), "name") ?? String()
+    let server = server_name(name.copy())
+    var e = Obj.new().s("id", "registry:{name}").b("community", true).s("registry", name.copy()).s("version", str_at(s.copy(), "version") ?? String()).s("updated", updated)
+    e = e.s("name", title_of(s.copy())).s("category", String()).s("description", (str_at(s.copy(), "description") ?? String()).trim().copy()).s("maker", maker_of(name)).maybe("website", website_of(s.copy())).s("server", server.copy())
+    var m = Making { server: server, fields: List<Json>(), secrets: List<Json>(), settings: LinkedMap<String, Json>(), why: String() }
+    var address = String()
+    var package = Json.Null
+    if let r = usable_remote(s.copy()) {
+        address = str_at(r.copy(), "url") ?? String()
+        m.template(address.copy(), at(r.copy(), "variables"), true)
+        for h in catalog.list(at(r, "headers")) {
+            let key = str_at(h.copy(), "name") ?? String()
+            if key.len() == 0 { continue }
+            if bool_at(h.copy(), "isSecret") == some(true) { m.secret(key, h, "header") } else { m.setting(key, h) }
+        }
+    } else if let p = usable_package(s.copy()) {
+        let runtime = m.arguments(at(p.copy(), "runtimeArguments"))
+        let args = m.arguments(at(p.copy(), "packageArguments"))
+        for v in catalog.list(at(p.copy(), "environmentVariables")) {
+            let key = str_at(v.copy(), "name") ?? String()
+            if key.len() == 0 { continue }
+            if bool_at(v.copy(), "isSecret") == some(true) { m.secret(key, v, "env") } else { m.setting(key, v) }
+        }
+        let version = (str_at(p.copy(), "version") ?? String()).trim().copy()
+        package = Obj.new().s("registry", str_at(p.copy(), "registryType") ?? String()).s("name", str_at(p, "identifier") ?? String()).s("version", if version.len() > 0 { version } else { String("latest") }).j("args", Json.Array(args)).j("runtime_args", Json.Array(runtime)).done()
+    } else {
+        m.why = unsupported_why(s)
+    }
+    e = e.j("reads", Json.Array(List<Json>())).j("changes", Json.Array(List<Json>())).s("tools_from", String()).b("tools_checked", false)
+    if m.why.len() > 0 { return e.s("sign_in", String("none")).s("unsupported", m.why.copy()).done() }
+    var needed = false
+    for sec in m.secrets.copy() {
+        if bool_at(sec, "optional") != some(true) { needed = true }
+    }
+    let remote = address.len() > 0
+    let sign_in = if needed { "secret" } else if remote { "unknown" } else { "none" }
+    e = if remote { e.s("url", address) } else { e.j("package", package) }
+    if not m.fields.is_empty() { e = e.j("fields", Json.Array(m.fields.copy())) }
+    if not m.secrets.is_empty() { e = e.j("secrets", Json.Array(m.secrets.copy())) }
+    e = e.j(if remote { "headers" } else { "env" }, Json.Object(m.settings.copy()))
+    return e.s("sign_in", String(sign_in)).done()
+}
+
+// The server a /v0.1/servers/NAME/versions/VERSION answer is about.
+pub fn server_of(answer: Json) -> (Json, String) {
+    let s = at(answer.copy(), "server")
+    let updated = str_at(at(at(answer, "_meta"), META), "updatedAt") ?? String()
+    return (s, updated)
+}
+
+// A search's answer as Spools gives it: the registry's servers as entries
+// (entry_of), but for one a curated entry is (it's reached at the same
+// address, or is the same package), and a server under two names, which one
+// of the addresses or packages of the other shows, once, as the one the
+// registry changed last, with the others' names in `also`; and the ids of the
+// curated entries that are one of them, or whose name or line has `query` in
+// it, in the catalog's order.
+pub fn found(answer: Json, query: String) -> (List<Json>, List<String>) {
+    let curated = catalog.entries()
+    var same = List<String>()
+    var kept = List<Json>()
+    var kept_ways = List<List<String>>()
+    for item in catalog.list(at(answer, "servers")) {
+        let s = at(item.copy(), "server")
+        let meta = at(at(item, "_meta"), META)
+        if str_at(meta.copy(), "status") == some(String("deleted")) { continue }
+        let w = ways(s.copy())
+        var is_curated = false
+        for c in curated.copy() {
+            if overlap(catalog.ways(c.copy()), w.copy()) {
+                is_curated = true
+                let id = str_at(c, "id") ?? String()
+                if not same.contains(id.copy()) { same.push(id) }
+            }
+        }
+        if is_curated { continue }
+        let e = entry_of(s, str_at(meta, "updatedAt") ?? String())
+        var twin = kept.len()
+        var k: usize = 0
+        while k < kept.len() {
+            if overlap(kept_ways[k].copy(), w.copy()) {
+                twin = k
+                break
+            }
+            k += 1
+        }
+        if twin == kept.len() {
+            kept.push(e)
+            kept_ways.push(w)
+            continue
+        }
+        let had = kept[twin].copy()
+        let newer = (str_at(e.copy(), "updated") ?? String()) > (str_at(had.copy(), "updated") ?? String())
+        let (winner, loser) = if newer { (e, had) } else { (had, e) }
+        var also = texts(at(winner.copy(), "also"))
+        for n in texts(at(loser.copy(), "also")) { also.push(n.copy()) }
+        also.push(str_at(loser, "registry") ?? String())
+        var names = List<Json>()
+        for n in also { names.push(Json.Str(n.copy())) }
+        kept[twin] = merge(winner, Obj.new().j("also", Json.Array(names)).done())
+        var both = kept_ways[twin].copy()
+        for x in w {
+            if not both.contains(x.copy()) { both.push(x.copy()) }
+        }
+        kept_ways[twin] = both
+    }
+    let q = query.trim().to_lower_root()
+    var ids = List<String>()
+    for c in curated {
+        let id = str_at(c.copy(), "id") ?? String()
+        let named = (str_at(c.copy(), "name") ?? String()).to_lower_root().contains(q.copy()) or (str_at(c, "description") ?? String()).to_lower_root().contains(q.copy())
+        if same.contains(id.copy()) or named { ids.push(id) }
+    }
+    return (kept, ids)
+}
+
+// --- Tests, with answers the registry gave (tests/mcp_registry/), run from
+// the repository's root as scripts/check.calx runs them ---
+
+fn sample(file: str) -> Json {
+    let text = fs.read_text("tests/mcp_registry/{file}")!
+    return parse(text ?? String())!
+}
+
+// The server named `name` in a saved answer.
+fn sample_server(file: str, name: str) -> Json {
+    for item in catalog.list(at(sample(file), "servers")) {
+        let s = at(item.copy(), "server")
+        if str_at(s.copy(), "name") == some(String(name)) { return s }
+    }
+    panic("no {name} in {file}")
+}
+
+fn converted(file: str, name: str) -> Json {
+    return entry_of(sample_server(file, name), String())
+}
+
+// What an entry becomes, as mcp.put takes it, with `fields`.
+fn made(entry: Json, fields: str) -> String {
+    let (spec, why) = catalog.spec_of(entry, parse(String(fields))!, String())
+    return if why.len() > 0 { why } else { "{spec}" }
+}
+
+@test
+fn names_a_registry_server() {
+    assert(server_name(String("io.github.microsoft/playwright-mcp")) == "playwright")
+    assert(server_name(String("com.notion/mcp")) == "notion")
+    assert(server_name(String("io.github.awkoy/notion-mcp-server")) == "notion")
+    assert(server_name(String("ai.smithery/smithery-notion")) == "smithery-notion")
+    assert(server_name(String("io.github.GitHub30/note-mcp-server")) == "note")
+    assert(server_name(String("io.github.x/Loom")) == "server" and server_name(String("dev.wirecat/notion-cli")) == "notion-cli")
+    assert(maker_of(String("io.github.microsoft/playwright-mcp")) == "microsoft" and maker_of(String("ai.smithery/smithery-notion")) == "smithery.ai")
+    assert(secret_name(String("notion"), String("NOTION_TOKEN")) == "notion.NOTION_TOKEN" and secret_name(String("x"), String("Api Key")) == "x.Api_Key")
+    assert(variables_in(String(#"https://{region}.example.com/{workspaceId}/{region}"#)) == [String("region"), String("workspaceId")])
+    assert(search_url(String("https://r.example"), String("a b/c"), 30) == "https://r.example/v0.1/servers?search=a%20b%2Fc&version=latest&limit=30")
+    assert(version_url(String("https://r.example"), String("io.github.x/y"), String("1.0.0")) == "https://r.example/v0.1/servers/io.github.x%2Fy/versions/1.0.0")
+}
+
+@test
+fn turns_remotes_into_servers() {
+    // A remote with no headers: an address, and a sign-in, if any, found when it's connected.
+    let plain = converted("notion.json", "com.insightfulpipe/notion")
+    assert(str_at(plain.copy(), "sign_in") == some(String("unknown")) and bool_at(plain.copy(), "community") == some(true))
+    assert(str_at(plain.copy(), "id") == some(String("registry:com.insightfulpipe/notion")) and str_at(plain.copy(), "name") == some(String("Notion MCP by InsightfulPipe")) and str_at(plain.copy(), "maker") == some(String("insightfulpipe.com")))
+    assert(made(plain, "\{\}") == #"{"name":"notion","url":"https://notion.insightfulmcp.com/","headers":{}}"#)
+    // A secret header, `Bearer {key}`: the key is the person's secret, named after the server, after its prefix.
+    let smithery = converted("notion.json", "ai.smithery/smithery-notion")
+    assert(str_at(smithery.copy(), "sign_in") == some(String("secret")))
+    assert("{at(smithery.copy(), "secrets")}" == #"[{"name":"smithery-notion.smithery_api_key","label":"smithery_api_key","in":"header","key":"Authorization","description":"Bearer token for Smithery authentication","prefix":"Bearer "}]"#)
+    assert(made(smithery, "\{\}") == #"{"name":"smithery-notion","url":"https://server.smithery.ai/@smithery/notion/mcp","headers":{"Authorization":{"secret":"smithery-notion.smithery_api_key","prefix":"Bearer "}}}"#)
+    // An address's {variables} are the person's fields.
+    let cloud = converted("playwright.json", "com.microsoft/playwright-cloud-browsers")
+    assert("{at(cloud.copy(), "fields")}" == #"[{"name":"region","label":"region","placeholder":"eastus","description":"Azure region hosting the Playwright workspace"},{"name":"workspaceId","label":"workspaceId","description":"Playwright workspace ID"}]"#)
+    assert(made(cloud.copy(), #"{"region":"westeurope","workspaceId":"w1"}"#) == #"{"name":"playwright-cloud-browsers","url":"https://westeurope.mcp.playwright.microsoft.com/playwrightworkspaces/w1/mcp","headers":{}}"#)
+    assert(made(cloud, #"{"region":"westeurope"}"#) == "Fill in workspaceId first.")
+    // Streamable HTTP is picked over SSE.
+    assert(str_at(converted("weather.json", "io.github.easakura/japan-weather-alerts-mcp"), "url") == some(String("https://tenki-mcp.easakura.workers.dev/mcp")))
+}
+
+@test
+fn turns_packages_into_servers() {
+    // npm, with a secret variable and an optional one left out.
+    let awkoy = converted("notion.json", "io.github.awkoy/notion-mcp-server")
+    assert(str_at(awkoy.copy(), "sign_in") == some(String("secret")) and catalog.runs(awkoy.copy()) == "instance")
+    assert(made(awkoy, "\{\}") == #"{"name":"notion","command":"npx","args":["-y","notion-mcp-server@3.6.0"],"env":{"NOTION_TOKEN":{"secret":"notion.NOTION_TOKEN"}}}"#)
+    // PyPI, run with uvx at its version.
+    let pypi = converted("notion.json", "com.mcparmory/notion")
+    assert(made(pypi.copy(), "\{\}") == #"{"name":"notion","command":"uvx","args":["mcparmory-notion==1.0.2"],"env":{}}"#)
+    assert(str_at(pypi, "sign_in") == some(String("none")))
+    // Arguments: given ones as they are, a needed one the person's field, a named one as its flag and value.
+    let wirecat = converted("notion.json", "dev.wirecat/notion-cli")
+    assert(made(wirecat.copy(), #"{"profiles":"work"}"#) == #"{"name":"notion-cli","command":"npx","args":["-y","@wirecat/notion-cli@0.9.0","mcp","serve","--profiles","work"],"env":{}}"#)
+    let shown = catalog.listed(wirecat.copy(), List<String>(), List<String>(), Json.Null)
+    assert(str_at(shown.copy(), "command") == some(String("npx")) and "{at(shown, "args")}" == #"["-y","@wirecat/notion-cli@0.9.0","mcp","serve","--profiles","{profiles}"]"#)
+    assert("{at(wirecat, "fields")}" == #"[{"name":"profiles","label":"profiles","placeholder":"personal","description":"The profiles this server serves: one name, a comma-separated list such as work,personal, or all for every profile on this computer"}]"#)
+    // Variables it needs that aren't secret are fields; a secret one is a secret.
+    let shck = converted("notion.json", "io.github.shck-dev/notion-mcp")
+    assert(made(shck, #"{"NOTION_USER_ID":"u1","NOTION_SPACE_ID":"s1"}"#) == #"{"name":"notion","command":"npx","args":["-y","@shck-dev/notion-mcp@0.5.2"],"env":{"NOTION_USER_ID":"u1","NOTION_SPACE_ID":"s1","NOTION_TOKEN":{"secret":"notion.NOTION_TOKEN"}}}"#)
+    // An optional secret is marked so.
+    let pipeworx = converted("notion.json", "io.github.pipeworx-io/notion_connect")
+    assert(str_at(pipeworx.copy(), "url") == some(String("https://gateway.pipeworx.io/notion_connect/mcp")))
+    let barevalue = entry_of(merge(sample_server("notion.json", "io.github.quietnotion/barevalue"), Obj.new().j("remotes", Json.Array(List<Json>())).done()), String())
+    assert(str_at(barevalue.copy(), "sign_in") == some(String("none")) and "{at(barevalue, "secrets")}".contains(#""optional":true"#))
+    // A variable with a default the person may leave as it is.
+    let nws = converted("weather.json", "io.github.cyanheads/nws-weather-mcp-server")
+    assert(str_at(nws, "url") == some(String("https://nws.caseyjhand.com/mcp")))
+}
+
+@test
+fn says_what_it_cant_connect() {
+    assert(str_at(converted("weather.json", "io.github.Br0ski777/weather-api"), "unsupported") == some(String("It's only a server over HTTP with SSE, the older transport. Loom connects to servers over Streamable HTTP, and runs npm and PyPI packages that speak stdio.")))
+    assert(str_at(converted("weather.json", "io.github.JonJam/accuweather-mcp"), "unsupported") == some(String("It's only a Docker image. Loom connects to servers over Streamable HTTP, and runs npm and PyPI packages that speak stdio.")))
+    assert((str_at(converted("weather.json", "io.github.EphraimElgrabli/gesher-weather"), "unsupported") ?? String()).starts_with("It's only an MCP bundle."))
+    assert((str_at(converted("nuget.json", "com.microsoft/nuget"), "unsupported") ?? String()).starts_with("It's only a NuGet package."))
+    assert(str_at(converted("weather.json", "io.github.antuelle78/weather-mcp"), "unsupported") == some(String("It doesn't say how it's reached or run.")))
+    let docker_too = converted("notion.json", "io.github.BiteFoundry/notion")
+    assert(str_at(docker_too.copy(), "unsupported") != none and str_at(docker_too, "url") == none)
+}
+
+@test
+fn gives_a_server_once() {
+    let (entries, curated) = found(sample("notion.json"), String("notion"))
+    var names = List<String>()
+    for e in entries.copy() { names.push(str_at(e, "registry") ?? String()) }
+    // The official one is the curated Notion, which is listed by its id.
+    assert(not names.contains(String("com.notion/mcp")) and curated == [String("notion")])
+    // The same npm package under two names is given once: the one changed last.
+    assert(names.contains(String("io.github.n24q02m/notion")) and not names.contains(String("io.github.n24q02m/better-notion-mcp")))
+    for e in entries.copy() {
+        if str_at(e.copy(), "registry") == some(String("io.github.n24q02m/notion")) { assert("{at(e, "also")}" == #"["io.github.n24q02m/better-notion-mcp"]"#) }
+    }
+    assert(entries.len() == 18)
+    let (more, playwright) = found(sample("playwright.json"), String("playwright"))
+    var others = List<String>()
+    for e in more { others.push(str_at(e, "registry") ?? String()) }
+    assert(playwright == [String("playwright")] and not others.contains(String("io.github.microsoft/playwright-mcp")))
+    assert(others.contains(String("io.github.oss-invisible/invisible-playwright-mcp")) and not others.contains(String("io.github.feder-cr/invisible-playwright-mcp")))
+    // A curated entry whose line has the words in it.
+    let (_, boards) = found(sample("github.json"), String("boards"))
+    assert(boards == [String("acta")])
+}
+
+@test
+fn takes_one_version() {
+    let answer = Obj.new().j("server", sample_server("playwright.json", "io.github.microsoft/playwright-mcp")).j("_meta", Obj.new().j(META, Obj.new().s("updatedAt", String("2026-11-01T00:00:00Z")).done()).done()).done()
+    let (s, updated) = server_of(answer)
+    assert(str_at(s, "name") == some(String("io.github.microsoft/playwright-mcp")) and updated == "2026-11-01T00:00:00Z")
+}

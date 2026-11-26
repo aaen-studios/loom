@@ -25,6 +25,13 @@ module server.catalog
 //     person would go wrong without it), reads and changes (the tools' names),
 //     tools_from (where they were read) and tools_checked (false where the
 //     names couldn't be checked against the server or its own docs).
+//
+// An entry from the MCP Registry (server/mcpregistry.calx) has the same
+// shape, with `community`, `registry`, `version` and `also`?, and may have
+// more: `headers` ({NAME: text}) for a remote, `runtime_args` in its package
+// (what npx or uvx is given before it), a field's `default`, `choices` and
+// `description`, a secret's `description` and `optional`, and `unsupported`,
+// why it can't be connected, in place of how it's reached.
 import std.json.{Json, parse}
 import shared.badge
 import shared.obj.{Obj, at, bool_at, str_at}
@@ -221,15 +228,21 @@ pub fn secret_names(entry: Json) -> List<String> {
     return out
 }
 
-// What fills each `{field}`: the person's value, checked, or why it can't be.
+// What fills each `{field}`: the person's value, or its `default` when they
+// leave it empty, checked, or why it can't be. One that's part of an address
+// has no spaces, and one with `choices` is one of them.
 fn field_values(entry: Json, given: Json) -> (List<(String, String)>, String) {
     var out = List<(String, String)>()
+    let remote = runs(entry.copy()) == "remote"
     for f in list(at(entry.copy(), "fields")) {
         let name = str_at(f.copy(), "name") ?? String()
         let label = str_at(f.copy(), "label") ?? name.copy()
         var value = ((given.get(name.copy()) ?? Json.Null).as_str() ?? String()).trim().copy()
+        if value.len() == 0 { value = str_at(f.copy(), "default") ?? String() }
         if value.len() == 0 { return (List<(String, String)>(), "Fill in {label} first.") }
-        if value.contains(" ") or value.contains("\n") or value.contains("\{") or value.contains("\}") { return (List<(String, String)>(), "{label} can't have spaces or braces in it.") }
+        if value.contains("\n") or value.contains("\{") or value.contains("\}") or (remote and value.contains(" ")) { return (List<(String, String)>(), if remote { "{label} can't have spaces or braces in it." } else { "{label} can't have braces or line breaks in it." }) }
+        let choices = names(at(f.copy(), "choices"))
+        if not choices.is_empty() and not choices.contains(value.copy()) { return (List<(String, String)>(), "{label} is one of {choices.join(", ")}.") }
         if str_at(f, "kind") == some(String("address")) {
             if not value.starts_with("https://") and not value.starts_with("http://") { return (List<(String, String)>(), "{label} is an address starting with https:// or http://.") }
             value = value.trim_suffix("/").copy()
@@ -266,7 +279,7 @@ pub fn spec_of(entry: Json, fields: Json, name: String) -> (Json, String) {
     if why.len() > 0 { return (Json.Null, why) }
     var settings = Obj.new()
     let place = if runs(entry.copy()) == "remote" { "header" } else { "env" }
-    if let Json.Object(env) = at(entry.copy(), "env") {
+    if let Json.Object(env) = at(entry.copy(), if place == "header" { "headers" } else { "env" }) {
         for (k, v) in env {
             settings.m.insert(k.copy(), Json.Str(filled(v.as_str() ?? String(), values.copy())))
         }
@@ -280,26 +293,77 @@ pub fn spec_of(entry: Json, fields: Json, name: String) -> (Json, String) {
         if url.contains("\{") or url.contains("\}") { return (Json.Null, "{url} has a field no one fills in.") }
         return (Obj.new().s("name", server).s("url", url).j("headers", settings.done()).done(), String())
     }
-    let package = at(entry, "package")
+    let (command, args, bad) = program(at(entry, "package"), values)
+    if bad.len() > 0 { return (Json.Null, bad) }
+    return (Obj.new().s("name", server).s("command", command).j("args", Json.Array(args)).j("env", settings.done()).done(), String())
+}
+
+// The program a package runs as, and its arguments, each `{field}` filled
+// from `values` (and left as it is without one); or why it isn't one loom runs.
+fn program(package: Json, values: List<(String, String)>) -> (String, List<Json>, String) {
     let id = str_at(package.copy(), "name") ?? String()
     let version = str_at(package.copy(), "version") ?? String("latest")
     let registry = str_at(package.copy(), "registry") ?? String()
     var args = List<Json>()
     var command = String()
+    // What npx or uvx itself is given goes before the package.
+    var runtime = List<Json>()
+    for a in names(at(package.copy(), "runtime_args")) {
+        runtime.push(Json.Str(filled(a, values.copy())))
+    }
     if registry == "npm" {
         command = String("npx")
         args.push(Json.Str(String("-y")))
+        args.extend(runtime)
         args.push(Json.Str("{id}@{version}"))
     } else if registry == "pypi" {
         command = String("uvx")
+        args.extend(runtime)
         args.push(Json.Str(if version == "latest" { "{id}@latest" } else { "{id}=={version}" }))
     } else {
-        return (Json.Null, "A {registry} package isn't one loom runs: only npm and pypi.")
+        return (String(), List<Json>(), "A {registry} package isn't one loom runs: only npm and pypi.")
     }
     for a in names(at(package, "args")) {
         args.push(Json.Str(filled(a, values.copy())))
     }
-    return (Obj.new().s("name", server).s("command", command).j("args", Json.Array(args)).j("env", settings.done()).done(), String())
+    return (command, args, String())
+}
+
+// `spec` without the headers or variables that are one of the secrets
+// `names`: the optional ones the person has none of.
+pub fn without_secrets(spec: Json, left_out: List<String>) -> Json {
+    if left_out.is_empty() { return spec.copy() }
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = spec {
+        for (k, v) in o {
+            if let Json.Object(settings) = v.copy() {
+                if k == "env" or k == "headers" {
+                    var kept = LinkedMap<String, Json>()
+                    for (name, value) in settings {
+                        if not left_out.contains(str_at(value.copy(), "secret") ?? String()) { kept.insert(name.copy(), value.copy()) }
+                    }
+                    m.insert(k.copy(), Json.Object(kept))
+                    continue
+                }
+            }
+            m.insert(k.copy(), v.copy())
+        }
+    }
+    return Json.Object(m)
+}
+
+// The ways an entry is reached, as mcpregistry.ways gives a server.json's,
+// to tell a registry server is one in the catalog: its fixed address, or its
+// package as `npm:name`.
+pub fn ways(entry: Json) -> List<String> {
+    if let address = str_at(entry.copy(), "url") {
+        if address.contains("\{") { return List<String>() }
+        return [address.to_lower_root().trim_suffix("/").copy()]
+    }
+    let p = at(entry, "package")
+    let name = (str_at(p.copy(), "name") ?? String()).to_lower_root()
+    if name.len() == 0 { return List<String>() }
+    return ["{str_at(p, "registry") ?? String()}:{name}"]
 }
 
 // Whether the person's server `had` is what `spec` would add: the same address,
@@ -324,20 +388,32 @@ pub fn listed(entry: Json, have: List<String>, servers: List<String>, connecting
     let e = entry.copy()
     var o = Obj.new().s("id", str_at(e.copy(), "id") ?? String()).s("name", str_at(e.copy(), "name") ?? String()).s("category", str_at(e.copy(), "category") ?? String()).s("description", str_at(e.copy(), "description") ?? String()).s("maker", str_at(e.copy(), "maker") ?? String()).maybe("website", str_at(e.copy(), "website")).maybe("logo", str_at(e.copy(), "logo"))
     o = o.j("badge", badge.badge(str_at(e.copy(), "server") ?? String(), String(), String())).s("server", str_at(e.copy(), "server") ?? String()).s("runs", runs(e.copy()))
-    if let address = str_at(e.copy(), "url") {
+    // One from the MCP Registry (server/mcpregistry.calx).
+    if bool_at(e.copy(), "community") == some(true) {
+        o = o.b("community", true).s("registry", str_at(e.copy(), "registry") ?? String()).s("version", str_at(e.copy(), "version") ?? String())
+        if at(e.copy(), "also") != Json.Null { o = o.j("also", at(e.copy(), "also")) }
+    }
+    if let why = str_at(e.copy(), "unsupported") {
+        o = o.s("unsupported", why)
+    } else if let address = str_at(e.copy(), "url") {
         o = o.s("url", address)
     } else {
-        let (spec, _) = spec_of(e.copy(), Json.Null, String())
-        o = o.s("command", str_at(spec.copy(), "command") ?? String()).j("args", at(spec, "args"))
+        // With a `{field}` for each field, as an address has.
+        let (command, args, _) = program(at(e.copy(), "package"), List<(String, String)>())
+        o = o.s("command", command).j("args", Json.Array(args))
     }
     var fields = List<Json>()
     for f in list(at(e.copy(), "fields")) {
-        fields.push(Obj.new().s("name", str_at(f.copy(), "name") ?? String()).s("label", str_at(f.copy(), "label") ?? String()).maybe("placeholder", str_at(f, "placeholder")).done())
+        var field = Obj.new().s("name", str_at(f.copy(), "name") ?? String()).s("label", str_at(f.copy(), "label") ?? String()).maybe("placeholder", str_at(f.copy(), "placeholder")).maybe("default", str_at(f.copy(), "default")).maybe("description", str_at(f.copy(), "description"))
+        if at(f.copy(), "choices") != Json.Null { field = field.j("choices", at(f, "choices")) }
+        fields.push(field.done())
     }
     var secrets = List<Json>()
     for s in list(at(e.copy(), "secrets")) {
         let name = str_at(s.copy(), "name") ?? String()
-        secrets.push(Obj.new().s("name", name.copy()).s("label", str_at(s.copy(), "label") ?? String()).maybe("placeholder", str_at(s, "placeholder")).b("have", have.contains(name)).done())
+        var secret = Obj.new().s("name", name.copy()).s("label", str_at(s.copy(), "label") ?? String()).maybe("placeholder", str_at(s.copy(), "placeholder")).maybe("description", str_at(s.copy(), "description")).b("have", have.contains(name))
+        if bool_at(s, "optional") == some(true) { secret = secret.b("optional", true) }
+        secrets.push(secret.done())
     }
     var tools = List<Json>()
     for (key, kind) in [("reads", "read"), ("changes", "change")] {
