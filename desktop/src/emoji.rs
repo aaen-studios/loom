@@ -190,7 +190,7 @@ pub fn as_names(text: &str) -> String {
 
 /// `text` with each of the person's own outside code as `:name:`; in code it stays as
 /// written, as the chat shows and copies it.
-fn names_outside_code(text: &str) -> String {
+pub fn names_outside_code(text: &str) -> String {
     let code = code_ranges(text);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
