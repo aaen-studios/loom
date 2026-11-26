@@ -221,7 +221,12 @@ impl Loom {
 
     /// Opens routine `r`'s page, to change it and see its history: its form as it is,
     /// or as the person left it.
-    fn open_routine(&mut self, r: &model::Routine, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_routine(
+        &mut self,
+        r: &model::Routine,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let own = model::drafts::Form::Routine(Box::new(model::drafts::RoutineDraft::of(r)));
         self.fill_form(DraftPage::Routines, Some(r.id.clone()), own, window, cx);
         if let Some(f) = self.model.load_routine_runs(Some(&r.id)) {

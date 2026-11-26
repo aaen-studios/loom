@@ -13,11 +13,13 @@ module tests.protocol.learn
 // person changed is kept as they changed it, to
 // the skill by the name it has now when it was renamed while the fix waited. In
 // a group chat, each member that answered looks back over its own part, one
-// after the other, and what it keeps goes under its own reply.
+// after the other, and what it keeps goes under its own reply. A note an older
+// instance left waiting is kept when the instance starts.
 //
 //     calx tests/protocol/learn.calx
 import std.json.{Json}
 import std.process.{exit}
+import std.sqlite.{Database, Value}
 import shared.obj.{Obj, at, bool_at, str_at}
 import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check}
@@ -280,13 +282,61 @@ fn run(i: Instance) ! Error {
     app.close()
 }
 
+// Before a restart: a note waiting under a reply, as an older instance left one
+// from before every note was kept at once. Gives the event to go on from and the reply.
+fn waiting_before(i: Instance) -> (i64, String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_w1", "agent.create", Obj.new().s("name", String("Rowan")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let c = try app.cmd("q_w2", "conversation.create", Obj.new().s("agent", agent.copy()).done())
+    let chat = str_at(at(c, "value"), "conversation") ?? String()
+    let m = try say(mut app, chat, "m_w1", String("hello"))
+    let reply = str_at(m, "id") ?? String()
+    let seq = app.seq
+    app.close()
+    let db = try Database.open("{i.data}/loom.db")
+    let user = try db.query_one(String("SELECT id FROM users LIMIT 1"), List<Value>()) else fail "there's no user"
+    let note = Obj.new().s("text", String("Ann likes figs.")).s("site", String()).b("shared", false).done()
+    _ = try db.execute(String("INSERT INTO proposals (id, user, agent, kind, data, why, recording, status, at, message) VALUES ('prop_old', ?, ?, 'note', ?, '', '', 'waiting', 1, ?)"), [user[0].copy(), Value.Text(agent), Value.Text("{note}"), Value.Text(reply.copy())])
+    return (seq, reply)
+}
+
+// After it: the note is kept, as Keep on its card kept it, and its reply says so.
+fn waiting_after(i: Instance, seq: i64, reply: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), seq)
+    let kept = try under(mut app, reply, "Ann likes figs.")
+    let items = learned(kept.copy())
+    try see(items.len() == 1 and str_at(items[0].copy(), "status") == some(String("kept")), "a note left waiting is kept when the instance starts, and its reply says so", "{kept}")
+    try check((try memories(mut app, "q_w3")).contains("Ann likes figs."), "as a note")
+    let waiting = try app.cmd("q_w4", "proposal.list", Obj.new().done())
+    try see(not "{waiting}".contains("Ann likes figs."), "and it waits no more", "{waiting}")
+    app.close()
+}
+
 fn main() ! Error {
     let inst = try Instance.start_with([String("--test-minute-ms"), String(MINUTE_MS)])
-    let failure: String? = match run(inst.copy()) {
+    var failure: String? = match run(inst.copy()) {
         ok => none,
         err(e) => some("{e}"),
     }
-    inst.stop()
+    var left: (i64, String) = (0, String())
+    if failure == none {
+        match waiting_before(inst.copy()) {
+            ok(l) => left = l,
+            err(e) => failure = some("{e}"),
+        }
+    }
+    if failure != none {
+        inst.stop()
+    } else {
+        let (seq, reply) = left
+        let back = try inst.restart_with([String("--test-minute-ms"), String(MINUTE_MS)], 0)
+        match waiting_after(back.copy(), seq, reply) {
+            ok => {},
+            err(e) => failure = some("{e}"),
+        }
+        back.stop()
+    }
     if let f = failure {
         eprintln("\n{f}")
         exit(1)

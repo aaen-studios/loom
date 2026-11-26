@@ -205,7 +205,7 @@ impl Loom {
         let Some(m) = self.model.messages.iter().find(|m| m.id == id).cloned() else {
             return;
         };
-        let text = crate::emoji::as_names(&model::copy_text(&m, &self.model.tools));
+        let text = model::copy_text(&m, &self.model.tools);
         if let Some(f) = self.model.start_card(id, &text) {
             self.send(f);
         }
