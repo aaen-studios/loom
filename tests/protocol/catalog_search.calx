@@ -6,6 +6,7 @@ module tests.protocol.catalog_search
 // as entries marked community, without the official Notion, which is the
 // curated one and listed by its id, and with a server under two names given
 // once; a search typed again is answered from what the instance kept. A
+// server's SVG icon comes with it, fetched with the answer and kept with it. A
 // connect of a registry server takes what it is from the registry, never from
 // the device: its address and its secret header, the person's key kept under
 // the server's own name; one loom can't connect, a version that isn't there
@@ -25,8 +26,10 @@ import shared.client.{Session, reply_text}
 import tests.kit.{Instance, check}
 
 // A server of the test's own, reached at an https address where nothing
-// listens, with a key in a header.
-const LIGHTS: str = #"{"name":"io.github.loom-test/lights","description":"Lights for a test.","version":"1.2.0","remotes":[{"type":"streamable-http","url":"https://127.0.0.1:9/mcp","headers":[{"name":"Authorization","value":"Bearer {lights_key}","isSecret":true,"isRequired":true}]}]}"#
+// listens, with a key in a header, and an icon the fake registry serves (its
+// address, REGISTRY, is filled in when it starts), before a PNG.
+const LIGHTS: str = #"{"name":"io.github.loom-test/lights","description":"Lights for a test.","version":"1.2.0","icons":[{"src":"REGISTRY/test/lights.svg","mimeType":"image/svg+xml","sizes":["any"]},{"src":"REGISTRY/test/lights.png","mimeType":"image/png"}],"remotes":[{"type":"streamable-http","url":"https://127.0.0.1:9/mcp","headers":[{"name":"Authorization","value":"Bearer {lights_key}","isSecret":true,"isRequired":true}]}]}"#
+const LIGHTS_SVG: str = #"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="10" r="6"/></svg>"#
 // And one that's only a Docker image.
 const DOCKER: str = #"{"name":"io.github.loom-test/lights-docker","description":"Lights in Docker.","version":"1.0.0","packages":[{"registryType":"oci","identifier":"ghcr.io/loom-test/lights:1.0.0","transport":{"type":"stdio"}}]}"#
 const KEY: str = "lights-key-value"
@@ -38,8 +41,9 @@ fn items(j: Json) -> List<Json> {
 
 // The fake registry: GET /v0.1/servers?search=&limit= and
 // /v0.1/servers/NAME/versions/VERSION, from `servers`, each a server.json
-// with its _meta; /test/stats says how often each was asked, and /test/down
-// and /test/up have it answer 503 or not.
+// with its _meta, and /test/lights.svg, the test's server's icon; /test/stats
+// says how often each was asked, and /test/down and /test/up have it answer
+// 503 or not.
 struct Registry {
     server: Server
     servers: List<Json>
@@ -50,13 +54,17 @@ impl Task for Registry {
         var r = self
         var searches: i64 = 0
         var versions: i64 = 0
+        var icons: i64 = 0
         var down = false
         loop {
             let req = r.server.next() else { continue }
             let path = req.path.copy()
             var res = Response.error(404)
             if path == "/test/stats" {
-                res = Response.new(200, String("application/json"), "{Obj.new().i("searches", searches).i("versions", versions).done()}".to_bytes())
+                res = Response.new(200, String("application/json"), "{Obj.new().i("searches", searches).i("versions", versions).i("icons", icons).done()}".to_bytes())
+            } else if path == "/test/lights.svg" {
+                icons += 1
+                res = Response.new(200, String("image/svg+xml"), String(LIGHTS_SVG).to_bytes())
             } else if path == "/test/down" or path == "/test/up" {
                 down = path == "/test/down"
                 res = Response.new(200, String("application/json"), "\{\}".to_bytes())
@@ -109,13 +117,16 @@ fn listed_server(s: Json) -> Json {
     return Obj.new().j("server", s).j("_meta", Obj.new().j("io.modelcontextprotocol.registry/official", Obj.new().s("status", String("active")).s("updatedAt", String("2026-11-20T00:00:00Z")).b("isLatest", true).done()).done()).done()
 }
 
-fn fake_servers() -> List<Json> ! Error {
+// The servers the fake registry has, at `base`: the icons the real ones
+// name on GitHub are asked of it instead, which hasn't got them, so the test
+// never reaches the internet.
+fn fake_servers(base: String) -> List<Json> ! Error {
     var out = List<Json>()
     for file in ["notion.json", "playwright.json", "weather.json"] {
         let text = try fs.read_text("tests/mcp_registry/{file}") ?? String()
-        out.extend(items(at(try parse(text), "servers")))
+        out.extend(items(at(try parse(text.replace("https://raw.githubusercontent.com/", "{base}/test/raw/")), "servers")))
     }
-    out.push(listed_server(try parse(String(LIGHTS))))
+    out.push(listed_server(try parse(String(LIGHTS).replace("REGISTRY", base.copy()))))
     out.push(listed_server(try parse(String(DOCKER))))
     return out
 }
@@ -190,7 +201,7 @@ fn run(i: Instance, registry: String) ! Error {
     try check("{at(smithery, "secrets")}".contains(#""name":"smithery-notion.smithery_api_key""#), "its secret is named after it")
     let docker = entry_in(notion, "io.github.BiteFoundry/notion")
     try check((str_at(docker.copy(), "unsupported") ?? String()).starts_with("It's only a Docker image.") and str_at(docker, "url") == none, "one loom can't connect says why")
-    _ = try app.cmd("q_2", "catalog.search", Obj.new().s("query", String("notion")).done())
+    let notion_again = try app.cmd("q_2", "catalog.search", Obj.new().s("query", String("notion")).done())
     try check(int_at(try stats(registry.copy()), "searches") == some(1), "the same search again is answered from what the instance kept")
     let short = try app.cmd("q_3", "catalog.search", Obj.new().s("query", String("no")).done())
     try check(code_of(short.copy()) == "bad_request" and message_of(short) == "Search for 3 letters or more.", "a search of fewer than 3 letters is refused")
@@ -201,7 +212,9 @@ fn run(i: Instance, registry: String) ! Error {
     let lights = try app.cmd("q_5", "catalog.search", Obj.new().s("query", String("lights")).done())
     try check("{at(at(lights.copy(), "value"), "curated")}" == #"["home-assistant"]"#, "a curated entry whose line has the words is listed by its id too")
     let entry = entry_in(lights, "io.github.loom-test/lights")
-    try check(str_at(entry.copy(), "version") == some(String("1.2.0")) and str_at(entry.copy(), "server") == some(String("lights")) and bool_at(entry, "connected") == some(false), "the test's server is there, at its version, to be added as lights")
+    try check(str_at(entry.copy(), "version") == some(String("1.2.0")) and str_at(entry.copy(), "server") == some(String("lights")) and bool_at(entry.copy(), "connected") == some(false), "the test's server is there, at its version, to be added as lights")
+    try check(str_at(entry, "icon_svg") == some(String(LIGHTS_SVG)) and int_at(try stats(registry.copy()), "icons") == some(1), "with the icon its server.json gives as an SVG, fetched with the search")
+    try check(str_at(entry_in(notion_again.copy(), "com.foreverworks/notion"), "icon_svg") == none and str_at(entry_in(notion_again, "ai.smithery/smithery-notion"), "icon_svg") == none, "one whose icon can't be fetched, and one with none, have no icon")
     let no_key = try app.cmd("q_6", "catalog.connect", Obj.new().s("registry", String("io.github.loom-test/lights")).s("version", String("1.2.0")).done())
     try check(code_of(no_key.copy()) == "bad_request" and message_of(no_key) == "Fill in lights_key first.", "its key is asked for")
     let mark = app.frames.len()
@@ -216,6 +229,7 @@ fn run(i: Instance, registry: String) ! Error {
     let again = try app.cmd("q_10", "catalog.search", Obj.new().s("query", String("lights")).done())
     try check("{at(entry_in(again, "io.github.loom-test/lights"), "servers")}" == #"["lights"]"#, "the search then says the person has it")
     try check(int_at(try stats(registry.copy()), "versions") == some(1), "and the registry was asked for that version once")
+    try check(str_at(entry_in(again, "io.github.loom-test/lights"), "icon_svg") == some(String(LIGHTS_SVG)) and int_at(try stats(registry.copy()), "icons") == some(1), "its icon is kept with the answer, and not fetched again")
 
     // --- What's refused ---
     let unsupported = try app.cmd("q_11", "catalog.connect", Obj.new().s("registry", String("io.github.loom-test/lights-docker")).s("version", String("1.0.0")).done())
@@ -253,7 +267,7 @@ fn main() ! Error {
     var server = try Server.listen(0)
     server.log = false
     let base = server.url().trim_suffix("/").copy()
-    _ = unsafe { Thread.spawn(Registry { server: server, servers: try fake_servers() }) }
+    _ = unsafe { Thread.spawn(Registry { server: server, servers: try fake_servers(base.copy()) }) }
     let inst = try Instance.start_with([String("--mcp-registry"), base.copy()])
     let failure: String? = match run(inst.copy(), base) {
         ok => none,

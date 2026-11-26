@@ -16,8 +16,11 @@ pub mod popup;
 mod rooms;
 pub mod t3;
 pub use popover::pop_under;
+pub mod spools;
 use rooms::Making;
 pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed, MAKE_WAIT};
+mod sidebar;
+pub use sidebar::{Drop, Section, SideItem, SidePart};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -86,57 +89,6 @@ fn sort_agents(agents: &mut [Agent]) {
             a.pinned.unwrap_or(0),
         )
     });
-}
-
-/// A part of the sidebar, as the core groups the agents (`core/sidebar.calx`): who's
-/// waiting on the person, the pinned ones, the rest not in a folder, each folder, and
-/// the hidden ones.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SidePart {
-    Waiting,
-    Pinned,
-    Agents,
-    Folder {
-        id: String,
-        name: String,
-        collapsed: bool,
-    },
-    Hidden,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Section {
-    pub part: SidePart,
-    /// Its agents' ids, in order.
-    pub agents: Vec<String>,
-}
-
-impl Section {
-    fn of(v: &Value) -> Option<Section> {
-        let part = match v.get("kind").and_then(Value::as_str)? {
-            "waiting" => SidePart::Waiting,
-            "pinned" => SidePart::Pinned,
-            "agents" => SidePart::Agents,
-            "hidden" => SidePart::Hidden,
-            "group" => SidePart::Folder {
-                id: s(v, "id"),
-                name: s(v, "name"),
-                collapsed: v.get("collapsed").and_then(Value::as_bool).unwrap_or(false),
-            },
-            _ => return None,
-        };
-        let agents = v
-            .get("agents")
-            .and_then(Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(Section { part, agents })
-    }
 }
 
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
@@ -546,7 +498,7 @@ pub enum SignIn {
 }
 
 /// One of the person's MCP servers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct McpServer {
     pub name: String,
     /// The command line, for one the agent starts; empty for one over HTTP.
@@ -559,12 +511,36 @@ pub struct McpServer {
     /// by itself, and its secret when it names one of their keys.
     pub client_id: String,
     pub client_secret: Option<String>,
+    /// How it stands, as its last test found it (Spools' Installed list), and why,
+    /// for one failing.
+    pub status: McpStatus,
+    pub why: String,
+    /// The tools its last test found, while it's connected.
+    pub tools: Vec<String>,
+    /// The ids of the person's agents that have it.
+    pub agents: Vec<String>,
+    /// The id of the catalog entry it came from, or whose fixed address it has.
+    pub catalog: String,
+    /// Its badge, with the icons it gave of its own once it has.
+    pub badge: Option<Badge>,
 }
 
-#[derive(Clone, Debug)]
+/// How one of the person's MCP servers stands, as `mcp.list` says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum McpStatus {
+    Connected,
+    SignIn,
+    Failing,
+    #[default]
+    Untested,
+}
+
+/// A value in a server's env or headers: text, or one of the person's secrets by name,
+/// with any text sent before it, such as `Bearer `.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Setting {
     Text(String),
-    Secret(String),
+    Secret { name: String, prefix: String },
 }
 
 impl McpServer {
@@ -585,7 +561,10 @@ impl McpServer {
                 m.iter()
                     .map(|(k, v)| {
                         let value = match v.get("secret").and_then(Value::as_str) {
-                            Some(name) => Setting::Secret(name.to_string()),
+                            Some(name) => Setting::Secret {
+                                name: name.to_string(),
+                                prefix: s(v, "prefix"),
+                            },
                             None => Setting::Text(v.as_str().unwrap_or_default().to_string()),
                         };
                         (k.clone(), value)
@@ -602,6 +581,17 @@ impl McpServer {
             .pointer("/client_secret/secret")
             .and_then(Value::as_str)
             .map(|n| format!("secret:{n}"));
+        let names = |key: &str| -> Vec<String> {
+            v.get(key)
+                .and_then(Value::as_array)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         McpServer {
             name: s(v, "name"),
             command,
@@ -610,24 +600,59 @@ impl McpServer {
             sign_in,
             client_id: s(v, "client_id"),
             client_secret,
+            status: match s(v, "status").as_str() {
+                "connected" => McpStatus::Connected,
+                "sign_in" => McpStatus::SignIn,
+                "failing" => McpStatus::Failing,
+                _ => McpStatus::Untested,
+            },
+            why: s(v, "why"),
+            tools: names("tools"),
+            agents: names("agents"),
+            catalog: s(v, "catalog"),
+            badge: v.get("badge").and_then(Badge::of),
         }
     }
 
-    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a line.
+    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a
+    /// line, a secret's prefix before it, as `Authorization=Bearer secret:GITHUB_TOKEN`.
     pub fn settings_text(&self) -> String {
         self.settings
             .iter()
             .map(|(k, v)| match v {
                 Setting::Text(t) => format!("{k}={t}"),
-                Setting::Secret(n) => format!("{k}=secret:{n}"),
+                Setting::Secret { name, prefix } => format!("{k}={prefix}secret:{name}"),
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
 }
 
+/// A setting's value as the form has it: `secret:KEY`, with any prefix before it
+/// (`Bearer secret:KEY`), names one of the person's secrets; anything else is text.
+/// A prefix is the text before `secret:` and ends in a space, and a secret's name is
+/// letters, digits, `_`, `-` and `.`.
+fn setting_value(v: &str) -> Value {
+    if let Some(at) = v.rfind("secret:") {
+        let (prefix, name) = (&v[..at], v[at + "secret:".len()..].trim());
+        let named = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if named && (prefix.is_empty() || prefix.ends_with(char::is_whitespace)) {
+            return if prefix.is_empty() {
+                json!({"secret": name})
+            } else {
+                json!({"secret": name, "prefix": prefix})
+            };
+        }
+    }
+    json!(v)
+}
+
 /// The `mcp.put` arguments for a server as the form has it: a command line, or an http(s)
-/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line.
+/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line, a secret's
+/// prefix kept before it (`NAME=Bearer secret:KEY`).
 pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
     let mut pairs = serde_json::Map::new();
     for l in settings.lines() {
@@ -638,11 +663,7 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
         if k.is_empty() {
             continue;
         }
-        let value = match v.strip_prefix("secret:") {
-            Some(n) => json!({"secret": n.trim()}),
-            None => json!(v),
-        };
-        pairs.insert(k.to_string(), value);
+        pairs.insert(k.to_string(), setting_value(v));
     }
     let line = line.trim();
     if line.starts_with("http://") || line.starts_with("https://") {
@@ -968,6 +989,8 @@ pub enum PlusRow {
     Routine(Box<Routine>),
     /// The end of a list beside the menu: its settings page.
     Manage(PlusSub),
+    /// Opens Spools in Settings, for the agent.
+    Spools,
     /// Opens the form that starts a T3 thread (PLAN.md, "T3 threads").
     StartT3,
 }
@@ -1033,6 +1056,7 @@ impl Model {
             let mut act = vec![
                 PlusRow::Open(PlusSub::Skills),
                 PlusRow::Open(PlusSub::Routines),
+                PlusRow::Spools,
             ];
             if !self.t3.servers.is_empty() {
                 act.push(PlusRow::StartT3);
@@ -1064,6 +1088,9 @@ impl Model {
             |r| (r.name.as_str(), ""),
             |r| PlusRow::Routine(Box::new(r)),
         ));
+        if plus_match(&q, "Spools", "integrations mcp").is_some() {
+            act.push(PlusRow::Spools);
+        }
         if !self.t3.servers.is_empty() && "start a t3 thread".contains(&q) {
             act.push(PlusRow::StartT3);
         }
@@ -6074,8 +6101,9 @@ pub struct Model {
     pub open_branch: Option<String>,
     /// The group chats, as the conversations list has them (PLAN.md, "Group chats").
     pub rooms: Vec<Room>,
-    /// Their order in the sidebar, as the core gives it.
-    room_order: Vec<String>,
+    /// Every agent and group chat in the person's order, as the core gives it
+    /// (`core/sidebar.calx`), for a drag to rearrange.
+    side_order: Vec<String>,
     /// The group chat the chat shows, by conversation, instead of the agent's chat.
     pub open_room: Option<String>,
     /// The room.create the app sent last, to show the group chat once it's made, and
@@ -6184,6 +6212,8 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<Secret>,
     mcp_stale: bool,
+    /// Spools, the integrations catalog, and connecting from it.
+    pub spools: spools::Spools,
     /// The settings list pages' forms, each item's as the person left it, changed and
     /// not saved (`drafts`).
     pub drafts: drafts::Drafts,
@@ -7233,6 +7263,7 @@ impl Model {
             "event" => self.event(f),
             "result" => self.result(f),
             "browser.state" => self.browser_state(f),
+            "connect" => self.connect_frame(f),
             "browser.frame" => {
                 // From an instance of protocol version 1, the JPEG in base64; later
                 // ones send it as a binary message (`take_page`).
@@ -7443,9 +7474,11 @@ impl Model {
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| s(&message, "agent"));
                     // One in another agent's thread with it marks that thread, not the
-                    // agent's chat with the person.
+                    // agent's chat with the person; one in a group chat marks that.
                     if asked {
                         self.asks_unread.insert(conversation.clone());
+                    } else if self.room(&conversation).is_some() {
+                        self.unread.insert(conversation.clone());
                     } else if !agent.is_empty() {
                         self.first_unread.entry(agent.clone()).or_insert((id, 0)).1 += 1;
                         self.unread.insert(agent);
@@ -7812,6 +7845,10 @@ impl Model {
         // A list page's Save: saved, its draft goes; refused, it stays, and the branch
         // for its command says why.
         self.drafts.answered(&id, f.get("error").is_none());
+        if id.starts_with("app.spools_") {
+            self.spools_result(&id, f);
+            return;
+        }
         // A group chat made here: the chat shows it.
         if id.starts_with("app.room_create") {
             self.room_create_answered(&id, f);
@@ -7955,6 +7992,10 @@ impl Model {
             return;
         }
         if let Some(name) = id.strip_prefix("app.mcp_test:") {
+            // The instance keeps what it found, which Spools' Installed list shows.
+            if self.spools.loaded {
+                self.mcp_stale = true;
+            }
             let found = match f.get("error") {
                 Some(e) if s(e, "code") == "sign_in_needed" => {
                     self.mcp_stale = true;
@@ -8910,26 +8951,7 @@ impl Model {
             .cloned()
             .unwrap_or_default();
         match what {
-            List::Sidebar => {
-                let sections = f
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map(|ss| ss.iter().filter_map(Section::of).collect())
-                    .unwrap_or_default();
-                self.sidebar = Rc::new(sections);
-                // Its group chats, first, as the core orders them.
-                self.room_order = items
-                    .iter()
-                    .filter(|sec| sec.get("kind").and_then(Value::as_str) == Some("rooms"))
-                    .flat_map(|sec| {
-                        sec.get("rooms")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .map(|r| s(&r, "id"))
-                    .collect();
-            }
+            List::Sidebar => self.take_sidebar(&items),
             // Offline, from the cache, until device.list says when each was last on.
             List::Devices => {
                 self.devices = items
@@ -9857,7 +9879,19 @@ impl Model {
             _ => Vec::new(),
         });
         let sites = sites.chain(previews);
-        for icon in cards.chain(asks).flat_map(Badge::icons).chain(sites) {
+        // And the icons Spools shows: those the person's servers gave of their own.
+        let spools = self
+            .spools
+            .entries
+            .iter()
+            .filter_map(|e| e.badge.as_ref())
+            .chain(self.mcp_servers.iter().filter_map(|m| m.badge.as_ref()));
+        for icon in cards
+            .chain(asks)
+            .chain(spools)
+            .flat_map(Badge::icons)
+            .chain(sites)
+        {
             if !wanted.contains(icon) {
                 wanted.push(icon.clone());
             }
@@ -10354,13 +10388,18 @@ impl Model {
         )
     }
 
-    /// Asks for the person's MCP servers and their secrets' names.
+    /// Asks for the person's MCP servers and their secrets' names, and the catalog
+    /// once Spools has been opened, whose entries say which they have.
     pub fn load_mcp(&mut self) -> Vec<Value> {
         let (a, b) = (self.id("app.mcp_list"), self.id("app.secrets"));
-        vec![
+        let mut out = vec![
             json!({"t": "cmd", "id": a, "name": "mcp.list"}),
             json!({"t": "cmd", "id": b, "name": "secret.list"}),
-        ]
+        ];
+        if self.spools.loaded {
+            out.extend(self.load_catalog());
+        }
+        out
     }
 
     /// Starts the MCP server `name` on the instance and asks for its tools.
@@ -11214,25 +11253,6 @@ impl Model {
         "You".into()
     }
 
-    /// Puts the agent `id`, dragged in the sidebar, in the place of `onto`, and gives
-    /// the instance the new order. Pinned agents stay above the rest.
-    pub fn move_agent(&mut self, id: &str, onto: &str) -> Option<Value> {
-        let from = self.agents.iter().position(|a| a.id == id)?;
-        let to = self.agents.iter().position(|a| a.id == onto)?;
-        if from == to {
-            return None;
-        }
-        let moved = Rc::make_mut(&mut self.agents).remove(from);
-        Rc::make_mut(&mut self.agents).insert(to, moved);
-        for (k, a) in Rc::make_mut(&mut self.agents).iter_mut().enumerate() {
-            a.order = Some(k as i64);
-        }
-        sort_agents(Rc::<Vec<Agent>>::make_mut(&mut self.agents));
-        let cmd = self.id("app.order");
-        let ids: Vec<&str> = self.agents.iter().map(|a| a.id.as_str()).collect();
-        Some(json!({"t": "cmd", "id": cmd, "name": "agent.order", "args": {"agents": ids}}))
-    }
-
     /// Pins the open agent to the top of the list, or takes its pin off.
     pub fn pin_agent(&mut self, pinned: bool) -> Option<Value> {
         let agent = self.selected.clone()?;
@@ -11240,25 +11260,6 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.pin", "args": {"agent": agent, "pinned": pinned}}),
         )
-    }
-
-    /// Puts an agent in a sidebar folder, or with None, out of them. It shows there at
-    /// once, and the instance tells every device.
-    pub fn group_agent(&mut self, agent: &str, group: Option<&str>) -> Value {
-        let sections = Rc::make_mut(&mut self.sidebar);
-        for sec in sections.iter_mut() {
-            sec.agents.retain(|a| a != agent);
-        }
-        let into = sections.iter_mut().find(|sec| match (&sec.part, group) {
-            (SidePart::Folder { id, .. }, Some(g)) => id == g,
-            (SidePart::Agents, None) => true,
-            _ => false,
-        });
-        if let Some(sec) = into {
-            sec.agents.push(agent.to_string());
-        }
-        let id = self.id("app.group_agent");
-        json!({"t": "cmd", "id": id, "name": "agent.group", "args": {"agent": agent, "group": group.unwrap_or_default()}})
     }
 
     /// Hides an agent in the sidebar, or shows it again.
@@ -11314,35 +11315,6 @@ impl Model {
     pub fn delete_folder(&mut self, folder: &str) -> Value {
         let id = self.id("app.folder");
         json!({"t": "cmd", "id": id, "name": "group.delete", "args": {"group": folder}})
-    }
-
-    /// The part of the sidebar an agent is in.
-    pub fn part_of(&self, agent: &str) -> Option<SidePart> {
-        self.sidebar
-            .iter()
-            .find(|sec| sec.agents.iter().any(|a| a == agent))
-            .map(|sec| sec.part.clone())
-    }
-
-    /// The sidebar's folders, each id and name, in order.
-    pub fn folders(&self) -> Vec<(String, String)> {
-        self.sidebar
-            .iter()
-            .filter_map(|sec| match &sec.part {
-                SidePart::Folder { id, name, .. } => Some((id.clone(), name.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The agents of the sidebar, in its order, without the hidden ones: what the rail
-    /// shows, and what Ctrl+1 to 9 open.
-    pub fn shown_agents(&self) -> Vec<String> {
-        self.sidebar
-            .iter()
-            .filter(|sec| sec.part != SidePart::Hidden)
-            .flat_map(|sec| sec.agents.iter().cloned())
-            .collect()
     }
 
     /// Sets an agent's permission mode, or with None, has it follow the default.
@@ -12057,6 +12029,67 @@ mod tests {
         assert!(kept.get("client_secret").is_none());
         let local = with_client(server_args("local", "npx thing", ""), "c1", "s");
         assert!(local.get("client_id").is_none());
+    }
+
+    #[test]
+    fn an_mcp_server_says_how_it_stands_for_the_installed_list() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+            {"name": "acta", "url": "https://acta.aaenz.no/api/mcp", "headers": {}, "status": "connected",
+             "tools": ["list_tasks"], "agents": ["a1", "a2"], "catalog": "acta"},
+            {"name": "t3", "url": "https://pc.ts.net/mcp", "headers": {}, "status": "failing", "why": "It didn't answer."},
+            {"name": "linear", "url": "https://mcp.linear.app/mcp", "headers": {}, "status": "sign_in"},
+            {"name": "local", "command": "npx", "args": ["thing"], "env": {}}
+        ]}}));
+        let acta = &m.mcp_servers[0];
+        assert_eq!(acta.status, McpStatus::Connected);
+        assert_eq!(acta.tools, ["list_tasks"]);
+        assert_eq!(acta.agents, ["a1", "a2"]);
+        assert_eq!(acta.catalog, "acta");
+        assert_eq!(
+            (m.mcp_servers[1].status, m.mcp_servers[1].why.as_str()),
+            (McpStatus::Failing, "It didn't answer.")
+        );
+        assert_eq!(m.mcp_servers[2].status, McpStatus::SignIn);
+        assert_eq!(m.mcp_servers[3].status, McpStatus::Untested);
+    }
+
+    #[test]
+    fn the_mcp_form_keeps_a_secrets_prefix() {
+        // LOO-364: a header that's `Bearer ` and a secret shows with its prefix, and
+        // saving the form sends it back as it was.
+        let mut m = Model::new();
+        m.take(
+            &json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+                {"name": "github", "url": "https://api.githubcopilot.com/mcp/", "headers": {
+                    "Authorization": {"secret": "GITHUB_TOKEN", "prefix": "Bearer "},
+                    "X-Plain": {"secret": "PLAIN"},
+                    "X-Text": "hello"
+                }}
+            ]}}),
+        );
+        let text = m.mcp_servers[0].settings_text();
+        assert!(text.contains("Authorization=Bearer secret:GITHUB_TOKEN"));
+        assert!(text.contains("X-Plain=secret:PLAIN"));
+        assert!(text.contains("X-Text=hello"));
+        let put = server_args("github", "https://api.githubcopilot.com/mcp/", &text);
+        assert_eq!(
+            put["headers"],
+            json!({
+                "Authorization": {"secret": "GITHUB_TOKEN", "prefix": "Bearer "},
+                "X-Plain": {"secret": "PLAIN"},
+                "X-Text": "hello"
+            })
+        );
+        // Text that only has secret: in it stays text.
+        let odd = server_args(
+            "x",
+            "npx x",
+            "URL=https://x.example/secret:y\nEMPTY=Bearer secret:\nNAME=my secret:has space",
+        );
+        assert_eq!(odd["env"]["URL"], "https://x.example/secret:y");
+        assert_eq!(odd["env"]["EMPTY"], "Bearer secret:");
+        assert_eq!(odd["env"]["NAME"], "my secret:has space");
     }
 
     #[test]
@@ -15427,11 +15460,15 @@ mod tests {
                 ],
                 vec![
                     PlusRow::Open(PlusSub::Skills),
-                    PlusRow::Open(PlusSub::Routines)
+                    PlusRow::Open(PlusSub::Routines),
+                    PlusRow::Spools
                 ],
             ]
         );
         assert!(m.plus_groups("", true)[0].contains(&PlusRow::PasteImage));
+        // Spools is found by its name, or what it's for.
+        assert_eq!(m.plus_groups("spo", false), vec![vec![PlusRow::Spools]]);
+        assert_eq!(m.plus_groups("mcp", false), vec![vec![PlusRow::Spools]]);
         // Typed, each group's rows that match: names that start with it first, then a
         // skill's when-to-use, and this agent's routines before another's.
         let found = m.plus_groups("rev", false);
@@ -16476,21 +16513,31 @@ mod tests {
         let mut m = Model::new();
         let asked: Vec<Value> = m.fetches();
         assert!(asked.iter().any(|f| f["what"] == "sidebar"));
-        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
-            {"kind": "waiting", "agents": ["a_3"]},
-            {"kind": "pinned", "agents": []},
-            {"kind": "agents", "agents": ["a_1"]},
-            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "agents": ["a_2"]},
-            {"kind": "hidden", "agents": ["a_4"]}
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One"}, {"id": "a_2", "name": "Two"}, {"id": "a_3", "name": "Three"}, {"id": "a_4", "name": "Four", "hidden": 2}
         ]}));
+        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
+            {"kind": "pinned", "agents": []},
+            {"kind": "waiting", "agents": ["a_3"]},
+            {"kind": "list", "items": [{"kind": "agent", "id": "a_1"}]},
+            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "items": [{"kind": "agent", "id": "a_2"}]},
+            {"kind": "hidden", "agents": ["a_4"]},
+            {"kind": "order", "items": ["a_3", "a_1", "a_2", "a_4"]}
+        ]}));
+        let shown = |m: &Model| -> Vec<String> {
+            m.rail_parts()
+                .iter()
+                .flat_map(|s| s.items.iter().map(|i| i.id().to_string()))
+                .collect()
+        };
         assert_eq!(m.folders(), [("g_1".to_string(), "Work".to_string())]);
-        assert_eq!(m.shown_agents(), ["a_3", "a_1", "a_2"]);
+        assert_eq!(shown(&m), ["a_3", "a_1", "a_2"]);
         assert_eq!(m.part_of("a_4"), Some(SidePart::Hidden));
         // Put in the folder, it's there at once.
         let f = m.group_agent("a_1", Some("g_1"));
         assert_eq!(f["name"], "agent.group");
         assert_eq!(f["args"], json!({"agent": "a_1", "group": "g_1"}));
-        assert_eq!(m.shown_agents(), ["a_3", "a_2", "a_1"]);
+        assert_eq!(shown(&m), ["a_3", "a_2", "a_1"]);
         let f = m.collapse_folder("g_1", true);
         assert_eq!(f["args"], json!({"group": "g_1", "collapsed": true}));
         assert!(m.rename_folder("g_1", "  ").is_none());
@@ -16524,7 +16571,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_stay_where_they_were_dragged() {
+    fn agents_are_listed_where_they_were_dragged() {
         let mut m = Model::new();
         m.take(&json!({"t": "core.data", "what": "agents", "items": [
             {"id": "a_1", "name": "One", "order": 2},
@@ -16534,12 +16581,6 @@ mod tests {
         ]}));
         let order = |m: &Model| m.agents.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
         assert_eq!(order(&m), ["a_2", "a_4", "a_1", "a_3"]);
-        // The last one dragged onto the first takes its place.
-        let f = m.move_agent("a_3", "a_2").unwrap();
-        assert_eq!(order(&m), ["a_3", "a_2", "a_4", "a_1"]);
-        assert_eq!(f["name"], "agent.order");
-        assert_eq!(f["args"]["agents"], json!(["a_3", "a_2", "a_4", "a_1"]));
-        assert!(m.move_agent("a_3", "a_3").is_none());
     }
 
     #[test]

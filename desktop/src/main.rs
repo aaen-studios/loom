@@ -316,6 +316,7 @@ gpui_kit::assets::icon_assets!(
         BookOpen,
         Bot,
         Plug,
+        Spool,
         Puzzle,
         Smartphone,
         Users,

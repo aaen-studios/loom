@@ -51,31 +51,6 @@ func listed(_ agents: [Agent]) -> [Agent] {
     }.map(\.element)
 }
 
-/// A part of the agent list, as the core groups the agents (core/sidebar.calx), the way
-/// the desktop's sidebar shows them: who's waiting on the person, the pinned ones, the
-/// rest not in a folder, each folder, and the hidden ones.
-struct SideSection: Equatable, Sendable {
-    enum Part: Equatable, Sendable {
-        case waiting, pinned, agents, hidden
-        case folder(id: String, name: String, collapsed: Bool)
-    }
-    var part: Part
-    /// Its agents' ids, in order.
-    var agents: [String]
-
-    init?(_ j: JSON) {
-        switch j["kind"].text {
-        case "waiting": part = .waiting
-        case "pinned": part = .pinned
-        case "agents": part = .agents
-        case "hidden": part = .hidden
-        case "group": part = .folder(id: j["id"].text, name: j["name"].text, collapsed: j["collapsed"].bool ?? false)
-        default: return nil
-        }
-        agents = j["agents"].array.map(\.text)
-    }
-}
-
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
 func points(_ j: JSON) -> [CGPoint] {
     j.array.compactMap { p in
@@ -1577,7 +1552,7 @@ final class Model {
     var agents: [Agent] = []
     /// How the agent list groups them, as the core says.
     var sidebar: [SideSection] = []
-    /// An agent to put in the folder asked for last, once it's made.
+    /// An agent or a group chat to put in the folder asked for last, once it's made.
     private var folderFor: String?
     var conversations: [Conversation] = []
     var runs: [Run] = []
@@ -1637,8 +1612,9 @@ final class Model {
     private(set) var thread: String?
     /// The group chat shown in the chat's place, by its conversation.
     var room: String?
-    /// The group chats' order in the sidebar, as the core gives it.
-    var roomOrder: [String] = []
+    /// Every agent and group chat in the person's order, as the core gives it
+    /// (core/sidebar.calx), for a move to rearrange.
+    var sideOrder: [String] = []
     /// New group chat's form: the members and colour picked so far.
     var roomForm = RoomForm()
     /// The room.create sent last, to show the group chat once it's made.
@@ -2225,13 +2201,13 @@ final class Model {
             let url = String(id[id.index(after: hash)...])
             linkPreviews[url] = error == nil && !f["value"]["link"].isNull ? .ready(PageLink.of(f["value"]["link"])) : .failed
         case let id where id.hasPrefix("app.folder_new"):
-            // A folder made for an agent: the agent goes in.
+            // A folder made for an agent or a group chat: it goes in.
             let agent = folderFor
             folderFor = nil
             if let error {
                 notice = error
-            } else if let agent, let group = f["value"]["group"]["id"].string {
-                pending.append(groupAgent(agent, group))
+            } else if let agent, let group = f["value"]["group"]["id"].string, let c = regroup(agent, group) {
+                pending.append(c)
             }
         case let id where id.hasPrefix("app.agent_files"):
             // The files the @ picker asked for, unless it has asked for others since.
@@ -2321,9 +2297,7 @@ final class Model {
         let items = f["items"].array
         switch what {
         case .sidebar:
-            sidebar = items.compactMap(SideSection.init)
-            // Its group chats, first, as the core orders them.
-            roomOrder = items.filter { $0["kind"].text == "rooms" }.flatMap { $0["rooms"].array.map { $0["id"].text } }
+            takeSidebar(items)
         case .agents:
             agents = listed(items.map {
                 Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text)
@@ -3099,35 +3073,6 @@ final class Model {
     }
 
     // MARK: The agent list's folders (PLAN.md, "The sidebar")
-
-    /// The folders, each id and name, in order.
-    var folders: [(id: String, name: String)] {
-        sidebar.compactMap {
-            if case .folder(let id, let name, _) = $0.part { return (id, name) }
-            return nil
-        }
-    }
-
-    /// The agents in the list's order, without the hidden ones.
-    var shownAgents: [Agent] {
-        let ids = sidebar.filter { $0.part != .hidden }.flatMap(\.agents)
-        return ids.isEmpty ? agents : ids.compactMap { self.agent($0) }
-    }
-
-    /// Puts an agent in a folder, or with nil, out of them. It shows there at once.
-    func groupAgent(_ agent: String, _ group: String?) -> JSON {
-        for i in sidebar.indices { sidebar[i].agents.removeAll { $0 == agent } }
-        if let i = sidebar.firstIndex(where: {
-            switch $0.part {
-            case .folder(let id, _, _): return id == group
-            case .agents: return group == nil
-            default: return false
-            }
-        }) {
-            sidebar[i].agents.append(agent)
-        }
-        return ["t": "cmd", "id": JSON(id("app.group_agent")), "name": "agent.group", "args": ["agent": JSON(agent), "group": JSON(group ?? "")]]
-    }
 
     /// Hides an agent, or shows it again.
     func hideAgent(_ agent: String, _ hidden: Bool) -> JSON {

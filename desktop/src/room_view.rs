@@ -1,4 +1,4 @@
-//! Group chats on screen (PLAN.md, "Group chats"): their rows atop the sidebar, the
+//! Group chats on screen (PLAN.md, "Group chats"): their rows in the sidebar's list, the
 //! chat's head while one is open, the line over each reply that says how it came to its
 //! agent, and the panel beside the chat that makes one or changes it. The instance
 //! picks who answers; this only draws it and sends what the person changes.
@@ -130,42 +130,8 @@ impl Loom {
         cx.notify();
     }
 
-    /// The group chats atop the sidebar: Everyone first, as the core orders them, each
-    /// with its members' threads woven together, under a head with a + that makes one.
-    pub(super) fn room_list(&self, cx: &mut Context<Self>) -> Option<Div> {
-        let rooms: Vec<model::Room> = self.model.sidebar_rooms().into_iter().cloned().collect();
-        if rooms.is_empty() && self.model.agents.len() < 2 {
-            return None;
-        }
-        let p = self.p;
-        let plus = div()
-            .id("new-room")
-            .role(Role::Button)
-            .aria_label("New group chat")
-            .size(px(18.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::ROW))
-            .text_color(p.ink_3)
-            .cursor_pointer()
-            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
-            .tooltip(tip("New group chat"))
-            .child(Icon::new(Ico::Plus).xsmall())
-            .on_click(cx.listener(|this, _, window, cx| this.new_room(window, cx)));
-        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S)).child(
-            self.group_head("group-rooms".into(), "Group chats".into(), None)
-                .justify_between()
-                .child(plus),
-        );
-        for r in &rooms {
-            list = list.child(self.room_row(r, cx));
-        }
-        Some(list)
-    }
-
     /// Its members' colours, the chat's own first when it has one: four at most.
-    fn room_colors(&self, r: &model::Room) -> Vec<Hsla> {
+    pub(super) fn room_colors(&self, r: &model::Room) -> Vec<Hsla> {
         let p = self.p;
         let mut colors: Vec<Hsla> = Vec::new();
         if !r.color.is_empty() {
@@ -181,7 +147,7 @@ impl Loom {
         colors
     }
 
-    fn room_mark(&self, r: &model::Room, w: f32, h: f32) -> Div {
+    pub(super) fn room_mark(&self, r: &model::Room, w: f32, h: f32) -> Div {
         div()
             .w(px(w))
             .h(px(h))
@@ -219,12 +185,14 @@ impl Loom {
             })
     }
 
-    /// A group chat's row: its mark and its name. A click opens it, a right-click its
-    /// settings.
-    fn room_row(&self, r: &model::Room, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// A group chat's row in the sidebar's list: its members' threads woven, its name,
+    /// and a dot at its end while a reply in it hasn't been seen. A click opens it, a
+    /// right-click its settings.
+    pub(super) fn room_row(&self, r: &model::Room, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let selected =
             self.model.open_room.as_deref() == Some(r.id.as_str()) && self.screen == Screen::Chat;
+        let unread = self.model.room_unread(&r.id);
         let (id, menu_id) = (r.id.clone(), r.id.clone());
         div()
             .id(SharedString::from(format!("room-{}", r.id)))
@@ -255,11 +223,18 @@ impl Loom {
                     .flex_1()
                     .min_w_0()
                     .text_size(px(size::BODY))
-                    .font_weight(FontWeight::MEDIUM)
+                    .font_weight(if unread {
+                        FontWeight::SEMIBOLD
+                    } else {
+                        FontWeight::MEDIUM
+                    })
                     .text_color(p.ink)
                     .truncate()
                     .child(r.name.clone()),
             )
+            .when(unread, |d| {
+                d.child(div().size(px(6.0)).flex_none().rounded_full().bg(p.ink))
+            })
     }
 
     /// The chat's head while a group chat is open: its mark, its name and how many are
@@ -572,7 +547,7 @@ impl Loom {
             .child(line("Router", u.router_today, u.router_month))
     }
 
-    fn member_chip(&self, id: String, a: &model::Agent, on: bool) -> Stateful<Div> {
+    pub(super) fn member_chip(&self, id: String, a: &model::Agent, on: bool) -> Stateful<Div> {
         let p = self.p;
         div()
             .id(SharedString::from(id))

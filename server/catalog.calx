@@ -13,8 +13,10 @@ module server.catalog
 // pull request. Each entry:
 //
 //     id, name, category (one of CATEGORIES), description (one line), maker,
-//     website?, logo? (a PNG's name, for later: none has one yet), server (the
-//     name it's added as), and how it's reached: `url` (an https address, with
+//     website?, logo? (its mark's file in catalog/, one colour in currentColor,
+//     which goes to the apps as `icon_svg`: logo_svg below, and catalog/README.md
+//     says where each came from), server (the name it's added as), and how it's
+//     reached: `url` (an https address, with
 //     `{field}` for each field), or `package` ({registry: npm or pypi, name,
 //     version, args?}), which runs on the instance, with `env`? ({NAME: text}).
 //     fields? ([{name, label, placeholder?, kind?}]: `address` is an http(s)
@@ -38,6 +40,37 @@ import shared.obj.{Obj, at, bool_at, str_at}
 
 pub const CATEGORIES: [str; 7] = ["Work", "Code", "Mail & calendar", "Files", "Money", "Home", "Fun"]
 
+// The entries' marks (catalog/README.md), built into the program as their files are.
+const ACTA: [u8; 455] = embed("catalog/acta.svg")
+const GITHUB: [u8; 811] = embed("catalog/github.svg")
+const NOTION: [u8; 967] = embed("catalog/notion.svg")
+const LINEAR: [u8; 442] = embed("catalog/linear.svg")
+const VERCEL: [u8; 121] = embed("catalog/vercel.svg")
+const CLOUDFLARE: [u8; 1163] = embed("catalog/cloudflare.svg")
+const HOME_ASSISTANT: [u8; 662] = embed("catalog/home-assistant.svg")
+
+// The SVG of the mark an entry's `logo` names, or none.
+pub fn logo_svg(name: String) -> String? {
+    let text = if name == "acta.svg" {
+        String.from_utf8(ACTA[..])
+    } else if name == "github.svg" {
+        String.from_utf8(GITHUB[..])
+    } else if name == "notion.svg" {
+        String.from_utf8(NOTION[..])
+    } else if name == "linear.svg" {
+        String.from_utf8(LINEAR[..])
+    } else if name == "vercel.svg" {
+        String.from_utf8(VERCEL[..])
+    } else if name == "cloudflare.svg" {
+        String.from_utf8(CLOUDFLARE[..])
+    } else if name == "home-assistant.svg" {
+        String.from_utf8(HOME_ASSISTANT[..])
+    } else {
+        return none
+    }
+    return some((text ?? String()).trim().copy())
+}
+
 const DATA: str = #"
     [
       {
@@ -47,6 +80,7 @@ const DATA: str = #"
         "description": "Boards, tasks and comments in Acta.",
         "maker": "Aaen Studios",
         "website": "https://acta.aaenz.no",
+        "logo": "acta.svg",
         "server": "acta",
         "url": "https://acta.aaenz.no/api/mcp",
         "sign_in": "oauth",
@@ -64,7 +98,7 @@ const DATA: str = #"
         "website": "https://github.com/pingdotgg/t3code",
         "server": "t3",
         "url": "{address}/mcp",
-        "fields": [{"name": "address", "label": "Address", "placeholder": "https://pc.tail1234.ts.net", "kind": "address"}],
+        "fields": [{"name": "address", "label": "Address", "placeholder": "https://host.tailnet.ts.net", "kind": "address"}],
         "sign_in": "oauth",
         "note": "Use an address your browser reaches too, such as Tailscale HTTPS: you sign in to T3 there.",
         "reads": ["t3_project_list", "t3_project_read", "t3_thread_list", "t3_thread_read", "t3_thread_search", "t3_thread_wait"],
@@ -79,6 +113,7 @@ const DATA: str = #"
         "description": "Repositories, issues and pull requests on GitHub.",
         "maker": "GitHub",
         "website": "https://github.com/github/github-mcp-server",
+        "logo": "github.svg",
         "server": "github",
         "url": "https://api.githubcopilot.com/mcp/",
         "sign_in": "secret",
@@ -95,6 +130,7 @@ const DATA: str = #"
         "description": "Pages, databases and comments in Notion.",
         "maker": "Notion",
         "website": "https://www.notion.com",
+        "logo": "notion.svg",
         "server": "notion",
         "url": "https://mcp.notion.com/mcp",
         "sign_in": "oauth",
@@ -110,6 +146,7 @@ const DATA: str = #"
         "description": "Issues, projects and cycles in Linear.",
         "maker": "Linear",
         "website": "https://linear.app",
+        "logo": "linear.svg",
         "server": "linear",
         "url": "https://mcp.linear.app/mcp",
         "sign_in": "oauth",
@@ -125,6 +162,7 @@ const DATA: str = #"
         "description": "Projects, deployments and their logs on Vercel.",
         "maker": "Vercel",
         "website": "https://vercel.com",
+        "logo": "vercel.svg",
         "server": "vercel",
         "url": "https://mcp.vercel.com",
         "sign_in": "oauth",
@@ -140,6 +178,7 @@ const DATA: str = #"
         "description": "Your Cloudflare account through its API, and Cloudflare's docs.",
         "maker": "Cloudflare",
         "website": "https://github.com/cloudflare/mcp",
+        "logo": "cloudflare.svg",
         "server": "cloudflare",
         "url": "https://mcp.cloudflare.com/mcp",
         "sign_in": "oauth",
@@ -170,6 +209,7 @@ const DATA: str = #"
         "description": "Lights, devices and what's on at home, through Home Assistant.",
         "maker": "Open Home Foundation",
         "website": "https://www.home-assistant.io/integrations/mcp_server/",
+        "logo": "home-assistant.svg",
         "server": "home-assistant",
         "url": "{address}/api/mcp",
         "fields": [{"name": "address", "label": "Address", "placeholder": "https://home.example.com", "kind": "address"}],
@@ -382,12 +422,20 @@ pub fn matches(entry: Json, server: Json) -> bool {
 }
 
 // An entry as catalog.list gives it, with `have`, the names of the person's
-// secrets, `servers`, the names of their servers made from it, and `connecting`,
-// a connect under way for it, or null.
-pub fn listed(entry: Json, have: List<String>, servers: List<String>, connecting: Json) -> Json {
+// secrets, `servers`, the names of their servers made from it, `icons`, the
+// icon and the dark one that one of those servers gave of its own (each a
+// file's SHA-256, or ""), which its badge shows over the entry's mark, and
+// `connecting`, a connect under way for it, or null.
+pub fn listed(entry: Json, have: List<String>, servers: List<String>, icons: (String, String), connecting: Json) -> Json {
     let e = entry.copy()
-    var o = Obj.new().s("id", str_at(e.copy(), "id") ?? String()).s("name", str_at(e.copy(), "name") ?? String()).s("category", str_at(e.copy(), "category") ?? String()).s("description", str_at(e.copy(), "description") ?? String()).s("maker", str_at(e.copy(), "maker") ?? String()).maybe("website", str_at(e.copy(), "website")).maybe("logo", str_at(e.copy(), "logo"))
-    o = o.j("badge", badge.badge(str_at(e.copy(), "server") ?? String(), String(), String())).s("server", str_at(e.copy(), "server") ?? String()).s("runs", runs(e.copy()))
+    // Its mark: the catalog's own, or, for one from the MCP Registry, the icon its
+    // server.json gave (`icon_svg`).
+    let mark = match str_at(e.copy(), "logo") {
+        some(name) => logo_svg(name),
+        none => str_at(e.copy(), "icon_svg"),
+    }
+    var o = Obj.new().s("id", str_at(e.copy(), "id") ?? String()).s("name", str_at(e.copy(), "name") ?? String()).s("category", str_at(e.copy(), "category") ?? String()).s("description", str_at(e.copy(), "description") ?? String()).s("maker", str_at(e.copy(), "maker") ?? String()).maybe("website", str_at(e.copy(), "website")).maybe("icon_svg", mark)
+    o = o.j("badge", badge.badge(str_at(e.copy(), "server") ?? String(), icons.0.copy(), icons.1.copy())).s("server", str_at(e.copy(), "server") ?? String()).s("runs", runs(e.copy()))
     // One from the MCP Registry (server/mcpregistry.calx).
     if bool_at(e.copy(), "community") == some(true) {
         o = o.b("community", true).s("registry", str_at(e.copy(), "registry") ?? String()).s("version", str_at(e.copy(), "version") ?? String())
@@ -488,7 +536,13 @@ fn every_entry_is_whole() {
         assert(why.len() == 0)
         let address = str_at(spec.copy(), "url") ?? String()
         assert(address.starts_with("https://") or str_at(spec, "command") != none)
+        // A logo is a mark that's there, in one colour.
+        if let logo = str_at(e.copy(), "logo") {
+            let svg = logo_svg(logo) ?? String()
+            assert(svg.starts_with("<svg ") and svg.ends_with("</svg>") and svg.contains("currentColor"))
+        }
     }
+    assert(logo_svg(String("nothing.svg")) == none)
     assert(categories() == [String("Work"), String("Code"), String("Home")])
 }
 
@@ -528,13 +582,18 @@ fn turns_an_entry_into_a_server() {
 @test
 fn lists_an_entry() {
     let github = find(String("github"))!
-    let l = listed(github, [String("GITHUB_TOKEN")], [String("github")], Json.Null)
+    let l = listed(github.copy(), [String("GITHUB_TOKEN")], [String("github")], (String(), String()), Json.Null)
     assert(str_at(l.copy(), "runs") == some(String("remote")) and str_at(l.copy(), "sign_in") == some(String("secret")) and bool_at(l.copy(), "connected") == some(true))
     assert("{at(l.copy(), "secrets")}" == #"[{"name":"GITHUB_TOKEN","label":"Personal access token","placeholder":"github_pat_…","have":true}]"#)
     let tools = list(at(l.copy(), "tools"))
     assert("{tools[0]}" == #"{"name":"get_me","kind":"read"}"#)
     assert("{tools[tools.len() - 1]}" == #"{"name":"pull_request_review_write","kind":"change"}"#)
-    assert(at(l.copy(), "connecting") == Json.Null and "{at(l, "badge")}" == "{badge.badge(String("github"), String(), String())}")
-    let p = listed(find(String("playwright"))!, List<String>(), List<String>(), Json.Null)
-    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p, "connected") == some(false))
+    assert(at(l.copy(), "connecting") == Json.Null and "{at(l.copy(), "badge")}" == "{badge.badge(String("github"), String(), String())}")
+    assert(str_at(l, "icon_svg") == logo_svg(String("github.svg")))
+    // The icon the person's server gave is on its badge.
+    let iconed = listed(github, List<String>(), [String("github")], (String("ab12"), String("cd34")), Json.Null)
+    assert("{at(iconed, "badge")}" == "{badge.badge(String("github"), String("ab12"), String("cd34"))}")
+    // One without a mark has its initial.
+    let p = listed(find(String("playwright"))!, List<String>(), List<String>(), (String(), String()), Json.Null)
+    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p.copy(), "connected") == some(false) and str_at(p, "icon_svg") == none)
 }

@@ -133,7 +133,8 @@ import Testing
         #expect(m.room == "c_9")
         #expect(m.roomOpen?.name == "Money")
         #expect(m.roomOpen?.members == ["a_1", "a_2"])
-        #expect(m.rooms.map(\.id) == ["c_9"])
+        // In the list at once, before the core lists it.
+        #expect(listedRooms(m) == ["Money"])
         #expect(m.makingRoom == nil)
         #expect(m.roomForm == RoomForm())
         #expect(m.dirty.contains(.sidebar))
@@ -202,8 +203,8 @@ import Testing
         #expect(room.color == "mint")
         #expect(!room.everyone)
         // In the list after Everyone, as the core orders them.
-        try #require(await eventually { model.roomOrder.count == 2 })
-        #expect(model.rooms.map(\.name) == ["Everyone", "Money"])
+        try #require(await eventually { model.sideOrder.contains(room.id) })
+        #expect(listedRooms(model) == ["Everyone", "Money"])
         #expect(model.roomForm == RoomForm())
         // It takes messages: its first member answers.
         try #require(await eventually { model.messagesCame })
@@ -223,6 +224,32 @@ import Testing
         #expect(model.notice == "There's no agent a_9.")
         #expect(model.room == nil)
         #expect(model.newRoom(name: "Ghosts").canMake)
-        #expect(model.rooms.map(\.name) == ["Everyone"])
+        #expect(listedRooms(model) == ["Everyone"])
+    }
+
+    @Test func aDragIsKeptOnTheSample() async throws {
+        let session = try await sampleSession()
+        let model = session.model
+        // Gardener, out of Home, to the top of the list, over Everyone.
+        let sent = model.drop("a_4", .before("c_6"))
+        #expect(sent.map { $0["name"] } == ["agent.group", "sidebar.order"])
+        let place = try #require(sent[1]["args"]["items"].array.firstIndex(of: "a_4"))
+        for c in sent { session.send(c) }
+        try #require(await eventually { model.agent("a_4")?.order == place && model.agent("a_4")?.group == nil })
+        #expect(model.listRows.first == .item(.agent("a_4")))
+        // Everyone into Home, and back out.
+        session.send(model.regroup("c_6", "g_1"))
+        try #require(await eventually { model.folderOf("c_6") == "g_1" && model.sideOrder.contains("c_6") })
+        session.send(model.regroup("c_6", nil))
+        try #require(await eventually { model.folderOf("c_6") == nil })
+    }
+}
+
+/// The group chats in the agent list's one list, by name, in order.
+@MainActor
+func listedRooms(_ m: Model) -> [String] {
+    m.sideSections.filter(\.part.listed).flatMap(\.items).compactMap { item in
+        if case .room(let id) = item { return m.roomNamed(id)?.name }
+        return nil
     }
 }

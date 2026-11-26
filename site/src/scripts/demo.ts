@@ -671,6 +671,70 @@ export function play(app: HTMLElement) {
 		waitingGroup.hidden = places.size === 0;
 	};
 
+	// A row drags to a new place in the list, or into the folder over its name, as in the app
+	// (app.rs, droppable): it fades where it was, and a line in the accent shows where it lands.
+	// Other agents' threads with it go along under it.
+	const sideList = app.querySelector<HTMLElement>('.side .list')!;
+	const withAsks = (row: Element) => {
+		const rows: Element[] = [row];
+		for (let n = row.nextElementSibling; n?.classList.contains('ask'); n = n.nextElementSibling) rows.push(n);
+		return rows;
+	};
+	let dragged: HTMLElement | null = null;
+	let target: { el: HTMLElement; where: 'before' | 'after' | 'in' } | null = null;
+	const untarget = () => {
+		target?.el.classList.remove('drop-before', 'drop-after', 'drop-in');
+		target = null;
+	};
+	for (const row of sideList.querySelectorAll<HTMLElement>(':scope > .agent')) {
+		row.draggable = true;
+		row.addEventListener('dragstart', (e) => {
+			dragged = row;
+			const ghost = row.cloneNode(true) as HTMLElement;
+			ghost.classList.add('ghost');
+			ghost.style.width = `${row.offsetWidth}px`;
+			app.append(ghost);
+			e.dataTransfer?.setDragImage(ghost, 24, 16);
+			e.dataTransfer?.setData('text/plain', '');
+			if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+			setTimeout(() => {
+				ghost.remove();
+				row.classList.add('dragging');
+			});
+		});
+		row.addEventListener('dragend', () => {
+			row.classList.remove('dragging');
+			dragged = null;
+			untarget();
+		});
+	}
+	sideList.addEventListener('dragover', (e) => {
+		if (!dragged) return;
+		const over = (e.target as Element).closest<HTMLElement>('.list > .agent, .list > .group-head.folder');
+		if (!over || over === dragged) return untarget();
+		e.preventDefault();
+		const box = over.getBoundingClientRect();
+		const where = over.classList.contains('folder') ? 'in' : e.clientY < box.top + box.height / 2 ? 'before' : 'after';
+		if (target?.el === over && target.where === where) return;
+		untarget();
+		target = { el: over, where };
+		over.classList.add(`drop-${where}`);
+	});
+	sideList.addEventListener('dragleave', (e) => {
+		if (!sideList.contains(e.relatedTarget as Node | null)) untarget();
+	});
+	sideList.addEventListener('drop', (e) => {
+		if (!dragged || !target) return;
+		e.preventDefault();
+		const rows = withAsks(dragged);
+		const { el, where } = target;
+		// In the folder, last; the folder is the list's last part, so that's over + New.
+		if (where === 'in') sideList.querySelector('.new-row')!.before(...rows);
+		else if (where === 'before') el.before(...rows);
+		else withAsks(el).at(-1)!.after(...rows);
+		untarget();
+	});
+
 	// The sidebar: collapsed by its control, and a rail anyway in a narrow window.
 	const bar = app.querySelector<HTMLButtonElement>('[data-bar]')!;
 	const narrow = matchMedia('(max-width: 860px)');
