@@ -691,9 +691,22 @@ impl TextLayout {
                 // 4. the cached layout was not truncated (a truncated layout answers an
                 //    unconstrained probe with the truncated size, which poisons intrinsic
                 //    sizing with whatever width some earlier measure pass happened to use)
+                //
+                // loom: and an unconstrained probe (no wrap width) is answered from a
+                // layout wrapped at a definite width only when nothing in it wrapped, so
+                // its size is the text's own. A wrapped layout poisons intrinsic sizing
+                // the same way a truncated one does: a reply's bubble, a flex item sized
+                // by its words, took the narrow size of an earlier pass as its width,
+                // and with its layout kept from frame to frame (gpui-base) it stayed
+                // that narrow.
                 if let Some(text_layout) = element_state.0.borrow().as_ref()
                     && let Some(size) = text_layout.size
-                    && (wrap_width.is_none() || wrap_width == text_layout.wrap_width)
+                    && (wrap_width == text_layout.wrap_width
+                        || wrap_width.is_none()
+                            && text_layout
+                                .lines
+                                .iter()
+                                .all(|line| line.wrap_boundaries.is_empty()))
                     && truncate_width.is_none()
                     && text_layout.truncate_width.is_none()
                 {

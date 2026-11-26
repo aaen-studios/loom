@@ -167,12 +167,14 @@ pub fn mcp_line(m: &McpServer, test: Option<&McpTest>) -> (String, Option<Dot>) 
     }
 }
 
-/// A routine's dot in the list: on, paused (none), or how its last run went wrong.
+/// A routine's dot in the list: on, paused (none), or how its last run went wrong. One
+/// on an event is on with no next run, and one that spends a lot for nothing warns.
 pub fn routine_dot(r: &Routine) -> Option<Dot> {
     match r.last_status.as_str() {
         "failed" => Some(Dot::Bad),
         "running" | "waiting" => Some(Dot::Warn),
-        _ if !r.on || r.next == 0 => None,
+        _ if !r.on || (r.next == 0 && r.event.is_none()) => None,
+        _ if r.cost.wasted => Some(Dot::Warn),
         _ => Some(Dot::Ok),
     }
 }
@@ -325,8 +327,7 @@ mod tests {
             url: url.into(),
             settings: Vec::new(),
             sign_in,
-            client_id: String::new(),
-            client_secret: None,
+            ..McpServer::default()
         };
         let local = server("", SignIn::No);
         assert_eq!(mcp_line(&local, None), ("npx acta-mcp".into(), None));
@@ -385,9 +386,39 @@ mod tests {
         assert_eq!(routine_dot(&failed), Some(Dot::Bad));
         let running = Routine {
             last_status: "running".into(),
-            ..on
+            ..on.clone()
         };
         assert_eq!(routine_dot(&running), Some(Dot::Warn));
+        // One that spends a lot for nothing warns, unless it's paused.
+        let wasteful = Routine {
+            cost: crate::model::RoutineCost {
+                wasted: true,
+                ..Default::default()
+            },
+            ..on.clone()
+        };
+        assert_eq!(routine_dot(&wasteful), Some(Dot::Warn));
+        assert_eq!(
+            routine_dot(&Routine {
+                on: false,
+                ..wasteful
+            }),
+            None
+        );
+        // On an event alone: no next run, and on all the same.
+        let on_event = Routine {
+            next: 0,
+            event: crate::model::watch::RoutineEvent::of(
+                &serde_json::json!({"target": {"board": "aaen-studios/loom"}, "to": "done"}),
+            ),
+            ..on
+        };
+        assert_eq!(routine_dot(&on_event), Some(Dot::Ok));
+        let on_nothing = Routine {
+            event: None,
+            ..on_event.clone()
+        };
+        assert_eq!(routine_dot(&on_nothing), None);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 //! A small ring that fills as something is used: an agent's context after the header's
-//! model, and the plan's limits in the sidebar.
+//! model, and the plan's limits in its card.
 
 use std::f32::consts::{FRAC_PI_2, TAU};
 

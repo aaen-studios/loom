@@ -188,6 +188,45 @@ pub fn as_names(text: &str) -> String {
     out
 }
 
+/// `text` with each of the person's own outside code as `:name:`; in code it stays as
+/// written, as the chat shows and copies it.
+fn names_outside_code(text: &str) -> String {
+    let code = code_ranges(text);
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for t in tokens(text) {
+        if code
+            .iter()
+            .any(|c| c.start <= t.range.start && t.range.start < c.end)
+        {
+            continue;
+        }
+        out.push_str(&text[at..t.range.start]);
+        out.push_str(&format!(":{}:", t.name));
+        at = t.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// What copying `selected` from the composer gives (LOO-347): its words with each of the
+/// person's own outside code as `:name:`, as copying from the chat gives them, and the
+/// words as they are when that's different, kept with them, so a paste into the composer
+/// takes the emoji back (`pasted`). A built-in emoji is its character in both.
+pub fn copied(selected: &str) -> (String, Option<String>) {
+    let shown = names_outside_code(selected);
+    let kept = (shown != selected).then(|| selected.to_string());
+    (shown, kept)
+}
+
+/// What a paste of `text` into the composer puts there: the words it was copied from, its
+/// emoji tokens and all, when `kept` is what `copied` kept with them; nothing otherwise,
+/// for the paste to go on as it does.
+pub fn pasted(text: &str, kept: Option<&str>) -> Option<String> {
+    kept.filter(|k| names_outside_code(k) == text)
+        .map(String::from)
+}
+
 /// Whether a message's words are only one to three emoji, built-in or the person's
 /// own, with nothing but spaces between, which the chat shows big.
 pub fn jumbo(text: &str) -> bool {
@@ -373,6 +412,25 @@ pub fn wanted() -> Vec<String> {
     WANTED.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
+/// A message's words as copying them from the chat gives them (LOO-347): each emoji the
+/// chat draws as what it copies as (`drawn`), and the rest as written, code and the
+/// person's own it has no picture of yet too.
+pub fn as_copied(text: &str) -> String {
+    let marks = drawn(text, 1, |id| {
+        let (name, _, path) = OWN.with(|o| o.borrow().get(id).cloned())?;
+        path.map(|_| (name, String::new()))
+    });
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    for d in marks {
+        out.push_str(&text[at..d.range.start]);
+        out.push_str(&d.copies);
+        at = d.range.end;
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
 /// One of the person's own, as the chat knows it: its name, whether it moves, and its
 /// picture once there. One that isn't fetched yet is wanted.
 pub fn own_one(id: &str) -> Option<Own> {
@@ -463,6 +521,64 @@ pub fn code_ranges(text: &str) -> Vec<Range<usize>> {
     out
 }
 
+/// An emoji the chat draws as a picture (LOO-347): where it's written in a message's
+/// words, all of it, whether one code point, several (👍🏽, 👨‍👩‍👧) or one of the person's
+/// own tokens, and what it copies as, the emoji itself or `:name:`. The selection takes
+/// it in whole or not at all, as one character.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Drawn {
+    pub range: Range<usize>,
+    pub copies: String,
+    /// Its picture's source in the chat's Markdown, and the link to its card.
+    pub source: String,
+    pub link: String,
+}
+
+/// The emoji the chat draws in a message's words, in order: each built-in one, drawn
+/// `side` device pixels square, and each of the person's own that `own` gives a name and a
+/// picture's source for, outside code. One of the person's own escaped as the person's
+/// words are (`model::literal_html`), `\<:name:id>`, takes its backslash in too.
+pub fn drawn(text: &str, side: u32, own: impl Fn(&str) -> Option<(String, String)>) -> Vec<Drawn> {
+    let code = code_ranges(text);
+    let in_code = |r: &Range<usize>| code.iter().any(|c| c.start <= r.start && r.start < c.end);
+    let mut out: Vec<Drawn> = Vec::new();
+    for t in tokens(text) {
+        if in_code(&t.range) {
+            continue;
+        }
+        let Some((name, source)) = own(&t.id) else {
+            continue;
+        };
+        let mut range = t.range.clone();
+        if range.start > 0 && text.as_bytes()[range.start - 1] == b'\\' {
+            range.start -= 1;
+        }
+        out.push(Drawn {
+            range,
+            copies: format!(":{name}:"),
+            source,
+            link: format!("{OWN_LINK}{}", t.id),
+        });
+    }
+    for (r, file) in find(text) {
+        if in_code(&r)
+            || out
+                .iter()
+                .any(|d| d.range.start <= r.start && r.start < d.range.end)
+        {
+            continue;
+        }
+        out.push(Drawn {
+            copies: text[r.clone()].to_string(),
+            range: r,
+            source: source(file, side),
+            link: format!("{LINK}{file}"),
+        });
+    }
+    out.sort_by_key(|d| d.range.start);
+    out
+}
+
 /// A message's Markdown with each emoji in it drawn: a built-in one as its Twemoji
 /// picture, one of the person's own as its picture, both `text_px` tall among words or
 /// `JUMBO` in a message of only one to three, and each a link to its card. Code stays as
@@ -477,58 +593,30 @@ pub fn pictured(text: &str, text_px: f32) -> String {
     } else {
         (text_px * IN_TEXT).round()
     };
-    let code = code_ranges(text);
-    let in_code = |r: &Range<usize>| code.iter().any(|c| c.start <= r.start && r.start < c.end);
-    // Each emoji: where it is, its picture's source, its link and what it copies as.
-    let mut marks: Vec<(Range<usize>, String, String, String)> = Vec::new();
-    for t in tokens(text) {
-        if in_code(&t.range) {
-            continue;
-        }
-        let Some((name, animated, Some(path))) = own_one(&t.id) else {
-            continue;
-        };
-        let mut range = t.range.clone();
-        if range.start > 0 && text.as_bytes()[range.start - 1] == b'\\' {
-            range.start -= 1;
-        }
+    let marks = drawn(text, device(side), |id| {
+        let (name, animated, path) = own_one(id)?;
         // One that moves is still unless it plays: its card plays it under the pointer.
         let from = if animated && !playing(false) {
             STILL_SOURCE
         } else {
             OWN_SOURCE
         };
-        marks.push((
-            range,
-            format!("{from}{path}"),
-            format!("{OWN_LINK}{}", t.id),
-            format!(":{name}:"),
-        ));
-    }
-    for (r, file) in find(text) {
-        if in_code(&r)
-            || marks
-                .iter()
-                .any(|m| m.0.start <= r.start && r.start < m.0.end)
-        {
-            continue;
-        }
-        marks.push((
-            r.clone(),
-            source(file, device(side)),
-            format!("{LINK}{file}"),
-            text[r].to_string(),
-        ));
-    }
+        Some((name, format!("{from}{}", path?)))
+    });
     if marks.is_empty() {
         return text.to_string();
     }
-    marks.sort_by_key(|m| m.0.start);
     let mut out = String::with_capacity(text.len() + marks.len() * 96);
     let mut at = 0;
     // Inside a link's words, as a mention's, an emoji is only its picture.
     let mut depth = 0i32;
-    for (range, src, link, alt) in marks {
+    for Drawn {
+        range,
+        copies: alt,
+        source: src,
+        link,
+    } in marks
+    {
         let before = &text[at..range.start];
         for c in before.chars() {
             match c {
@@ -633,14 +721,51 @@ pub struct Row {
     pub lit: usize,
 }
 
-/// What the composer's words should become at the cursor: `suffix` there goes, and
-/// `with` takes its place. `item` is the emoji, for a piece of one.
+/// What the core said the composer's words should become where it was asked: `suffix`,
+/// at the end of `before` (the words up to the cursor then), goes, and `with` takes its
+/// place. `item` is the emoji, for a piece of one.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Replace {
     pub suffix: String,
     pub with: String,
     pub item: Option<Item>,
+    pub before: String,
 }
+
+impl Replace {
+    /// Where its suffix is in the composer's words as they are now, `value`: where it
+    /// was typed, while the words up to there are still as they were when it was asked
+    /// (LOO-370). Words typed after it since don't matter.
+    fn range_in(&self, value: &str) -> Option<Range<usize>> {
+        let end = self.before.len();
+        (value.get(..end) == Some(self.before.as_str()) && self.before.ends_with(&self.suffix))
+            .then(|| end - self.suffix.len()..end)
+    }
+}
+
+/// A name closed with its colon, or an emoticon, to make its emoji in the composer:
+/// `range` of its words goes, and the emoji's piece takes its place, with a space after
+/// it when `space`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Conversion {
+    pub range: Range<usize>,
+    pub item: Item,
+    pub space: bool,
+}
+
+/// What the core was asked of what was typed (`emoji.typed`): its number, the words up
+/// to the cursor then, whether emoticons turn, and whether its answer came.
+#[derive(Clone, Debug)]
+struct Ask {
+    n: u64,
+    before: String,
+    emoticons: bool,
+    answered: bool,
+}
+
+/// How many of the last asks are kept, for their answers and for a conversion made
+/// before them: older ones are let go.
+const KEPT_ASKS: usize = 64;
 
 /// The app's emoji: the person's own, the suggestion row, the picker's groups and
 /// search, and where each of the person's own pictures is.
@@ -650,8 +775,15 @@ pub struct Emojis {
     pub tone: u32,
     pub own: Vec<Custom>,
     pub row: Option<Row>,
-    /// A replacement the core said for what was typed, for the app to make.
-    pub replace: Option<Replace>,
+    /// The replacements the core said for what was typed, for the app to make
+    /// (`conversions`).
+    replaces: Vec<Replace>,
+    /// The last asks of what was typed, oldest first.
+    asks: std::collections::VecDeque<Ask>,
+    /// The number of the ask about what was typed last, whose answer is the row.
+    latest: u64,
+    /// Asks again about words a conversion changed, to send (`asks_again`).
+    again: Vec<Value>,
     pub groups: Vec<Group>,
     /// The picker's search: what was asked, and what it found.
     pub found: Option<(String, Vec<Item>)>,
@@ -771,9 +903,88 @@ impl Emojis {
 
     /// What's typed up to the cursor, for the suggestion row or a replacement.
     pub fn typed(&mut self, before: &str, emoticons: bool) -> Value {
+        let f = self.ask(before, emoticons);
+        self.latest = self.asked;
+        f
+    }
+
+    fn ask(&mut self, before: &str, emoticons: bool) -> Value {
         let tone = self.tone;
         self.asked += 1;
+        self.asks.push_back(Ask {
+            n: self.asked,
+            before: before.to_string(),
+            emoticons,
+            answered: false,
+        });
+        if self.asks.len() > KEPT_ASKS {
+            self.asks.pop_front();
+        }
         json!({"t": "emoji.typed", "id": format!("app.emoji.typed:{}", self.asked), "text": before, "tone": tone, "emoticons": emoticons})
+    }
+
+    /// What's asked again of what was typed, as a conversion changed it (`conversions`).
+    pub fn asks_again(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.again)
+    }
+
+    /// The names and emoticons to make their emoji in the composer, whose words are now
+    /// `value` with the cursor at `cursor` (LOO-370): each where it was typed, however
+    /// late the core's answer came and whatever was typed after it since, while the words
+    /// up to there are as they were. The last first, so each range is where the ones
+    /// before it left the words, and the cursor after them all, kept where the person
+    /// was typing. Each made changes the asks it was in as it changed the words, and one
+    /// that ends where a name or an emoticon could is asked again (`asks_again`): the core
+    /// reads no name after another's colon, `:sob::sob:`, but does after its emoji.
+    pub fn conversions(&mut self, value: &str, cursor: usize) -> (Vec<Conversion>, usize) {
+        let mut todo = std::mem::take(&mut self.replaces);
+        todo.sort_by_key(|r| std::cmp::Reverse(r.before.len()));
+        let mut now = value.to_string();
+        let mut cursor = cursor.min(now.len());
+        let mut out = Vec::new();
+        for r in todo {
+            let Some(range) = r.range_in(&now) else {
+                continue;
+            };
+            let item = r.item.clone().unwrap_or_else(|| Item {
+                emoji: r.with.trim_end().to_string(),
+                ..Item::default()
+            });
+            let space = r.with.ends_with(' ');
+            // A piece's words are its emoji (`emoji_ui::piece_of`).
+            let made = format!("{}{}", item.emoji, if space { " " } else { "" });
+            now.replace_range(range.clone(), &made);
+            cursor = if cursor >= range.end {
+                cursor - range.len() + made.len()
+            } else if cursor > range.start {
+                range.start + made.len()
+            } else {
+                cursor
+            };
+            let mut again = Vec::new();
+            self.asks.retain_mut(|a| {
+                if a.before.len() < range.end || a.before.get(range.clone()) != Some(&r.suffix[..])
+                {
+                    return true;
+                }
+                a.before.replace_range(range.clone(), &made);
+                if a.before.len() > range.start + made.len()
+                    && a.before.ends_with([':', ' '])
+                    && now.starts_with(&a.before)
+                {
+                    // Its answer, about the words before, is let go.
+                    again.push((a.before.clone(), a.emoticons));
+                    return false;
+                }
+                true
+            });
+            for (before, emoticons) in again {
+                let f = self.ask(&before, emoticons);
+                self.again.push(f);
+            }
+            out.push(Conversion { range, item, space });
+        }
+        (out, cursor)
     }
 
     pub fn find(&mut self, query: &str) -> Value {
@@ -910,18 +1121,35 @@ impl Emojis {
                 true
             }
             "core.emoji" => {
-                if id.starts_with("app.emoji.typed:") {
-                    // Only the answer to what was typed last.
-                    if id != format!("app.emoji.typed:{}", self.asked) {
+                if let Some(n) = id.strip_prefix("app.emoji.typed:") {
+                    let n: u64 = n.parse().unwrap_or(0);
+                    let latest = n == self.latest;
+                    let before = self
+                        .asks
+                        .iter_mut()
+                        .find(|a| a.n == n && !a.answered)
+                        .map(|a| {
+                            a.answered = true;
+                            a.before.clone()
+                        });
+                    // A replacement is made however late its answer comes, where it was
+                    // typed (`conversions`, LOO-370).
+                    if let Some(r) = f.get("replace") {
+                        if latest {
+                            self.row = None;
+                        }
+                        if let Some(before) = before {
+                            self.replaces.push(Replace {
+                                suffix: s(r, "suffix"),
+                                with: s(r, "with"),
+                                item: r.get("item").map(Item::of),
+                                before,
+                            });
+                        }
                         return true;
                     }
-                    if let Some(r) = f.get("replace") {
-                        self.row = None;
-                        self.replace = Some(Replace {
-                            suffix: s(r, "suffix"),
-                            with: s(r, "with"),
-                            item: r.get("item").map(Item::of),
-                        });
+                    // The row is only the answer to what was typed last.
+                    if !latest {
                         return true;
                     }
                     let items: Vec<Item> = f
@@ -1038,8 +1266,8 @@ pub fn plays(always: bool, hovered: bool, reduced: bool) -> bool {
 mod tests {
     // Not a glob: GPUI has an attribute of its own named test.
     use super::{
-        as_names, code_ranges, find, jumbo, name_from_file, pictured, plays, svg, sync_own,
-        text_of, tokens, untoned, wanted, Custom, Emojis, PickerEscape,
+        as_names, code_ranges, copied, drawn, find, jumbo, name_from_file, pasted, pictured, plays,
+        svg, sync_own, text_of, tokens, untoned, wanted, Custom, Emojis, PickerEscape,
     };
     use serde_json::{json, Value};
 
@@ -1101,6 +1329,90 @@ mod tests {
         assert!(!e.picking && e.held.is_none());
     }
 
+    /// Each emoji drawn in `text`: the words it's written with, and what it copies as.
+    fn spans(text: &str) -> Vec<(String, String)> {
+        let own = |id: &str| (id == "e_3").then(|| ("party_cat".into(), "/f/e_3".into()));
+        drawn(text, 36, own)
+            .into_iter()
+            .map(|d| (text[d.range].to_string(), d.copies))
+            .collect()
+    }
+
+    /// The words as copying them whole gives them: each drawn emoji as what it copies as.
+    fn copy_of(text: &str) -> String {
+        let own = |id: &str| (id == "e_3").then(|| ("party_cat".into(), "/f/e_3".into()));
+        let mut out = String::new();
+        let mut at = 0;
+        for d in drawn(text, 36, own) {
+            out.push_str(&text[at..d.range.start]);
+            out.push_str(&d.copies);
+            at = d.range.end;
+        }
+        out + &text[at..]
+    }
+
+    #[test]
+    fn each_drawn_emoji_is_its_whole_writing_and_copies_as_itself() {
+        let text = "Word 😭 word word 💢 wad";
+        assert_eq!(
+            spans(text),
+            vec![("😭".into(), "😭".into()), ("💢".into(), "💢".into())]
+        );
+        assert_eq!(copy_of(text), text);
+        // Several code points are one emoji: a skin tone, a family, a keycap.
+        let text = "a 👍🏽 b 👨‍👩‍👧 c #️⃣";
+        assert_eq!(
+            spans(text),
+            vec![
+                ("👍🏽".into(), "👍🏽".into()),
+                ("👨‍👩‍👧".into(), "👨‍👩‍👧".into()),
+                ("#️⃣".into(), "#️⃣".into()),
+            ]
+        );
+        assert_eq!(copy_of(text), text);
+        // One of the person's own copies as its name, its escape taken in with it; one
+        // that isn't known, and code, are words.
+        let text = "hi \\<:party_cat:e_3> and <:gone:e_9> `😭`";
+        assert_eq!(
+            spans(text),
+            vec![("\\<:party_cat:e_3>".into(), ":party_cat:".into())]
+        );
+        assert_eq!(copy_of(text), "hi :party_cat: and <:gone:e_9> `😭`");
+        // Side by side, each is its own.
+        assert_eq!(
+            spans("😭<:party_cat:e_3>👍🏽"),
+            vec![
+                ("😭".into(), "😭".into()),
+                ("<:party_cat:e_3>".into(), ":party_cat:".into()),
+                ("👍🏽".into(), "👍🏽".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn copying_from_the_composer_gives_the_persons_own_by_name_and_pastes_them_back() {
+        // Built-in emoji copy as themselves, and nothing needs keeping.
+        assert_eq!(copied("Word 😭 wad 👨‍👩‍👧"), ("Word 😭 wad 👨‍👩‍👧".into(), None));
+        let raw = "Word <:party_cat:e_3> 👍🏽 wad";
+        let (text, kept) = copied(raw);
+        assert_eq!(text, "Word :party_cat: 👍🏽 wad");
+        assert_eq!(kept.as_deref(), Some(raw));
+        // A paste back into the composer takes the tokens back.
+        assert_eq!(pasted(&text, kept.as_deref()).as_deref(), Some(raw));
+        // Anything else pastes as it is: what was kept is for other words.
+        assert_eq!(pasted("other words", kept.as_deref()), None);
+        assert_eq!(pasted(&text, None), None);
+        // In code a token is copied as written, as the chat copies it.
+        let code = "see `<:party_cat:e_3>` and <:party_cat:e_3>";
+        let (text, kept) = copied(code);
+        assert_eq!(text, "see `<:party_cat:e_3>` and :party_cat:");
+        assert_eq!(pasted(&text, kept.as_deref()).as_deref(), Some(code));
+        assert_eq!(
+            copied("`<:party_cat:e_3>`"),
+            ("`<:party_cat:e_3>`".into(), None)
+        );
+    }
+
     #[test]
     fn the_chat_draws_emoji_but_not_in_code() {
         super::set_scale(2.0);
@@ -1123,13 +1435,15 @@ mod tests {
 
     #[test]
     fn the_persons_own_are_drawn_once_fetched() {
-        let mut e = Emojis::default();
-        e.own = vec![Custom {
-            id: "e_3".into(),
-            name: "party_cat".into(),
-            file: "ab".into(),
-            animated: false,
-        }];
+        let mut e = Emojis {
+            own: vec![Custom {
+                id: "e_3".into(),
+                name: "party_cat".into(),
+                file: "ab".into(),
+                animated: false,
+            }],
+            ..Default::default()
+        };
         sync_own(&e);
         // Not fetched: it stays its token, and is wanted.
         assert_eq!(pictured("hi <:party_cat:e_3>", 14.0), "hi <:party_cat:e_3>");
@@ -1188,7 +1502,122 @@ mod tests {
             json!({"suffix": ":sob:", "with": "😭", "item": {"emoji": "😭", "names": ["sob"]}});
         e.take(&json!({"t": "core.emoji", "id": newer["id"], "replace": replace}));
         assert!(e.row.is_none());
-        assert_eq!(e.replace.clone().unwrap().with, "😭");
+        assert_eq!(e.replaces[0].with, "😭");
+        assert_eq!(e.replaces[0].before, "so :sob:");
+    }
+
+    /// Types `words` into the composer a character at a time, asking the core after each
+    /// as the app does, and gives the asks.
+    fn type_fast(e: &mut Emojis, words: &str) -> Vec<Value> {
+        words
+            .char_indices()
+            .map(|(i, c)| e.typed(&words[..i + c.len_utf8()], true))
+            .collect()
+    }
+
+    /// The core's answer to an ask, as `shared/emoji.calx` gives it for these: `:sob:`
+    /// closed with its colon is its emoji, unless its colon follows a letter, a digit or
+    /// another colon; `:)` with a space after it is its emoji; anything else has no
+    /// suggestions.
+    fn answer(ask: &Value) -> Value {
+        let before = ask["text"].as_str().unwrap();
+        let sob = json!({"emoji": "😭", "names": ["sob"], "name": "sob"});
+        let smile = json!({"emoji": "🙂", "names": ["slight_smile"], "name": "slight_smile"});
+        let opens = before
+            .strip_suffix(":sob:")
+            .map(|rest| !rest.ends_with(|c: char| c.is_ascii_alphanumeric() || c == ':'));
+        if opens == Some(true) {
+            json!({"t": "core.emoji", "id": ask["id"], "replace": {"suffix": ":sob:", "with": "😭", "item": sob}})
+        } else if before.ends_with(":) ") {
+            json!({"t": "core.emoji", "id": ask["id"], "replace": {"suffix": ":) ", "with": "🙂 ", "item": smile}})
+        } else {
+            json!({"t": "core.emoji", "id": ask["id"], "items": []})
+        }
+    }
+
+    /// The composer's words once the app made `todo` (`emoji_ui::take_emoji`).
+    fn made(value: &str, todo: &[super::Conversion]) -> String {
+        let mut now = value.to_string();
+        for k in todo {
+            let space = if k.space { " " } else { "" };
+            now.replace_range(k.range.clone(), &format!("{}{space}", k.item.emoji));
+        }
+        now
+    }
+
+    #[test]
+    fn a_name_typed_fast_becomes_its_emoji_however_late_the_answer_comes() {
+        // LOO-370: `:sob:` and more words typed at full speed, every answer coming only
+        // once all of it is typed, newest first.
+        let words = "hi :sob: and more";
+        let mut e = Emojis::default();
+        for ask in type_fast(&mut e, words).iter().rev() {
+            e.take(&answer(ask));
+        }
+        let (todo, cursor) = e.conversions(words, words.len());
+        let now = made(words, &todo);
+        assert_eq!(now, "hi 😭 and more");
+        assert_eq!(
+            cursor,
+            now.len(),
+            "the cursor stays where the person was typing"
+        );
+        // Once made, nothing is made again, whatever the words asked again about bring.
+        for ask in e.asks_again() {
+            assert!(ask["text"].as_str().unwrap().starts_with("hi 😭 "));
+            e.take(&answer(&ask));
+        }
+        assert_eq!(e.conversions(&now, cursor), (vec![], cursor));
+    }
+
+    #[test]
+    fn names_typed_fast_become_emoji_whatever_order_the_answers_come_in() {
+        // Two names one straight after the other, which the core reads as one only
+        // once the first is its emoji, and an emoticon.
+        let words = ":sob::sob: x :) y";
+        // Each answer comes in a frame of its own, in a mixed-up order, and the app makes
+        // what each frame brings, and asks again what it says to, before the next.
+        for order in [
+            vec![4, 9, 15, 0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14, 16],
+            vec![16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+            vec![9, 4, 0, 16, 15, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 14],
+        ] {
+            let mut e = Emojis::default();
+            let asks = type_fast(&mut e, words);
+            assert_eq!(asks.len(), order.len());
+            let mut queue: std::collections::VecDeque<Value> =
+                order.iter().map(|i| asks[*i].clone()).collect();
+            let mut now = words.to_string();
+            let mut cursor = now.len();
+            while let Some(ask) = queue.pop_front() {
+                e.take(&answer(&ask));
+                let (todo, moved) = e.conversions(&now, cursor);
+                now = made(&now, &todo);
+                cursor = moved;
+                queue.extend(e.asks_again());
+            }
+            assert_eq!(now, "😭😭 x 🙂 y", "answers in the order {order:?}");
+            assert_eq!(cursor, now.len());
+        }
+    }
+
+    #[test]
+    fn a_late_answer_lets_go_of_words_changed_before_its_name() {
+        let mut e = Emojis::default();
+        for ask in type_fast(&mut e, ":sob:") {
+            e.take(&answer(&ask));
+        }
+        // The name was taken back and something else typed before the answer was made.
+        assert_eq!(e.conversions(":so", 3), (vec![], 3));
+        let asks = type_fast(&mut e, ":sob:");
+        e.take(&answer(&asks[4]));
+        assert_eq!(e.conversions("x:sob:", 6).0, vec![]);
+        // The cursor moved back into the words before it: it stays there.
+        let asks = type_fast(&mut e, "a :sob: b");
+        e.take(&answer(&asks[6]));
+        let (todo, cursor) = e.conversions("a :sob: b", 1);
+        assert_eq!(made("a :sob: b", &todo), "a 😭 b");
+        assert_eq!(cursor, 1);
     }
 
     #[test]

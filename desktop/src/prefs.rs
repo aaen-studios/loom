@@ -88,6 +88,9 @@ pub struct Prefs {
     pub auto_update: bool,
     /// Whether the sidebar shows the search box over the agents.
     pub search: bool,
+    /// Whether the chat shows its session's context: the header's ring and its card, and
+    /// the lines where it was compacted or a fresh session started (`crate::model::context`).
+    pub show_context: bool,
     /// Settings → Emoji: whether the composer shows the emoji button, whether moving
     /// emoji play only under the pointer, the skin tone (0 for none, 1 to 5 light to
     /// dark), and whether `:)` becomes 🙂.
@@ -103,6 +106,9 @@ pub struct Prefs {
     /// `None` while they haven't, and it opens at most of the window
     /// (`crate::model::popup::size`).
     pub popup_size: Option<(f32, f32)>,
+    /// The Acta boards cards were made on here, the last first, for Make a card's
+    /// picker (`crate::model::acta`).
+    pub card_boards: Vec<String>,
 }
 
 impl Default for Prefs {
@@ -124,6 +130,7 @@ impl Default for Prefs {
             awake: false,
             auto_update: false,
             search: false,
+            show_context: false,
             emoji_button: true,
             emoji_hover: false,
             skin_tone: 0,
@@ -131,6 +138,7 @@ impl Default for Prefs {
             width: Width::Normal,
             server_names: BTreeMap::new(),
             popup_size: None,
+            card_boards: Vec::new(),
         }
     }
 }
@@ -212,6 +220,7 @@ impl Prefs {
             awake: b("awake", d.awake),
             auto_update: b("auto_update", d.auto_update),
             search: b("search", d.search),
+            show_context: b("show_context", d.show_context),
             emoji_button: b("emoji_button", d.emoji_button),
             emoji_hover: b("emoji_hover", d.emoji_hover),
             skin_tone: v
@@ -243,6 +252,17 @@ impl Prefs {
                     _ => None,
                 })
                 .filter(|(w, h)| *w > 0.0 && *h > 0.0),
+            card_boards: v
+                .get("card_boards")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .filter(|b| b.contains('/'))
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -300,6 +320,7 @@ impl Prefs {
         m.insert("awake".into(), json!(self.awake));
         m.insert("auto_update".into(), json!(self.auto_update));
         m.insert("search".into(), json!(self.search));
+        m.insert("show_context".into(), json!(self.show_context));
         m.insert("emoji_button".into(), json!(self.emoji_button));
         m.insert("emoji_hover".into(), json!(self.emoji_hover));
         m.insert("skin_tone".into(), json!(self.skin_tone));
@@ -315,6 +336,9 @@ impl Prefs {
         m.insert("server_names".into(), json!(self.server_names));
         if let Some((w, h)) = self.popup_size {
             m.insert("popup_size".into(), json!([w.round(), h.round()]));
+        }
+        if !self.card_boards.is_empty() {
+            m.insert("card_boards".into(), json!(self.card_boards));
         }
         Value::Object(m)
     }
@@ -507,6 +531,22 @@ mod tests {
     }
 
     #[test]
+    fn the_boards_cards_were_made_on_are_kept_in_order() {
+        assert!(Prefs::default().to_json().get("card_boards").is_none());
+        let p = Prefs {
+            card_boards: vec!["aaen-studios/calcite".into(), "aaen-studios/loom".into()],
+            ..Prefs::default()
+        };
+        assert_eq!(Prefs::from_json(&p.to_json()), p);
+        // What isn't a board's ref is dropped.
+        let kept = Prefs::from_json(&json!({"card_boards": ["w/b", 3, "", "loom"]}));
+        assert_eq!(kept.card_boards, vec!["w/b".to_string()]);
+        assert!(Prefs::from_json(&json!({"card_boards": "w/b"}))
+            .card_boards
+            .is_empty());
+    }
+
+    #[test]
     fn search_is_hidden_until_the_person_shows_it() {
         assert!(!Prefs::default().search);
         // A prefs file kept before search could be hidden still loads, with it hidden.
@@ -515,6 +555,18 @@ mod tests {
         assert!(!p.search && p.theme == Theme::Dark && !p.bubbles && !p.tray);
         let shown = Prefs::from_json(&serde_json::json!({"search": true}));
         assert!(shown.search);
+        assert_eq!(Prefs::from_json(&shown.to_json()), shown);
+    }
+
+    #[test]
+    fn context_is_hidden_until_the_person_shows_it() {
+        assert!(!Prefs::default().show_context);
+        // A prefs file kept before it could be shown loads with it hidden.
+        assert!(!Prefs::from_json(&json!({"theme": "dark"})).show_context);
+        let shown = Prefs {
+            show_context: true,
+            ..Prefs::default()
+        };
         assert_eq!(Prefs::from_json(&shown.to_json()), shown);
     }
 

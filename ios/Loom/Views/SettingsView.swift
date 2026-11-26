@@ -10,12 +10,15 @@ struct SettingsView: View {
     @AppStorage("loom.username") private var username = ""
     @AppStorage(Prefs.replies) private var replies = Prefs.bubbles
     @AppStorage(Prefs.vibrant) private var vibrant = false
+    @AppStorage(Prefs.showContext) private var showContext = false
     @State private var notifications: UNAuthorizationStatus = .notDetermined
     @State private var confirmSignOut = false
     /// Add a device, open at launch with `-addDevice`, for its screenshot.
     @State private var addingDevice = ProcessInfo.processInfo.arguments.contains("-addDevice")
     /// Settings → Emoji, open at launch with `-emojiSettings`, for its screenshot.
     @State private var emojiSettings = ProcessInfo.processInfo.arguments.contains("-emojiSettings")
+    /// Settings → Spools, open at launch with `-spools`, for its screenshots.
+    @State private var spoolsOpen = ProcessInfo.processInfo.arguments.contains("-spools")
 
     var body: some View {
         let model = session.model
@@ -67,6 +70,11 @@ struct SettingsView: View {
                 }
                 Section {
                     NavigationLink {
+                        SpoolsView()
+                    } label: {
+                        Text("Spools").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                    NavigationLink {
                         SecretsView()
                     } label: {
                         Text("Secrets").font(Fonts.body).foregroundStyle(P.ink)
@@ -82,6 +90,9 @@ struct SettingsView: View {
                     .tint(P.ink3)
                     Toggle(isOn: $vibrant) {
                         Text("Vibrant bubbles").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                    Toggle(isOn: $showContext) {
+                        Text("Show context").font(Fonts.body).foregroundStyle(P.ink)
                     }
                     NavigationLink {
                         EmojiSettingsView()
@@ -150,6 +161,7 @@ struct SettingsView: View {
             }
             .navigationDestination(isPresented: $addingDevice) { AddDeviceView() }
             .navigationDestination(isPresented: $emojiSettings) { EmojiSettingsView() }
+            .navigationDestination(isPresented: $spoolsOpen) { SpoolsView() }
         }
         .task { notifications = await Notifications.status() }
         .onAppear {

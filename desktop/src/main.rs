@@ -316,6 +316,7 @@ gpui_kit::assets::icon_assets!(
         BookOpen,
         Bot,
         Plug,
+        Spool,
         Puzzle,
         Smartphone,
         Users,
@@ -374,7 +375,10 @@ gpui_kit::assets::icon_assets!(
         Plane,
         Volleyball,
         Flag,
-        ImagePlus
+        ImagePlus,
+        // Acta beside the chat: Boards in the + menu and its board picker, and Make a card.
+        Layers,
+        LayersPlus
     ]
 );
 

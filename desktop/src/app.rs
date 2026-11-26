@@ -10,8 +10,9 @@ use std::time::{Duration, Instant};
 use gpui_kit::assets::IconName as Ico;
 use gpui_kit::base::TextSelection;
 use gpui_kit::component::input::{
-    Enter, Escape, IndentInline, InlineToken, Input, InputContent, InputEvent, InputState,
-    MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea, TextareaState,
+    Copy as CopyText, Cut as CutText, Enter, Escape, IndentInline, InlineToken, Input,
+    InputContent, InputEvent, InputState, MoveDown, MoveLeft, MoveRight, MoveUp, Paste, Textarea,
+    TextareaState,
 };
 use gpui_kit::component::message_scroller::{MessageScroller, MessageScrollerState};
 use gpui_kit::component::text::{
@@ -41,70 +42,131 @@ use settings::{settings_found, settings_groups, system_dark};
 #[path = "rules.rs"]
 mod rules;
 
+#[path = "acta_ui.rs"]
+mod acta_ui;
 #[path = "learned.rs"]
 mod learned;
 #[path = "room_view.rs"]
 mod room_view;
+#[path = "t3_view.rs"]
+mod t3_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
-use emoji_ui::RowKey;
+use emoji_ui::{Greeting, RowKey};
+#[path = "form_drafts.rs"]
+mod form_drafts;
 #[path = "list_page.rs"]
 mod list_page;
 #[path = "routines.rs"]
 mod routines;
+#[path = "spools.rs"]
+mod spools;
+#[path = "watch_view.rs"]
+mod watch_view;
+use crate::model::drafts::Page as DraftPage;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
 
-/// What dropping a dragged agent on a row does.
-type DropAgent = Box<dyn Fn(&AgentDrag, &mut Window, &mut App) + 'static>;
-
-/// An agent being dragged in the sidebar to a new place, with what its floating copy
-/// under the pointer shows: its thread in its shape, and its name.
+/// An agent or a group chat being dragged in the sidebar to a new place, with what its
+/// floating copy under the pointer shows: the row lifted, its thread in its shape (or a
+/// group chat's members' threads woven) and its name. A tile drags among the tiles, a
+/// row among the list's rows and onto folders.
 #[derive(Clone)]
-pub struct AgentDrag {
+pub struct SideDrag {
     id: String,
     name: SharedString,
     tint: Hsla,
     outline: Option<Vec<(f32, f32)>>,
+    /// A group chat's colours, for its woven threads; empty for an agent.
+    weave: Vec<Hsla>,
+    /// Whether it's a pinned agent's tile.
+    tile: bool,
+    /// The rail's: its thread alone, no name.
+    rail: bool,
     p: Palette,
 }
 
-impl AgentDrag {
+impl SideDrag {
     fn of(a: &model::Agent, p: Palette) -> Self {
-        AgentDrag {
+        SideDrag {
             id: a.id.clone(),
             name: a.name.clone().into(),
             tint: thread::color(&a.color, p.dark),
             outline: a.outline().map(<[_]>::to_vec),
+            weave: Vec::new(),
+            tile: false,
+            rail: false,
             p,
         }
     }
 
-    fn ghost(d: &AgentDrag, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<AgentDrag> {
+    fn room(r: &model::Room, colors: Vec<Hsla>, p: Palette) -> Self {
+        SideDrag {
+            id: r.id.clone(),
+            name: r.name.clone().into(),
+            tint: p.ink_3,
+            outline: None,
+            weave: colors,
+            tile: false,
+            rail: false,
+            p,
+        }
+    }
+
+    fn tile(mut self) -> Self {
+        self.tile = true;
+        self
+    }
+
+    fn rail(mut self) -> Self {
+        self.rail = true;
+        self
+    }
+
+    fn ghost(d: &SideDrag, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<SideDrag> {
         let d = d.clone();
         cx.new(|_| d)
     }
 }
 
-impl Render for AgentDrag {
+impl Render for SideDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let p = self.p;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(space::M))
-            .px(px(space::M))
-            .py(px(space::S))
-            .rounded(px(radius::ROW))
-            .bg(p.raised)
-            .border_1()
-            .border_color(p.line_strong)
-            .shadow_lg()
-            .text_size(px(size::BODY))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(p.ink)
-            .child(thread::strand(
+        if self.tile && !self.rail {
+            return div()
+                .size(px(TILE))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(space::XS))
+                .px(px(space::S))
+                .rounded(px(radius::CARD))
+                .bg(p.raised_2)
+                .shadow_lg()
+                .child(thread::strand_in(
+                    format!("drag-{}", self.id),
+                    Mood::Idle,
+                    self.tint,
+                    self.outline.as_deref(),
+                    TILE_THREAD,
+                    16.0,
+                    None,
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .text_center()
+                        .text_size(px(size::SMALL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink)
+                        .truncate()
+                        .child(self.name.clone()),
+                );
+        }
+        let mark = if self.weave.is_empty() {
+            div().child(thread::strand(
                 format!("drag-{}", self.id),
                 Mood::Idle,
                 self.tint,
@@ -113,7 +175,35 @@ impl Render for AgentDrag {
                 10.0,
                 None,
             ))
-            .child(self.name.clone())
+        } else {
+            div()
+                .w(px(26.0))
+                .h(px(14.0))
+                .flex_none()
+                .child(thread::weave(self.weave.clone(), 0.0, 1.0, 14.0))
+        };
+        // Lifted a little down and to the right of where it was taken, so the line
+        // where it lands shows beside it.
+        div().pt(px(space::M)).pl(px(space::S)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::M))
+                .when(!self.rail, |d| {
+                    d.w(px(layout::SIDEBAR - 2.0 * space::S)).px(px(space::M))
+                })
+                .when(self.rail, |d| d.size(px(RAIL_ROW)).justify_center())
+                .py(px(space::S))
+                .rounded(px(radius::ROW))
+                .bg(p.raised_2)
+                .shadow_lg()
+                .text_size(px(size::BODY))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(p.ink)
+                .opacity(0.96)
+                .child(mark)
+                .when(!self.rail, |d| d.child(self.name.clone())),
+        )
     }
 }
 
@@ -141,6 +231,8 @@ pub struct Palette {
     /// A match found in the chat, and the one it's on (Ctrl+F).
     pub find: Hsla,
     pub find_current: Hsla,
+    /// Where something dragged lands, such as the line between two rows in the sidebar.
+    pub drop: Hsla,
 }
 
 impl Palette {
@@ -169,6 +261,7 @@ impl Palette {
             warn: c(d::WARN, l::WARN),
             find: c(d::FIND, l::FIND),
             find_current: c(d::FIND_CURRENT, l::FIND_CURRENT),
+            drop: c(d::DROP, l::DROP),
         }
     }
 }
@@ -200,14 +293,21 @@ enum Screen {
     AddServer,
     /// A group chat's settings, or the form that makes one.
     Room,
+    /// Acta beside the chat: a card's side preview, making a card, or a board.
+    Acta,
     Aside,
     Page,
     Tables,
+    /// The form that starts a T3 thread.
+    T3Start,
     Import,
     Appearance,
     ChatPrefs,
     AppPrefs,
     Emoji,
+    /// Spools, the integrations catalog: its Find tab, and its Installed tab.
+    Spools,
+    Installed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -226,7 +326,7 @@ enum Ctx {
     Message(String, Option<String>),
     /// A server in the sidebar's foot, by its folder.
     Server(String),
-    /// The sidebar's list of agents, under its last.
+    /// The sidebar's empty space, or its + New: New group chat, New agent, New folder.
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
@@ -455,6 +555,8 @@ pub struct Loom {
     /// The popup's shape as it's drawn, its corner while it's dragged, and its list
     /// pages' find field (list_page.rs).
     list_ui: list_page::ListUi,
+    /// Spools' search and the boxes of the form in its pane (spools.rs).
+    spools_ui: spools::SpoolsUi,
     /// The update icon's popup: the pointer is on the icon, or on the popup, and when it
     /// last left both, so the popup stays a moment for the pointer to cross the gap.
     update_over: (bool, bool),
@@ -529,6 +631,10 @@ pub struct Loom {
     renaming_folder: Option<String>,
     /// Whether the sidebar's hidden agents are shown.
     hidden_open: bool,
+    /// While an agent or a group chat is dragged in the sidebar: which one, and the row
+    /// it would land beside, true for over it, where the line shows.
+    side_dragging: Option<String>,
+    side_drop: Option<(String, bool)>,
     /// Whether the agent menu shows the folders to move the agent to.
     menu_folders: bool,
     listing_hosts: bool,
@@ -551,7 +657,9 @@ pub struct Loom {
     panel_opening: Option<String>,
     /// What came through the open panel's door, waiting for the window's task.
     door_in: Rc<std::cell::RefCell<Vec<crate::panel::Message>>>,
+    /// A note to remember, on the Memory page, and a proposed note's text, each its own.
     note_in: Entity<InputState>,
+    proposal_note_in: Entity<InputState>,
     profile_in: Entity<TextareaState>,
     /// The instructions every agent follows, on the Defaults page.
     every_in: Entity<TextareaState>,
@@ -565,6 +673,8 @@ pub struct Loom {
     confirm_delete: bool,
     /// The routine page's schedule fields, history and week (routines.rs).
     routine_ui: routines::RoutineUi,
+    /// The form that starts a T3 thread, beside the chat.
+    t3_ui: t3_view::T3Ui,
     routine_prompt_in: Entity<TextareaState>,
     /// On the routines page: none for the list, `Some(None)` for a new routine,
     /// `Some(Some(id))` for one being changed. The form's agent and switches go with it.
@@ -628,8 +738,13 @@ pub struct Loom {
     /// On the Brains page: none for the first, `Some(None)` for the ACP Registry, and
     /// `Some(Some(name))` for the program picked.
     program_open: Option<Option<String>>,
+    /// A secret to add, its name and value, on the Secrets page.
     set_key_in: Entity<InputState>,
     set_value_in: Entity<InputState>,
+    /// The open program's setting to add, its name and value: its own, not the Secrets
+    /// page's.
+    setting_key_in: Entity<InputState>,
+    setting_value_in: Entity<InputState>,
     /// The open program's share: tokens each person may use, and whether each month.
     share_in: Entity<InputState>,
     share_month: bool,
@@ -1170,6 +1285,7 @@ impl Loom {
         }
         let skill_name_in = input(window, cx, "release-notes", false);
         let note_in = input(window, cx, "Something to remember", false);
+        let proposal_note_in = input(window, cx, "Something to remember", false);
         let profile_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(6, 20)
@@ -1185,7 +1301,9 @@ impl Loom {
         let relay_in = input(window, cx, "https://push.loom.example", false);
         let move_code_in = input(window, cx, "loom-move-…", false);
         let routine_ui = routines::RoutineUi::new(window, cx);
+        let t3_ui = t3_view::T3Ui::new(window, cx);
         let list_ui = list_page::ListUi::new(window, cx);
+        let spools_ui = spools::SpoolsUi::new(window, cx);
         let task_prompt_in = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(3, 14)
@@ -1227,6 +1345,8 @@ ACTA_KEY=secret:ACTA_KEY",
         let mcp_client_in = input(window, cx, "Only if its sign-in asks for one", false);
         let mcp_client_secret_in = input(window, cx, "secret:KEY, or the secret", true);
         let set_value_in = input(window, cx, "Its value", true);
+        let setting_key_in = input(window, cx, "ANTHROPIC_API_KEY", false);
+        let setting_value_in = input(window, cx, "Its value", true);
         let share_in = input(window, cx, "Tokens", false);
         let skill_desc_in = input(window, cx, "When it's for, in one sentence", false);
         let skill_body_in = cx.new(|cx| {
@@ -1239,6 +1359,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 .auto_grow(4, 14)
                 .placeholder("How should it work?")
         });
+        // The list pages' forms: each change is kept as its item's draft (form_drafts.rs).
+        for state in [
+            &mcp_name_in,
+            &mcp_cmd_in,
+            &mcp_client_in,
+            &mcp_client_secret_in,
+            &skill_name_in,
+            &skill_desc_in,
+            &proposal_note_in,
+            &setting_key_in,
+            &setting_value_in,
+            &share_in,
+            &routine_name_in,
+        ] {
+            form_drafts::watch(state, window, cx);
+        }
+        for state in [&mcp_settings_in, &skill_body_in, &routine_prompt_in] {
+            form_drafts::watch(state, window, cx);
+        }
         if let Ok(server) = std::env::var("LOOM_SERVER") {
             server_in.update(cx, |s, cx| s.set_value(server, window, cx));
         }
@@ -1605,6 +1744,7 @@ ACTA_KEY=secret:ACTA_KEY",
             side: None,
             settings_last: Screen::Profile,
             list_ui,
+            spools_ui,
             update_over: (false, false),
             update_left: None,
             rows: Rc::new(Vec::new()),
@@ -1643,6 +1783,8 @@ ACTA_KEY=secret:ACTA_KEY",
             folder_in,
             renaming_folder: None,
             hidden_open: false,
+            side_dragging: None,
+            side_drop: None,
             menu_folders: false,
             listing_hosts: false,
             ssh_host_in,
@@ -1657,6 +1799,7 @@ ACTA_KEY=secret:ACTA_KEY",
             panel_opening: None,
             door_in: Rc::new(std::cell::RefCell::new(Vec::new())),
             note_in,
+            proposal_note_in,
             profile_in,
             every_in,
             routine_name_in,
@@ -1707,6 +1850,7 @@ ACTA_KEY=secret:ACTA_KEY",
             form_at: Instant::now(),
             confirm_delete: false,
             routine_ui,
+            t3_ui,
             routine_prompt_in,
             routine_open: None,
             routine_agent: None,
@@ -1747,6 +1891,8 @@ ACTA_KEY=secret:ACTA_KEY",
             check_in,
             set_key_in,
             set_value_in,
+            setting_key_in,
+            setting_value_in,
             share_in,
             share_month: false,
             instructions_in,
@@ -1763,6 +1909,7 @@ ACTA_KEY=secret:ACTA_KEY",
             place,
             notice: None,
         };
+        loom.model.keep_boards(&loom.prefs.card_boards);
         loom.fetch();
         window.focus(&loom.keys, cx);
         loom
@@ -1788,6 +1935,8 @@ ACTA_KEY=secret:ACTA_KEY",
             self.end_search(window, cx);
         } else if self.popup.is_some() {
             self.popup = None;
+        } else if self.side == Some(Screen::Acta) && self.model.shut_acta_menu() {
+            // A menu in Acta's panel shuts first.
         } else if self.side.is_some() && self.screen == Screen::Chat {
             self.close_side(cx);
         } else if self.model.conn == Some(Conn::SignedOut) {
@@ -1836,6 +1985,16 @@ ACTA_KEY=secret:ACTA_KEY",
     /// How wide the sidebar is, once it's done moving, in a window `window` wide.
     fn bar_width(&self, window: f32) -> f32 {
         self.bar.width(window, self.beside())
+    }
+
+    /// How wide the sidebar is drawn now, easing between whole and the rail.
+    fn sidebar_now(&self, railed: bool) -> f32 {
+        let k = motion::level(
+            &SharedString::from("sidebar-rail"),
+            railed,
+            crate::rail::SLIDE,
+        );
+        layout::SIDEBAR + (layout::RAIL - layout::SIDEBAR) * k
     }
 
     /// The person's collapse or open, from the sidebar's control or Ctrl+B.
@@ -2085,9 +2244,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
             }
         }
-        // A list page opens with its find field empty, on its first.
+        // A list page opens with its find field empty, on its first, and the form left
+        // open keeps its draft.
         self.list_ui.find_for = None;
-        self.list_ui.filled = None;
+        self.leave_form(cx);
         match screen {
             Screen::Server => {
                 let f = self.model.load_scripts();
@@ -2119,6 +2279,12 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             Screen::Routines => {
                 let f = self.model.load_routines();
+                self.send(f);
+                // The person's Acta and T3 servers, for "On an event".
+                for f in self.model.load_mcp() {
+                    self.send(f);
+                }
+                let f = self.model.ask_t3_servers();
                 self.send(f);
                 self.routine_open = None;
                 _ = self.model.load_routine_runs(None);
@@ -2162,6 +2328,12 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.send(f);
                 }
                 self.mcp_open = None;
+            }
+            Screen::Spools | Screen::Installed => {
+                for f in self.model.open_spools(None) {
+                    self.send(f);
+                }
+                self.model.spools.picked = None;
             }
             Screen::ThisDevice => {
                 let f = self.model.device_get();
@@ -2257,6 +2429,7 @@ ACTA_KEY=secret:ACTA_KEY",
         }
         self.model.page = None;
         self.model.tables_open = false;
+        self.model.t3.form = None;
         self.side = None;
         self.model.editing = None;
         cx.notify();
@@ -2303,6 +2476,7 @@ ACTA_KEY=secret:ACTA_KEY",
         // The choice is the first server's.
         self.show_server("", cx);
         self.model = Model::new();
+        self.model.keep_boards(&self.prefs.card_boards);
         self.screen = Screen::Chat;
         self.menu = None;
         // The old core stops, and its instance with it, as it's dropped.
@@ -2462,11 +2636,14 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(i) = self.away.iter().position(|a| a.dir == dir) else {
             return;
         };
+        // The form open is this server's, and keeps its draft with it.
+        self.leave_form(cx);
         let a = &mut self.away[i];
         std::mem::swap(&mut self.core, &mut a.core);
         std::mem::swap(&mut self.events, &mut a.events);
         std::mem::swap(&mut self.model, &mut a.model);
         std::mem::swap(&mut self.here, &mut a.dir);
+        self.model.keep_boards(&self.prefs.card_boards);
         keep_last_server(&self.here);
         // The one away notifies whatever the window does; the one here, only while it's
         // not looked at, and it's looked at now.
@@ -2797,6 +2974,12 @@ ACTA_KEY=secret:ACTA_KEY",
         for f in self.model.card_fetches(model::now_ms()) {
             self.core.send(&f.to_string());
         }
+        for f in self.model.t3_fetches() {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.watch_fetches() {
+            self.core.send(&f.to_string());
+        }
     }
 
     /// Shows the newest notice from the model, and hides one that's been up its time.
@@ -3069,6 +3252,18 @@ ACTA_KEY=secret:ACTA_KEY",
         .detach();
     }
 
+    /// Ctrl+C or Ctrl+X in the composer, with one of the person's own emoji in what's
+    /// selected: it's copied as `:name:`, with its token kept for a paste back into the
+    /// composer (`emoji::copied`). Gives whether it copied, so other words copy as they do.
+    fn copy_composer(&mut self, cx: &mut Context<Self>) -> bool {
+        let selected = self.composer.read(cx).selected_value().to_string();
+        let (text, Some(kept)) = crate::emoji::copied(&selected) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string_with_metadata(text, kept));
+        true
+    }
+
     /// Ctrl+V in the composer: an image, or files copied in Explorer, become attachments.
     /// Gives whether it took the paste, so text still pastes as text.
     fn paste_files(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3165,7 +3360,12 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        let mut rows: Vec<Row> = self.model.shown().into_iter().map(Row::Message).collect();
+        let mut rows: Vec<Row> = self
+            .model
+            .shown_with(self.prefs.show_context)
+            .into_iter()
+            .map(Row::Message)
+            .collect();
         rows.extend(self.model.shown_approvals().into_iter().map(Row::Approval));
         // What another chat's frames change leaves this one's rows as they were: the
         // list keeps them, so its cached drawing stays good. Compared from the end,
@@ -3257,34 +3457,97 @@ ACTA_KEY=secret:ACTA_KEY",
         });
     }
 
-    /// What dropping a dragged agent on the agent `onto` does: puts it in that one's
-    /// place, and tells the instance the new order. Dropped on one in a folder, it goes
-    /// in that folder; on one out of them, out of its own.
-    fn drop_agent(&self, onto: &str, cx: &mut Context<Self>) -> DropAgent {
-        let onto = onto.to_string();
-        Box::new(cx.listener(move |this, d: &AgentDrag, _, cx| {
-            let into = match this.model.part_of(&onto) {
-                Some(model::SidePart::Folder { id, .. }) => Some(Some(id)),
-                Some(model::SidePart::Agents) => Some(None),
-                _ => None,
-            };
-            if let Some(f) = this.model.move_agent(&d.id, &onto) {
-                this.send(f);
-            }
-            if let Some(group) = into {
-                let from = this.model.part_of(&d.id);
-                let already = match (&from, &group) {
-                    (Some(model::SidePart::Folder { id, .. }), Some(g)) => id == g,
-                    (Some(model::SidePart::Agents), None) => true,
-                    _ => false,
+    /// Makes a row of the sidebar's list, or one of the rail's, take a dragged agent or
+    /// group chat: over its upper half it lands before the row, else after it, where a
+    /// thin line shows, and a drop puts it there (`model::Model::drop_item`). While it's
+    /// dragged, its own row stays behind faded. Tiles drag only among tiles.
+    fn droppable(
+        &self,
+        row: Stateful<Div>,
+        id: &str,
+        rail: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        let line = self
+            .side_drop
+            .as_ref()
+            .filter(|(at, _)| at == id)
+            .map(|(_, over)| *over);
+        let faded = self.side_dragging.as_deref() == Some(id);
+        let (at, dropped) = (id.to_string(), id.to_string());
+        let inset = if rail { space::S } else { space::M };
+        row.relative()
+            .when(faded, |d| d.opacity(0.35))
+            .on_drag_move(
+                cx.listener(move |this, e: &DragMoveEvent<SideDrag>, _, cx| {
+                    let (tile, id) = {
+                        let d = e.drag(cx);
+                        (d.tile, d.id.clone())
+                    };
+                    if tile {
+                        return;
+                    }
+                    let mut changed = this.side_dragging.as_deref() != Some(id.as_str());
+                    this.side_dragging = Some(id);
+                    if e.bounds.contains(&e.event.position) {
+                        let here = Some((at.clone(), e.event.position.y < e.bounds.center().y));
+                        changed |= this.side_drop != here;
+                        this.side_drop = here;
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                }),
+            )
+            .can_drop(|d, _, _| d.downcast_ref::<SideDrag>().is_some_and(|d| !d.tile))
+            .on_drop(cx.listener(move |this, d: &SideDrag, _, cx| {
+                let over = this
+                    .side_drop
+                    .as_ref()
+                    .filter(|(at, _)| *at == dropped)
+                    .is_none_or(|(_, over)| *over);
+                let to = if over {
+                    model::Drop::Before(dropped.clone())
+                } else {
+                    model::Drop::After(dropped.clone())
                 };
-                if !already {
-                    let f = this.model.group_agent(&d.id, group.as_deref());
+                for f in this.model.drop_item(&d.id, &to) {
                     this.send(f);
                 }
-            }
-            cx.notify();
-        }))
+                this.side_drop = None;
+                this.side_dragging = None;
+                cx.notify();
+            }))
+            .when_some(line, move |d, over| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(inset))
+                        .right(px(inset))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(p.drop)
+                        .when(over, |d| d.top(px(-2.0)))
+                        .when(!over, |d| d.bottom(px(-2.0))),
+                )
+            })
+    }
+
+    /// Makes a pinned agent's tile, on the sidebar or the rail, take another tile
+    /// dragged onto it: the dragged one goes in its place.
+    fn tile_drop(&self, tile: Stateful<Div>, id: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let onto = id.to_string();
+        tile.can_drop(|d, _, _| d.downcast_ref::<SideDrag>().is_some_and(|d| d.tile))
+            .drag_over::<SideDrag>(move |s, _, _, _| s.bg(p.raised_2))
+            .on_drop(cx.listener(move |this, d: &SideDrag, _, cx| {
+                let to = this.model.onto(&d.id, &onto);
+                for f in this.model.drop_item(&d.id, &to) {
+                    this.send(f);
+                }
+                cx.notify();
+            }))
     }
 
     /// Puts a sidebar folder's name in a field in its place, chosen, to type over.
@@ -3400,6 +3663,9 @@ ACTA_KEY=secret:ACTA_KEY",
     /// The panel beside the chat on the right: an agent's page, or a plugin's panel,
     /// whose web view sits over the space left for it under the head.
     fn side_panel(&mut self, side: Screen, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        if side == Screen::Acta {
+            return self.acta_side(window, cx);
+        }
         let p = self.p;
         let width = side_width(
             side == Screen::Plugins || side == Screen::Page,
@@ -3425,6 +3691,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .map_or_else(|| "New group chat".to_string(), |r| r.name.clone()),
             ),
             Screen::Tables => (Ico::Sheet, format!("{name}'s tables")),
+            Screen::T3Start => (Ico::SquareTerminal, "Start a T3 thread".to_string()),
             Screen::Aside => (
                 Ico::MessageCircleQuestionMark,
                 format!("Ask {name} on the side"),
@@ -3452,6 +3719,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Memory => self.memory_page(cx),
             Screen::Room => self.room_panel(window, cx),
             Screen::Tables => self.tables_panel(cx),
+            Screen::T3Start => self.t3_start_panel(cx),
             Screen::Aside => self.aside_page(&name),
             // The page's web view sits over this, once it's here.
             Screen::Page if self.model.page_path().is_none() => div()
@@ -3730,6 +3998,9 @@ ACTA_KEY=secret:ACTA_KEY",
         if settings::page_kind(open) == crate::model::popup::Kind::List {
             self.ready_list_page(open, window, cx);
         }
+        if open == Screen::Spools {
+            self.ready_spools(window, cx);
+        }
         let mut nav = div()
             .w(px(layout::NAV))
             .flex_none()
@@ -3812,9 +4083,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 list = list.child(div().h(px(space::S)));
             }
             for (id, icon, label, screen) in pages {
+                // Spools is lit on either of its tabs.
+                let lit = screen == open || (screen == Screen::Spools && open == Screen::Installed);
                 list = list.child(
                     self.menu_item(id, icon, label, false)
-                        .when(screen == open, |d| d.bg(p.active))
+                        .when(lit, |d| d.bg(p.active))
                         .on_click(cx.listener(move |this, _, _, cx| this.open(screen, cx))),
                 );
             }
@@ -3909,6 +4182,8 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::ChatPrefs => self.chat_prefs_page(cx),
             Screen::AppPrefs => self.app_prefs_page(cx),
             Screen::Emoji => self.emoji_page(cx),
+            Screen::Spools => self.spools_page(cx),
+            Screen::Installed => self.installed_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -6705,9 +6980,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-            .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-            .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.raised_2))
-            .on_drop(self.drop_agent(&a.id, cx))
+            .on_drag(SideDrag::of(a, p).tile(), SideDrag::ghost)
             // The same key as its row's would be, so pinning or unpinning it while it
             // works carries on its motion.
             .child(thread::strand_in(
@@ -6746,9 +7019,74 @@ ACTA_KEY=secret:ACTA_KEY",
             })
     }
 
+    /// An agent waiting on the person, under the tiles: its thread, its name with what it
+    /// asks under it on one line, and a warm dot at its end. A click opens its chat, a
+    /// right-click its menu.
+    fn waiting_row(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+            && self.screen == Screen::Chat
+            && self.model.open_room.is_none();
+        let id = a.id.clone();
+        div()
+            .id(SharedString::from(format!("waiting-{}", a.id)))
+            .role(Role::Button)
+            .aria_label(a.name.clone())
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(p.active))
+            .when(!selected, move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let id = id.clone();
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.agent_menu_at(id.clone(), e.position, cx);
+                })
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+            .child(thread::strand(
+                format!("side-{}", a.id),
+                self.model.mood(&a.id),
+                thread::color(&a.color, p.dark),
+                a.outline(),
+                26.0,
+                10.0,
+                self.model.finished_at(&a.id),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(size::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.ink)
+                            .truncate()
+                            .child(a.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .truncate()
+                            .child(self.model.preview(a)),
+                    ),
+            )
+            .child(div().size(px(6.0)).flex_none().rounded_full().bg(p.warn))
+    }
+
     /// An agent's row in the sidebar: its thread, its name, and what it's on after it.
-    /// A click opens its chat, a right-click its menu, and it drags into a new place, or
-    /// into a folder.
+    /// A click opens its chat, a right-click its menu.
     fn agent_row(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let selected = self.model.selected.as_deref() == Some(a.id.as_str())
@@ -6796,9 +7134,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-            .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-            .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
-            .on_drop(self.drop_agent(&a.id, cx))
             .child(thread::strand(
                 format!("side-{}", a.id),
                 mood,
@@ -6905,8 +7240,9 @@ ACTA_KEY=secret:ACTA_KEY",
             })
     }
 
-    /// A folder's head: a click opens or shuts it, a right-click has Rename and Delete,
-    /// and an agent dropped on it goes in. While it's being renamed, its name is a field.
+    /// A folder's head: a click opens or shuts it, a right-click has the New menu with
+    /// Rename and Delete, and an agent or a group chat dropped on it goes in, last. While
+    /// it's being renamed, its name is a field.
     fn folder_head(
         &self,
         folder: &str,
@@ -6945,45 +7281,129 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.open_ctx(e.position, Ctx::Folder(menu_id.clone()), cx);
             }),
         )
-        .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover).text_color(p.ink))
-        .on_drop(cx.listener(move |this, d: &AgentDrag, _, cx| {
-            let f = this.model.group_agent(&d.id, Some(&drop_id));
-            this.send(f);
+        .on_drag_move(cx.listener(|this, e: &DragMoveEvent<SideDrag>, _, cx| {
+            // Over a folder's name, the line goes: it goes in the folder.
+            if e.bounds.contains(&e.event.position) && this.side_drop.is_some() {
+                this.side_drop = None;
+                cx.notify();
+            }
+        }))
+        .can_drop(|d, _, _| d.downcast_ref::<SideDrag>().is_some_and(|d| !d.tile))
+        .drag_over::<SideDrag>(move |s, _, _, _| s.bg(p.hover).text_color(p.ink))
+        .on_drop(cx.listener(move |this, d: &SideDrag, _, cx| {
+            for f in this
+                .model
+                .drop_item(&d.id, &model::Drop::Folder(drop_id.clone()))
+            {
+                this.send(f);
+            }
+            this.side_drop = None;
+            this.side_dragging = None;
             cx.notify();
         }))
         .into_any_element()
     }
 
-    /// The sidebar's agents, as the core groups them (`core/sidebar.calx`): who's waiting
-    /// on the person, the pinned ones as tiles, the rest each on one line, each folder
-    /// under its name, and the hidden ones last, shut until opened.
+    /// An agent or a group chat in the sidebar's list, or in a folder: its row, which
+    /// drags into a new place, or onto a folder.
+    fn side_row(&self, it: &model::SideItem, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        match it {
+            model::SideItem::Agent(id) => {
+                let Some(a) = self.model.agent(id) else {
+                    return Vec::new();
+                };
+                let row = self
+                    .agent_row(a, cx)
+                    .on_drag(SideDrag::of(a, p), SideDrag::ghost);
+                let mut out = vec![self.droppable(row, id, false, cx).into_any_element()];
+                out.extend(
+                    self.ask_rows(a, cx)
+                        .into_iter()
+                        .map(IntoElement::into_any_element),
+                );
+                out
+            }
+            model::SideItem::Room(id) => {
+                let Some(r) = self.model.room(id).cloned() else {
+                    return Vec::new();
+                };
+                let row = self
+                    .room_row(&r, cx)
+                    .on_drag(SideDrag::room(&r, self.room_colors(&r), p), SideDrag::ghost);
+                vec![self.droppable(row, id, false, cx).into_any_element()]
+            }
+        }
+    }
+
+    /// The quiet row that ends the list: + New, which opens New group chat, New agent and
+    /// New folder.
+    fn new_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id("side-new")
+            .role(Role::Button)
+            .aria_label("New")
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .text_size(px(size::BODY))
+            .text_color(p.ink_3)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+            .child(
+                div()
+                    .w(px(26.0))
+                    .flex()
+                    .justify_center()
+                    .child(Icon::new(Ico::Plus).small()),
+            )
+            .child("New")
+            .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                this.open_ctx(e.position(), Ctx::Agents, cx)
+            }))
+    }
+
+    /// The thin line between who's waiting, or the tiles, and the list.
+    fn side_line(&self) -> Div {
+        div()
+            .mx(px(space::L))
+            .my(px(space::XS))
+            .h(px(1.0))
+            .bg(self.p.line)
+    }
+
+    /// The sidebar's agents and group chats, as the core groups them (`core/sidebar.calx`):
+    /// the pinned agents as tiles, who's waiting on the person under a small head, a thin
+    /// line, then one list of agents and group chats in the person's order with each
+    /// folder under its name, + New, and the hidden ones last, shut until opened.
     fn agent_list(&mut self, cx: &mut Context<Self>) -> Div {
-        let agents = self.model.agents.clone();
-        let sections = self.model.sidebar.clone();
-        let by_id: HashMap<&str, &model::Agent> =
-            agents.iter().map(|a| (a.id.as_str(), a)).collect();
-        // An agent the sidebar doesn't have yet, just made, goes with the rest.
-        let listed: HashSet<&str> = sections
-            .iter()
-            .flat_map(|s| s.agents.iter().map(String::as_str))
-            .collect();
-        let extra: Vec<&model::Agent> = agents
-            .iter()
-            .filter(|a| !listed.contains(a.id.as_str()))
-            .collect();
+        let sections = self.model.side_sections();
         let mut tiles = Vec::new();
-        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
         let mut top = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
         let mut waiting = false;
+        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        let mut hidden = Vec::new();
         for sec in sections.iter() {
-            let members: Vec<&model::Agent> = sec
-                .agents
-                .iter()
-                .filter_map(|id| by_id.get(id.as_str()).copied())
+            let agents: Vec<model::Agent> = sec
+                .agents()
+                .filter_map(|id| self.model.agent(id).cloned())
                 .collect();
             match &sec.part {
+                model::SidePart::Pinned => {
+                    for a in &agents {
+                        let tile = self.pinned_tile(a, cx);
+                        tiles.push(self.tile_drop(tile, &a.id, cx));
+                        // Its tile has no room under it for other agents' threads with it:
+                        // they head the list while it's open.
+                        list = list.children(self.ask_rows(a, cx));
+                    }
+                }
                 model::SidePart::Waiting => {
-                    if members.is_empty() {
+                    if agents.is_empty() {
                         continue;
                     }
                     waiting = true;
@@ -6992,23 +7412,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         "Waiting on you".into(),
                         None,
                     ));
-                    for a in members {
-                        top = top.child(self.agent_row(a, cx));
+                    for a in &agents {
+                        top = top.child(self.waiting_row(a, cx));
                         top = top.children(self.ask_rows(a, cx));
                     }
                 }
-                model::SidePart::Pinned => {
-                    for a in members {
-                        tiles.push(self.pinned_tile(a, cx));
-                        // Its tile has no room under it for other agents' threads with it:
-                        // they head the list while it's open.
-                        list = list.children(self.ask_rows(a, cx));
-                    }
-                }
-                model::SidePart::Agents => {
-                    for a in members.into_iter().chain(extra.iter().copied()) {
-                        list = list.child(self.agent_row(a, cx));
-                        list = list.children(self.ask_rows(a, cx));
+                model::SidePart::List => {
+                    for it in &sec.items {
+                        list = list.children(self.side_row(it, cx));
                     }
                 }
                 model::SidePart::Folder {
@@ -7018,60 +7429,43 @@ ACTA_KEY=secret:ACTA_KEY",
                 } => {
                     list = list.child(self.folder_head(id, name, *collapsed, cx));
                     if !collapsed {
-                        for a in members {
-                            list = list.child(self.agent_row(a, cx));
-                            list = list.children(self.ask_rows(a, cx));
+                        for it in &sec.items {
+                            list = list.children(self.side_row(it, cx));
                         }
                     }
                 }
-                model::SidePart::Hidden => {
-                    if members.is_empty() {
-                        continue;
-                    }
-                    let open = self.hidden_open;
-                    list = list.child(
-                        self.group_head("group-hidden".into(), "Hidden".into(), Some(open))
-                            .role(Role::Button)
-                            .aria_label("Hidden")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.hidden_open = !open;
-                                cx.notify();
-                            })),
-                    );
-                    if open {
-                        for a in members {
-                            list = list.child(self.agent_row(a, cx));
-                            list = list.children(self.ask_rows(a, cx));
-                        }
-                    }
-                }
+                model::SidePart::Hidden => hidden = agents,
             }
         }
-        // Before the core has grouped them: as they're listed.
-        if sections.is_empty() {
-            for a in agents.iter() {
-                if a.pinned.is_some() {
-                    tiles.push(self.pinned_tile(a, cx));
-                    list = list.children(self.ask_rows(a, cx));
-                } else {
+        list = list.child(self.new_row(cx));
+        if !hidden.is_empty() {
+            let open = self.hidden_open;
+            list = list.child(
+                self.group_head(
+                    "group-hidden".into(),
+                    format!("Hidden · {}", hidden.len()),
+                    Some(open),
+                )
+                .role(Role::Button)
+                .aria_label("Hidden")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.hidden_open = !open;
+                    cx.notify();
+                })),
+            );
+            if open {
+                for a in &hidden {
                     list = list.child(self.agent_row(a, cx));
                     list = list.children(self.ask_rows(a, cx));
                 }
             }
         }
+        let above = waiting || !tiles.is_empty();
         div()
             .flex()
             .flex_col()
             .gap(px(space::S))
-            .when_some(self.room_list(cx), |d, rooms| {
-                d.child(rooms)
-                    .child(div().px(px(space::S)).child(self.group_head(
-                        "group-agents".into(),
-                        "Agents".into(),
-                        None,
-                    )))
-            })
-            .when(waiting, |d| d.child(top))
+            // Three across, each row centred, so a fourth starts a second row centred too.
             .when(!tiles.is_empty(), |d| {
                 d.child(
                     div()
@@ -7083,12 +7477,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         .children(tiles),
                 )
             })
+            .when(waiting, |d| d.child(top))
+            .when(above, |d| d.child(self.side_line()))
             .child(list)
     }
 
-    /// The whole sidebar: the knot and the wordmark, the + and the collapse, search when
-    /// it's shown, the agents as the core groups them (`agent_list`), and at the foot the
-    /// server, the update icon and the gear.
+    /// The whole sidebar: the knot and the wordmark, the collapse, search when it's
+    /// shown, the agents and group chats as the core groups them (`agent_list`), and at
+    /// the foot the server, the update icon and the gear.
     fn whole_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
@@ -7139,14 +7535,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .child("loom"),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .child(self.new_agent_button("new-agent", control::ICON_SMALL, cx))
-                            .child(self.bar_button(false, cx)),
-                    ),
+                    .child(self.bar_button(false, cx)),
             )
             .when(search_shown, |d| {
                 d.child(
@@ -7194,7 +7583,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(if searching { self.hits(cx) } else { list }),
             )
             .when_some(self.update_pop(false, cx), |d, pop| d.child(pop))
-            .children(self.limit_boxes(cx))
             // The server, as its spool, on the left, and the settings on the right: each
             // opens the popup. While anything loom runs is behind, the update icon sits
             // just left of the gear.
@@ -7217,15 +7605,15 @@ ACTA_KEY=secret:ACTA_KEY",
     /// moves.
     fn sidebar(&mut self, railed: bool, listening: bool, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let k = motion::level(
-            &SharedString::from("sidebar-rail"),
-            railed,
-            crate::rail::SLIDE,
-        );
-        let width = layout::SIDEBAR + (layout::RAIL - layout::SIDEBAR) * k;
+        let width = self.sidebar_now(railed);
         // What's in it is a view of its own, drawn again only when what it shows changes
         // (`SidebarKey`), its threads move or a hover in it fades: a frame that only
         // changes the chat, such as a reply streaming, uses it as it was.
+        // A drag let go away from the sidebar leaves no line or faded row behind.
+        if !cx.has_active_drag() {
+            self.side_dragging = None;
+            self.side_drop = None;
+        }
         let key = self.sidebar_key(railed);
         let view = match &self.side_view {
             Some(v) => v.clone(),
@@ -7305,7 +7693,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 .selected
                 .clone()
                 .filter(|_| self.screen == Screen::Chat && model.open_room.is_none()),
-            rooms: model.sidebar_rooms().into_iter().cloned().collect(),
+            rooms: model.rooms.clone(),
+            rooms_unread: model
+                .rooms
+                .iter()
+                .filter(|r| model.room_unread(&r.id))
+                .map(|r| r.id.clone())
+                .collect(),
+            dragging: self.side_dragging.clone(),
+            drop_at: self.side_drop.clone(),
             room_open: model
                 .open_room
                 .clone()
@@ -7347,12 +7743,6 @@ ACTA_KEY=secret:ACTA_KEY",
             behind: behind.to_vec(),
             behind_all: self.hub().behind_all,
             update_open: !behind.is_empty() && self.update_pop_open(),
-            minute: if model.plan_limits().is_empty() {
-                0
-            } else {
-                chrono::Local::now().timestamp_millis() / 60_000
-            },
-            limits: model.plan_limits(),
         }
     }
 
@@ -7398,116 +7788,6 @@ ACTA_KEY=secret:ACTA_KEY",
             .on_click(cx.listener(|this, _, window, cx| this.toggle_bar(window, cx)))
     }
 
-    /// The + that makes an agent, `size` square.
-    fn new_agent_button(
-        &self,
-        id: &'static str,
-        size: f32,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let p = self.p;
-        div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label("New agent")
-            .occlude()
-            .size(px(size))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::ROW))
-            .text_color(p.ink_2)
-            .cursor_pointer()
-            .soft_hover(transparent_black(), p.hover, None)
-            .child(Icon::new(IconName::Plus).small())
-            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)))
-    }
-
-    /// The limits of the person's plans, over the server's row: a box for each program
-    /// that reports them and that their agents run on, with its icon and its plan's name,
-    /// then a line each for the session and the week, a ring with how much is used and
-    /// when it resets. A click opens the program under Brains. The rail leaves them out.
-    fn limit_boxes(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let p = self.p;
-        let now = chrono::Local::now();
-        let mut out = Vec::new();
-        for (name, limits) in self.model.plan_limits() {
-            let listed = self.model.program_listed(&name).cloned();
-            let plan = if limits.plan.is_empty() {
-                self.model.program_title(&name)
-            } else {
-                limits.plan.clone()
-            };
-            let mut lines = Vec::new();
-            for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
-                let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
-                    continue;
-                };
-                let ink = match meter::Level::of(w.used) {
-                    meter::Level::Bad => p.bad,
-                    meter::Level::Warn => p.warn,
-                    meter::Level::Quiet => p.ink_2,
-                };
-                lines.push(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(space::S))
-                        .child(meter::ring(
-                            control::LIMIT_RING,
-                            w.fraction(),
-                            ink,
-                            p.line_strong,
-                        ))
-                        .child(div().flex_1().text_color(p.ink_2).child(label))
-                        .child(div().text_color(p.ink_3).child(w.words(now))),
-                );
-            }
-            let open = name.clone();
-            out.push(
-                div()
-                    .id(SharedString::from(format!("limits-{name}")))
-                    .role(Role::Button)
-                    .aria_label(format!("{plan} limits"))
-                    .mx(px(space::S))
-                    .mb(px(space::XS))
-                    .p(px(space::S))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::XS))
-                    .rounded(px(radius::BUTTON))
-                    .border_1()
-                    .border_color(p.line)
-                    .text_size(px(size::CAPTION))
-                    .cursor_pointer()
-                    .soft_hover(transparent_black(), p.hover, None)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(space::S))
-                            .child(self.brain_icon(listed.as_ref(), control::LIMIT_RING))
-                            .child(
-                                div()
-                                    .text_size(px(size::SMALL))
-                                    .text_color(p.ink)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(plan),
-                            ),
-                    )
-                    .children(lines)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        // Brains opens on its list, so the program's page after.
-                        this.open(Screen::Programs, cx);
-                        this.program_open = Some(Some(open.clone()));
-                    }))
-                    .into_any_element(),
-            );
-        }
-        out
-    }
-
     /// The settings gear, which opens the popup on the page last open.
     fn gear(&self, settings_open: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
@@ -7540,40 +7820,129 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
     }
 
-    /// The agents the rail shows: the sidebar's, in its order, without the hidden ones,
-    /// and one just made that it doesn't have yet. Before the core has grouped them, as
-    /// they're listed.
-    fn rail_agents(&self) -> Vec<model::Agent> {
-        if self.model.sidebar.is_empty() {
-            return self.model.agents.to_vec();
-        }
-        let listed: HashSet<&str> = self
-            .model
-            .sidebar
-            .iter()
-            .flat_map(|s| s.agents.iter().map(String::as_str))
-            .collect();
-        let mut out: Vec<model::Agent> = self
-            .model
-            .shown_agents()
-            .iter()
-            .filter_map(|id| self.model.agent(id).cloned())
-            .collect();
-        out.extend(
-            self.model
-                .agents
-                .iter()
-                .filter(|a| !listed.contains(a.id.as_str()))
-                .cloned(),
-        );
-        out
+    /// One agent or group chat on the rail: an agent's thread, or a group chat's members'
+    /// threads woven in its colours, its name out to its right under the pointer, a dot
+    /// while a reply waits (a warm one while the agent waits on the person), dragged
+    /// into a new place as its row would be.
+    fn rail_item(
+        &self,
+        it: &model::SideItem,
+        part: &model::SidePart,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let p = self.p;
+        let el = SharedString::from(format!("rail-{}", it.id()));
+        let hover = motion::hover_key(el.clone());
+        let base = div()
+            .id(el)
+            .role(Role::Button)
+            .relative()
+            .size(px(RAIL_ROW))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .cursor_pointer();
+        let (selected, tile) = match it {
+            model::SideItem::Agent(id) => {
+                let a = self.model.agent(id)?.clone();
+                let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+                    && self.screen == Screen::Chat
+                    && self.model.open_room.is_none();
+                let waiting = *part == model::SidePart::Waiting;
+                let unread = self.model.unread.contains(&a.id);
+                let (menu, open) = (a.id.clone(), a.id.clone());
+                let mut tile = base
+                    .aria_label(a.name.clone())
+                    .children(tip_beside(
+                        p,
+                        &hover,
+                        a.name.clone().into(),
+                        RAIL_ROW,
+                        RAIL_ROW,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.agent_menu_at(menu.clone(), e.position, cx);
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(open.clone(), cx)))
+                    .child(thread::strand(
+                        format!("side-{}", a.id),
+                        self.model.mood(&a.id),
+                        thread::color(&a.color, p.dark),
+                        a.outline(),
+                        26.0,
+                        10.0,
+                        self.model.finished_at(&a.id),
+                    ))
+                    .when(waiting, |d| d.child(rail_dot(p).bg(p.warn)))
+                    .when(unread && !waiting, |d| d.child(rail_dot(p)));
+                tile = match part {
+                    model::SidePart::Pinned => {
+                        let t = tile.on_drag(SideDrag::of(&a, p).tile().rail(), SideDrag::ghost);
+                        self.tile_drop(t, &a.id, cx)
+                    }
+                    model::SidePart::Waiting => tile,
+                    _ => {
+                        let t = tile.on_drag(SideDrag::of(&a, p).rail(), SideDrag::ghost);
+                        self.droppable(t, &a.id, true, cx)
+                    }
+                };
+                (selected, tile)
+            }
+            model::SideItem::Room(id) => {
+                let r = self.model.room(id)?.clone();
+                let selected = self.model.open_room.as_deref() == Some(r.id.as_str())
+                    && self.screen == Screen::Chat;
+                let (menu, open) = (r.id.clone(), r.id.clone());
+                let tile = base
+                    .aria_label(r.name.clone())
+                    .children(tip_beside(
+                        p,
+                        &hover,
+                        r.name.clone().into(),
+                        RAIL_ROW,
+                        RAIL_ROW,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_ctx(e.position, Ctx::Room(menu.clone()), cx);
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_room(open.clone(), cx)))
+                    .child(self.room_mark(&r, 26.0, 14.0))
+                    .when(self.model.room_unread(&r.id), |d| d.child(rail_dot(p)))
+                    .on_drag(
+                        SideDrag::room(&r, self.room_colors(&r), p).rail(),
+                        SideDrag::ghost,
+                    );
+                (selected, self.droppable(tile, &r.id, true, cx))
+            }
+        };
+        let tile = tile
+            .when(selected, |d| d.bg(p.active))
+            .when(!selected, move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            });
+        // The one on screen has no hover to fade, so its name keeps the pointer itself.
+        Some(if selected {
+            motion::tracks_hover(tile, hover).into_any_element()
+        } else {
+            tile.into_any_element()
+        })
     }
 
     /// The sidebar collapsed: the control that opens it (beside a Mac's traffic lights,
-    /// in the title bar), each agent as its thread, in the sidebar's order without the
-    /// hidden ones, a short line under the pinned ones, with a dot while a reply waits and its name out to its right
-    /// under the pointer, and at the foot the update icon over the gear over the server's
-    /// yarn.
+    /// in the title bar), then as the sidebar has them, without the hidden ones, the
+    /// pinned agents, who's waiting, the agents and group chats, and each folder's, a
+    /// short line between each part (`rail_item`), and at the foot the update icon over
+    /// the gear over the server's yarn.
     fn rail(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div()
@@ -7582,18 +7951,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .gap(px(2.0))
             .py(px(space::XS));
-        // In the sidebar's order, without the hidden ones.
-        let agents = self.rail_agents();
-        for (n, a) in agents.iter().enumerate() {
-            let selected = self.model.selected.as_deref() == Some(a.id.as_str())
-                && self.screen == Screen::Chat
-                && self.model.open_room.is_none();
-            let unread = self.model.unread.contains(&a.id);
-            let id = a.id.clone();
-            let el = SharedString::from(format!("rail-{}", a.id));
-            let hover = motion::hover_key(el.clone());
-            // The pinned agents come first (model.rs): a line ends them.
-            if n > 0 && agents[n - 1].pinned.is_some() && a.pinned.is_none() {
+        for (n, sec) in self.model.rail_parts().iter().enumerate() {
+            if n > 0 {
                 list = list.child(
                     div()
                         .w(px(space::L))
@@ -7603,57 +7962,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         .bg(p.line_strong),
                 );
             }
-            let tile = div()
-                .id(el)
-                .role(Role::Button)
-                .aria_label(a.name.clone())
-                .relative()
-                .size(px(RAIL_ROW))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::ROW))
-                .cursor_pointer()
-                .when(selected, |d| d.bg(p.active))
-                .when(!selected, move |d| {
-                    d.soft_hover(transparent_black(), p.hover, None)
-                })
-                .children(tip_beside(
-                    p,
-                    &hover,
-                    a.name.clone().into(),
-                    RAIL_ROW,
-                    RAIL_ROW,
-                ))
-                .on_mouse_down(MouseButton::Right, {
-                    let id = id.clone();
-                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.agent_menu_at(id.clone(), e.position, cx);
-                    })
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-                .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
-                .on_drop(self.drop_agent(&a.id, cx))
-                .child(thread::strand(
-                    format!("side-{}", a.id),
-                    self.model.mood(&a.id),
-                    thread::color(&a.color, p.dark),
-                    a.outline(),
-                    26.0,
-                    10.0,
-                    self.model.finished_at(&a.id),
-                ))
-                .when(unread, |d| d.child(rail_dot(p)));
-            // The one on screen has no hover to fade, so its name keeps the pointer itself.
-            list = list.child(if selected {
-                motion::tracks_hover(tile, hover)
-            } else {
-                tile
-            });
+            for it in &sec.items {
+                list = list.children(self.rail_item(it, &sec.part, cx));
+            }
         }
+
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
         // The other servers' yarns over the one on screen, which is at the very bottom.
@@ -8029,15 +8342,21 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    fn header(&mut self, cx: &mut Context<Self>) -> Div {
+    /// The chat's header, `room` wide inside its padding (`header_room`). As the window
+    /// narrows, its chips give up what they can in a fixed order (`model::header`), so
+    /// nothing in it runs under the window's buttons.
+    fn header(&mut self, room: f32, window: &Window, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         // The window's own title bar: it drags the window, and the system's buttons sit at its end.
+        // What's in it never reaches past it, whatever it measured.
         let bar = div()
             .flex_1()
+            .min_w_0()
             .h_full()
             .flex()
             .items_center()
             .justify_between()
+            .overflow_hidden()
             .px(px(space::L));
         let Some(agent) = self
             .model
@@ -8057,6 +8376,26 @@ ACTA_KEY=secret:ACTA_KEY",
         let watching =
             self.browser_docked && self.model.watching.as_deref() == Some(agent.id.as_str());
         let tint = thread::color(&agent.color, p.dark);
+        // The chat's pins, while it has some, or they're open in the popover under it:
+        // how many the instance says, or of the messages here until it has.
+        let pinned = self
+            .model
+            .pins_count
+            .max(self.model.messages.iter().filter(|m| m.pinned).count());
+        let pins_open = self.pins.is_some();
+        let group = self.model.room_open().cloned();
+        let sizes = self.header_sizes(
+            room,
+            &agent,
+            group.as_ref(),
+            (pinned > 0 || pins_open).then_some(pinned),
+            browsing || watching,
+            window,
+        );
+        let fit = model::header::fit(&sizes);
+        // What a narrow header took from a control shows whole under the pointer.
+        let cut = fit.cut(&sizes);
+        let bar = bar.gap(px(fit.gap));
         let globe = div()
             .id("browser-toggle")
             .role(Role::Button)
@@ -8082,7 +8421,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 None,
             )
             .child(Icon::new(Ico::Globe).small())
-            .child("Browser")
+            .when(fit.browser_word, |d| d.child("Browser"))
+            .when(cut.browser, |d| d.tooltip(tip("Browser")))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let id = this.model.selected.clone();
                 if this.model.watching == id && this.browser_docked {
@@ -8092,13 +8432,6 @@ ACTA_KEY=secret:ACTA_KEY",
                     this.watch(id, cx);
                 }
             }));
-        // The chat's pins, while it has some, or they're open in the popover under it:
-        // how many the instance says, or of the messages here until it has.
-        let pinned = self
-            .model
-            .pins_count
-            .max(self.model.messages.iter().filter(|m| m.pinned).count());
-        let pins_open = self.pins.is_some();
         let pop = self
             .pins_pop(cx)
             .and_then(|pop| self.pins_placed(pop, cx.reduce_motion()));
@@ -8158,16 +8491,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 .size_full(),
             )
             .children(pop);
-        // How full the agent's session context is, after its model.
-        let context = self.context_ring(cx);
+        // How full the agent's session context is, after its model, half a gap closer to it.
+        let context = self.context_ring(cx).map(|c| c.ml(px(-fit.gap / 2.0)));
         // A group chat: its mark and name, which open its settings, its pins, and the
         // context of the member that answered last.
-        if let Some(room) = self.model.room_open().cloned() {
-            return bar.child(self.room_head(&room, cx)).child(
+        if let Some(room) = group {
+            return bar.child(self.room_head(&room, &fit, cut.head, cx)).child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(space::L))
+                    .gap(px(fit.gap))
                     .when(pinned > 0 || pins_open, |d| d.child(pins))
                     .children(context),
             );
@@ -8178,6 +8512,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .role(Role::Button)
                 .aria_label(agent.name.clone())
                 .occlude()
+                .min_w_0()
                 .flex()
                 .items_center()
                 .gap(px(space::S))
@@ -8190,6 +8525,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     self.menu == Some(Menu::Agent) && self.menu_at.is_none(),
                     |d| d.bg(p.hover),
                 )
+                .when(cut.head, |d| d.tooltip(tip_text(agent.name.clone())))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu_at = None;
                     this.menu_folders = false;
@@ -8204,31 +8540,37 @@ ACTA_KEY=secret:ACTA_KEY",
                     "head",
                     self.model.mood(&agent.id),
                     thread::color(&agent.color, p.dark),
-                    26.0,
+                    HEAD_MARK,
                     10.0,
                     self.model.finished_at(&agent.id),
                 ))
                 .child(
                     div()
+                        .min_w_0()
+                        .when_some(fit.name, |d, most| d.max_w(px(most)))
+                        .truncate()
                         .text_size(px(size::BODY))
                         .font_weight(FontWeight::MEDIUM)
                         .text_color(p.ink)
                         .child(agent.name.clone()),
                 )
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .xsmall()
-                        .text_color(p.ink_3),
-                ),
+                .when(fit.chevrons, |d| {
+                    d.child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                }),
         )
         .child(
             div()
+                .flex_none()
                 .flex()
                 .items_center()
-                .gap(px(space::L))
+                .gap(px(fit.gap))
                 .when(pinned > 0 || pins_open, |d| d.child(pins))
                 .when(browsing || watching, |d| d.child(globe))
-                .children(self.brain_chip(&agent, cx))
+                .children(self.brain_chip(&agent, fit.brain, cut.brain, cx))
                 .children(context)
                 .child(
                     div()
@@ -8244,15 +8586,23 @@ ACTA_KEY=secret:ACTA_KEY",
                         .cursor_pointer()
                         .soft_hover(transparent_black(), p.hover, None)
                         .when(self.menu == Some(Menu::Permission), |d| d.bg(p.hover))
+                        .when(cut.permission, |d| d.tooltip(tip(permission)))
                         .flex()
                         .items_center()
                         .gap(px(space::XS))
-                        .child(permission)
                         .child(
-                            Icon::new(IconName::ChevronDown)
-                                .xsmall()
-                                .text_color(p.ink_3),
+                            div()
+                                .when_some(fit.permission, |d, most| d.max_w(px(most)))
+                                .truncate()
+                                .child(permission),
                         )
+                        .when(fit.chevrons, |d| {
+                            d.child(
+                                Icon::new(IconName::ChevronDown)
+                                    .xsmall()
+                                    .text_color(p.ink_3),
+                            )
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.menu = if this.menu == Some(Menu::Permission) {
                                 None
@@ -8263,6 +8613,103 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 ),
         )
+    }
+
+    /// How wide what the header holds is, in each of its forms, for `model::header::fit`:
+    /// the agent's menu or the group chat's head, its pins (`pins`, how many, while
+    /// they show), the browser chip, the brain chip, the context ring and the permission
+    /// chip, as `header` lays them out. Words are measured in the app's font.
+    fn header_sizes(
+        &self,
+        room: f32,
+        agent: &model::Agent,
+        group: Option<&model::Room>,
+        pins: Option<usize>,
+        browser: bool,
+        window: &Window,
+    ) -> model::header::Sizes {
+        let words = |text: &str| ui_text_width(text, size::CAPTION, FontWeight::NORMAL, window);
+        // A chip's padding, and its chevron with the gap before it.
+        let chip = 2.0 * space::S;
+        let chevron = space::XS + CHEVRON;
+        let pins = pins.map_or(0.0, |n| {
+            chip + ICON_GLYPH
+                + if n > 0 {
+                    space::XS + words(&n.to_string())
+                } else {
+                    0.0
+                }
+        });
+        let context = if self.model.context_shown(self.prefs.show_context).is_some() {
+            control::CONTEXT_BUTTON
+        } else {
+            0.0
+        };
+        if let Some(r) = group {
+            let (head, name, members) = self.room_head_widths(r, window);
+            return model::header::Sizes {
+                room,
+                head,
+                name,
+                members,
+                pins,
+                context,
+                ..Default::default()
+            };
+        }
+        let name = ui_text_width(&agent.name, size::BODY, FontWeight::MEDIUM, window);
+        let head_chevron = space::S + CHEVRON;
+        let browser = if browser {
+            (
+                chip + ICON_GLYPH + space::XS + words("Browser"),
+                chip + ICON_GLYPH,
+            )
+        } else {
+            (0.0, 0.0)
+        };
+        let brain = agent.picked().map_or((0.0, 0.0, 0.0), |picked| {
+            let icon = chip + BRAIN_ICON;
+            let with = |text: &str| icon + BRAIN_GAP + words(text) + BRAIN_GAP + CHEVRON;
+            let model = agent.picked_model().map_or(icon, |m| with(&m));
+            (with(&picked), model, icon)
+        });
+        let permission_words = words(model::mode_name(agent.mode()));
+        model::header::Sizes {
+            room,
+            head: chip + HEAD_MARK + space::S + name + head_chevron,
+            name,
+            members: 0.0,
+            pins,
+            browser,
+            brain,
+            context,
+            permission: chip + permission_words + chevron,
+            permission_words,
+            chevrons: head_chevron + chevron,
+        }
+    }
+
+    /// How wide the header's room is inside its padding, in a window `w` wide: the
+    /// column beside the sidebar as it's drawn now, less the window's buttons, or on a
+    /// Mac beside the rail, its traffic lights and the control after them.
+    fn header_room(&self, w: f32, railed: bool, window: &Window) -> f32 {
+        let column = w - self.sidebar_now(railed);
+        let buttons = if cfg!(target_os = "macos") {
+            0.0
+        } else {
+            WINDOW_BUTTONS
+        };
+        // Where it starts: on a Mac beside the rail, past the lights, the control that
+        // opens the sidebar and its own short padding (`render`).
+        let start = if railed && self.lights {
+            LIGHTS_PAD + control::ICON_SMALL + space::XS
+        } else if cfg!(target_os = "macos") && window.is_fullscreen() {
+            // GPUI Kit's bar pads its start in full screen.
+            0.75 * window.rem_size().as_f32() + space::L
+        } else {
+            space::L
+        };
+        (column - buttons - start - space::L).max(0.0)
     }
 
     /// A menu entry: its icon and its title.
@@ -8577,7 +9024,11 @@ ACTA_KEY=secret:ACTA_KEY",
         let drawn = pieces.clone();
         Textarea::new(&self.composer)
             .appearance(false)
-            .token(move |t, _, _| composer_token(p, &drawn, t.token().id(), t.token().text()))
+            .token(move |t, window, cx| {
+                // A selected piece has the selection's colour while the words beside it
+                // show theirs: the textarea leaves it to the piece (LOO-347).
+                composer_token(p, &drawn, t, window, cx)
+            })
             .on_token_click(move |e, _, cx| {
                 let id = e.token().id().to_string();
                 let _ = this.update(cx, |loom, cx| loom.open_piece(&id, cx));
@@ -9067,6 +9518,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 cx.notify();
             }
+            PlusRow::Spools => {
+                self.shut_plus(window, cx);
+                let agent = self.model.selected.clone();
+                self.open_spools_for(agent, cx);
+            }
+            PlusRow::StartT3 => {
+                self.shut_plus(window, cx);
+                self.open_t3_start(window, cx);
+            }
             PlusRow::Manage(s) => {
                 self.shut_plus(window, cx);
                 self.open(
@@ -9077,6 +9537,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     },
                     cx,
                 );
+            }
+            PlusRow::Boards => {
+                self.shut_plus(window, cx);
+                self.open_board_panel(None, cx);
             }
         }
     }
@@ -9143,6 +9607,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     Some((line, if bad { p.bad } else { p.ink_3 })),
                 )
             }
+            PlusRow::Spools => (Ico::Spool, "Spools…".into(), None),
             PlusRow::Manage(s) => {
                 let none = self.model.plus_sub(*s).len() == 1;
                 let title = match (s, none) {
@@ -9152,6 +9617,8 @@ ACTA_KEY=secret:ACTA_KEY",
                 };
                 (Ico::Settings, title.into(), None)
             }
+            PlusRow::StartT3 => (Ico::SquareTerminal, "Start a T3 thread".into(), None),
+            PlusRow::Boards => (Ico::Layers, "Boards".into(), None),
         }
     }
 
@@ -9552,11 +10019,24 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// The header's brain chip: the program's icon and what the agent is set to on it,
-    /// such as "Opus 5.5 · Medium". It opens one menu just under it, with each setting
-    /// the program offers (its model, then its effort) under its name.
-    fn brain_chip(&self, agent: &model::Agent, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// such as "Opus 5.5 · Medium", or as a narrow header shows it (`model::header`):
+    /// "Opus 5.5", or the icon alone, with its words whole under the pointer then (`cut`).
+    /// It opens one menu just under it, with each setting the program offers (its model,
+    /// then its effort) under its name.
+    fn brain_chip(
+        &self,
+        agent: &model::Agent,
+        shows: model::header::Brain,
+        cut: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Stateful<Div>> {
         let p = self.p;
         let picked = agent.picked()?;
+        let words = match shows {
+            model::header::Brain::Whole => Some(picked.clone()),
+            model::header::Brain::Model => agent.picked_model(),
+            model::header::Brain::Icon => None,
+        };
         let listed = self.model.program_listed(&agent.program).cloned();
         let open = self.menu == Some(Menu::Model);
         let menu = open.then(|| self.brain_menu(agent, cx));
@@ -9567,6 +10047,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 .aria_label(format!("Brain: {picked}"))
                 .relative()
                 .occlude()
+                .flex_none()
                 .px(px(space::S))
                 .py(px(space::XS))
                 .rounded(px(radius::ROW))
@@ -9575,16 +10056,18 @@ ACTA_KEY=secret:ACTA_KEY",
                 .cursor_pointer()
                 .soft_hover(transparent_black(), p.hover, None)
                 .when(open, |d| d.bg(p.hover))
+                .when(cut, |d| d.tooltip(tip_text(picked.clone())))
                 .flex()
                 .items_center()
-                .gap(px(space::XS + 2.0))
-                .child(self.brain_icon(listed.as_ref(), 12.0))
-                .child(picked)
-                .child(
-                    Icon::new(IconName::ChevronDown)
-                        .xsmall()
-                        .text_color(p.ink_3),
-                )
+                .gap(px(BRAIN_GAP))
+                .child(self.brain_icon(listed.as_ref(), BRAIN_ICON))
+                .when_some(words, |d, words| {
+                    d.child(words).child(
+                        Icon::new(IconName::ChevronDown)
+                            .xsmall()
+                            .text_color(p.ink_3),
+                    )
+                })
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.menu = if this.menu == Some(Menu::Model) {
                         None
@@ -9707,6 +10190,28 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// What the sidebar's + New, and a right-click on its empty space or on a folder,
+    /// offer: New group chat, New agent and New folder.
+    fn new_menu(&self, panel: Div, cx: &mut Context<Self>) -> Div {
+        panel
+            .child(
+                self.menu_item("ctx-new-room", Ico::Users, "New group chat", false)
+                    .on_click(cx.listener(|this, _, window, cx| this.new_room(window, cx))),
+            )
+            .child(
+                self.menu_item("ctx-new-agent", Ico::Bot, "New agent", false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ctx = None;
+                        this.open(Screen::NewAgent, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                self.menu_item("ctx-new-folder", Ico::Folder, "New folder", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.new_folder(None, cx))),
+            )
+    }
+
     /// The menu a right-click opened, at the pointer, with what can be done to what was
     /// clicked: the same things its buttons and the agent menu do.
     fn ctx_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -9803,6 +10308,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let pinned = m.pinned;
                 let pin_id = m.id.clone();
+                let (card_from, card_live) = (m.id.clone(), m.live);
                 let (gone_id, can_delete) = (m.id.clone(), !m.live && !m.queued);
                 panel = panel
                     .child(
@@ -9826,6 +10332,16 @@ ACTA_KEY=secret:ACTA_KEY",
                                 close(this, cx);
                             })),
                     );
+                // With Acta connected: a card made from it, in the panel beside the chat.
+                if self.model.has_acta() && !card_live {
+                    panel = panel.child(
+                        self.menu_item("ctx-card", Ico::LayersPlus, "Make a card…", false)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                close(this, cx);
+                                this.start_card_panel(&card_from, window, cx);
+                            })),
+                    );
+                }
                 // Delete, in red after a line: at once, leaving a mark (LOO-208).
                 if can_delete {
                     panel = panel
@@ -9924,26 +10440,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 );
             }
-            Ctx::Agents => {
-                panel = panel
-                    .child(
-                        self.menu_item("ctx-new-agent", Ico::Plus, "New agent", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.ctx = None;
-                                this.open(Screen::NewAgent, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.menu_item("ctx-new-folder", Ico::FolderPlus, "New folder", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.new_folder(None, cx))),
-                    );
-            }
+            Ctx::Agents => panel = self.new_menu(panel, cx),
             Ctx::Room(room) => panel = self.room_menu(panel, room, cx),
             Ctx::Resend(message, agent) => panel = self.resend_menu(panel, message, agent, cx),
             Ctx::Folder(folder) => {
                 let rename = folder.clone();
-                panel = panel
+                panel = self
+                    .new_menu(panel, cx)
+                    .child(div().my(px(space::XS)).h(px(1.0)).bg(p.line))
                     .child(
                         self.menu_item("ctx-rename-folder", Ico::Pencil, "Rename", false)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -10575,7 +11079,9 @@ ACTA_KEY=secret:ACTA_KEY",
         let w = window.viewport_size().width.as_f32();
         let side = match self.side {
             Some(side) => side_width(
-                side == Screen::Plugins || side == Screen::Page,
+                side == Screen::Plugins
+                    || side == Screen::Page
+                    || (side == Screen::Acta && self.acta_wide()),
                 w,
                 self.bar_width(w),
                 self.side_w,
@@ -10907,7 +11413,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let emoji_row = self.emoji_row().map(|row| self.emoji_row_view(&row, cx));
-        let emoji_picker = self.emoji_picker_view(window, cx);
+        // A new chat's greeting and composer move up for the picker under them.
+        let lift = if empty && !in_task {
+            self.hero_lift(window, cx)
+        } else {
+            0.0
+        };
+        let emoji_picker = self.emoji_picker_view(lift, window, cx);
         let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
             .then(|| self.emoji_button(cx));
         let composer_at = self.emoji_ui.composer_at.clone();
@@ -10929,9 +11441,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .relative()
                 // Where it is, for the emoji picker to open by it, and again in the next
                 // frame once it moved with the picker open, as when the window resizes.
+                // A new chat's is kept as it is down.
                 .child(
                     canvas(
                         move |b, window, _| {
+                            let b = Bounds::new(point(b.left(), b.top() + px(lift)), b.size);
                             if composer_at.replace(Some(b)) != Some(b) && picker_open {
                                 window.request_animation_frame();
                             }
@@ -11013,16 +11527,39 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .text_size(px(size::COMPOSER))
                                 // Before the textarea's own Paste, which would
                                 // paste a copied file as its path.
+                                // Copying gives the person's own emoji as :name:, with
+                                // their tokens kept for a paste back in here (LOO-347).
+                                .capture_action(cx.listener(|this, _: &CopyText, _, cx| {
+                                    if this.copy_composer(cx) {
+                                        cx.stop_propagation();
+                                    }
+                                }))
+                                .capture_action(cx.listener(|this, _: &CutText, window, cx| {
+                                    if this.copy_composer(cx) {
+                                        cx.stop_propagation();
+                                        this.composer.update(cx, |c, cx| c.replace("", window, cx));
+                                    }
+                                }))
                                 .capture_action(cx.listener(|this, _: &Paste, window, cx| {
                                     if this.paste_files(cx) {
                                         cx.stop_propagation();
                                         return;
                                     }
-                                    // A link alone pastes as its preview.
-                                    let text = cx
-                                        .read_from_clipboard()
+                                    let item = cx.read_from_clipboard();
+                                    let text = item
+                                        .as_ref()
                                         .and_then(|item| item.text())
                                         .unwrap_or_default();
+                                    // What was copied from here, with its emoji.
+                                    let kept = item.as_ref().and_then(|item| item.metadata());
+                                    if let Some(words) =
+                                        crate::emoji::pasted(&text, kept.map(String::as_str))
+                                    {
+                                        cx.stop_propagation();
+                                        this.composer
+                                            .update(cx, |c, cx| c.replace(words, window, cx));
+                                        return;
+                                    }
                                     // A card's link, with Acta connected, as its pill.
                                     if let Some(url) = model::pasted_card(&text)
                                         .filter(|_| !this.model.acta_boards.is_empty())
@@ -11211,8 +11748,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .flex_col()
                     .relative()
+                    // Up for the picker, what of the greeting would pass under the header
+                    // has faded by then (`greeting`); this keeps anything else off it.
+                    .when(lift > 0.0, |d| d.overflow_hidden())
                     .child(if empty && !in_task {
                         self.hero(agent.as_ref(), composer.take(), cx)
+                            .relative()
+                            .top(px(-lift))
                             .into_any_element()
                     } else {
                         let list_at = self.list_at.clone();
@@ -12016,13 +12558,19 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XL))
             .px(px(space::XL))
             .pb(px(60.0))
-            .child(thread("hero", mood, tint, 140.0, 16.0, snapped))
+            .child(self.greeting(
+                Greeting::Line,
+                thread("hero", mood, tint, 140.0, 16.0, snapped),
+            ))
             .child(
-                div()
-                    .text_size(px(size::HERO))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child(a.name.clone()),
+                self.greeting(
+                    Greeting::Name,
+                    div()
+                        .text_size(px(size::HERO))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(a.name.clone()),
+                ),
             )
             .when_some(composer, |d, c| {
                 // An empty chat keeps its composer at the normal width, whatever the
@@ -12667,6 +13215,9 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             list = list.child(row);
         }
+        // What it follows outside loom, to take away (watch_view.rs).
+        let editing = self.model.editing.clone().unwrap_or_default();
+        let following = self.following_list(model::watch::Follower::Agent(&editing), cx);
         // The person's MCP servers, each on or off for this agent.
         let has: Vec<String> = self
             .model
@@ -12679,19 +13230,12 @@ ACTA_KEY=secret:ACTA_KEY",
         if self.model.mcp_servers.is_empty() {
             servers = servers.child(
                 div()
+                    .h(px(control::BUTTON_SMALL))
                     .flex()
                     .items_center()
-                    .gap(px(space::M))
-                    .child(
-                        div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child("None yet"),
-                    )
-                    .child(
-                        self.small_button("edit-mcp-setup", "Set up", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::Mcp, cx))),
-                    ),
+                    .text_size(px(size::CAPTION))
+                    .text_color(p.ink_3)
+                    .child("None yet"),
             );
         }
         for m in self.model.mcp_servers.clone() {
@@ -13135,10 +13679,11 @@ ACTA_KEY=secret:ACTA_KEY",
                     })
                     .child(group("Knows"))
                     .child(rows(vec![memories, skills, tables, files]))
-                    .child(self.field("MCP servers", servers))
+                    .child(self.field("MCP servers", self.add_from_spools(servers, cx)))
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
                     .child(rows(vec![activity, routines, usage]))
+                    .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
@@ -13281,33 +13826,16 @@ ACTA_KEY=secret:ACTA_KEY",
         }))
     }
 
-    /// Fills the MCP server form with server `m`'s, as it's picked.
+    /// Fills the MCP server form with server `m`'s, as it's picked, or with what the
+    /// person left in it.
     pub(super) fn fill_mcp(
         &mut self,
         m: &model::McpServer,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line = if m.url.is_empty() {
-            m.command.clone()
-        } else {
-            m.url.clone()
-        };
-        self.mcp_name_in
-            .update(cx, |s, cx| s.set_value(m.name.clone(), window, cx));
-        self.mcp_cmd_in
-            .update(cx, |s, cx| s.set_value(line, window, cx));
-        self.mcp_settings_in
-            .update(cx, |s, cx| s.set_value(m.settings_text(), window, cx));
-        let (client, secret) = (
-            m.client_id.clone(),
-            m.client_secret.clone().unwrap_or_default(),
-        );
-        self.mcp_client_in
-            .update(cx, |s, cx| s.set_value(client, window, cx));
-        self.mcp_client_secret_in
-            .update(cx, |s, cx| s.set_value(secret, window, cx));
-        self.list_ui.filled = Some((Screen::Mcp, m.name.clone()));
+        let own = model::drafts::mcp_form(Some(m));
+        self.fill_form(DraftPage::Mcp, Some(m.name.clone()), own, window, cx);
     }
 
     /// The MCP servers page: the person's servers down the left, which each agent gets if
@@ -13316,18 +13844,9 @@ ACTA_KEY=secret:ACTA_KEY",
         let new_server = |this: &Self, cx: &mut Context<Self>, primary: bool| {
             this.small_button("new-mcp", "New server", primary)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    for s in [
-                        &this.mcp_name_in,
-                        &this.mcp_cmd_in,
-                        &this.mcp_client_in,
-                        &this.mcp_client_secret_in,
-                    ] {
-                        s.update(cx, |s, cx| s.set_value("", window, cx));
-                    }
-                    this.mcp_settings_in
-                        .update(cx, |s, cx| s.set_value("", window, cx));
+                    let own = model::drafts::mcp_form(None);
+                    this.fill_form(DraftPage::Mcp, None, own, window, cx);
                     this.mcp_open = Some(None);
-                    this.list_ui.filled = None;
                     cx.notify();
                 }))
         };
@@ -13383,12 +13902,13 @@ ACTA_KEY=secret:ACTA_KEY",
             return div().into_any_element();
         };
         let (line, dot) = popup::mcp_line(&m, self.model.mcp_tests.get(&m.name));
-        self.list_row(
+        self.list_row_unsaved(
             format!("mcp-{}", m.name),
             self.tile(Ico::Plug),
             m.name.clone(),
             line,
             dot,
+            self.unsaved(DraftPage::Mcp, &m.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13409,6 +13929,7 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Vec<AnyElement> {
         let open = m.map(|m| m.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-mcp", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13424,25 +13945,32 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 let client = this.mcp_client_in.read(cx).value().to_string();
                 let secret = this.mcp_client_secret_in.read(cx).value().to_string();
-                let f = this.model.put_mcp(crate::model::with_client(
-                    crate::model::server_args(&name, &line, &settings),
-                    &client,
-                    &secret,
-                ));
+                let now = this.form_now(DraftPage::Mcp, cx);
+                // A new name renames it: the name it's saved under goes as `was`.
+                let f = this.model.put_mcp(
+                    crate::model::with_client(
+                        crate::model::server_args(&name, &line, &settings),
+                        &client,
+                        &secret,
+                    ),
+                    saving.as_deref(),
+                );
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Mcp, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.mcp_open = split.then(|| Some(name.clone()));
-                this.list_ui.filled = Some((Screen::Mcp, name));
+                this.mcp_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-mcp", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it was; else back to the list.
-                if split && changing {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it was; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !(split && changing) {
                     this.mcp_open = None;
                 }
                 cx.notify();
@@ -13453,7 +13981,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.delete_mcp(&name);
                     this.send(f);
                     this.mcp_open = None;
-                    this.list_ui.filled = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 }))
         });
@@ -13629,20 +14157,16 @@ ACTA_KEY=secret:ACTA_KEY",
         self.settings_page("secrets-page", "Secrets", None, groups)
     }
 
-    /// Fills the skill form with skill `k`'s, as it's picked.
+    /// Fills the skill form with skill `k`'s, as it's picked, or with what the person
+    /// left in it.
     pub(super) fn fill_skill(
         &mut self,
         k: &model::Skill,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.skill_name_in
-            .update(cx, |s, cx| s.set_value(k.name.clone(), window, cx));
-        self.skill_desc_in
-            .update(cx, |s, cx| s.set_value(k.description.clone(), window, cx));
-        self.skill_body_in
-            .update(cx, |s, cx| s.set_value(k.body.clone(), window, cx));
-        self.list_ui.filled = Some((Screen::Skills, k.name.clone()));
+        let own = model::drafts::skill_form(Some(k));
+        self.fill_form(DraftPage::Skills, Some(k.name.clone()), own, window, cx);
     }
 
     /// The skills page: the person's skills down the left, which every agent reads when a
@@ -13701,6 +14225,7 @@ ACTA_KEY=secret:ACTA_KEY",
     fn skill_pane(&mut self, k: Option<&model::Skill>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let open = k.map(|k| k.name.clone());
         let split = self.list_split();
+        let saving = open.clone();
         let save = self
             .small_button("save-skill", "Save", true)
             .on_click(cx.listener(move |this, _, _, cx| {
@@ -13714,21 +14239,26 @@ ACTA_KEY=secret:ACTA_KEY",
                     cx.notify();
                     return;
                 }
-                let f = this.model.save_skill(&name, &description, &text);
+                let now = this.form_now(DraftPage::Skills, cx);
+                let f = this
+                    .model
+                    .save_skill(&name, &description, &text, saving.as_deref());
+                // Its draft stays until the instance says it's saved, and the form
+                // stays on it: by the name it had until then, and by a new one after
+                // (`moved_in`); refused, it stays as it is.
+                this.form_saving(DraftPage::Skills, Some(name.trim().to_string()), &f, now);
                 this.send(f);
-                // Side by side, it stays picked, as it was saved.
-                this.skill_open = split.then(|| Some(name.clone()));
-                this.list_ui.filled = Some((Screen::Skills, name));
+                this.skill_open = Some(saving.clone());
                 cx.notify();
             }));
         let changing = open.is_some();
         let cancel = self
             .small_button("cancel-skill", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it was; else back to the list.
-                if split && changing {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it was; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !(split && changing) {
                     this.skill_open = None;
                 }
                 cx.notify();
@@ -13739,7 +14269,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.delete_skill(&name);
                     this.send(f);
                     this.skill_open = None;
-                    this.list_ui.filled = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 }))
         });
@@ -13770,13 +14300,9 @@ ACTA_KEY=secret:ACTA_KEY",
     fn new_skill_button(&self, cx: &mut Context<Self>) -> AnyElement {
         self.small_button("new-skill", "New skill", self.model.skills.is_empty())
             .on_click(cx.listener(|this, _, window, cx| {
-                for s in [&this.skill_name_in, &this.skill_desc_in] {
-                    s.update(cx, |s, cx| s.set_value("", window, cx));
-                }
-                this.skill_body_in
-                    .update(cx, |s, cx| s.set_value("", window, cx));
+                let own = model::drafts::skill_form(None);
+                this.fill_form(DraftPage::Skills, None, own, window, cx);
                 this.skill_open = Some(None);
-                this.list_ui.filled = None;
                 cx.notify();
             }))
             .into_any_element()
@@ -13787,12 +14313,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let Some(k) = self.model.skills.get(ix).cloned() else {
             return div().into_any_element();
         };
-        self.list_row(
+        self.list_row_unsaved(
             format!("skill-{}", k.name),
             self.tile(Ico::BookOpen),
             k.name.clone(),
             k.description.clone(),
             None,
+            self.unsaved(DraftPage::Skills, &k.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13804,31 +14331,16 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// Fills the proposal form with proposal `k`'s, as it's picked: a skill's name, when
-    /// it's for and how, a fix's skill fixed, or a note.
+    /// it's for and how, a fix's skill fixed, or a note; or with what the person left in
+    /// it.
     pub(super) fn fill_proposal(
         &mut self,
         k: &model::Proposal,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if k.kind == "skill" {
-            let (name, description, body) = (k.name.clone(), k.description.clone(), k.body.clone());
-            self.skill_name_in
-                .update(cx, |s, cx| s.set_value(name, window, cx));
-            self.skill_desc_in
-                .update(cx, |s, cx| s.set_value(description, window, cx));
-            self.skill_body_in
-                .update(cx, |s, cx| s.set_value(body, window, cx));
-        } else if k.kind == "fix" {
-            let body = k.body.clone();
-            self.skill_body_in
-                .update(cx, |s, cx| s.set_value(body, window, cx));
-        } else {
-            let text = k.text.clone();
-            self.note_in
-                .update(cx, |s, cx| s.set_value(text, window, cx));
-        }
-        self.list_ui.filled = Some((Screen::Proposals, k.id.clone()));
+        let own = model::drafts::proposal_form(k);
+        self.fill_form(DraftPage::Proposals, Some(k.id.clone()), own, window, cx);
     }
 
     /// What a proposal is, as its row says it: "Skill from Juniper".
@@ -13910,12 +14422,13 @@ ACTA_KEY=secret:ACTA_KEY",
             Ico::Lightbulb
         };
         let line = self.proposal_line(&k);
-        self.list_row(
+        self.list_row_unsaved(
             format!("proposal-{}", k.id),
             self.tile(icon),
             k.title(),
             line,
             None,
+            self.unsaved(DraftPage::Proposals, &k.id),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
@@ -13951,21 +14464,25 @@ ACTA_KEY=secret:ACTA_KEY",
                 } else if p.kind == "fix" {
                     p.body = this.skill_body_in.read(cx).value().to_string();
                 } else {
-                    p.text = this.note_in.read(cx).value().to_string();
+                    p.text = this.proposal_note_in.read(cx).value().to_string();
                 }
+                let now = this.form_now(DraftPage::Proposals, cx);
                 let f = this.model.keep_proposal(&p);
+                // Its draft stays until the instance says it's kept, and with its row
+                // again if it refuses.
+                this.form_saving(DraftPage::Proposals, Some(p.id.clone()), &f, now);
                 this.send(f);
+                this.leave_form(cx);
                 this.proposal_open = None;
-                this.list_ui.filled = None;
                 cx.notify();
             }));
         let cancel = self
             .small_button("cancel-proposal", "Cancel", false)
             .on_click(cx.listener(move |this, _, _, cx| {
-                // Side by side, its form goes back to how it came; else back to the list.
-                if split {
-                    this.list_ui.filled = None;
-                } else {
+                // Its changes go. Side by side, its form goes back to how it came; else
+                // back to the list.
+                this.model.drafts.discard();
+                if !split {
                     this.proposal_open = None;
                 }
                 cx.notify();
@@ -13977,7 +14494,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 let f = this.model.drop_proposal(&id);
                 this.send(f);
                 this.proposal_open = None;
-                this.list_ui.filled = None;
+                this.model.drafts.discard();
                 cx.notify();
             }));
         let icon = if skill || open.kind == "fix" {
@@ -14031,7 +14548,7 @@ ACTA_KEY=secret:ACTA_KEY",
             rows.push(self.text_row("The skill, fixed", None, Textarea::new(&self.skill_body_in)));
             groups.push(self.group(None, rows));
         } else {
-            let mut rows = vec![self.field_row("Note", Input::new(&self.note_in))];
+            let mut rows = vec![self.field_row("Note", Input::new(&self.proposal_note_in))];
             if !open.site.is_empty() || open.shared {
                 let mut how = Vec::new();
                 if !open.site.is_empty() {
@@ -15516,7 +16033,7 @@ ACTA_KEY=secret:ACTA_KEY",
         let control = |id: &'static str, icon: Ico, area: WindowControlArea, close: bool| {
             div()
                 .id(id)
-                .w(px(34.0))
+                .w(px(WINDOW_BUTTON))
                 .h(px(28.0))
                 .flex()
                 .items_center()
@@ -15567,9 +16084,10 @@ ACTA_KEY=secret:ACTA_KEY",
             )
             .child(
                 div()
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(2.0))
+                    .gap(px(WINDOW_BUTTON_GAP))
                     .px(px(space::S))
                     .child(control(
                         "win-min",
@@ -16293,22 +16811,28 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let (listed, shown, what, newer) = self.brain_about(&prog);
         let name = prog.name.clone();
-        self.list_row(
+        self.list_row_unsaved(
             format!("program-{}", prog.name),
             self.brain_tile(listed.as_ref(), control::LEAD),
             shown,
             what,
             newer.map(|_| popup::Dot::Warn),
+            self.unsaved(DraftPage::Brains, &prog.name),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| {
             this.program_open = Some(Some(name.clone()));
-            for s in [&this.set_key_in, &this.set_value_in] {
-                s.update(cx, |s, cx| s.set_value("", window, cx));
-            }
+            this.fill_brain(&name, window, cx);
             cx.notify();
         }))
         .into_any_element()
+    }
+
+    /// Fills the brain form, its setting to add and its tokens to share, empty for brain
+    /// `name`, as it's picked, or with what the person left in it.
+    pub(super) fn fill_brain(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let own = model::drafts::brain_form();
+        self.fill_form(DraftPage::Brains, Some(name.to_string()), own, window, cx);
     }
 
     /// The ACP Registry, as the row under the brains: how many of its programs aren't
@@ -16338,6 +16862,7 @@ ACTA_KEY=secret:ACTA_KEY",
             picked,
         )
         .on_click(cx.listener(|this, _, _, cx| {
+            this.leave_form(cx);
             this.program_open = Some(None);
             cx.notify();
         }))
@@ -16379,13 +16904,13 @@ ACTA_KEY=secret:ACTA_KEY",
                 .gap(px(space::S))
                 .px(px(space::L))
                 .py(px(space::M))
-                .child(div().flex_1().child(Input::new(&self.set_key_in)))
-                .child(div().flex_1().child(Input::new(&self.set_value_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_key_in)))
+                .child(div().flex_1().child(Input::new(&self.setting_value_in)))
                 .child(
                     self.small_button(format!("set-{}", prog.name), "Add setting", false)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            let key = this.set_key_in.read(cx).value().to_string();
-                            let value = this.set_value_in.read(cx).value().to_string();
+                            let key = this.setting_key_in.read(cx).value().to_string();
+                            let value = this.setting_value_in.read(cx).value().to_string();
                             if key.trim().is_empty() {
                                 this.model.notices.push(
                                     "A setting needs a name, such as ANTHROPIC_API_KEY.".into(),
@@ -16395,7 +16920,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                             let f = this.model.set_setting(&program, &key, Some(&value));
                             this.send(f);
-                            for s in [&this.set_key_in, &this.set_value_in] {
+                            for s in [&this.setting_key_in, &this.setting_value_in] {
                                 s.update(cx, |s, cx| s.set_value("", window, cx));
                             }
                             cx.notify();
@@ -16534,19 +17059,82 @@ ACTA_KEY=secret:ACTA_KEY",
                     let f = this.model.remove_program(&program);
                     this.send(f);
                     this.program_open = None;
+                    this.model.drafts.discard();
                     cx.notify();
                 })),
         );
-        vec![
-            self.pane_head(
-                Some(self.brain_tile(listed.as_ref(), control::ICON_LARGE + 6.0)),
-                shown,
-                Some(what),
-                None,
-            ),
-            self.group(None, rows),
-            actions.into_any_element(),
-        ]
+        let mut pane = vec![self.pane_head(
+            Some(self.brain_tile(listed.as_ref(), control::ICON_LARGE + 6.0)),
+            shown,
+            Some(what),
+            None,
+        )];
+        pane.extend(self.program_plan(&prog.name));
+        pane.push(self.group(None, rows));
+        pane.push(actions.into_any_element());
+        pane
+    }
+
+    /// The plan the person is signed in to with a program, on its page under Brains:
+    /// Signed in with the plan's name, then the session and the week, each a bar with how
+    /// much is used and when it resets. None while it has reported no plan.
+    fn program_plan(&self, program: &str) -> Option<AnyElement> {
+        let limits = self.model.program_limits(program)?.clone();
+        let p = self.p;
+        let now = chrono::Local::now();
+        let mut rows = Vec::new();
+        if !limits.plan.is_empty() {
+            rows.push(
+                self.field_row(
+                    "Signed in",
+                    div()
+                        .text_size(px(size::BODY))
+                        .text_color(p.ink)
+                        .truncate()
+                        .child(limits.plan.clone()),
+                ),
+            );
+        }
+        for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
+            let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
+                continue;
+            };
+            let (bar, words) = self.limit_inks(w.used);
+            rows.push(
+                self.field_row(
+                    label,
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(space::M))
+                        .child(
+                            div()
+                                .flex_1()
+                                .h(px(6.0))
+                                .rounded_full()
+                                .bg(p.line_strong)
+                                .overflow_hidden()
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(relative(w.fraction()))
+                                        .rounded_full()
+                                        .bg(bar),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(layout::LIMIT_WORDS))
+                                .text_right()
+                                .text_size(px(size::CAPTION))
+                                .text_color(words)
+                                .child(w.words(now)),
+                        ),
+                ),
+            );
+        }
+        Some(self.group(None, rows))
     }
 
     /// The ACP Registry's programs that aren't on the instance, beside the list: as
@@ -17221,7 +17809,7 @@ ACTA_KEY=secret:ACTA_KEY",
     /// on it, or once it's clicked (PLAN.md, "One endless chat").
     fn context_ring(&mut self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
         let chat = self.model.conversation();
-        let Some(fill) = self.model.context() else {
+        let Some(fill) = self.model.context_shown(self.prefs.show_context) else {
             self.context_card = None;
             return None;
         };
@@ -17265,13 +17853,14 @@ ACTA_KEY=secret:ACTA_KEY",
             .is_some()
             .then(|| self.context_card_view(&fill, ink, cx));
         // The card hangs under the ring, centred on it, over the chat. The pointer on the
-        // ring is heard here: the ring's own hover is its soft hover's.
+        // ring is heard here: the ring's own hover is its soft hover's. The header sets
+        // how close it sits to the chip before it.
         Some(
             div()
                 .id("context-at")
                 .occlude()
                 .relative()
-                .ml(px(-space::S))
+                .flex_none()
                 .on_hover(
                     cx.listener(|this, over: &bool, _, cx| this.context_hover(true, *over, cx)),
                 )
@@ -17307,9 +17896,10 @@ ACTA_KEY=secret:ACTA_KEY",
         )
     }
 
-    /// The context card: how many tokens the session holds of its window, as a bar, when
-    /// it was last compacted and where a fresh session starts, with Compact now (where its
-    /// program compacts when asked) and Start a fresh session.
+    /// The context card: how many tokens the session holds of its window, as a bar, what
+    /// the chat costs (its last turn's tokens and the last 24 hours'), when it was last
+    /// compacted, with Compact now (where its program compacts when asked) and Start a
+    /// fresh session.
     fn context_card_view(
         &self,
         fill: &model::ContextFill,
@@ -17400,12 +17990,30 @@ ACTA_KEY=secret:ACTA_KEY",
                             .bg(ink),
                     ),
             )
-            .child(
+            .children(fill.costs().into_iter().map(|(name, tokens)| {
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .child(name)
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(crate::prefs::mono_font())
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink)
+                            .child(tokens),
+                    )
+            }))
+            .children(fill.line(now).map(|line| {
                 div()
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
-                    .child(fill.line(now)),
-            )
+                    .child(line)
+            }))
             .child(
                 div()
                     .flex()
@@ -17433,6 +18041,75 @@ ACTA_KEY=secret:ACTA_KEY",
                         )),
                     ),
             )
+            // The plan, under a hairline across the card.
+            .when_some(self.context_plan_view(fill), |d, plan| {
+                d.child(div().mx(px(-space::M)).h(px(1.0)).bg(p.line))
+                    .child(plan)
+            })
+    }
+
+    /// How a plan's limit is coloured at `used` percent: its ring or its bar, and its
+    /// words. Quiet, then orange from 75% and red from 90%.
+    fn limit_inks(&self, used: i64) -> (Hsla, Hsla) {
+        let p = self.p;
+        match meter::Level::of(used) {
+            meter::Level::Bad => (p.bad, p.bad),
+            meter::Level::Warn => (p.warn, p.warn),
+            meter::Level::Quiet => (p.ink_3, p.ink_3),
+        }
+    }
+
+    /// The plan of the program the open chat runs on, under the context card's Context
+    /// (`Model::context_plan`): the program's mark and the plan's name, then a line each
+    /// for the session and the week, a small ring with how much is used and when it
+    /// resets. None while the program has reported no plan.
+    fn context_plan_view(&self, fill: &model::ContextFill) -> Option<Div> {
+        let (program, limits) = self.model.context_plan(fill)?;
+        let p = self.p;
+        let now = chrono::Local::now();
+        let listed = self.model.program_listed(&program).cloned();
+        let plan = if limits.plan.is_empty() {
+            self.model.program_title(&program)
+        } else {
+            limits.plan.clone()
+        };
+        let mut out = div().flex().flex_col().gap(px(space::S)).child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(self.brain_icon(listed.as_ref(), control::LIMIT_RING))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(size::BODY))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(plan),
+                ),
+        );
+        for (label, window) in [("Session", limits.session), ("This week", limits.week)] {
+            let Some(w) = window.map(|w| w.at(now.timestamp_millis())) else {
+                continue;
+            };
+            let (ring, words) = self.limit_inks(w.used);
+            out = out.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .text_size(px(size::CAPTION))
+                    .child(meter::ring(
+                        control::LIMIT_RING,
+                        w.fraction(),
+                        ring,
+                        p.line_strong,
+                    ))
+                    .child(div().flex_1().text_color(p.ink_2).child(label))
+                    .child(div().flex_none().text_color(words).child(w.words(now))),
+            );
+        }
+        Some(out)
     }
 
     /// The pointer came onto the ring (`ring`) or the card, or left it. The card shows
@@ -17908,6 +18585,11 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Stateful<Div> {
         let p = self.p;
         let m = &pin.message;
+        // A reply in a group chat is its own agent's, as the chat draws it.
+        let (name, tint, agent) = match (room_view::reply_look(p, m), &m.routed) {
+            (Some((n, t)), Some(r)) => (n, t, r.agent.as_str()),
+            _ => (name.to_string(), tint, agent),
+        };
         let id = m.id.clone();
         let lit = pop.lit.as_deref() == Some(id.as_str());
         let opened = pop.open.contains(&id);
@@ -17983,7 +18665,7 @@ ACTA_KEY=secret:ACTA_KEY",
             reply(
                 p,
                 m,
-                name,
+                &name,
                 tint,
                 Mood::Idle,
                 false,
@@ -22104,7 +22786,12 @@ fn board_icon(size: f32) -> AnyElement {
 
 /// The colour a card's status is drawn in (`model::CardInk`).
 fn card_ink(p: Palette, card: &model::ActaCard) -> Hsla {
-    match card.ink() {
+    ink_color(p, card.ink())
+}
+
+/// A card status's colour.
+fn ink_color(p: Palette, ink: model::CardInk) -> Hsla {
+    match ink {
         model::CardInk::Quiet => p.ink_3,
         model::CardInk::Sky => thread::color("sky", p.dark),
         model::CardInk::Gold => thread::color("gold", p.dark),
@@ -22125,13 +22812,30 @@ fn card_id_text(id: &str, color: Hsla) -> Div {
 /// A card's pill, in a message or the composer (PLAN.md, "Cards in messages"): its board's
 /// tile, its id in mono, its title cut to fit and a dot in its status's colour, on the
 /// bubble's fill with a line around it. Under the pointer its preview shows under it, and
-/// a click opens it in Acta. A card that isn't there, or that the person can't see, is
-/// its id alone, quiet; one still being looked up, its tile and its id.
+/// a click opens its side preview. A card that isn't there, or that the person can't see, is
+/// its id alone, quiet; one still being looked up, its tile and its id. `cut` is the
+/// width a line too narrow for it cut it to, and whether its title still shows there
+/// (`model::pill_fit`).
 fn card_pill(
     p: Palette,
     key: SharedString,
     id: &str,
     card: Option<&model::ActaCard>,
+    cut: Option<(f32, bool)>,
+) -> AnyElement {
+    card_pill_in(p, key, id, card, None, cut)
+}
+
+/// `card_pill`, and in a watch's line (`line_dot`, watch_view.rs): without its tile, which
+/// the line's mark already is, and its dot in the colour of the status the line is about.
+/// There, in a row, it gives way as the row narrows, and takes no `cut`.
+fn card_pill_in(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line_dot: Option<Hsla>,
+    cut: Option<(f32, bool)>,
 ) -> AnyElement {
     if card.is_some_and(|c| c.missing) {
         return card_id_text(id, p.ink_3).into_any_element();
@@ -22139,8 +22843,10 @@ fn card_pill(
     let pill = div()
         .id(SharedString::from(format!("{key}-pill")))
         .h(px(control::PILL))
+        .min_w_0()
         .max_w(px(layout::PILL_TITLE + 110.0))
-        .pl(px(4.0))
+        .when_some(cut, |d, (w, _)| d.w(px(w)))
+        .pl(px(if line_dot.is_some() { 7.0 } else { 4.0 }))
         .pr(px(7.0))
         .flex()
         .items_center()
@@ -22150,12 +22856,12 @@ fn card_pill(
         .border_color(p.line)
         .bg(p.bubble)
         .cursor_pointer()
-        .child(board_icon(14.0))
+        .when(line_dot.is_none(), |d| d.child(board_icon(14.0)))
         .child(card_id_text(id, p.ink_2));
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
     };
-    let url = card.link();
+    let to_open = card.clone();
     let title = div()
         .min_w_0()
         .max_w(px(layout::PILL_TITLE))
@@ -22165,22 +22871,65 @@ fn card_pill(
         .when(card.struck(), |d| d.line_through())
         .child(card.title.clone());
     let pill = pill
-        .child(title)
+        .when(cut.is_none_or(|(_, titled)| titled), |d| d.child(title))
         .child(
             div()
                 .flex_none()
                 .size(px(7.0))
                 .rounded_full()
-                .bg(card_ink(p, &card)),
+                .bg(line_dot.unwrap_or_else(|| card_ink(p, &card))),
         )
-        .on_click(move |_, _, cx| cx.open_url(&url));
+        // Its side preview, beside the chat.
+        .on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx));
+    // In a row (Following, the cards made from a message), it gives way, its title cut
+    // shorter; cut to a width (a watch's line, `watch_view::line_pill_cut`), it keeps it.
     gpui_kit::base::HoverCard::new(key)
+        .when(cut.is_none(), |d| d.min_w_0())
+        .when(cut.is_some(), |d| d.flex_none())
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
         .close_delay(Duration::from_millis(150))
         .trigger(pill)
         .content(move |_, _, _| card_preview(p, &card))
         .into_any_element()
+}
+
+/// A card's pill on a line `line` wide that isn't a message's words, the composer's:
+/// measured as it is, and when it's wider than the line, cut to it as a message's words
+/// cut it (`model::pill_fit`), there being nowhere else on the line for it to start.
+fn line_pill(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let Some(c) = card.filter(|c| !c.missing) else {
+        return card_pill(p, key, id, card, None);
+    };
+    let mut measured = card_pill(p, key.clone(), id, card, None);
+    let natural = measured
+        .layout_as_root(
+            gpui::size(
+                gpui::AvailableSpace::MaxContent,
+                gpui::AvailableSpace::MaxContent,
+            ),
+            window,
+            cx,
+        )
+        .width
+        .as_f32();
+    let cut = (natural > line).then(|| {
+        let bare = natural
+            - (ui_text_width(&c.title, size::SMALL, FontWeight::NORMAL, window)
+                .min(layout::PILL_TITLE)
+                + 5.0);
+        let w = model::pill_fit(natural, bare, line, line).unwrap_or(line);
+        (w, model::pill_titled(w, bare))
+    });
+    card_pill(p, key, id, card, cut)
 }
 
 /// A card's preview, under its pill: its board and id, its title, chips for its status (in
@@ -22210,7 +22959,7 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
     for c in card.chips() {
         chips = chips.child(chip(c, p.ink_2, p.line_strong));
     }
-    let button = |name: &'static str, url: String| {
+    let button = |name: &'static str| {
         div()
             .id(name)
             .h(px(28.0))
@@ -22226,10 +22975,10 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
             .cursor_pointer()
             .soft_hover(transparent_black(), p.hover, None)
             .child(name)
-            .on_click(move |_, _, cx| cx.open_url(&url))
     };
-    // Both open it in Acta, until it has a preview beside the chat.
+    // Open shows its side preview beside the chat, and its board's name the board.
     let url = card.link();
+    let (to_open, board, board_name) = (card.clone(), card.board.clone(), card.board_label());
     div().id("card-preview").pt(px(space::XS)).child(
         div()
             .w(px(layout::CARD_PREVIEW))
@@ -22250,7 +22999,16 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .text_size(px(size::CAPTION))
                     .text_color(p.ink_3)
                     .child(board_icon(14.0))
-                    .child(card.place()),
+                    .child(
+                        div()
+                            .id("card-preview-board")
+                            .role(Role::Button)
+                            .cursor_pointer()
+                            .soft_ink(p.ink_3, p.ink)
+                            .child(board_name)
+                            .on_click(move |_, _, cx| acta_ui::open_board(&board, cx)),
+                    )
+                    .child(format!("· {}", card.id)),
             )
             .child(
                 div()
@@ -22296,8 +23054,10 @@ fn card_preview(p: Palette, card: &model::ActaCard) -> Stateful<Div> {
                     .pt(px(2.0))
                     .flex()
                     .gap(px(space::S))
-                    .child(button("Open", url.clone()))
-                    .child(button("Open in Acta", url)),
+                    .child(
+                        button("Open").on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx)),
+                    )
+                    .child(button("Open in Acta").on_click(move |_, _, cx| cx.open_url(&url))),
             ),
     )
 }
@@ -22330,15 +23090,40 @@ impl MarkdownPlugin for CardPills {
     fn render_inline(
         &self,
         node: &MarkdownNode,
-        _context: &InlineRenderContext,
-        _window: &mut Window,
+        context: &InlineRenderContext,
+        window: &mut Window,
         _cx: &mut App,
     ) -> Option<InlineElement> {
         let id = node.data::<String>()?.clone();
         let (p, card) = CARD_TIPS.with(|t| t.borrow().get(&id).cloned())?;
         let key = SharedString::from(format!("card-{id}"));
+        // How much of it is its title, with the gap before it, for a line that cuts it.
+        let run = context.text_style().to_run(card.title.len());
+        let title = window
+            .text_system()
+            .shape_line(
+                SharedString::from(card.title.clone()),
+                px(size::SMALL),
+                &[run],
+                None,
+            )
+            .width
+            .as_f32()
+            .min(layout::PILL_TITLE)
+            + 5.0;
+        let pill = card_pill(p, key.clone(), &id, Some(&card), None);
         // Its text sits on the line's baseline.
-        Some(InlineElement::new(card_pill(p, key, &id, Some(&card))).with_baseline(px(15.5)))
+        Some(InlineElement::new(pill).with_baseline(px(15.5)).cut_to_fit(
+            move |natural, room, line| {
+                let bare = natural.as_f32() - title;
+                model::pill_fit(natural.as_f32(), bare, room.as_f32(), line.as_f32()).map(px)
+            },
+            move |natural, width| {
+                let w = width.as_f32();
+                let titled = model::pill_titled(w, natural.as_f32() - title);
+                card_pill(p, key.clone(), &id, Some(&card), Some((w, titled)))
+            },
+        ))
     }
 }
 
@@ -22351,14 +23136,19 @@ fn card_extensions() -> MarkdownExtensions {
     EXT.with(|e| e.clone())
 }
 
-/// Opens a card a message's words link to (`model::CARD_LINK`), in Acta. Gives whether
-/// `url` was one.
+/// Opens a card a message's words link to (`model::CARD_LINK`) in its side preview.
+/// Gives whether `url` was one.
 fn open_card_link(url: &str, cx: &mut App) -> bool {
+    // A T3 thread's link opens its page in T3's app, once its card is known.
+    if let Some(page) = t3_view::page_of(url) {
+        cx.open_url(&page);
+        return true;
+    }
     let Some(id) = url.strip_prefix(model::CARD_LINK) else {
         return false;
     };
     if let Some((_, card)) = CARD_TIPS.with(|t| t.borrow().get(id).cloned()) {
-        cx.open_url(&card.link());
+        acta_ui::open_card(&card, cx);
     }
     true
 }
@@ -22602,7 +23392,45 @@ struct ComposerPieces {
 /// tiny picture or icon and its name cut in the middle (only the tiny picture when it
 /// stands with others), or a link pasted as a preview as its site's icon and its page's
 /// title, or its site until that's known. The whole name or address shows on hover.
-fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) -> AnyElement {
+/// While the selection takes it in, it has the selection's colour across the line's height,
+/// as the words beside it do. None is wider than the composer's line: a card's pill has its
+/// title cut, as in a message (`line_pill`).
+fn composer_token(
+    p: Palette,
+    pieces: &ComposerPieces,
+    t: &gpui_kit::base::input::InlineTokenContext,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let line = t.available_width();
+    let (id, words) = (t.token().id(), t.token().text());
+    div()
+        .h_full()
+        .max_w(line)
+        .flex()
+        .items_center()
+        .when_some(t.selection(), |d, color| d.bg(color))
+        .child(composer_piece_of(
+            p,
+            pieces,
+            id,
+            words,
+            line.as_f32(),
+            window,
+            cx,
+        ))
+        .into_any_element()
+}
+
+fn composer_piece_of(
+    p: Palette,
+    pieces: &ComposerPieces,
+    id: &str,
+    words: &str,
+    line: f32,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
     let row = |tip: String, tint: Hsla| {
         div()
             .id(SharedString::from(format!("piece-{id}")))
@@ -22639,12 +23467,8 @@ fn composer_token(p: Palette, pieces: &ComposerPieces, id: &str, words: &str) ->
             .filter(|i| !i.is_empty())
             .or_else(|| model::card_link(r).map(|(_, i)| i))
             .unwrap_or_else(|| r.to_string());
-        return card_pill(
-            p,
-            SharedString::from(format!("piece-{id}")),
-            &card_id,
-            shown.as_ref(),
-        );
+        let key = SharedString::from(format!("piece-{id}"));
+        return line_pill(p, key, &card_id, shown.as_ref(), line, window, cx);
     }
     if let Some(att) = id.strip_prefix(model::ATTACH) {
         let Some((a, small)) = pieces.files.get(att) else {
@@ -24065,6 +24889,12 @@ fn reply(
         }
         body = body.child(chips);
     }
+    // The T3 threads it started or names, each a card.
+    if show.pin.is_none() {
+        if let Some(cards) = t3_view::thread_cards(p, m, show.text_scale, &this) {
+            body = body.child(cards);
+        }
+    }
     // A pin has its agent's thread and name over it, in the Pinned popover.
     if show.pin.is_some() {
         return body.w_full();
@@ -25127,6 +25957,7 @@ impl Render for Loom {
         self.settle_server(cx);
         sync_badge_files(&self.model.files);
         sync_mention_agents(&self.model.agents);
+        acta_ui::keep_opener(cx.entity().downgrade());
         self.finish_weaving(window, cx);
         if std::mem::take(&mut self.rows_dirty) {
             self.refresh_rows(cx);
@@ -25411,19 +26242,19 @@ impl Render for Loom {
         // Beside the rail, a Mac's traffic lights reach past it, so the title bar has the
         // control that opens the sidebar after them, its icon where the knot is in the
         // whole sidebar, and then the header.
+        let room = self.header_room(ww, railed, window);
         let header = if railed && self.lights {
-            let inset = (control::ICON_SMALL - ICON_GLYPH) / 2.0;
             div()
                 .flex_1()
                 .min_w_0()
                 .h_full()
                 .flex()
                 .items_center()
-                .pl(px(LIGHTS_END - inset - layout::RAIL))
+                .pl(px(LIGHTS_PAD))
                 .child(self.bar_button(true, cx))
-                .child(self.header(cx).pl(px(space::XS)))
+                .child(self.header(room, window, cx).pl(px(space::XS)))
         } else {
-            self.header(cx)
+            self.header(room, window, cx)
         };
         // Drawn last, over the sheet that takes the pointer while it's open.
         // From a right-click in the sidebar, it opens at the pointer instead.
@@ -26025,6 +26856,22 @@ pub(crate) const LIGHTS: (f32, f32) = (16.0, 17.0);
 const LIGHTS_END: f32 = LIGHTS.0 + 60.0 + LIGHTS.0;
 /// How wide a small icon is drawn, in its button.
 const ICON_GLYPH: f32 = 14.0;
+/// Beside the rail on a Mac, the room before the control that opens the sidebar, so its
+/// icon is where the knot is in the whole sidebar.
+const LIGHTS_PAD: f32 = LIGHTS_END - (control::ICON_SMALL - ICON_GLYPH) / 2.0 - layout::RAIL;
+/// How wide an extra-small icon is drawn, as a chevron.
+const CHEVRON: f32 = 12.0;
+/// The mark at the start of the chat's header: the agent's thread, or the group chat's
+/// weave.
+const HEAD_MARK: f32 = 26.0;
+/// The brain chip's program icon, and the gap between the chip's things.
+const BRAIN_ICON: f32 = 12.0;
+const BRAIN_GAP: f32 = space::XS + 2.0;
+/// Loom's own minimise, maximise and close, where it draws them (not on a Mac): each
+/// this wide, 2 apart, with `space::S` either side of the three.
+const WINDOW_BUTTON: f32 = 34.0;
+const WINDOW_BUTTON_GAP: f32 = 2.0;
+const WINDOW_BUTTONS: f32 = 3.0 * WINDOW_BUTTON + 2.0 * WINDOW_BUTTON_GAP + 2.0 * space::S;
 
 /// Whether a Mac's traffic lights are gone from the window's corner: full screen, where
 /// they leave with the title bar.
@@ -26399,6 +27246,8 @@ mod row_tests {
             file: None,
             card: None,
             parent: None,
+            update: None,
+            mark: String::new(),
         };
         let mut blocks = vec![block("text", text, None)];
         if let Some(c) = call {
@@ -26424,6 +27273,7 @@ mod row_tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             status: "done".into(),
         }
     }
@@ -26491,6 +27341,7 @@ mod row_tests {
             hold_keys: Rc::default(),
             lit: false,
             found: None,
+            line_cut: None,
         }
     }
 
@@ -26629,9 +27480,13 @@ struct SidebarKey {
     hidden_open: bool,
     /// The agent whose chat is on screen.
     selected: Option<String>,
-    /// The group chats, and the one on screen.
+    /// The group chats, the ones with a reply not seen, and the one on screen.
     rooms: Vec<model::Room>,
+    rooms_unread: Vec<String>,
     room_open: Option<String>,
+    /// What's being dragged in it, and the line where it would land.
+    dragging: Option<String>,
+    drop_at: Option<(String, bool)>,
     /// Another agent's thread with it, when that's on screen in its chat's place.
     ask_open: Option<String>,
     query: String,
@@ -26644,9 +27499,6 @@ struct SidebarKey {
     behind: Vec<model::Behind>,
     behind_all: bool,
     update_open: bool,
-    /// The limits of the person's plans, and the minute, for the 0% once one resets.
-    limits: Vec<(String, model::PlanLimits)>,
-    minute: i64,
 }
 
 /// An agent, as the sidebar shows it.
@@ -26776,6 +27628,26 @@ fn when_at(gutter: f32, time: f32, person: bool, bubble: Option<f32>, content: f
     }
 }
 
+/// How wide `text` is on one line at `size` and `weight` in the app's font, measured
+/// before anything is laid out, as the header's chips are (`Loom::header_sizes`).
+fn ui_text_width(text: &str, size: f32, weight: FontWeight, window: &Window) -> f32 {
+    let mut f = font(crate::prefs::ui_font());
+    f.weight = weight;
+    let run = TextRun {
+        len: text.len(),
+        font: f,
+        color: black(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(SharedString::from(text.to_string()), px(size), &[run], None)
+        .width
+        .as_f32()
+}
+
 /// How wide `text` is on one line at `size`, in the window's font.
 fn text_width(text: &str, size: f32, window: &Window) -> f32 {
     let style = window.text_style();
@@ -26833,7 +27705,9 @@ impl ChatList {
 }
 
 /// The button that goes down to the chat's newest message, while it isn't at its bottom:
-/// round, with how many came meanwhile in the agent's colour at its corner.
+/// round, with how many came meanwhile in the agent's colour at its corner. The count
+/// is the circle's sibling, drawn after it, since a div's border is drawn over its
+/// children and would cut through the count.
 fn jump_button(p: Palette, tint: Hsla, came: usize, scroller: Entity<MessageScrollerState>) -> Div {
     const SIZE: f32 = 34.0;
     let black: Hsla = rgb(0x000000).into();
@@ -26846,57 +27720,70 @@ fn jump_button(p: Palette, tint: Hsla, came: usize, scroller: Entity<MessageScro
         .justify_center()
         .child(
             div()
-                .id("jump-to-latest")
-                .role(Role::Button)
-                .aria_label("Jump to latest")
                 .relative()
                 .size(px(SIZE))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_full()
-                .border_1()
-                .border_color(p.line)
-                .text_color(p.ink_2)
-                .cursor_pointer()
-                .shadow(vec![BoxShadow {
-                    color: black.opacity(if p.dark { 0.5 } else { 0.14 }),
-                    offset: point(px(0.0), px(4.0)),
-                    blur_radius: px(14.0),
-                    spread_radius: px(-2.0),
-                    inset: false,
-                }])
-                .soft_hover(card_fill(p), p.raised_2, Some((p.ink_2, p.ink)))
-                .child(Icon::new(IconName::ArrowDown).small())
-                .when(came > 0, |d| {
-                    let n = if came > 99 {
-                        "99+".to_string()
-                    } else {
-                        came.to_string()
-                    };
-                    d.child(
-                        div()
-                            .absolute()
-                            .top(px(-5.0))
-                            .left(px(SIZE - 13.0))
-                            .h(px(17.0))
-                            .min_w(px(17.0))
-                            .px(px(4.0))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded_full()
-                            .bg(tint)
-                            .text_size(px(size::CAPTION - 1.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(motion::ink_on(tint, p.ink, p.bg))
-                            .child(n),
-                    )
-                })
-                .on_click(move |_, _, cx| {
-                    scroller.update(cx, |s, cx| s.scroll_to_end(cx));
-                }),
+                .child(jump_circle(p, black, SIZE, scroller))
+                .when(came > 0, |d| d.child(jump_count(p, tint, came, SIZE))),
         )
+}
+
+/// The jump button's circle, with its border and the arrow.
+fn jump_circle(
+    p: Palette,
+    black: Hsla,
+    size: f32,
+    scroller: Entity<MessageScrollerState>,
+) -> Stateful<Div> {
+    div()
+        .id("jump-to-latest")
+        .role(Role::Button)
+        .aria_label("Jump to latest")
+        .size(px(size))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .border_1()
+        .border_color(p.line)
+        .text_color(p.ink_2)
+        .cursor_pointer()
+        .shadow(vec![BoxShadow {
+            color: black.opacity(if p.dark { 0.5 } else { 0.14 }),
+            offset: point(px(0.0), px(4.0)),
+            blur_radius: px(14.0),
+            spread_radius: px(-2.0),
+            inset: false,
+        }])
+        .soft_hover(card_fill(p), p.raised_2, Some((p.ink_2, p.ink)))
+        .child(Icon::new(IconName::ArrowDown).small())
+        .on_click(move |_, _, cx| {
+            scroller.update(cx, |s, cx| s.scroll_to_end(cx));
+        })
+}
+
+/// How many came while the chat wasn't at its bottom, at the jump button's corner.
+fn jump_count(p: Palette, tint: Hsla, came: usize, size: f32) -> Div {
+    let n = if came > 99 {
+        "99+".to_string()
+    } else {
+        came.to_string()
+    };
+    div()
+        .absolute()
+        .top(px(-5.0))
+        .left(px(size - 13.0))
+        .h(px(17.0))
+        .min_w(px(17.0))
+        .px(px(4.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(tint)
+        .text_size(px(size::CAPTION - 1.0))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(motion::ink_on(tint, p.ink, p.bg))
+        .child(n)
 }
 
 impl Render for ChatList {
@@ -26982,6 +27869,8 @@ struct RowInputs {
     /// What's found in it, while the find box has matches: what was looked for, and
     /// the match it'"'"'s on when that'"'"'s in it, by its piece and which.
     found: Option<(String, Option<(usize, usize)>)>,
+    /// A watch line's card pill, cut to its row (`watch_view::line_pill_cut`).
+    line_cut: Option<(f32, bool)>,
 }
 
 impl RowInputs {
@@ -27013,6 +27902,7 @@ impl RowInputs {
             && self.hold_keys == o.hold_keys
             && self.lit == o.lit
             && self.found == o.found
+            && self.line_cut == o.line_cut
     }
 }
 
@@ -27319,6 +28209,10 @@ fn chat_list(
                         .map(|a| (a.piece, a.nth));
                 Some((f.query.clone(), at))
             }),
+            line_cut: m.and_then(|m| {
+                let line = model::watch::line_of(m)?;
+                watch_view::line_pill_cut(p, m, line, content, window, cx)
+            }),
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -27427,9 +28321,35 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .text_color(p.ink_3)
             .child(line)
     });
+    // A watch's line, quiet and left-aligned (watch_view.rs).
+    if let Some(line) = match &row {
+        Row::Message(m) => model::watch::line_of(m).map(|l| (m, l)),
+        _ => None,
+    } {
+        return watch_view::update_line(p, line.0, line.1, joined, column, time_line, i.line_cut);
+    }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.
     if let Row::Message(m) = &row {
+        // A T3 thread the person started: its card, where the chat's replies go.
+        if model::t3::is_start_line(m) {
+            return div()
+                .id(SharedString::from(format!("msg-{}", m.id)))
+                .role(Role::ListItem)
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .px(px(space::XL))
+                .children(time_line)
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(column))
+                        .py(px(space::S))
+                        .children(t3_view::thread_cards(p, m, show.text_scale, &this)),
+                );
+        }
         if m.role == "loom" {
             let words = m.blocks.first().map(|b| b.text.clone()).unwrap_or_default();
             let rule = || div().flex_1().h(px(1.0)).bg(p.line_strong);
@@ -27523,7 +28443,8 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             open,
             this.clone(),
             None,
-        ),
+        )
+        .children(t3_view::thread_cards(p, m, show.text_scale, &this)),
         Row::Message(m) => reply(
             p,
             m,
@@ -27612,6 +28533,11 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
     let more_at = branch_at.clone();
     let to_more = this.clone();
     let lit = i.lit;
+    // Under it, the pills of the cards made from it (LOO-342).
+    let made = match &row {
+        Row::Message(m) if !m.deleted => acta_ui::made_pills(p, m),
+        _ => None,
+    };
     // To a screen reader, a message is an item in the chat, named by who said
     // what.
     let (row_id, said) = match row {
@@ -27657,6 +28583,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 .rounded(px(radius::BUBBLE))
                 .when(lit, |d| d.bg(tint.opacity(if p.dark { 0.16 } else { 0.1 })))
                 .child(inner)
+                .children(made)
                 .child(links)
                 // Over the message, where it's in the corner.
                 .children(when)
@@ -27972,6 +28899,91 @@ mod composer_tests {
         );
         cx.simulate_keystrokes("backspace");
         assert_eq!(shown(&c, cx), ("See ".into(), vec![]));
+    }
+}
+
+// A reply's words lay out at the chat's width after a resize (LOO-366): a bubble sized by
+// its words, as a reply's is (`ReplyDraw::bubbles`), isn't held to the width they were
+// wrapped at in an earlier, narrower frame (vendor/README.md, gpui-pre).
+#[cfg(test)]
+mod wrap_tests {
+    // Not `super::*`: GPUI Kit's `test` would stand for the `#[test]` `gpui::test` makes.
+    use gpui::{
+        canvas, div, px, relative, AppContext as _, Context, Entity, IntoElement,
+        ParentElement as _, Render, Styled as _, TestAppContext, Window,
+    };
+    use gpui_kit::component::text::{TextView, TextViewState};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    const WORDS: &str = "Here is a longer reply so the chat has something to wrap. It goes on \
+        for a while about weaving, threads, looms and the patterns they make, so that at any \
+        width it spans several lines.";
+
+    struct Host {
+        words: Entity<TextViewState>,
+        width: f32,
+        bubble: Rc<Cell<f32>>,
+    }
+
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let bubble = self.bubble.clone();
+            div().w(px(self.width)).child(
+                div().flex().child(
+                    div()
+                        .relative()
+                        .max_w(relative(0.94))
+                        .px(px(16.0))
+                        .child(div().flex().flex_col().child(TextView::new(&self.words)))
+                        .child(
+                            canvas(
+                                move |b, _, _| bubble.set(b.size.width.as_f32()),
+                                |_, _, _, _| {},
+                            )
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .size_full(),
+                        ),
+                ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn a_bubble_wrapped_narrow_takes_the_width_it_has_again(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let bubble = Rc::new(Cell::new(0.0));
+        let (host, cx) = cx.add_window_view({
+            let bubble = bubble.clone();
+            move |_, cx| Host {
+                words: cx.new(|cx| TextViewState::markdown(WORDS, cx)),
+                width: 600.0,
+                bubble,
+            }
+        });
+        let at = |width: f32, cx: &mut gpui::VisualTestContext| {
+            host.update(cx, |h, cx| {
+                h.width = width;
+                cx.notify();
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            bubble.get()
+        };
+        // As wide as the row lets it be, its words being longer than that on one line.
+        let wide = at(600.0, cx);
+        assert!((wide - 0.94 * 600.0).abs() < 1.0, "{wide}");
+        // Narrow, then wide again: as wide as before, not the narrow width's.
+        let narrow = at(120.0, cx);
+        assert!(narrow < 0.94 * 120.0 + 1.0, "{narrow}");
+        for _ in 0..2 {
+            let again = at(600.0, cx);
+            assert!(
+                (again - wide).abs() < 1.0,
+                "{again} after {narrow}, {wide} before"
+            );
+        }
     }
 }
 

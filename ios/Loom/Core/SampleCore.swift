@@ -14,7 +14,9 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     private var linkWaiting = false
     private var agents: [JSON]
     private var conversations: [JSON]
-    private var messages: [String: [JSON]]
+    var messages: [String: [JSON]]
+    /// What Acta, T3 and Spools keep as the person uses them (SampleIntegrations.swift).
+    var kept = SampleKept()
     private var runs: [JSON] = []
     private var tools: [JSON] = []
     private var approvals: [JSON] = []
@@ -33,6 +35,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         agents = s.agents
         conversations = s.conversations
         messages = s.messages
+        messages["c_2", default: []] += s.integrationMessages
         // A few of the Gardener's messages are pinned, as they would be on an instance.
         for (n, id) in ["msg_42", "msg_43", "msg_40", "msg_44"].enumerated() {
             guard let i = messages["c_4"]?.firstIndex(where: { $0["id"].text == id }), case .object(var m) = messages["c_4"]![i] else { continue }
@@ -51,11 +54,11 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         }
     }
 
-    private func tell(_ f: JSON) {
+    func tell(_ f: JSON) {
         if !stopped { inbox.push(f) }
     }
 
-    private func later(_ seconds: Double, _ work: @escaping @Sendable () -> Void) {
+    func later(_ seconds: Double, _ work: @escaping @Sendable () -> Void) {
         queue.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
@@ -66,7 +69,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         tell(["t": "synced", "seq": JSON(seq)])
     }
 
-    private func event(_ kind: String, _ fields: [String: JSON]) {
+    func event(_ kind: String, _ fields: [String: JSON]) {
         seq += 1
         var f = fields
         f["t"] = "event"
@@ -183,14 +186,18 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 ]]])
             case "device.revoke", "password.set":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": [:]])
-            case "mcp.list":
-                tell(["t": "result", "id": f["id"], "ok": true, "value": ["servers": [["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed"]]]])
             case "mcp.sign_in", "mcp.signed_in":
                 later(0.4) { [self] in
                     tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "sign_in_failed", "message": "Sample servers can't be signed in to."]])
                 }
             case "agent.group", "agent.hide", "group.create", "group.update", "group.delete":
                 folders(f)
+            case "sidebar.order":
+                order(f)
+            case "room.update" where !f["args"]["group"].isNull:
+                order(f)
+            case "room.create":
+                makeRoom(f)
             case "agent.files":
                 let query = f["args"]["query"].text.lowercased()
                 let found = Sample.folder.filter { query.isEmpty || $0["path"].text.lowercased().contains(query) }
@@ -233,7 +240,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 let picture = isPicture(name)
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["file": ["file": JSON(picture ? "sample-leaf" : "sample-\(name)"), "name": JSON(name), "mime": JSON(picture ? "image/png" : "text/markdown"), "size": 2_400]]])
             default:
-                break
+                // Acta, T3 and Spools, and the person's MCP servers.
+                _ = integrations(f)
             }
         case "emoji.typed", "emoji.find", "emoji.picker":
             tell(emoji(f))
@@ -347,30 +355,76 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     }
 
     /// The agent list's sections as the core gives them (core/sidebar.calx), for the
-    /// sample's agents, which are in the order they're listed.
+    /// sample's agents and group chats: pinned agents first, then group chats never
+    /// placed (Everyone first), then the rest by `order`, then agents never placed.
     private func sidebar() -> [JSON] {
         let waiting = Set(approvals.compactMap { a in runs.first { $0["run"] == a["run"] }?["agent"].string })
-        var asking: [String] = [], pinned: [String] = [], loose: [String] = [], hidden: [String] = []
-        var inFolder: [String: [String]] = [:]
+        let rooms = conversations.filter { !$0["room"].isNull }
+        var keyed: [(key: [Int], item: JSON, of: JSON, room: Bool)] = []
+        for (n, c) in rooms.enumerated() {
+            let r = c["room"]
+            let key = r["order"].int.map { [2, $0, 0, n] } ?? [1, r["everyone"].bool == true ? 0 : 1, 0, n]
+            keyed.append((key, ["kind": "room", "id": c["id"], "name": r["name"], "color": r["color"], "everyone": JSON(r["everyone"].bool ?? false)], r, true))
+        }
+        for (n, a) in agents.enumerated() {
+            let m = rooms.count + n
+            let key = a["pinned"].int.map { [0, a["order"].int ?? Int.max, $0, m] } ?? a["order"].int.map { [2, $0, 0, m] } ?? [3, 0, 0, m]
+            keyed.append((key, ["kind": "agent", "id": a["id"]], a, false))
+        }
+        keyed.sort { $0.key.lexicographicallyPrecedes($1.key) }
+        var asking: [String] = [], pinned: [String] = [], loose: [JSON] = [], hidden: [String] = [], order: [String] = []
+        var inFolder: [String: [JSON]] = [:]
         let known = Set(groups.map { $0["id"].text })
-        for a in agents {
-            let id = a["id"].text
-            if !a["pinned"].isNull && a["hidden"].isNull { pinned.append(id) }
+        for k in keyed {
+            let id = k.item["id"].text
+            order.append(id)
+            let folder = k.of["group"].string.flatMap { known.contains($0) ? $0 : nil }
+            if k.room {
+                if let g = folder { inFolder[g, default: []].append(k.item) } else { loose.append(k.item) }
+            } else if !k.of["pinned"].isNull && k.of["hidden"].isNull { pinned.append(id) }
             else if waiting.contains(id) { asking.append(id) }
-            else if !a["hidden"].isNull { hidden.append(id) }
-            else if let g = a["group"].string, known.contains(g) { inFolder[g, default: []].append(id) }
-            else { loose.append(id) }
+            else if !k.of["hidden"].isNull { hidden.append(id) }
+            else if let g = folder { inFolder[g, default: []].append(k.item) }
+            else { loose.append(k.item) }
         }
         let part = { (kind: String, ids: [String]) -> JSON in ["kind": JSON(kind), "agents": JSON(ids)] }
-        // The group chats first, Everyone at the top (core/sidebar.calx).
-        let rooms = conversations.filter { !$0["room"].isNull }.map { c -> JSON in ["id": c["id"], "name": c["room"]["name"], "color": c["room"]["color"], "everyone": JSON(c["room"]["everyone"].bool ?? false)] }
-        var out: [JSON] = rooms.isEmpty ? [] : [["kind": "rooms", "rooms": .array(rooms), "agents": []]]
-        out += [part("waiting", asking), part("pinned", pinned), part("agents", loose)]
+        var out: [JSON] = [part("pinned", pinned), part("waiting", asking), ["kind": "list", "items": .array(loose)]]
         for g in groups {
-            out.append(["kind": "group", "id": g["id"], "name": g["name"], "collapsed": JSON(g["collapsed"].bool ?? false), "agents": JSON(inFolder[g["id"].text] ?? [])])
+            out.append(["kind": "group", "id": g["id"], "name": g["name"], "collapsed": JSON(g["collapsed"].bool ?? false), "items": .array(inFolder[g["id"].text] ?? [])])
         }
         out.append(part("hidden", hidden))
+        out.append(["kind": "order", "items": JSON(order)])
         return out
+    }
+
+    /// sidebar.order, and a group chat put in a folder, as the instance answers them.
+    private func order(_ f: JSON) {
+        func set(_ j: JSON, _ key: String, _ value: JSON) -> JSON {
+            guard case .object(var o) = j else { return j }
+            o[key] = value
+            return .object(o)
+        }
+        let args = f["args"]
+        if f["name"].text == "room.update" {
+            guard let i = conversations.firstIndex(where: { $0["id"] == args["conversation"] }) else { return }
+            let room = set(conversations[i]["room"], "group", args["group"].text.isEmpty ? .null : args["group"])
+            conversations[i] = set(conversations[i], "room", room)
+            event("conversation.updated", ["conversation": ["id": args["conversation"], "room": room]])
+            tell(["t": "result", "id": f["id"], "ok": true, "value": ["conversation": conversations[i]]])
+            return
+        }
+        let ids = args["items"].array.map(\.text)
+        for (k, id) in ids.enumerated() {
+            if let i = agents.firstIndex(where: { $0["id"].text == id }), agents[i]["order"].int != k {
+                agents[i] = set(agents[i], "order", JSON(k))
+                event("agent.updated", ["agent": agents[i]])
+            } else if let i = conversations.firstIndex(where: { $0["id"].text == id }), conversations[i]["room"]["order"].int != k {
+                let room = set(conversations[i]["room"], "order", JSON(k))
+                conversations[i] = set(conversations[i], "room", room)
+                event("conversation.updated", ["conversation": ["id": JSON(id), "room": room]])
+            }
+        }
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["items": JSON(ids)]])
     }
 
     /// A message pinned or its pin taken off, as the instance does it: kept on the message,
@@ -391,6 +445,30 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             return
         }
         tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": JSON("There's no message \(id.text).")]])
+    }
+
+    /// A group chat made, as the instance makes one (server/rooms.calx, `room_made`): its
+    /// name and members checked, kept as a conversation with no messages yet, told as
+    /// conversation.created, and given back.
+    private func makeRoom(_ f: JSON) {
+        let args = f["args"]
+        let name = args["name"].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let members = args["members"].array.map(\.text)
+        let known = Set(agents.map { $0["id"].text })
+        func refuse(_ code: String, _ message: String) {
+            tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": JSON(code), "message": JSON(message)]])
+        }
+        if name.isEmpty { return refuse("bad_request", "A group chat needs a name.") }
+        if let stranger = members.first(where: { !known.contains($0) }) { return refuse("not_found", "There's no agent \(stranger).") }
+        if members.count < 2 { return refuse("bad_request", "A group chat has two members or more.") }
+        next += 1
+        let id = "c_s\(next)"
+        let c: JSON = ["id": JSON(id), "agent": "", "title": JSON(name), "at": JSON(Sample.now()),
+                       "room": ["name": JSON(name), "members": JSON(members), "color": JSON(args["color"].text.trimmingCharacters(in: .whitespaces)), "default": "", "corrections": []]]
+        conversations.insert(c, at: 0)
+        messages[id] = []
+        event("conversation.created", ["conversation": c])
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["conversation": c]])
     }
 
     /// The folder commands, as the instance answers them.
@@ -432,6 +510,11 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             for i in agents.indices where agents[i]["group"] == id {
                 agents[i] = set(agents[i], "group", .null)
                 event("agent.updated", ["agent": agents[i]])
+            }
+            for i in conversations.indices where conversations[i]["room"]["group"] == id {
+                let room = set(conversations[i]["room"], "group", .null)
+                conversations[i] = set(conversations[i], "room", room)
+                event("conversation.updated", ["conversation": ["id": conversations[i]["id"], "room": room]])
             }
             event("group.deleted", ["group": id])
         }
@@ -586,11 +669,11 @@ enum Sample {
     """
 
     static let agents: [JSON] = [
-        ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask",
+        ["id": "a_1", "name": "Builder", "color": "periwinkle", "shape": "yarn", "acp_agent": "claude", "permission": "ask", "pinned": 1795187000000,
          "instructions": "Builds loom, runs its tests and writes the release notes."],
         ["id": "a_2", "name": "Scribe", "color": "mint", "shape": "heart", "acp_agent": "claude", "permission": "auto",
          "instructions": "Keeps the notes: plans, meetings and the week's log."],
-        ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask",
+        ["id": "a_3", "name": "Postmaster", "color": "apricot", "acp_agent": "codex", "permission": "ask", "pinned": 1795187000001,
          "instructions": "Reads the mail in every inbox and says what needs me."],
         ["id": "a_4", "name": "Gardener", "color": "pink", "shape": "star", "acp_agent": "gemini", "permission": "allow", "group": "g_1",
          "instructions": "Looks after the balcony garden."],
@@ -679,6 +762,19 @@ enum Sample {
              "blocks": [["kind": "text", "text": "It did 👍 All green on main. <:knot:e_1> In code it stays as written: `:sob:`."]]],
             ["id": "msg_5", "conversation": "c_1", "role": "person", "from": "d_4", "at": 1795187120000,
              "blocks": [["kind": "text", "text": "🎉🎉"]]],
+            // A watch's lines (PLAN.md, "Watching outside events"), and the reply of the
+            // agent the last one woke.
+            ["id": "msg_6", "conversation": "c_1", "role": "loom", "at": 1795187121000,
+             "blocks": [["kind": "update", "integration": "acta", "watch": "w_1", "board": "aaen-studios/loom", "board_name": "loom", "card": "LOO-206", "title": "Show agents' usage limits in the sidebar",
+                         "event": "moved", "to": "review", "said": "moved to In review", "by": "Ola", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "text": "LOO-206 moved to In review · Ola"]]],
+            ["id": "msg_7", "conversation": "c_1", "role": "loom", "at": 1795187122000,
+             "blocks": [["kind": "update", "integration": "acta", "watch": "w_1", "board": "aaen-studios/loom", "board_name": "loom", "card": "LOO-206", "title": "Show agents' usage limits in the sidebar",
+                         "event": "moved", "to": "done", "said": "moved to Done", "by": "Elliot", "url": "https://acta.aaenz.no/aaen-studios/loom#LOO-206", "text": "LOO-206 moved to Done · Elliot"]]],
+            ["id": "msg_8", "conversation": "c_1", "role": "loom", "at": 1795187124000,
+             "blocks": [["kind": "update", "integration": "t3", "watch": "w_2", "server": "t3", "thread": "th_9", "title": "Fix the build", "run": "run_1",
+                         "event": "finished", "state": "completed", "said": "Thread finished", "text": "Thread finished · Fix the build"]]],
+            ["id": "msg_9", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_3", "at": 1795187128000,
+             "blocks": [["kind": "text", "text": "The build fix landed and LOO-206 shipped. Both are in the release notes."]]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,

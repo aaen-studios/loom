@@ -134,6 +134,8 @@ struct PlusSheet: View {
         case .file(let f): middleCut(f.file.name)
         case .skill(let k): k.name
         case .routine(let r): r.name
+        case .boards: "Boards"
+        case .startT3: "Start a T3 thread"
         }
     }
 
@@ -145,6 +147,8 @@ struct PlusSheet: View {
         case .open(.skills), .skill: "book"
         case .open(.routines), .routine: "clock"
         case .file(let f): f.file.isImage ? "photo" : "doc.text"
+        case .boards: "square.3.layers.3d"
+        case .startT3: "plus.bubble"
         }
     }
 
@@ -215,6 +219,8 @@ struct PlusSheet: View {
         case .file(let f): take(.sent(f.file))
         case .skill(let k): take(.skill(k.name))
         case .routine(let r): confirm = r.id
+        case .boards: take(.boards)
+        case .startT3: take(.startT3)
         }
     }
 }
@@ -227,6 +233,10 @@ enum PlusTake {
     case files
     case sent(FileRef)
     case skill(String)
+    /// A board of the person's Acta, on a screen of its own.
+    case boards
+    /// The sheet that starts a T3 thread.
+    case startT3
 }
 
 /// The newest photos on the phone, a row of them to tap, then one that opens the picker.

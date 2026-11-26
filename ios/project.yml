@@ -35,6 +35,11 @@ targets:
       - path: ../build/ios/Twemoji.xcassets
         group: Loom/Resources
         optional: true
+      # Spools' marks from server/catalog, which scripts/ios.calx puts in a catalog that
+      # keeps their vectors, each named for its entry (`mark-acta`).
+      - path: ../build/ios/Marks.xcassets
+        group: Loom/Resources
+        optional: true
       - path: ../design/twemoji/sequences.txt
         group: Loom/Resources
         buildPhase: resources
@@ -58,6 +63,21 @@ targets:
         TARGETED_DEVICE_FAMILY: "1"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_PREVIEWS: YES
+  # The app's unit tests, of what it works out without the core, run in the app in the
+  # simulator (ios/README.md, "Testing it").
+  LoomTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LoomTests
+    dependencies:
+      - target: Loom
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: no.aaenz.loom.tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_STRICT_CONCURRENCY: complete
   # The app driven as a person drives it, with taps and swipes, on sample frames, in its
   # own scheme (ios/README.md, "Driving it").
   LoomUITests:
@@ -78,8 +98,13 @@ schemes:
     build:
       targets:
         Loom: all
+        LoomTests: [test]
     run:
       config: Debug
+    test:
+      config: Debug
+      targets:
+        - LoomTests
   LoomUI:
     build:
       targets:

@@ -31,6 +31,16 @@ pub(super) struct RoutineUi {
     pub run_open: Option<String>,
     /// The week the calendar shows, in weeks from this one.
     pub week: i64,
+    /// The event it runs on, for "On an event", as it's picked, and the T3 thread typed.
+    pub event: model::watch::RoutineEvent,
+    pub thread_in: Entity<InputState>,
+    /// Its gate's command and the seconds it may take, as typed.
+    pub gate_in: Entity<InputState>,
+    pub gate_seconds_in: Entity<InputState>,
+    /// Its runs' model and effort as picked, values its agent's program takes; empty for
+    /// its agent's own.
+    pub model: String,
+    pub effort: String,
 }
 
 impl RoutineUi {
@@ -42,6 +52,12 @@ impl RoutineUi {
         let from_in = field(window, cx, "08:00");
         let to_in = field(window, cx, "20:00");
         let time_in = field(window, cx, "HH:MM");
+        let thread_in = field(window, cx, "Thread id");
+        let gate_in = field(window, cx, "gh pr view 8006 --json state | ./changed.sh");
+        let gate_seconds_in = field(window, cx, "60");
+        for state in [&thread_in, &gate_in, &gate_seconds_in] {
+            super::form_drafts::watch(state, window, cx);
+        }
         // A change to the hours or the window asks again when it runs next.
         for state in [&every_in, &from_in, &to_in] {
             cx.subscribe_in(
@@ -78,6 +94,12 @@ impl RoutineUi {
             adding_time: false,
             run_open: None,
             week: 0,
+            event: model::watch::RoutineEvent::default(),
+            thread_in,
+            gate_in,
+            gate_seconds_in,
+            model: String::new(),
+            effort: String::new(),
         }
     }
 }
@@ -187,61 +209,21 @@ impl Loom {
         self.routine_schedule_changed(cx);
     }
 
-    /// Fills the routine page's schedule fields from `s`.
-    fn set_routine_schedule(
-        &mut self,
-        s: model::Schedule,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let minutes = s.every % 60 != 0;
-        let every = if minutes { s.every } else { s.every / 60 };
-        let ui = &mut self.routine_ui;
-        ui.every_in
-            .update(cx, |f, cx| f.set_value(every.to_string(), window, cx));
-        ui.from_in
-            .update(cx, |f, cx| f.set_value(s.from.clone(), window, cx));
-        ui.to_in
-            .update(cx, |f, cx| f.set_value(s.to.clone(), window, cx));
-        ui.minutes = minutes;
-        ui.adding_time = false;
-        ui.run_open = None;
-        ui.schedule = s;
-    }
-
-    /// Opens the routine form, empty, for a new one.
+    /// Opens the routine form for a new one: empty, or as the person left it.
     pub(super) fn new_routine(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         _ = self.model.load_routine_runs(None);
-        self.routine_name_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.set_routine_schedule(model::Schedule::default(), window, cx);
-        self.routine_prompt_in
-            .update(cx, |s, cx| s.set_value("", window, cx));
-        self.routine_agent = self.model.selected.clone();
-        self.routine_notify = true;
-        self.routine_on = true;
-        self.routine_catch_up = true;
-        self.routine_thread = false;
-        self.routine_webhook = false;
-        self.set_routine_flow(&[], window, cx);
+        let own = model::drafts::RoutineDraft::new(self.model.selected.clone());
+        let own = model::drafts::Form::Routine(Box::new(own));
+        self.fill_form(DraftPage::Routines, None, own, window, cx);
         self.routine_open = Some(None);
         self.routine_schedule_changed(cx);
     }
 
-    /// Opens routine `r`'s page, to change it and see its history.
+    /// Opens routine `r`'s page, to change it and see its history: its form as it is,
+    /// or as the person left it.
     fn open_routine(&mut self, r: &model::Routine, window: &mut Window, cx: &mut Context<Self>) {
-        self.routine_name_in
-            .update(cx, |s, cx| s.set_value(r.name.clone(), window, cx));
-        self.set_routine_schedule(r.schedule.clone(), window, cx);
-        self.routine_prompt_in
-            .update(cx, |s, cx| s.set_value(r.prompt.clone(), window, cx));
-        self.routine_agent = Some(r.agent.clone());
-        self.routine_notify = r.notify;
-        self.routine_on = r.on;
-        self.routine_catch_up = r.catch_up;
-        self.routine_thread = r.post == "thread";
-        self.routine_webhook = !r.hook.is_empty();
-        self.set_routine_flow(&r.flow, window, cx);
+        let own = model::drafts::Form::Routine(Box::new(model::drafts::RoutineDraft::of(r)));
+        self.fill_form(DraftPage::Routines, Some(r.id.clone()), own, window, cx);
         if let Some(f) = self.model.load_routine_runs(Some(&r.id)) {
             self.send(f);
         }
@@ -303,6 +285,7 @@ impl Loom {
                     lit,
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.leave_form(cx);
                     this.routine_open = None;
                     cx.notify();
                 }))
@@ -606,7 +589,12 @@ impl Loom {
             Some(a) => (a.name.clone(), thread::color(&a.color, p.dark)),
             None => ("a deleted agent".to_string(), p.ink_3),
         };
-        let next = if !r.on || r.next == 0 {
+        // One on an event or its webhook alone has no next run: it says what runs it.
+        let next = if !r.on {
+            "paused".to_string()
+        } else if let Some(when) = self.model.routine_unscheduled(r) {
+            when
+        } else if r.next == 0 {
             "paused".to_string()
         } else if day_of(r.next) == "Today" {
             format!("next at {}", time_of(r.next))
@@ -669,14 +657,16 @@ impl Loom {
         let line = match running {
             Some(_) => "running now".to_string(),
             None if !last.is_empty() => last,
+            None if r.cost.wasted => r.cost.warning(),
             None => next,
         };
-        self.list_row(
+        self.list_row_unsaved(
             format!("routine-{}", r.id),
             self.routine_lead(&r, tint, false),
             r.name.clone(),
             line,
             popup::routine_dot(&r),
+            self.unsaved(DraftPage::Routines, &r.id),
             picked,
         )
         .on_click(cx.listener(move |this, _, window, cx| this.open_routine(&r, window, cx)))
@@ -688,7 +678,12 @@ impl Loom {
     /// thread, for one that has one.
     fn routine_head(&self, r: &model::Routine, cx: &mut Context<Self>) -> AnyElement {
         let (agent, tint, next, last, running) = self.routine_words(r);
-        let mut line = format!("{agent} · {} · {next}", r.when);
+        let when = self.model.routine_when(r);
+        let mut line = if when == next {
+            format!("{agent} · {when}")
+        } else {
+            format!("{agent} · {when} · {next}")
+        };
         if !last.is_empty() {
             line = format!("{line} · {last}");
         }
@@ -718,10 +713,14 @@ impl Loom {
                     })),
             );
         }
-        self.pane_head(
+        // What it costs, in the warn ink while it spends a lot for nothing.
+        let p = self.p;
+        let ink = if r.cost.wasted { p.warn } else { p.ink_3 };
+        self.pane_head_noted(
             Some(self.routine_lead(r, tint, true)),
             r.name.clone(),
             Some(line),
+            Some((r.cost.words(), ink)),
             Some(controls.into_any_element()),
         )
     }
@@ -738,29 +737,53 @@ impl Loom {
     fn routine_when_group(&mut self, open: Option<&str>, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
         let repeat = self.routine_ui.schedule.repeat.clone();
+        // On an event, once there's something to watch: an Acta board, or a T3 server.
+        let watchable = !self.model.acta_boards.is_empty()
+            || !self.model.event_servers("t3").is_empty()
+            || repeat == "event";
         let mut kinds = Vec::new();
         for (kind, label) in [
             ("hours", "Every few hours"),
             ("days", "On days"),
             ("webhook", "Webhook"),
+            ("event", "On an event"),
         ] {
+            if kind == "event" && !watchable {
+                continue;
+            }
             let on = repeat == kind || (kind == "webhook" && repeat.is_empty());
             kinds.push(
                 self.segment(format!("routine-repeat-{kind}"), label, on)
+                    // Four fit a settings panel's width when they sit closer.
+                    .when(watchable, |d| d.px(px(space::S)))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.routine_ui.schedule.repeat = kind.into();
                         this.routine_ui.adding_time = false;
+                        if kind == "event" && this.routine_ui.event.integration.is_empty() {
+                            this.routine_ui.event = this.new_event("acta");
+                        }
                         this.routine_schedule_changed(cx);
                     })),
             );
         }
-        let mut rows = vec![self
-            .row(
-                None,
-                "Repeat",
-                None,
-                Some(self.segments(kinds).into_any_element()),
+        // Its choices go under "Repeat" when the panel's too narrow for both, and onto a
+        // second line when it's narrower still.
+        let mut rows = vec![div()
+            .min_h(px(control::ROW))
+            .px(px(space::L))
+            .py(px(space::S + 2.0))
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .justify_between()
+            .gap(px(space::S))
+            .child(
+                div()
+                    .text_size(px(size::BODY))
+                    .text_color(self.p.ink)
+                    .child("Repeat"),
             )
+            .child(self.segments(kinds).flex_wrap())
             .into_any_element()];
         if repeat == "hours" {
             let small = |state: &Entity<InputState>, w: f32| {
@@ -794,6 +817,9 @@ impl Loom {
                     .into_any_element(),
             );
         }
+        if repeat == "event" {
+            rows.extend(self.routine_event_rows(cx));
+        }
         if repeat == "hours" || repeat == "days" {
             rows.push(self.routine_days_row(cx));
         }
@@ -826,6 +852,165 @@ impl Loom {
             }
         }
         self.group(Some("When"), rows)
+    }
+
+    /// A new event for "On an event": on Acta, a card on the person's first board moving
+    /// to Done; on T3, the first T3 server's thread finishing. Acta when T3 is asked for
+    /// and there's none, and T3 when Acta is and the person has no boards.
+    fn new_event(&self, integration: &str) -> model::watch::RoutineEvent {
+        let boards = &self.model.acta_boards;
+        let t3 = self.model.event_servers("t3");
+        let on_t3 = (integration == "t3" && !t3.is_empty()) || boards.is_empty();
+        if on_t3 && !t3.is_empty() {
+            return model::watch::RoutineEvent::new_t3(&t3[0]);
+        }
+        model::watch::RoutineEvent::new_acta(boards.first().map_or("", |(_, b)| b.as_str()))
+    }
+
+    /// "On an event"'s rows: Acta or T3 when the person has both, which server when they
+    /// have several, and on Acta the board and what happens on it (a move to a status,
+    /// a new card or a comment), or on T3 the thread.
+    fn routine_event_rows(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let e = self.routine_ui.event.clone();
+        let mut rows = Vec::new();
+        let boards = self.model.acta_boards.clone();
+        let t3 = self.model.event_servers("t3");
+        if !boards.is_empty() && !t3.is_empty() {
+            let mut kinds = Vec::new();
+            for (kind, label) in [("acta", "Acta"), ("t3", "T3")] {
+                kinds.push(
+                    self.segment(
+                        format!("routine-event-{kind}"),
+                        label,
+                        e.integration == kind,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.routine_ui.event.integration != kind {
+                            this.routine_ui.event = this.new_event(kind);
+                            this.keep_draft(cx);
+                        }
+                        cx.notify();
+                    })),
+                );
+            }
+            rows.push(
+                self.row(
+                    None,
+                    "On",
+                    None,
+                    Some(self.segments(kinds).into_any_element()),
+                )
+                .into_any_element(),
+            );
+        }
+        // Which server, when there are several of its kind.
+        let servers = self.model.event_servers(&e.integration);
+        if servers.len() > 1 {
+            let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+            for name in servers {
+                let on = e.server == name
+                    || (e.server.is_empty() && e.integration == "acta" && name == "acta");
+                let picked = name.clone();
+                chips = chips.child(
+                    self.chip(
+                        SharedString::from(format!("routine-server-{name}")),
+                        &name,
+                        on,
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let picked = picked.clone();
+                        this.change_event(cx, |e| e.server = picked);
+                    })),
+                );
+            }
+            rows.push(self.field_row("Server", chips));
+        }
+        if e.integration == "t3" {
+            rows.push(self.field_row("Thread", Input::new(&self.routine_ui.thread_in)));
+            return rows;
+        }
+        // The board, from the person's own.
+        let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+        for (_, board) in boards {
+            let picked = board.clone();
+            chips = chips.child(
+                self.chip(
+                    SharedString::from(format!("routine-board-{board}")),
+                    &model::watch::board_label(&board),
+                    e.board == board,
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let picked = picked.clone();
+                    this.change_event(cx, |e| {
+                        // One card's event is on its board: another board is any card's.
+                        if e.board != picked {
+                            e.card.clear();
+                        }
+                        e.board = picked;
+                    });
+                })),
+            );
+        }
+        rows.push(self.field_row("Board", chips));
+        // What happens on it: a move to a status, a new card, or a comment.
+        let mut kinds = Vec::new();
+        for (kind, label) in [
+            ("moved", "Moves to"),
+            ("created", "New card"),
+            ("commented", "Comment"),
+        ] {
+            kinds.push(
+                self.segment(format!("routine-event-kind-{kind}"), label, e.kind == kind)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_event(cx, |e| {
+                            e.kind = kind.into();
+                            if kind == "moved" && e.to.is_empty() {
+                                e.to = "done".into();
+                            }
+                        });
+                    })),
+            );
+        }
+        rows.push(
+            self.row(
+                None,
+                "Event",
+                None,
+                Some(self.segments(kinds).into_any_element()),
+            )
+            .into_any_element(),
+        );
+        if e.kind == "moved" {
+            let mut chips = div().flex().flex_wrap().gap(px(space::XS));
+            for (key, label) in model::watch::STATUSES {
+                chips = chips.child(
+                    self.chip(
+                        SharedString::from(format!("routine-status-{key}")),
+                        label,
+                        e.to == key,
+                        false,
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.change_event(cx, |e| e.to = key.into());
+                    })),
+                );
+            }
+            rows.push(self.field_row("Status", chips));
+        }
+        rows
+    }
+
+    /// Changes the event "On an event" has picked, which the routine's draft keeps.
+    fn change_event(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut model::watch::RoutineEvent),
+    ) {
+        change(&mut self.routine_ui.event);
+        self.keep_draft(cx);
+        cx.notify();
     }
 
     /// The days a routine runs on, as seven round toggles, with "Weekdays" or "Every day"
@@ -1157,6 +1342,84 @@ impl Loom {
         detail.into_any_element()
     }
 
+    /// The routine's gate (PLAN.md, "Routines"): the command, and the seconds it may take.
+    fn routine_gate_row(&self) -> AnyElement {
+        let p = self.p;
+        let ui = &self.routine_ui;
+        self.field_row(
+            "Gate",
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .font_family(font::MONO)
+                        .child(Input::new(&ui.gate_in)),
+                )
+                .child(
+                    div()
+                        .w(px(56.0))
+                        .flex_none()
+                        .child(Input::new(&ui.gate_seconds_in)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child("s"),
+                ),
+        )
+    }
+
+    /// The routine's model or effort (`effort`), as chips of what its agent's program
+    /// offers for `option`: its agent's own, `own`, marked default, which it follows
+    /// until another is picked.
+    fn routine_pick_row(
+        &self,
+        label: &str,
+        option: &model::ConfigOption,
+        own: String,
+        effort: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let picked = if effort {
+            &self.routine_ui.effort
+        } else {
+            &self.routine_ui.model
+        };
+        let on = if option.values.iter().any(|(v, _)| v == picked) {
+            picked.clone()
+        } else {
+            own.clone()
+        };
+        let mut row = div().flex().flex_wrap().gap(px(space::XS + 2.0));
+        for (value, name) in &option.values {
+            let is_own = *value == own;
+            let chosen = if is_own { String::new() } else { value.clone() };
+            row = row.child(
+                self.chip(
+                    format!("routine-{}-{value}", option.category),
+                    name,
+                    *value == on,
+                    is_own,
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if effort {
+                        this.routine_ui.effort = chosen.clone();
+                    } else {
+                        this.routine_ui.model = chosen.clone();
+                    }
+                    cx.notify();
+                })),
+            );
+        }
+        self.field_row(label, row)
+    }
+
     /// The page of the routine picked, beside the list, with its form and history, or a
     /// new routine's form.
     fn routine_form(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -1177,28 +1440,40 @@ impl Loom {
             cx,
             |this, id| this.routine_agent = Some(id),
         );
-        groups.push(self.group(
-            None,
-            vec![
-                self.field_row("Name", Input::new(&self.routine_name_in)),
-                self.field_row("Agent", chips),
-                div()
-                    .p(px(space::L))
-                    .flex()
-                    .flex_col()
-                    .gap(px(space::S))
-                    .child(
-                        div()
-                            .text_size(px(size::BODY))
-                            .text_color(p.ink)
-                            .child("Prompt"),
-                    )
-                    .child(Textarea::new(&self.routine_prompt_in))
-                    .into_any_element(),
-            ],
-        ));
+        let mut first = vec![
+            self.field_row("Name", Input::new(&self.routine_name_in)),
+            self.field_row("Agent", chips),
+            div()
+                .p(px(space::L))
+                .flex()
+                .flex_col()
+                .gap(px(space::S))
+                .child(
+                    div()
+                        .text_size(px(size::BODY))
+                        .text_color(p.ink)
+                        .child("Prompt"),
+                )
+                .child(Textarea::new(&self.routine_prompt_in))
+                .into_any_element(),
+            self.routine_gate_row(),
+        ];
+        // Its model and effort, from those its agent's program offers.
+        let agent = self
+            .routine_agent
+            .as_deref()
+            .and_then(|id| self.model.agent(id))
+            .cloned();
+        if let Some(a) = agent {
+            for option in a.picks() {
+                let effort = option.category == "thought_level";
+                let label = if effort { "Effort" } else { "Model" };
+                first.push(self.routine_pick_row(label, &option, a.chosen(&option.id), effort, cx));
+            }
+        }
+        groups.push(self.group(None, first));
         groups.push(self.routine_when_group(open.as_deref(), cx));
-        let by_hook_alone = !matches!(self.routine_ui.schedule.repeat.as_str(), "hours" | "days");
+        let by_hook_alone = matches!(self.routine_ui.schedule.repeat.as_str(), "" | "webhook");
         let mut options = vec![
             self.switch_row("routine-on", "On", "", self.routine_on, cx, |this| {
                 this.routine_on = !this.routine_on
@@ -1228,7 +1503,8 @@ impl Loom {
                 |this| this.routine_thread = !this.routine_thread,
             ),
         ];
-        // On a schedule, it can run by webhook too; with Repeat on Webhook, that's all.
+        // On a schedule or an event, it can run by webhook too; with Repeat on Webhook,
+        // that's all.
         if !by_hook_alone {
             options.push(self.switch_row(
                 "routine-webhook",
@@ -1296,7 +1572,25 @@ impl Loom {
                     return;
                 };
                 let schedule = this.routine_schedule(cx).to_json();
-                let webhook = this.routine_webhook || schedule.is_null();
+                let repeat = this.routine_ui.schedule.repeat.clone();
+                let webhook = this.routine_webhook || matches!(repeat.as_str(), "" | "webhook");
+                // On an event: the one picked. Off one it ran on alone: taken away. One
+                // it runs on beside its schedule stays as it is.
+                let event = if repeat == "event" {
+                    let mut e = this.routine_ui.event.clone();
+                    e.thread = this.routine_ui.thread_in.read(cx).value().to_string();
+                    if let Some(why) = e.missing() {
+                        this.model.notices.push(why.into());
+                        cx.notify();
+                        return;
+                    }
+                    Some(e.to_json())
+                } else {
+                    let saved = this.model.routines.iter().find(|r| r.id == editing);
+                    saved
+                        .filter(|r| r.event.is_some() && r.schedule.repeat.is_empty())
+                        .map(|_| Value::Null)
+                };
                 // The flow, one step after another; one an agent made
                 // with steps side by side stays as it is.
                 let flow = if this.routine_flow_kept.is_empty() {
@@ -1323,12 +1617,42 @@ impl Loom {
                 } else {
                     None
                 };
+                let ui = &this.routine_ui;
+                let gate = ui.gate_in.read(cx).value().trim().to_string();
+                let seconds = ui.gate_seconds_in.read(cx).value().trim().to_string();
+                let gate_seconds = match seconds.parse::<i64>() {
+                    Ok(s) if s > 0 => s,
+                    _ if seconds.is_empty() || gate.is_empty() => 0,
+                    _ => {
+                        this.model
+                            .notices
+                            .push("Write the seconds its gate may take as a number.".into());
+                        cx.notify();
+                        return;
+                    }
+                };
+                // A model or effort the agent's program doesn't offer, as when the agent
+                // was changed, goes back to the agent's own.
+                let offered = |category: &str, value: &str| {
+                    let a = this.model.agent(&agent);
+                    let options = a.map(|a| a.picks()).unwrap_or_default();
+                    match options.iter().find(|o| o.category == category) {
+                        Some(o) if !o.values.iter().any(|(v, _)| v == value) => String::new(),
+                        _ => value.to_string(),
+                    }
+                };
+                let model_picked = offered("model", &ui.model);
+                let effort_picked = offered("thought_level", &ui.effort);
                 let form = model::RoutineForm {
                     id: editing.clone(),
                     name,
                     agent,
                     prompt,
                     schedule,
+                    gate,
+                    gate_seconds,
+                    model: model_picked,
+                    effort: effort_picked,
                     notify: this.routine_notify,
                     on: this.routine_on,
                     catch_up: this.routine_catch_up,
@@ -1340,9 +1664,15 @@ impl Loom {
                     .into(),
                     webhook,
                     flow,
+                    event,
                 };
+                let now = this.form_now(DraftPage::Routines, cx);
                 let f = this.model.save_routine(&form);
+                // Its draft stays until the instance says it's saved; the form closes.
+                let key = (!editing.is_empty()).then(|| editing.clone());
+                this.form_saving(DraftPage::Routines, key, &f, now);
                 this.send(f);
+                this.leave_form(cx);
                 this.routine_open = None;
                 cx.notify();
             }));
@@ -1350,6 +1680,7 @@ impl Loom {
             .small_button("cancel-routine", "Cancel", false)
             .on_click(cx.listener(|this, _, _, cx| {
                 this.routine_open = None;
+                this.model.drafts.discard();
                 cx.notify();
             }));
         let mut left = div().flex().gap(px(space::S));
@@ -1363,6 +1694,7 @@ impl Loom {
                             let f = this.model.delete_routine(&id);
                             this.send(f);
                             this.routine_open = None;
+                            this.model.drafts.discard();
                             cx.notify();
                         })),
                 )
@@ -1371,6 +1703,7 @@ impl Loom {
                         .on_click(cx.listener(move |this, _, _, cx| {
                             let f = this.model.run_routine(&run);
                             this.send(f);
+                            this.leave_form(cx);
                             this.routine_open = None;
                             cx.notify();
                         })),
@@ -1388,22 +1721,19 @@ impl Loom {
         groups
     }
 
-    /// Fills the routine form's flow from `flow`: steps it edits when they go one after
-    /// another, or kept as they are when an agent put some side by side.
-    fn set_routine_flow(
+    /// Fills the routine form's flow: the steps it edits, one after another, each its
+    /// agent and prompt, or `kept`, steps an agent put side by side, kept as they are.
+    pub(super) fn set_routine_flow(
         &mut self,
-        flow: &[model::FlowStep],
+        steps: &[(Option<String>, String)],
+        kept: Vec<model::FlowStep>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.routine_flow.clear();
-        self.routine_flow_kept.clear();
-        if !model::flow_is_chain(flow) {
-            self.routine_flow_kept = flow.to_vec();
-            return;
-        }
-        for step in flow {
-            let prompt = step.prompt.clone();
+        self.routine_flow_kept = kept;
+        for (agent, prompt) in steps {
+            let prompt = prompt.clone();
             let input = cx.new(|cx| {
                 let mut t = TextareaState::new(window, cx)
                     .auto_grow(2, 10)
@@ -1411,7 +1741,8 @@ impl Loom {
                 t.set_value(prompt, window, cx);
                 t
             });
-            self.routine_flow.push((Some(step.agent.clone()), input));
+            form_drafts::watch(&input, window, cx);
+            self.routine_flow.push((agent.clone(), input));
         }
     }
 
@@ -1528,6 +1859,7 @@ impl Loom {
                                         "What this agent is asked, with the answer before it.",
                                     )
                                 });
+                                form_drafts::watch(&input, window, cx);
                                 this.routine_flow.push((None, input));
                                 cx.notify();
                             }))

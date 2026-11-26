@@ -16,4 +16,6 @@ enum Prefs {
     static let emojiButton = "loom.emoji_button"
     static let emoticons = "loom.emoticons"
     static let skinTone = "loom.skin_tone"
+    /// Settings → Chat → Show context: the chat header's ring and its card (off).
+    static let showContext = "loom.show_context"
 }

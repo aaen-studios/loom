@@ -461,7 +461,27 @@ pub fn span(
     w: f32,
     h: f32,
 ) -> impl IntoElement {
-    let key = key.into();
+    span_drawn(key.into(), taut, tint, false)
+        .w(px(w))
+        .h(px(h))
+        .flex_none()
+}
+
+/// The thread between loom's knot and an integration's logo on Spools' wide cards,
+/// across what room it has, `h` high: slack, curved and dashed until the integration is
+/// connected, then pulled straight and whole, its dashes closing as it tightens, with
+/// the span's one twang.
+pub fn tie(key: impl Into<SharedString>, taut: bool, tint: Hsla, h: f32) -> impl IntoElement {
+    span_drawn(key.into(), taut, tint, true)
+        .flex_1()
+        .min_w_0()
+        .h(px(h))
+}
+
+/// How long a dash of a slack tie is, and its gap, in pixels.
+const DASH: f32 = 4.0;
+
+fn span_drawn(key: SharedString, taut: bool, tint: Hsla, dashed: bool) -> Canvas<()> {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
@@ -491,6 +511,11 @@ pub fn span(
             let room = (bounds.size.height.as_f32() / 2.0 - thread_stroke::SMALL).max(1.0);
             let steps = (width / 1.5).max(32.0) as usize;
             let mut pb = PathBuilder::stroke(px(thread_stroke::SMALL));
+            // A tie's dashes close up as it's pulled straight.
+            let gap = DASH * (1.0 - tight);
+            if dashed && gap > 0.25 {
+                pb = pb.dash_array(&[px(DASH), px(gap)]);
+            }
             for i in 0..=steps {
                 let u = i as f32 / steps as f32;
                 let p = point(
@@ -508,9 +533,6 @@ pub fn span(
             }
         },
     )
-    .w(px(w))
-    .h(px(h))
-    .flex_none()
 }
 
 /// How far a shape's moods bend it, in pixels: less than a straight thread's, so the

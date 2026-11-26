@@ -4,15 +4,16 @@ Each agent has one chat that never ends. Choose an agent in the sidebar to talk 
 
 ## The sidebar
 
-The sidebar lists your group chats first ([Group chats](#group-chats)), then your agents in groups:
+The sidebar lists, from the top:
 
-- **Waiting on you**, at the top, while an agent waits on a question or a permission. It goes back to its place once you've answered. A pinned agent keeps its tile instead.
-- **Pinned agents**, as tiles, three across. **Pin to top** is in the agent's menu.
-- **The rest**, a line each, with what an agent is on after its name while it works.
-- **Folders** you make: **New folder** in the space under the agents, or **Move to folder** in an agent's menu. Click a folder's name to open or shut it, and right-click it to rename or delete it. Drag an agent onto a folder's name to put it in, or onto an agent outside to take it out. Deleting a folder keeps its agents.
+- **Pinned agents**, as tiles. **Pin to top** is in the agent's menu.
+- **Waiting on you**, while an agent waits on a question or a permission, with what it asks under its name. It goes back to its place once you've answered. A pinned agent keeps its tile instead.
+- **Your agents and group chats** ([Group chats](#group-chats)) in one list, in your order, a line each, with what an agent is on after its name while it works. Drag one to put it somewhere else: a line shows where it will go. Tiles drag among the tiles.
+- **Folders** you make, in the list: **New folder** in the **+ New** menu, or **Move to folder** in an agent's menu. Click a folder's name to open or shut it, and right-click it to rename or delete it. Drag an agent or a group chat onto a folder's name to put it in, or out of the folder to take it out. Deleting a folder keeps what was in it.
+- **+ New**, at the end of the list: a new group chat, agent or folder. Right-clicking the empty space or a folder's name opens the same.
 - **Hidden**, at the bottom and shut until you open it: agents you hid with **Hide** in their menu. **Show** brings one back.
 
-Your folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent for Move to folder and Hide, and long-press a folder's name to rename or delete it.
+Your order, folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent or a group chat and drag it to move it, or let go for Move to folder and Hide; long-press a folder's name to rename or delete it.
 
 At the bottom of the sidebar, over the server, a box shows your plan's limits as the agent program reports them: its icon and the plan's name, such as "Claude Max", then how much of the session and of the week is used, each a small ring with when it resets ("42% · 15:30", "78% · Mon"). A ring turns orange from 75% and red from 90%. Click the box to open the program under **Brains**. There's a box for each program your agents run on that reports its limits. Claude does; Codex doesn't, and a program on an API key has no plan, so neither has a box. The iPhone app doesn't show them yet.
 
@@ -28,9 +29,9 @@ On the desktop, a chat opens on its newest 200 messages. Scroll near the top and
 
 ## How full the chat is
 
-The chat never ends, but the agent program's session under it does. The ring in the chat's header, right after the model, fills with the session's context, orange from 70% and red from 90%. Under the pointer it shows a card: **Context** with its tokens of the window ("82k of 200k"), a bar, when the program last compacted the session and that a fresh session starts at 80% ("Compacted 2 h ago · a fresh session starts at 80%"). **Compact now** has the program compact the session, where it can when asked, as Claude's can, and **Start a fresh session** sends your next message to a fresh one. A click on the ring keeps the card open until you click outside it, press Esc or click the ring again. In a group chat the ring and the card are for the agent that answered last, "Ledger's context".
+The chat never ends, but the agent program's session under it does. None of this shows until you turn on **Show context** in Settings → Chat. Then the ring in the chat's header, right after the model, fills with the session's context, orange from 70% and red from 90%. Under the pointer it shows a card: **Context** with its tokens of the window ("82k of 200k"), a bar, what the chat costs, your last turn's tokens and the last 24 hours' of every turn in it (**Last turn** 410k, **Last 24 hours** 6.2M), and when the program last compacted the session ("Compacted 2 h ago"). **Compact now** has the program compact the session, where it can when asked, as Claude's can, and **Start a fresh session** sends your next message to a fresh one. A click on the ring keeps the card open until you click outside it, press Esc or click the ring again. In a group chat the ring and the card are for the agent that answered last, "Ledger's context".
 
-Once the session is 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost. A quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context, "Context compacted · 182k → 16k". In a group chat the line names the agent whose session it was: "Ledger's fresh session starts here", "Ledger's context compacted · 120k → 76k".
+Once the session is 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost. A long chat, 100,000 tokens or more, moves to a fresh session sooner, when it costs least: on your first message an hour or more after the last, once the program's prompt cache has gone. The agent wrote a summary of the chat for it while you were away, which the fresh session is given with the newest of the chat, so it carries on where you left off. Your message doesn't wait for the summary, and nothing shows in the chat. With Show context on, a quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context, "Context compacted · 182k → 16k". In a group chat the line names the agent whose session it was: "Ledger's fresh session starts here", "Ledger's context compacted · 120k → 76k".
 
 On the iPhone the ring is in the chat's header too, and a tap opens its card as a sheet, with the same Compact now and Start a fresh session. The iPhone doesn't show the lines across the chat yet.
 
@@ -40,7 +41,7 @@ To try another way from some point without losing the chat, point at a message a
 
 ## Group chats
 
-A group chat is a chat with several of your agents in it, where loom picks which one answers each message. **Everyone** has all your agents in it, and is there once you have two. To make another, choose **+** by **Group chats** in the sidebar, name it, pick two or more agents, and a colour if you want one. On the iPhone, the **+** is by **Group chats** in the agent list.
+A group chat is a chat with several of your agents in it, where loom picks which one answers each message. **Everyone** has all your agents in it, and is there once you have two. To make another, choose **+ New** at the end of the sidebar's list, then **New group chat**, name it, pick two or more agents, and a colour if you want one. On the iPhone, **+ New** is at the end of the agent list too.
 
 You just write. One agent answers each message: the one your message is for, or the one that answered last while you stay on the same subject. A line over each answer says who answered and why, "→ Ledger · money question", in that agent's shape and colour. To pick yourself, mention an agent: "@Hermes any new mail?" goes to Hermes, and the line says "you asked".
 
@@ -48,7 +49,7 @@ If the wrong agent answered, click the line and pick another. Your message goes 
 
 Each answer is the agent's own, with its memory, tools and permissions. It sees what was said in the group chat since it last answered, by whom. Your chat with each agent stays as it was: nothing from a group chat goes into it, and a message pinned in a group chat is pinned there only.
 
-Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. **Usage** says how many tokens its agents' answers there used today and this month, and on its own line, how many loom's picking used. Everyone's members are always all your agents. Right-click a group chat in the sidebar to delete it; Everyone can't be deleted. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
+Click the group chat's name over the chat to change its name, members, colour, and who answers when loom can't tell, the agent you pick or the one that answered last. Its **Corrections** are the examples you made, newest first; the × by one forgets it. **Following** has what the group chat follows ([Following Acta and T3](#following-acta-and-t3)). **Usage** says how many tokens its agents' answers there used today and this month, and on its own line, how many loom's picking used. Everyone's members are always all your agents. Right-click a group chat in the sidebar to delete it; Everyone can't be deleted. On the iPhone, the people icon at the chat's top opens these, and swiping a correction left forgets it.
 
 The picking is done by a small, fast model: Claude Haiku 5.5, unless you pick another in [Agent defaults](agents.md#agent-defaults). It's ready when you open the app or a group chat, so a message is picked for in about a second. What it reads to pick an agent is the agent's **What it's for** line ([Making an agent](agents.md#making-an-agent)), its skills and its MCP servers.
 
@@ -153,7 +154,7 @@ On an iPhone, **+** opens a sheet with the same lists, and your newest photos in
 
 Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
 
-The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box, or below it in a new chat when there's more room there. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box where it fits there, and otherwise below it, as in a new chat, where the message box moves up to make room for it. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
 
 A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
 
@@ -192,6 +193,12 @@ A routine runs out of sight: its prompt and the agent's answer stay out of the c
 A routine due while the agent is answering you waits until it's done, and until the messages you queued have gone. If the chat is still busy after 10 minutes, or the routine's next time comes first, that run is skipped.
 
 Each routine's **History**, on its page under **Routines**, says how every run ended (posted, quiet, failed, or skipped and why) and what the agent posted or answered ([Settings](settings.md#routines)).
+
+## Following Acta and T3
+
+An agent can follow an Acta board, a card on one, or a T3 thread for you, and tell you in the chat when something happens there. Each change is a quiet line on the left: the board's purple tile, the card's pill with its dot in the colour of the status the line is about (where it moved to, for a move), and what happened and who, "moved to Done · Sam"; or for a thread, its strand and title and "Thread finished", the strand lying straight in green once it finished, sagging in red if it failed. Lines one after another sit close together. When the change wakes the agent, its reply comes after the line. On the iPhone the lines show the same way.
+
+What an agent or a group chat follows is under **Following** in its settings: each as its pill, with a red dot and why when loom couldn't look, and an × to stop following it. It shows only when there's something followed.
 
 ## A backup program
 

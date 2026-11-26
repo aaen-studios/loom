@@ -11,6 +11,8 @@ module tests.fake_agent.main
 //     /think TEXT         an agent_thought_chunk
 //     /plan A; B; C       a plan with those entries
 //     /tool TITLE         a tool call that runs and completes
+//     /toolout TITLE|OUT  a tool call (kind other) that completes with OUT, as
+//                         text, as what it gives back
 //     /ask TITLE          a command (kind execute) that asks permission first,
 //                         and runs or fails by the answer
 //     /read TITLE         the same for a tool that only reads (kind read)
@@ -95,6 +97,12 @@ module tests.fake_agent.main
 //                         and /mcp hints each one's name and annotations, a line each
 //     /mcpkeep TOOL JSON  the same, through one loom mcp the session keeps, started
 //                         at its first /mcpkeep, as a real agent keeps its servers
+//     /mcpnew TOOL JSON   the same as /mcp, as a client of MCP 2026-07-28 would:
+//                         no initialize, and each request says its version in
+//                         _meta; it says "TOOL (RESULTTYPE): RESULT". /mcpnew
+//                         discover says server/discover's "discover: RESULTTYPE
+//                         VERSIONS NAME", and /mcpnew stale what tools/list
+//                         asked in 1900-01-01 gives: "stale: CODE VERSIONS"
 //
 // A turn ends with end_turn after its last step, or with cancelled as soon as
 // session/cancel arrives. Each session it starts or picks up offers /compact
@@ -109,6 +117,12 @@ module tests.fake_agent.main
 // "why": "up MS ms", how long ago the program started; and reports 12 tokens.
 // With "USAGE:USED/SIZE" in the message, the router's session also reports its
 // context as USED tokens of a SIZE window (usage_update), as /usage does.
+//
+// With FAKE_RECORD set to a file, it adds a line of JSON to that file for each
+// prompt it plays, for measuring what loom sends (tests/protocol/usage.calx):
+// {"session", "chars" (every text block's), "loom" (those of its "[loom: ...]"
+// blocks), "notes" (the start of each of those), "said" (what it said back),
+// "summary" (whether loom asked it for a summary of its chat)}.
 //
 // With --load it offers session/load, and plays a line back when a session is
 // loaded; with --resume it offers session/resume; with --forget it offers
@@ -152,6 +166,7 @@ pub enum Step {
     Think(String)
     Plan(List<String>)
     Tool(String)
+    ToolOut(String, String)    // a title, and what the call gives back
     Ask(String, String)
     Act(String, String)    // a kind, and the rawInput as JSON
     Shell(String)    // the rawInput as JSON
@@ -177,6 +192,7 @@ pub enum Step {
     Context
     Mcp(String, String)
     McpKeep(String, String)
+    McpNew(String, String)
     Env(String)
     Net(String)
     Servers
@@ -214,6 +230,9 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Plan(entries))
         } else if word == "/tool" {
             steps.push(Step.Tool(rest))
+        } else if word == "/toolout" {
+            let bar = rest.find("|") ?? rest.len()
+            steps.push(Step.ToolOut(rest[..bar].trim().copy(), if bar < rest.len() { rest[bar + 1..].trim().copy() } else { String() }))
         } else if word == "/ask" {
             steps.push(Step.Ask(String("execute"), rest))
         } else if word == "/act" {
@@ -255,12 +274,12 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Crash)
         } else if word == "/files" {
             steps.push(Step.Files)
-        } else if word == "/mcp" or word == "/mcpkeep" {
+        } else if word == "/mcp" or word == "/mcpkeep" or word == "/mcpnew" {
             let (tool, args) = match rest.find(" ") {
                 some(at) => (rest[..at].copy(), rest[at + 1..].copy()),
                 none => (rest.copy(), String(#"{}"#)),
             }
-            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else { Step.McpKeep(tool, args) })
+            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else if word == "/mcpkeep" { Step.McpKeep(tool, args) } else { Step.McpNew(tool, args) })
         } else if word == "/context" {
             steps.push(Step.Context)
         } else if word == "/uptime" {
@@ -435,6 +454,10 @@ struct Agent {
     later: List<String>
     // Each session's context as it last reported it, used of size, for a bare /compact.
     usage: Map<String, (i64, i64)>
+    // With --record=PATH, the file each prompt and close is written to, a JSON line each.
+    record: String
+    // Each session's turns so far, and the characters they sent and said, for --record.
+    history: Map<String, (i64, i64)>
 }
 
 // The config options a session offers (ACP's session config options): a model
@@ -834,8 +857,31 @@ impl Agent {
         return said
     }
 
+    // Calls `tool` of loom's own MCP server as a client of MCP 2026-07-28: no
+    // initialize, and each request says its version in its _meta.
+    fn call_modern(a: Agent, session: String, tool: String, args: String) -> String {
+        let child = match a.spawn_loom(session) {
+            ok(ch) => ch,
+            err(e) => return "{e}",
+        }
+        let said = talk_modern(child, tool, args)
+        child.kill()
+        return said
+    }
+
     // Starts the loom mcp the session was given, and says initialize.
     fn start_loom(a: Agent, session: String) -> Child ! Error {
+        let child = try a.spawn_loom(session)
+        let init = String(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"#)
+        if let err(e) = child.write_text("{init}\n") { fail "loom mcp: {e}" }
+        if child.wait_for_line(String("\"id\":1"), 60000) == none { fail "loom mcp didn't answer initialize" }
+        let initialized = String(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+        if let err(e) = child.write_text("{initialized}\n") { fail "loom mcp: {e}" }
+        return child
+    }
+
+    // Starts the loom mcp the session was given.
+    fn spawn_loom(a: Agent, session: String) -> Child ! Error {
         var found = Json.Null
         var servers = Json.Null
         if let s = a.mcp.find(session.copy()) { servers = s.copy() }
@@ -860,11 +906,6 @@ impl Agent {
             ok(ch) => ch,
             err(e) => fail "loom mcp didn't start: {e}",
         }
-        let init = String(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"fake-agent","version":"1"}}}"#)
-        if let err(e) = child.write_text("{init}\n") { fail "loom mcp: {e}" }
-        if child.wait_for_line(String("\"id\":1"), 60000) == none { fail "loom mcp didn't answer initialize" }
-        let initialized = String(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
-        if let err(e) = child.write_text("{initialized}\n") { fail "loom mcp: {e}" }
         return child
     }
 
@@ -928,6 +969,7 @@ impl Agent {
         var text = String()
         var got = List<String>()
         var context = String()
+        var sent_chars: i64 = 0
         if let Json.Array(blocks) = params.get(String("prompt")) ?? Json.Null {
             for b in blocks {
                 let kind = (b.get(String("type")) ?? Json.Null).as_str() ?? String()
@@ -938,6 +980,7 @@ impl Agent {
                     let found = fs.exists(path_of((b.get(String("uri")) ?? Json.Null).as_str() ?? String()))
                     got.push(if found { "link {name}" } else { "missing {name}" })
                 } else if let t = (b.get(String("text")) ?? Json.Null).as_str() {
+                    sent_chars += i64.wrap(u64(t.len()))
                     // What loom says about where the person is, not a step.
                     if t.starts_with("[loom:") {
                         if context.len() > 0 { context.push_str("\n") }
@@ -961,10 +1004,28 @@ impl Agent {
         }
         // Asked to pick for a group chat, it answers as a router would.
         if context.contains("[loom: route]") { text = route_pick(context.copy(), "up {unsafe { Instant.now() }.nanos_since(a.born) / 1000000} ms") }
+        // With --record, what this prompt carried: how many turns came before it in its
+        // session, and how many characters they sent and said.
+        let (turns_before, chars_before): (i64, i64) = a.history.get(session.copy()) ?? (i64(0), i64(0))
+        if a.record.len() > 0 {
+            let values = a.values(session.copy())
+            var line = LinkedMap<String, Json>()
+            line.insert("session", js(session.copy()))
+            line.insert("turn", int(turns_before + 1))
+            line.insert("chars", int(sent_chars))
+            line.insert("history", int(chars_before))
+            line.insert("model", js(value_of(values.copy(), "model")))
+            line.insert("effort", js(value_of(values, "effort")))
+            line.insert("text", js(if text.len() > 200 { text[..200].copy() } else { text.copy() }))
+            line.insert("context", js(if context.len() > 2000 { context[..2000].copy() } else { context.copy() }))
+            a.write_record(Json.Object(line))
+        }
+        var said_chars: i64 = 0
         var last_used: i64 = 0
         for step in script(text) {
             match step {
                 Step.Say(s) => {
+                    said_chars += i64.wrap(u64(s.len()))
                     for c in chunks(s) {
                         chunk(session.copy(), "agent_message_chunk", c)
                         if slow > 0 and a.idle(slow) { reason = String("cancelled"); break }
@@ -989,6 +1050,10 @@ impl Agent {
                     let tool = a.tool_call(session.copy(), String("execute"), title.copy())
                     tool_update(session.copy(), tool.copy(), "in_progress", String())
                     tool_update(session.copy(), tool, "completed", "ran: {title}")
+                },
+                Step.ToolOut(title, output) => {
+                    let tool = a.tool_call(session.copy(), String("other"), title.copy())
+                    tool_update(session.copy(), tool, "completed", output.copy())
                 },
                 Step.SelfPrompt => chunk(session.copy(), "user_message_chunk", String("Look into the spoons.")),
                 Step.Subagent(title, inner) => {
@@ -1139,6 +1204,7 @@ impl Agent {
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.McpKeep(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_kept(session.copy(), tool, args)),
+                Step.McpNew(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_modern(session.copy(), tool, args)),
                 Step.Link(path) => {
                     var content = LinkedMap<String, Json>()
                     content.insert("type", js(String("resource_link")))
@@ -1176,6 +1242,7 @@ impl Agent {
             }
             if reason != "end_turn" { break }
         }
+        a.history.insert(session.copy(), (turns_before + 1, chars_before + sent_chars + said_chars))
         var r = LinkedMap<String, Json>()
         r.insert("stopReason", js(reason))
         if tokens > 0 {
@@ -1186,10 +1253,17 @@ impl Agent {
             r.insert("usage", Json.Object(usage))
         }
         respond(id, Json.Object(r))
+        usage_record(session.copy(), params.copy(), said_chars)
         if let (used, size) = compacted {
             a.next_id += 1
             compaction(session, "compact_{a.next_id}", last_used, used, size)
         }
+    }
+
+    // With --record, writes `line` to its file, a line of JSON.
+    fn write_record(a: Agent, line: Json) {
+        if a.record.len() == 0 { return }
+        if let err(e) = fs.append_text(a.record.copy(), "{line}\n") { eprintln("fake agent: recording to {a.record}: {e}") }
     }
 
     // Session `session`'s config values: its own, or the defaults (a session
@@ -1212,11 +1286,11 @@ impl Agent {
             prompt.insert("embeddedContext", Json.Bool(false))
             var caps = LinkedMap<String, Json>()
             caps.insert("loadSession", Json.Bool(a.picks_up == "load" or a.picks_up == "forget"))
-            if a.picks_up == "resume" {
-                var resume = LinkedMap<String, Json>()
-                resume.insert("resume", Json.Object(LinkedMap<String, Json>()))
-                caps.insert("sessionCapabilities", Json.Object(resume))
-            }
+            // It closes sessions, as Claude's adapter does.
+            var session_caps = LinkedMap<String, Json>()
+            session_caps.insert("close", Json.Object(LinkedMap<String, Json>()))
+            if a.picks_up == "resume" { session_caps.insert("resume", Json.Object(LinkedMap<String, Json>())) }
+            caps.insert("sessionCapabilities", Json.Object(session_caps))
             caps.insert("promptCapabilities", Json.Object(prompt))
             // It takes MCP servers over HTTP, as claude-agent-acp does.
             var mcp = LinkedMap<String, Json>()
@@ -1271,6 +1345,18 @@ impl Agent {
             r.insert("configOptions", config_options(a.values(session.copy())))
             respond(id ?? Json.Null, Json.Object(r))
             offer_commands(session)
+        } else if name == "session/close" {
+            let session = (params.get(String("sessionId")) ?? Json.Null).as_str() ?? String()
+            _ = a.mcp.remove(session.copy())
+            _ = a.meta.remove(session.copy())
+            _ = a.config.remove(session.copy())
+            _ = a.usage.remove(session.copy())
+            _ = a.history.remove(session.copy())
+            if let k = a.kept.remove(session.copy()) { k.kill() }
+            var line = LinkedMap<String, Json>()
+            line.insert("closed", js(session))
+            a.write_record(Json.Object(line))
+            respond(id ?? Json.Null, Json.Object(LinkedMap<String, Json>()))
         } else if name == "session/prompt" and a.picks_up == "limited" {
             respond_error(id ?? Json.Null, -32000, String("You've hit your usage limit. Try again in 3 hours."))
         } else if name == "session/prompt" {
@@ -1366,13 +1452,55 @@ fn method(m: Json) -> String {
     return (m.get(String("method")) ?? Json.Null).as_str() ?? String()
 }
 
+// With FAKE_RECORD set, a line for the prompt `params` gave `session`, which it
+// answered with `said` characters: its text blocks' characters, those of loom's
+// notes and the start of each.
+fn usage_record(session: String, params: Json, said: i64) {
+    let path = env.variable(String("FAKE_RECORD")) else return
+    var chars: i64 = 0
+    var loom: i64 = 0
+    var notes = List<Json>()
+    var summary = false
+    if let Json.Array(blocks) = params.get(String("prompt")) ?? Json.Null {
+        for b in blocks {
+            let t = (b.get(String("text")) ?? Json.Null).as_str() else continue
+            chars += i64.wrap(t.len())
+            if t.starts_with("[loom:") {
+                loom += i64.wrap(t.len())
+                if t.contains("answer with a summary") { summary = true }
+                var start = String()
+                for r in t.runes() {
+                    if start.len() >= 48 { break }
+                    start.push(r)
+                }
+                notes.push(js(start))
+            }
+        }
+    }
+    var line = LinkedMap<String, Json>()
+    line.insert("session", js(session))
+    line.insert("chars", int(chars))
+    line.insert("loom", int(loom))
+    line.insert("notes", Json.Array(notes))
+    line.insert("said", int(said))
+    line.insert("summary", Json.Bool(summary))
+    if let err(e) = fs.append_text(path, "{Json.Object(line)}\n") { eprintln("fake agent: recording: {e}") }
+}
+
 fn main() {
     let inbox = Receiver<String>()
     let reader = Reader { out: inbox.sender() }
     _ = unsafe { Thread.spawn(reader) }
-    let given = env.args()
-    let picks_up = if given.len() > 0 { given[0].replace("--", "") } else { String() }
-    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>() }
+    var picks_up = String()
+    var record = String()
+    for arg in env.args() {
+        if arg.starts_with("--record=") {
+            record = arg[9..].copy()
+        } else if picks_up.len() == 0 {
+            picks_up = arg.replace("--", "")
+        }
+    }
+    var a = Agent { inbox: inbox, sessions: 0, next_id: 0, tools: 0, picks_up: picks_up, mcp: Map<String, Json>(), meta: Map<String, Json>(), stamp: bytes.hex(random_bytes(3)), backlog: List<Json>(), config: Map<String, Map<String, String>>(), kept: Map<String, Child>(), kept_id: 1, born: unsafe { Instant.now() }, later: List<String>(), usage: Map<String, (i64, i64)>(), record: record, history: Map<String, (i64, i64)>() }
     loop {
         if a.backlog.len() > 0 {
             let m = a.backlog.remove(0)
@@ -1444,4 +1572,68 @@ fn path_of(uri: String) -> String {
 fn value_of(values: Map<String, String>, key: str) -> String {
     if let v = values.find(String(key)) { return v.copy() }
     return String()
+}
+
+// A request to loom mcp as MCP 2026-07-28 makes it, and what to say of its
+// answer (/mcpnew).
+fn talk_modern(child: Child, tool: String, args: String) -> String {
+    let arguments = match parse(args.copy()) {
+        ok(j) => j,
+        err(_) => return "the arguments aren't JSON: {args}",
+    }
+    var info = LinkedMap<String, Json>()
+    info.insert("name", js(String("fake-agent")))
+    info.insert("version", js(String("1")))
+    var meta = LinkedMap<String, Json>()
+    meta.insert("io.modelcontextprotocol/protocolVersion", js(String(if tool == "stale" { "1900-01-01" } else { "2026-07-28" })))
+    meta.insert("io.modelcontextprotocol/clientInfo", Json.Object(info))
+    meta.insert("io.modelcontextprotocol/clientCapabilities", Json.Object(LinkedMap<String, Json>()))
+    let asked = if tool == "discover" { "server/discover" } else if tool == "list" or tool == "stale" { "tools/list" } else { "tools/call" }
+    var p = LinkedMap<String, Json>()
+    if asked == "tools/call" {
+        p.insert("name", js(tool.copy()))
+        p.insert("arguments", arguments)
+    }
+    p.insert("_meta", Json.Object(meta))
+    var m = LinkedMap<String, Json>()
+    m.insert("jsonrpc", js(String("2.0")))
+    m.insert("id", int(2))
+    m.insert("method", js(String(asked)))
+    m.insert("params", Json.Object(p))
+    if let err(e) = child.write_text("{Json.Object(m)}\n") { return "loom mcp: {e}" }
+    let line = child.wait_for_line(String("\"id\":2,"), 300000) else return String("loom mcp didn't answer in 5 minutes")
+    let answer = match parse(line) {
+        ok(j) => j,
+        err(_) => return String("loom mcp's answer isn't JSON"),
+    }
+    if tool == "stale" {
+        let e = answer.get(String("error")) ?? Json.Null
+        let data = e.get(String("data")) ?? Json.Null
+        return "stale: {e.get(String("code")) ?? Json.Null} {names_in(data.get(String("supported")) ?? Json.Null)}"
+    }
+    let result = answer.get(String("result")) ?? Json.Null
+    let kind = (result.get(String("resultType")) ?? Json.Null).as_str() ?? String("none")
+    if tool == "discover" {
+        let server = ((result.get(String("_meta")) ?? Json.Null).get(String("io.modelcontextprotocol/serverInfo")) ?? Json.Null).get(String("name")) ?? Json.Null
+        return "discover: {kind} {names_in(result.get(String("supportedVersions")) ?? Json.Null)} {server.as_str() ?? String()}"
+    }
+    if tool == "list" { return "tools ({kind}): {names_in(result.get(String("tools")) ?? Json.Null)}" }
+    var text = String()
+    if let Json.Array(content) = result.get(String("content")) ?? Json.Null {
+        for c in content {
+            text.push_str((c.get(String("text")) ?? Json.Null).as_str() ?? String())
+        }
+    }
+    return "{tool} ({kind}): {text}"
+}
+
+// A list's strings, or its objects' names, joined with commas.
+fn names_in(list: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(xs) = list {
+        for x in xs {
+            out.push(x.as_str() ?? (x.get(String("name")) ?? Json.Null).as_str() ?? String())
+        }
+    }
+    return out.join(",")
 }

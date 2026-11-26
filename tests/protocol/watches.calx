@@ -1,0 +1,383 @@
+module tests.protocol.watches
+
+// Watches (PLAN.md, "Watching outside events"), against the fake Acta and its
+// fake T3 (tests/fake_acta), which the person has as MCP servers. A watch on a
+// board posts a quiet line in its chat for each change on it, in words ("LOO-206
+// moved to In review · Ola"), and none for another board's. A routine with an
+// event runs when a card on its board moves to Done, with what happened below
+// its prompt, by "event", and not for a move elsewhere; its watch is the
+// routine's to change. A watch on a T3 thread that wakes an agent posts "Thread
+// finished · TITLE" when its run ends, then the agent's quiet turn in its chat,
+// with what the thread said last, and nothing from the person. status.since gives
+// a board's activity or a thread's history since a time or since the chat's last
+// check, and so does the status_since tool. A thread an agent starts through
+// Code Mode wakes it once it finishes, once (skipped without Deno). After a
+// restart a watch goes on from where it read to, telling nothing twice.
+//
+//     calx tests/protocol/watches.calx
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import std.thread.{sleep}
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+// The first script waits while the instance fetches Deno.
+const LONG: u32 = 600000
+
+fn fetch_json(address: String) -> Json ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return try parse(String.from_utf8(r.body) ?? String())
+}
+
+fn calls(fake: String, key: str) -> i64 ! Error {
+    return int_at(try fetch_json("{fake}/test/calls"), key) ?? 0
+}
+
+// Waits until the fake has had `key` called at least `n` times.
+fn called(fake: String, key: str, n: i64) ! Error {
+    var waited = 0
+    while try calls(fake.copy(), key) < n {
+        if waited > 600 { fail "the fake wasn't called with {key}" }
+        unsafe { sleep(100000000) }
+        waited += 1
+    }
+}
+
+fn send(app: Session, conversation: String, cid: str, text: String) ! Error {
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation).s("text", text).done())
+}
+
+// The next message of `role` created in `conversation`, among the frames from
+// `mark` on, read already or still to come; `mark` moves past it.
+fn created(app: mut Session, mark: mut usize, conversation: String, role: str, wait_ms: u32 = 30000) -> Json ! Error {
+    loop {
+        while mark < app.frames.len() {
+            let f = app.frames[mark].copy()
+            mark += 1
+            if str_at(f.copy(), "kind") != some(String("message.created")) { continue }
+            let m = at(f, "message")
+            if str_at(m.copy(), "role") == some(String(role)) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+        }
+        _ = try app.until("event", "", wait_ms)
+    }
+}
+
+// The block of the next quiet line in `conversation`.
+fn line(app: mut Session, mark: mut usize, conversation: String) -> Json ! Error {
+    let m = try created(mut app, mut mark, conversation, "loom")
+    if let Json.Array(blocks) = at(m, "blocks") {
+        if blocks.len() > 0 { return blocks[0].copy() }
+    }
+    fail "a loom line with no block"
+}
+
+// The status of `card` on message `m` once it has one, as it came or with a
+// message.updated from `mark` on, read already or still to come.
+fn card_status(app: mut Session, mark: usize, m: Json, card: str) -> String ! Error {
+    if let s = str_at(at(at(m.copy(), "cards"), card), "status") { return s }
+    let id = str_at(m, "id") ?? String()
+    var at_frame = mark
+    loop {
+        while at_frame < app.frames.len() {
+            let f = app.frames[at_frame].copy()
+            at_frame += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let u = at(f, "message")
+            if str_at(u.copy(), "id") != some(id.copy()) { continue }
+            if let s = str_at(at(at(u, "cards"), card), "status") { return s }
+        }
+        _ = try app.until("event", "")
+    }
+}
+
+// The next event of `kind` from `mark` on; `mark` moves past it.
+fn next_event(app: mut Session, mark: mut usize, kind: str) -> Json ! Error {
+    loop {
+        while mark < app.frames.len() {
+            let f = app.frames[mark].copy()
+            mark += 1
+            if str_at(f.copy(), "t") == some(String("event")) and str_at(f.copy(), "kind") == some(String(kind)) { return f }
+        }
+        _ = try app.until("event", "")
+    }
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn message_of(r: Json) -> String {
+    return str_at(at(r, "error"), "message") ?? String()
+}
+
+// The routine's runs, once `n` have ended.
+fn runs_ended(app: mut Session, q: str, id: String, n: usize) -> List<Json> ! Error {
+    var waited = 0
+    loop {
+        let r = try app.cmd(q, "routine.runs", Obj.new().s("id", id.copy()).done())
+        var ended = List<Json>()
+        if let Json.Array(runs) = at(at(r, "value"), "runs") {
+            for each in runs {
+                let status = str_at(each.copy(), "status") ?? String()
+                if status != "running" and status != "waiting" { ended.push(each.copy()) }
+            }
+        }
+        if ended.len() >= n { return ended }
+        if waited > 600 { fail "the routine's run didn't end" }
+        unsafe { sleep(100000000) }
+        waited += 1
+    }
+}
+
+// The watch watch.list gave that runs a routine.
+fn routine_watch(list: Json) -> Json {
+    if let Json.Array(ws) = at(at(list, "value"), "watches") {
+        for w in ws {
+            if str_at(at(w.copy(), "wake"), "routine") != none { return w.copy() }
+        }
+    }
+    return Json.Null
+}
+
+fn now_ms() -> i64 {
+    return unsafe { Timestamp.now() }.unix_ms
+}
+
+fn run(i: Instance, fake: String) -> String ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var seen = app.frames.len()
+    var events = app.frames.len()
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Planner")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("allow")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+    let board = Obj.new().s("board", String("aaen-studios/loom")).done()
+    let start = now_ms()
+
+    // --- Refused ---
+    let no_acta = try app.cmd("q_3", "watch.put", Obj.new().j("target", board.copy()).s("conversation", chat.copy()).done())
+    try check(code_of(no_acta.copy()) == "not_found" and message_of(no_acta) == "Acta isn't connected.", "with no Acta connected, a board can't be watched")
+    _ = try app.cmd("q_4", "mcp.put", Obj.new().s("name", String("acta")).s("url", "{fake}/api/mcp").j("headers", Obj.new().s("Authorization", String("Bearer acta-key")).done()).done())
+    _ = try app.cmd("q_5", "mcp.put", Obj.new().s("name", String("t3")).s("url", "{fake}/t3/mcp").j("headers", Obj.new().s("Authorization", String("Bearer t3-key")).done()).done())
+    _ = try app.cmd("q_6", "agent.update", Obj.new().s("agent", agent.copy()).j("mcp", Json.Array([Json.Str(String("t3"))])).done())
+    let nowhere = try app.cmd("q_7", "watch.put", Obj.new().j("target", board.copy()).done())
+    try check(code_of(nowhere.copy()) == "bad_request" and message_of(nowhere) == "A watch needs a chat to post in, something to wake, or both.", "a watch with no chat and nothing to wake is refused")
+    let no_status = try app.cmd("q_8", "watch.put", Obj.new().j("target", board.copy()).s("conversation", chat.copy()).s("to", String("shipped")).done())
+    try check(code_of(no_status) == "bad_request", "and one for a move to a status Acta doesn't have")
+    let no_server = try app.cmd("q_9", "watch.put", Obj.new().s("integration", String("t3")).j("target", Obj.new().s("thread", String("th_9")).done()).s("conversation", chat.copy()).done())
+    try check(code_of(no_server.copy()) == "bad_request" and message_of(no_server).contains("names its server"), "and a T3 watch that doesn't name its server")
+    let other = try app.cmd("q_10", "watch.put", Obj.new().s("server", String("nope")).j("target", board.copy()).s("conversation", chat.copy()).done())
+    try check(code_of(other.copy()) == "not_found" and message_of(other) == "nope isn't one of your MCP servers over HTTP.", "and one on a server that isn't theirs")
+
+    // --- A board ---
+    let put = try app.cmd("q_11", "watch.put", Obj.new().j("target", board.copy()).s("conversation", chat.copy()).done())
+    let w = at(at(put, "value"), "watch")
+    let watch_id = str_at(w.copy(), "id") ?? String()
+    try check(watch_id.len() > 0 and str_at(w.copy(), "integration") == some(String("acta")) and str_at(w.copy(), "server") == some(String("acta")) and at(w.copy(), "target") == board and at(w.copy(), "wake") == Json.Null, "a board is watched, on the person's Acta, posting in a chat and waking nothing")
+    try check("{at(w, "events")}" == #"["moved","created","commented","assigned"]"#, "for every kind of change, with no events given")
+    let updated = try next_event(mut app, mut events, "watch.updated")
+    try check(str_at(at(updated, "watch"), "id") == some(watch_id.copy()), "and the person's devices hear of it")
+    try send(app, chat.copy(), "m_cards_1", String("Where is LOO-206?"))
+    let asked = try created(mut app, mut seen, chat.copy(), "person")
+    let was = try card_status(mut app, seen, asked, "LOO-206")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    _ = try fetch_json("{fake}/test/status?task=LOO-206&status=review&by=Ola")
+    let moved = try line(mut app, mut seen, chat.copy())
+    try send(app, chat.copy(), "m_cards_2", String("And LOO-206 now?"))
+    let asked_again = try created(mut app, mut seen, chat.copy(), "person")
+    let now = try card_status(mut app, seen, asked_again, "LOO-206")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    try check(was == "in_progress" and now == "review", "a card the watch saw move is looked up again for the next message that names it, not shown as it was kept")
+    try check(str_at(moved.copy(), "kind") == some(String("update")) and str_at(moved.copy(), "integration") == some(String("acta")) and str_at(moved.copy(), "watch") == some(watch_id.copy()), "a card moving on it is a quiet line in the chat, an update from the watch")
+    try check(str_at(moved.copy(), "board") == some(String("aaen-studios/loom")) and str_at(moved.copy(), "board_name") == some(String("loom")) and str_at(moved.copy(), "card") == some(String("LOO-206")) and str_at(moved.copy(), "title") == some(String("Show agents' usage limits in the sidebar")) and str_at(moved.copy(), "url") == some(String("https://acta.aaenz.no/aaen-studios/loom#LOO-206")), "with its board, card, title and address")
+    try check(str_at(moved.copy(), "event") == some(String("moved")) and str_at(moved.copy(), "to") == some(String("review")) and str_at(moved.copy(), "by") == some(String("Ola")) and str_at(moved, "text") == some(String("LOO-206 moved to In review · Ola")), "and what happened, by who: \"LOO-206 moved to In review · Ola\"")
+    _ = try fetch_json("{fake}/test/activity?task=CAL-338&text=moved%20it%20to%20Done&by=Ola")
+    _ = try fetch_json("{fake}/test/activity?task=LOO-351&text=commented%3A%20Shipped%20in%200.3.1&by=Ola")
+    let commented = try line(mut app, mut seen, chat.copy())
+    try check(str_at(commented.copy(), "card") == some(String("LOO-351")) and str_at(commented, "event") == some(String("commented")), "a comment is a line too, and a card on another board isn't")
+
+    // --- A routine on an event ---
+    let r = try app.cmd("q_12", "routine.put", Obj.new().s("name", String("Shipped")).s("agent", agent.copy()).s("prompt", String("Note what shipped.")).j("event", Obj.new().j("target", board.copy()).s("to", String("done")).done()).done())
+    let routine = at(at(r, "value"), "routine")
+    let routine_id = str_at(routine.copy(), "id") ?? String()
+    try check("{at(routine.copy(), "event")}" == #"{"integration":"acta","server":"acta","target":{"board":"aaen-studios/loom"},"kind":"moved","to":"done"}"#, "a routine runs on an event: a move to Done on a board, on the person's Acta")
+    try check((str_at(routine, "when") ?? String()).contains("when a card on aaen-studios/loom moves to Done"), "which its when says")
+    let listed = try app.cmd("q_13", "watch.list", Obj.new().done())
+    let its = routine_watch(listed)
+    try check(str_at(at(its.copy(), "wake"), "routine") == some(routine_id.copy()) and str_at(its.copy(), "conversation") == some(String()), "it's kept as a watch that runs the routine, posting nowhere")
+    let mine = try app.cmd("q_14", "watch.remove", Obj.new().s("id", str_at(its, "id") ?? String()).done())
+    try check(code_of(mine.copy()) == "bad_request" and message_of(mine).contains("routine.put"), "which is the routine's to change")
+    _ = try fetch_json("{fake}/test/status?task=LOO-351&status=in_progress&by=Ola")
+    let elsewhere = try line(mut app, mut seen, chat.copy())
+    try check(str_at(elsewhere, "text") == some(String("LOO-351 moved to In progress · Ola")), "a move to In progress is a line")
+    _ = try fetch_json("{fake}/test/status?task=LOO-206&status=done&by=Ola")
+    let shipped = try line(mut app, mut seen, chat.copy())
+    try check(str_at(shipped, "text") == some(String("LOO-206 moved to Done · Ola")), "and a move to Done")
+    let ran = try runs_ended(mut app, "q_15", routine_id.copy(), 1)
+    let said = str_at(ran[0].copy(), "said") ?? String()
+    try check(ran.len() == 1 and str_at(ran[0].copy(), "by") == some(String("event")), "the move to Done ran the routine, once, by an event")
+    try check(said.contains("Note what shipped.") and said.contains("LOO-206 \"Show agents' usage limits in the sidebar\": moved to Done, by Ola") and not said.contains("LOO-351"), "with what happened below its prompt, and the move to In progress didn't")
+
+    // --- A T3 thread ---
+    _ = try fetch_json("{fake}/test/t3/start?thread=th_9&title=Fix%20the%20build")
+    let t3 = try app.cmd("q_16", "watch.put", Obj.new().s("integration", String("t3")).s("server", String("t3")).j("target", Obj.new().s("thread", String("th_9")).done()).s("conversation", chat.copy()).j("wake", Obj.new().s("agent", String("Planner")).done()).done())
+    let tw = at(at(t3, "value"), "watch")
+    let thread_watch = str_at(tw.copy(), "id") ?? String()
+    try check(str_at(at(tw.copy(), "wake"), "agent") == some(agent.copy()) and "{at(tw, "events")}" == #"["finished"]"#, "a T3 thread is watched, waking an agent, named by its name, when it finishes")
+    try called(fake.copy(), "t3_thread_wait th_9", 1)
+    var person = seen
+    _ = try fetch_json("{fake}/test/t3/finish?thread=th_9&status=completed&text=The%20build%20is%20green%20again.")
+    let finished = try line(mut app, mut seen, chat.copy())
+    try check(str_at(finished.copy(), "integration") == some(String("t3")) and str_at(finished.copy(), "server") == some(String("t3")) and str_at(finished.copy(), "thread") == some(String("th_9")) and str_at(finished.copy(), "title") == some(String("Fix the build")) and str_at(finished.copy(), "run") == some(String("run_1")), "the thread finishing is a quiet line, with its server, thread, title and run")
+    try check(str_at(finished.copy(), "event") == some(String("finished")) and str_at(finished.copy(), "state") == some(String("completed")) and str_at(finished, "text") == some(String("Thread finished · Fix the build")), "\"Thread finished · Fix the build\", with its state")
+    let woke = reply_text(try created(mut app, mut seen, chat.copy(), "agent"))
+    try check(woke.contains("The T3 thread \"Fix the build\" (id th_9, on the MCP server t3) finished.") and woke.contains("The build is green again."), "then the agent's turn in its chat, told what the thread said last")
+    var from_person = false
+    while person < seen {
+        let f = app.frames[person].copy()
+        person += 1
+        if str_at(f.copy(), "kind") == some(String("message.created")) and str_at(at(f, "message"), "role") == some(String("person")) { from_person = true }
+    }
+    try check(not from_person, "a quiet turn, with nothing from the person")
+    _ = try fetch_json("{fake}/test/t3/start?thread=th_9")
+    _ = try fetch_json("{fake}/test/t3/finish?thread=th_9&status=failed")
+    let failed = try line(mut app, mut seen, chat.copy())
+    try check(str_at(failed.copy(), "run") == some(String("run_2")) and str_at(failed, "text") == some(String("Thread failed · Fix the build")), "its next run failing is \"Thread failed\"")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    _ = try app.cmd("q_17", "watch.remove", Obj.new().s("id", thread_watch.copy()).done())
+    let removed = try next_event(mut app, mut events, "watch.removed")
+    try check(str_at(removed, "watch") == some(thread_watch), "watch.remove takes it away, which the devices hear")
+
+    // --- Status since a check ---
+    let since = try app.cmd("q_18", "status.since", Obj.new().j("target", board.copy()).s("conversation", chat.copy()).i("since", start).done())
+    let s = at(since, "value")
+    var kinds = List<String>()
+    if let Json.Array(list) = at(s.copy(), "activity") {
+        for a in list {
+            kinds.push("{str_at(a.copy(), "card") ?? String()} {str_at(a.copy(), "kind") ?? String()} {str_at(a.copy(), "to") ?? String()} {str_at(a, "by") ?? String()}")
+        }
+    }
+    try check(kinds.join(", ") == "LOO-206 moved review Ola, LOO-351 commented  Ola, LOO-351 moved in_progress Ola, LOO-206 moved done Ola", "status.since gives a board's activity since a time, oldest first, with who did it")
+    let checked = int_at(s, "checked") ?? 0
+    let again = at(try app.cmd("q_19", "status.since", Obj.new().j("target", board.copy()).s("conversation", chat.copy()).done()), "value")
+    try check(int_at(again.copy(), "since") == some(checked) and "{at(again, "activity")}" == "[]", "and next time, since that check, from the same chat")
+    _ = try fetch_json("{fake}/test/activity?task=LOO-206&text=assigned%20it%20to%20Ola&by=Elliot")
+    let assigned = try line(mut app, mut seen, chat.copy())
+    try check(str_at(assigned.copy(), "assignee") == some(String("Ola")) and str_at(assigned, "text") == some(String("LOO-206 assigned to Ola · Elliot")), "an assignment is a line, with who it went to")
+    let one = at(try app.cmd("q_20", "status.since", Obj.new().j("target", Obj.new().s("board", String("aaen-studios/loom")).s("card", String("LOO-206")).done()).s("conversation", chat.copy()).done()), "value")
+    var card_kinds = List<String>()
+    if let Json.Array(list) = at(one, "activity") {
+        for a in list { card_kinds.push(str_at(a, "kind") ?? String()) }
+    }
+    try check(card_kinds.join(" ") == "moved moved assigned", "a card's own activity, from a day back the first time it's checked from a chat")
+    let thread = at(at(try app.cmd("q_21", "status.since", Obj.new().s("server", String("t3")).j("target", Obj.new().s("thread", String("th_9")).done()).i("since", start).done()), "value"), "thread")
+    try check(str_at(thread.copy(), "title") == some(String("Fix the build")) and "{at(thread, "runs")}".contains("\"status\":\"failed\""), "and a T3 thread's, with its runs")
+    let unnamed = try app.cmd("q_22", "status.since", Obj.new().j("target", Obj.new().s("thread", String("th_9")).done()).done())
+    try check(code_of(unnamed) == "not_found", "a thread's needs its server")
+
+    // --- The agent's tool ---
+    let helper = str_at(at(at(try app.cmd("q_23", "agent.create", Obj.new().s("name", String("Helper")).s("acp_agent", String("fake")).s("instructions", String("Test.")).b("code_mode", false).done()), "value"), "agent"), "id") ?? String()
+    let side = str_at(at(try app.cmd("q_24", "conversation.create", Obj.new().s("agent", helper).done()), "value"), "conversation") ?? String()
+    var side_seen = app.frames.len()
+    try send(app, side.copy(), "m_1", String(#"/mcp status_since {"board":"aaen-studios/loom"}"#))
+    let told = reply_text(try created(mut app, mut side_seen, side.copy(), "agent"))
+    try check(told.starts_with("status_since: ") and told.contains("\"card\":\"LOO-206\"") and told.contains("\"kind\":\"assigned\""), "status_since gives an agent the same, from its chat")
+    try send(app, side.copy(), "m_2", String(#"/mcp status_since {"board":"aaen-studios/loom"}"#))
+    let told_again = reply_text(try created(mut app, mut side_seen, side.copy(), "agent"))
+    try check(told_again.contains("\"activity\":[]"), "and the next time, only what came since")
+
+    // --- A thread an agent starts ---
+    try send(app, chat.copy(), "m_3", "/mcp run_code {Obj.new().s("code", String(#"const r = await mcp.t3.t3_thread_launch({ title: "Write the notes", prompt: "Write them." }); return r.threadId;"#)).done()}")
+    let launched = reply_text(try created(mut app, mut seen, chat.copy(), "agent", LONG))
+    if launched.contains("Deno couldn't be fetched") or launched.contains("Deno has no build") {
+        println("skip  a thread an agent starts: {launched}")
+    } else {
+        try check(launched.starts_with("run_code: Returned:") and launched.contains("th_2"), "an agent in Code Mode starts a T3 thread")
+        var follows = Json.Null
+        while follows == Json.Null {
+            let e = try next_event(mut app, mut events, "watch.updated")
+            if str_at(at(at(e.copy(), "watch"), "target"), "thread") == some(String("th_2")) { follows = at(e, "watch") }
+        }
+        try check(str_at(at(follows.copy(), "wake"), "agent") == some(agent.copy()) and str_at(follows.copy(), "conversation") == some(chat.copy()) and bool_at(follows.copy(), "once") == some(true) and str_at(at(follows.copy(), "target"), "title") == some(String("Write the notes")), "which is watched at once, to wake it in its chat when it finishes, once")
+        _ = try fetch_json("{fake}/test/t3/finish?thread=th_2&status=completed&text=Notes%20written.")
+        let done = try line(mut app, mut seen, chat.copy())
+        try check(str_at(done, "text") == some(String("Thread finished · Write the notes")), "the thread finishing is a line in its chat")
+        let after = reply_text(try created(mut app, mut seen, chat.copy(), "agent"))
+        try check(after.contains("Notes written."), "and the agent's turn")
+        let gone = try next_event(mut app, mut events, "watch.removed")
+        try check(str_at(gone, "watch") == str_at(follows, "id"), "and its watch goes")
+    }
+    app.close()
+    return chat
+}
+
+// After a restart: the board watch reads on from where it had, and the
+// routine's still runs.
+fn after_restart(i: Instance, fake: String, chat: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var seen = app.frames.len()
+    _ = try fetch_json("{fake}/test/status?task=LOO-351&status=done&by=Ola")
+    let next = try line(mut app, mut seen, chat.copy())
+    try check(str_at(next, "text") == some(String("LOO-351 moved to Done · Ola")), "after a restart, the next line is the next change, with nothing told again")
+    var routine = String()
+    if let Json.Array(rs) = at(at(try app.cmd("q_1", "routine.list", Obj.new().done()), "value"), "routines") {
+        for r in rs {
+            routine = str_at(r, "id") ?? String()
+        }
+    }
+    let ran = try runs_ended(mut app, "q_2", routine, 2)
+    try check(ran.len() == 2 and (str_at(ran[0].copy(), "said") ?? String()).contains("LOO-351"), "and the routine runs for it")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_acta/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let said = child.wait_for_line(String("fake acta: "), 120000) else {
+        child.kill()
+        fail "the fake Acta didn't start"
+    }
+    return (child, said[said.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let args: List<String> = [String("--test-acta"), "{fake}/api/mcp", String("--test-minute-ms"), String("1000")]
+    let inst = match Instance.start_with(args.copy()) {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    var failure: String? = none
+    var chat = String()
+    match run(inst.copy(), fake.copy()) {
+        ok(c) => chat = c,
+        err(e) => failure = some("{e}"),
+    }
+    if failure == none {
+        match inst.restart_with(args, 0) {
+            ok(again) => {
+                if let err(e) = after_restart(again.copy(), fake.copy(), chat) { failure = some("{e}") }
+                again.stop()
+            },
+            err(e) => failure = some("{e}"),
+        }
+    } else {
+        inst.stop()
+    }
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nwatches: all good")
+}

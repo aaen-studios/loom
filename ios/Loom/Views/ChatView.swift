@@ -30,8 +30,11 @@ struct ChatView: View {
     @State private var pinsOpen = false
     /// The context's card, open in a sheet from the header's ring.
     @State private var contextOpen = false
+    @AppStorage(Prefs.showContext) private var showContext = false
     /// The group chat's settings, open in a sheet.
     @State private var roomSettings = false
+    /// What the agent follows, open in a sheet from the menu.
+    @State private var followingOpen = false
 
     var body: some View {
         let model = session.model
@@ -41,6 +44,7 @@ struct ChatView: View {
         let here = roomId != nil ? model.room == roomId : model.selected == agentId && model.thread == thread?.id && model.room == nil
         let messages = here ? model.shown : []
         let approvals = here ? model.shownApprovals : []
+        let stacked = stackedLines(messages)
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: Tokens.Space.l + 2) {
@@ -50,30 +54,41 @@ struct ChatView: View {
                             .frame(maxWidth: .infinity)
                     }
                     ForEach(messages) { m in
-                        Group {
-                            if m.deleted {
+                        VStack(alignment: m.isPerson ? .trailing : .leading, spacing: Tokens.Space.s) {
+                            if let line = m.watchLine {
+                                WatchLineRow(line: line)
+                                    .padding(.top, stacked.contains(m.id) ? 6 - (Tokens.Space.l + 2) : 0)
+                            } else if m.deleted {
                                 DeletedMark(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent)
+                            } else if isStartLine(m) {
+                                // The line a thread the person started lands in: its card.
+                                ThreadCards(message: m)
                             } else if m.isPerson {
                                 PersonMessage(message: m, agent: agent, tint: room.map { $0.color.isEmpty ? "grey" : $0.color })
                             } else {
                                 Reply(message: m, agent: m.routed.flatMap { model.agent($0.agent) } ?? agent, openThoughts: $openThoughts)
                             }
+                            // The cards made from it, under it on its side.
+                            if !m.deleted && !m.made.isEmpty {
+                                MadePills(message: m)
+                            }
                         }
+                        .frame(maxWidth: .infinity, alignment: m.isPerson ? .trailing : .leading)
                         // Lit for a moment, once a quote went to it.
                         .background(lit == m.id ? P.thread(agent?.color ?? "").opacity(0.12) : .clear, in: RoundedRectangle(cornerRadius: Tokens.Radius.bubble, style: .continuous))
-                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted) { model.reply(to: m.id) })
+                        .modifier(SwipeToReply(enabled: thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil) { model.reply(to: m.id) })
                         .contextMenu {
                             // One menu a message rather than selectable text in each
                             // paragraph, which made each row many times dearer to build.
                             let text = m.text
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Button {
                                     model.reply(to: m.id)
                                 } label: {
                                     Label("Reply", systemImage: "arrowshape.turn.up.left")
                                 }
                             }
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Button {
                                     session.send(model.pin(m.id, !m.pinned))
                                 } label: {
@@ -92,8 +107,17 @@ struct ChatView: View {
                                     Label("Select text", systemImage: "selection.pin.in.out")
                                 }
                             }
+                            // A card on one of the person's Acta boards, made from its words
+                            // (PLAN.md, "Acta beside the chat").
+                            if model.hasActa && thread == nil && !m.live && !m.queued && !m.deleted && !isStartLine(m) && m.watchLine == nil {
+                                Button {
+                                    session.send(model.startCard(message: m.id, text: text))
+                                } label: {
+                                    Label("Make a card…", systemImage: "square.3.layers.3d")
+                                }
+                            }
                             // At once, leaving a mark where it was (PLAN.md, "Deleting a message").
-                            if thread == nil && !m.live && !m.queued && !m.deleted {
+                            if thread == nil && !m.live && !m.queued && !m.deleted && m.watchLine == nil {
                                 Divider()
                                 Button(role: .destructive) {
                                     session.send(model.deleteMessage(m.id))
@@ -191,7 +215,7 @@ struct ChatView: View {
             }
             // How full the agent's session context is, in a group chat the member's that
             // answered last, with its card in a sheet.
-            if thread == nil, here, let fill = model.context {
+            if thread == nil, here, showContext, let fill = model.context {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         contextOpen = true
@@ -235,6 +259,14 @@ struct ChatView: View {
                         } label: {
                             Label("Start a new chat", systemImage: "square.and.pencil")
                         }
+                        // What the agent follows, when it follows something.
+                        if !model.following(.agent(agentId)).isEmpty {
+                            Button {
+                                followingOpen = true
+                            } label: {
+                                Label("Following", systemImage: "bell")
+                            }
+                        }
                         // Other agents' threads with it, each to read on a screen of its own.
                         let asks = model.asks(agentId)
                         if !asks.isEmpty {
@@ -272,6 +304,28 @@ struct ChatView: View {
         .sheet(isPresented: $roomSettings) {
             if let roomId { RoomSettingsSheet(roomId: roomId) }
         }
+        .sheet(isPresented: warming ? .constant(false) : $followingOpen) {
+            FollowingSheet(agentId: agentId)
+        }
+        // Acta beside the chat and T3's start sheet, from the chat shown: a card's preview
+        // here while no board is pushed over it, which shows its own.
+        .sheet(isPresented: shown(here, model.acta.sheet != nil && model.acta.screen == nil) { model.acta.sheet = nil }) {
+            CardSheetView()
+        }
+        .sheet(isPresented: shown(here, model.acta.form != nil) { model.acta.form = nil }) {
+            MakeCardSheet()
+                .presentationDetents([.large])
+        }
+        .sheet(isPresented: shown(here, model.t3.form != nil) { model.t3.form = nil }) {
+            T3StartSheet()
+                .presentationDetents([.large])
+        }
+        .navigationDestination(isPresented: shown(here && thread == nil, model.acta.screen != nil) {
+            model.acta.screen = nil
+            model.acta.sheet = nil
+        }) {
+            BoardScreenView()
+        }
         .toolbarBackground(P.bg, for: .navigationBar)
         .quickLookPreview(warming ? .constant(nil) : Bindable(model).toOpen)
         .fullScreenCover(item: warming ? .constant(nil) : Bindable(model).viewing) { v in
@@ -280,12 +334,12 @@ struct ChatView: View {
         .sheet(isPresented: warming ? .constant(false) : $pinsOpen) {
             PinsSheet(agent: agent)
         }
-        .sheet(isPresented: warming ? .constant(false) : $contextOpen) {
+        .sheet(isPresented: warming || !showContext ? .constant(false) : $contextOpen) {
             ContextSheet()
         }
         .sheet(item: $reading) { r in
             NavigationStack {
-                SelectableText(text: r.text, message: r.message, agent: r.agent) { quote, ask in
+                SelectableText(text: r.text, message: r.message, agent: r.agent, paths: session.model.emoji.paths, selectAll: r.selectAll) { quote, ask in
                     reading = nil
                     if let id = r.message { session.model.reply(to: id, quote: quote, ask: ask) }
                 }
@@ -304,6 +358,7 @@ struct ChatView: View {
             if let roomId {
                 model.open(room: roomId)
                 session.flush()
+                openFromLaunch()
                 return
             }
             model.select(agentId)
@@ -336,15 +391,65 @@ struct ChatView: View {
         if thread == nil, args.contains("-context") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { contextOpen = true }
         }
+        // `-select <message>` opens Select text on that message with all its words
+        // selected, for screenshots of the selection over its emoji.
+        if thread == nil, let i = args.firstIndex(of: "-select"), i + 1 < args.count {
+            let id = args[i + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                guard let m = session.model.messages.first(where: { $0.id == id }) else { return }
+                reading = Reading(text: m.text, message: m.id, agent: !m.isPerson, selectAll: true)
+            }
+        }
+        // `-card <id>` opens that card's preview on the loom board, `-make <message>` Make a
+        // card on that message, `-board` the board last used, `-t3start` Start a T3
+        // thread, and `-jump <message>` goes to that message, once the chat's messages and
+        // the person's boards have come, for screenshots of each.
+        func value(_ flag: String) -> String? {
+            guard let i = args.firstIndex(of: flag), i + 1 < args.count else { return nil }
+            return args[i + 1]
+        }
+        if thread == nil {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                let model = session.model
+                if let id = value("-jump") { model.jumpTo = id }
+                if let id = value("-card") { session.send(model.openCard(board: "aaen-studios/loom", id: id)) }
+                if let id = value("-make"), let m = model.messages.first(where: { $0.id == id }) { session.send(model.startCard(message: m.id, text: m.text)) }
+                if args.contains("-board") { for f in model.openBoard() { session.send(f) } }
+                if args.contains("-t3start") { session.send(model.openT3Form()) }
+                // `-following` opens what the chat follows: the agent's, or the group
+                // chat's settings.
+                if args.contains("-following") {
+                    if roomId != nil { roomSettings = true } else { followingOpen = true }
+                }
+            }
+        }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
         threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }
     }
 
-    /// A link tapped in a message: a file it mentions or one sent with it opens here, and
-    /// a page in the browser.
+    /// Whether what the model has open shows from this chat: only from the one shown, and
+    /// never from the hidden one drawn before any opens. Shut by the person, `shut` puts it
+    /// away in the model.
+    private func shown(_ here: Bool, _ open: Bool, shut: @escaping () -> Void) -> Binding<Bool> {
+        Binding(get: { !warming && here && open }, set: { if !$0 { shut() } })
+    }
+
+    /// A link tapped in a message: a card's pill opens its preview, a T3 thread opens in T3,
+    /// a file it mentions or one sent with it opens here, and a page in the browser.
     private func follow(_ url: URL) -> OpenURLAction.Result {
         let model = session.model
-        switch LinkTo(url.absoluteString) {
+        let link = url.absoluteString
+        if link.hasPrefix(cardLink) {
+            if let c = model.pillCard(link), !c.board.isEmpty {
+                session.send(model.openCard(board: c.board, id: c.id))
+            }
+            return .handled
+        }
+        if let thread = linkThread(link) {
+            let page = model.messages.lazy.flatMap(\.threads).first { $0.thread == thread }?.url
+            return page.flatMap(URL.init(string:)).map { .systemAction($0) } ?? .handled
+        }
+        switch LinkTo(link) {
         case .file:
             session.send(model.openFileMention(url.absoluteString))
             return .handled
@@ -392,26 +497,39 @@ struct ChatView: View {
         /// The message it's from, to reply to a part of; nil for one that can't be.
         var message: String? = nil
         var agent = false
+        /// Whether it opens with all its words selected (`-select`).
+        var selectAll = false
     }
 }
 
 /// A message's text, to select any part of it, and with a part selected, to quote it or,
-/// in an agent's reply, ask about it (LOO-200).
+/// in an agent's reply, ask about it (LOO-200). Its emoji are drawn as the chat draws
+/// them, each one character to the selection, which highlights it as the words beside it
+/// and copies and quotes it as the emoji itself or `:name:` (LOO-347).
 private struct SelectableText: UIViewRepresentable {
     var text: String
     var message: String?
     var agent: Bool
+    /// The person's own emoji's pictures, by id.
+    var paths: [String: String]
+    /// Whether it opens with all its words selected (`-select` at launch).
+    var selectAll = false
     var quote: (String, Bool) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     final class Coordinator: NSObject, UITextViewDelegate {
         var parent: SelectableText
+        /// What it shows, piece by piece, to copy and quote from.
+        var shown: [Emoji.Piece] = []
+        /// What it was drawn from, so it's drawn again only when that changes: the words,
+        /// the pictures of the person's own, and the text size.
+        var drawn: (text: String, paths: [String: String], size: DynamicTypeSize)?
         init(_ parent: SelectableText) { self.parent = parent }
 
         func textView(_ textView: UITextView, editMenuForTextIn range: NSRange, suggestedActions: [UIMenuElement]) -> UIMenu? {
-            guard parent.message != nil, range.length > 0, let r = Range(range, in: textView.text) else { return nil }
-            let words = String(textView.text[r])
+            guard parent.message != nil, range.length > 0 else { return nil }
+            let words = Emoji.copied(shown, range)
             var mine = [UIAction(title: "Quote", image: UIImage(systemName: "text.quote")) { [parent] _ in parent.quote(words, false) }]
             if parent.agent {
                 mine.append(UIAction(title: "Ask about this", image: UIImage(systemName: "questionmark.bubble")) { [parent] _ in parent.quote(words, true) })
@@ -420,22 +538,76 @@ private struct SelectableText: UIViewRepresentable {
         }
     }
 
-    func makeUIView(context: Context) -> UITextView {
-        let v = UITextView()
+    /// The text view, which copies what's selected as `copied` gives it.
+    final class Words: UITextView {
+        var copied: ((NSRange) -> String)?
+
+        override func copy(_ sender: Any?) {
+            guard let copied, selectedRange.length > 0 else { return super.copy(sender) }
+            UIPasteboard.general.string = copied(selectedRange)
+        }
+    }
+
+    func makeUIView(context: Context) -> Words {
+        let v = Words()
         v.delegate = context.coordinator
         v.isEditable = false
         v.isSelectable = true
         v.backgroundColor = .clear
-        v.font = UIFont.preferredFont(forTextStyle: .body)
         v.adjustsFontForContentSizeCategory = true
-        v.textColor = UIColor(P.ink)
         v.textContainerInset = UIEdgeInsets(top: 16, left: 12, bottom: 16, right: 12)
+        let coordinator = context.coordinator
+        v.copied = { [weak coordinator] range in coordinator.map { Emoji.copied($0.shown, range) } ?? "" }
         return v
     }
 
-    func updateUIView(_ v: UITextView, context: Context) {
-        context.coordinator.parent = self
-        if v.text != text { v.text = text }
+    func updateUIView(_ v: Words, context: Context) {
+        let c = context.coordinator
+        c.parent = self
+        let size = context.environment.dynamicTypeSize
+        guard c.drawn?.text != text || c.drawn?.paths != paths || c.drawn?.size != size else { return }
+        let first = c.drawn == nil
+        c.drawn = (text, paths, size)
+        let font = UIFont.preferredFont(forTextStyle: .body)
+        let words: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor(P.ink)]
+        let side = (font.pointSize * Emoji.inText).rounded()
+        let made = NSMutableAttributedString()
+        c.shown = []
+        for p in Emoji.pieces(text, paths: paths) {
+            var image: UIImage?
+            if case .emoji(_, let picture, let own) = p {
+                image = own ? paths[picture].flatMap { Emoji.picture(path: $0, side: side) } : Emoji.picture(picture, side: side)
+            }
+            switch (p, image) {
+            case (.emoji, .some(let image)):
+                let a = NSTextAttachment(image: image)
+                // On the line as the chat's emoji sit (`Emoji.inline`).
+                a.bounds = CGRect(x: 0, y: -side * 0.2, width: side, height: side)
+                let one = NSMutableAttributedString(attachment: a)
+                one.addAttributes(words, range: NSRange(location: 0, length: one.length))
+                made.append(one)
+                c.shown.append(p)
+            case (.emoji(let copies, _, _), .none):
+                // A picture it doesn't have is the emoji as text, as it copies.
+                made.append(NSAttributedString(string: copies, attributes: words))
+                c.shown.append(.words(copies))
+            case (.words(let w), _):
+                made.append(NSAttributedString(string: w, attributes: words))
+                c.shown.append(p)
+            }
+        }
+        // Drawn again, as a picture came or the text size changed, it keeps what the person
+        // selected while it's still the same length.
+        let kept = v.selectedRange
+        let same = v.textStorage.length == made.length
+        v.attributedText = made
+        if !first && same && kept.length > 0 { v.selectedRange = kept }
+        if first && selectAll {
+            DispatchQueue.main.async {
+                v.becomeFirstResponder()
+                v.selectedRange = NSRange(location: 0, length: v.textStorage.length)
+            }
+        }
     }
 }
 
@@ -722,7 +894,7 @@ struct PersonMessage: View {
                 }
             }
             if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                MarkdownView(titledLinks(words, message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
+                MarkdownView(titledLinks(withCardPills(words, message.cards), message.links), keepBreaks: true, font: Fonts.body, links: model.inline(message))
                     .fixedSize(horizontal: false, vertical: true)
                     .foldLong(message.came, key: message.id, pin: pin)
                     .padding(.horizontal, Tokens.Space.l)
@@ -732,6 +904,10 @@ struct PersonMessage: View {
             }
             if message.queued {
                 Text("Waiting to send").font(Fonts.caption).foregroundStyle(P.ink3)
+            }
+            // The T3 threads it names, each a card.
+            if pin == nil {
+                ThreadCards(message: message)
             }
         }
         .frame(maxWidth: .infinity, alignment: pin == nil ? .trailing : .leading)
@@ -820,6 +996,10 @@ struct Reply: View {
             if pin == nil && !message.sources.isEmpty && sourcesAt(laid) == nil {
                 SourcesTab(message: message)
             }
+            // The T3 threads it started or names, each a card.
+            if pin == nil {
+                ThreadCards(message: message)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -847,11 +1027,11 @@ struct Reply: View {
                 if onTheWay {
                     // What it said on its way to the answer: smaller and quieter, never a
                     // bubble, so it doesn't read as a message.
-                    MarkdownView(session.model.replyWords(message, b.text), font: Fonts.small, ink: P.ink2, live: live, links: links)
+                    MarkdownView(withCardPills(session.model.replyWords(message, b.text), message.cards), font: Fonts.small, ink: P.ink2, live: live, links: links)
                 } else if replies == Prefs.bubbles {
                     // Grey, never the agent's colour, which is the person's: its corner by
                     // the thread small, as a speech bubble's tail.
-                    let bubble = MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
+                    let bubble = MarkdownView(titledLinks(withCardPills(session.model.replyWords(message, b.text), message.cards), message.links), live: live, links: links)
                         .foldLong(message.came, key: "\(message.id)/\(i)", pin: pin)
                         .padding(.horizontal, Tokens.Space.l)
                         .padding(.vertical, Tokens.Space.s + 3)
@@ -867,7 +1047,7 @@ struct Reply: View {
                         bubble
                     }
                 } else {
-                    MarkdownView(titledLinks(session.model.replyWords(message, b.text), message.links), live: live, links: links)
+                    MarkdownView(titledLinks(withCardPills(session.model.replyWords(message, b.text), message.cards), message.links), live: live, links: links)
                         .foldLong(message.came, key: "\(message.id)/\(i)", pin: pin)
                     if i == sourcesAt { SourcesTab(message: message) }
                 }

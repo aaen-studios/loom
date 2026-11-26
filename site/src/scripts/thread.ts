@@ -305,9 +305,18 @@ export class Thread {
 	}
 }
 
+/** What the loop draws: a thread, or a tie. */
+interface Drawn {
+	readonly svg: SVGSVGElement;
+	visible: boolean;
+	stale: boolean;
+	readonly moving: boolean;
+	draw(clock: number): void;
+}
+
 /** The one animation loop. */
 const loop = (() => {
-	const threads = new Set<Thread>();
+	const threads = new Set<Drawn>();
 	let raf = 0;
 	const seen =
 		typeof IntersectionObserver === 'function'
@@ -352,7 +361,7 @@ const loop = (() => {
 	});
 	document.addEventListener('visibilitychange', kick);
 	return {
-		add(th: Thread) {
+		add(th: Drawn) {
 			threads.add(th);
 			seen?.observe(th.svg);
 			th.draw(now());
@@ -389,6 +398,101 @@ const threads = new WeakMap<SVGSVGElement, Thread>();
 
 /** The thread drawn in svg, once threadsIn has started it. */
 export const threadOf = (svg: Element | null) => (svg ? threads.get(svg as SVGSVGElement) : undefined);
+
+// ---------------------------------------------------------------------------------------------
+// The thread between loom's knot and an integration's logo on Spools' wide cards (thread.rs, tie
+// and span_drawn): slack, hanging and drifting, and dashed, until the integration is connected;
+// then pulled straight and whole, its dashes closing as it tightens, with one twang.
+
+/** How long a tie twangs once it's pulled straight, in seconds (thread.rs, TWANG). */
+const TWANG = 1.2;
+/** A slack tie's dash (thread.rs, DASH). */
+const DASH = 4;
+
+export class Tie {
+	readonly svg: SVGSVGElement;
+	w = 0;
+	readonly h: number;
+	taut: boolean;
+	private at = -99;
+	private path: SVGPathElement;
+	visible = true;
+	stale = true;
+
+	constructor(svg: SVGSVGElement, o: { h: number; color: string; taut: boolean }) {
+		this.svg = svg;
+		this.h = o.h;
+		this.taut = o.taut;
+		svg.setAttribute('fill', 'none');
+		this.path = document.createElementNS(NS, 'path');
+		this.path.setAttribute('stroke-width', String(stroke.small));
+		this.path.style.stroke = `var(--thread-${o.color})`;
+		svg.append(this.path);
+		// It runs across what room its card gives it, so it's measured whenever that changes.
+		const measure = () => {
+			this.w = svg.clientWidth;
+			svg.setAttribute('viewBox', `0 0 ${this.w} ${this.h}`);
+			this.stale = true;
+			loop.kick();
+		};
+		if (typeof ResizeObserver === 'function') new ResizeObserver(measure).observe(svg);
+		measure();
+		loop.add(this);
+	}
+
+	/** Pulls it straight (or lets it go), eased, with one twang once it's straight. */
+	pull(taut = true) {
+		if (taut === this.taut) return;
+		this.taut = taut;
+		this.at = now();
+		loop.kick();
+	}
+
+	/** Slack, it drifts; pulled straight or let go, it moves until it settles. */
+	get moving() {
+		return !this.taut || now() - this.at < Math.max(TWANG, EASE);
+	}
+
+	draw(clock: number) {
+		const still = reduced?.matches ?? false;
+		const t = still ? 1.7 : clock;
+		const since = still ? 99 : clock - this.at;
+		const k = ease(since / EASE);
+		const tight = this.taut ? k : 1 - k;
+		const slack = 1 - tight;
+		const { w, h } = this;
+		const room = Math.max(h / 2 - stroke.small, 1);
+		const steps = Math.max(32, Math.round(w / 1.5));
+		let d = '';
+		for (let i = 0; i <= steps; i++) {
+			const u = i / steps;
+			const arch = Math.sin(PI * u);
+			// Slack, it hangs in the middle and drifts, as a thread held loosely at both ends.
+			const sag = -arch * room * 0.75 * slack;
+			const drift = Math.sin(TAU * (u * 1.2 - t * 0.22)) * arch * room * 0.3 * slack;
+			const twang =
+				this.taut && since < TWANG ? motion.snap.amplitude * room * Math.exp(-motion.snap.damping * since) * Math.sin(TAU * (motion.snap.frequency / 10) * since) * arch : 0;
+			d += `${i ? 'L' : 'M'}${at(u * w)} ${at(h / 2 - (sag + drift + twang))}`;
+		}
+		this.path.setAttribute('d', d);
+		// Its dashes close up as it's pulled straight.
+		const gap = DASH * slack;
+		this.path.setAttribute('stroke-dasharray', gap > 0.25 ? `${DASH} ${at(gap)}` : 'none');
+	}
+}
+
+const ties = new WeakMap<SVGSVGElement, Tie>();
+
+/** Starts a tie in every `<svg data-tie>` under root: its colour from data-color, its height from its height attribute, and taut when data-taut is there. */
+export function tiesIn(root: ParentNode = document) {
+	for (const svg of root.querySelectorAll<SVGSVGElement>('svg[data-tie]')) {
+		if (ties.has(svg)) continue;
+		ties.set(svg, new Tie(svg, { h: Number(svg.getAttribute('height')) || 28, color: svg.dataset.color ?? 'grey', taut: svg.hasAttribute('data-taut') }));
+	}
+}
+
+/** The tie drawn in svg, once tiesIn has started it. */
+export const tieOf = (svg: Element | null) => (svg ? ties.get(svg as SVGSVGElement) : undefined);
 
 // ---------------------------------------------------------------------------------------------
 // A server's ball of yarn (thread.rs, yarn), at rest as a connected one is: a soft ball in a pale

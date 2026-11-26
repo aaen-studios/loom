@@ -9,12 +9,21 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+pub mod acta;
+pub mod context;
+pub mod drafts;
+pub mod header;
 mod popover;
 pub mod popup;
 mod rooms;
+pub mod t3;
+pub mod watch;
 pub use popover::pop_under;
+pub mod spools;
 use rooms::Making;
 pub use rooms::{MembersCount, Room, RoomForm, RoomUsage, Routed, MAKE_WAIT};
+mod sidebar;
+pub use sidebar::{Drop, Section, SideItem, SidePart};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -83,57 +92,6 @@ fn sort_agents(agents: &mut [Agent]) {
             a.pinned.unwrap_or(0),
         )
     });
-}
-
-/// A part of the sidebar, as the core groups the agents (`core/sidebar.calx`): who's
-/// waiting on the person, the pinned ones, the rest not in a folder, each folder, and
-/// the hidden ones.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SidePart {
-    Waiting,
-    Pinned,
-    Agents,
-    Folder {
-        id: String,
-        name: String,
-        collapsed: bool,
-    },
-    Hidden,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Section {
-    pub part: SidePart,
-    /// Its agents' ids, in order.
-    pub agents: Vec<String>,
-}
-
-impl Section {
-    fn of(v: &Value) -> Option<Section> {
-        let part = match v.get("kind").and_then(Value::as_str)? {
-            "waiting" => SidePart::Waiting,
-            "pinned" => SidePart::Pinned,
-            "agents" => SidePart::Agents,
-            "hidden" => SidePart::Hidden,
-            "group" => SidePart::Folder {
-                id: s(v, "id"),
-                name: s(v, "name"),
-                collapsed: v.get("collapsed").and_then(Value::as_bool).unwrap_or(false),
-            },
-            _ => return None,
-        };
-        let agents = v
-            .get("agents")
-            .and_then(Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(Section { part, agents })
-    }
 }
 
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
@@ -270,26 +228,39 @@ impl Agent {
         out
     }
     /// What the header's brain chip says, as "Opus · High"; None when there's nothing
-    /// What the header's chips say together, as "Opus · High"; None when there's nothing
     /// to pick.
     pub fn picked(&self) -> Option<String> {
-        let names: Vec<String> = self
-            .picks()
-            .iter()
-            .map(|o| {
-                let v = self.chosen(&o.id);
-                o.values
-                    .iter()
-                    .find(|(value, _)| *value == v)
-                    .map_or(v, |(_, name)| name.clone())
-            })
-            .filter(|n| !n.is_empty())
-            .collect();
+        let names: Vec<String> = self.picked_names().into_iter().map(|(_, n)| n).collect();
         if names.is_empty() {
             None
         } else {
             Some(names.join(" · "))
         }
+    }
+
+    /// What the brain chip says once a narrow header drops its effort: the model alone
+    /// (`model::header`). None when the program has no model to pick.
+    pub fn picked_model(&self) -> Option<String> {
+        self.picked_names()
+            .into_iter()
+            .find_map(|(category, name)| (category == "model").then_some(name))
+    }
+
+    /// The name of the value each of `picks` is on, the model first, with its category.
+    fn picked_names(&self) -> Vec<(String, String)> {
+        self.picks()
+            .iter()
+            .map(|o| {
+                let v = self.chosen(&o.id);
+                let name = o
+                    .values
+                    .iter()
+                    .find(|(value, _)| *value == v)
+                    .map_or(v, |(_, name)| name.clone());
+                (o.category.clone(), name)
+            })
+            .filter(|(_, n)| !n.is_empty())
+            .collect()
     }
 }
 
@@ -530,7 +501,7 @@ pub enum SignIn {
 }
 
 /// One of the person's MCP servers.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct McpServer {
     pub name: String,
     /// The command line, for one the agent starts; empty for one over HTTP.
@@ -543,12 +514,36 @@ pub struct McpServer {
     /// by itself, and its secret when it names one of their keys.
     pub client_id: String,
     pub client_secret: Option<String>,
+    /// How it stands, as its last test found it (Spools' Installed list), and why,
+    /// for one failing.
+    pub status: McpStatus,
+    pub why: String,
+    /// The tools its last test found, while it's connected.
+    pub tools: Vec<String>,
+    /// The ids of the person's agents that have it.
+    pub agents: Vec<String>,
+    /// The id of the catalog entry it came from, or whose fixed address it has.
+    pub catalog: String,
+    /// Its badge, with the icons it gave of its own once it has.
+    pub badge: Option<Badge>,
 }
 
-#[derive(Clone, Debug)]
+/// How one of the person's MCP servers stands, as `mcp.list` says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum McpStatus {
+    Connected,
+    SignIn,
+    Failing,
+    #[default]
+    Untested,
+}
+
+/// A value in a server's env or headers: text, or one of the person's secrets by name,
+/// with any text sent before it, such as `Bearer `.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Setting {
     Text(String),
-    Secret(String),
+    Secret { name: String, prefix: String },
 }
 
 impl McpServer {
@@ -569,7 +564,10 @@ impl McpServer {
                 m.iter()
                     .map(|(k, v)| {
                         let value = match v.get("secret").and_then(Value::as_str) {
-                            Some(name) => Setting::Secret(name.to_string()),
+                            Some(name) => Setting::Secret {
+                                name: name.to_string(),
+                                prefix: s(v, "prefix"),
+                            },
                             None => Setting::Text(v.as_str().unwrap_or_default().to_string()),
                         };
                         (k.clone(), value)
@@ -586,6 +584,17 @@ impl McpServer {
             .pointer("/client_secret/secret")
             .and_then(Value::as_str)
             .map(|n| format!("secret:{n}"));
+        let names = |key: &str| -> Vec<String> {
+            v.get(key)
+                .and_then(Value::as_array)
+                .map(|l| {
+                    l.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
         McpServer {
             name: s(v, "name"),
             command,
@@ -594,24 +603,59 @@ impl McpServer {
             sign_in,
             client_id: s(v, "client_id"),
             client_secret,
+            status: match s(v, "status").as_str() {
+                "connected" => McpStatus::Connected,
+                "sign_in" => McpStatus::SignIn,
+                "failing" => McpStatus::Failing,
+                _ => McpStatus::Untested,
+            },
+            why: s(v, "why"),
+            tools: names("tools"),
+            agents: names("agents"),
+            catalog: s(v, "catalog"),
+            badge: v.get("badge").and_then(Badge::of),
         }
     }
 
-    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a line.
+    /// Its settings as the form shows them, one `NAME=value` or `NAME=secret:KEY` a
+    /// line, a secret's prefix before it, as `Authorization=Bearer secret:GITHUB_TOKEN`.
     pub fn settings_text(&self) -> String {
         self.settings
             .iter()
             .map(|(k, v)| match v {
                 Setting::Text(t) => format!("{k}={t}"),
-                Setting::Secret(n) => format!("{k}=secret:{n}"),
+                Setting::Secret { name, prefix } => format!("{k}={prefix}secret:{name}"),
             })
             .collect::<Vec<_>>()
             .join("\n")
     }
 }
 
+/// A setting's value as the form has it: `secret:KEY`, with any prefix before it
+/// (`Bearer secret:KEY`), names one of the person's secrets; anything else is text.
+/// A prefix is the text before `secret:` and ends in a space, and a secret's name is
+/// letters, digits, `_`, `-` and `.`.
+fn setting_value(v: &str) -> Value {
+    if let Some(at) = v.rfind("secret:") {
+        let (prefix, name) = (&v[..at], v[at + "secret:".len()..].trim());
+        let named = !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+        if named && (prefix.is_empty() || prefix.ends_with(char::is_whitespace)) {
+            return if prefix.is_empty() {
+                json!({"secret": name})
+            } else {
+                json!({"secret": name, "prefix": prefix})
+            };
+        }
+    }
+    json!(v)
+}
+
 /// The `mcp.put` arguments for a server as the form has it: a command line, or an http(s)
-/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line.
+/// address, and its settings, one `NAME=value` or `NAME=secret:KEY` a line, a secret's
+/// prefix kept before it (`NAME=Bearer secret:KEY`).
 pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
     let mut pairs = serde_json::Map::new();
     for l in settings.lines() {
@@ -622,11 +666,7 @@ pub fn server_args(name: &str, line: &str, settings: &str) -> Value {
         if k.is_empty() {
             continue;
         }
-        let value = match v.strip_prefix("secret:") {
-            Some(n) => json!({"secret": n.trim()}),
-            None => json!(v),
-        };
-        pairs.insert(k.to_string(), value);
+        pairs.insert(k.to_string(), setting_value(v));
     }
     let line = line.trim();
     if line.starts_with("http://") || line.starts_with("https://") {
@@ -651,6 +691,15 @@ pub fn with_client(mut args: Value, client_id: &str, client_secret: &str) -> Val
             Some(n) => json!({"secret": n.trim()}),
             None => json!(secret),
         };
+    }
+    args
+}
+
+/// An MCP server's or a skill's `args` with `was`, the name a saved one is saved
+/// under: the instance renames it when `args` names another (protocol.md, `mcp.put`).
+fn renaming(mut args: Value, was: Option<&str>) -> Value {
+    if let (Some(was), Some(o)) = (was, args.as_object_mut()) {
+        o.insert("was".into(), json!(was));
     }
     args
 }
@@ -943,6 +992,12 @@ pub enum PlusRow {
     Routine(Box<Routine>),
     /// The end of a list beside the menu: its settings page.
     Manage(PlusSub),
+    /// Opens Spools in Settings, for the agent.
+    Spools,
+    /// Opens the form that starts a T3 thread (PLAN.md, "T3 threads").
+    StartT3,
+    /// Opens a board of the person's Acta beside the chat, with Acta connected.
+    Boards,
 }
 
 impl PlusRow {
@@ -1003,13 +1058,18 @@ impl Model {
             }
             add.push(PlusRow::Open(PlusSub::Recent));
             add.push(PlusRow::Emoji);
-            return vec![
-                add,
-                vec![
-                    PlusRow::Open(PlusSub::Skills),
-                    PlusRow::Open(PlusSub::Routines),
-                ],
+            let mut act = vec![
+                PlusRow::Open(PlusSub::Skills),
+                PlusRow::Open(PlusSub::Routines),
+                PlusRow::Spools,
             ];
+            if !self.t3.servers.is_empty() {
+                act.push(PlusRow::StartT3);
+            }
+            if self.has_acta() {
+                act.push(PlusRow::Boards);
+            }
+            return vec![add, act];
         }
         let mut add: Vec<PlusRow> = [(PlusRow::Attach, "Attach files")]
             .into_iter()
@@ -1036,6 +1096,15 @@ impl Model {
             |r| (r.name.as_str(), ""),
             |r| PlusRow::Routine(Box::new(r)),
         ));
+        if plus_match(&q, "Spools", "integrations mcp").is_some() {
+            act.push(PlusRow::Spools);
+        }
+        if !self.t3.servers.is_empty() && "start a t3 thread".contains(&q) {
+            act.push(PlusRow::StartT3);
+        }
+        if self.has_acta() && "boards".contains(&q) {
+            act.push(PlusRow::Boards);
+        }
         vec![add, act]
             .into_iter()
             .filter(|g| !g.is_empty())
@@ -1073,6 +1142,7 @@ impl Model {
             self.load_skills(),
             self.load_routines(),
             json!({"t": "cmd", "id": id, "name": "files.recent", "args": {"limit": 50}}),
+            self.ask_t3_servers(),
         ]
     }
 
@@ -1231,6 +1301,73 @@ pub struct Routine {
     pub conversation: String,
     /// What happens to its answer (PLAN.md, "Routine flows"): the steps after it.
     pub flow: Vec<FlowStep>,
+    /// What outside loom it runs on, if anything (PLAN.md, "Watching outside events").
+    pub event: Option<watch::RoutineEvent>,
+    /// Its gate (PLAN.md, "Routines"): a command that runs before its agent wakes, and
+    /// the seconds it may take. Empty for none.
+    pub gate: String,
+    pub gate_seconds: i64,
+    /// The model and effort its runs use, as values its agent's program takes. Empty for
+    /// its agent's own.
+    pub model: String,
+    pub effort: String,
+    /// What its runs cost over the last week.
+    pub cost: RoutineCost,
+}
+
+/// What a routine's runs cost over the last week (protocol.md, `routine.list`): tokens a
+/// run and a day, how many ran and how many of them were quiet, and whether it spends a
+/// lot for nothing, its runs mostly quiet.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RoutineCost {
+    pub run: i64,
+    pub day: i64,
+    pub runs: i64,
+    pub quiet: i64,
+    pub wasted: bool,
+}
+
+impl RoutineCost {
+    fn of(v: &Value) -> RoutineCost {
+        let n = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
+        RoutineCost {
+            run: n("run"),
+            day: n("day"),
+            runs: n("runs"),
+            quiet: n("quiet"),
+            wasted: v.get("wasted").and_then(Value::as_bool).unwrap_or(false),
+        }
+    }
+
+    /// What it costs, for its page's head: "1.4M tokens a run · 5.4M a day · mostly
+    /// quiet". Empty before it has run.
+    pub fn words(&self) -> String {
+        if self.runs == 0 {
+            return String::new();
+        }
+        let mut words = if self.day == 0 {
+            "No tokens this week".to_string()
+        } else {
+            format!(
+                "{} tokens a run · {} a day",
+                tokens_short(self.run),
+                tokens_short(self.day)
+            )
+        };
+        if self.quiet * 2 > self.runs {
+            words.push_str(" · mostly quiet");
+        }
+        words
+    }
+
+    /// Its row's line in the list, for one that spends a lot for nothing: "5.4M tokens a
+    /// day, mostly quiet". Empty for any other.
+    pub fn warning(&self) -> String {
+        if !self.wasted {
+            return String::new();
+        }
+        format!("{} tokens a day, mostly quiet", tokens_short(self.day))
+    }
 }
 
 /// A step of a routine's flow: its agent is asked `prompt` once the steps it comes
@@ -1315,7 +1452,8 @@ pub const WEEKDAYS: u8 = 0b001_1111;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schedule {
     /// "hours" (every few hours or minutes), "days" (at times on chosen days), or "" for
-    /// none: a routine that only runs by webhook.
+    /// none: a routine that only runs by webhook. The routine form has "event" too, for
+    /// one that runs on an event and has no schedule.
     pub repeat: String,
     /// The days it runs on, bit 0 Monday to bit 6 Sunday.
     pub days: u8,
@@ -1479,6 +1617,16 @@ impl Routine {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().map(FlowStep::of).collect())
                 .unwrap_or_default(),
+            event: watch::RoutineEvent::of(r.get("event").unwrap_or(&Value::Null)),
+            gate: r.get("gate").map(|g| s(g, "command")).unwrap_or_default(),
+            gate_seconds: r
+                .get("gate")
+                .and_then(|g| g.get("timeout"))
+                .and_then(Value::as_i64)
+                .unwrap_or(0),
+            model: s(r, "model"),
+            effort: s(r, "effort"),
+            cost: RoutineCost::of(r.get("cost").unwrap_or(&Value::Null)),
         }
     }
 }
@@ -1500,6 +1648,8 @@ pub struct RoutineRun {
     pub hint: String,
     pub said: String,
     pub posted: Vec<String>,
+    /// Whether its gate found nothing new, so its agent wasn't woken.
+    pub gate_quiet: bool,
 }
 
 /// How a run ended, as the history colours it.
@@ -1534,6 +1684,8 @@ impl RoutineRun {
                         .collect()
                 })
                 .unwrap_or_default(),
+            gate_quiet: v.get("status").and_then(Value::as_str) == Some("quiet")
+                && v.get("woke").and_then(Value::as_bool) == Some(false),
         }
     }
 
@@ -1565,8 +1717,12 @@ impl RoutineRun {
     }
 
     /// Its line in the history: the first line of what it posted, or why it failed or
-    /// was skipped, or else of what its agent answered.
+    /// was skipped, or else of what its agent answered, or "Nothing new" for one whose
+    /// gate found nothing.
     pub fn line(&self) -> String {
+        if self.gate_quiet && self.said.trim().is_empty() {
+            return "Nothing new".into();
+        }
         let text = match self.mark() {
             RunMark::Failed | RunMark::Skipped if !self.error.is_empty() => self.error.clone(),
             _ => self
@@ -1622,6 +1778,16 @@ pub struct RoutineForm {
     pub post: String,
     /// The flow after it, or none to leave it as it is. An empty one takes it off.
     pub flow: Option<Vec<FlowStep>>,
+    /// Its event as `routine.put` takes it, null to take it off, or none to leave it.
+    pub event: Option<Value>,
+    /// Its gate's command, and the seconds it may take (0 for the instance's default).
+    /// An empty command takes the gate off.
+    pub gate: String,
+    pub gate_seconds: i64,
+    /// Its runs' model and effort, values its agent's program takes; empty for its
+    /// agent's own.
+    pub model: String,
+    pub effort: String,
 }
 
 /// One entry of the activity log.
@@ -1846,6 +2012,10 @@ pub struct Block {
     /// The subagent call a tool call, words or a thought sit inside: the call of the
     /// Task or Agent call that made them, drawn in it rather than in the reply.
     pub parent: Option<String>,
+    /// A watch's line, a `loom` message's `update` block (`model/watch.rs`).
+    pub update: Option<std::sync::Arc<watch::WatchLine>>,
+    /// A `loom` line's mark (`compacted`, `fresh`, `t3_thread`), or empty.
+    pub mark: String,
 }
 
 impl Block {
@@ -1857,6 +2027,8 @@ impl Block {
             file: None,
             card: None,
             parent: None,
+            update: None,
+            mark: String::new(),
         }
     }
 
@@ -1885,6 +2057,12 @@ impl Block {
                 None
             },
             parent: b.get("parent").and_then(Value::as_str).map(str::to_string),
+            update: (kind == "update").then(|| std::sync::Arc::new(watch::WatchLine::of(b))),
+            mark: if kind == "mark" {
+                s(b, "mark")
+            } else {
+                String::new()
+            },
             kind,
         }
     }
@@ -1915,6 +2093,7 @@ fn mark_text(b: &Value, member: Option<&str>) -> String {
                 ),
             }
         }
+        "t3_thread" => "T3 thread started".into(),
         _ => String::new(),
     }
 }
@@ -1948,18 +2127,26 @@ pub struct ContextFill {
     pub compacts: bool,
     /// In a group chat, the member whose session it is: the one that answered last.
     pub agent: Option<String>,
+    /// What the chat costs, in tokens: its person's last turn there, and every turn
+    /// there in the last 24 hours. 0 for not known.
+    pub turn: i64,
+    pub day: i64,
 }
-
-/// How full a context may get before the chat's next message goes to a fresh session
-/// (the instance's `CONTEXT_RENEW_PERCENT`).
-pub const CONTEXT_RENEW_PERCENT: i64 = 80;
 
 impl ContextFill {
     pub fn of(x: &Value) -> Option<ContextFill> {
         let n = |k: &str| x.get(k).and_then(Value::as_i64).unwrap_or(0);
+        let tokens = |k: &str| {
+            x.get("tokens")
+                .and_then(|t| t.get(k))
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        };
         let fill = ContextFill {
             used: n("used"),
             size: n("size"),
+            turn: tokens("turn"),
+            day: tokens("day"),
             compacted: x.get("compacted").and_then(Value::as_i64),
             compacts: x.get("compacts").and_then(Value::as_bool).unwrap_or(false),
             agent: x
@@ -2001,14 +2188,24 @@ impl ContextFill {
         format!("{} of {}", tokens_short(self.used), tokens_short(self.size))
     }
 
-    /// The card's line under its bar, at `now` (Unix ms): when the session was last
-    /// compacted, if it was, and where a fresh one starts.
-    pub fn line(&self, now: i64) -> String {
-        let fresh = format!("fresh session starts at {CONTEXT_RENEW_PERCENT}%");
-        match self.compacted {
-            Some(at) => format!("Compacted {} · a {fresh}", ago(now - at)),
-            None => format!("A {fresh}"),
+    /// The card's rows of what the chat costs, each a title and its tokens: "Last
+    /// turn" "410k", "Last 24 hours" "6.2M". None that isn't known.
+    pub fn costs(&self) -> Vec<(&'static str, String)> {
+        let mut rows = Vec::new();
+        if self.turn > 0 {
+            rows.push(("Last turn", tokens_short(self.turn)));
         }
+        if self.day > 0 {
+            rows.push(("Last 24 hours", tokens_short(self.day)));
+        }
+        rows
+    }
+
+    /// The card's line over its buttons, at `now` (Unix ms): when the session was last
+    /// compacted, if it was.
+    pub fn line(&self, now: i64) -> Option<String> {
+        self.compacted
+            .map(|at| format!("Compacted {}", ago(now - at)))
     }
 }
 
@@ -2842,6 +3039,9 @@ pub struct Message {
     /// The Acta cards it names that the instance has looked up, by id. Shared, so a
     /// message stays small.
     pub cards: std::sync::Arc<HashMap<String, ActaCard>>,
+    /// The T3 threads it names or its agent's T3 tool calls started, as the instance
+    /// looked them up, in the order its words link them (PLAN.md, "T3 threads").
+    pub threads: std::sync::Arc<Vec<t3::ThreadCard>>,
     /// How an agent's turn ended (`done`, `cancelled`, `failed` or `limit`), or empty
     /// when the message doesn't say: a person's, one still being written, or one kept
     /// before messages said.
@@ -3138,19 +3338,22 @@ impl Message {
     /// the chat hasn't gone on, or an MCP server an agent proposed that's asking, being
     /// added or wants a sign-in.
     pub fn card_waits(&self, newest: bool) -> bool {
-        self.blocks
-            .iter()
-            .any(|b| match b.card.as_ref().map(|c| &c.body) {
-                Some(CardBody::Choices { .. }) => self.takes_answers(newest),
-                Some(CardBody::Form { answers, .. }) => {
-                    answers.is_none() && self.takes_answers(newest)
-                }
-                Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
-                Some(CardBody::McpAdd { state, .. }) => {
-                    matches!(state.as_str(), "asking" | "adding" | "sign_in")
-                }
-                _ => false,
-            })
+        // A T3 thread still going: its strand moves and its time counts.
+        self.threads.iter().any(t3::ThreadCard::moving)
+            || self
+                .blocks
+                .iter()
+                .any(|b| match b.card.as_ref().map(|c| &c.body) {
+                    Some(CardBody::Choices { .. }) => self.takes_answers(newest),
+                    Some(CardBody::Form { answers, .. }) => {
+                        answers.is_none() && self.takes_answers(newest)
+                    }
+                    Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
+                    Some(CardBody::McpAdd { state, .. }) => {
+                        matches!(state.as_str(), "asking" | "adding" | "sign_in")
+                    }
+                    _ => false,
+                })
     }
 
     /// A turn that didn't end by itself: stopped, failed, or out of tokens. Such a reply
@@ -3721,6 +3924,35 @@ pub const CARD_LINK: &str = "loom-card:";
 /// How the id of a card's piece in the composer starts, then what it names: the card's
 /// id, or its link.
 pub const CARD: &str = "loom-card:";
+/// The least room a card pill's cut title is left (`pill_fit`); with less, its pill
+/// shows its id alone.
+pub const PILL_TITLE_LEAST: f32 = 40.0;
+
+/// How wide a card's pill is on a line of a message's words (PLAN.md, "Cards in
+/// messages"), from its own width, its width with no title (`bare`), the room left on
+/// the line where it would start and the line's width. One that fits there keeps its
+/// width, and one that fits a whole line starts the next (None). Wider than a line, its
+/// title is cut to the room left; with no room there for some of its title, it starts
+/// the next line (None), where it's asked again with the whole line's room, and a line
+/// with no room for any of its title shows its id alone.
+pub fn pill_fit(natural: f32, bare: f32, room: f32, line: f32) -> Option<f32> {
+    if natural <= room {
+        Some(natural)
+    } else if natural <= line {
+        None
+    } else if pill_titled(room, bare) {
+        Some(room)
+    } else if room < line {
+        None
+    } else {
+        Some(bare)
+    }
+}
+
+/// Whether a card's pill cut to `width` keeps its title (`pill_fit`).
+pub fn pill_titled(width: f32, bare: f32) -> bool {
+    width >= bare + PILL_TITLE_LEAST
+}
 
 /// A card on one of the person's Acta boards that a message names, as the instance
 /// looked it up (protocol.md, "Messages and streaming"), or one that isn't there or that
@@ -3745,6 +3977,9 @@ pub struct ActaCard {
     pub missing: bool,
     /// When it was looked up, in Unix ms.
     pub at: i64,
+    /// Made from the message (its `made_cards`): its place among those, whose pills show
+    /// under it (PLAN.md, "Acta beside the chat").
+    pub made: Option<usize>,
 }
 
 /// The colour a card's status is drawn in: its dot, and its chip in the preview.
@@ -3787,6 +4022,7 @@ impl ActaCard {
             subtasks_done: n("subtasks_done"),
             missing: v.get("missing").and_then(Value::as_bool).unwrap_or(false),
             at: v.get("at").and_then(Value::as_i64).unwrap_or(0),
+            made: None,
         }
     }
 
@@ -3822,17 +4058,17 @@ impl ActaCard {
         }
     }
 
-    /// The preview's top line: its board and its id, `loom · LOO-206`.
-    pub fn place(&self) -> String {
-        let board = if self.board_name.is_empty() {
-            self.board.rsplit('/').next().unwrap_or_default()
+    /// Its board's name, as the preview's top line has it before the id, `loom`, which
+    /// opens the board: as Acta names it, or the board's part after its workspace.
+    pub fn board_label(&self) -> String {
+        if self.board_name.is_empty() {
+            self.board
+                .rsplit('/')
+                .next()
+                .unwrap_or_default()
+                .to_string()
         } else {
-            &self.board_name
-        };
-        if board.is_empty() {
-            self.id.clone()
-        } else {
-            format!("{board} · {}", self.id)
+            self.board_name.clone()
         }
     }
 
@@ -3877,12 +4113,22 @@ impl ActaCard {
 }
 
 fn cards_of(m: &Value) -> std::sync::Arc<HashMap<String, ActaCard>> {
+    // Those made from it, in the order they were.
+    let made: Vec<String> = m
+        .get("made_cards")
+        .and_then(Value::as_array)
+        .map(|l| l.iter().map(|c| s(c, "id")).collect())
+        .unwrap_or_default();
     let cards: HashMap<String, ActaCard> = m
         .get("cards")
         .and_then(Value::as_object)
         .map(|o| {
             o.iter()
-                .map(|(id, v)| (id.clone(), ActaCard::of(v)))
+                .map(|(id, v)| {
+                    let mut card = ActaCard::of(v);
+                    card.made = made.iter().position(|x| x == id);
+                    (id.clone(), card)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -4053,7 +4299,7 @@ impl Model {
     /// of the shown chat, once it shows, whose cards were looked up over 5 minutes ago,
     /// for their status as it is now.
     pub fn card_fetches(&mut self, now: i64) -> Vec<Value> {
-        let mut out = Vec::new();
+        let mut out: Vec<Value> = self.line_refresh().into_iter().collect();
         if !self.boards_asking && self.boards_at.is_none_or(|t| now - t >= BOARDS_FRESH_MS) {
             self.boards_asking = true;
             let id = self.id("app.acta_boards");
@@ -4066,6 +4312,12 @@ impl Model {
             }
             if m.cards.values().any(|c| c.stale(now)) {
                 stale.push(m.id.clone());
+            }
+        }
+        // And those whose pills a panel beside the chat redrew, for the instance to keep.
+        for id in std::mem::take(&mut self.acta.again) {
+            if !stale.contains(&id) {
+                stale.push(id);
             }
         }
         for ids in stale.chunks(100) {
@@ -4088,6 +4340,8 @@ impl Model {
                     .map(|b| (s(b, "prefix"), s(b, "board")))
                     .filter(|(p, _)| !p.is_empty())
                     .collect();
+                // Their names, for Acta's panels beside the chat.
+                self.acta.names = list.iter().map(|b| (s(b, "board"), s(b, "name"))).collect();
             }
             return true;
         }
@@ -4130,7 +4384,7 @@ mod card_tests {
         assert_eq!(c.ink(), CardInk::Sky);
         assert!(!c.struck());
         assert_eq!(c.status_words(), "In progress");
-        assert_eq!(c.place(), "loom · LOO-206");
+        assert_eq!(c.board_label(), "loom");
         assert_eq!(c.chips(), vec!["Elliot", "M", "desktop"]);
         assert_eq!(c.subtasks_line().as_deref(), Some("Subtasks 3 of 5"));
         assert!((c.subtasks_part() - 0.6).abs() < 1e-6);
@@ -4144,11 +4398,34 @@ mod card_tests {
         let canceled = card(json!({"id": "X-1", "board": "w/b", "status": "canceled"}));
         assert!(canceled.struck());
         assert_eq!(canceled.status_words(), "Canceled");
-        assert_eq!(canceled.place(), "b · X-1");
+        assert_eq!(canceled.board_label(), "b");
         assert_eq!(canceled.subtasks_line(), None);
         assert_eq!(canceled.link(), "https://acta.aaenz.no/w/b#X-1");
         let gone = card(json!({"id": "LOO-9", "board": "aaen-studios/loom", "missing": true}));
         assert!(gone.missing);
+    }
+
+    #[test]
+    fn a_pill_wider_than_its_line_has_its_title_cut() {
+        // A pill 380 wide, 100 with no title.
+        let fit = |room: f32, line: f32| pill_fit(380.0, 100.0, room, line);
+        // It fits where it is, or starts the next line whole.
+        assert_eq!(fit(400.0, 500.0), Some(380.0));
+        assert_eq!(fit(200.0, 500.0), None);
+        // Wider than its line: its title is cut to the room left there.
+        assert_eq!(fit(300.0, 320.0), Some(300.0));
+        assert_eq!(fit(320.0, 320.0), Some(320.0));
+        assert!(pill_titled(300.0, 100.0));
+        // Room there for less than a few letters of it: the next line, where its title
+        // is cut to the whole line.
+        assert!(!pill_titled(139.0, 100.0) && pill_titled(140.0, 100.0));
+        assert_eq!(fit(120.0, 320.0), None);
+        assert_eq!(fit(60.0, 320.0), None);
+        assert_eq!(fit(320.0, 320.0), Some(320.0));
+        // A line with no room for any of its title: its id alone, even past a line
+        // narrower than that.
+        assert_eq!(fit(130.0, 130.0), Some(100.0));
+        assert_eq!(fit(90.0, 90.0), Some(100.0));
     }
 
     #[test]
@@ -4278,6 +4555,7 @@ mod card_tests {
                 sources: Vec::new(),
                 links: HashMap::new(),
                 cards: std::sync::Arc::new(cards),
+                threads: Default::default(),
                 status: String::new(),
                 reply: None,
                 routed: None,
@@ -4620,11 +4898,13 @@ pub fn selected_in(m: &Message, selected: &str) -> bool {
     if picked.is_empty() {
         return false;
     }
+    // An emoji is selected as it copies: one of the person's own the chat draws as its
+    // name, and one in code or not drawn yet as written (LOO-347).
     let shown = m
         .blocks
         .iter()
         .filter(|b| b.kind == "text" && b.parent.is_none())
-        .map(|b| spoken(&b.text))
+        .map(|b| spoken(&crate::emoji::as_copied(&b.text)))
         .collect::<Vec<_>>()
         .join(" ");
     squash(&shown).contains(&picked)
@@ -5239,9 +5519,13 @@ pub fn corners(mine: bool, joined: Joined) -> Corners {
 /// How each of the chat's rows joins the ones beside it (`None` for a row that isn't a
 /// message): the person's messages next to each other, each with words, are one group,
 /// and so are those another agent sent with message_agent, each its own sender's. An
-/// agent's reply joins only its own bubbles (`parts`).
+/// agent's reply joins only its own bubbles (`parts`). A watch's lines one after
+/// another join too, so they stack tight.
 pub fn person_joins(rows: &[Option<&Message>]) -> Vec<Joined> {
     let sender = |m: &Message| {
+        if watch::line_of(m).is_some() {
+            return Some(Some(String::from("loom:watch")));
+        }
         (m.role == "person"
             && m.blocks
                 .iter()
@@ -5913,9 +6197,14 @@ pub struct Model {
     pub acta_boards: Vec<(String, String)>,
     boards_at: Option<i64>,
     boards_asking: bool,
+    /// Acta beside the chat: a card's side preview, making a card, a board (model/acta.rs).
+    pub acta: acta::Acta,
     /// The messages of the shown chat whose cards were looked at since it showed
     /// (`card_fetches`).
     cards_looked: HashSet<String>,
+    /// T3's threads: which messages the instance follows, answers on their way, and the
+    /// start form (src/model/t3.rs).
+    pub t3: t3::T3,
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     pub files: Rc<HashMap<String, String>>,
     /// file.get requests on their way: what they fetch, and whether to open it.
@@ -5988,6 +6277,8 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The person's watches, and the cards their lines show (`model/watch.rs`).
+    pub watch: watch::Watches,
     /// The files sent or received lately in the person's chats, newest first, for the
     /// composer's + menu.
     pub recent_files: Vec<RecentFile>,
@@ -6029,8 +6320,9 @@ pub struct Model {
     pub open_branch: Option<String>,
     /// The group chats, as the conversations list has them (PLAN.md, "Group chats").
     pub rooms: Vec<Room>,
-    /// Their order in the sidebar, as the core gives it.
-    room_order: Vec<String>,
+    /// Every agent and group chat in the person's order, as the core gives it
+    /// (`core/sidebar.calx`), for a drag to rearrange.
+    side_order: Vec<String>,
     /// The group chat the chat shows, by conversation, instead of the agent's chat.
     pub open_room: Option<String>,
     /// The room.create the app sent last, to show the group chat once it's made, and
@@ -6139,6 +6431,11 @@ pub struct Model {
     pub mcp_servers: Vec<McpServer>,
     pub secrets: Vec<Secret>,
     mcp_stale: bool,
+    /// Spools, the integrations catalog, and connecting from it.
+    pub spools: spools::Spools,
+    /// The settings list pages' forms, each item's as the person left it, changed and
+    /// not saved (`drafts`).
+    pub drafts: drafts::Drafts,
     /// The fields of secret cards the person unticked Save as on, as `call/field`; the
     /// cards whose answer went and hasn't come back; and what the instance said to one
     /// it refused.
@@ -6865,6 +7162,7 @@ impl Model {
             learned: learned_of(m),
             links: links_of(m),
             cards: cards_of(m),
+            threads: t3::threads_of(m),
             status: s(m, "status"),
             routed: Routed::of(m),
             routine: s(m, "routine"),
@@ -7063,7 +7361,7 @@ impl Model {
                 self.queue_stale = true;
                 self.tasks_stale = true;
                 self.updates_stale = true;
-                // The programs, for the limits of the person's plans in the sidebar.
+                // The programs, for the limits of the person's plans in the context card.
                 self.programs_stale = true;
                 for l in [
                     List::Agents,
@@ -7184,6 +7482,7 @@ impl Model {
             "event" => self.event(f),
             "result" => self.result(f),
             "browser.state" => self.browser_state(f),
+            "connect" => self.connect_frame(f),
             "browser.frame" => {
                 // From an instance of protocol version 1, the JPEG in base64; later
                 // ones send it as a binary message (`take_page`).
@@ -7266,6 +7565,7 @@ impl Model {
                 }
                 "agent" if self.editing.is_some() => self.revisions_stale = true,
                 "proposal" => self.proposals_stale = true,
+                "watch" => self.watches_changed(),
                 "plugin" if kind != "plugin.data" => self.plugins_stale = true,
                 "user" | "people" if self.people_open => self.people_stale = true,
                 _ => {}
@@ -7394,9 +7694,11 @@ impl Model {
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| s(&message, "agent"));
                     // One in another agent's thread with it marks that thread, not the
-                    // agent's chat with the person.
+                    // agent's chat with the person; one in a group chat marks that.
                     if asked {
                         self.asks_unread.insert(conversation.clone());
+                    } else if self.room(&conversation).is_some() {
+                        self.unread.insert(conversation.clone());
                     } else if !agent.is_empty() {
                         self.first_unread.entry(agent.clone()).or_insert((id, 0)).1 += 1;
                         self.unread.insert(agent);
@@ -7441,6 +7743,7 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            "watch" => self.watch_event(&kind, f),
             "proposal" => {
                 self.proposals_stale = true;
             }
@@ -7760,6 +8063,13 @@ impl Model {
 
     fn result(&mut self, f: &Value) {
         let id = s(f, "id");
+        // A list page's Save: saved, its draft goes; refused, it stays, and the branch
+        // for its command says why.
+        self.drafts.answered(&id, f.get("error").is_none());
+        if id.starts_with("app.spools_") {
+            self.spools_result(&id, f);
+            return;
+        }
         // A group chat made here: the chat shows it.
         if id.starts_with("app.room_create") {
             self.room_create_answered(&id, f);
@@ -7767,6 +8077,9 @@ impl Model {
         }
         if id.starts_with("app.room_summary") {
             self.room_usage_came(f);
+            return;
+        }
+        if self.take_watch_answer(&id, f) {
             return;
         }
         // Compact now, or Start a fresh session: the chat shows what came of it, and
@@ -7820,6 +8133,14 @@ impl Model {
         }
         // A card for the composer, the person's boards, or a refresh of cards.
         if self.take_card_answer(&id, f) {
+            return;
+        }
+        // A T3 thread's answer, the start form's, or the threads followed (src/model/t3.rs).
+        if self.take_t3_answer(&id, f) {
+            return;
+        }
+        // What Acta's panels beside the chat asked.
+        if self.take_panel_answer(&id, f) {
             return;
         }
         // A link pasted in the composer, looked up: its preview, or its site when the
@@ -7899,6 +8220,10 @@ impl Model {
             return;
         }
         if let Some(name) = id.strip_prefix("app.mcp_test:") {
+            // The instance keeps what it found, which Spools' Installed list shows.
+            if self.spools.loaded {
+                self.mcp_stale = true;
+            }
             let found = match f.get("error") {
                 Some(e) if s(e, "code") == "sign_in_needed" => {
                     self.mcp_stale = true;
@@ -8569,6 +8894,8 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.skills_stale = true;
+            // A skill renamed: the fixes proposed for it name it by its new name.
+            self.proposals_stale = true;
         } else if id.starts_with("app.memory_list") {
             self.notes = f
                 .pointer("/value/memories")
@@ -8852,26 +9179,7 @@ impl Model {
             .cloned()
             .unwrap_or_default();
         match what {
-            List::Sidebar => {
-                let sections = f
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map(|ss| ss.iter().filter_map(Section::of).collect())
-                    .unwrap_or_default();
-                self.sidebar = Rc::new(sections);
-                // Its group chats, first, as the core orders them.
-                self.room_order = items
-                    .iter()
-                    .filter(|sec| sec.get("kind").and_then(Value::as_str) == Some("rooms"))
-                    .flat_map(|sec| {
-                        sec.get("rooms")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .map(|r| s(&r, "id"))
-                    .collect();
-            }
+            List::Sidebar => self.take_sidebar(&items),
             // Offline, from the cache, until device.list says when each was last on.
             List::Devices => {
                 self.devices = items
@@ -9129,6 +9437,7 @@ impl Model {
                     learned: Vec::new(),
                     links: HashMap::new(),
                     cards: Default::default(),
+                    threads: Default::default(),
                     status: String::new(),
                     pinned: false,
                     reply: q.reply.clone(),
@@ -9158,6 +9467,7 @@ impl Model {
                 m.routine_name = r.name.clone();
             }
         }
+        self.line_cards(&mut out);
         let conversation = self.conversation();
         for r in &self.runs {
             // A routine's quiet run shows only what its agent posts, which comes as messages.
@@ -9187,6 +9497,7 @@ impl Model {
                 learned: Vec::new(),
                 links: HashMap::new(),
                 cards: Default::default(),
+                threads: Default::default(),
                 status: String::new(),
                 pinned: false,
                 reply: None,
@@ -9797,7 +10108,19 @@ impl Model {
             _ => Vec::new(),
         });
         let sites = sites.chain(previews);
-        for icon in cards.chain(asks).flat_map(Badge::icons).chain(sites) {
+        // And the icons Spools shows: those the person's servers gave of their own.
+        let spools = self
+            .spools
+            .entries
+            .iter()
+            .filter_map(|e| e.badge.as_ref())
+            .chain(self.mcp_servers.iter().filter_map(|m| m.badge.as_ref()));
+        for icon in cards
+            .chain(asks)
+            .chain(spools)
+            .flat_map(Badge::icons)
+            .chain(sites)
+        {
             if !wanted.contains(icon) {
                 wanted.push(icon.clone());
             }
@@ -10087,18 +10410,27 @@ impl Model {
         frame
     }
 
-    /// The sidebar's plan limits: one for each program that reports them and that the
-    /// person's agents run on, their own or as their backup, in the order installed.
-    pub fn plan_limits(&self) -> Vec<(String, PlanLimits)> {
+    /// The limits of the person's plan with a program on the instance, where it reports
+    /// them: its page under Brains shows them.
+    pub fn program_limits(&self, program: &str) -> Option<&PlanLimits> {
         self.installed
             .iter()
-            .filter(|p| {
-                self.agents
-                    .iter()
-                    .any(|a| a.program == p.name || a.backup == p.name)
-            })
-            .filter_map(|p| Some((p.name.clone(), p.limits.clone()?)))
-            .collect()
+            .find(|p| p.name == program)?
+            .limits
+            .as_ref()
+    }
+
+    /// The plan the context card shows under Context: that of the program the open chat
+    /// runs on, or in a group chat, of the member whose session the ring is for. None
+    /// while that program has reported no plan.
+    pub fn context_plan(&self, fill: &ContextFill) -> Option<(String, PlanLimits)> {
+        let program = if self.open_room.is_some() {
+            self.agent(fill.agent.as_deref()?)?.program.clone()
+        } else {
+            self.chat_program()?
+        };
+        let limits = self.program_limits(&program)?.clone();
+        Some((program, limits))
     }
 
     pub fn programs(&mut self) -> Value {
@@ -10294,13 +10626,18 @@ impl Model {
         )
     }
 
-    /// Asks for the person's MCP servers and their secrets' names.
+    /// Asks for the person's MCP servers and their secrets' names, and the catalog
+    /// once Spools has been opened, whose entries say which they have.
     pub fn load_mcp(&mut self) -> Vec<Value> {
         let (a, b) = (self.id("app.mcp_list"), self.id("app.secrets"));
-        vec![
+        let mut out = vec![
             json!({"t": "cmd", "id": a, "name": "mcp.list"}),
             json!({"t": "cmd", "id": b, "name": "secret.list"}),
-        ]
+        ];
+        if self.spools.loaded {
+            out.extend(self.load_catalog());
+        }
+        out
     }
 
     /// Starts the MCP server `name` on the instance and asks for its tools.
@@ -10309,9 +10646,11 @@ impl Model {
         json!({"t": "cmd", "id": format!("app.mcp_test:{name}"), "name": "mcp.test", "args": {"name": name}})
     }
 
-    pub fn put_mcp(&mut self, args: Value) -> Value {
+    /// Saves an MCP server as its form has it. `was` is the name a saved one is
+    /// saved under, so a new name in the form renames it.
+    pub fn put_mcp(&mut self, args: Value, was: Option<&str>) -> Value {
         let id = self.id("app.mcp_put");
-        json!({"t": "cmd", "id": id, "name": "mcp.put", "args": args})
+        json!({"t": "cmd", "id": id, "name": "mcp.put", "args": renaming(args, was)})
     }
 
     pub fn delete_mcp(&mut self, name: &str) -> Value {
@@ -10713,10 +11052,17 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "skill.list", "args": {"bodies": true}})
     }
 
-    /// Saves a skill, new or changed.
-    pub fn save_skill(&mut self, name: &str, description: &str, body: &str) -> Value {
+    /// Saves a skill, new or changed; `was`, as for `put_mcp`, renames a saved one.
+    pub fn save_skill(
+        &mut self,
+        name: &str,
+        description: &str,
+        body: &str,
+        was: Option<&str>,
+    ) -> Value {
         let id = self.id("app.skill_put");
-        json!({"t": "cmd", "id": id, "name": "skill.put", "args": {"name": name.trim(), "description": description.trim(), "body": body}})
+        let args = json!({"name": name.trim(), "description": description.trim(), "body": body});
+        json!({"t": "cmd", "id": id, "name": "skill.put", "args": renaming(args, was)})
     }
 
     pub fn delete_skill(&mut self, name: &str) -> Value {
@@ -10962,6 +11308,17 @@ impl Model {
                 .map(|s| json!({"name": s.name, "agent": s.agent, "prompt": s.prompt, "after": s.after}))
                 .collect();
         }
+        if let Some(event) = &f.event {
+            args["event"] = event.clone();
+        }
+        let command = f.gate.trim();
+        args["gate"] = match (command.is_empty(), f.gate_seconds) {
+            (true, _) => Value::Null,
+            (false, s) if s > 0 => json!({"command": command, "timeout": s}),
+            (false, _) => json!({"command": command}),
+        };
+        args["model"] = json!(f.model);
+        args["effort"] = json!(f.effort);
         json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
     }
 
@@ -11145,25 +11502,6 @@ impl Model {
         "You".into()
     }
 
-    /// Puts the agent `id`, dragged in the sidebar, in the place of `onto`, and gives
-    /// the instance the new order. Pinned agents stay above the rest.
-    pub fn move_agent(&mut self, id: &str, onto: &str) -> Option<Value> {
-        let from = self.agents.iter().position(|a| a.id == id)?;
-        let to = self.agents.iter().position(|a| a.id == onto)?;
-        if from == to {
-            return None;
-        }
-        let moved = Rc::make_mut(&mut self.agents).remove(from);
-        Rc::make_mut(&mut self.agents).insert(to, moved);
-        for (k, a) in Rc::make_mut(&mut self.agents).iter_mut().enumerate() {
-            a.order = Some(k as i64);
-        }
-        sort_agents(Rc::<Vec<Agent>>::make_mut(&mut self.agents));
-        let cmd = self.id("app.order");
-        let ids: Vec<&str> = self.agents.iter().map(|a| a.id.as_str()).collect();
-        Some(json!({"t": "cmd", "id": cmd, "name": "agent.order", "args": {"agents": ids}}))
-    }
-
     /// Pins the open agent to the top of the list, or takes its pin off.
     pub fn pin_agent(&mut self, pinned: bool) -> Option<Value> {
         let agent = self.selected.clone()?;
@@ -11171,25 +11509,6 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.pin", "args": {"agent": agent, "pinned": pinned}}),
         )
-    }
-
-    /// Puts an agent in a sidebar folder, or with None, out of them. It shows there at
-    /// once, and the instance tells every device.
-    pub fn group_agent(&mut self, agent: &str, group: Option<&str>) -> Value {
-        let sections = Rc::make_mut(&mut self.sidebar);
-        for sec in sections.iter_mut() {
-            sec.agents.retain(|a| a != agent);
-        }
-        let into = sections.iter_mut().find(|sec| match (&sec.part, group) {
-            (SidePart::Folder { id, .. }, Some(g)) => id == g,
-            (SidePart::Agents, None) => true,
-            _ => false,
-        });
-        if let Some(sec) = into {
-            sec.agents.push(agent.to_string());
-        }
-        let id = self.id("app.group_agent");
-        json!({"t": "cmd", "id": id, "name": "agent.group", "args": {"agent": agent, "group": group.unwrap_or_default()}})
     }
 
     /// Hides an agent in the sidebar, or shows it again.
@@ -11245,35 +11564,6 @@ impl Model {
     pub fn delete_folder(&mut self, folder: &str) -> Value {
         let id = self.id("app.folder");
         json!({"t": "cmd", "id": id, "name": "group.delete", "args": {"group": folder}})
-    }
-
-    /// The part of the sidebar an agent is in.
-    pub fn part_of(&self, agent: &str) -> Option<SidePart> {
-        self.sidebar
-            .iter()
-            .find(|sec| sec.agents.iter().any(|a| a == agent))
-            .map(|sec| sec.part.clone())
-    }
-
-    /// The sidebar's folders, each id and name, in order.
-    pub fn folders(&self) -> Vec<(String, String)> {
-        self.sidebar
-            .iter()
-            .filter_map(|sec| match &sec.part {
-                SidePart::Folder { id, name, .. } => Some((id.clone(), name.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The agents of the sidebar, in its order, without the hidden ones: what the rail
-    /// shows, and what Ctrl+1 to 9 open.
-    pub fn shown_agents(&self) -> Vec<String> {
-        self.sidebar
-            .iter()
-            .filter(|sec| sec.part != SidePart::Hidden)
-            .flat_map(|sec| sec.agents.iter().cloned())
-            .collect()
     }
 
     /// Sets an agent's permission mode, or with None, has it follow the default.
@@ -11813,6 +12103,117 @@ mod tests {
     }
 
     #[test]
+    fn a_list_pages_draft_stays_until_the_instance_says_its_saved() {
+        use drafts::{Form, Page};
+        let mut m = Model::new();
+        let key = (Page::Mcp, Some("acta".to_string()));
+        let own = Form::Fields(vec![
+            "acta".into(),
+            "https://acta.example/mcp".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
+        let edited = Form::Fields(vec![
+            "acta".into(),
+            "https://acta.example/api/mcp".into(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]);
+        m.drafts.open(key.clone(), own);
+        m.drafts.edit(edited.clone());
+        // Refused: the draft stays, with its dot, and the window says why.
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://acta.example/api/mcp"}),
+            Some("acta"),
+        );
+        let id = s(&f, "id");
+        m.drafts.saving(id.clone(), key.clone(), edited.clone());
+        assert!(m.drafts.has(Page::Mcp, Some("acta")));
+        m.take(&json!({"t": "result", "id": id, "ok": false, "error": {"code": "invalid", "message": "That address doesn't answer."}}));
+        assert!(m.drafts.has(Page::Mcp, Some("acta")));
+        assert_eq!(m.notices, vec!["That address doesn't answer.".to_string()]);
+        // Saved: it goes.
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://acta.example/api/mcp"}),
+            Some("acta"),
+        );
+        let id = s(&f, "id");
+        m.drafts.saving(id.clone(), key, edited);
+        m.take(
+            &json!({"t": "result", "id": "app.mcp_list_99", "ok": true, "value": {"servers": []}}),
+        );
+        assert!(m.drafts.has(Page::Mcp, Some("acta")));
+        m.take(&json!({"t": "result", "id": id, "ok": true, "value": {}}));
+        assert!(!m.drafts.has(Page::Mcp, Some("acta")));
+    }
+
+    #[test]
+    fn a_saved_ones_save_says_the_name_its_saved_under() {
+        let mut m = Model::new();
+        let f = m.put_mcp(
+            json!({"name": "gh", "url": "https://api.github.example/mcp"}),
+            Some("github"),
+        );
+        assert_eq!(
+            (s(&f["args"], "name"), s(&f["args"], "was")),
+            ("gh".into(), "github".into())
+        );
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://acta.example/mcp"}),
+            None,
+        );
+        assert!(f["args"].get("was").is_none());
+        let f = m.save_skill(
+            " changelog ",
+            "Notes.",
+            "Keep them short.",
+            Some("release-notes"),
+        );
+        assert_eq!(
+            (s(&f["args"], "name"), s(&f["args"], "was")),
+            ("changelog".into(), "release-notes".into())
+        );
+        assert!(m.save_skill("new", "New.", "", None)["args"]
+            .get("was")
+            .is_none());
+    }
+
+    #[test]
+    fn a_rename_to_a_name_another_has_keeps_its_draft_and_says_why() {
+        use drafts::{Form, Page};
+        let mut m = Model::new();
+        let fields = |name: &str| {
+            Form::Fields(vec![
+                name.into(),
+                "https://api.github.example/mcp".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ])
+        };
+        m.drafts
+            .open((Page::Mcp, Some("github".into())), fields("github"));
+        m.drafts.edit(fields("acta"));
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://api.github.example/mcp"}),
+            Some("github"),
+        );
+        let id = s(&f, "id");
+        m.drafts
+            .saving(id.clone(), (Page::Mcp, Some("acta".into())), fields("acta"));
+        m.take(&json!({"t": "result", "id": id, "ok": false, "error": {"code": "name_taken", "message": "There's an MCP server named acta already."}}));
+        assert!(m.drafts.has(Page::Mcp, Some("github")) && !m.drafts.has(Page::Mcp, Some("acta")));
+        assert!(m.drafts.is_open(Page::Mcp, Some("github")));
+        assert!(m.drafts.moved_in(Page::Mcp, &["acta", "github"]).is_empty());
+        assert_eq!(
+            m.notices,
+            vec!["There's an MCP server named acta already.".to_string()]
+        );
+    }
+
+    #[test]
     fn an_mcp_server_that_signs_in() {
         let mut m = Model::new();
         m.take(&json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
@@ -11877,6 +12278,67 @@ mod tests {
         assert!(kept.get("client_secret").is_none());
         let local = with_client(server_args("local", "npx thing", ""), "c1", "s");
         assert!(local.get("client_id").is_none());
+    }
+
+    #[test]
+    fn an_mcp_server_says_how_it_stands_for_the_installed_list() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+            {"name": "acta", "url": "https://acta.aaenz.no/api/mcp", "headers": {}, "status": "connected",
+             "tools": ["list_tasks"], "agents": ["a1", "a2"], "catalog": "acta"},
+            {"name": "t3", "url": "https://pc.ts.net/mcp", "headers": {}, "status": "failing", "why": "It didn't answer."},
+            {"name": "linear", "url": "https://mcp.linear.app/mcp", "headers": {}, "status": "sign_in"},
+            {"name": "local", "command": "npx", "args": ["thing"], "env": {}}
+        ]}}));
+        let acta = &m.mcp_servers[0];
+        assert_eq!(acta.status, McpStatus::Connected);
+        assert_eq!(acta.tools, ["list_tasks"]);
+        assert_eq!(acta.agents, ["a1", "a2"]);
+        assert_eq!(acta.catalog, "acta");
+        assert_eq!(
+            (m.mcp_servers[1].status, m.mcp_servers[1].why.as_str()),
+            (McpStatus::Failing, "It didn't answer.")
+        );
+        assert_eq!(m.mcp_servers[2].status, McpStatus::SignIn);
+        assert_eq!(m.mcp_servers[3].status, McpStatus::Untested);
+    }
+
+    #[test]
+    fn the_mcp_form_keeps_a_secrets_prefix() {
+        // LOO-364: a header that's `Bearer ` and a secret shows with its prefix, and
+        // saving the form sends it back as it was.
+        let mut m = Model::new();
+        m.take(
+            &json!({"t": "result", "id": "app.mcp_list1", "ok": true, "value": {"servers": [
+                {"name": "github", "url": "https://api.githubcopilot.com/mcp/", "headers": {
+                    "Authorization": {"secret": "GITHUB_TOKEN", "prefix": "Bearer "},
+                    "X-Plain": {"secret": "PLAIN"},
+                    "X-Text": "hello"
+                }}
+            ]}}),
+        );
+        let text = m.mcp_servers[0].settings_text();
+        assert!(text.contains("Authorization=Bearer secret:GITHUB_TOKEN"));
+        assert!(text.contains("X-Plain=secret:PLAIN"));
+        assert!(text.contains("X-Text=hello"));
+        let put = server_args("github", "https://api.githubcopilot.com/mcp/", &text);
+        assert_eq!(
+            put["headers"],
+            json!({
+                "Authorization": {"secret": "GITHUB_TOKEN", "prefix": "Bearer "},
+                "X-Plain": {"secret": "PLAIN"},
+                "X-Text": "hello"
+            })
+        );
+        // Text that only has secret: in it stays text.
+        let odd = server_args(
+            "x",
+            "npx x",
+            "URL=https://x.example/secret:y\nEMPTY=Bearer secret:\nNAME=my secret:has space",
+        );
+        assert_eq!(odd["env"]["URL"], "https://x.example/secret:y");
+        assert_eq!(odd["env"]["EMPTY"], "Bearer secret:");
+        assert_eq!(odd["env"]["NAME"], "my secret:has space");
     }
 
     #[test]
@@ -12129,6 +12591,40 @@ mod tests {
         assert!(!m.reply_to("msg_9", None, false));
     }
 
+    // LOO-347: words selected with emoji in them are the message's, one of the person's
+    // own selected as its name.
+    #[test]
+    fn words_selected_with_emoji_are_the_messages() {
+        let mut e = crate::emoji::Emojis::default();
+        for (id, name) in [("e_3", "party_cat"), ("e_9", "gone")] {
+            e.own.push(crate::emoji::Custom {
+                id: id.into(),
+                name: name.into(),
+                file: "ab".into(),
+                animated: false,
+            });
+        }
+        e.paths.insert("e_3".into(), "/f/e_3".into());
+        crate::emoji::sync_own(&e);
+        let mut m = in_chat();
+        m.take(
+            &json!({"t": "core.data", "id": "app.messages:c_1", "what": "messages", "items": [
+                {"id": "msg_1", "role": "person", "from": "d_1", "at": 1, "blocks": [
+                    {"kind": "text", "text": "Word 😭 word <:party_cat:e_3> 👨‍👩‍👧 wad"}
+                ]},
+                {"id": "msg_2", "role": "person", "from": "d_1", "at": 2, "blocks": [
+                    {"kind": "text", "text": "a <:gone:e_9> b `<:party_cat:e_3>` c"}
+                ]}
+            ]}),
+        );
+        assert!(model_selected(&m, "msg_1", "Word 😭 word"));
+        assert!(model_selected(&m, "msg_1", "😭 word :party_cat: 👨‍👩‍👧 wad"));
+        assert!(!model_selected(&m, "msg_1", "<:party_cat:e_3> wad x"));
+        // Not drawn yet, or in code: as written, as it's shown and copied.
+        assert!(model_selected(&m, "msg_2", "a <:gone:e_9> b"));
+        assert!(model_selected(&m, "msg_2", "b <:party_cat:e_3> c"));
+    }
+
     fn model_selected(m: &Model, id: &str, words: &str) -> bool {
         m.messages
             .iter()
@@ -12201,6 +12697,7 @@ mod tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             status: String::new(),
             pinned: false,
             reply: None,
@@ -12769,6 +13266,7 @@ mod tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             status: String::new(),
             pinned: false,
             reply: None,
@@ -12814,6 +13312,7 @@ mod tests {
             learned: Vec::new(),
             links: HashMap::new(),
             cards: Default::default(),
+            threads: Default::default(),
             pinned: false,
             reply: None,
             status: status.into(),
@@ -13504,7 +14003,11 @@ mod tests {
         assert_eq!(fill.percent(), 56);
         assert_eq!(fill.tip(), "Context 56%, 112k of 200k");
         assert_eq!(fill.amount(), "112k of 200k");
-        assert_eq!(fill.line(0), "A fresh session starts at 80%");
+        assert_eq!(fill.line(0), None);
+        assert!(
+            fill.costs().is_empty(),
+            "nothing it costs until a turn says"
+        );
         assert_eq!(m.context_title(&fill), "Context");
         m.select(Some("a_2".into()));
         assert_eq!(m.context(), None, "nothing until its program says");
@@ -13514,6 +14017,8 @@ mod tests {
             compacted: None,
             compacts: false,
             agent: None,
+            turn: 0,
+            day: 0,
         };
         assert_eq!(at(750_000).percent(), 75);
         assert_eq!(at(-5).fraction(), 0.0);
@@ -13528,15 +14033,23 @@ mod tests {
     fn the_context_card_says_when_it_was_compacted_and_compacts_or_starts_fresh() {
         let mut m = Model::new();
         m.take(&conversations(json!([
-            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000, "compacted": 1_000, "compacts": true}},
+            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000, "compacted": 1_000, "compacts": true, "tokens": {"turn": 410_000, "day": 6_200_000}}},
         ])));
         m.select(Some("a_1".into()));
         let fill = m.context().expect("its program said");
         assert!(fill.compacts);
         let hour = 3_600_000;
         assert_eq!(
-            fill.line(1_000 + 2 * hour),
-            "Compacted 2 h ago · a fresh session starts at 80%"
+            fill.line(1_000 + 2 * hour).as_deref(),
+            Some("Compacted 2 h ago")
+        );
+        // What the chat costs: its last turn and its last 24 hours, a title and tokens each.
+        assert_eq!(
+            fill.costs(),
+            vec![
+                ("Last turn", "410k".to_string()),
+                ("Last 24 hours", "6.2M".to_string())
+            ]
         );
         assert_eq!(ago(30_000), "just now");
         assert_eq!(ago(5 * 60_000), "5 min ago");
@@ -13625,42 +14138,75 @@ mod tests {
     }
 
     #[test]
-    fn the_sidebar_has_the_limits_of_the_plans_the_agents_run_on() {
+    fn a_programs_page_has_the_limits_of_its_plan() {
         let mut m = Model::new();
-        m.take(&json!({"t": "core.data", "what": "agents", "items": [
-            {"id": "a_1", "name": "Main", "acp_agent": "claude"},
-        ]}));
         let limits = json!({"plan": "Claude Max", "session": {"used": 42, "resets": 1_795_620_600_000i64}, "week": {"used": 78, "resets": 1_795_900_000_000i64}});
         m.take(
             &json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [
                 {"name": "claude", "limits": limits},
                 {"name": "codex"},
-                {"name": "other", "limits": limits},
             ]}}),
         );
-        let shown = m.plan_limits();
+        let shown = m.program_limits("claude").expect("it reported them");
+        assert_eq!(shown.plan, "Claude Max");
         assert_eq!(
-            shown.len(),
-            1,
-            "only the programs that report them and that agents use"
-        );
-        assert_eq!(shown[0].0, "claude");
-        assert_eq!(shown[0].1.plan, "Claude Max");
-        assert_eq!(
-            shown[0].1.session,
+            shown.session,
             Some(LimitWindow {
                 used: 42,
                 resets: 1_795_620_600_000
             })
         );
+        assert_eq!(m.program_limits("codex"), None, "it reports none");
+        assert_eq!(m.program_limits("gone"), None);
         // A later report changes them in place.
         m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {"plan": "Claude Max", "session": {"used": 50, "resets": 1_795_620_600_000i64}}}));
-        let shown = m.plan_limits();
-        assert_eq!(shown[0].1.session.map(|w| w.used), Some(50));
-        assert_eq!(shown[0].1.week, None);
+        let shown = m.program_limits("claude").expect("still a plan's");
+        assert_eq!(shown.session.map(|w| w.used), Some(50));
+        assert_eq!(shown.week, None);
         // A login that isn't a plan's has none to show.
         m.take(&json!({"t": "event", "kind": "limits.updated", "program": "claude", "limits": {}}));
-        assert!(m.plan_limits().is_empty());
+        assert_eq!(m.program_limits("claude"), None);
+    }
+
+    #[test]
+    fn the_context_card_has_the_plan_of_the_program_the_chat_runs_on() {
+        let mut m = Model::new();
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "Main", "acp_agent": "claude"},
+            {"id": "a_2", "name": "Coder", "acp_agent": "codex"},
+            {"id": "a_3", "name": "Scribe", "acp_agent": "claude"},
+        ]}));
+        let max = json!({"plan": "Claude Max", "session": {"used": 42, "resets": 0}, "week": {"used": 78, "resets": 0}});
+        let pro = json!({"plan": "ChatGPT Pro", "week": {"used": 10, "resets": 0}});
+        m.take(
+            &json!({"t": "result", "id": "app.acp_1", "ok": true, "value": {"programs": [
+                {"name": "claude", "limits": max},
+                {"name": "codex", "limits": pro},
+                {"name": "gemini"},
+            ]}}),
+        );
+        m.take(&conversations(json!([
+            {"id": "c_1", "agent": "a_1", "at": 1, "context": {"used": 82_000, "size": 200_000}},
+            {"id": "c_2", "agent": "a_2", "at": 1, "context": {"used": 9_000, "size": 200_000}},
+            {"id": "c_3", "agent": "a_3", "at": 1, "context": {"used": 9_000, "size": 200_000}, "program": "gemini"},
+            {"id": "r_1", "agent": "", "room": "r_1", "at": 1, "context": {"used": 5_000, "size": 200_000, "agent": "a_2"}},
+        ])));
+        let plan = |m: &Model| {
+            let fill = m.context()?;
+            m.context_plan(&fill)
+                .map(|(program, limits)| (program, limits.plan))
+        };
+        m.select(Some("a_1".into()));
+        assert_eq!(plan(&m), Some(("claude".into(), "Claude Max".into())));
+        m.select(Some("a_2".into()));
+        assert_eq!(plan(&m), Some(("codex".into(), "ChatGPT Pro".into())));
+        // A chat moved to another program has that one's, and one with no plan, none.
+        m.select(Some("a_3".into()));
+        assert_eq!(plan(&m), None);
+        // In a group chat, the program of the member the ring is for, not the lead's.
+        m.select(Some("a_1".into()));
+        m.open_room = Some("r_1".into());
+        assert_eq!(plan(&m), Some(("codex".into(), "ChatGPT Pro".into())));
     }
 
     #[test]
@@ -14962,11 +15508,22 @@ mod tests {
         let ids: Vec<String> = a.picks().iter().map(|o| o.id.clone()).collect();
         assert_eq!(ids, ["model", "effort"]);
         assert_eq!(a.picked().as_deref(), Some("Opus · High"));
+        // A narrow header's brain chip drops the effort.
+        assert_eq!(a.picked_model().as_deref(), Some("Opus"));
         let f = m.set_config("a_1", "model", "sonnet").unwrap();
         assert_eq!(f["args"]["config"]["model"], "sonnet");
         assert_eq!(
             m.agent("a_1").unwrap().picked().as_deref(),
             Some("Sonnet · High")
+        );
+        // A program with an effort and no model has nothing to show once that's dropped.
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main", "options": [
+            {"id": "effort", "name": "Effort", "category": "thought_level", "value": "medium", "options": [{"value": "medium", "name": "Medium"}]}
+        ]}]}));
+        let a = m.agent("a_1").unwrap();
+        assert_eq!(
+            (a.picked().as_deref(), a.picked_model()),
+            (Some("Medium"), None)
         );
         // A program that offers nothing to pick shows no picker.
         m.take(
@@ -15199,11 +15756,15 @@ mod tests {
                 ],
                 vec![
                     PlusRow::Open(PlusSub::Skills),
-                    PlusRow::Open(PlusSub::Routines)
+                    PlusRow::Open(PlusSub::Routines),
+                    PlusRow::Spools
                 ],
             ]
         );
         assert!(m.plus_groups("", true)[0].contains(&PlusRow::PasteImage));
+        // Spools is found by its name, or what it's for.
+        assert_eq!(m.plus_groups("spo", false), vec![vec![PlusRow::Spools]]);
+        assert_eq!(m.plus_groups("mcp", false), vec![vec![PlusRow::Spools]]);
         // Typed, each group's rows that match: names that start with it first, then a
         // skill's when-to-use, and this agent's routines before another's.
         let found = m.plus_groups("rev", false);
@@ -15556,6 +16117,96 @@ mod tests {
         assert_eq!(
             (going.mark(), going.took()),
             (RunMark::Going, String::new())
+        );
+        // A gate that found nothing new: quiet, and it says so.
+        let gated =
+            run(json!({"run": "r5", "at": 1000, "ended": 1500, "status": "quiet", "woke": false}));
+        assert_eq!(
+            (gated.mark(), gated.pill(), gated.line()),
+            (RunMark::Quiet, "Quiet", "Nothing new".into())
+        );
+        // One its agent was woken for, that posted nothing, says what it answered.
+        let woken =
+            run(json!({"run": "r6", "at": 1000, "status": "quiet", "said": "Still 1.21.4."}));
+        assert_eq!(woken.line(), "Still 1.21.4.");
+    }
+
+    #[test]
+    fn a_routines_gate_model_effort_and_cost_are_read_and_saved() {
+        let r = Routine::of(&json!({
+            "id": "rt_1", "name": "Watch PR", "agent": "a_1", "prompt": "Post what's new.",
+            "gate": {"command": "gh pr view 8006 | ./changed.sh", "timeout": 90},
+            "model": "haiku", "effort": "low",
+            "cost": {"run": 1_350_000, "day": 5_400_000, "runs": 28, "quiet": 27, "wasted": true}
+        }));
+        assert_eq!(
+            (
+                r.gate.as_str(),
+                r.gate_seconds,
+                r.model.as_str(),
+                r.effort.as_str()
+            ),
+            ("gh pr view 8006 | ./changed.sh", 90, "haiku", "low")
+        );
+        assert_eq!(
+            r.cost.words(),
+            "1.4M tokens a run · 5.4M a day · mostly quiet"
+        );
+        assert_eq!(r.cost.warning(), "5.4M tokens a day, mostly quiet");
+        let plain = Routine::of(
+            &json!({"id": "rt_2", "cost": {"run": 40_000, "day": 80_000, "runs": 2, "quiet": 0, "wasted": false}}),
+        );
+        assert_eq!(
+            (
+                plain.gate.as_str(),
+                plain.cost.words(),
+                plain.cost.warning()
+            ),
+            ("", "40k tokens a run · 80k a day".into(), String::new())
+        );
+        assert_eq!(Routine::of(&json!({"id": "rt_3"})).cost.words(), "");
+        let asleep = RoutineCost {
+            runs: 4,
+            quiet: 4,
+            ..RoutineCost::default()
+        };
+        assert_eq!(asleep.words(), "No tokens this week · mostly quiet");
+        let mut m = Model::new();
+        let form = RoutineForm {
+            name: "Watch PR".into(),
+            agent: "a_1".into(),
+            prompt: "Post what's new.".into(),
+            gate: " ./changed.sh ".into(),
+            gate_seconds: 90,
+            model: "haiku".into(),
+            effort: "low".into(),
+            ..RoutineForm::default()
+        };
+        let args = &m.save_routine(&form)["args"];
+        assert_eq!(
+            (&args["gate"], &args["model"], &args["effort"]),
+            (
+                &json!({"command": "./changed.sh", "timeout": 90}),
+                &json!("haiku"),
+                &json!("low")
+            )
+        );
+        // No command takes the gate off; no seconds leaves them to the instance; no
+        // model or effort is its agent's own.
+        let off = RoutineForm {
+            gate: " ".into(),
+            model: String::new(),
+            ..form.clone()
+        };
+        let args = &m.save_routine(&off)["args"];
+        assert_eq!((&args["gate"], &args["model"]), (&Value::Null, &json!("")));
+        let default_seconds = RoutineForm {
+            gate_seconds: 0,
+            ..form
+        };
+        assert_eq!(
+            m.save_routine(&default_seconds)["args"]["gate"],
+            json!({"command": "./changed.sh"})
         );
     }
 
@@ -16248,21 +16899,31 @@ mod tests {
         let mut m = Model::new();
         let asked: Vec<Value> = m.fetches();
         assert!(asked.iter().any(|f| f["what"] == "sidebar"));
-        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
-            {"kind": "waiting", "agents": ["a_3"]},
-            {"kind": "pinned", "agents": []},
-            {"kind": "agents", "agents": ["a_1"]},
-            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "agents": ["a_2"]},
-            {"kind": "hidden", "agents": ["a_4"]}
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One"}, {"id": "a_2", "name": "Two"}, {"id": "a_3", "name": "Three"}, {"id": "a_4", "name": "Four", "hidden": 2}
         ]}));
+        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
+            {"kind": "pinned", "agents": []},
+            {"kind": "waiting", "agents": ["a_3"]},
+            {"kind": "list", "items": [{"kind": "agent", "id": "a_1"}]},
+            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "items": [{"kind": "agent", "id": "a_2"}]},
+            {"kind": "hidden", "agents": ["a_4"]},
+            {"kind": "order", "items": ["a_3", "a_1", "a_2", "a_4"]}
+        ]}));
+        let shown = |m: &Model| -> Vec<String> {
+            m.rail_parts()
+                .iter()
+                .flat_map(|s| s.items.iter().map(|i| i.id().to_string()))
+                .collect()
+        };
         assert_eq!(m.folders(), [("g_1".to_string(), "Work".to_string())]);
-        assert_eq!(m.shown_agents(), ["a_3", "a_1", "a_2"]);
+        assert_eq!(shown(&m), ["a_3", "a_1", "a_2"]);
         assert_eq!(m.part_of("a_4"), Some(SidePart::Hidden));
         // Put in the folder, it's there at once.
         let f = m.group_agent("a_1", Some("g_1"));
         assert_eq!(f["name"], "agent.group");
         assert_eq!(f["args"], json!({"agent": "a_1", "group": "g_1"}));
-        assert_eq!(m.shown_agents(), ["a_3", "a_2", "a_1"]);
+        assert_eq!(shown(&m), ["a_3", "a_2", "a_1"]);
         let f = m.collapse_folder("g_1", true);
         assert_eq!(f["args"], json!({"group": "g_1", "collapsed": true}));
         assert!(m.rename_folder("g_1", "  ").is_none());
@@ -16296,7 +16957,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_stay_where_they_were_dragged() {
+    fn agents_are_listed_where_they_were_dragged() {
         let mut m = Model::new();
         m.take(&json!({"t": "core.data", "what": "agents", "items": [
             {"id": "a_1", "name": "One", "order": 2},
@@ -16306,12 +16967,6 @@ mod tests {
         ]}));
         let order = |m: &Model| m.agents.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
         assert_eq!(order(&m), ["a_2", "a_4", "a_1", "a_3"]);
-        // The last one dragged onto the first takes its place.
-        let f = m.move_agent("a_3", "a_2").unwrap();
-        assert_eq!(order(&m), ["a_3", "a_2", "a_4", "a_1"]);
-        assert_eq!(f["name"], "agent.order");
-        assert_eq!(f["args"]["agents"], json!(["a_3", "a_2", "a_4", "a_1"]));
-        assert!(m.move_agent("a_3", "a_3").is_none());
     }
 
     #[test]

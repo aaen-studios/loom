@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gpui::{AnyElement, IntoElement, Pixels, TextStyle};
 
 /// A GPUI element participating as one atomic object in a text line.
@@ -8,6 +10,17 @@ use gpui::{AnyElement, IntoElement, Pixels, TextStyle};
 pub struct InlineElement {
     pub(crate) element: AnyElement,
     pub(crate) baseline: Option<Pixels>,
+    /// loom: how the line cuts it when it's wider than the line (`cut_to_fit`).
+    pub(crate) fit: Option<Rc<InlineFit>>,
+}
+
+/// loom: how an inline element wider than its line is cut (`InlineElement::cut_to_fit`).
+pub(crate) struct InlineFit {
+    /// Given its own width, the room left on the line where it would start and the
+    /// line's width: the width it takes there, or None to start the next line.
+    pub width: Box<dyn Fn(Pixels, Pixels, Pixels) -> Option<Pixels>>,
+    /// The element again, given its own width, at the width it takes.
+    pub build: Box<dyn Fn(Pixels, Pixels) -> AnyElement>,
 }
 
 impl InlineElement {
@@ -15,6 +28,7 @@ impl InlineElement {
         Self {
             element: element.into_any_element(),
             baseline: None,
+            fit: None,
         }
     }
 
@@ -22,6 +36,24 @@ impl InlineElement {
     /// By default the box aligns its bottom with the surrounding text's descent.
     pub fn with_baseline(mut self, baseline: Pixels) -> Self {
         self.baseline = Some(baseline);
+        self
+    }
+
+    /// loom: lets the line cut the element when it's wider than a whole line, which
+    /// would otherwise overflow it. `width` is asked, with the element's own width, the
+    /// room left on the line where it would start and the line's width, what width it
+    /// takes there, or None to start the next line, where it's asked again with the
+    /// whole line's room; `build` makes the element again, given its own width, at the
+    /// width it takes. One that fits a line keeps its size, and wraps whole.
+    pub fn cut_to_fit(
+        mut self,
+        width: impl Fn(Pixels, Pixels, Pixels) -> Option<Pixels> + 'static,
+        build: impl Fn(Pixels, Pixels) -> AnyElement + 'static,
+    ) -> Self {
+        self.fit = Some(Rc::new(InlineFit {
+            width: Box::new(width),
+            build: Box::new(build),
+        }));
         self
     }
 }

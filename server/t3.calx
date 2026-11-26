@@ -1,0 +1,499 @@
+module server.t3
+
+// T3 Code's threads in loom (PLAN.md, "T3 threads"): the threads a message
+// names, by T3's own thread links (`t3-thread://v2/ENV/THREAD`, which T3's
+// tools give and tell agents to mention a thread by) or because an agent's T3
+// tool call in that reply started one or sent it work, and a thread as T3's
+// MCP tools give it, made into the card a message keeps for the apps: its
+// state, latest step, time, pull requests and the question it waits on. The
+// instance calls T3 as the person through `server/mcpcall.calx`; this is only
+// reading what was written and what came, and the models the start form offers
+// until T3 lists them.
+import std.json.{Json, parse}
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, int_at, str_at}
+
+// How a T3 thread link starts, then the environment's id, a slash and the thread's.
+pub const LINK: str = "t3-thread://v2/"
+// The most threads one message names that are looked up.
+pub const MOST: usize = 6
+// The longest a step, a reason or a question is kept on a card.
+const TEXT_MOST: usize = 240
+
+/// A thread a message names: the T3 environment its link names ("" when only its
+/// id is known), and its id.
+pub struct Ref {
+    pub env: String
+    pub thread: String
+}
+
+fn url_end(c: u8) -> bool {
+    return c == b' ' or c == b'\t' or c == b'\r' or c == b'<' or c == b'>' or c == b'"' or c == b'`' or c == b')' or c == b']' or c == b'\\' or c == b'\''
+}
+
+/// The thread a T3 thread link names, or none.
+pub fn link_ref(url: String) -> Ref? {
+    if not url.starts_with(LINK) { return none }
+    let rest = url[LINK.len()..].copy()
+    let slash = rest.find("/") else return none
+    let env = rest[..slash].copy()
+    let thread = rest[slash + 1..].trim_suffix("/").copy()
+    if env.len() == 0 or thread.len() == 0 or thread.contains("/") { return none }
+    return some(Ref { env: env, thread: thread })
+}
+
+fn add(out: mut List<Ref>, r: own Ref) {
+    for had in out {
+        if had.thread == r.thread {
+            return
+        }
+    }
+    if out.len() < MOST { out.push(r) }
+}
+
+/// The threads `text` links to, in the order they come, each once. Code, in
+/// backticks or a fenced block, isn't looked in.
+pub fn refs_in(text: String) -> List<Ref> {
+    var out = List<Ref>()
+    if not text.contains(LINK) { return out }
+    var fenced = false
+    for line in text.split("\n") {
+        let t = line.trim_start()
+        if t.starts_with("```") or t.starts_with("~~~") {
+            fenced = not fenced
+            continue
+        }
+        if fenced { continue }
+        let b = line.to_bytes()
+        var k: usize = 0
+        while k < b.len() {
+            if b[k] == b'`' {
+                k += 1
+                while k < b.len() and b[k] != b'`' { k += 1 }
+                k += 1
+                continue
+            }
+            if b[k] == b't' and line[k..].starts_with(LINK) {
+                var end = k
+                while end < b.len() and not url_end(b[end]) { end += 1 }
+                var url = line[k..end].copy()
+                while url.ends_with(".") or url.ends_with(",") or url.ends_with(";") or url.ends_with(":") or url.ends_with("!") or url.ends_with("?") {
+                    url = url[..url.len() - 1].copy()
+                }
+                if let r = link_ref(url) { add(mut out, r) }
+                k = end
+                continue
+            }
+            k += 1
+        }
+    }
+    return out
+}
+
+/// The thread a T3 tool started or sent work to, from what the tool gave back:
+/// an object with the thread's `threadId` and its `link`, as t3_thread_launch and
+/// t3_thread_send answer. A list of threads (t3_thread_list) or a thread read
+/// (t3_thread_read) names threads without starting them, so it's none.
+pub fn started_by(output: String) -> Ref? {
+    let j = match parse(output.trim().copy()) {
+        ok(j) => j,
+        err(_) => return none,
+    }
+    let thread = str_at(j.copy(), "threadId") ?? String()
+    if thread.len() == 0 { return none }
+    let found = refs_in(str_at(j, "link") ?? String())
+    for r in found {
+        if r.thread == thread { return some(r.copy()) }
+    }
+    return none
+}
+
+/// The threads an agent's tool call started, from its output's text parts, as ACP's
+/// `content` has them.
+pub fn started_in(content: Json) -> List<Ref> {
+    var out = List<Ref>()
+    if let Json.Array(parts) = content {
+        for p in parts {
+            let text = str_at(at(p.copy(), "content"), "text") ?? str_at(p, "text") ?? String()
+            if let r = started_by(text) { add(mut out, r) }
+        }
+    }
+    return out
+}
+
+/// What a card's state is, from the thread T3 gave: `waiting` while a question or
+/// an approval waits on the person, `working` while a run goes on, `done` once it
+/// ended well or the thread is idle, and `failed` once it failed or was stopped.
+pub fn state_of(status: String, pending: i64) -> String {
+    if pending > 0 { return String("waiting") }
+    if status == "failed" or status == "interrupted" or status == "cancelled" or status == "rolled_back" { return String("failed") }
+    if status == "completed" or status == "idle" { return String("done") }
+    return String("working")
+}
+
+// `s` on one line, cut to at most `most` bytes at a word when there's one, with "…".
+fn cut(s: String, most: usize) -> String {
+    let one = s.replace("\r", "").replace("\n", " ").trim().copy()
+    if one.len() <= most { return one }
+    var end: usize = 0
+    for r in one.runes() {
+        let n = "{r}".len()
+        if end + n > most { break }
+        end += n
+    }
+    var kept = one[..end].copy()
+    if let space = kept.find_last(" ") {
+        if space > most / 2 { kept = kept[..space].copy() }
+    }
+    return "{kept.trim_end()}…"
+}
+
+fn first_line(s: String) -> String {
+    let t = s.trim()
+    return t[..(t.find("\n") ?? t.len())].trim().copy()
+}
+
+/// What an activity item did, in a few words, for the card's latest step: a
+/// command as it ran, a tool by its name, a file it changed, or its title.
+pub fn step_of(item: Json) -> String {
+    let kind = str_at(item.copy(), "type") ?? String()
+    let title = str_at(item.copy(), "title") ?? String()
+    let text = str_at(item.copy(), "text") ?? String()
+    if kind == "command_execution" {
+        let line = first_line(text)
+        let command = if line.starts_with("$ ") { line[2..].copy() } else { line }
+        return cut(if command.len() > 0 { command } else { title }, TEXT_MOST)
+    }
+    if title.len() > 0 { return cut(title, TEXT_MOST) }
+    if kind == "dynamic_tool" or kind == "mcp_tool" {
+        if let ok(j) = parse(text.copy()) {
+            if let name = str_at(j, "toolName") { return cut(name, TEXT_MOST) }
+        }
+    }
+    if kind == "file_change" {
+        if let name = str_at(item, "fileName") { return cut("Edit {name}", TEXT_MOST) }
+    }
+    return cut(first_line(text), TEXT_MOST)
+}
+
+// Whether an activity item is a step a card shows: what the thread did, not what it thought.
+fn is_step(kind: String) -> bool {
+    return kind == "command_execution" or kind == "dynamic_tool" or kind == "mcp_tool" or kind == "file_change" or kind == "file_search" or kind == "web_search" or kind == "subagent" or kind == "assistant_message"
+}
+
+fn items(read: Json) -> List<Json> {
+    var out = List<Json>()
+    if let Json.Array(xs) = at(read, "items") { out = xs.copy() }
+    // Newest last, by position.
+    var sorted = List<Json>()
+    for x in out {
+        let p = int_at(x.copy(), "position") ?? 0
+        var k = sorted.len()
+        while k > 0 and (int_at(sorted[k - 1].copy(), "position") ?? 0) > p { k -= 1 }
+        sorted.insert(k, x.copy())
+    }
+    return sorted
+}
+
+/// When an ISO time was, in Unix milliseconds, or 0.
+pub fn ms_of(iso: String) -> i64 {
+    if iso.len() == 0 { return 0 }
+    if let t = Timestamp.parse_iso(iso.copy()) { return t.unix_ms }
+    if let t = Timestamp.parse_iso("{iso}Z") { return t.unix_ms }
+    return 0
+}
+
+/// The thread's page in T3's own app, in the browser: its origin, the environment and the thread.
+pub fn page(origin: String, env: String, thread: String) -> String {
+    if origin.len() == 0 or env.len() == 0 { return String() }
+    return "{origin.trim_suffix("/")}/{env}/{thread}"
+}
+
+/// A T3 server's origin, from its MCP address: `https://pc.example.ts.net` of
+/// `https://pc.example.ts.net/mcp`.
+pub fn origin_of(mcp_url: String) -> String {
+    let after = (mcp_url.find("://") ?? 0) + 3
+    if after > mcp_url.len() { return String() }
+    let slash = mcp_url[after..].find("/") ?? (mcp_url.len() - after)
+    return mcp_url[..after + slash].copy()
+}
+
+/// The question a thread waits on, as t3_pending_request's read gives it: the
+/// request, the first question's id and words, and its choices.
+pub fn question_of(read: Json) -> Json {
+    let request = str_at(read.copy(), "requestId") ?? str_at(at(read.copy(), "request"), "requestId") ?? String()
+    var questions = at(read.copy(), "questions")
+    if questions == Json.Null { questions = at(at(read, "request"), "questions") }
+    let Json.Array(qs) = questions else return Json.Null
+    if qs.len() == 0 or request.len() == 0 { return Json.Null }
+    let q = qs[0].copy()
+    var choices = List<Json>()
+    if let Json.Array(options) = at(q.copy(), "options") {
+        for o in options {
+            let label = str_at(o.copy(), "label") ?? o.as_str() ?? String()
+            if label.len() > 0 and choices.len() < 6 { choices.push(Json.Str(label)) }
+        }
+    }
+    let words = str_at(q.copy(), "question") ?? str_at(q.copy(), "header") ?? String()
+    return Obj.new().s("kind", String("question")).s("request", request).s("question", str_at(q, "id") ?? String()).s("text", cut(words, TEXT_MOST)).j("choices", Json.Array(choices)).done()
+}
+
+/// The approval a thread waits on, from its activity: the newest approval request,
+/// with its request's id when T3 gave it, and what it asks.
+pub fn approval_of(read: Json) -> Json {
+    var found = Json.Null
+    for x in items(read) {
+        if str_at(x.copy(), "type") == some(String("approval_request")) { found = x.copy() }
+    }
+    if found == Json.Null { return Json.Null }
+    let words = str_at(found.copy(), "prompt") ?? str_at(found.copy(), "reason") ?? str_at(found.copy(), "text") ?? str_at(found.copy(), "title") ?? String()
+    let o = Obj.new().s("kind", String("approval")).s("request", str_at(found, "requestId") ?? String()).s("text", cut(first_line(words), TEXT_MOST))
+    return o.j("choices", Json.Array([Json.Str(String("Approve")), Json.Str(String("Decline"))])).done()
+}
+
+/// What a message keeps of a thread, from t3_thread_read's answer (`read`, with
+/// its activity), the question or approval it waits on (`ask`, or null), the
+/// server it's on and that server's origin, its project's name, its effort when
+/// loom knows it, and when this was looked up.
+pub fn card_of(read: Json, ask: Json, server: String, origin: String, project: String, effort: String, at_ms: i64) -> Json {
+    let t = at(read.copy(), "thread")
+    let id = str_at(t.copy(), "threadId") ?? String()
+    let pending = int_at(t.copy(), "pendingRequestCount") ?? 0
+    let state = state_of(str_at(t.copy(), "status") ?? String(), if ask != Json.Null { 1 } else { pending })
+    var env = String()
+    for r in refs_in(str_at(t.copy(), "link") ?? String()) { env = r.env.copy() }
+    var o = Obj.new().s("thread", id.copy()).s("server", server).s("title", str_at(t.copy(), "title") ?? String()).s("project", project)
+    o = o.s("model", model_name(str_at(t.copy(), "model") ?? String()))
+    if effort.len() > 0 { o = o.s("effort", effort) }
+    o = o.s("state", state.copy())
+    // The latest step, while it works or once it's done.
+    var step = String()
+    var reason = String()
+    for x in items(read.copy()) {
+        let kind = str_at(x.copy(), "type") ?? String()
+        if is_step(kind.copy()) { step = step_of(x.copy()) }
+        if kind == "error" { reason = cut(first_line(str_at(x, "text") ?? String()), TEXT_MOST) }
+    }
+    if step.len() > 0 and state != "failed" { o = o.s("step", step) }
+    // Its run's time: the latest run's start, and its end once it has.
+    if let Json.Array(runs) = at(read.copy(), "recentRuns") {
+        if runs.len() > 0 {
+            let r = runs[0].copy()
+            let started = ms_of(str_at(r.copy(), "startedAt") ?? str_at(r.copy(), "requestedAt") ?? String())
+            let ended = ms_of(str_at(r, "completedAt") ?? String())
+            if started > 0 { o = o.i("started", started) }
+            if ended > 0 and (state == "done" or state == "failed") { o = o.i("ended", ended) }
+        }
+    }
+    var prs = List<Json>()
+    if let Json.Array(given) = at(t.copy(), "pullRequests") {
+        for p in given {
+            let n = int_at(p.copy(), "number") ?? 0
+            if n > 0 { prs.push(Obj.new().i("number", n).s("url", str_at(p.copy(), "url") ?? String()).s("state", str_at(p, "state") ?? String()).done()) }
+        }
+    }
+    if prs.len() > 0 { o = o.j("prs", Json.Array(prs)) }
+    if state == "waiting" and ask != Json.Null { o = o.j("ask", ask) }
+    if state == "failed" {
+        let status = str_at(t.copy(), "status") ?? String()
+        if reason.len() == 0 { reason = String(if status == "interrupted" or status == "cancelled" { "Stopped" } else { "Failed" }) }
+        o = o.s("reason", reason)
+    }
+    o = o.s("url", page(origin, env, id))
+    return o.i("at", at_ms).done()
+}
+
+/// What a message keeps of a thread none of the person's T3 servers has.
+pub fn missing(thread: String, at_ms: i64) -> Json {
+    return Obj.new().s("thread", thread).b("missing", true).i("at", at_ms).done()
+}
+
+/// A card's ask marked as one loom couldn't answer: the person approves in T3 itself.
+pub fn in_t3(card: Json) -> Json {
+    let ask = at(card.copy(), "ask")
+    if ask == Json.Null { return card.copy() }
+    var a = Obj.new()
+    if let Json.Object(m) = ask {
+        for (k, v) in m {
+            a.m.insert(k.copy(), v.copy())
+        }
+    }
+    a = a.b("in_t3", true)
+    var o = Obj.new()
+    if let Json.Object(m) = card {
+        for (k, v) in m {
+            o.m.insert(k.copy(), v.copy())
+        }
+    }
+    o.m.insert(String("ask"), a.done())
+    return o.done()
+}
+
+// --- The models the start form offers, until T3 lists them ---
+
+// Each provider T3 runs, its models, and their efforts with the one picked first.
+const MODELS: str = #"
+    [
+      {"id": "claudeAgent", "name": "Claude", "models": [
+        {"id": "claude-opus-5-5", "name": "Opus 5.5", "efforts": ["low", "medium", "high", "xhigh", "max"], "effort": "high"},
+        {"id": "claude-sonnet-5-5", "name": "Sonnet 5.5", "efforts": ["low", "medium", "high", "xhigh", "max"], "effort": "high"},
+        {"id": "claude-fable-5-2", "name": "Fable 5.2", "efforts": ["low", "medium", "high", "xhigh", "max"], "effort": "medium"},
+        {"id": "claude-haiku-5-5", "name": "Haiku 5.5", "efforts": [], "effort": ""}
+      ]},
+      {"id": "codex", "name": "Codex", "models": [
+        {"id": "gpt-6.1-sol", "name": "GPT-6.1 Sol", "efforts": ["low", "medium", "high", "xhigh"], "effort": "medium"},
+        {"id": "gpt-6-astra", "name": "GPT-6 Astra", "efforts": ["low", "medium", "high", "xhigh"], "effort": "medium"},
+        {"id": "gpt-6-luna", "name": "GPT-6 Luna", "efforts": ["low", "medium", "high", "xhigh"], "effort": "medium"}
+      ]}
+    ]
+    "#
+
+/// Each provider, with its models and their efforts, as `t3.form` gives them.
+pub fn providers() -> Json {
+    return match parse(String(MODELS)) {
+        ok(j) => j,
+        err(_) => Json.Array(List<Json>()),
+    }
+}
+
+/// A model as a card names it: `Opus 5.5` for `claude-opus-5-5`, or its id when
+/// it isn't one loom knows.
+pub fn model_name(id: String) -> String {
+    if let Json.Array(ps) = providers() {
+        for p in ps {
+            if let Json.Array(ms) = at(p, "models") {
+                for m in ms {
+                    if str_at(m.copy(), "id") == some(id.copy()) { return str_at(m, "name") ?? id.copy() }
+                }
+            }
+        }
+    }
+    return id.copy()
+}
+
+/// The model `id` of `provider`, or null.
+pub fn find_model(provider: String, id: String) -> Json {
+    if let Json.Array(ps) = providers() {
+        for p in ps {
+            if str_at(p.copy(), "id") != some(provider.copy()) { continue }
+            if let Json.Array(ms) = at(p, "models") {
+                for m in ms {
+                    if str_at(m.copy(), "id") == some(id.copy()) { return m.copy() }
+                }
+            }
+        }
+    }
+    return Json.Null
+}
+
+/// The words of a thread a person starts from the form: its title, from the
+/// task's first line, cut short.
+pub fn title_of(task: String) -> String {
+    return cut(first_line(task).trim_suffix(".").copy(), 80)
+}
+
+/// What t3_thread_launch is given for a thread the person starts from the form,
+/// or why it can't be: the project, the model with its effort, and the task as
+/// its first message. `effort` must be one the model has; a model with none
+/// takes none.
+pub fn launch_args(project: String, provider: String, model: String, effort: String, task: String) -> (Json, String) {
+    if project.trim().len() == 0 { return (Json.Null, String("Pick a project.")) }
+    if task.trim().len() == 0 { return (Json.Null, String("Say what the thread is to do.")) }
+    let m = find_model(provider.copy(), model.copy())
+    if m == Json.Null { return (Json.Null, String("That model isn't one T3 runs.")) }
+    var efforts = List<String>()
+    if let Json.Array(es) = at(m, "efforts") {
+        for e in es { efforts.push(e.as_str() ?? String()) }
+    }
+    if effort.len() > 0 and not efforts.contains(effort.copy()) { return (Json.Null, "{model_name(model.copy())} has no {effort} effort.") }
+    var selection = Obj.new().s("provider", provider).s("model", model)
+    if effort.len() > 0 { selection = selection.j("options", Obj.new().s("effort", effort).done()) }
+    let args = Obj.new().s("projectId", project).s("title", title_of(task.copy())).s("message", task.trim().copy()).j("modelSelection", selection.done()).done()
+    return (args, String())
+}
+
+/// The projects of a T3 server, from t3_project_list: each id and title.
+pub fn projects_of(listed: Json) -> List<(String, String)> {
+    var out = List<(String, String)>()
+    if let Json.Array(ps) = at(listed, "projects") {
+        for p in ps {
+            let id = str_at(p.copy(), "id") ?? String()
+            if id.len() == 0 or at(p.copy(), "archivedAt") != Json.Null { continue }
+            out.push((id, str_at(p, "title") ?? String()))
+        }
+    }
+    return out
+}
+
+@test
+fn finds_thread_links() {
+    let text = "Started [Fix the flaky sign-in test](t3-thread://v2/env-1/mcp:3ce1a19f), and see t3-thread://v2/env-2/thread%3Aa%3Ab. Not `t3-thread://v2/env-1/x` here.\n```\nt3-thread://v2/env-1/y\n```\nAgain [x](t3-thread://v2/env-1/mcp:3ce1a19f)."
+    var shown = List<String>()
+    for r in refs_in(String(text)) {
+        shown.push("{r.env}/{r.thread}")
+    }
+    assert(shown.join(" ") == "env-1/mcp:3ce1a19f env-2/thread%3Aa%3Ab")
+    assert(link_ref(String("t3-thread://v2/env")) == none and link_ref(String("https://x/y/z")) == none)
+}
+
+@test
+fn finds_the_thread_a_tool_started() {
+    let launched = #"{"threadId":"mcp:1","link":"[Fix it](t3-thread://v2/env-1/mcp:1)","status":"starting"}"#
+    let r = started_by(String(launched)) ?? Ref { env: String(), thread: String() }
+    assert(r.env == "env-1" and r.thread == "mcp:1")
+    // A list or a read names threads without starting them.
+    assert(started_by(String(#"{"threads":[{"threadId":"mcp:1","link":"[a](t3-thread://v2/env-1/mcp:1)"}]}"#)) == none)
+    assert(started_by(String(#"{"thread":{"threadId":"mcp:1"}}"#)) == none and started_by(String("ran: ls")) == none)
+    let content = parse(#"[{"type":"content","content":{"type":"text","text":"{\"threadId\":\"mcp:2\",\"link\":\"[b](t3-thread://v2/env-1/mcp:2)\"}"}}]"#)!
+    let found = started_in(content)
+    assert(found.len() == 1 and found[0].thread == "mcp:2")
+}
+
+@test
+fn reads_a_threads_state() {
+    assert(state_of(String("running"), 0) == "working" and state_of(String("waiting"), 0) == "working" and state_of(String("starting"), 0) == "working")
+    assert(state_of(String("running"), 1) == "waiting" and state_of(String("completed"), 0) == "done" and state_of(String("idle"), 0) == "done")
+    assert(state_of(String("failed"), 0) == "failed" and state_of(String("interrupted"), 0) == "failed")
+}
+
+@test
+fn makes_a_card() {
+    let read = parse(###"{"thread":{"threadId":"mcp:1","projectId":"p1","title":"Fix the flaky sign-in test","link":"[Fix](t3-thread://v2/env-1/mcp:1)","status":"running","model":"claude-opus-5-5","pullRequests":[{"number":295,"url":"https://github.com/a/b/pull/295","state":"open"}],"pendingRequestCount":0},"recentRuns":[{"status":"running","startedAt":"2026-11-26T02:09:17.000Z","completedAt":null}],"items":[{"position":5,"type":"reasoning","text":"Hm"},{"position":4,"type":"command_execution","text":"$ calx tests/protocol/signin.calx\nok"},{"position":3,"type":"dynamic_tool","text":"{\"toolName\":\"Read\"}"}]}"###)!
+    let card = card_of(read.copy(), Json.Null, String("t3-pc"), String("https://pc.example.ts.net"), String("loom"), String("high"), 9)
+    assert("{card}" == #"{"thread":"mcp:1","server":"t3-pc","title":"Fix the flaky sign-in test","project":"loom","model":"Opus 5.5","effort":"high","state":"working","step":"calx tests/protocol/signin.calx","started":1795658957000,"prs":[{"number":295,"url":"https://github.com/a/b/pull/295","state":"open"}],"url":"https://pc.example.ts.net/env-1/mcp:1","at":9}"#)
+    // Waiting on a question, with its choices.
+    let q = question_of(parse(#"{"requestId":"r1","questions":[{"id":"q1","question":"Keep the retry, or make the test wait for the port instead?","options":[{"label":"Wait for the port"},{"label":"Keep the retry"}]}]}"#)!)
+    assert("{q}" == #"{"kind":"question","request":"r1","question":"q1","text":"Keep the retry, or make the test wait for the port instead?","choices":["Wait for the port","Keep the retry"]}"#)
+    let waiting = card_of(read.copy(), q, String("t3-pc"), String(), String("loom"), String(), 9)
+    assert(str_at(waiting.copy(), "state") == some(String("waiting")) and str_at(at(waiting.copy(), "ask"), "request") == some(String("r1")) and str_at(waiting, "url") == some(String()))
+    // Failed, with the reason its error gave.
+    let failed = parse(###"{"thread":{"threadId":"mcp:1","title":"T","status":"failed","model":"gpt-6-luna"},"recentRuns":[{"startedAt":"2026-11-26T02:00:00Z","completedAt":"2026-11-26T02:18:00Z"}],"items":[{"position":1,"type":"command_execution","text":"$ ls"},{"position":2,"type":"error","text":"Usage limit reached · resets 15:30"}]}"###)!
+    let f = card_of(failed, Json.Null, String("t3"), String(), String(), String(), 1)
+    assert(str_at(f.copy(), "reason") == some(String("Usage limit reached · resets 15:30")) and str_at(f.copy(), "step") == none and str_at(f.copy(), "model") == some(String("GPT-6 Luna")))
+    assert((int_at(f.copy(), "ended") ?? 0) - (int_at(f, "started") ?? 0) == 1080000)
+}
+
+@test
+fn reads_an_approval() {
+    let read = parse(#"{"items":[{"position":2,"type":"approval_request","requestId":"ap1","prompt":"Run rm -rf build?\nIn loom"},{"position":1,"type":"approval_request","requestId":"ap0","prompt":"old"}]}"#)!
+    let a = approval_of(read)
+    assert("{a}" == #"{"kind":"approval","request":"ap1","text":"Run rm -rf build?","choices":["Approve","Decline"]}"#)
+    let card = Obj.new().s("thread", String("x")).j("ask", a).done()
+    assert(at(at(in_t3(card), "ask"), "in_t3") == Json.Bool(true))
+}
+
+@test
+fn launches_from_the_form() {
+    let (args, why) = launch_args(String("p1"), String("claudeAgent"), String("claude-opus-5-5"), String("high"), String("Fix the flaky sign-in test.\nIt fails one run in five."))
+    assert(why.len() == 0)
+    assert("{args}" == #"{"projectId":"p1","title":"Fix the flaky sign-in test","message":"Fix the flaky sign-in test.\nIt fails one run in five.","modelSelection":{"provider":"claudeAgent","model":"claude-opus-5-5","options":{"effort":"high"}}}"#)
+    let (_, no_effort) = launch_args(String("p1"), String("claudeAgent"), String("claude-haiku-5-5"), String("high"), String("x"))
+    assert(no_effort == "Haiku 5.5 has no high effort.")
+    let (_, no_task) = launch_args(String("p1"), String("codex"), String("gpt-6-luna"), String(), String(" "))
+    assert(no_task == "Say what the thread is to do.")
+    let (_, no_model) = launch_args(String("p1"), String("codex"), String("claude-opus-5-5"), String(), String("x"))
+    assert(no_model == "That model isn't one T3 runs.")
+    assert(origin_of(String("https://pc.example.ts.net/mcp")) == "https://pc.example.ts.net" and origin_of(String("http://127.0.0.1:3773/mcp")) == "http://127.0.0.1:3773")
+    let projects = projects_of(parse(#"{"projects":[{"id":"p1","title":"loom"},{"id":"p2","title":"old","archivedAt":"2026-01-01"}]}"#)!)
+    assert(projects.len() == 1 and projects[0].1 == "loom")
+}

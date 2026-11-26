@@ -55,7 +55,9 @@
   --layout-context-card: 300px;
   --layout-pill-title: 260px;
   --layout-card-preview: 330px;
+  --layout-board-column: 140px;
   --layout-field-label: 120px;
+  --layout-limit-words: 88px;
   --control-button: 34px;
   --control-button-small: 30px;
   --control-button-wide: 46px;
@@ -76,6 +78,7 @@
   --control-grip: 14px;
   --control-row-tall: 68px;
   --control-pill: 22px;
+  --control-tile: 76px;
   --phone-size-caption: 12.5;
   --phone-size-small: 14;
   --phone-size-body: 16;
@@ -130,6 +133,7 @@
   --warn: #f2a77a;
   --find: #3b3417;
   --find-current: #94781a;
+  --drop: #9ea8ff;
   --board: #7d5fd6;
   --thread-periwinkle: #9ea8ff;
   --thread-mint: #74d6a6;
@@ -167,6 +171,7 @@
     --warn: #c2621f;
     --find: #fbefb4;
     --find-current: #f2cc3d;
+    --drop: #5763e0;
     --board: #7d5fd6;
     --thread-periwinkle: #5763e0;
     --thread-mint: #18a06a;
@@ -204,6 +209,7 @@
   --warn: #c2621f;
   --find: #fbefb4;
   --find-current: #f2cc3d;
+  --drop: #5763e0;
   --board: #7d5fd6;
   --thread-periwinkle: #5763e0;
   --thread-mint: #18a06a;

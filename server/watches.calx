@@ -1,0 +1,695 @@
+module server.watches
+
+// Watching outside events (PLAN.md, "Watching outside events"): what a watch
+// holds, what Acta's activity and T3's thread waits say, and what a watch
+// posts in its chat and tells what it wakes. The instance keeps the watches,
+// looks at each as its person through `server/mcpcall.calx`, off its loop, and
+// acts on what this makes of the answers.
+//
+// A watch is one person's: `integration` (acta or t3) and `server`, their MCP
+// server it's reached through; `target`, an Acta board, a card on one, or a T3
+// thread; `conversation`, the chat its lines go in, or "" for none; `wake`, an
+// agent or a routine it wakes, or null; `events`, the kinds of change it
+// follows; `to`, for moves, only those to that status; and `cursor`, how far
+// it has read, which a restart keeps.
+import std.json.{Json, parse}
+import std.time.{Timestamp}
+import shared.obj.{Obj, at, bool_at, merge, str_at}
+import server.acta
+
+/// Acta's kinds of change, which a watch follows all of unless it names some.
+pub const ACTA_EVENTS: str = "moved created commented assigned"
+/// T3's: one of the thread's runs ended.
+pub const T3_EVENTS: str = "finished"
+/// Acta's statuses, as a move's `to` names them.
+pub const STATUSES: str = "todo in_progress review done canceled"
+/// The most lines one look at a board posts.
+pub const LINES_MOST: usize = 20
+/// How long a T3 wait waits for a run to end, in ms.
+pub const T3_WAIT_MS: i64 = 25000
+// The most of what a thread said last that the agent it wakes is told.
+const SAID_MOST: usize = 4000
+// The most of one item of a thread's history that status.since gives.
+const ITEM_MOST: usize = 1000
+
+fn one_of(s: String, list: str) -> bool {
+    return s.len() > 0 and " {list} ".contains(" {s} ")
+}
+
+// `s` cut to at most `most` bytes, on a character, with "…".
+fn cut(s: String, most: usize) -> String {
+    if s.len() <= most { return s.copy() }
+    var end: usize = 0
+    for r in s.runes() {
+        let n = "{r}".len()
+        if end + n > most { break }
+        end += n
+    }
+    return "{s[..end].trim_end()}…"
+}
+
+fn ms_of(when: String) -> i64 {
+    if let t = Timestamp.parse_iso(when) { return t.unix_ms }
+    return 0
+}
+
+/// What a watch, or status.since, looks at, from what was given: for Acta
+/// `{board, card?}`, the board as `workspace/board`, or a card's link alone;
+/// for T3 `{thread}`. With why it isn't one, or "".
+pub fn target_of(integration: String, given: Json) -> (Json, String) {
+    if integration == "t3" {
+        let thread = (str_at(given, "thread") ?? String()).trim().copy()
+        if thread.len() == 0 or thread.len() > 400 { return (Json.Null, String("A T3 target names its thread, by its id.")) }
+        return (Obj.new().s("thread", thread).done(), String())
+    }
+    var board = (str_at(given.copy(), "board") ?? String()).trim().copy()
+    var card = (str_at(given, "card") ?? String()).trim().copy()
+    if let r = acta.link_ref(card.copy()) {
+        if board.len() == 0 { board = r.board.copy() }
+        if board != r.board { return (Json.Null, "{r.id} is on {r.board}, not {board}.") }
+        card = r.id.copy()
+    }
+    let parts = board.split("/")
+    if parts.len() != 2 or parts[0].len() == 0 or parts[1].len() == 0 { return (Json.Null, String("An Acta target names its board, as workspace/board, and card for one card on it.")) }
+    if card.len() > 0 and not acta.is_id(card.copy()) { return (Json.Null, "{card} isn't a card's id.") }
+    var o = Obj.new().s("board", board)
+    if card.len() > 0 { o = o.s("card", card) }
+    return (o.done(), String())
+}
+
+/// A target as one line, which status.since keeps the last check by:
+/// `acta:workspace/board`, with `#ID` for a card, or `t3:server:thread`.
+pub fn target_key(integration: String, server: String, target: Json) -> String {
+    if integration == "t3" { return "t3:{server}:{str_at(target, "thread") ?? String()}" }
+    let board = str_at(target.copy(), "board") ?? String()
+    if let card = str_at(target, "card") { return "acta:{board}#{card}" }
+    return "acta:{board}"
+}
+
+// The kinds of change a watch follows, from `given`: a list of them, empty or
+// with "all" for all, or null for all.
+fn events_of(integration: String, given: Json) -> (Json, String) {
+    let kinds = if integration == "t3" { T3_EVENTS } else { ACTA_EVENTS }
+    var picked = List<String>()
+    var all = given == Json.Null
+    if let Json.Array(list) = given.copy() {
+        if list.len() == 0 { all = true }
+        for e in list {
+            let k = e.as_str() ?? String()
+            if k == "all" {
+                all = true
+                continue
+            }
+            if not one_of(k.copy(), kinds) { return (Json.Null, "events are {kinds.replace(" ", ", ")}, or all.") }
+            if not picked.contains(k.copy()) { picked.push(k) }
+        }
+    } else if not all {
+        return (Json.Null, "events are a list of {kinds.replace(" ", ", ")}, or all.")
+    }
+    if all { picked = String(kinds).split(" ") }
+    var out = List<Json>()
+    for k in picked { out.push(Json.Str(k.copy())) }
+    return (Json.Array(out), String())
+}
+
+/// The kinds of change watch `w` follows.
+pub fn events(w: Json) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(list) = at(w, "events") {
+        for e in list {
+            if let k = e.as_str() { out.push(k) }
+        }
+    }
+    return out
+}
+
+pub fn follows(w: Json, kind: String) -> bool {
+    return events(w).contains(kind)
+}
+
+/// A watch from watch.put's args, over the one it changes (`old`, or null for
+/// a new one): its integration, server, target, conversation, wake, events and
+/// `to`, checked, with why it isn't one, or "". The instance checks the chat,
+/// the agent, the routine and the server are the person's, and fills in their
+/// Acta as the server when none is named.
+pub fn read(args: Json, old: Json) -> (Json, String) {
+    let m = merge(old.copy(), args.copy())
+    let integration = str_at(m.copy(), "integration") ?? String("acta")
+    if integration != "acta" and integration != "t3" { return (Json.Null, String("integration is acta or t3.")) }
+    let (target, why) = target_of(integration.copy(), at(m.copy(), "target"))
+    if why.len() > 0 { return (Json.Null, why) }
+    let server = (str_at(m.copy(), "server") ?? String()).trim().copy()
+    if integration == "t3" and server.len() == 0 { return (Json.Null, String("A T3 watch names its server: the person's MCP server for that T3.")) }
+    let conversation = str_at(m.copy(), "conversation") ?? String()
+    let wake = at(m.copy(), "wake")
+    if wake != Json.Null {
+        let agent = str_at(wake.copy(), "agent") ?? String()
+        let routine = str_at(wake.copy(), "routine") ?? String()
+        if (agent.len() == 0) == (routine.len() == 0) { return (Json.Null, String("wake is null, or names an agent or a routine.")) }
+    }
+    if conversation.len() == 0 and wake == Json.Null { return (Json.Null, String("A watch needs a chat to post in, something to wake, or both.")) }
+    var given_events = at(m.copy(), "events")
+    let to_given = str_at(m.copy(), "to")
+    // A move to a status, with no kinds named, follows only moves.
+    if to_given != none and at(args.copy(), "events") == Json.Null and (old == Json.Null or str_at(old.copy(), "to") == none) { given_events = Json.Array([Json.Str(String("moved"))]) }
+    let (kinds, bad) = events_of(integration.copy(), given_events)
+    if bad.len() > 0 { return (Json.Null, bad) }
+    var o = Obj.new().s("integration", integration.copy()).s("server", server).j("target", target).s("conversation", conversation).j("wake", wake).j("events", kinds.copy())
+    if let to = to_given {
+        let key = status_key(to)
+        if integration != "acta" or not one_of(key.copy(), STATUSES) { return (Json.Null, "to is one of Acta's statuses: {STATUSES.replace(" ", ", ")}.") }
+        if not follows(Obj.new().j("events", kinds).done(), String("moved")) { return (Json.Null, String("to is for moves: its events have moved.")) }
+        o = o.s("to", key)
+    }
+    if bool_at(m, "once") == some(true) { o = o.b("once", true) }
+    return (o.done(), String())
+}
+
+/// A routine's `event` (routine.put): `integration` (acta if left out),
+/// `server`, `target` and `kind` (one of the kinds a watch follows, or all;
+/// moved when only `to` is given), with `to` for a move, as the routine keeps
+/// it, with why it isn't one, or "".
+pub fn trigger_of(event: Json) -> (Json, String) {
+    let (w, why) = read(trigger_args(event.copy(), String("-")), Json.Null)
+    if why.len() > 0 { return (Json.Null, why) }
+    let kinds = events(w.copy())
+    let all_kinds = String(if str_at(w.copy(), "integration") == some(String("t3")) { T3_EVENTS } else { ACTA_EVENTS }).split(" ")
+    let kind = if kinds.len() == 1 and all_kinds.len() > 1 { kinds[0].copy() } else { String("all") }
+    var o = Obj.new().s("integration", str_at(w.copy(), "integration") ?? String()).s("server", str_at(w.copy(), "server") ?? String()).j("target", at(w.copy(), "target")).s("kind", kind)
+    if let to = str_at(w, "to") { o = o.s("to", to) }
+    return (o.done(), String())
+}
+
+/// The watch that runs routine `routine` on its `event`, as trigger_of keeps it.
+pub fn trigger_watch(event: Json, routine: String) -> Json {
+    let (w, _) = read(trigger_args(event, routine), Json.Null)
+    return w
+}
+
+fn trigger_args(event: Json, routine: String) -> Json {
+    var kind = str_at(event.copy(), "kind") ?? String()
+    let to = str_at(event.copy(), "to")
+    if kind.len() == 0 { kind = if to != none { String("moved") } else { String("all") } }
+    var o = Obj.new().j("integration", at(event.copy(), "integration")).j("server", at(event.copy(), "server")).j("target", at(event.copy(), "target")).s("conversation", String()).j("wake", Obj.new().s("routine", routine).done()).j("events", Json.Array([Json.Str(kind)]))
+    if let t = to { o = o.s("to", t) }
+    return o.done()
+}
+
+// --- Acta's activity ---
+
+/// What a change on a board was, from Acta's words for it.
+pub struct Change {
+    pub kind: String    // moved, created, commented, assigned, or other
+    pub to: String    // moved: the status it went to, as STATUSES names it; assigned: to whom
+    pub said: String    // what happened, as its line says it: "moved to Done"
+}
+
+/// A status as Acta's words name it ("In progress", "In review", "Done") as
+/// STATUSES does: in_progress, review, done.
+pub fn status_key(label: String) -> String {
+    let l = label.trim().to_lower_root().copy()
+    if l == "to do" or l == "todo" { return String("todo") }
+    if l == "in progress" or l == "in_progress" { return String("in_progress") }
+    if l == "in review" or l == "review" { return String("review") }
+    if l == "canceled" or l == "cancelled" { return String("canceled") }
+    return l.replace(" ", "_")
+}
+
+/// A status's name, as a line says it.
+pub fn status_label(key: String) -> String {
+    if key == "todo" { return String("To do") }
+    if key == "in_progress" { return String("In progress") }
+    if key == "review" { return String("In review") }
+    if key == "done" { return String("Done") }
+    if key == "canceled" { return String("Canceled") }
+    return key.replace("_", " ")
+}
+
+/// What a change on a board was, from the words list_activity gives for it:
+/// "moved it to Done", "created the task", "commented", "assigned it to
+/// Elliot". Acta says nothing more of it (no kind, no status before or after),
+/// so this is the one place loom reads its words.
+pub fn change_of(text: String) -> Change {
+    let t = text.trim().copy()
+    if t.starts_with("moved it to project ") { return Change { kind: String("other"), to: String(), said: "moved to the project {t[20..].trim()}" } }
+    if t.starts_with("moved it to ") {
+        let label = t[12..].trim().copy()
+        let key = status_key(label.copy())
+        return Change { kind: String("moved"), to: key.copy(), said: "moved to {if one_of(key.copy(), STATUSES) { status_label(key) } else { label }}" }
+    }
+    if t.starts_with("created") { return Change { kind: String("created"), to: String(), said: String("new card") } }
+    if t.starts_with("commented") { return Change { kind: String("commented"), to: String(), said: String("commented") } }
+    if t.starts_with("assigned it to ") {
+        let who = t[15..].trim().copy()
+        return Change { kind: String("assigned"), to: who.copy(), said: "assigned to {who}" }
+    }
+    if t.starts_with("unassigned") { return Change { kind: String("assigned"), to: String(), said: String("unassigned") } }
+    return Change { kind: String("other"), to: String(), said: t }
+}
+
+/// One change on a board, as list_activity gives it, and what it was.
+pub struct Entry {
+    pub card: String
+    pub title: String
+    pub by: String
+    pub at: String    // when, as Acta wrote it, which a cursor keeps
+    pub at_ms: i64
+    pub text: String    // Acta's words: "moved it to Done"
+    pub change: Change
+}
+
+/// The changes list_activity answered with, oldest first (it gives the newest first).
+pub fn entries_of(answer: Json) -> List<Entry> {
+    var out = List<Entry>()
+    if let Json.Array(list) = at(answer, "activity") {
+        var k = list.len()
+        while k > 0 {
+            k -= 1
+            let a = list[k].copy()
+            let when = str_at(a.copy(), "at") ?? String()
+            let text = str_at(a.copy(), "text") ?? String()
+            out.push(Entry { card: str_at(a.copy(), "task") ?? String(), title: str_at(a.copy(), "title") ?? String(), by: str_at(a, "by") ?? String(), at: when.copy(), at_ms: ms_of(when), text: text.copy(), change: change_of(text) })
+        }
+    }
+    return out
+}
+
+/// A board watch's cursor when it's made: a millisecond before now, so what came
+/// before isn't posted, and a change Acta writes in the very millisecond the
+/// watch is made, which a cursor of now would take as read already, is.
+pub fn start_cursor(now_ms: i64) -> String {
+    return Timestamp { unix_ms: now_ms - 1 }.iso(0)
+}
+
+/// Whether change `e` came after `cursor`, the newest change read before: later
+/// than it, or in the same millisecond and later in Acta's microseconds, which
+/// it writes the same way each time.
+pub fn after_cursor(e: Entry, cursor: String) -> bool {
+    let c = ms_of(cursor.copy())
+    if e.at_ms != c { return e.at_ms > c }
+    let a = e.at.to_bytes()
+    let b = cursor.to_bytes()
+    var k: usize = 0
+    while k < a.len() and k < b.len() {
+        if a[k] != b[k] { return a[k] > b[k] }
+        k += 1
+    }
+    return a.len() > b.len()
+}
+
+/// The changes of `entries` after `cursor`, oldest first, and the cursor after them.
+pub fn new_since(entries: List<Entry>, cursor: String) -> (List<Entry>, String) {
+    var out = List<Entry>()
+    var next = cursor.copy()
+    for e in entries {
+        if not after_cursor(e.copy(), cursor.copy()) { continue }
+        if e.at_ms >= ms_of(next.copy()) { next = e.at.copy() }
+        out.push(e.copy())
+    }
+    return (out, next)
+}
+
+/// Whether watch `w` posts change `e`: on its card, when it watches one, of a
+/// kind it follows, and for a move when it has `to`, to that status.
+pub fn wanted(w: Json, e: Entry) -> bool {
+    if let card = str_at(at(w.copy(), "target"), "card") {
+        if card != e.card { return false }
+    }
+    if not follows(w.copy(), e.change.kind.copy()) { return false }
+    if let to = str_at(w, "to") {
+        if e.change.kind == "moved" and e.change.to != to { return false }
+    }
+    return true
+}
+
+// A change's `to`, the status it moved to, or `assignee`, who it was assigned to.
+fn with_change(o: own Obj, c: Change) -> Obj {
+    if c.to.len() == 0 { return o }
+    return o.s(if c.kind == "assigned" { "assignee" } else { "to" }, c.to.copy())
+}
+
+/// The block of the line a change on a board posts in the watch's chat: an
+/// `update` block, which the apps draw as a quiet line, with its words as
+/// `text` for what doesn't draw one yet.
+pub fn acta_line(w: Json, e: Entry, board_name: String) -> Json {
+    let board = str_at(at(w.copy(), "target"), "board") ?? String()
+    var o = Obj.new().s("kind", String("update")).s("integration", String("acta")).s("watch", str_at(w, "id") ?? String()).s("board", board.copy()).s("board_name", board_name).s("card", e.card.copy()).s("title", e.title.copy()).s("event", e.change.kind.copy())
+    o = with_change(o, e.change.copy())
+    let by_line = if e.by.len() > 0 { " · {e.by}" } else { String() }
+    return o.s("said", e.change.said.copy()).s("by", e.by.copy()).s("url", "https://{acta.HOST}/{board}#{e.card}").i("happened", e.at_ms).s("text", "{e.card} {e.change.said}{by_line}").done()
+}
+
+/// What changes on a board tell the agent or the routine a watch wakes.
+pub fn acta_came(w: Json, entries: List<Entry>, board_name: String) -> String {
+    let target = at(w, "target")
+    let board = str_at(target.copy(), "board") ?? String()
+    var lines = List<String>()
+    for e in entries {
+        let who = if e.by.len() > 0 { ", by {e.by}" } else { String() }
+        let when = Timestamp { unix_ms: e.at_ms }.iso(0)
+        lines.push("- {e.card} \"{e.title}\": {e.change.said}{who}, at {when}")
+    }
+    let which = if let card = str_at(target, "card") { "the card {card} on the Acta board {board_name} ({board})" } else { "the Acta board {board_name} ({board})" }
+    return "What changed on {which}, which loom follows for your person:\n{lines.join("\n")}"
+}
+
+/// A board's changes since `since` (Unix ms), as status.since gives them,
+/// oldest first: each `card`, `title`, `by`, `at` (Unix ms), `kind`, `to` and `said`.
+pub fn acta_since(entries: List<Entry>, since: i64) -> List<Json> {
+    var out = List<Json>()
+    for e in entries {
+        if e.at_ms <= since { continue }
+        var o = Obj.new().s("card", e.card.copy()).s("title", e.title.copy()).s("by", e.by.copy()).i("at", e.at_ms).s("kind", e.change.kind.copy())
+        o = with_change(o, e.change.copy())
+        out.push(o.s("said", e.change.said.copy()).done())
+    }
+    return out
+}
+
+// --- T3's threads ---
+
+/// How a T3 wait ended: the run it waited on, how that stands, and whether it
+/// gave up waiting first.
+pub struct Ended {
+    pub run: String
+    pub status: String
+    pub timed_out: bool
+}
+
+pub fn ended_of(answer: Json) -> Ended {
+    return Ended { run: str_at(answer.copy(), "runId") ?? String(), status: str_at(answer.copy(), "status") ?? String(), timed_out: bool_at(answer, "timedOut") ?? false }
+}
+
+/// Whether a run's status is one it ended in.
+pub fn ended(status: String) -> bool {
+    return one_of(status, "completed failed interrupted cancelled rolled_back")
+}
+
+/// What a T3 watch does after a wait.
+pub enum T3Next {
+    // Wait again at once, with this cursor.
+    Again(String),
+    // Look again later, with this cursor.
+    Later(String),
+    // Tell of this run, which ended: the cursor from then on.
+    Tell(String),
+}
+
+/// What a T3 watch does with a wait's answer, given its cursor, the run it
+/// told of last. A cursor of "?" is a watch the person just made: a run that
+/// ended before it is taken as read, and one running then is told of when it
+/// ends.
+pub fn t3_next(e: Ended, cursor: String) -> T3Next {
+    let done = e.run.len() > 0 and not e.timed_out and ended(e.status.copy())
+    if cursor == "?" {
+        if done { return T3Next.Later(e.run.copy()) }
+        if e.timed_out { return T3Next.Again(String()) }
+        return T3Next.Later(String())
+    }
+    if e.timed_out { return T3Next.Again(cursor.copy()) }
+    if not done or e.run == cursor { return T3Next.Later(cursor.copy()) }
+    return T3Next.Tell(e.run.copy())
+}
+
+/// A thread's title, and what it said last, from t3_thread_read's answer.
+pub fn thread_said(answer: Json) -> (String, String) {
+    let title = str_at(at(answer.copy(), "thread"), "title") ?? String()
+    var said = String()
+    if let Json.Array(items) = at(answer, "items") {
+        for it in items {
+            let kind = str_at(it.copy(), "type") ?? String()
+            if kind == "assistant_message" or kind.len() == 0 { said = str_at(it, "text") ?? said.copy() }
+        }
+    }
+    return (title, said)
+}
+
+/// What a run that ended says on its line: "Thread finished", "Thread failed"
+/// or "Thread stopped".
+pub fn t3_said(status: String) -> String {
+    if status == "completed" { return String("Thread finished") }
+    if status == "failed" { return String("Thread failed") }
+    return String("Thread stopped")
+}
+
+/// The block of the line a thread's run that ended posts in the watch's chat.
+pub fn t3_line(w: Json, run: String, status: String, title: String) -> Json {
+    let thread = str_at(at(w.copy(), "target"), "thread") ?? String()
+    let said = t3_said(status.copy())
+    let name = if title.len() > 0 { title.copy() } else { thread.copy() }
+    return Obj.new().s("kind", String("update")).s("integration", String("t3")).s("watch", str_at(w.copy(), "id") ?? String()).s("server", str_at(w, "server") ?? String()).s("thread", thread).s("title", title).s("run", run).s("event", String("finished")).s("state", status).s("said", said.copy()).s("text", "{said} · {name}").done()
+}
+
+/// What a thread's run that ended tells the agent or the routine a watch wakes.
+pub fn t3_came(w: Json, status: String, title: String, said: String) -> String {
+    let thread = str_at(at(w.copy(), "target"), "thread") ?? String()
+    let server = str_at(w, "server") ?? String()
+    let name = if title.len() > 0 { "\"{title}\"" } else { thread.copy() }
+    let how = if status == "completed" { String("finished") } else if status == "failed" { String("failed") } else { "stopped ({status})" }
+    let out = "The T3 thread {name} (id {thread}, on the MCP server {server}) {how}."
+    if said.trim().len() == 0 { return out }
+    return "{out} What it said last:\n\n{cut(said, SAID_MOST)}"
+}
+
+/// A thread's history since `since` (Unix ms), from t3_thread_read's activity,
+/// as status.since gives it: its `title` and `status`, its `runs` that started
+/// or ended since, each `run`, `status`, `started` and `ended` (Unix ms, 0
+/// while it runs), and its `items` since, each `type`, `title`, `text` (cut)
+/// and `at`.
+pub fn t3_since(answer: Json, since: i64) -> Json {
+    let thread = at(answer.copy(), "thread")
+    var runs = List<Json>()
+    if let Json.Array(list) = at(answer.copy(), "recentRuns") {
+        for r in list {
+            let started = ms_of(str_at(r.copy(), "startedAt") ?? String())
+            let ended_at = ms_of(str_at(r.copy(), "completedAt") ?? String())
+            if started <= since and ended_at <= since { continue }
+            runs.push(Obj.new().s("run", str_at(r.copy(), "runId") ?? String()).s("status", str_at(r, "status") ?? String()).i("started", started).i("ended", ended_at).done())
+        }
+    }
+    var items = List<Json>()
+    if let Json.Array(list) = at(answer, "items") {
+        for it in list {
+            let t = ms_of(str_at(it.copy(), "updatedAt") ?? String())
+            if t <= since { continue }
+            items.push(Obj.new().s("type", str_at(it.copy(), "type") ?? String()).maybe("title", str_at(it.copy(), "title")).s("text", cut(str_at(it, "text") ?? String(), ITEM_MOST)).i("at", t).done())
+        }
+    }
+    return Obj.new().s("title", str_at(thread.copy(), "title") ?? String()).s("status", str_at(thread, "status") ?? String()).j("runs", Json.Array(runs)).j("items", Json.Array(items)).done()
+}
+
+/// The thread T3's t3_thread_launch made, from what it answered: its id and
+/// its title, or none.
+pub fn launched_thread(value: Json) -> (String, String)? {
+    var o = value.copy()
+    if str_at(o.copy(), "threadId") == none and at(o.copy(), "thread") != Json.Null { o = at(o, "thread") }
+    let id = str_at(o.copy(), "threadId") ?? String()
+    if id.len() == 0 { return none }
+    return some((id, str_at(o, "title") ?? String()))
+}
+
+/// How long a watch whose look failed `failures` times in a row waits before
+/// the next: half a minute, doubled each time, up to half an hour.
+pub fn backoff(failures: i64, minute_ms: i64) -> i64 {
+    let most = 30 * minute_ms
+    var wait = minute_ms / 2
+    var n: i64 = 1
+    while n < failures and wait < most {
+        wait = wait * 2
+        n += 1
+    }
+    if wait > most { return most }
+    return wait
+}
+
+/// A routine's event in words, for its `when`: "when a card on
+/// aaen-studios/loom moves to Done".
+pub fn describe(event: Json) -> String {
+    let target = at(event.copy(), "target")
+    if str_at(event.copy(), "integration") == some(String("t3")) { return "when the T3 thread {str_at(target, "thread") ?? String()} finishes" }
+    let board = str_at(target.copy(), "board") ?? String()
+    let subject = if let card = str_at(target, "card") { card } else { "a card on {board}" }
+    let kind = str_at(event.copy(), "kind") ?? String("all")
+    if kind == "moved" {
+        if let to = str_at(event, "to") { return "when {subject} moves to {status_label(to)}" }
+        return "when {subject} moves"
+    }
+    if kind == "created" { return "when a card is made on {board}" }
+    if kind == "commented" { return "when {subject} gets a comment" }
+    if kind == "assigned" { return "when {subject} is assigned" }
+    return "when {subject} changes"
+}
+
+@test
+fn reads_what_acta_says_happened() {
+    let moved = change_of(String("moved it to Done"))
+    assert(moved.kind == "moved" and moved.to == "done" and moved.said == "moved to Done")
+    let review = change_of(String("moved it to In review"))
+    assert(review.kind == "moved" and review.to == "review" and review.said == "moved to In review")
+    let going = change_of(String("moved it to In progress"))
+    assert(going.to == "in_progress" and going.said == "moved to In progress")
+    let custom = change_of(String("moved it to Blocked on Apple"))
+    assert(custom.kind == "moved" and custom.to == "blocked_on_apple" and custom.said == "moved to Blocked on Apple")
+    let project = change_of(String("moved it to project Phase 8: Integrations"))
+    assert(project.kind == "other" and project.said == "moved to the project Phase 8: Integrations")
+    assert(change_of(String("created the task")).kind == "created" and change_of(String("created the task")).said == "new card")
+    assert(change_of(String("commented")).kind == "commented")
+    let given = change_of(String("assigned it to Elliot"))
+    assert(given.kind == "assigned" and given.to == "Elliot" and given.said == "assigned to Elliot")
+    assert(change_of(String("unassigned it")).kind == "assigned")
+    let edited = change_of(String("edited the description"))
+    assert(edited.kind == "other" and edited.said == "edited the description")
+    assert(change_of(String("completed “Tag v0.3.0”")).kind == "other")
+    assert(status_key(String("To do")) == "todo" and status_key(String("Cancelled")) == "canceled" and status_label(String("in_progress")) == "In progress")
+}
+
+@test
+fn reads_targets() {
+    let (board, why) = target_of(String("acta"), parse(#"{"board":"aaen-studios/loom"}"#)!)
+    assert(why.len() == 0 and "{board}" == #"{"board":"aaen-studios/loom"}"#)
+    let (card, _) = target_of(String("acta"), parse(#"{"card":"https://acta.aaenz.no/aaen-studios/loom#LOO-206"}"#)!)
+    assert("{card}" == #"{"board":"aaen-studios/loom","card":"LOO-206"}"#)
+    let (_, elsewhere) = target_of(String("acta"), parse(#"{"board":"aaen-studios/calcite","card":"https://acta.aaenz.no/aaen-studios/loom#LOO-206"}"#)!)
+    assert(elsewhere == "LOO-206 is on aaen-studios/loom, not aaen-studios/calcite.")
+    let (_, bare) = target_of(String("acta"), parse(#"{"card":"LOO-206"}"#)!)
+    assert(bare.contains("names its board"))
+    let (_, not_card) = target_of(String("acta"), parse(#"{"board":"a/b","card":"UTF-8x"}"#)!)
+    assert(not_card == "UTF-8x isn't a card's id.")
+    let (thread, _) = target_of(String("t3"), parse(#"{"thread":"th_1"}"#)!)
+    assert("{thread}" == #"{"thread":"th_1"}"#)
+    assert(target_key(String("acta"), String("acta"), card) == "acta:aaen-studios/loom#LOO-206" and target_key(String("acta"), String("acta"), board) == "acta:aaen-studios/loom" and target_key(String("t3"), String("t3-vps"), thread) == "t3:t3-vps:th_1")
+}
+
+@test
+fn reads_a_watch() {
+    let (w, why) = read(parse(#"{"target":{"board":"aaen-studios/loom"},"conversation":"c_1"}"#)!, Json.Null)
+    assert(why.len() == 0 and "{w}" == #"{"integration":"acta","server":"","target":{"board":"aaen-studios/loom"},"conversation":"c_1","wake":null,"events":["moved","created","commented","assigned"]}"#)
+    let (done, _) = read(parse(#"{"target":{"board":"a/b"},"wake":{"routine":"rt_1"},"to":"Done"}"#)!, Json.Null)
+    assert("{at(done.copy(), "events")}" == #"["moved"]"# and str_at(done, "to") == some(String("done")))
+    let (some_kinds, _) = read(parse(#"{"target":{"board":"a/b"},"conversation":"c_1","events":["commented","moved","commented"]}"#)!, Json.Null)
+    assert("{at(some_kinds, "events")}" == #"["commented","moved"]"#)
+    let (all, _) = read(parse(#"{"target":{"board":"a/b"},"conversation":"c_1","events":["all"]}"#)!, Json.Null)
+    assert(events(all).len() == 4)
+    let (_, nowhere) = read(parse(#"{"target":{"board":"a/b"}}"#)!, Json.Null)
+    assert(nowhere == "A watch needs a chat to post in, something to wake, or both.")
+    let (_, both) = read(parse(#"{"target":{"board":"a/b"},"wake":{"agent":"a_1","routine":"rt_1"}}"#)!, Json.Null)
+    assert(both == "wake is null, or names an agent or a routine.")
+    let (_, odd) = read(parse(#"{"target":{"board":"a/b"},"conversation":"c_1","events":["deleted"]}"#)!, Json.Null)
+    assert(odd == "events are moved, created, commented, assigned, or all.")
+    let (_, odd_to) = read(parse(#"{"target":{"board":"a/b"},"conversation":"c_1","to":"later"}"#)!, Json.Null)
+    assert(odd_to.starts_with("to is one of Acta's statuses"))
+    let (_, to_without_moves) = read(parse(#"{"target":{"board":"a/b"},"conversation":"c_1","events":["commented"],"to":"done"}"#)!, Json.Null)
+    assert(to_without_moves == "to is for moves: its events have moved.")
+    let (_, t3_nameless) = read(parse(#"{"integration":"t3","target":{"thread":"th_1"},"conversation":"c_1"}"#)!, Json.Null)
+    assert(t3_nameless.starts_with("A T3 watch names its server"))
+    let (t3, _) = read(parse(#"{"integration":"t3","server":"t3","target":{"thread":"th_1"},"wake":{"agent":"a_1"},"conversation":"c_1","once":true}"#)!, Json.Null)
+    assert("{t3}" == #"{"integration":"t3","server":"t3","target":{"thread":"th_1"},"conversation":"c_1","wake":{"agent":"a_1"},"events":["finished"],"once":true}"#)
+    // A change keeps what it doesn't name.
+    let (changed, _) = read(parse(#"{"events":["moved"]}"#)!, w)
+    assert(str_at(at(changed.copy(), "target"), "board") == some(String("aaen-studios/loom")) and "{at(changed, "events")}" == #"["moved"]"#)
+}
+
+@test
+fn reads_a_routine_event() {
+    let (e, why) = trigger_of(parse(#"{"server":"acta","target":{"board":"aaen-studios/loom"},"to":"done"}"#)!)
+    assert(why.len() == 0 and "{e}" == #"{"integration":"acta","server":"acta","target":{"board":"aaen-studios/loom"},"kind":"moved","to":"done"}"#)
+    let w = trigger_watch(e.copy(), String("rt_1"))
+    assert("{w}" == #"{"integration":"acta","server":"acta","target":{"board":"aaen-studios/loom"},"conversation":"","wake":{"routine":"rt_1"},"events":["moved"],"to":"done"}"#)
+    assert(describe(e) == "when a card on aaen-studios/loom moves to Done")
+    let (any, _) = trigger_of(parse(#"{"target":{"board":"a/b","card":"LOO-3"}}"#)!)
+    assert(str_at(any.copy(), "kind") == some(String("all")) and describe(any) == "when LOO-3 changes")
+    let (made, _) = trigger_of(parse(#"{"target":{"board":"a/b"},"kind":"created"}"#)!)
+    assert(describe(made) == "when a card is made on a/b")
+    let (thread, _) = trigger_of(parse(#"{"integration":"t3","server":"t3","target":{"thread":"th_1"}}"#)!)
+    assert(str_at(thread.copy(), "kind") == some(String("all")) and describe(thread) == "when the T3 thread th_1 finishes")
+    let (_, bad) = trigger_of(parse(#"{"target":{"board":"a/b"},"kind":"deleted"}"#)!)
+    assert(bad.starts_with("events are"))
+}
+
+@test
+fn reads_activity_past_its_cursor() {
+    let answer = parse(#"{"board":"aaen-studios/loom","activity":[{"task":"LOO-2","title":"B","by":"Elliot","at":"2026-11-26T02:49:55.034521+00:00","text":"moved it to Done"},{"task":"LOO-1","title":"A","by":"Elliot","at":"2026-11-26T02:49:55.034100+00:00","text":"commented"},{"task":"LOO-1","title":"A","by":"Elliot","at":"2026-11-26T02:40:00.000000+00:00","text":"created the task"}]}"#)!
+    let entries = entries_of(answer)
+    assert(entries.len() == 3 and entries[0].text == "created the task" and entries[2].card == "LOO-2")
+    // What was read up to the comment: the move in the same millisecond is new, the comment isn't.
+    let (fresh, next) = new_since(entries.copy(), String("2026-11-26T02:49:55.034100+00:00"))
+    assert(fresh.len() == 1 and fresh[0].card == "LOO-2" and next == "2026-11-26T02:49:55.034521+00:00")
+    let (none_new, same) = new_since(entries.copy(), next.copy())
+    assert(none_new.len() == 0 and same == next)
+    // A watch made at a time takes only what came after it.
+    let (later, _) = new_since(entries.copy(), start_cursor(ms_of(String("2026-11-26T02:45:00Z"))))
+    assert(later.len() == 2)
+    assert(start_cursor(1795187131123) == "2026-11-20T15:05:31.122Z")
+    // A change in the very millisecond a watch is made is new, as Acta writes it and as ms.
+    let same_ms = entries_of(parse(#"{"activity":[{"task":"LOO-3","title":"C","by":"Ola","at":"2026-11-20T15:05:31.123456+00:00","text":"commented"},{"task":"LOO-3","title":"C","by":"Ola","at":"2026-11-20T15:05:31.123Z","text":"moved it to In review"}]}"#)!)
+    let (caught, _) = new_since(same_ms, start_cursor(1795187131123))
+    assert(caught.len() == 2)
+    let since = acta_since(entries.copy(), ms_of(String("2026-11-26T02:45:00Z")))
+    assert(since.len() == 2 and "{since[1]}" == #"{"card":"LOO-2","title":"B","by":"Elliot","at":1795661395034,"kind":"moved","to":"done","said":"moved to Done"}"#)
+    let given = acta_since(entries_of(parse(#"{"activity":[{"task":"LOO-1","title":"A","by":"Elliot","at":"2026-11-26T02:49:00Z","text":"assigned it to Ola"}]}"#)!), 0)
+    assert("{given[0]}" == #"{"card":"LOO-1","title":"A","by":"Elliot","at":1795661340000,"kind":"assigned","assignee":"Ola","said":"assigned to Ola"}"#)
+}
+
+@test
+fn picks_what_a_watch_posts() {
+    let entries = entries_of(parse(#"{"activity":[{"task":"LOO-2","title":"B","by":"Elliot","at":"2026-11-26T02:50:00Z","text":"moved it to In review"},{"task":"LOO-2","title":"B","by":"Ola","at":"2026-11-26T02:49:00Z","text":"moved it to Done"},{"task":"LOO-1","title":"A","by":"Elliot","at":"2026-11-26T02:48:00Z","text":"edited the description"},{"task":"LOO-1","title":"A","by":"Elliot","at":"2026-11-26T02:47:00Z","text":"commented"}]}"#)!)
+    let (board, _) = read(parse(#"{"id":"w_1","target":{"board":"aaen-studios/loom"},"conversation":"c_1"}"#)!, Json.Null)
+    var posted = List<String>()
+    for e in entries.copy() {
+        if wanted(board.copy(), e.copy()) { posted.push("{e.card} {e.change.kind}") }
+    }
+    assert(posted.join(", ") == "LOO-1 commented, LOO-2 moved, LOO-2 moved")
+    let (done_on_card, _) = read(parse(#"{"target":{"board":"aaen-studios/loom","card":"LOO-2"},"wake":{"routine":"rt_1"},"to":"done"}"#)!, Json.Null)
+    var woke = List<String>()
+    for e in entries.copy() {
+        if wanted(done_on_card.copy(), e.copy()) { woke.push(e.by.copy()) }
+    }
+    assert(woke.join(", ") == "Ola")
+    let line = acta_line(merge(board.copy(), parse(#"{"id":"w_1"}"#)!), entries[2].copy(), String("loom"))
+    assert("{line}" == #"{"kind":"update","integration":"acta","watch":"w_1","board":"aaen-studios/loom","board_name":"loom","card":"LOO-2","title":"B","event":"moved","to":"done","said":"moved to Done","by":"Ola","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-2","happened":1795661340000,"text":"LOO-2 moved to Done · Ola"}"#)
+    let came = acta_came(board, [entries[2].copy()], String("loom"))
+    assert(came == "What changed on the Acta board loom (aaen-studios/loom), which loom follows for your person:\n- LOO-2 \"B\": moved to Done, by Ola, at 2026-11-26T02:49:00Z")
+}
+
+@test
+fn waits_on_a_thread() {
+    let running = ended_of(parse(#"{"threadId":"th_1","runId":"r_1","status":"running","timedOut":true}"#)!)
+    let finished = ended_of(parse(#"{"threadId":"th_1","runId":"r_1","status":"completed","timedOut":false}"#)!)
+    let failed_next = ended_of(parse(#"{"threadId":"th_1","runId":"r_2","status":"failed","timedOut":false}"#)!)
+    let idle = ended_of(parse(#"{"threadId":"th_1","runId":"","status":"idle","timedOut":false}"#)!)
+    // Made by the person: a run that ended before is read, one running is told when it ends.
+    assert(t3_next(finished.copy(), String("?")) == T3Next.Later(String("r_1")))
+    assert(t3_next(running.copy(), String("?")) == T3Next.Again(String()))
+    assert(t3_next(idle.copy(), String("?")) == T3Next.Later(String()))
+    // From a launch, or once read: a run that ends is told, once.
+    assert(t3_next(running.copy(), String()) == T3Next.Again(String()))
+    assert(t3_next(finished.copy(), String()) == T3Next.Tell(String("r_1")))
+    assert(t3_next(finished.copy(), String("r_1")) == T3Next.Later(String("r_1")))
+    assert(t3_next(failed_next, String("r_1")) == T3Next.Tell(String("r_2")))
+    assert(t3_next(idle, String("r_1")) == T3Next.Later(String("r_1")))
+    let read_back = parse(#"{"thread":{"threadId":"th_1","title":"Fix the login page","status":"completed"},"items":[{"type":"user_message","text":"Go"},{"type":"assistant_message","text":"Fixed it in PR #12."}]}"#)!
+    let (title, said) = thread_said(read_back)
+    assert(title == "Fix the login page" and said == "Fixed it in PR #12.")
+    let w = parse(#"{"id":"w_2","integration":"t3","server":"t3","target":{"thread":"th_1"}}"#)!
+    assert("{t3_line(w.copy(), String("r_1"), String("completed"), title.copy())}" == #"{"kind":"update","integration":"t3","watch":"w_2","server":"t3","thread":"th_1","title":"Fix the login page","run":"r_1","event":"finished","state":"completed","said":"Thread finished","text":"Thread finished · Fix the login page"}"#)
+    assert(t3_said(String("failed")) == "Thread failed" and t3_said(String("interrupted")) == "Thread stopped")
+    assert(t3_came(w.copy(), String("completed"), title, said) == "The T3 thread \"Fix the login page\" (id th_1, on the MCP server t3) finished. What it said last:\n\nFixed it in PR #12.")
+    assert(t3_came(w, String("interrupted"), String(), String()) == "The T3 thread th_1 (id th_1, on the MCP server t3) stopped (interrupted).")
+    let history = t3_since(parse(#"{"thread":{"title":"Fix","status":"completed"},"recentRuns":[{"runId":"r_2","status":"completed","startedAt":"2026-11-26T02:28:47.894Z","completedAt":"2026-11-26T02:37:47.265Z"},{"runId":"r_1","status":"completed","startedAt":"2026-11-26T02:14:12.387Z","completedAt":"2026-11-26T02:28:16.190Z"}],"items":[{"type":"reasoning","title":"Thinking","text":"Hm.","updatedAt":"2026-11-26T02:20:00Z"},{"type":"assistant_message","title":null,"text":"Done.","updatedAt":"2026-11-26T02:37:47.196Z"}]}"#)!, ms_of(String("2026-11-26T02:30:00Z")))
+    assert("{history}" == #"{"title":"Fix","status":"completed","runs":[{"run":"r_2","status":"completed","started":1795660127894,"ended":1795660667265}],"items":[{"type":"assistant_message","text":"Done.","at":1795660667196}]}"#)
+}
+
+@test
+fn knows_the_thread_a_launch_made() {
+    let (id, title) = launched_thread(parse(#"{"threadId":"th_9","title":"Port the parser","link":"[Port the parser](t3-thread://x)"}"#)!) ?? (String(), String())
+    assert(id == "th_9" and title == "Port the parser")
+    let (nested, _) = launched_thread(parse(#"{"thread":{"threadId":"th_8"}}"#)!) ?? (String(), String())
+    assert(nested == "th_8")
+    assert(launched_thread(parse(#"{"ok":true}"#)!) == none)
+}
+
+@test
+fn backs_off_when_it_fails() {
+    assert(backoff(1, 60000) == 30000 and backoff(2, 60000) == 60000 and backoff(3, 60000) == 120000)
+    assert(backoff(20, 60000) == 1800000 and backoff(0, 1000) == 500)
+}

@@ -51,31 +51,6 @@ func listed(_ agents: [Agent]) -> [Agent] {
     }.map(\.element)
 }
 
-/// A part of the agent list, as the core groups the agents (core/sidebar.calx), the way
-/// the desktop's sidebar shows them: who's waiting on the person, the pinned ones, the
-/// rest not in a folder, each folder, and the hidden ones.
-struct SideSection: Equatable, Sendable {
-    enum Part: Equatable, Sendable {
-        case waiting, pinned, agents, hidden
-        case folder(id: String, name: String, collapsed: Bool)
-    }
-    var part: Part
-    /// Its agents' ids, in order.
-    var agents: [String]
-
-    init?(_ j: JSON) {
-        switch j["kind"].text {
-        case "waiting": part = .waiting
-        case "pinned": part = .pinned
-        case "agents": part = .agents
-        case "hidden": part = .hidden
-        case "group": part = .folder(id: j["id"].text, name: j["name"].text, collapsed: j["collapsed"].bool ?? false)
-        default: return nil
-        }
-        agents = j["agents"].array.map(\.text)
-    }
-}
-
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
 func points(_ j: JSON) -> [CGPoint] {
     j.array.compactMap { p in
@@ -132,21 +107,24 @@ struct ContextFill: Equatable, Sendable {
     var compacts = false
     /// In a group chat, the member whose session it is: the one that answered last.
     var agent: String?
+    /// What the chat costs, in tokens: its person's last turn there, and every turn there in
+    /// the last 24 hours. 0 for not known.
+    var turn = 0
+    var day = 0
 
-    /// How full a context may get before the chat's next message goes to a fresh session.
-    static let renewPercent = 80
-
-    init(used: Int, size: Int, compacted: Int? = nil, compacts: Bool = false, agent: String? = nil) {
+    init(used: Int, size: Int, compacted: Int? = nil, compacts: Bool = false, agent: String? = nil, turn: Int = 0, day: Int = 0) {
         self.used = used
         self.size = size
         self.compacted = compacted
         self.compacts = compacts
         self.agent = agent
+        self.turn = turn
+        self.day = day
     }
 
     init?(_ x: JSON) {
         guard let size = x["size"].int, size > 0 else { return nil }
-        self.init(used: x["used"].int ?? 0, size: size, compacted: x["compacted"].int, compacts: x["compacts"].bool ?? false, agent: x["agent"].string.flatMap { $0.isEmpty ? nil : $0 })
+        self.init(used: x["used"].int ?? 0, size: size, compacted: x["compacted"].int, compacts: x["compacts"].bool ?? false, agent: x["agent"].string.flatMap { $0.isEmpty ? nil : $0 }, turn: x["tokens"]["turn"].int ?? 0, day: x["tokens"]["day"].int ?? 0)
     }
 
     var percent: Int { size > 0 ? min(max(used, 0) * 100 / size, 100) : 0 }
@@ -154,7 +132,7 @@ struct ContextFill: Equatable, Sendable {
     /// How much of the ring is filled, from 0 to 1.
     var fraction: Double { size > 0 ? min(max(Double(used) / Double(size), 0), 1) : 0 }
 
-    /// Quiet, warm from 70% (before its fresh session at 80%), and red from 90%.
+    /// Quiet, warm from 70%, and red from 90%.
     enum Level { case quiet, warn, bad }
     var level: Level { percent >= 90 ? .bad : percent >= 70 ? .warn : .quiet }
 
@@ -164,11 +142,20 @@ struct ContextFill: Equatable, Sendable {
     /// Its tokens of its window, beside the card's title: "82k of 200k".
     var amount: String { "\(ContextFill.short(used)) of \(ContextFill.short(size))" }
 
-    /// The card's line under its bar, at `now` (Unix ms).
-    func line(now: Int) -> String {
-        let fresh = "fresh session starts at \(ContextFill.renewPercent)%"
-        guard let at = compacted else { return "A \(fresh)" }
-        return "Compacted \(ContextFill.ago(now - at)) · a \(fresh)"
+    /// The card's rows of what the chat costs, a title and its tokens each: "Last turn"
+    /// "410k", "Last 24 hours" "6.2M". None that isn't known.
+    var costs: [(String, String)] {
+        var rows: [(String, String)] = []
+        if turn > 0 { rows.append(("Last turn", ContextFill.short(turn))) }
+        if day > 0 { rows.append(("Last 24 hours", ContextFill.short(day))) }
+        return rows
+    }
+
+    /// The card's line over its buttons, at `now` (Unix ms): when the session was last
+    /// compacted, if it was.
+    func line(now: Int) -> String? {
+        guard let at = compacted else { return nil }
+        return "Compacted \(ContextFill.ago(now - at))"
     }
 
     /// A count of tokens as the ring says it: 900, 16k, 182k, 1M, 1.5M.
@@ -388,6 +375,8 @@ struct Block: Equatable, Sendable {
     /// "Messages and streaming"): the phone leaves them out of the reply.
     var parent: String?
     var card: Card?
+    /// A watch's line, a `loom` message's `update` block (Watches.swift).
+    var update: WatchLine?
 
     static func text(_ kind: String, _ text: String) -> Block {
         Block(kind: kind, text: text, call: nil, file: nil)
@@ -402,7 +391,8 @@ struct Block: Equatable, Sendable {
             file: kind == "file" ? FileRef(b) : nil,
             plan: b["entries"].array.map { PlanEntry(content: $0["content"].text, status: $0["status"].text) },
             parent: b["parent"].string,
-            card: kind == "card" ? Card(b["card"]) : nil
+            card: kind == "card" ? Card(b["card"]) : nil,
+            update: kind == "update" ? WatchLine(b) : nil
         )
     }
 }
@@ -550,6 +540,12 @@ struct Message: Identifiable, Equatable, Sendable {
     var routed: Routed?
     /// Deleted (PLAN.md, "Deleting a message"): a mark in its place, with no blocks.
     var deleted = false
+    /// The Acta cards it names that the instance has looked up, by id, and those made
+    /// from it, in the order they were (PLAN.md, "Cards in messages").
+    var cards: [String: ActaCard] = [:]
+    var made: [String] = []
+    /// The T3 threads it names or started, in the order its words link them (T3.swift).
+    var threads: [ThreadCard] = []
     /// How it came to the open chat, for whether a long one is cut (`Model.shown`).
     var came = Came.before
 
@@ -1022,6 +1018,8 @@ struct Inline: Equatable, Sendable {
     var agents: [String: Agent] = [:]
     /// The pictures of the person's own emoji it has, by id, once fetched (PLAN.md, "Emoji").
     var emoji: [String: String] = [:]
+    /// The Acta cards it names, by id, which its words show as pills (Acta.swift).
+    var cards: [String: ActaCard] = [:]
 }
 
 struct Tool: Equatable, Sendable {
@@ -1506,6 +1504,10 @@ enum PlusRow: Equatable, Sendable {
     case file(RecentFile)
     case skill(PlusSkill)
     case routine(PlusRoutine)
+    /// A board of the person's Acta, with Acta connected (PLAN.md, "Acta beside the chat").
+    case boards
+    /// The sheet that starts a T3 thread, with T3 connected (PLAN.md, "T3 threads").
+    case startT3
 }
 
 /// A skill picked from the + menu as a mention: its name, going as `loom:skill/<name>`.
@@ -1565,7 +1567,7 @@ final class Model {
     var agents: [Agent] = []
     /// How the agent list groups them, as the core says.
     var sidebar: [SideSection] = []
-    /// An agent to put in the folder asked for last, once it's made.
+    /// An agent or a group chat to put in the folder asked for last, once it's made.
     private var folderFor: String?
     var conversations: [Conversation] = []
     var runs: [Run] = []
@@ -1625,10 +1627,13 @@ final class Model {
     private(set) var thread: String?
     /// The group chat shown in the chat's place, by its conversation.
     var room: String?
-    /// The group chats' order in the sidebar, as the core gives it.
-    var roomOrder: [String] = []
+    /// Every agent and group chat in the person's order, as the core gives it
+    /// (core/sidebar.calx), for a move to rearrange.
+    var sideOrder: [String] = []
+    /// New group chat's form: the members and colour picked so far.
+    var roomForm = RoomForm()
     /// The room.create sent last, to show the group chat once it's made.
-    var makingRoom: String?
+    var makingRoom: MakingRoom?
     /// What a group chat used, as `room.summary` gives it, for its settings.
     var roomUsage: RoomUsage?
     /// How each reply still being written in a group chat came to its agent, by its message.
@@ -1653,6 +1658,13 @@ final class Model {
     var recentFiles: [RecentFile] = []
     /// The person's own emoji, the suggestion row and the picker (PLAN.md, "Emoji").
     let emoji = Emojis()
+    /// Acta's cards, their sheets and boards (Acta.swift), T3's threads and their start
+    /// sheet (T3.swift), and Spools (Spools.swift).
+    var acta = ActaState()
+    var t3 = T3State()
+    var spools = SpoolsState()
+    /// The person's MCP servers, as `mcp.list` last gave them, for Spools' Installed.
+    var mcpServers: [McpServer] = []
     /// Files the core has fetched, by SHA-256, or SHA-256 and ".thumb": where they are.
     var files: [String: String] = [:]
     /// A file fetched to be opened, for the screen to show.
@@ -1692,14 +1704,14 @@ final class Model {
     /// address.
     var toSignIn: (server: String, url: URL)?
     /// Whether `mcp.list` is to be asked again.
-    private var mcpStale = false
+    var mcpStale = false
     /// The files the @ picker found: for which agent, for what, and the files.
     private var foundFiles: (agent: String, query: String, files: [FoundFile]) = ("", "", [])
     /// The `agent.files` asked for and not answered yet: its id, the agent and the query.
     private var filesAsking: (id: String, agent: String, query: String)?
     /// Frames the model has to send that no screen asked for, such as fetching a file a
     /// message mentions once the instance has it ready: sent with the next fetches.
-    private var pending: [JSON] = []
+    var pending: [JSON] = []
 
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
@@ -1768,6 +1780,7 @@ final class Model {
         cameLive = []
         foldFlips = []
         unreadFrom = first
+        cardsChatOpened()
     }
 
     /// The chat is left for the agents list. Its agent stays selected, so its chat opens
@@ -1949,7 +1962,11 @@ final class Model {
             case "update_needed": conn = .updateNeeded
             default: conn = .starting
             }
-            if state != "live" { synced = false }
+            if state != "live" {
+                synced = false
+                // What was sent on the connection that went is never answered.
+                roomCreateLost(nil)
+            }
             if state == "signed_out" {
                 loggingIn = false
                 me = nil
@@ -1970,6 +1987,7 @@ final class Model {
         case "synced":
             synced = true
             dirty.formUnion(CoreList.allCases)
+            watchesStale()
             programsWanted = true
             // The core tells what catching up brought here, not an event at a time
             // (core/README.md): the text of replies that ended meanwhile goes, and an
@@ -2024,6 +2042,9 @@ final class Model {
             live[message] = blocks
         case "event":
             event(f)
+        case "connect":
+            // A server connected from Spools moved to its next step (Spools.swift).
+            connectFrame(f)
         case "core.moved":
             // The instance moved, and the core followed it there (protocol.md, "moved").
             notice = "Your instance moved to \(f["address"].text). The app is connected there now."
@@ -2039,7 +2060,12 @@ final class Model {
             // A move the core won't follow (`moved_unsigned`, `moved_elsewhere`) says why
             // here too, and the app stays where it is.
             let code = f["code"].text
-            if code != "offline" { notice = f["message"].string ?? code }
+            if code != "offline" {
+                notice = f["message"].string ?? code
+            } else {
+                // A room.create that didn't go: Make is on again.
+                roomCreateLost(f["for"].text)
+            }
         default:
             break
         }
@@ -2112,6 +2138,9 @@ final class Model {
             }
         case "account":
             if let has = f["has_password"].bool { hasPassword = has }
+        case "watch":
+            // The person's watches, for Follow on a card's sheet and a board.
+            takeWatchEvent(kind, f)
         default:
             break
         }
@@ -2149,7 +2178,7 @@ final class Model {
     }
 
     private func result(_ f: JSON) {
-        if mcpResult(f) { return }
+        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) { return }
         if f["id"].text == "app.acp" {
             // Quietly: without the titles, programs show by their own names.
             var titles: [String: String] = [:]
@@ -2174,7 +2203,7 @@ final class Model {
             pinsMore = v["more"].bool ?? false
             pinsCount = v["count"].int ?? pins.count
         case let id where id.hasPrefix("app.room_create"):
-            if let error { notice = error; makingRoom = nil } else { roomMade(f) }
+            roomCreateAnswered(f)
         case let id where id.hasPrefix("app.room_summary:"):
             if error == nil { roomUsageCame(f) }
         case let id where id.hasPrefix("app.context"):
@@ -2188,13 +2217,13 @@ final class Model {
             let url = String(id[id.index(after: hash)...])
             linkPreviews[url] = error == nil && !f["value"]["link"].isNull ? .ready(PageLink.of(f["value"]["link"])) : .failed
         case let id where id.hasPrefix("app.folder_new"):
-            // A folder made for an agent: the agent goes in.
+            // A folder made for an agent or a group chat: it goes in.
             let agent = folderFor
             folderFor = nil
             if let error {
                 notice = error
-            } else if let agent, let group = f["value"]["group"]["id"].string {
-                pending.append(groupAgent(agent, group))
+            } else if let agent, let group = f["value"]["group"]["id"].string, let c = regroup(agent, group) {
+                pending.append(c)
             }
         case let id where id.hasPrefix("app.agent_files"):
             // The files the @ picker asked for, unless it has asked for others since.
@@ -2284,9 +2313,7 @@ final class Model {
         let items = f["items"].array
         switch what {
         case .sidebar:
-            sidebar = items.compactMap(SideSection.init)
-            // Its group chats, first, as the core orders them.
-            roomOrder = items.filter { $0["kind"].text == "rooms" }.flatMap { $0["rooms"].array.map { $0["id"].text } }
+            takeSidebar(items)
         case .agents:
             agents = listed(items.map {
                 Agent(id: $0["id"].text, name: $0["name"].text, color: $0["color"].text, program: $0["acp_agent"].text, shape: $0["shape"].text, drawing: points($0["drawing"]), pinned: $0["pinned"].int, order: $0["order"].int, group: $0["group"].string, hidden: !$0["hidden"].isNull, instructions: $0["instructions"].text, forLine: $0["for"].text)
@@ -2323,8 +2350,10 @@ final class Model {
         case .messages:
             moreMessages = f["more"].bool ?? false
             messagesCame = true
-            // Loom's own lines across the chat (a compaction, a fresh session) are the desktop's.
-            messages = items.filter { !routinePrompt($0) && $0["role"].text != "loom" }.map(messageOf)
+            // Loom's own lines across the chat (a compaction, a fresh session) are the
+            // desktop's; a watch's lines show here too, as quiet rows, and the line a T3 thread
+            // started from loom lands in shows as its card.
+            messages = items.filter { !routinePrompt($0) && ($0["role"].text != "loom" || isWatchLine($0) || !threadsOf($0).isEmpty) }.map(messageOf)
             reaching = false
             placeQueued()
             // The tool calls these messages name.
@@ -2339,7 +2368,12 @@ final class Model {
 
     /// A stored message, as the instance keeps it.
     private func messageOf(_ m: JSON) -> Message {
-        Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull, routed: Routed.of(m), deleted: !m["deleted"].isNull)
+        var cards: [String: ActaCard] = [:]
+        if case .object(let o) = m["cards"] {
+            for (id, c) in o { cards[id] = ActaCard(c) }
+        }
+        return Message(id: m["id"].text, role: m["role"].text, at: m["at"].int ?? 0, blocks: m["blocks"].array.map(Block.of), from: from(m["from"].text), fromAgent: m["from"].text.hasPrefix("a_") ? m["from"].text : nil, status: m["status"].text, sources: m["sources"].array.map(Source.of).filter { !$0.url.isEmpty }, links: PageLink.all(m["links"]), named: m["mentions"].array.map { NamedFile(path: $0["path"].text, name: $0["name"].text, size: $0["size"].int ?? 0, thumb: $0["thumb"].string) }.filter { !$0.path.isEmpty }, reply: ReplyTo.of(m), pinned: !m["pinned"].isNull, routed: Routed.of(m), deleted: !m["deleted"].isNull,
+                       cards: cards, made: m["made_cards"].array.map { $0["id"].text }.filter { cards[$0] != nil }, threads: threadsOf(m))
     }
 
     /// Takes the answer to one of the MCP commands the model sent, if it is one: the
@@ -2355,6 +2389,7 @@ final class Model {
                     signed[s["name"].text] = s["signed_in_as"].text
                 }
                 mcpSignedIn = signed
+                mcpServers = f["value"]["servers"].array.map(McpServer.init)
             }
             return true
         }
@@ -2508,6 +2543,11 @@ final class Model {
         // And those of pictures sent before and picked to go again, which the composer
         // has no file of its own to draw.
         wanted += attachments.filter { $0.path.isEmpty && isPicture($0.name) }.compactMap { $0.file?.file }
+        // And the icons Spools' entries and the person's servers gave of their own.
+        wanted += (spools.entries + spools.search.entries).compactMap(\.badge).flatMap(\.icons) + mcpServers.compactMap(\.badge).flatMap(\.icons)
+        // What the Acta cards and the T3 threads of the chat need asked.
+        out += cardFetches(now: nowMs())
+        out += t3Fetches()
         for sha in Set(wanted) {
             let key = "\(sha).thumb"
             if files[key] != nil || getting.values.contains(where: { $0.key == key }) { continue }
@@ -2668,6 +2708,7 @@ final class Model {
     /// fetched, and the agents it mentions.
     func inline(_ m: Message) -> Inline {
         var out = Inline()
+        out.cards = m.cards
         for (url, link) in m.links {
             if let icon = link.icon, let path = files["\(icon).thumb"] { out.icons[url] = path }
         }
@@ -2745,6 +2786,7 @@ final class Model {
             ["t": "cmd", "id": JSON(id("app.plus_skills")), "name": "skill.list", "args": [:]],
             ["t": "cmd", "id": JSON(id("app.plus_routines")), "name": "routine.list", "args": [:]],
             ["t": "cmd", "id": JSON(id("app.recent_files")), "name": "files.recent", "args": ["limit": 50]],
+            askT3Servers(),
         ]
     }
 
@@ -2755,7 +2797,10 @@ final class Model {
     func plusGroups(_ query: String) -> [[PlusRow]] {
         let q = query.trimmingCharacters(in: .whitespaces).lowercased()
         if q.isEmpty {
-            return [[.attach, .open(.recent), .emoji], [.open(.skills), .open(.routines)]]
+            var act: [PlusRow] = [.open(.skills), .open(.routines)]
+            if hasActa { act.append(.boards) }
+            if !t3.servers.isEmpty { act.append(.startT3) }
+            return [[.attach, .open(.recent), .emoji], act]
         }
         func found<T>(_ rows: [T], _ name: (T) -> (String, String), _ row: (T) -> PlusRow) -> [PlusRow] {
             let hits = rows.compactMap { r -> (Bool, T)? in
@@ -2768,8 +2813,10 @@ final class Model {
         var add: [PlusRow] = "attach files".contains(q) ? [.attach] : []
         if "emoji".contains(q) { add.append(.emoji) }
         add += found(recentFiles, { ($0.file.name, "") }, PlusRow.file)
-        let act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
+        var act = found(skills, { ($0.name, $0.description) }, PlusRow.skill)
             + found(plusRoutines, { ($0.name, "") }, PlusRow.routine)
+        if hasActa && "boards".contains(q) { act.append(.boards) }
+        if !t3.servers.isEmpty && "start a t3 thread".contains(q) { act.append(.startT3) }
         return [add, act].filter { !$0.isEmpty }
     }
 
@@ -3043,35 +3090,6 @@ final class Model {
     }
 
     // MARK: The agent list's folders (PLAN.md, "The sidebar")
-
-    /// The folders, each id and name, in order.
-    var folders: [(id: String, name: String)] {
-        sidebar.compactMap {
-            if case .folder(let id, let name, _) = $0.part { return (id, name) }
-            return nil
-        }
-    }
-
-    /// The agents in the list's order, without the hidden ones.
-    var shownAgents: [Agent] {
-        let ids = sidebar.filter { $0.part != .hidden }.flatMap(\.agents)
-        return ids.isEmpty ? agents : ids.compactMap { self.agent($0) }
-    }
-
-    /// Puts an agent in a folder, or with nil, out of them. It shows there at once.
-    func groupAgent(_ agent: String, _ group: String?) -> JSON {
-        for i in sidebar.indices { sidebar[i].agents.removeAll { $0 == agent } }
-        if let i = sidebar.firstIndex(where: {
-            switch $0.part {
-            case .folder(let id, _, _): return id == group
-            case .agents: return group == nil
-            default: return false
-            }
-        }) {
-            sidebar[i].agents.append(agent)
-        }
-        return ["t": "cmd", "id": JSON(id("app.group_agent")), "name": "agent.group", "args": ["agent": JSON(agent), "group": JSON(group ?? "")]]
-    }
 
     /// Hides an agent, or shows it again.
     func hideAgent(_ agent: String, _ hidden: Bool) -> JSON {

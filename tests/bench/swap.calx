@@ -1,0 +1,149 @@
+module tests.bench.swap
+
+// A long chat swaps to a fresh session once its prompt cache has gone cold
+// (PLAN.md, "One endless chat"), checked with Claude itself, run by hand: does
+// the agent still answer about the start of the chat after the swap, and how long
+// does the person wait for that turn? A minute lasts a second here, so a chat
+// pauses 4 s after its last turn and its cache is cold an hour, 60 s, after that;
+// LOOM_TEST_SWAP_TOKENS=1 makes any chat long enough to swap. It prints each
+// turn's time and tokens, what the cold turn answered, and what Claude Code wrote
+// to its cache, with how long it keeps it. With --no-swap, no chat is long enough,
+// and the cold turn goes on in its session, to compare.
+//
+//     LOOM_TEST_CLAUDE="npx @agentclientprotocol/claude-agent-acp" calx tests/bench/swap.calx [--no-swap]
+import std.env
+import std.fs
+import std.json.{parse}
+import std.process.{exit}
+import std.thread.{sleep}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, loom}
+
+const ASKED: str = "Plan with me: on Monday I take the 07:42 train to Bergen, on Tuesday we hike Ulriken, and on Wednesday we eat at Bryggeloftet at 19:30. My sister Bea joins on Tuesday only. Say you have it, in one line."
+
+// A turn: what the agent answered, how long until its first words and its end, in
+// ms, and its tokens.
+fn turn(app: mut Session, chat: String, cid: str, text: String) -> (String, i64, i64, i64) ! Error {
+    let start = unsafe { Instant.now() }
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", chat.copy()).s("text", text).done())
+    var going = String()
+    while going.len() == 0 {
+        let f = try app.until("event", "run.started", 300000)
+        if str_at(f.copy(), "conversation") == some(chat.copy()) and bool_at(f.copy(), "quiet") != some(true) { going = str_at(f, "run") ?? String() }
+    }
+    loop {
+        let d = try app.until("delta", "", 300000)
+        if str_at(d, "run") == some(going.copy()) { break }
+    }
+    let first = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+    loop {
+        let f = try app.until("event", "run.finished", 300000)
+        if str_at(f.copy(), "run") == some(going.copy()) {
+            let took = i64.wrap(unsafe { Instant.now() }.nanos_since(start) / 1000000)
+            let answer = reply_text(at(try app.event("message.created"), "message"))
+            return (answer, first, took, int_at(at(f, "usage"), "total") ?? 0)
+        }
+    }
+}
+
+fn chat_with(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Tester")).s("acp_agent", String("claude")).s("permission", String("allow")).s("instructions", String("You are a test agent, chatting with a tester.")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent).done()), "value"), "conversation") ?? String()
+    let (a1, f1, t1, k1) = try turn(mut app, chat.copy(), "m_1", String(ASKED))
+    println("turn 1 (a new session): first words {f1} ms, done {t1} ms, {k1} tokens: {a1}")
+    let (a2, f2, t2, k2) = try turn(mut app, chat.copy(), "m_2", String("Also: I booked the hotel Zander K for two nights. One line."))
+    println("turn 2 (warm): first words {f2} ms, done {t2} ms, {k2} tokens: {a2}")
+    // The pause's quiet turn: looking back, and the summary.
+    var quiet = String()
+    while quiet.len() == 0 {
+        let f = try app.until("event", "run.started", 300000)
+        if bool_at(f.copy(), "quiet") == some(true) { quiet = str_at(f, "run") ?? String() }
+    }
+    let paused = unsafe { Instant.now() }
+    loop {
+        let f = try app.until("event", "run.finished", 300000)
+        if str_at(f.copy(), "run") == some(quiet.copy()) {
+            println("the pause's quiet turn: {str_at(f.copy(), "status") ?? String()}, {int_at(at(f, "usage"), "total") ?? 0} tokens, {unsafe { Instant.now() }.nanos_since(paused) / 1000000} ms")
+            break
+        }
+    }
+    // An hour, here 60 s, after it: the cache is cold.
+    unsafe { sleep(65000000000) }
+    let (a3, f3, t3, k3) = try turn(mut app, chat.copy(), "m_3", String("Back again. What time is the Wednesday dinner, who joins on Tuesday, and which hotel did I book? One line."))
+    println("turn 3 (cold, swapped): first words {f3} ms, done {t3} ms, {k3} tokens: {a3}")
+    let (a4, f4, t4, k4) = try turn(mut app, chat.copy(), "m_4", String("And which train on Monday? One line."))
+    println("turn 4 (warm, after the swap): first words {f4} ms, done {t4} ms, {k4} tokens: {a4}")
+    let log = "{try app.cmd("q_3", "activity.list", Obj.new().done())}"
+    println("swapped: {log.contains("its prompt cache had gone cold")}; the cold turn knew the dinner {a3.contains("19:30")}, Bea {a3.contains("Bea")}, the hotel {a3.contains("Zander")}; the next knew the train {a4.contains("07:42")}")
+    app.close()
+}
+
+// What Claude Code wrote to its prompt cache in the transcripts under `data`'s agents,
+// and for how long: (tokens kept an hour, tokens kept five minutes).
+fn cache_writes(data: String) -> (i64, i64) {
+    let home = env.variable(String("USERPROFILE")) ?? env.variable(String("HOME")) ?? String()
+    let root = "{home}/.claude/projects"
+    let mark = data.replace("\\", "/").split("/")
+    let name = mark[mark.len() - 1].copy()
+    var hour: i64 = 0
+    var five: i64 = 0
+    let dirs = match fs.list(root.copy()) {
+        ok(d) => d,
+        err(_) => return (0, 0),
+    }
+    for d in dirs {
+        if not d.contains(name.copy()) { continue }
+        let files = match fs.list("{root}/{d}") {
+            ok(f) => f,
+            err(_) => continue,
+        }
+        for f in files {
+            if not f.ends_with(".jsonl") { continue }
+            let text = match fs.read_text("{root}/{d}/{f}") {
+                ok(some(t)) => t,
+                _ => continue,
+            }
+            for line in text.split("\n") {
+                let j = match parse(line.copy()) {
+                    ok(v) => v,
+                    err(_) => continue,
+                }
+                let made = at(at(at(j, "message"), "usage"), "cache_creation")
+                hour += int_at(made.copy(), "ephemeral_1h_input_tokens") ?? 0
+                five += int_at(made, "ephemeral_5m_input_tokens") ?? 0
+            }
+        }
+    }
+    return (hour, five)
+}
+
+fn main() ! Error {
+    let claude = env.variable(String("LOOM_TEST_CLAUDE")) else {
+        println("swap: set LOOM_TEST_CLAUDE to an ACP command line for Claude")
+        return
+    }
+    let data = try fs.temp_dir()
+    var add: List<String> = [String("acp"), String("add"), String("claude")]
+    for part in claude.split(" ") { add.push(part.copy()) }
+    _ = try loom(data.copy(), add).output()
+    _ = calx()
+    let least = if env.args().contains(String("--no-swap")) { String("1000000000") } else { String("1") }
+    let cmd = loom(data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root"), String("--test-minute-ms"), String("1000")]).env(String("LOOM_TEST_SWAP_TOKENS"), least)
+    let i = try Instance.launch(data.copy(), cmd)
+    let failure: String? = match chat_with(i.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    let (hour, five) = cache_writes(data.copy())
+    println("Claude Code's cache writes: {hour} tokens kept an hour, {five} kept five minutes")
+    println("its transcripts are in ~/.claude/projects, in the folders named for {data}")
+    i.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+}

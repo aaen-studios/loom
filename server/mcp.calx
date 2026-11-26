@@ -15,7 +15,11 @@ module server.mcp
 // agent's permission mode allows the call or the person said yes.
 //
 // MCP is JSON-RPC 2.0, one message a line. Requests are answered in turn: a
-// message_agent call waits for the other agent's reply.
+// message_agent call waits for the other agent's reply. It speaks both eras of
+// MCP (PLAN.md, "MCP versions"): a request whose `_meta` says
+// 2026-07-28 is answered as that version says, with no initialize, and a
+// client that says initialize is answered in the legacy era's version it
+// asks for, or 2025-11-25.
 import std.bytes
 import std.env
 import std.fs
@@ -32,8 +36,8 @@ import server.codemode.{Tool}
 import server.icons
 import server.mcpclient.{Server}
 import server.mcpclient
+import server.t3
 
-const PROTOCOL: str = "2025-06-18"
 const CALL_WAIT: u32 = 3600000    // message_agent waits on a whole reply
 const DENO_WAIT: u32 = 900000     // the first script waits while Deno is fetched
 const MAX_ANSWER: usize = 16777216
@@ -44,6 +48,38 @@ fn reply(id: Json, result: Json) {
 
 fn reply_error(id: Json, number: i64, message: String) {
     println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("error", Obj.new().i("code", number).s("message", message).done()).done()}")
+}
+
+fn server_info() -> Json {
+    return Obj.new().s("name", String("loom")).s("version", String("1")).done()
+}
+
+// Every version of MCP loom mcp speaks, newest first.
+fn versions() -> Json {
+    var out = List<Json>()
+    out.push(Json.Str(String(mcpclient.MODERN)))
+    for v in mcpclient.LEGACY {
+        out.push(Json.Str(String(v)))
+    }
+    return Json.Array(out)
+}
+
+// A result as the modern era gives it: saying it's final, and in its `_meta`
+// who gives it.
+fn modern_result(result: Json) -> Json {
+    let first = merge(Obj.new().s("resultType", String("complete")).done(), result)
+    return merge(first, Obj.new().j("_meta", Obj.new().j("io.modelcontextprotocol/serverInfo", server_info()).done()).done())
+}
+
+// A list's result in the modern era: what loom offers an agent changes with
+// its person's plugins and rights, so it's stale at once, and it's theirs.
+fn modern_list(result: Json) -> Json {
+    return modern_result(merge(result, Obj.new().i("ttlMs", 0).s("cacheScope", String("private")).done()))
+}
+
+// What server/discover answers, before modern_list.
+fn discovered() -> Json {
+    return Obj.new().j("supportedVersions", versions()).j("capabilities", Obj.new().j("tools", Obj.new().done()).done()).done()
 }
 
 // A tool result for the agent to read.
@@ -137,6 +173,14 @@ fn reply_text(id: Json, result: String) {
     println("\{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}\}")
 }
 
+// The instance's text for a tool's result, an object on one line, saying it's
+// final as the modern era's results do.
+fn final_text(result: String) -> String {
+    let rest = result[1..].trim_start().copy()
+    if rest.starts_with("\}") { return String("\{\"resultType\":\"complete\"\}") }
+    return "\{\"resultType\":\"complete\",{rest}"
+}
+
 // --- Code Mode ---
 
 struct Code {
@@ -146,6 +190,7 @@ struct Code {
     tools: List<Tool>
     servers: Map<String, Server>
     trouble: List<String>    // servers that didn't start, and why
+    said_trouble: List<String>    // the trouble search_tools has said in this session
     signing: List<String>    // servers that wait for their person to sign in
     added: bool    // an add_mcp_server call went, so the agent may have a server more
     runs: i64
@@ -385,7 +430,14 @@ impl Code {
         self.load(link)
         let limit = int_at(args.copy(), "limit") ?? 10
         let most: usize = if limit < 1 { 1 } else if limit > 30 { 30 } else { usize.wrap(limit) }
-        return said(codemode.search(self.tools.copy(), str_at(args, "query") ?? String(), most, self.not_reached()))
+        // A server that didn't start is said once a session, and again when the
+        // search names it.
+        let query = str_at(args, "query") ?? String()
+        let trouble = codemode.trouble_to_say(self.not_reached(), self.said_trouble.copy(), query.copy())
+        for t in trouble.copy() {
+            if not self.said_trouble.contains(t.copy()) { self.said_trouble.push(t.copy()) }
+        }
+        return said(codemode.search(self.tools.copy(), query, most, trouble))
     }
 
     // Where Deno is, asking the instance, which fetches it the first time.
@@ -584,7 +636,19 @@ impl Code {
         } else {
             self.servers.insert(t.server.copy(), server)
         }
-        if act > 0 { _ = link.send("/api/mcp/done", Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy()).done()) }
+        // A T3 tool that started a thread or sent it work: the instance puts its card
+        // on the reply (PLAN.md, "T3 threads").
+        var threads = List<Json>()
+        if why.len() == 0 {
+            if let r = t3.started_by("{value}") { threads.push(Obj.new().s("env", r.env.copy()).s("thread", r.thread.copy()).done()) }
+        }
+        if act > 0 or threads.len() > 0 {
+            var done = Obj.new().i("act", act).b("ok", why.len() == 0).s("why", why.copy())
+            // A thread started on T3: the instance wakes the agent when it finishes.
+            if act > 0 and why.len() == 0 and t.name == "t3_thread_launch" { done = done.s("server", t.server.copy()).j("launched", value.copy()) }
+            if threads.len() > 0 { done = done.j("threads", Json.Array(threads)) }
+            _ = link.send("/api/mcp/done", done.done())
+        }
         if why.len() > 0 { fail "{why}" }
         return value
     }
@@ -667,43 +731,98 @@ fn start_listed(spec: Json) -> (Server, List<Json>) ! Error {
     }
 }
 
+fn is_object(j: Json) -> bool {
+    if let Json.Object(_) = j { return true }
+    return false
+}
+
+// Answers one message. A request whose `_meta` names its version is of the
+// modern era, and answered as it stands; any other is of the legacy era,
+// after initialize.
 fn handle(link: Link, c: mut Code, m: Json) {
     let id = m.get(String("id")) else return    // a notification, such as notifications/initialized
     let method = str_at(m.copy(), "method") ?? String()
     let params = at(m, "params")
+    let meta = at(params.copy(), "_meta")
+    let named = meta.get(String("io.modelcontextprotocol/protocolVersion")) else {
+        if method == "server/discover" {
+            reply_error(id, -32602, String("server/discover says the version it's asked in, as _meta's io.modelcontextprotocol/protocolVersion"))
+            return
+        }
+        handle_legacy(link, mut c, id, method, params)
+        return
+    }
+    let version = named.as_str() ?? String()
+    if version != mcpclient.MODERN {
+        let data = Obj.new().j("supported", versions()).s("requested", version.copy()).done()
+        println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("error", Obj.new().i("code", -32022).s("message", "loom doesn't speak MCP {version}").j("data", data).done()).done()}")
+        return
+    }
+    if not is_object(at(meta, "io.modelcontextprotocol/clientCapabilities")) {
+        reply_error(id, -32602, String("A request in MCP 2026-07-28 says what its client can do, as _meta's io.modelcontextprotocol/clientCapabilities"))
+        return
+    }
+    if method == "server/discover" {
+        reply(id, modern_list(discovered()))
+    } else if method == "tools/list" or method == "tools/call" {
+        tools_request(link, mut c, id, method, params, true)
+    } else {
+        reply_error(id, -32601, "loom doesn't offer {method}")
+    }
+}
+
+fn handle_legacy(link: Link, c: mut Code, id: Json, method: String, params: Json) {
     if method == "initialize" {
-        let version = str_at(params, "protocolVersion") ?? String(PROTOCOL)
-        let info = Obj.new().s("name", String("loom")).s("version", String("1")).done()
-        reply(id, Obj.new().s("protocolVersion", version).j("capabilities", Obj.new().j("tools", Obj.new().done()).done()).j("serverInfo", info).done())
+        let asked = str_at(params, "protocolVersion") ?? String()
+        let version = if mcpclient.legacy(asked.copy()) { asked } else { String(mcpclient.LEGACY[0]) }
+        reply(id, Obj.new().s("protocolVersion", version).j("capabilities", Obj.new().j("tools", Obj.new().done()).done()).j("serverInfo", server_info()).done())
     } else if method == "ping" {
         reply(id, Obj.new().done())
-    } else if method == "tools/list" {
+    } else if method == "tools/list" or method == "tools/call" {
+        tools_request(link, mut c, id, method, params, false)
+    } else {
+        reply_error(id, -32601, "loom doesn't offer {method}")
+    }
+}
+
+fn reply_as(id: Json, result: Json, modern: bool, list: bool) {
+    if not modern {
+        reply(id, result)
+    } else if list {
+        reply(id, modern_list(result))
+    } else {
+        reply(id, modern_result(result))
+    }
+}
+
+// tools/list and tools/call, in either era.
+fn tools_request(link: Link, c: mut Code, id: Json, method: String, params: Json, modern: bool) {
+    if method == "tools/list" {
         if c.on {
-            reply(id, Obj.new().j("tools", Json.Array(tools.code_mode_tools())).done())
+            reply_as(id, Obj.new().j("tools", Json.Array(tools.code_mode_tools())).done(), modern, true)
             return
         }
         match own_tools(link, mut c) {
-            ok(t) => reply(id, t),
+            ok(t) => reply_as(id, t, modern, true),
             err(e) => reply_error(id, -32603, "loom's instance didn't answer: {e}"),
         }
-    } else if method == "tools/call" {
-        let name = str_at(params.copy(), "name") ?? String()
-        let arguments = at(params, "arguments")
-        // In Code Mode a call by a tool's own name still goes to the instance,
-        // which decides it as ever.
-        if c.on and name == "search_tools" {
-            reply(id, c.search(link, arguments))
-        } else if c.on and name == "run_code" {
-            reply(id, c.run(link, arguments))
-            c.tidy(link)
-        } else {
-            // A server the agent proposed and its person added is started at
-            // its next search or script.
-            if name == "add_mcp_server" { c.added = true }
-            reply_text(id, link.call_text(name, arguments))
-        }
+        return
+    }
+    let name = str_at(params.copy(), "name") ?? String()
+    let arguments = at(params, "arguments")
+    // In Code Mode a call by a tool's own name still goes to the instance,
+    // which decides it as ever.
+    if c.on and name == "search_tools" {
+        reply_as(id, c.search(link, arguments), modern, false)
+    } else if c.on and name == "run_code" {
+        reply_as(id, c.run(link, arguments), modern, false)
+        c.tidy(link)
     } else {
-        reply_error(id, -32601, "loom doesn't offer {method}")
+        // A server the agent proposed and its person added is started at
+        // its next search or script.
+        if name == "add_mcp_server" { c.added = true }
+        let text = link.call_text(name, arguments)
+        reply_text(id, if modern { final_text(text) } else { text })
     }
 }
 
@@ -712,7 +831,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), said_trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
@@ -722,4 +841,11 @@ pub fn serve() ! Error {
         }
     }
     c.stop()
+}
+
+@test
+fn answers_as_the_modern_era_does() {
+    assert(final_text(String(#"{"content":[]}"#)) == #"{"resultType":"complete","content":[]}"#)
+    assert(final_text(String("\{\}")) == #"{"resultType":"complete"}"#)
+    assert("{modern_list(discovered())}" == #"{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18","2025-03-26","2024-11-05"],"capabilities":{"tools":{}},"ttlMs":0,"cacheScope":"private","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"loom","version":"1"}}}"#)
 }

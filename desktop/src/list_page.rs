@@ -18,15 +18,14 @@ pub(super) struct Shape {
 
 /// The popup's own state: the open page's shape, whether a grid page is being drawn,
 /// its corner while it's dragged (where the pointer and the size were as it went down),
-/// and a list page's find field, with the page it's for and the item whose form is
-/// filled in.
+/// and a list page's find field, with the page it's for. The item whose form is filled
+/// in is the model's (`model::drafts`).
 pub(super) struct ListUi {
     pub shape: Option<Shape>,
     pub wide: bool,
     pub drag: Option<((f32, f32), (f32, f32))>,
     pub find_in: Entity<InputState>,
     pub find_for: Option<Screen>,
-    pub filled: Option<(Screen, String)>,
 }
 
 impl ListUi {
@@ -48,7 +47,6 @@ impl ListUi {
             drag: None,
             find_in,
             find_for: None,
-            filled: None,
         }
     }
 }
@@ -79,6 +77,7 @@ fn find_words(screen: Screen) -> &'static str {
         Screen::Skills => "Find a skill",
         Screen::Proposals => "Find a proposal",
         Screen::Routines => "Find a routine",
+        Screen::Installed => "Find a server",
         _ => "Find",
     }
 }
@@ -111,9 +110,9 @@ impl Loom {
     }
 
     /// Readies the open list page before it's drawn: an empty find field asking for
-    /// what the page lists, each time a page opens, and the form of what shows beside
-    /// the list without being picked (the first, side by side) filled in as a click
-    /// fills it.
+    /// what the page lists, each time a page opens, what its form holds kept as its
+    /// item's draft while it's changed, and the form of what shows beside the list
+    /// without being picked (the first, side by side) filled in as a click fills it.
     pub(super) fn ready_list_page(
         &mut self,
         open: Screen,
@@ -127,13 +126,21 @@ impl Loom {
                 s.set_placeholder(find_words(open), window, cx);
             });
         }
+        self.keep_draft(cx);
         let split = self.list_split();
-        let filled =
-            |this: &Self, key: &str| this.list_ui.filled.as_ref() == Some(&(open, key.to_string()));
+        let filled = |this: &Self, key: &str| {
+            form_drafts::draft_page(open).is_some_and(|p| this.model.drafts.is_open(p, Some(key)))
+        };
         match open {
             Screen::Mcp => {
                 let servers = self.model.mcp_servers.clone();
                 let keys: Vec<&str> = servers.iter().map(|m| m.name.as_str()).collect();
+                // One saved under a new name: the page follows it there.
+                for (was, now) in self.model.drafts.moved_in(DraftPage::Mcp, &keys) {
+                    if self.mcp_open.as_ref() == Some(&was) {
+                        self.mcp_open = Some(Some(now));
+                    }
+                }
                 let open_at = self.mcp_open.as_ref().map(|o| o.as_deref());
                 if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
                     if !filled(self, &servers[i].name) {
@@ -144,6 +151,11 @@ impl Loom {
             Screen::Skills => {
                 let skills = self.model.skills.clone();
                 let keys: Vec<&str> = skills.iter().map(|k| k.name.as_str()).collect();
+                for (was, now) in self.model.drafts.moved_in(DraftPage::Skills, &keys) {
+                    if self.skill_open.as_ref() == Some(&was) {
+                        self.skill_open = Some(Some(now));
+                    }
+                }
                 let open_at = self.skill_open.as_ref().map(|o| o.as_deref());
                 if let Pane::Item(i) = popup::shows(split, open_at, &keys, false).pane {
                     if !filled(self, &skills[i].name) {
@@ -161,22 +173,38 @@ impl Loom {
                     }
                 }
             }
+            Screen::Programs => {
+                let keys: Vec<String> = self
+                    .model
+                    .installed
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect();
+                let names: Vec<&str> = keys.iter().map(String::as_str).collect();
+                let open_at = self.program_open.as_ref().map(|o| o.as_deref());
+                if let Pane::Item(i) = popup::shows(split, open_at, &names, false).pane {
+                    if !filled(self, &keys[i]) {
+                        self.fill_brain(&keys[i], window, cx);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
     /// Back to the open list page's list, from what was picked, where they show one at
-    /// a time.
+    /// a time. What its form holds stays as its draft.
     fn list_back(&mut self, cx: &mut Context<Self>) {
+        self.leave_form(cx);
         match self.popup {
             Some(Screen::Mcp) => self.mcp_open = None,
             Some(Screen::Skills) => self.skill_open = None,
             Some(Screen::Proposals) => self.proposal_open = None,
             Some(Screen::Programs) => self.program_open = None,
             Some(Screen::Routines) => self.routine_open = None,
+            Some(Screen::Installed) => self.model.spools.picked = None,
             _ => {}
         }
-        self.list_ui.filled = None;
         cx.notify();
     }
 
@@ -184,18 +212,29 @@ impl Loom {
     /// box with the list down its left and the one picked beside it; or, without room
     /// for both, the list until one is picked, and then the one picked with the way back.
     pub(super) fn list_detail(&mut self, page: ListPage, cx: &mut Context<Self>) -> Div {
-        let p = self.p;
-        let split = self.list_split();
-        let list_w = self.list_ui.shape.and_then(|s| s.list);
-        let pane_shown = !matches!(page.shows.pane, Pane::Nothing);
         let title = div()
             .min_h(px(control::BUTTON))
             .flex()
             .items_center()
             .text_size(px(size::HEADING - 2.0))
             .font_weight(FontWeight::SEMIBOLD)
-            .text_color(p.ink)
-            .child(page.title);
+            .text_color(self.p.ink)
+            .child(page.title)
+            .into_any_element();
+        self.list_layout(title, page, cx)
+    }
+
+    /// A list page under a head of its own, such as Spools' title with its tabs.
+    pub(super) fn list_layout(
+        &mut self,
+        title: AnyElement,
+        page: ListPage,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let split = self.list_split();
+        let list_w = self.list_ui.shape.and_then(|s| s.list);
+        let pane_shown = !matches!(page.shows.pane, Pane::Nothing);
         let find = page.shows.list.then(|| {
             div()
                 .min_h(px(control::BUTTON_SMALL))
@@ -364,6 +403,22 @@ impl Loom {
         dot: Option<popup::Dot>,
         picked: bool,
     ) -> Stateful<Div> {
+        self.list_row_unsaved(id, lead, name, line, dot, false, picked)
+    }
+
+    /// A list row, as `list_row` draws it, with a dot in the ink an unread reply's dot
+    /// has before its state's dot while it has changes not saved.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn list_row_unsaved(
+        &self,
+        id: impl Into<SharedString>,
+        lead: AnyElement,
+        name: impl Into<SharedString>,
+        line: String,
+        dot: Option<popup::Dot>,
+        unsaved: bool,
+        picked: bool,
+    ) -> Stateful<Div> {
         let p = self.p;
         let dot = dot.map(|d| match d {
             popup::Dot::Ok => p.ok,
@@ -410,6 +465,9 @@ impl Loom {
                         )
                     }),
             )
+            .when(unsaved, |d| {
+                d.child(div().size(px(6.0)).flex_none().rounded_full().bg(p.ink))
+            })
             .when_some(dot, |d, c| {
                 d.child(div().size(px(6.0)).flex_none().rounded_full().bg(c))
             })
@@ -424,8 +482,22 @@ impl Loom {
         line: Option<String>,
         actions: Option<AnyElement>,
     ) -> AnyElement {
+        self.pane_head_noted(lead, title, line, None, actions)
+    }
+
+    /// The head of what's picked, as `pane_head` draws it, with a second line under its
+    /// first in an ink of its own: what a routine costs.
+    pub(super) fn pane_head_noted(
+        &self,
+        lead: Option<AnyElement>,
+        title: impl Into<SharedString>,
+        line: Option<String>,
+        note: Option<(String, Hsla)>,
+        actions: Option<AnyElement>,
+    ) -> AnyElement {
         let p = self.p;
         let line = line.filter(|l| !l.is_empty());
+        let note = note.filter(|(n, _)| !n.is_empty());
         div()
             .flex()
             .items_center()
@@ -453,6 +525,15 @@ impl Loom {
                                 .text_color(p.ink_3)
                                 .line_clamp(2)
                                 .child(l),
+                        )
+                    })
+                    .when_some(note, |d, (n, ink)| {
+                        d.child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(ink)
+                                .truncate()
+                                .child(n),
                         )
                     }),
             )

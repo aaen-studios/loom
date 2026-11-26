@@ -33,6 +33,7 @@ Under **Messages**:
 - **Vibrant bubbles**: your messages sit in the agent's own colour, light in the light theme and deep in the dark, rather than a touch of it. Off by default.
 - **Tool calls**: how much of an agent's work a reply shows. **Hidden** shows none, not even one that failed: the agent tells you itself when a failure matters. **Folded** puts each run of calls on one line, which opens to show each. **Every call** shows each on its own line. Hidden is the default.
 - **Thoughts**: whether a reply shows an agent's thinking. **Hidden** shows none, **Folded** puts each under Thought, to open, and **Open** shows each open. Hidden is the default.
+- **Show context**: the ring in the chat's header that fills with the agent session's context, its card, and the lines across the chat where a session was compacted or started fresh. Off by default ([How full the chat is](chat.md#how-full-the-chat-is)).
 
 However much of its work a reply shows, a finished turn reads as one answer: the agent's last words, with what it said and did on the way folded under one line, such as "3 steps", that opens with a click. While it works, one quiet line says what it's doing. A turn you stopped, or one that failed, keeps everything it had in view.
 
@@ -78,13 +79,14 @@ Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), 
 
 ## Routines
 
-A routine sends an agent a prompt on a schedule, or when something posts to its webhook. The page shows the week over your routines: days across, hours down, each routine a small block in its agent's colour at its times, and one that runs every few hours as thin ticks. Today stands out, and the arrows go to other weeks. Click a block, or a routine, to open it.
+A routine sends an agent a prompt on a schedule, when something posts to its webhook, or when something happens on an Acta board or a T3 thread. The page shows the week over your routines: days across, hours down, each routine a small block in its agent's colour at its times, and one that runs every few hours as thin ticks. Today stands out, and the arrows go to other weeks. Click a block, or a routine, to open it.
 
 On a routine's page, **Repeat** sets when it runs:
 
 - **Every few hours**: "Every 2 hours, from 08:00 to 20:00", on the days you pick. A routine an agent set every 30 minutes shows minutes here.
 - **On days**: the days, M T W T F S S, and its times, one or more. **+ Time** adds one; × takes one off. "Weekdays" or "Every day" shows beside the days when that's what's picked.
 - **Webhook**: only when something posts to its webhook. Its address and secret show under **Options** once it's saved. A routine on a schedule can have one too, with **Webhook too**.
+- **On an event**: when something happens on your Acta or T3, which shows once you have an Acta board or a T3 server connected ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). **On** picks Acta or T3 when you have both, and **Server** which one when you have several. For Acta, pick the **Board**, then the **Event**: **Moves to** a **Status** (Todo, In progress, Review, Done or Canceled), **New card**, or **Comment**. For T3, type the **Thread**'s id; the routine runs when its run finishes. The list says it in words: "When a LOO card moves to Done". What happened comes after the routine's prompt.
 
 Times are in your time zone, summer time included. Under them, **Next** says when it runs the next three times.
 

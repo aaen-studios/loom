@@ -8,6 +8,11 @@ import Get from '../components/Get.astro';
 import Knot from '../components/Knot.astro';
 import { INSTALL } from '../lib/site.mjs';
 import { brains, count } from '../lib/registry.mjs';
+import actaMark from '../../../server/catalog/acta.svg?raw';
+import githubMark from '../../../server/catalog/github.svg?raw';
+import notionMark from '../../../server/catalog/notion.svg?raw';
+import linearMark from '../../../server/catalog/linear.svg?raw';
+import vercelMark from '../../../server/catalog/vercel.svg?raw';
 
 // The Brains page as the app draws it (desktop/src/app.rs, programs_page, and list_page.rs): the
 // brains down the left and the ACP Registry, picked, beside them, with the registry's own names,
@@ -19,6 +24,14 @@ const listed = await brains([...MINE, ...CARDS]);
 const toInstall = Math.max(0, (await count()) - MINE.length);
 const mine = listed.filter((b) => MINE.includes(b.id)).map((b) => ({ ...b, settings: b.id === 'claude-acp' ? '1 setting' : 'No settings' }));
 const cards = listed.filter((b) => CARDS.includes(b.id));
+// Claude Agent's page, which its row opens (desktop/src/app.rs, program_pane): its head, then
+// who it's signed in as and the plan's limits as bars, orange from 75% and red from 90%
+// (desktop/src/meter.rs, Level::of).
+const claude = mine.find((b) => b.id === 'claude-acp');
+const LIMITS = [
+	{ name: 'Session', used: 42, resets: '15:30' },
+	{ name: 'This week', used: 78, resets: 'Mon' },
+];
 
 // The Rules page as the app draws it (desktop/src/rules.rs), each rule in the server's own words
 // (server/rules.calx, said).
@@ -32,6 +45,23 @@ const STARTERS = ['You', 'An agent', 'Routine', 'Webhook', 'Script'];
 
 // Each server's yarn is drawn from its name, as the app draws it.
 const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
+
+// Spools' Find tab as the app draws it (desktop/src/spools.rs): Acta and T3 Code as wide cards,
+// each with loom's knot tied to its logo, the category pills, and the rest as tiles four to a row,
+// in the catalog's own words, each with its badge's colour and its mark, or its initial where it has
+// none (server/catalog.calx, server/catalog/, shared/badge.calx). When the panel comes into view,
+// T3 Code connects: its tie pulls taut and Installed counts it.
+const featured = [
+	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', color: 'mint', mark: actaMark, connected: true },
+	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', color: 'mint', mark: '', connected: false },
+];
+const PILLS = ['All', 'Work', 'Code', 'Mail & calendar', 'Files', 'Home', 'Fun'];
+const tiles = [
+	{ name: 'GitHub', color: 'pink', mark: githubMark },
+	{ name: 'Notion', color: 'pink', mark: notionMark },
+	{ name: 'Linear', color: 'mint', mark: linearMark },
+	{ name: 'Vercel', color: 'sky', mark: vercelMark },
+];
 
 // Each with an agent's thread, which works while the item is hovered.
 const more = [
@@ -127,7 +157,7 @@ const faq = {
 							<div class="list-rows mine">
 								{
 									mine.map((b) => (
-										<div class="list-row">
+										<div class="list-row" data-program={b.id === claude?.id ? b.id : undefined}>
 											<span class="tile" style={`--icon: url(${b.icon})`} />
 											<span class="row-text">
 												<span class="row-title">{b.name}</span>
@@ -138,7 +168,7 @@ const faq = {
 								}
 							</div>
 							<div class="list-foot">
-								<div class="list-row picked">
+								<div class="list-row picked" data-registry>
 									<span class="tile glyph">
 										<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"></path><path d="M12 22V12"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="m7.5 4.27 9 5.15"></path></svg>
 									</span>
@@ -149,7 +179,7 @@ const faq = {
 								</div>
 							</div>
 						</div>
-						<div class="pane">
+						<div class="pane" data-registry-page>
 							<div class="pane-head">
 								<span class="back" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></span>
 								<span class="pane-title">ACP Registry</span>
@@ -171,6 +201,34 @@ const faq = {
 								}
 							</div>
 						</div>
+						{
+							claude && (
+								<div class="pane" data-program-page hidden>
+									<div class="program-head">
+										<span class="tile big" style={`--icon: url(${claude.icon})`} />
+										<span class="row-text">
+											<span class="pane-title">{claude.name}</span>
+											<span class="row-sub">{`Version ${claude.version} · ${claude.settings}`}</span>
+										</span>
+									</div>
+									<div class="box">
+										<div class="field-row">
+											<span class="field-name">Signed in</span>
+											<span class="plan-name">Claude Max</span>
+										</div>
+										{LIMITS.map((l) => (
+											<div class:list={['field-row', 'limit', { warn: l.used >= 75 && l.used < 90, bad: l.used >= 90 }]}>
+												<span class="field-name">{l.name}</span>
+												<span class="limit-bar">
+													<span style={`width: ${l.used}%`} />
+												</span>
+												<span class="limit-words">{`${l.used}% · ${l.resets}`}</span>
+											</div>
+										))}
+									</div>
+								</div>
+							)
+						}
 					</div>
 				</div>
 			</div>
@@ -259,6 +317,69 @@ const faq = {
 					}
 				</div>
 				<Command text={INSTALL} class="server-cmd" />
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-spools">
+		<div class="wrap split flip">
+			<div class="copy" data-reveal>
+				<h2 id="f-spools">Spools connect agents to your apps</h2>
+				<p>
+					Acta, T3 Code, GitHub, Notion, Linear and more, each connected from its card: fill in what it needs, sign in, and pick the agents that get it, with each tool marked as reading or changing something. The search finds the MCP Registry's servers too, marked Community, and any other MCP server can be added by hand.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="page spools" aria-label="Spools in loom's settings">
+					<div class="spools-head">
+						<span class="page-title">Spools</span>
+						<span class="tabs">
+							<span class="tab on">Find</span>
+							<span class="tab" data-installed="1">Installed · 1</span>
+						</span>
+					</div>
+					<div class="find">
+						<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
+						<span>Search Spools</span>
+					</div>
+					<div class="spool-cards">
+						{
+							featured.map((e) => (
+								<div class="spool-card" data-spool={e.id} style={`--tint: var(--thread-${e.color})`}>
+									<div class="tie">
+										<span class="knot-box">
+											<Knot size={20} />
+										</span>
+										<svg data-tie data-color={e.color} data-taut={e.connected ? '' : undefined} height="28" aria-hidden="true" />
+										{e.mark ? <span class="badge" set:html={e.mark} /> : <span class="badge">{e.name[0]}</span>}
+									</div>
+									<span class="card-text">
+										<span class="spool-name">{e.name}</span>
+										<span class="spool-sub">{e.text}</span>
+									</span>
+									<div class="spool-foot">
+										<span class="spool-state" hidden={!e.connected}>
+											<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>
+											Connected
+										</span>
+										<span class="spool-actions">{e.connected ? <span class="btn-small">Manage</span> : <span class="btn-small primary">Connect</span>}</span>
+									</div>
+								</div>
+							))
+						}
+					</div>
+					<div class="pills">{PILLS.map((p, i) => <span class:list={['pill', { on: i === 0 }]}>{p}</span>)}</div>
+					<div class="spool-tiles">
+						{
+							tiles.map((t) => (
+								<div class="spool-tile">
+									<span class="badge small" style={`--tint: var(--thread-${t.color})`} set:html={t.mark} />
+									<span class="spool-tile-name">{t.name}</span>
+								</div>
+							))
+						}
+					</div>
+				</div>
 			</div>
 		</div>
 	</section>
@@ -680,6 +801,82 @@ const faq = {
 	.brains .cards {
 		grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--layout-card-least)), 1fr));
 	}
+	.pane[hidden] {
+		display: none;
+	}
+	/* A brain's row opens its page beside the list, and the ACP Registry's row the registry. */
+	.list-row[data-program],
+	.list-row[data-registry] {
+		cursor: pointer;
+		transition: background-color 0.12s;
+	}
+	.list-row[data-program]:not(.picked):hover,
+	.list-row[data-registry]:not(.picked):hover {
+		background: var(--hover);
+	}
+	/* A brain's page (desktop/src/app.rs, program_pane): its head, then the plan it's signed in
+	   to, its session and its week, each a bar 6 tall with how much is used and when it resets
+	   after it: quiet, orange from 75% and red from 90% (program_plan, limit_inks). */
+	.program-head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		min-width: 0;
+	}
+	.field-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		padding: calc(var(--space-s) + 2px) var(--space-l);
+		font-size: var(--size-body);
+	}
+	/* The app's label column, narrower in this small copy of the page, so the bar keeps room. */
+	.field-name {
+		flex: none;
+		width: min(var(--layout-field-label), 30%);
+		white-space: nowrap;
+	}
+	.plan-name {
+		flex: 1;
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.limit-bar {
+		flex: 1;
+		min-width: 0;
+		height: 6px;
+		border-radius: 999px;
+		background: var(--line-strong);
+		overflow: hidden;
+	}
+	.limit-bar span {
+		display: block;
+		height: 100%;
+		border-radius: 999px;
+		background: var(--ink-3);
+	}
+	.limit-words {
+		flex: none;
+		width: var(--layout-limit-words, 88px);
+		text-align: right;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+	}
+	.limit.warn .limit-bar span {
+		background: var(--warn);
+	}
+	.limit.warn .limit-words {
+		color: var(--warn);
+	}
+	.limit.bad .limit-bar span {
+		background: var(--bad);
+	}
+	.limit.bad .limit-words {
+		color: var(--bad);
+	}
 	@media (max-width: 560px) {
 		.split-box {
 			grid-template-columns: minmax(0, 1fr);
@@ -833,6 +1030,210 @@ const faq = {
 	}
 	.visual :global(.server-cmd) {
 		background: var(--bg);
+	}
+
+	/* Spools' Find tab, as the app draws it (desktop/src/spools.rs): Find and Installed beside the
+	   title, the search, Acta and T3 Code as wide cards in a soft tint of their colour, the pills, and
+	   the rest as tiles four to a row. */
+	.spools {
+		gap: var(--space-l);
+	}
+	.spools-head {
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+		min-height: var(--control-button);
+	}
+	.tabs {
+		display: flex;
+		gap: var(--space-xs);
+	}
+	.tab {
+		display: flex;
+		align-items: center;
+		height: var(--control-segment);
+		padding: 0 var(--space-m);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.tab.on {
+		background: var(--active);
+		color: var(--ink);
+		font-weight: var(--weight-medium);
+	}
+	.spool-cards {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-m);
+	}
+	.spool-card {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-m);
+		padding: var(--space-l);
+		border: 1px solid color-mix(in srgb, var(--tint) 30%, var(--line));
+		border-radius: var(--radius-card);
+		background: color-mix(in srgb, var(--tint) 7%, var(--card));
+	}
+	/* loom's knot, the tie, and the logo. */
+	.tie {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+	}
+	.tie svg {
+		flex: 1;
+		min-width: 0;
+		height: 28px;
+	}
+	.knot-box {
+		flex: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--control-icon-large);
+		height: var(--control-icon-large);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		background: var(--bg);
+		color: var(--ink);
+	}
+	.knot-box :global(svg) {
+		flex: none;
+	}
+	/* A server's badge: its initial on its colour (app.rs, badge_view). */
+	.badge {
+		--size: var(--control-icon-large);
+		flex: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--size);
+		height: var(--size);
+		border-radius: var(--radius-card);
+		background: var(--tint);
+		font-size: 15px;
+		font-weight: var(--weight-semibold);
+		color: var(--button-ink);
+	}
+	.badge.small {
+		--size: 26px;
+		border-radius: var(--radius-row);
+		font-size: 11px;
+	}
+	/* Its mark, in the initial's place and ink. */
+	.badge :global(svg) {
+		width: 56%;
+		height: 56%;
+	}
+	.spool-card .card-text {
+		min-width: 0;
+	}
+	.spool-name,
+	.spool-sub,
+	.spool-tile-name {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.spool-name {
+		font-size: var(--size-body);
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
+	}
+	.spool-sub {
+		font-size: var(--size-small);
+		color: var(--ink-2);
+	}
+	.spool-foot {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-s);
+		min-height: var(--control-button-small);
+	}
+	.spool-state {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ok);
+	}
+	.spool-state[hidden] {
+		display: none;
+	}
+	.spool-state.arrived {
+		animation: arrive 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+	}
+	.spool-actions {
+		margin-left: auto;
+		display: flex;
+		gap: var(--space-s);
+	}
+	.spools .i {
+		width: 14px;
+		height: 14px;
+		flex: none;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.pills {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.pill {
+		display: flex;
+		align-items: center;
+		height: var(--control-segment);
+		padding: 0 var(--space-m);
+		border: 1px solid var(--line);
+		border-radius: 999px;
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+	}
+	.pill.on {
+		border-color: transparent;
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.spool-tiles {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: var(--space-s);
+	}
+	.spool-tile {
+		min-width: 0;
+		height: var(--control-tile);
+		display: flex;
+		flex-direction: column;
+		justify-content: space-between;
+		padding: var(--space-m);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--card);
+	}
+	.spool-tile-name {
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+	}
+	/* Where it's narrow, the cards go one under the other and the tiles two to a row. */
+	@media (max-width: 560px) {
+		.spool-cards {
+			grid-template-columns: minmax(0, 1fr);
+		}
+		.spool-tiles {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
 	}
 
 	.more {
@@ -991,7 +1392,7 @@ const faq = {
 <script>
 	// The panels' little scenes, each played once when it comes into view, and the grid's threads,
 	// which work while their item is hovered.
-	import { threadOf, threadsIn, yarnsIn, type Mood } from '../scripts/thread';
+	import { threadOf, threadsIn, tieOf, tiesIn, yarnsIn, type Mood } from '../scripts/thread';
 
 	const pause = (ms: number) => new Promise((done) => setTimeout(done, ms));
 	const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1003,6 +1404,21 @@ const faq = {
 	};
 
 	const ease = 'cubic-bezier(0.2, 0.7, 0.3, 1)';
+
+	// Brains: Claude Agent's row opens its page beside the list, with the plan it's signed in to and
+	// its limits, and the ACP Registry's row the registry again (desktop/src/app.rs, program_pane).
+	const brainsPage = document.querySelector<HTMLElement>('.brains');
+	const programPage = brainsPage?.querySelector<HTMLElement>('[data-program-page]');
+	const registryPage = brainsPage?.querySelector<HTMLElement>('[data-registry-page]');
+	const pickBrain = (row: Element, program: boolean) => {
+		if (!brainsPage || !programPage || !registryPage) return;
+		programPage.hidden = !program;
+		registryPage.hidden = program;
+		for (const r of brainsPage.querySelectorAll('.list-row')) r.classList.toggle('picked', r === row);
+	};
+	for (const row of brainsPage?.querySelectorAll('[data-program], [data-registry]') ?? []) {
+		row.addEventListener('click', () => pickBrain(row, row.hasAttribute('data-program')));
+	}
 
 	// Brains: the first card installs and joins the brains down the left, as the app lists it once it's
 	// in, one fewer to install, and the cards move up into its place, the next in the registry coming
@@ -1026,6 +1442,8 @@ const faq = {
 		button.replaceWith(busy);
 		await pause(2400);
 		const row = model.cloneNode(true) as HTMLElement;
+		row.removeAttribute('data-program');
+		row.classList.remove('picked');
 		row.querySelector('.tile')?.setAttribute('style', `--icon: url(${card.dataset.icon})`);
 		const title = row.querySelector('.row-title');
 		const sub = row.querySelector('.row-sub');
@@ -1123,6 +1541,41 @@ const faq = {
 
 	// Servers: each with its ball of yarn, at rest while it's connected.
 	yarnsIn(document.querySelector('.servers') ?? undefined);
+
+	// Spools: Acta's tie is taut and T3 Code's slack. T3 Code's Connect is pressed, and once it's
+	// connected its tie pulls straight with a twang, the card says so with Connect another and Manage,
+	// as the app's does for one there can be several of, and Installed counts it.
+	const spools = document.querySelector<HTMLElement>('.spools');
+	tiesIn(spools ?? undefined);
+	whenShown(spools?.closest('[data-reveal]') ?? null, async () => {
+		const card = spools?.querySelector<HTMLElement>('[data-spool="t3"]');
+		const tie = tieOf(card?.querySelector('svg[data-tie]') ?? null);
+		const state = card?.querySelector<HTMLElement>('.spool-state');
+		const button = card?.querySelector<HTMLElement>('.spool-actions .btn-small');
+		const installed = spools?.querySelector<HTMLElement>('[data-installed]');
+		if (!tie || !state || !button || still) return;
+		await pause(1400);
+		button.classList.add('pressed');
+		await pause(160);
+		button.classList.remove('pressed');
+		await pause(1100);
+		tie.pull();
+		await pause(250);
+		state.hidden = false;
+		state.classList.add('arrived');
+		// Clones, so they keep the page's scoped styles.
+		const another = button.cloneNode(true) as HTMLElement;
+		another.classList.remove('primary');
+		another.textContent = 'Connect another';
+		const manage = another.cloneNode(true) as HTMLElement;
+		manage.textContent = 'Manage';
+		button.replaceWith(another, manage);
+		if (installed) {
+			const n = Number(installed.dataset.installed) + 1;
+			installed.dataset.installed = String(n);
+			installed.textContent = `Installed · ${n}`;
+		}
+	});
 
 	// The grid: each item's thread works while it's hovered, and they all twang as the grid arrives.
 	const items = [...document.querySelectorAll<HTMLElement>('.grid li')];

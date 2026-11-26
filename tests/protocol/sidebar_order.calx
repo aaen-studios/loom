@@ -1,0 +1,115 @@
+module tests.protocol.sidebar_order
+
+// The sidebar's one list (PLAN.md, "The sidebar"): sidebar.order puts the
+// person's agents and group chats in the order they dragged them into, each
+// keeping its place as `order`, an agent on itself and a group chat on its
+// room, so every device lists them the same; neither is a revision. A new agent
+// or group chat goes at the end once anything is placed. A group chat goes in a
+// folder with room.update, as an agent does with agent.group, and deleting the
+// folder takes it out.
+//
+//     calx tests/protocol/sidebar_order.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.client.{Session}
+import tests.kit.{Instance, check}
+
+fn agent(app: mut Session, id: str, name: str) -> Json ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done())
+    return at(at(made, "value"), "agent")
+}
+
+fn room_of(answer: Json) -> Json {
+    return at(at(at(answer, "value"), "conversation"), "room")
+}
+
+// The newest event of `kind` about `id` (an agent's, or a conversation's) among
+// what the app has read.
+fn last_about(app: Session, kind: str, id: String) -> Json {
+    var found = Json.Null
+    for f in app.frames {
+        if str_at(f.copy(), "kind") != some(String(kind)) { continue }
+        let about = if kind == "agent.updated" { at(f.copy(), "agent") } else { at(f.copy(), "conversation") }
+        if str_at(about.copy(), "id") == some(id.copy()) { found = about }
+    }
+    return found
+}
+
+fn strs(ids: List<String>) -> Json {
+    var out = List<Json>()
+    for id in ids { out.push(Json.Str(id.copy())) }
+    return Json.Array(out)
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let ledger = try agent(mut app, "q_1", "Ledger")
+    let hermes = try agent(mut app, "q_2", "Hermes")
+    let (l, h) = (str_at(ledger.copy(), "id") ?? String(), str_at(hermes.copy(), "id") ?? String())
+    try check(int_at(ledger, "order") == none and int_at(hermes, "order") == none, "before anything is placed, a new agent has no place: it's listed as it was made")
+    var everyone = String()
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.created")) and bool_at(at(at(f.copy(), "conversation"), "room"), "everyone") == some(true) { everyone = str_at(at(f, "conversation"), "id") ?? String() }
+    }
+    let made = try app.cmd("q_3", "room.create", Obj.new().s("name", String("Money")).j("members", strs([l.copy(), h.copy()])).done())
+    let money = str_at(at(at(made.copy(), "value"), "conversation"), "id") ?? String()
+    try check(everyone.len() > 0 and int_at(room_of(made), "order") == none, "nor does a new group chat")
+
+    // --- One order for agents and group chats ---
+    let ordered = try app.cmd("q_4", "sidebar.order", Obj.new().j("items", strs([money.copy(), h.copy(), everyone.copy(), l.copy()])).done())
+    let told_room = at(last_about(app, "conversation.updated", money.copy()), "room")
+    let told_agent = last_about(app, "agent.updated", h.copy())
+    try check(int_at(at(ordered, "value"), "moved") == some(4) and int_at(told_room.copy(), "order") == some(0) and str_at(told_room, "name") == some(String("Money")) and int_at(told_agent.copy(), "order") == some(1) and int_at(told_agent, "revision") == some(1), "sidebar.order keeps each one's place, an agent's on itself and a group chat's on its room, tells every device, and isn't a revision")
+    let again = try app.cmd("q_5", "sidebar.order", Obj.new().j("items", strs([money.copy(), h.copy(), everyone.copy(), l.copy()])).done())
+    try check(int_at(at(again, "value"), "moved") == some(0), "the same order again moves nothing")
+    let unknown = try app.cmd("q_6", "sidebar.order", Obj.new().j("items", strs([String("a_nothing")])).done())
+    let not_list = try app.cmd("q_7", "sidebar.order", Obj.new().s("items", money.copy()).done())
+    try check(str_at(at(unknown, "error"), "code") == some(String("not_found")) and str_at(at(not_list, "error"), "code") == some(String("bad_request")), "an agent or group chat that isn't there is refused, as is a list that isn't one")
+    let chat = try app.cmd("q_8", "conversation.create", Obj.new().s("agent", l.copy()).done())
+    let own_chat = str_at(at(chat, "value"), "conversation") ?? String()
+    let not_room = try app.cmd("q_9", "sidebar.order", Obj.new().j("items", strs([own_chat])).done())
+    try check(str_at(at(not_room, "error"), "code") == some(String("not_found")), "an agent's own chat has no place in the sidebar")
+
+    // --- What's new goes at the end ---
+    let casper = try agent(mut app, "q_10", "Casper")
+    let later = try app.cmd("q_11", "room.create", Obj.new().s("name", String("Code")).j("members", strs([l.copy(), str_at(casper.copy(), "id") ?? String()])).done())
+    try check(int_at(casper, "order") == some(4) and int_at(room_of(later), "order") == some(5), "once anything is placed, a new agent or group chat goes at the end")
+
+    // --- A group chat in a folder ---
+    let folder = try app.cmd("q_12", "group.create", Obj.new().s("name", String("Work")).done())
+    let gid = str_at(at(at(folder, "value"), "group"), "id") ?? String()
+    let put = try app.cmd("q_13", "room.update", Obj.new().s("conversation", money.copy()).s("group", gid.copy()).done())
+    let heard = at(last_about(app, "conversation.updated", money.copy()), "room")
+    try check(str_at(room_of(put.copy()), "group") == some(gid.copy()) and int_at(room_of(put), "order") == some(0) and str_at(heard, "group") == some(gid.copy()), "a group chat goes in a folder, keeping its place, and every device hears it")
+    let nowhere = try app.cmd("q_14", "room.update", Obj.new().s("conversation", money.copy()).s("group", String("g_nothing")).done())
+    try check(str_at(at(nowhere, "error"), "code") == some(String("not_found")), "a folder that isn't there can't be put in")
+    _ = try app.cmd("q_15", "group.delete", Obj.new().s("group", gid.copy()).done())
+    let out = at(last_about(app, "conversation.updated", money.copy()), "room")
+    try check(str_at(out.copy(), "group") == none and str_at(out, "name") == some(String("Money")), "deleting the folder takes its group chats out of it")
+    _ = try app.cmd("q_16", "room.update", Obj.new().s("conversation", money.copy()).s("group", gid.copy()).done())
+    let back = try app.cmd("q_17", "room.update", Obj.new().s("conversation", money.copy()).s("group", String()).done())
+    try check(str_at(at(back, "error"), "code") == none and str_at(room_of(back), "group") == none, "and an empty folder takes it out of any")
+
+    // --- Another device lists them the same ---
+    let phone = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let there = int_at(last_about(phone, "agent.updated", l), "order")
+    let room_there = int_at(at(last_about(phone, "conversation.updated", money), "room"), "order")
+    try check(there == some(3) and room_there == some(0), "another device catching up has each one's place")
+    phone.close()
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nsidebar_order: all good")
+}
