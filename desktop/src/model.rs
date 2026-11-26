@@ -671,6 +671,15 @@ pub fn with_client(mut args: Value, client_id: &str, client_secret: &str) -> Val
     args
 }
 
+/// An MCP server's or a skill's `args` with `was`, the name a saved one is saved
+/// under: the instance renames it when `args` names another (protocol.md, `mcp.put`).
+fn renaming(mut args: Value, was: Option<&str>) -> Value {
+    if let (Some(was), Some(o)) = (was, args.as_object_mut()) {
+        o.insert("was".into(), json!(was));
+    }
+    args
+}
+
 /// The frame that sends the instance what the browser brought back from a sign-in.
 pub fn signed_in_frame(query: &str) -> Value {
     json!({"t": "cmd", "id": "app.mcp_signed_in", "name": "mcp.signed_in", "args": {"query": query}})
@@ -8616,6 +8625,8 @@ impl Model {
                 self.notices.push(s(e, "message"));
             }
             self.skills_stale = true;
+            // A skill renamed: the fixes proposed for it name it by its new name.
+            self.proposals_stale = true;
         } else if id.starts_with("app.memory_list") {
             self.notes = f
                 .pointer("/value/memories")
@@ -10358,9 +10369,11 @@ impl Model {
         json!({"t": "cmd", "id": format!("app.mcp_test:{name}"), "name": "mcp.test", "args": {"name": name}})
     }
 
-    pub fn put_mcp(&mut self, args: Value) -> Value {
+    /// Saves an MCP server as its form has it. `was` is the name a saved one is
+    /// saved under, so a new name in the form renames it.
+    pub fn put_mcp(&mut self, args: Value, was: Option<&str>) -> Value {
         let id = self.id("app.mcp_put");
-        json!({"t": "cmd", "id": id, "name": "mcp.put", "args": args})
+        json!({"t": "cmd", "id": id, "name": "mcp.put", "args": renaming(args, was)})
     }
 
     pub fn delete_mcp(&mut self, name: &str) -> Value {
@@ -10762,10 +10775,17 @@ impl Model {
         json!({"t": "cmd", "id": id, "name": "skill.list", "args": {"bodies": true}})
     }
 
-    /// Saves a skill, new or changed.
-    pub fn save_skill(&mut self, name: &str, description: &str, body: &str) -> Value {
+    /// Saves a skill, new or changed; `was`, as for `put_mcp`, renames a saved one.
+    pub fn save_skill(
+        &mut self,
+        name: &str,
+        description: &str,
+        body: &str,
+        was: Option<&str>,
+    ) -> Value {
         let id = self.id("app.skill_put");
-        json!({"t": "cmd", "id": id, "name": "skill.put", "args": {"name": name.trim(), "description": description.trim(), "body": body}})
+        let args = json!({"name": name.trim(), "description": description.trim(), "body": body});
+        json!({"t": "cmd", "id": id, "name": "skill.put", "args": renaming(args, was)})
     }
 
     pub fn delete_skill(&mut self, name: &str) -> Value {
@@ -11883,7 +11903,10 @@ mod tests {
         m.drafts.open(key.clone(), own);
         m.drafts.edit(edited.clone());
         // Refused: the draft stays, with its dot, and the window says why.
-        let f = m.put_mcp(json!({"name": "acta", "url": "https://acta.example/api/mcp"}));
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://acta.example/api/mcp"}),
+            Some("acta"),
+        );
         let id = s(&f, "id");
         m.drafts.saving(id.clone(), key.clone(), edited.clone());
         assert!(m.drafts.has(Page::Mcp, Some("acta")));
@@ -11891,7 +11914,10 @@ mod tests {
         assert!(m.drafts.has(Page::Mcp, Some("acta")));
         assert_eq!(m.notices, vec!["That address doesn't answer.".to_string()]);
         // Saved: it goes.
-        let f = m.put_mcp(json!({"name": "acta", "url": "https://acta.example/api/mcp"}));
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://acta.example/api/mcp"}),
+            Some("acta"),
+        );
         let id = s(&f, "id");
         m.drafts.saving(id.clone(), key, edited);
         m.take(
@@ -11900,6 +11926,70 @@ mod tests {
         assert!(m.drafts.has(Page::Mcp, Some("acta")));
         m.take(&json!({"t": "result", "id": id, "ok": true, "value": {}}));
         assert!(!m.drafts.has(Page::Mcp, Some("acta")));
+    }
+
+    #[test]
+    fn a_saved_ones_save_says_the_name_its_saved_under() {
+        let mut m = Model::new();
+        let f = m.put_mcp(
+            json!({"name": "gh", "url": "https://api.github.example/mcp"}),
+            Some("github"),
+        );
+        assert_eq!(
+            (s(&f["args"], "name"), s(&f["args"], "was")),
+            ("gh".into(), "github".into())
+        );
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://acta.example/mcp"}),
+            None,
+        );
+        assert!(f["args"].get("was").is_none());
+        let f = m.save_skill(
+            " changelog ",
+            "Notes.",
+            "Keep them short.",
+            Some("release-notes"),
+        );
+        assert_eq!(
+            (s(&f["args"], "name"), s(&f["args"], "was")),
+            ("changelog".into(), "release-notes".into())
+        );
+        assert!(m.save_skill("new", "New.", "", None)["args"]
+            .get("was")
+            .is_none());
+    }
+
+    #[test]
+    fn a_rename_to_a_name_another_has_keeps_its_draft_and_says_why() {
+        use drafts::{Form, Page};
+        let mut m = Model::new();
+        let fields = |name: &str| {
+            Form::Fields(vec![
+                name.into(),
+                "https://api.github.example/mcp".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ])
+        };
+        m.drafts
+            .open((Page::Mcp, Some("github".into())), fields("github"));
+        m.drafts.edit(fields("acta"));
+        let f = m.put_mcp(
+            json!({"name": "acta", "url": "https://api.github.example/mcp"}),
+            Some("github"),
+        );
+        let id = s(&f, "id");
+        m.drafts
+            .saving(id.clone(), (Page::Mcp, Some("acta".into())), fields("acta"));
+        m.take(&json!({"t": "result", "id": id, "ok": false, "error": {"code": "name_taken", "message": "There's an MCP server named acta already."}}));
+        assert!(m.drafts.has(Page::Mcp, Some("github")) && !m.drafts.has(Page::Mcp, Some("acta")));
+        assert!(m.drafts.is_open(Page::Mcp, Some("github")));
+        assert!(m.drafts.moved_in(Page::Mcp, &["acta", "github"]).is_empty());
+        assert_eq!(
+            m.notices,
+            vec!["There's an MCP server named acta already.".to_string()]
+        );
     }
 
     #[test]

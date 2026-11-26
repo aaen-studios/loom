@@ -368,7 +368,8 @@ impl Loom {
     }
 
     /// Makes what the core said of what was typed, in the window: a name closed with its
-    /// colon, or an emoticon, becomes its emoji. Then fetches the pictures the chat met.
+    /// colon, or an emoticon, becomes its emoji where it was typed, however late the answer
+    /// came (`Emojis::conversions`, LOO-370). Then fetches the pictures the chat met.
     pub(super) fn take_emoji(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         emoji::set_scale(window.scale_factor());
         emoji::sync_own(&self.model.emoji);
@@ -377,15 +378,43 @@ impl Loom {
                 self.send(f);
             }
         }
-        let Some(r) = self.model.emoji.replace.take() else {
-            return;
+        let (value, cursor) = {
+            let c = self.composer.read(cx);
+            (c.value().to_string(), c.cursor())
         };
-        let item = r.item.clone().unwrap_or_else(|| Item {
-            emoji: r.with.trim_end().to_string(),
-            ..Item::default()
+        let (todo, cursor) = self.model.emoji.conversions(&value, cursor);
+        if todo.is_empty() {
+            return;
+        }
+        self.composer.update(cx, |c, cx| {
+            for k in &todo {
+                let (id, words) = piece_of(&k.item);
+                let end = k.range.start + words.len();
+                let made = c
+                    .replace_range_with_token(
+                        k.range.clone(),
+                        InlineToken::new(id, words),
+                        window,
+                        cx,
+                    )
+                    .is_ok();
+                if made && k.space {
+                    c.set_selected_range(end..end, cx);
+                    c.insert(" ", window, cx);
+                }
+            }
+            let to = cursor.min(c.value().len());
+            c.set_selected_range(to..to, cx);
+            c.focus(window, cx);
         });
-        let space = r.with.ends_with(' ');
-        self.put_emoji(&item, Some(&r.suffix), space, true, window, cx);
+        for k in &todo {
+            let used = self.model.emoji.used(&k.item.emoji);
+            self.send(used);
+        }
+        for f in self.model.emoji.asks_again() {
+            self.send(f);
+        }
+        cx.notify();
     }
 
     /// Puts an emoji in the composer as a piece: in place of `suffix` just before the
