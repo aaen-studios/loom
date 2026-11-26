@@ -63,34 +63,43 @@ func points(_ j: JSON) -> [CGPoint] {
 struct Conversation: Equatable, Sendable {
     var id: String
     var agent: String
-    /// Whether it's the agent's chat, the one the core's `send` with `agent` goes to: not
-    /// a task's conversation, the side questions', a branch, a routine's own thread or
-    /// another agent's thread with it.
+    /// Whether it may be the agent's chat: not a task's conversation, the side questions',
+    /// a branch, a routine's own thread, another agent's thread with it or a thread an
+    /// agent made. Of those, the chat is the one marked `main`.
     var isChat = true
+    /// Whether it's its agent's chat with the person (`main`), however new any other is.
+    var main = false
     /// For another agent's thread with it (`message_agent`), that agent's id, or
     /// `plugin:ID` for a plugin's panel.
     var askedBy: String?
+    /// For a thread an agent made with conversation.create, that agent's id: beside the
+    /// chat, never the chat.
+    var madeBy: String?
     var title = ""
     /// For a group chat, its room (PLAN.md, "Group chats"). Never an agent's chat.
     var room: Room?
     /// How full its session's context is, once its program has said.
     var context: ContextFill?
 
-    init(id: String, agent: String, isChat: Bool = true, askedBy: String? = nil, title: String = "") {
+    init(id: String, agent: String, isChat: Bool = true, main: Bool = false, askedBy: String? = nil, madeBy: String? = nil, title: String = "") {
         self.id = id
         self.agent = agent
-        self.isChat = isChat && askedBy == nil
+        self.isChat = isChat && askedBy == nil && madeBy == nil
+        self.main = main
         self.askedBy = askedBy
+        self.madeBy = madeBy
         self.title = title
     }
 
     init(_ c: JSON) {
         id = c["id"].text
         agent = c["agent"].text
+        main = c["main"].bool ?? false
         askedBy = c["asked_by"].string
+        madeBy = c["made_by"].string
         title = c["title"].text
         room = c["room"].isNull ? nil : Room(id: id, c["room"])
-        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && room == nil
+        isChat = c["task"].isNull && !(c["side"].bool ?? false) && c["branch_of"].isNull && c["routine"].isNull && askedBy == nil && madeBy == nil && room == nil
         context = ContextFill(c["context"])
     }
 }
@@ -181,15 +190,19 @@ struct ContextFill: Equatable, Sendable {
     }
 }
 
-/// Another agent's thread with an agent, as its chat lists it.
+/// Another agent's thread with an agent, or a thread an agent made beside its chat, as
+/// its chat lists it.
 struct Ask: Hashable, Identifiable {
     func hash(into h: inout Hasher) { h.combine(id) }
 
     var id: String
-    /// The agent that asks, when it's one of the person's agents still.
+    /// The agent that asks or made it, when it's one of the person's agents still.
     var by: Agent?
     /// "From Casper", by the asking agent's name now, or the thread's own title.
     var label: String
+    /// One an agent made (`made_by`), which the person writes in too, rather than another
+    /// agent's, which is only read.
+    var made = false
 }
 
 /// Pictures shown big, to page through.
@@ -1623,7 +1636,8 @@ final class Model {
     /// The pin last taken off, where it was among the pins, for Undo.
     private(set) var unpinned: (pin: Pin, at: Int)?
     var selected: String?
-    /// Another agent's thread with the selected agent, while it's shown in its chat's place.
+    /// A thread with the selected agent, another agent's or one an agent made, while it's
+    /// shown in its chat's place.
     private(set) var thread: String?
     /// The group chat shown in the chat's place, by its conversation.
     var room: String?
@@ -1745,21 +1759,28 @@ final class Model {
 
     func agent(_ id: String) -> Agent? { agents.first { $0.id == id } }
 
-    /// The conversation an agent's chat shows: its newest, never another agent's thread
-    /// with it, however new that is.
+    /// The conversation an agent's chat shows: the one the instance marks `main`, however
+    /// new any other is. An instance from before `main` marks none, and its chat is then
+    /// its newest that may be one.
     func conversation(of agent: String?) -> String? {
         guard let agent else { return nil }
+        if let main = conversations.first(where: { $0.agent == agent && $0.main }) { return main.id }
         return conversations.first { $0.agent == agent && $0.isChat }?.id
     }
 
-    /// The selected agent's chat, or another agent's thread with it while that's open.
+    /// The selected agent's chat, or a thread with it while that's open.
     var conversation: String? { room ?? thread ?? conversation(of: selected) }
 
-    /// The threads other agents (and plugins' panels) keep with `agent`, newest first.
+    /// The threads other agents (and plugins' panels) keep with `agent`, and the ones
+    /// agents made beside its chat, labelled with their titles, newest first.
     func asks(_ agent: String) -> [Ask] {
-        conversations.filter { $0.agent == agent && $0.askedBy != nil }.map { c in
-            let by = c.askedBy.flatMap { self.agent($0) }
-            return Ask(id: c.id, by: by, label: by.map { "From \($0.name)" } ?? c.title)
+        conversations.filter { $0.agent == agent && !$0.main && ($0.askedBy != nil || $0.madeBy != nil) }.map { c in
+            if let asker = c.askedBy {
+                let by = self.agent(asker)
+                return Ask(id: c.id, by: by, label: by.map { "From \($0.name)" } ?? c.title)
+            }
+            let title = c.title.trimmingCharacters(in: .whitespaces)
+            return Ask(id: c.id, by: c.madeBy.flatMap { self.agent($0) }, label: title.isEmpty ? "New conversation" : c.title, made: true)
         }
     }
 
@@ -2573,10 +2594,14 @@ final class Model {
         attachments = []
         dropped = []
         var frame: [String: JSON] = ["t": "send", "agent": JSON(agent), "text": JSON(text)]
-        // Into a group chat, the instance picks who answers.
+        // Into the conversation the chat shows: a thread an agent made while it's open, or
+        // the agent's chat, which the core finds (and makes) while there's none. Into a
+        // group chat, the instance picks who answers.
         if let room {
             frame.removeValue(forKey: "agent")
             frame["conversation"] = JSON(room)
+        } else if let shown = conversation {
+            frame["conversation"] = JSON(shown)
         }
         if !files.isEmpty { frame["files"] = JSON(files) }
         if let r = replyingHere {
