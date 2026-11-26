@@ -18585,6 +18585,11 @@ ACTA_KEY=secret:ACTA_KEY",
     ) -> Stateful<Div> {
         let p = self.p;
         let m = &pin.message;
+        // A reply in a group chat is its own agent's, as the chat draws it.
+        let (name, tint, agent) = match (room_view::reply_look(p, m), &m.routed) {
+            (Some((n, t)), Some(r)) => (n, t, r.agent.as_str()),
+            _ => (name.to_string(), tint, agent),
+        };
         let id = m.id.clone();
         let lit = pop.lit.as_deref() == Some(id.as_str());
         let opened = pop.open.contains(&id);
@@ -18660,7 +18665,7 @@ ACTA_KEY=secret:ACTA_KEY",
             reply(
                 p,
                 m,
-                name,
+                &name,
                 tint,
                 Mood::Idle,
                 false,

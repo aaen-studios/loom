@@ -76,6 +76,25 @@ fn line(app: mut Session, mark: mut usize, conversation: String) -> Json ! Error
     fail "a loom line with no block"
 }
 
+// The status of `card` on message `m` once it has one, as it came or with a
+// message.updated from `mark` on, read already or still to come.
+fn card_status(app: mut Session, mark: usize, m: Json, card: str) -> String ! Error {
+    if let s = str_at(at(at(m.copy(), "cards"), card), "status") { return s }
+    let id = str_at(m, "id") ?? String()
+    var at_frame = mark
+    loop {
+        while at_frame < app.frames.len() {
+            let f = app.frames[at_frame].copy()
+            at_frame += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let u = at(f, "message")
+            if str_at(u.copy(), "id") != some(id.copy()) { continue }
+            if let s = str_at(at(at(u, "cards"), card), "status") { return s }
+        }
+        _ = try app.until("event", "")
+    }
+}
+
 // The next event of `kind` from `mark` on; `mark` moves past it.
 fn next_event(app: mut Session, mark: mut usize, kind: str) -> Json ! Error {
     loop {
@@ -162,8 +181,17 @@ fn run(i: Instance, fake: String) -> String ! Error {
     try check("{at(w, "events")}" == #"["moved","created","commented","assigned"]"#, "for every kind of change, with no events given")
     let updated = try next_event(mut app, mut events, "watch.updated")
     try check(str_at(at(updated, "watch"), "id") == some(watch_id.copy()), "and the person's devices hear of it")
+    try send(app, chat.copy(), "m_cards_1", String("Where is LOO-206?"))
+    let asked = try created(mut app, mut seen, chat.copy(), "person")
+    let was = try card_status(mut app, seen, asked, "LOO-206")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
     _ = try fetch_json("{fake}/test/status?task=LOO-206&status=review&by=Ola")
     let moved = try line(mut app, mut seen, chat.copy())
+    try send(app, chat.copy(), "m_cards_2", String("And LOO-206 now?"))
+    let asked_again = try created(mut app, mut seen, chat.copy(), "person")
+    let now = try card_status(mut app, seen, asked_again, "LOO-206")
+    _ = try created(mut app, mut seen, chat.copy(), "agent")
+    try check(was == "in_progress" and now == "review", "a card the watch saw move is looked up again for the next message that names it, not shown as it was kept")
     try check(str_at(moved.copy(), "kind") == some(String("update")) and str_at(moved.copy(), "integration") == some(String("acta")) and str_at(moved.copy(), "watch") == some(watch_id.copy()), "a card moving on it is a quiet line in the chat, an update from the watch")
     try check(str_at(moved.copy(), "board") == some(String("aaen-studios/loom")) and str_at(moved.copy(), "board_name") == some(String("loom")) and str_at(moved.copy(), "card") == some(String("LOO-206")) and str_at(moved.copy(), "title") == some(String("Show agents' usage limits in the sidebar")) and str_at(moved.copy(), "url") == some(String("https://acta.aaenz.no/aaen-studios/loom#LOO-206")), "with its board, card, title and address")
     try check(str_at(moved.copy(), "event") == some(String("moved")) and str_at(moved.copy(), "to") == some(String("review")) and str_at(moved.copy(), "by") == some(String("Ola")) and str_at(moved, "text") == some(String("LOO-206 moved to In review · Ola")), "and what happened, by who: \"LOO-206 moved to In review · Ola\"")
