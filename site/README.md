@@ -32,6 +32,7 @@ It's [Astro](https://astro.build), with every page drawn by hand, built to plain
 - **Search engines** get each page's title and description, link previews, structured data (Aaen Studios, the app with its newest version and downloads, each page, where it sits, and the home page's questions), the sitemap with when each page was built, and the releases' feed. `public/451ff9cdc5ebc39516500a5b114455f3.txt` is the site's [IndexNow](https://www.indexnow.org) key: sending its pages' addresses with it to `https://api.indexnow.org/indexnow` tells Bing and the other engines that take it that they changed.
 - **No scrollbar.** When nobody has scrolled a few seconds after the page opens, an arrow at the bottom says there's more ([`src/components/Nudge.astro`](src/components/Nudge.astro)).
 - **Motion** stops off screen and in a hidden tab, and holds still with reduced motion.
+- **Loom's sign-in client.** [`public/client.json`](public/client.json), at `https://loom.rip/client.json`, is loom's Client ID Metadata Document: an authorization server that takes them knows loom by that address when it signs in to an MCP server (`PLAN.md`, "Signing in to MCP servers"). Its address and the return addresses it names are in `server/oauth.calx` too, whose tests check they're the same, so moving or changing it is a change to both.
 
 ## Running it
 
