@@ -468,6 +468,194 @@ impl Element for InlineObject {
     }
 }
 
+/// loom: an emoji loom draws as a picture (`loom_emoji_alt` in `node.rs`), selected as
+/// one unit as an [`InlineObject`] is. The selection takes it in once it runs past its
+/// middle, a double click selects it alone and a triple click its paragraph, and then it
+/// has the selection's colour over its row's box, as the words beside it do, and copies
+/// as its alt text (`Paragraph::selected_text`).
+pub(super) struct EmojiPicture {
+    picture: AnyElement,
+    alt: SharedString,
+    selected: Arc<Mutex<bool>>,
+    /// Its row's box across its width, in the window.
+    selection_bounds: Bounds<Pixels>,
+    line_bounds: super::state::ParagraphRows,
+    size: Size<Pixels>,
+}
+
+impl EmojiPicture {
+    pub fn new(
+        picture: AnyElement,
+        alt: SharedString,
+        selected: Arc<Mutex<bool>>,
+        selection_bounds: Bounds<Pixels>,
+        line_bounds: super::state::ParagraphRows,
+        size: Size<Pixels>,
+    ) -> Self {
+        Self {
+            picture,
+            alt,
+            selected,
+            selection_bounds,
+            line_bounds,
+            size,
+        }
+    }
+}
+
+#[cfg(not(feature = "gpui-fast"))]
+impl IntoElement for EmojiPicture {
+    type Element = Self;
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for EmojiPicture {
+    type RequestLayoutState = ();
+    type PrepaintState = Hitbox;
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, ()) {
+        let style = gpui::Style {
+            size: size(self.size.width.into(), self.size.height.into()),
+            ..Default::default()
+        };
+        (window.request_layout(style, [], cx), ())
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Hitbox {
+        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+        self.picture.prepaint_as_root(
+            bounds.origin,
+            size(
+                AvailableSpace::Definite(bounds.size.width),
+                AvailableSpace::Definite(bounds.size.height),
+            ),
+            window,
+            cx,
+        );
+        hitbox
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        bounds: Bounds<Pixels>,
+        _: &mut (),
+        hitbox: &mut Hitbox,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let view = GlobalState::global(cx).text_view_state();
+        let selectable = view
+            .as_ref()
+            .is_some_and(|view| view.read(cx).is_selectable());
+        let selected = selectable
+            && view.as_ref().is_some_and(|view| {
+                let state = view.read(cx);
+                if state.preserve_inline_selection && !state.is_all_selected() {
+                    return self.selected.lock().is_ok_and(|selected| *selected);
+                }
+                state.is_all_selected()
+                    || state.multi_click_selection().is_some_and(|s| {
+                        s.line_bounds.map_or_else(
+                            || bounds.contains(&s.pos),
+                            |row| row.contains(&bounds.center()),
+                        )
+                    })
+                    || state
+                        .painted_selection_points(cx)
+                        .is_some_and(|(start, end)| {
+                            object_in_selection(self.selection_bounds, start, end)
+                        })
+            });
+        if let Ok(mut value) = self.selected.lock() {
+            *value = selected;
+        }
+        if selected {
+            let color = view.as_ref().unwrap().read(cx).text_view_style.selection();
+            window.paint_quad(gpui::fill(self.selection_bounds, color));
+        }
+        if let Some(view) = view.filter(|_| selectable) {
+            let adapter = &view.read(cx).selection_adapter;
+            adapter.register_copy_projection(
+                super::selection_adapter::CopyProjection::InlineObject(
+                    InlineObjectSelectionProjection {
+                        selected: Arc::downgrade(&self.selected),
+                        bounds: self.selection_bounds,
+                    },
+                ),
+                cx,
+            );
+            // A drag that starts on it starts in the words.
+            let visible = self
+                .selection_bounds
+                .intersect(&window.content_mask().bounds);
+            if visible.size.width > Pixels::ZERO && visible.size.height > Pixels::ZERO {
+                adapter.register_inline(vec![visible]);
+            }
+            let hitbox = hitbox.clone();
+            let selected_state = self.selected.clone();
+            let alt = self.alt.to_string();
+            let current_view = window.current_view();
+            let line_bounds = self.line_bounds;
+            let row = self.selection_bounds;
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if !phase.bubble()
+                    || !hitbox.is_hovered(window)
+                    || event.button != MouseButton::Left
+                    || !(2..=3).contains(&event.click_count)
+                {
+                    return;
+                }
+                GlobalState::suppress_text_selection(cx);
+                if let Ok(mut value) = selected_state.lock() {
+                    *value = true;
+                }
+                view.update(cx, |state, cx| {
+                    if event.click_count == 3 {
+                        state.set_multi_click_line(line_bounds, cx);
+                    } else {
+                        state.set_multi_click_selection(
+                            event.position,
+                            TextViewMultiClickKind::Word,
+                            alt.clone(),
+                            (
+                                caret_line_box(row.origin, row.size.height),
+                                caret_line_box(row.top_right(), row.size.height),
+                            ),
+                            cx,
+                        );
+                    }
+                });
+                cx.notify(current_view);
+            });
+        }
+        self.picture.paint(window, cx);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::inline::test_draw::in_prepaint;

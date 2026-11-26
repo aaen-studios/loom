@@ -17,7 +17,7 @@ enum PieceKind {
 /// attached (`loom-attach:` and its attachment's id) or a link pasted as a preview
 /// (`loom-link:` and its address), with its text: the mention's words, the file's whole
 /// name or the address.
-struct Piece: Equatable, Sendable {
+struct Piece: Equatable, Sendable, Codable {
     var id: String
     var text: String
 }
@@ -64,9 +64,54 @@ func composerText(_ parts: [Either]) -> String {
 }
 
 /// A stretch of the composer: words, or a piece.
-enum Either: Equatable, Sendable {
+enum Either: Equatable, Sendable, Codable {
     case words(String)
     case piece(Piece)
+}
+
+/// What copying a stretch of the composer gives anywhere else, as desktop/src/emoji.rs's
+/// `copied` (LOO-347): its words, an emoji as itself or one of the person's own as
+/// `:name:`, a mention as its words, a file as its name and a link as its address.
+func copiedText(_ parts: [Either]) -> String {
+    var out = ""
+    for part in parts {
+        switch part {
+        case .words(let w):
+            out += w
+        case .piece(let p):
+            if p.id.hasPrefix(PieceKind.emoji) {
+                out += Emoji.asNames(p.text)
+            } else if p.id.hasPrefix(PieceKind.link) {
+                out += String(p.id.dropFirst(PieceKind.link.count))
+            } else {
+                out += p.text
+            }
+        }
+    }
+    return out
+}
+
+/// What copying a stretch of the composer keeps for a paste back into it: its emoji and
+/// mentions as pieces, and a file or a link as its words, as the file stays attached once
+/// and a link pasted alone becomes its preview again. Nil when it has neither.
+func keptParts(_ parts: [Either]) -> [Either]? {
+    var kept = false
+    let out = parts.map { part -> Either in
+        guard case .piece(let p) = part else { return part }
+        if p.id.hasPrefix(PieceKind.attach) || p.id.hasPrefix(PieceKind.link) { return .words(copiedText([part])) }
+        kept = true
+        return part
+    }
+    return kept ? out : nil
+}
+
+/// The composer's stretch a paste puts back as it was copied, pieces and all: what
+/// copying kept beside its words (`kept`, the parts as JSON), while the words pasted are
+/// still the ones copied, as desktop/src/emoji.rs's `pasted`.
+func pastedParts(_ text: String?, kept: Data?) -> [Either]? {
+    guard let text, let kept, let parts = try? JSONDecoder().decode([Either].self, from: kept),
+          copiedText(parts) == text else { return nil }
+    return parts
 }
 
 /// The length of the code, Markdown link or `<…>` at the start of `s`, which a bare
