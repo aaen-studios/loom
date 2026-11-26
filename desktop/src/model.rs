@@ -5244,6 +5244,19 @@ pub fn one_line(md: &str) -> String {
     out
 }
 
+/// Plain words for the Markdown view to show as they are, as a quote's `one_line` is:
+/// each ASCII mark escaped, so none of them makes formatting, a link or a tag.
+pub fn plain_md(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.len() / 8);
+    for c in text.chars() {
+        if c.is_ascii_punctuation() {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// A tool call's title, as its agent named it.
 pub fn tool_title(call: Option<&String>, tools: &Tools) -> String {
     call.and_then(|c| tools.get(c))
@@ -13929,6 +13942,16 @@ mod tests {
         let long = one_line(&"word ".repeat(200));
         assert_eq!(long.chars().count(), QUOTE_MOST + 1);
         assert!(long.ends_with('…') && !long.contains('\n'));
+    }
+
+    #[test]
+    fn plain_words_keep_their_marks_in_markdown() {
+        assert_eq!(plain_md("2 * 3 = 6"), "2 \\* 3 \\= 6");
+        assert_eq!(
+            plain_md("# see <b> at https://x.no_y"),
+            "\\# see \\<b\\> at https\\:\\/\\/x\\.no\\_y"
+        );
+        assert_eq!(plain_md("“quoted” æøå 🙂"), "“quoted” æøå 🙂");
     }
 
     #[test]
