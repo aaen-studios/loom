@@ -69,6 +69,7 @@ pub mod layout {
     pub const MENU_WIDE: f32 = 240.0;
     pub const PINS: f32 = 460.0;
     pub const CARET: f32 = 11.0;
+    pub const CONTEXT_CARD: f32 = 300.0;
     pub const FIELD_LABEL: f32 = 120.0;
 }
 
@@ -81,7 +82,8 @@ pub mod control {
     pub const ICON: f32 = 28.0;
     pub const ICON_SMALL: f32 = 26.0;
     pub const ICON_COMPOSER: f32 = 32.0;
-    pub const CONTEXT_RING: f32 = 16.0;
+    pub const CONTEXT_RING: f32 = 14.0;
+    pub const CONTEXT_BUTTON: f32 = 26.0;
     pub const ICON_LARGE: f32 = 34.0;
     pub const LEAD: f32 = 30.0;
     pub const SERVER: f32 = 46.0;

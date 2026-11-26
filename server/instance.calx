@@ -512,6 +512,7 @@ pub struct Instance {
     routine_marks: Map<String, (String, String)>    // a routine run -> how its agent said it went: quiet or failed, and why
     quiet_turns: Map<String, QuietTurn>    // a run the person doesn't see, a routine's or a step of its flow -> what it's for
     looking_back: Map<String, String>    // the quiet turn an agent looks back over its chat in, once it paused -> the reply it goes under
+    compacting: List<String>    // the quiet turns that compact their session, as the person asked (conversation.compact), each in looking_back too
     paused: LinkedMap<String, Paused>    // "user/conversation" -> when the chat will have paused, after the person's last turn there
     run_chains: Map<String, List<String>>    // a run message_agent started -> the agents that asked on the way, oldest first
     panel_calls: Map<String, Waiter>    // run -> a panel's plugin.message waiting on it
@@ -753,6 +754,7 @@ enum Renew {
     Tools    // its agent's tools changed, and a session keeps its tools
     Idle    // nothing was said in it for SESSION_IDLE_CLOSE_MS
     Lost    // its program couldn't pick it up again after a restart
+    Asked    // the person asked for one (conversation.fresh)
 }
 
 // Whether a tool call's report is a compaction of its session's context, as
@@ -2085,7 +2087,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -9686,8 +9688,10 @@ impl Instance {
             let agent = try i.store.agent(user.copy(), str_at(conversation.copy(), "agent") ?? String()) ?? Json.Null
             // An agent looking back over its paused chat stops for the person's
             // message, which goes at once, with nothing said of what it stopped.
-            let looking = i.looking_back.contains(running.copy())
-            let steer = looking or defaults.busy_of(agent, try i.store.defaults(user.copy())) == "steer"
+            // A compaction they asked for finishes first, whatever the agent's `busy`.
+            let compacting = i.compacting.contains(running.copy())
+            let looking = i.looking_back.contains(running.copy()) and not compacting
+            let steer = looking or (not compacting and defaults.busy_of(agent, try i.store.defaults(user.copy())) == "steer")
             var queued = Obj.new().s("id", message_id.copy()).s("text", text).j("files", Json.Array(sent_files)).s("from", device.copy()).i("at", now())
             if form != Json.Null { queued = queued.j("form", form.copy()) }
             if replying != Json.Null { queued = queued.j("reply", replying.copy()) }
@@ -10569,9 +10573,14 @@ impl Instance {
         }
         let reply = try i.store.new_id("msg")
         try i.store.add_run(user.copy(), run_id.copy(), conversation_id.copy())
+        // A compaction the person asked for is its program's `/compact` alone, which
+        // the program reads as a command only when nothing comes before it: what the
+        // agent is to be told waits for its next turn.
+        let compacting = i.compacting.contains(run_id.copy())
         // A branch's first turn: the agent is handed the chat it goes on from.
         var note = given_note.copy()
-        if let (chat, at_message) = try i.store.branch_to_hand(user.copy(), conversation_id.copy()) {
+        let branch: (String, String)? = if compacting { none } else { try i.store.branch_to_hand(user.copy(), conversation_id.copy()) }
+        if let (chat, at_message) = branch {
             let before = try i.transcript(user.copy(), chat, some(at_message), agent_id.copy())
             let handoff = "[loom: This conversation is a branch of your chat with your person: it goes on from the last message below, apart from that chat, which goes on as it was. Your chat up to there, newest last:\n\n{if before.len() > 0 { before } else { String("(Nothing said yet.)") }}]"
             note = if note.len() > 0 { "{handoff}\n\n{note}" } else { handoff }
@@ -10579,7 +10588,7 @@ impl Instance {
         }
         // Messages the person deleted from the chat since its last turn: gone for it too.
         // In a group chat each member is told on its own, of its replies and the others'.
-        let deleted = try i.store.deleted_to_tell(user.copy(), conversation_id.copy(), agent_id.copy())
+        let deleted = if compacting { List<(String, String, String, String)>() } else { try i.store.deleted_to_tell(user.copy(), conversation_id.copy(), agent_id.copy()) }
         if deleted.len() > 0 {
             let names = if in_room { try i.names_of_agents(user.copy()) } else { List<(String, String)>() }
             var said = List<String>()
@@ -10598,8 +10607,9 @@ impl Instance {
             try i.store.deleted_told(user.copy(), conversation_id.copy(), agent_id.copy())
         }
         // A run in a task's conversation is the task's, running again.
-        if let task = try i.store.task_in(user.copy(), conversation_id.copy()) {
-            try i.task_changed(user.copy(), merge(without(task, "error"), Obj.new().s("status", String("running")).s("run", run_id.copy()).i("updated", now()).done()))
+        let task: Json? = if compacting { none } else { try i.store.task_in(user.copy(), conversation_id.copy()) }
+        if let t = task {
+            try i.task_changed(user.copy(), merge(without(t, "error"), Obj.new().s("status", String("running")).s("run", run_id.copy()).i("updated", now()).done()))
         }
         let agent = try i.store.agent(user.copy(), agent_id.copy())
         let revision = int_at(agent.copy() ?? Json.Null, "revision") ?? 0
@@ -10609,7 +10619,8 @@ impl Instance {
         // A chat the person moved to another program: its first turn there
         // starts with loom's summary of it, and the reply says so first.
         var notice = String()
-        if let moved_from = try i.store.summary_to_hand(user.copy(), conversation_id.copy()) {
+        let moved: String? = if compacting { none } else { try i.store.summary_to_hand(user.copy(), conversation_id.copy()) }
+        if let moved_from = moved {
             let summary = try i.summary_of(user.copy(), conversation_id.copy(), answering.copy(), moved_from.copy(), agent_id.copy())
             note = if note.len() > 0 { "{summary}\n\n{note}" } else { summary }
             notice = brains.moved_line(moved_from, program.copy(), "hand")
@@ -10936,6 +10947,7 @@ impl Instance {
             Renew.Tools => "which had other tools, since your person changed them, so this one starts fresh. Use the tools you have now, whatever the chat below used.",
             Renew.Idle => "which had been idle for hours, so this one starts fresh. Files and pages you looked at then may have changed: look again before relying on them.",
             Renew.Lost => "which couldn't be picked up again, so this one starts fresh.",
+            Renew.Asked => "which your person chose to start afresh, so this one starts fresh.",
         }
         let carried = if in_room {
             let upto_there = if said.len() > 0 { " The chat up to your last reply there, newest last:\n\n{said}\n\nWhat was said since is below." } else { String(" What was said there is below.") }
@@ -10951,6 +10963,7 @@ impl Instance {
             Renew.Tools => "the agent's tools changed, and a session keeps its tools",
             Renew.Idle => "nothing had been said in the last one for 12 hours",
             Renew.Lost => "the last one couldn't be picked up again",
+            Renew.Asked => "the person asked for one",
         }
         let what = if in_room { "its part of a group chat" } else { "the chat" }
         i.log(user, agent.copy(), "session", "Carried {what} on in a fresh session: {logged}", agent)
@@ -11002,10 +11015,16 @@ impl Instance {
         // chat, so the conversation never overflows or resends all of itself.
         // So does one whose tools aren't the ones its agent's sessions start
         // with now: an agent's tools never change inside a session. And one
-        // left idle for hours, as when a routine keeps the program going.
+        // left idle for hours, as when a routine keeps the program going, or
+        // one the person asked to start afresh. A compaction they asked for
+        // compacts a nearly full session rather than leave it, and has nothing
+        // to do in one that's left for the others.
+        let compacting = i.compacting.contains(run_id.copy())
         if known.len() > 0 {
             var renew: Renew? = none
-            if i.nearly_full(known.copy()) {
+            if i.fresh_wanted(user.copy(), conversation.copy()) {
+                renew = some(Renew.Asked)
+            } else if i.nearly_full(known.copy()) and not compacting {
                 renew = some(Renew.Full)
             } else if i.tools_changed(user.copy(), agent.copy(), conversation.copy(), known.copy()) {
                 renew = some(Renew.Tools)
@@ -11013,6 +11032,10 @@ impl Instance {
                 renew = some(Renew.Idle)
             }
             if let why = renew {
+                if compacting {
+                    i.nothing_to_compact(run_id)
+                    return
+                }
                 _ = i.context.remove(known.copy())
                 _ = p.sessions.remove(conversation.copy())
                 p.forget(known.copy())
@@ -11040,10 +11063,16 @@ impl Instance {
             }
             if let session = kept {
                 // Picked up with the tools it started with, or, since they
-                // changed or it's been idle for hours, carried on in a fresh session.
+                // changed, it's been idle for hours or the person asked, carried
+                // on in a fresh session.
+                let asked = i.fresh_wanted(user.copy(), conversation.copy())
                 let changed = i.tools_changed(user.copy(), agent.copy(), conversation.copy(), session.copy())
-                if changed or i.left_idle(user.copy(), conversation.copy(), session.copy()) {
-                    if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), if changed { Renew.Tools } else { Renew.Idle }) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
+                if asked or changed or i.left_idle(user.copy(), conversation.copy(), session.copy()) {
+                    if compacting {
+                        i.nothing_to_compact(run_id)
+                        return
+                    }
+                    if let err(e) = i.carry_over(user.copy(), agent.copy(), run_id.copy(), if asked { Renew.Asked } else if changed { Renew.Tools } else { Renew.Idle }) { eprintln("loom: carrying a chat over to a fresh session: {e}") }
                     i.new_session(mut p, run_id)
                     return
                 }
@@ -11057,7 +11086,25 @@ impl Instance {
                 return
             }
         }
+        if compacting {
+            i.nothing_to_compact(run_id)
+            return
+        }
         i.new_session(mut p, run_id)
+    }
+
+    // A compaction the person asked for that finds no session to compact, as one
+    // the chat's next turn leaves for a fresh one: it ends, having done nothing.
+    fn nothing_to_compact(i: mut Instance, run_id: String) {
+        if let err(e) = i.finish(run_id, String("done"), none) { eprintln("loom: ending a compaction with nothing to compact: {e}") }
+    }
+
+    // Whether the person asked for the next turn in `seat` to start a fresh session.
+    fn fresh_wanted(i: Instance, user: String, seat: String) -> bool {
+        return match i.store.fresh_asked(user, seat) {
+            ok(asked) => asked,
+            err(_) => false,
+        }
     }
 
     // Starts a new ACP session for a run, when there's none to pick up.
@@ -11138,7 +11185,7 @@ impl Instance {
         }
         var picked = String()
         if let session = kept {
-            if i.nearly_full(session.copy()) or i.tools_changed(p.user.copy(), p.agent.copy(), conversation.copy(), session.copy()) or i.left_idle(p.user.copy(), conversation.copy(), session.copy()) { return }
+            if i.nearly_full(session.copy()) or i.fresh_wanted(p.user.copy(), conversation.copy()) or i.tools_changed(p.user.copy(), p.agent.copy(), conversation.copy(), session.copy()) or i.left_idle(p.user.copy(), conversation.copy(), session.copy()) { return }
             if p.resume or p.load { picked = session }
         }
         let folder = match fs.absolute(i.folder_of(p.user.copy(), p.agent.copy())) {
@@ -11266,6 +11313,14 @@ impl Instance {
         p.next_id += 1
         let id = p.next_id
         var prompt = List<Json>()
+        // A compaction the person asked for: the program's command alone, with
+        // nothing told before it, which waits for the next turn.
+        if i.compacting.contains(run_id.copy()) {
+            prompt.push(Obj.new().s("type", String("text")).s("text", text).done())
+            p.pending.insert(id, Pending.Prompt(run_id.copy()))
+            p.to.send(Out.Prompt(id, session.copy(), prompt, List<acp.Image>()))
+            return
+        }
         // Where the person is writing from, when the session hasn't been told
         // yet (PLAN.md, "Your devices"): with the prompt, never in the
         // instructions.
@@ -11536,6 +11591,11 @@ impl Instance {
                     // Gone, or too old: a new session instead, given the newest of
                     // the chat as a full one's is, or in a group chat the member's part.
                     eprintln("loom: agent {p.agent} couldn't pick session {sid} up again: {str_at(e, "message") ?? String()}")
+                    // A compaction has nothing to compact in a new one.
+                    if i.compacting.contains(run.copy()) {
+                        i.nothing_to_compact(run)
+                        return
+                    }
                     let agent = if let r = i.runs.find(run.copy()) { r.agent.copy() } else { String() }
                     if agent.len() > 0 {
                         if let err(failed) = i.carry_over(p.user.copy(), agent, run.copy(), Renew.Lost) { eprintln("loom: carrying a chat over to a fresh session: {failed}") }
@@ -11820,31 +11880,63 @@ impl Instance {
         return none
     }
 
-    // How full a session's context is, kept with its chat, and told to the
-    // person's apps when what they show of it changes: its percent, or its window.
+    // How full a session's context is, kept with its chat with whether its
+    // program compacts one on request, and told to the person's apps when what
+    // they show of it changes: its percent, its window, or that. A session the
+    // person asked to start afresh is done with: what it says now isn't kept.
     fn keep_context(i: Instance, p: Proc, session: String, used: i64, size: i64) ! Error {
         let conversation = i.session_chat(p, session) else return
+        if try i.store.fresh_asked(p.user.copy(), conversation.copy()) { return }
         let (was, window): (i64, i64) = try i.store.context(p.user.copy(), conversation.copy()) ?? (i64(0), i64(0))
-        if window == size and was * 100 / window == used * 100 / size { return }
+        let compacts = try i.store.context_compacts(p.user.copy(), conversation.copy())
+        if window == size and was * 100 / window == used * 100 / size and compacts == p.compacts { return }
         try i.store.put_context(p.user.copy(), conversation.copy(), used, size)
-        // A member's seat in a group chat isn't a conversation the apps know.
-        if not conversation.contains("/") { try i.tell_context(p.user.copy(), conversation, used, size) }
+        if compacts != p.compacts { try i.store.put_compacts(p.user.copy(), conversation.copy(), p.compacts) }
+        try i.show_context(p.user.copy(), conversation)
     }
 
-    fn tell_context(i: Instance, user: String, conversation: String, used: i64, size: i64) ! Error {
-        let context = Obj.new().i("used", used).i("size", size).done()
+    // A session's context, as it's kept now, goes to the person's apps with its
+    // chat. A group chat shows its member that answered last: `seat` is a
+    // member's, `CONVERSATION/AGENT`, which the chat shows when it's the one
+    // shown already, when the member is answering there now, or when none is.
+    fn show_context(i: Instance, user: String, seat: String) ! Error {
+        let cut = seat.find("/") else {
+            try i.tell_context(user, seat)
+            return
+        }
+        let conversation = seat[..cut].copy()
+        let member = seat[cut + 1..].copy()
+        let shown = try i.store.context_agent(user.copy(), conversation.copy())
+        if shown.len() > 0 and shown != member and not i.answers_in(user.copy(), conversation.copy(), member.copy()) { return }
+        try i.store.show_seat_context(user.copy(), conversation.copy(), seat, member)
+        try i.tell_context(user, conversation)
+    }
+
+    // Whether `agent` is answering in `conversation` now, not in a quiet turn.
+    fn answers_in(i: Instance, user: String, conversation: String, agent: String) -> bool {
+        for (id, r) in i.runs {
+            if r.user == user and r.conversation == conversation and r.agent == agent and not i.looking_back.contains(id.copy()) { return true }
+        }
+        return false
+    }
+
+    fn tell_context(i: Instance, user: String, conversation: String) ! Error {
+        let context = try i.store.context_shown(user.copy(), conversation.copy()) else return
         try i.event(user, "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", conversation).j("context", context).done()).done())
     }
 
     // A chat goes on in a fresh session: its context starts again from nothing,
-    // and when the last one was nearly full, a line in the chat says so (PLAN.md,
-    // "One endless chat"). In a group chat it's one member's seat that does,
-    // whose context is kept apart and drawn nowhere, so the chat has no line.
+    // never compacted, and when the last one was nearly full, a line in the chat
+    // says so (PLAN.md, "One endless chat"); one the person asked for has its line
+    // already. In a group chat it's one member's seat that does, which the chat
+    // shows while that member answers there, and the chat has no line.
     fn went_fresh(i: Instance, user: String, conversation: String, seat: String, renew: Renew) ! Error {
+        if try i.store.fresh_asked(user.copy(), seat.copy()) { try i.store.ask_fresh(user.copy(), seat.copy(), false) }
         let (_, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
         if size > 0 {
             try i.store.put_context(user.copy(), seat.copy(), 0, size)
-            if seat == conversation { try i.tell_context(user.copy(), conversation.copy(), 0, size) }
+            try i.store.put_compacted(user.copy(), seat.copy(), 0)
+            try i.show_context(user.copy(), seat.copy())
         }
         if seat != conversation { return }
         if let Renew.Full = renew { _ = try i.chat_line(user, conversation, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
@@ -11894,9 +11986,12 @@ impl Instance {
                 _ = p.compactions.remove(call)
             },
             none => {
-                let id = try i.chat_line(p.user.copy(), conversation, mark.done())
+                let id = try i.chat_line(p.user.copy(), conversation.copy(), mark.done())
                 // The tokens after can come in a later report.
                 if after == 0 { p.compactions.insert(call, id) }
+                // The apps say when it was last compacted.
+                try i.store.put_compacted(p.user.copy(), conversation.copy(), now())
+                try i.show_context(p.user.copy(), conversation)
             },
         }
     }
@@ -12915,6 +13010,7 @@ impl Instance {
         if let err(e) = i.close_mcp_adds(run_id.copy()) { eprintln("loom: ending run {run_id}: {e}") }
         let r = i.runs.remove(run_id.copy()) else return
         let looked_back = i.looking_back.contains(run_id.copy())
+        if let k = i.compacting.position(|x| x == run_id) { _ = i.compacting.remove(k) }
         match i.wind_up(r, status.copy(), error.copy()) {
             ok(ends) => if not ends { return },
             err(e) => {
@@ -13783,6 +13879,45 @@ impl Instance {
             i.log(user.copy(), agent_id, "session", "Moved a chat from {brains.title(now_on)} to {brains.title(program.copy())}", device)
             try i.event(user.copy(), "conversation.updated", Obj.new().j("conversation", Obj.new().s("id", id.copy()).s("program", program).done()).done())
             return Answer.Value(Obj.new().j("conversation", try i.store.conversation(user, id) ?? c).done())
+        }
+        // The person compacts a chat's session now, or starts its next turn in a
+        // fresh one (PLAN.md, "One endless chat"). In a group chat it's a member's
+        // own session there: the one named, or the one the chat shows.
+        if name == "conversation.compact" or name == "conversation.fresh" {
+            let id = str_at(args.copy(), "conversation") ?? String()
+            let c = try i.store.conversation(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no conversation {id}.")
+            let room = at(c.copy(), "room")
+            var agent = str_at(c.copy(), "agent") ?? String()
+            var seat = id.copy()
+            if room != Json.Null {
+                agent = str_at(args, "agent") ?? String()
+                if agent.len() == 0 { agent = try i.store.context_agent(user.copy(), id.copy()) }
+                if not rooms.members_of(room, try i.agent_ids(user.copy())).contains(agent.copy()) { return Answer.Refused(String("bad_request"), String("Name the member whose session it is.")) }
+                seat = "{id}/{agent}"
+            }
+            if i.chat_busy(user.copy(), id.copy()) { return Answer.Refused(String("busy"), String("The agent is answering in it. Try again once the turn is over.")) }
+            let (used, size): (i64, i64) = try i.store.context(user.copy(), seat.copy()) ?? (i64(0), i64(0))
+            if name == "conversation.fresh" {
+                // Its next turn starts a fresh session, given the newest of the chat;
+                // the apps show it from nothing now, under a line in the chat.
+                try i.store.ask_fresh(user.copy(), seat.copy(), true)
+                if size > 0 {
+                    try i.store.put_context(user.copy(), seat.copy(), 0, size)
+                    try i.store.put_compacted(user.copy(), seat.copy(), 0)
+                    try i.show_context(user.copy(), seat.copy())
+                }
+                if room == Json.Null { _ = try i.chat_line(user, id, Obj.new().s("kind", String("mark")).s("mark", String("fresh")).done()) }
+                return Answer.Value(empty)
+            }
+            if used <= 0 or try i.store.fresh_asked(user.copy(), seat.copy()) { return Answer.Refused(String("bad_request"), String("There's nothing in its session to compact.")) }
+            if not try i.store.context_compacts(user.copy(), seat) { return Answer.Refused(String("not_supported"), String("Its agent program can't compact a session when asked.")) }
+            // A quiet turn of the program's `/compact`, which the chat shows as the
+            // line its compaction puts there, and what's sent meanwhile waits for.
+            let run_id = try i.store.new_id("run")
+            i.looking_back.insert(run_id.copy(), String())
+            i.compacting.push(run_id.copy())
+            try i.start_run_as(user, c, run_id.copy(), String(), String("/compact"), List<Json>(), String(), String(), String("person"), agent, Json.Null, List<String>())
+            return Answer.Value(Obj.new().s("run", run_id).done())
         }
         if name == "conversation.rename" or name == "conversation.delete" {
             let id = str_at(args.copy(), "conversation") ?? String()

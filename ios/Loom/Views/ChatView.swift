@@ -28,6 +28,8 @@ struct ChatView: View {
     @State private var lit: String?
     /// The chat's pins, open in a sheet from the header's pin.
     @State private var pinsOpen = false
+    /// The context's card, open in a sheet from the header's ring.
+    @State private var contextOpen = false
     /// The group chat's settings, open in a sheet.
     @State private var roomSettings = false
 
@@ -180,6 +182,18 @@ struct ChatView: View {
                     ConnLine(conn: model.conn)
                 }
             }
+            // How full the agent's session context is, in a group chat the member's that
+            // answered last, with its card in a sheet.
+            if thread == nil, here, let fill = model.context {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        contextOpen = true
+                    } label: {
+                        ContextRing(fill: fill)
+                    }
+                    .accessibilityLabel(fill.tip)
+                }
+            }
             if thread == nil {
                 ToolbarItem(placement: .topBarTrailing) {
                     // The chat's pins, with how many there are.
@@ -259,6 +273,9 @@ struct ChatView: View {
         .sheet(isPresented: warming ? .constant(false) : $pinsOpen) {
             PinsSheet(agent: agent)
         }
+        .sheet(isPresented: warming ? .constant(false) : $contextOpen) {
+            ContextSheet()
+        }
         .sheet(item: $reading) { r in
             NavigationStack {
                 SelectableText(text: r.text, message: r.message, agent: r.agent) { quote, ask in
@@ -307,6 +324,10 @@ struct ChatView: View {
         // `-pins` opens the chat's pins, for screenshots of the sheet.
         if thread == nil, args.contains("-pins") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { pinsOpen = true }
+        }
+        // `-context` opens the context's card, for screenshots of the sheet.
+        if thread == nil, args.contains("-context") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { contextOpen = true }
         }
         guard thread == nil, let i = args.firstIndex(of: "-thread"), i + 1 < args.count else { return }
         threadOpen = session.model.asks(agentId).first { $0.id == args[i + 1] }

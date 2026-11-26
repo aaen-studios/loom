@@ -635,7 +635,8 @@ enum Sample {
         // Builder's thread with Gardener (`message_agent`), newer than the person's chat
         // with Gardener and never in its place.
         ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000],
-        ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000],
+        // How full its session is, compacted two hours before its last message.
+        ["id": "c_1", "agent": "a_1", "title": "", "at": 1795187131000, "context": ["used": 82_000, "size": 200_000, "compacted": 1795179931000, "compacts": true]],
         ["id": "c_2", "agent": "a_2", "title": "", "at": 1795187131000],
         ["id": "c_3", "agent": "a_3", "title": "", "at": 1795187131000],
         ["id": "c_4", "agent": "a_4", "title": "", "at": 1795187131000],
