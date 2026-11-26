@@ -713,7 +713,7 @@ Ask an agent about its chat without adding to it: "what did we decide about the 
 
 ## Long messages and tables
 
-- **A long message is cut** after about ten lines, its last line fading into its bubble, with a quiet "Show more" under it that opens it in place; "Show less" folds it again. Nothing is cut that would hide only a line or so. The desktop app measures each message as it's laid out to know where (`cut_long` in `app.rs`), so the cut fits any width and text size.
+- **A long message is cut** after about ten lines, its last line fading into its bubble, with a quiet "Show more" under it that opens it in place; "Show less" folds it again. Nothing is cut that would hide only a line or so. Only what was there and read when the chat opened is cut: a reply that streams in or comes while the chat is open, what the person sends from it, and the replies from the "3 new" line on show whole, and once the chat is left and opened again they're cut as the rest are. One folded or opened by hand stays so while the chat is open. A group chat's are the same. The desktop app's model says which (`model::folds`), and the app measures each message as it's laid out to know where (`cut_long` in `app.rs`), so the cut fits any width and text size. The iPhone's chat shows every message whole; only its pins are cut.
 - **A table in a reply** takes the bubble's width, with a quiet line under it: how many rows it has ("3 rows") and a small bordered **Copy**, which copies it as CSV; its chevron opens Copy as CSV, Copy as Markdown and Copy as text (in columns). The desktop app's model finds the tables in a reply's words, outside code blocks, and writes the copies (`model::pieces`, `model::table_copy`).
 
 ## Pinned messages
