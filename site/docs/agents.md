@@ -36,7 +36,7 @@ Choose **+** at the top of the sidebar. An agent has a name, the program it runs
 
 - **Brain**: its model and effort, permission mode, what a message while it answers does, and its backup program.
 - **Knows**: its memories, skills, tables and files, each counted, its MCP servers, and Code Mode ([In the chat](chat.md#how-an-agent-uses-its-tools)).
-- **Does**: its activity, its routines, and the tokens it used today and this month.
+- **Does**: its activity, its routines, and the tokens it used today and this month. **Following**, under them, has the Acta boards, cards and T3 threads it follows ([In the chat](chat.md#following-acta-and-t3)).
 - **Runs**: whether it's isolated, and its network ([Permissions](permissions.md#isolated-agents)), then the versions of its instructions, to go back to one.
 - **This chat**: the program the chat runs on ([Moving a chat to another program](chat.md#moving-a-chat-to-another-program)), and **Start fresh**.
 
