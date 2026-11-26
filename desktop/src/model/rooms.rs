@@ -164,7 +164,7 @@ impl Model {
         self.open_branch = None;
         self.messages.clear();
         self.messages_for = None;
-        self.messages_more = 0;
+        self.first_page();
         self.replying = None;
         self.new_line = None;
         self.dirty.insert(List::Messages);
@@ -305,6 +305,7 @@ impl Model {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Came;
     use super::*;
 
     fn with_room(m: &mut Model) {
@@ -334,6 +335,33 @@ mod tests {
         m.select(Some("a_2".into()));
         assert_eq!(m.open_room, None);
         assert_ne!(m.conversation().as_deref(), Some("c_9"));
+    }
+
+    // LOO-350: as in an agent's chat, what comes while it's open shows whole, and what
+    // was there when it opened is cut.
+    #[test]
+    fn a_group_chat_s_live_messages_come_before_once_it_opens_again() {
+        let mut m = Model::new();
+        with_room(&mut m);
+        m.synced = true;
+        m.show_room("c_9");
+        let page = |ids: &[&str]| {
+            let items: Vec<Value> = ids
+                .iter()
+                .map(|id| json!({"id": id, "role": "agent", "at": 1, "blocks": [{"kind": "text", "text": "Words"}]}))
+                .collect();
+            json!({"t": "core.data", "id": "app.messages:c_9", "what": "messages", "items": items})
+        };
+        m.take(&page(&["msg_1"]));
+        m.take(&json!({"t": "event", "kind": "message.created", "conversation": "c_9", "message": {"id": "msg_2", "role": "agent", "agent": "a_1", "at": 2, "blocks": [{"kind": "text", "text": "Words"}]}}));
+        let came = |m: &Model| -> Vec<Came> { m.shown().into_iter().map(|x| x.came).collect() };
+        assert_eq!(came(&m), vec![Came::Before, Came::Live]);
+        m.flip_fold("more-msg_1/0");
+        m.select(Some("a_1".into()));
+        m.show_room("c_9");
+        assert!(m.fold_flips().is_empty());
+        m.take(&page(&["msg_1", "msg_2"]));
+        assert_eq!(came(&m), vec![Came::Before, Came::Before]);
     }
 
     #[test]

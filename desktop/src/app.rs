@@ -10615,7 +10615,10 @@ ACTA_KEY=secret:ACTA_KEY",
             .as_ref()
             .map(|a| self.model.mood(&a.id))
             .unwrap_or(Mood::Idle);
-        let open = self.open_thoughts.clone();
+        // What's open, with the long messages folded or opened by hand since the chat
+        // opened (`model::folds`).
+        let mut open = self.open_thoughts.clone();
+        open.extend(self.model.fold_flips().iter().cloned());
         let show = Show {
             tools: self.prefs.tools,
             thoughts: self.prefs.thoughts,
@@ -17967,6 +17970,15 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// Folds a long message in the chat by hand, or opens it, from its Show more or Show
+    /// less: so it stays while the chat is open (`model::folds`).
+    fn flip_fold(&mut self, key: String, cx: &mut Context<Self>) {
+        self.model.flip_fold(&key);
+        self.refresh_rows(cx);
+        self.scroller.update(cx, |s, cx| s.remeasure(cx));
+        cx.notify();
+    }
+
     /// Opens or shuts a reply's list of sources, from its tab.
     pub fn toggle_sources(&mut self, key: String, cx: &mut Context<Self>) {
         let just_shut = self
@@ -18730,12 +18742,13 @@ fn person(
     )
     .found_in(&m.id, 0);
     // In a pin, cut at about four lines with Show more; in the chat, cut after ten
-    // lines, to open in place, and open while the find box is on it.
+    // lines when it was there before the chat opened, to open in place, and open while
+    // the find box is on it (`model::folds`).
     let said = if pin.is_some() {
         pin_cut(kept, &m.id, pin, size::BODY * scale, bg)
     } else {
         let fold = format!("more-{}", m.id);
-        let unfolded = open.contains(&fold) || find_is_on(&m.id);
+        let unfolded = !model::folds(m.came, open.contains(&fold), find_is_on(&m.id));
         let toggler = this.clone();
         cut_long(
             fold.clone(),
@@ -18747,7 +18760,7 @@ fn person(
             ink,
             unfolded,
             move |cx| {
-                let _ = toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+                let _ = toggler.update(cx, |loom, cx| loom.flip_fold(fold.clone(), cx));
             },
         )
         .into_any_element()
@@ -22377,13 +22390,18 @@ impl ReplyDraw<'_> {
             }
             // A pin's are cut at about four lines in the Pinned popover, fading into its
             // bubble, or into the popover where replies are plain text. In the chat, cut
-            // after ten lines, to open in place, and open while the find box is on it.
+            // after ten lines when it was there before the chat opened, to open in place,
+            // and open while the find box is on it (`model::folds`).
             let cut = if show.pin.is_some() {
                 let fill = if show.bubbles { p.bubble } else { p.raised };
                 pin_cut(said_in, &key, show.pin, size::REPLY * show.text_scale, fill)
             } else {
                 let fold = format!("more-{key}");
-                let open = self.open.contains(&fold) || find_is_on(&self.m.id);
+                let open = !model::folds(
+                    self.m.came,
+                    self.open.contains(&fold),
+                    find_is_on(&self.m.id),
+                );
                 let toggler = self.this.clone();
                 cut_long(
                     fold.clone(),
@@ -22395,8 +22413,7 @@ impl ReplyDraw<'_> {
                     p.ink,
                     open,
                     move |cx| {
-                        let _ =
-                            toggler.update(cx, |loom, cx| loom.toggle_thought(fold.clone(), cx));
+                        let _ = toggler.update(cx, |loom, cx| loom.flip_fold(fold.clone(), cx));
                     },
                 )
                 .into_any_element()
@@ -25374,6 +25391,7 @@ mod row_tests {
             blocks,
             live: false,
             queued: false,
+            came: model::Came::Before,
             from_agent: None,
             routed: None,
             routine: String::new(),
