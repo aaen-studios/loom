@@ -1,0 +1,265 @@
+module tests.protocol.catalog
+
+// Spools, the integrations catalog (PLAN.md, "The integrations catalog"):
+// catalog.list gives every entry, Acta first, with its tools marked as reading
+// or changing, how it signs in and what the person fills in, and whether
+// they've connected it. catalog.connect turns an entry into their server and
+// takes it through the mcp_add card's path from settings: T3 Code at the fake
+// OAuth server's address (tests/fake_oauth) goes to `sign_in`, then, once the
+// person has, to `agents`, each step a `connect` frame, having signed loom up
+// as a native app for only what the server takes; mcp.agents picks its agents
+// and finishes it. Connecting it again tries it as it is. A Home Assistant at
+// the fake, with a token the person types, reaches it as `Bearer <token>`; a
+// wrong one fails, with why, which mcp.list keeps. A name that's taken, a field
+// left out, an unknown entry and an agent running them are refused.
+//
+//     calx tests/protocol/catalog.calx
+import std.bytes
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.process.{Child, Command, Stdio, exit}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+// Where a test's browser comes back to; nothing listens there, since the test
+// reads the address off the fake's consent page.
+const REDIRECT: str = "http://127.0.0.1:9/callback"
+const TOKEN: str = "fake-key"
+
+fn fetch_text(address: String) -> String ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return String.from_utf8(r.body) ?? String()
+}
+
+// What the browser brings back: the consent page's link, to the redirect.
+fn consent(address: String) -> String ! Error {
+    let page = try fetch_text(address)
+    let at_link = page.find("href=\"") else { fail "the sign-in page has no link: {page}" }
+    let rest = page[at_link + 6..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    return rest[..end].copy()
+}
+
+fn query_of(link: String) -> String {
+    let q = link.find("?") ?? link.len()
+    return if q < link.len() { link[q + 1..].copy() } else { String() }
+}
+
+fn ok_of(r: Json) -> bool {
+    return at(r, "ok") == Json.Bool(true)
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn message_of(r: Json) -> String {
+    return str_at(at(r, "error"), "message") ?? String()
+}
+
+fn items(j: Json) -> List<Json> {
+    if let Json.Array(xs) = j { return xs.copy() }
+    return List<Json>()
+}
+
+// The entry `id` in catalog.list's answer.
+fn entry_in(listed: Json, id: str) -> Json {
+    for e in items(at(at(listed, "value"), "entries")) {
+        if str_at(e.copy(), "id") == some(String(id)) { return e.copy() }
+    }
+    return Json.Null
+}
+
+// The server `name` in mcp.list's answer.
+fn server_in(listed: Json, name: str) -> Json {
+    for s in items(at(at(listed, "value"), "servers")) {
+        if str_at(s.copy(), "name") == some(String(name)) { return s.copy() }
+    }
+    return Json.Null
+}
+
+// The connect of `server` once it's at `step`: among the frames from `mark`
+// on, or those still to come.
+fn connect_in(app: mut Session, mark: usize, server: str, step: str) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            let c = at(f.copy(), "connect")
+            if str_at(f, "t") == some(String("connect")) and str_at(c.copy(), "server") == some(String(server)) and str_at(c.copy(), "step") == some(String(step)) { return c }
+        }
+        _ = try app.until("connect", "", 120000)
+    }
+}
+
+fn connect(app: mut Session, id: str, args: Json) -> Json ! Error {
+    return try app.cmd(id, "catalog.connect", args)
+}
+
+// Signs in to `name` as the app and the person's browser would.
+fn sign_in(app: mut Session, name: str, ids: (str, str)) -> Json ! Error {
+    let (first, second) = ids
+    let began = try app.cmd(first, "mcp.sign_in", Obj.new().s("name", String(name)).s("redirect", String(REDIRECT)).done())
+    if not ok_of(began.copy()) { return began }
+    let link = try consent(str_at(at(began, "value"), "url") ?? String())
+    return try app.cmd(second, "mcp.signed_in", Obj.new().s("query", query_of(link)).done())
+}
+
+fn agents_of(server: Json) -> String {
+    return "{at(server, "agents")}"
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var ids = List<String>()
+    for (n, name) in [("q_1", "Builder"), ("q_2", "Helper")] {
+        let made = try app.cmd(n, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).done())
+        ids.push(str_at(at(at(made, "value"), "agent"), "id") ?? String())
+    }
+    let builder = ids[0].copy()
+    let helper = ids[1].copy()
+
+    // --- The list ---
+    let listed = try app.cmd("q_3", "catalog.list", Obj.new().done())
+    let first = items(at(at(listed.copy(), "value"), "entries"))[0].copy()
+    try check(str_at(first, "id") == some(String("acta")) and "{at(at(listed.copy(), "value"), "categories")}" == #"["Work","Code","Home"]"#, "catalog.list starts with Acta, and gives the categories that have entries")
+    let github = entry_in(listed.copy(), "github")
+    let github_tools = "{at(github.copy(), "tools")}"
+    try check(str_at(github.copy(), "sign_in") == some(String("secret")) and "{at(github.copy(), "secrets")}" == #"[{"name":"GITHUB_TOKEN","label":"Personal access token","placeholder":"github_pat_…","have":false}]"# and str_at(github.copy(), "runs") == some(String("remote")), "GitHub takes a personal access token as a secret, and runs remotely")
+    try check(github_tools.contains(#"{"name":"get_me","kind":"read"}"#) and github_tools.contains(#"{"name":"merge_pull_request","kind":"change"}"#) and bool_at(github.copy(), "tools_checked") == some(true), "its tools are marked as reading or changing")
+    let t3 = entry_in(listed.copy(), "t3")
+    try check("{at(t3.copy(), "fields")}" == #"[{"name":"address","label":"Address","placeholder":"https://pc.tail1234.ts.net"}]"# and str_at(t3.copy(), "note") != none and str_at(t3.copy(), "sign_in") == some(String("oauth")) and bool_at(t3, "connected") == some(false), "T3 Code asks for its address, signs in, and isn't connected yet")
+    let playwright = entry_in(listed, "playwright")
+    try check(str_at(playwright.copy(), "runs") == some(String("instance")) and str_at(playwright, "command") == some(String("npx")), "Playwright runs on the instance")
+
+    // --- A field entry that signs in: T3 Code, at the fake ---
+    var mark = app.frames.len()
+    let started = try connect(mut app, "q_4", Obj.new().s("id", String("t3")).j("fields", Obj.new().s("address", "{fake}/").done()).done())
+    try check(str_at(at(at(started, "value"), "connect"), "step") == some(String("adding")), "catalog.connect answers once the server is added, at adding")
+    let kept = server_in(try app.cmd("q_5", "mcp.list", Obj.new().done()), "t3")
+    try check(str_at(kept.copy(), "url") == some("{fake}/mcp") and str_at(kept, "catalog") == some(String("t3")), "the server is the person's, at the address they gave, from the catalog's T3")
+    _ = try connect_in(mut app, mark, "t3", "sign_in")
+    try check(true, "it goes on to sign_in, as the server answers 401")
+    try check(ok_of(try sign_in(mut app, "t3", ("q_6", "q_7"))), "the person signs in")
+    let works = try connect_in(mut app, mark, "t3", "agents")
+    try check("{at(works, "tools")}" == #"["whoami"]"#, "and once they have, it's tried again and goes on to agents, with its tools")
+    let stats = try parse(try fetch_text("{fake}/test/stats"))
+    try check("{at(stats, "signed_up")}" == #"{"grant_types":["authorization_code","refresh_token"],"application_type":"native"}"#, "loom signed up as a native app, for the grant types the server lists")
+    let connecting = at(entry_in(try app.cmd("q_8", "catalog.list", Obj.new().done()), "t3"), "connecting")
+    try check(str_at(connecting, "step") == some(String("agents")), "catalog.list has the connect under way")
+    let given = try app.cmd("q_9", "mcp.agents", Obj.new().s("name", String("t3")).j("agents", Json.Array([Json.Str(builder.copy())])).done())
+    try check(ok_of(given), "mcp.agents gives it to the agents picked")
+    _ = try connect_in(mut app, mark, "t3", "done")
+    try check(true, "and the connect is done")
+    let servers = try app.cmd("q_10", "mcp.list", Obj.new().done())
+    let on = server_in(servers, "t3")
+    try check(str_at(on.copy(), "status") == some(String("connected")) and "{at(on.copy(), "tools")}" == #"["whoami"]"# and agents_of(on.copy()) == "[\"{builder}\"]" and str_at(on, "sign_in") == some(String("signed_in")), "mcp.list says it's connected, with its tools and the agent that has it")
+    let after = entry_in(try app.cmd("q_11", "catalog.list", Obj.new().done()), "t3")
+    try check(bool_at(after.copy(), "connected") == some(true) and "{at(after.copy(), "servers")}" == #"["t3"]"# and at(after, "connecting") == Json.Null, "and catalog.list, with no connect under way")
+
+    // --- Again, as it is ---
+    mark = app.frames.len()
+    _ = try connect(mut app, "q_12", Obj.new().s("id", String("t3")).done())
+    _ = try connect_in(mut app, mark, "t3", "agents")
+    try check(true, "connecting it again without fields tries it as it is, signed in, and asks for its agents")
+    _ = try app.cmd("q_13", "mcp.agents", Obj.new().s("name", String("t3")).j("agents", Json.Array([Json.Str(builder.copy()), Json.Str(helper.copy())])).done())
+    try check(agents_of(server_in(try app.cmd("q_14", "mcp.list", Obj.new().done()), "t3")) == "[\"{builder}\",\"{helper}\"]", "mcp.agents adds an agent")
+    _ = try app.cmd("q_15", "mcp.agents", Obj.new().s("name", String("t3")).j("agents", Json.Array(List<Json>())).done())
+    let updated = at(try app.event("agent.updated"), "agent")
+    try check(agents_of(server_in(try app.cmd("q_16", "mcp.list", Obj.new().done()), "t3")) == "[]" and "{at(updated, "mcp")}" == "[]", "and takes them away, each agent changed as agent.update changes it")
+    try check(code_of(try app.cmd("q_18", "mcp.agents", Obj.new().s("name", String("t3")).j("agents", Json.Array([Json.Str(String("a_404"))])).done())) == "not_found" and code_of(try app.cmd("q_19", "mcp.agents", Obj.new().s("name", String("nope")).j("agents", Json.Array(List<Json>())).done())) == "not_found", "an agent or a server that isn't the person's is not_found")
+
+    // --- What's refused ---
+    try check(code_of(try connect(mut app, "q_20", Obj.new().s("id", String("nope")).done())) == "not_found", "an entry that isn't in the catalog is not_found")
+    let no_field = try connect(mut app, "q_21", Obj.new().s("id", String("home-assistant")).done())
+    try check(code_of(no_field.copy()) == "bad_request" and message_of(no_field) == "Fill in Address first.", "a field left out is asked for by its label")
+    let bad_field = try connect(mut app, "q_22", Obj.new().s("id", String("home-assistant")).j("fields", Obj.new().s("address", String("home.local")).done()).done())
+    try check(message_of(bad_field) == "Address is an address starting with https:// or http://.", "and an address that isn't one is refused")
+    let no_secret = try connect(mut app, "q_23", Obj.new().s("id", String("home-assistant")).j("fields", Obj.new().s("address", fake.copy()).done()).done())
+    try check(code_of(no_secret.copy()) == "bad_request" and message_of(no_secret) == "Fill in Long-lived access token first.", "a secret the person doesn't have is asked for by its label")
+    _ = try app.cmd("q_24", "mcp.put", Obj.new().s("name", String("github")).s("url", String("https://other.example/mcp")).done())
+    let taken = try connect(mut app, "q_25", Obj.new().s("id", String("github")).j("secrets", Obj.new().s("GITHUB_TOKEN", String("ghp_x")).done()).done())
+    try check(code_of(taken) == "exists" and not "{try app.cmd("q_26", "secret.list", Obj.new().done())}".contains("GITHUB_TOKEN"), "a name another server has is refused, keeping nothing")
+
+    // --- A secret entry with a field: Home Assistant, at the fake ---
+    mark = app.frames.len()
+    let home = Obj.new().s("id", String("home-assistant")).j("fields", Obj.new().s("address", fake.copy()).done()).j("secrets", Obj.new().s("HOME_ASSISTANT_TOKEN", String(TOKEN)).done()).done()
+    try check(ok_of(try connect(mut app, "q_27", home)), "with its address and token, Home Assistant is taken")
+    let lights = try connect_in(mut app, mark, "home-assistant", "agents")
+    try check("{at(lights, "tools")}" == #"["lights"]"#, "its token reached it as Bearer, so it gives its tools")
+    let ha = server_in(try app.cmd("q_28", "mcp.list", Obj.new().done()), "home-assistant")
+    try check("{at(ha.copy(), "headers")}" == #"{"Authorization":{"secret":"HOME_ASSISTANT_TOKEN","prefix":"Bearer "}}"# and str_at(ha.copy(), "sign_in") == none and str_at(ha, "status") == some(String("connected")), "the server sends the person's secret after its prefix, and signs no one in")
+    try check("{try app.cmd("q_29", "secret.list", Obj.new().done())}".contains(#""name":"HOME_ASSISTANT_TOKEN""#), "and the token is kept with their secrets")
+    mark = app.frames.len()
+    _ = try connect(mut app, "q_30", Obj.new().s("id", String("home-assistant")).j("secrets", Obj.new().s("HOME_ASSISTANT_TOKEN", String("wrong")).done()).done())
+    let failed = try connect_in(mut app, mark, "home-assistant", "failed")
+    try check((str_at(failed, "said") ?? String()).len() > 0, "a wrong token, given again, replaces it, and the connect fails, saying why")
+    let failing = server_in(try app.cmd("q_31", "mcp.list", Obj.new().done()), "home-assistant")
+    try check(str_at(failing.copy(), "status") == some(String("failing")) and (str_at(failing, "why") ?? String()).len() > 0, "mcp.list keeps it as failing, with why")
+    mark = app.frames.len()
+    _ = try connect(mut app, "q_32", Obj.new().s("id", String("home-assistant")).j("secrets", Obj.new().s("HOME_ASSISTANT_TOKEN", String(TOKEN)).done()).done())
+    _ = try connect_in(mut app, mark, "home-assistant", "agents")
+    _ = try app.cmd("q_33", "mcp.agents", Obj.new().s("name", String("home-assistant")).j("agents", Json.Array([Json.Str(helper.copy())])).done())
+    _ = try connect_in(mut app, mark, "home-assistant", "done")
+    try check(str_at(server_in(try app.cmd("q_34", "mcp.list", Obj.new().done()), "home-assistant"), "status") == some(String("connected")), "the right one again connects it")
+    _ = try app.cmd("q_35", "mcp.delete", Obj.new().s("name", String("home-assistant")).done())
+    try check(bool_at(entry_in(try app.cmd("q_36", "catalog.list", Obj.new().done()), "home-assistant"), "connected") == some(false), "deleted, it isn't connected any more")
+
+    // --- An agent can't ---
+    let chat = str_at(at(try app.cmd("q_37", "conversation.create", Obj.new().s("agent", builder.copy()).done()), "value"), "conversation") ?? String()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", chat.copy()).s("text", "/mcpkeep run_command {Obj.new().s("name", String("catalog.connect")).j("args", Obj.new().s("id", String("acta")).done()).done()}").done())
+    let refused = reply_text(try app.reply())
+    try check(refused.contains("Spools") and server_in(try app.cmd("q_38", "mcp.list", Obj.new().done()), "acta") == Json.Null, "an agent can't connect one itself")
+
+    // --- The token is nowhere it shouldn't be ---
+    var seen = "{try app.cmd("q_39", "activity.list", Obj.new().done())}"
+    for f in app.frames {
+        seen = "{seen}\n{f}"
+    }
+    var database = List<u8>()
+    for name in ["loom.db", "loom.db-wal"] {
+        let path = "{i.data}/{name}"
+        if fs.exists(path.copy()) { database.extend(try fs.read(path)) }
+    }
+    try check(not seen.contains(TOKEN) and bytes.find(database, TOKEN.to_bytes()) == none, "the token typed in isn't in what the app was sent, the activity log or the database")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_oauth/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake oauth: "), 120000) else {
+        child.kill()
+        fail "the fake OAuth server didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\ncatalog: all good")
+}

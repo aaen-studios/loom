@@ -34,6 +34,7 @@ import server.acp.{Line, Out}
 import server.announce
 import server.browser
 import server.cards
+import server.catalog
 import server.codemode
 import server.commands
 import server.files
@@ -188,6 +189,32 @@ struct McpAdd {
 const MCP_SETTINGS_MOST: usize = 20
 // The waiter a proposed server's test answers, before the proposal's call.
 const MCP_ADD_TEST: str = "mcp_add:"
+// The waiter a test of a server being connected from the catalog answers.
+const CONNECT_TEST: str = "connect:"
+
+// A server the person is connecting from the catalog (PLAN.md, "The
+// integrations catalog"), from catalog.connect until they've picked its agents:
+// `step` is `adding` (kept, and being tried), `sign_in` (it waits for them to
+// sign in), `agents` (it works: which agents get it?), `failed` (it didn't
+// work, with why in `said`) or `done`. Each change goes to the person's devices
+// as a `connect` frame. Kept by "user/server", until the instance stops.
+struct Connect {
+    user: String
+    server: String
+    entry: String    // the catalog entry's id
+    step: String
+    said: String
+    tools: List<String>    // what it offers, once it works
+}
+
+impl Connect {
+    // As catalog.connect, catalog.list and the `connect` frame give it.
+    fn json(self) -> Json {
+        var offers = List<Json>()
+        for t in self.tools { offers.push(Json.Str(t.copy())) }
+        return Obj.new().s("entry", self.entry.copy()).s("server", self.server.copy()).s("step", self.step.copy()).s("said", self.said.copy()).j("tools", Json.Array(offers)).done()
+    }
+}
 
 // What an agent hears of a server its person added that waits for them to
 // sign in.
@@ -474,6 +501,7 @@ pub struct Instance {
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     setups: Map<String, Setup>    // tc_ id -> loom going onto one of the person's hosts
     mcp_adds: LinkedMap<String, McpAdd>    // tc_ id -> an MCP server an agent proposed, while its turn goes on
+    connects: LinkedMap<String, Connect>    // user/server -> a server being connected from the catalog
     emojis: emoji.Table    // the built-in emoji, for an agent's `:name:` (PLAN.md, "Emoji")
     sealer: XChaCha20Poly1305    // seals and opens secrets, with secret.key, which only the instance reads
     next_sweep: i64
@@ -1670,7 +1698,8 @@ fn valid_secret(name: String) -> bool {
     return cards.good_secret_name(name)
 }
 
-// An MCP server's env or headers, if each value is text or {"secret": NAME}.
+// An MCP server's env or headers, if each value is text or {"secret": NAME},
+// with `prefix`, text sent before the secret, such as "Bearer ".
 fn settings_of(j: Json) -> Json? {
     var o = Obj.new()
     if j == Json.Null { return some(o.done()) }
@@ -1680,7 +1709,9 @@ fn settings_of(j: Json) -> Json? {
         if let s = v.as_str() {
             o.m.insert(k.copy(), Json.Str(s))
         } else if let secret = str_at(v.copy(), "secret") {
-            o.m.insert(k.copy(), Obj.new().s("secret", secret).done())
+            let prefix = at(v, "prefix")
+            if prefix != Json.Null and prefix.as_str() == none { return none }
+            o.m.insert(k.copy(), Obj.new().s("secret", secret).maybe("prefix", prefix.as_str()).done())
         } else {
             return none
         }
@@ -1705,11 +1736,57 @@ fn mcp_spec(args: Json) -> (Json, String) {
                 if let s = a.as_str() { list.push(Json.Str(s)) }
             }
         }
-        let env = settings_of(at(args, "env")) else return (Json.Null, String(#"Each value in env is text, or {"secret": NAME}."#))
+        let env = settings_of(at(args, "env")) else return (Json.Null, String(#"Each value in env is text, or {"secret": NAME}, with a "prefix" of text if it has one."#))
         return (server.s("command", command).j("args", Json.Array(list)).j("env", env).done(), String())
     }
-    let headers = settings_of(at(args, "headers")) else return (Json.Null, String(#"Each value in headers is text, or {"secret": NAME}."#))
+    let headers = settings_of(at(args, "headers")) else return (Json.Null, String(#"Each value in headers is text, or {"secret": NAME}, with a "prefix" of text if it has one."#))
     return (server.s("url", address).j("headers", headers).done(), String())
+}
+
+// Whether the agent `agent` has the MCP server `server`.
+fn has_server(agent: Json, server: String) -> bool {
+    if let Json.Array(names) = at(agent, "mcp") { return names.contains(Json.Str(server.copy())) }
+    return false
+}
+
+// A person's MCP server as the Installed list has it (PLAN.md, "The
+// integrations catalog"): `status` from its sign-in and its last test,
+// `connected`, `sign_in`, `failing` (with `why`) or `untested`, and the tools
+// that test found. `signed` is its sign-in as mcp.list gives it, and `tested`
+// what the last test kept ({at, ok, tools, error, sign_in}), or null.
+fn server_status(signed: String, tested: Json) -> Json {
+    var o = Obj.new()
+    let worked = bool_at(tested.copy(), "ok") ?? false
+    let wanted_sign_in = bool_at(tested.copy(), "sign_in") ?? false
+    var status = String("untested")
+    if signed == "needed" or (wanted_sign_in and signed != "signed_in") {
+        status = String("sign_in")
+    } else if tested != Json.Null and not worked and not wanted_sign_in {
+        status = String("failing")
+        o = o.s("why", str_at(tested.copy(), "error") ?? String())
+    } else if worked {
+        status = String("connected")
+    }
+    let connected = status == "connected"
+    o = o.s("status", status)
+    if tested != Json.Null {
+        o = o.i("tested_at", int_at(tested.copy(), "at") ?? 0)
+        if connected { o = o.j("tools", at(tested, "tools")) }
+    }
+    return o.done()
+}
+
+@test
+fn says_how_a_server_stands() {
+    let good = Obj.new().i("at", 5).b("ok", true).j("tools", Json.Array([Json.Str(String("whoami"))])).done()
+    assert("{server_status(String("signed_in"), good.copy())}" == #"{"status":"connected","tested_at":5,"tools":["whoami"]}"#)
+    assert("{server_status(String("needed"), good)}" == #"{"status":"sign_in","tested_at":5}"#)
+    let asked = Obj.new().i("at", 6).b("ok", false).b("sign_in", true).s("error", String("x")).done()
+    assert(str_at(server_status(String(), asked.copy()), "status") == some(String("sign_in")))
+    assert(str_at(server_status(String("signed_in"), asked), "status") == some(String("untested")))
+    let failed = Obj.new().i("at", 7).b("ok", false).s("error", String("It didn't start.")).done()
+    assert("{server_status(String(), failed)}" == #"{"why":"It didn't start.","status":"failing","tested_at":7}"#)
+    assert("{server_status(String(), Json.Null)}" == #"{"status":"untested"}"#)
 }
 
 @test
@@ -1718,7 +1795,9 @@ fn an_mcp_server_is_checked_once_for_both_ways_in() {
     assert(why.len() == 0 and "{s}" == #"{"name":"acta","url":"https://acta.example/mcp","headers":{"Authorization":{"secret":"ACTA_KEY"}}}"#)
     let (c, _) = mcp_spec(Obj.new().s("name", String("fake")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Int(3)])).done())
     assert("{c}" == #"{"name":"fake","command":"npx","args":["-y"],"env":{}}"#)
-    for bad in [#"{"name":"loom","url":"https://x"}"#, #"{"name":"Bad Name","url":"https://x"}"#, #"{"name":"two","url":"https://x","command":"npx"}"#, #"{"name":"ftp","url":"ftp://x"}"#, #"{"name":"odd","command":"x","env":{"K":1}}"#] {
+    let (p, _) = mcp_spec(parse(String(#"{"name":"github","url":"https://x","headers":{"Authorization":{"secret":"GITHUB_TOKEN","prefix":"Bearer ","other":1}}}"#))!)
+    assert("{p}" == #"{"name":"github","url":"https://x","headers":{"Authorization":{"secret":"GITHUB_TOKEN","prefix":"Bearer "}}}"#)
+    for bad in [#"{"name":"loom","url":"https://x"}"#, #"{"name":"Bad Name","url":"https://x"}"#, #"{"name":"two","url":"https://x","command":"npx"}"#, #"{"name":"ftp","url":"ftp://x"}"#, #"{"name":"odd","command":"x","env":{"K":1}}"#, #"{"name":"odd","command":"x","env":{"K":{"secret":"K","prefix":2}}}"#] {
         let (_, no) = mcp_spec(parse(String(bad))!)
         assert(no.len() > 0)
     }
@@ -2008,7 +2087,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -4204,7 +4283,9 @@ impl Instance {
             }
         }
         if missing.len() > 0 {
-            i.answer_cmd(w, Answer.Refused(String("mcp_failed"), "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} under Keys on the MCP servers page."))
+            let why = "It uses {if missing.len() == 1 { "a secret" } else { "secrets" }} you don't have: {missing.join(", ")}. Add {if missing.len() == 1 { "it" } else { "them" }} under Keys on the MCP servers page."
+            try i.keep_tested(user.copy(), server_name.copy(), List<String>(), why.copy(), false)
+            i.answer_cmd(w, Answer.Refused(String("mcp_failed"), why))
             return
         }
         let keyed = own_auth(server.copy())
@@ -4232,12 +4313,16 @@ impl Instance {
         if d.error.len() > 0 {
             if d.sign_in and not t.own_auth {
                 try i.needs_sign_in(t.user.copy(), t.server.copy())
-                i.answer_cmd(t.waiter, Answer.Refused(String("sign_in_needed"), "{t.server} needs you to sign in."))
+                let why = "{t.server} needs you to sign in."
+                try i.keep_tested(t.user.copy(), t.server.copy(), List<String>(), why.copy(), true)
+                i.answer_cmd(t.waiter, Answer.Refused(String("sign_in_needed"), why))
                 return
             }
+            try i.keep_tested(t.user.copy(), t.server.copy(), List<String>(), d.error.copy(), false)
             i.answer_cmd(t.waiter, Answer.Refused(String("mcp_failed"), d.error.copy()))
             return
         }
+        try i.keep_tested(t.user.copy(), t.server.copy(), d.tools.copy(), String(), false)
         // Its icons first, so a card that shows it ready has them.
         try i.took_icons(t.user.copy(), t.server.copy(), d.icon)
         var names = List<Json>()
@@ -4327,22 +4412,36 @@ impl Instance {
     // The person's MCP servers as mcp.list gives them: each over HTTP with
     // `sign_in`, `needed` or `signed_in` (with `signed_in_as` when the sign-in
     // said who, and `signed_in_at`), once loom knows it signs in, and a
-    // `client_secret` given as text only as `client_secret_set`.
+    // `client_secret` given as text only as `client_secret_set`; with how it
+    // stands (server_status), the agents that have it, and the catalog entry
+    // it came from.
     fn listed_servers(i: Instance, user: String) -> List<Json> ! Error {
         var out = List<Json>()
+        let agents = try i.store.agents(user.copy())
         for s in try i.store.mcp_servers(user.copy()) {
+            let name = str_at(s.copy(), "name") ?? String()
             var shown = s.copy()
             if let secret = at(s.copy(), "client_secret").as_str() {
                 shown = merge(without(shown, "client_secret"), Obj.new().b("client_secret_set", secret.len() > 0).done())
             }
+            var signed = String()
             if str_at(s.copy(), "url") != none and not own_auth(s.copy()) {
-                let g = i.grant_of(user.copy(), str_at(s, "name") ?? String())
+                let g = i.grant_of(user.copy(), name.copy())
                 if oauth.signed_in(g.copy()) {
+                    signed = String("signed_in")
                     shown = merge(shown, Obj.new().s("sign_in", String("signed_in")).maybe("signed_in_as", str_at(g.copy(), "who")).i("signed_in_at", int_at(g, "at") ?? 0).done())
                 } else if g != Json.Null {
+                    signed = String("needed")
                     shown = merge(shown, Obj.new().s("sign_in", String("needed")).done())
                 }
             }
+            var having = List<Json>()
+            for a in agents.copy() {
+                if has_server(a.copy(), name.copy()) { having.push(Json.Str(str_at(a, "id") ?? String())) }
+            }
+            let from = try i.catalog_of(user.copy(), s)
+            shown = merge(shown, server_status(signed, try i.tested_of(user.copy(), name)))
+            shown = merge(shown, Obj.new().j("agents", Json.Array(having)).maybe("catalog", if from.len() > 0 { some(from) } else { none }).done())
             out.push(shown)
         }
         return out
@@ -4682,12 +4781,15 @@ impl Instance {
         return some(Json.Array(out))
     }
 
-    // A setting's value: text as it is, or {"secret": NAME} as that secret.
+    // A setting's value: text as it is, or {"secret": NAME} as that secret,
+    // after its `prefix`.
     fn value_of(i: Instance, user: String, v: Json) -> String? {
         if let s = v.as_str() { return some(s) }
-        let name = str_at(v, "secret") else return none
+        let name = str_at(v.copy(), "secret") else return none
+        let prefix = str_at(v, "prefix") ?? String()
         return match i.secret(user, name) {
-            ok(found) => found,
+            ok(some(found)) => some("{prefix}{found}"),
+            ok(none) => none,
             err(e) => {
                 eprintln("loom: a secret didn't open: {e}")
                 none
@@ -8270,6 +8372,7 @@ impl Instance {
     // went through (`error` empty), and the server is tried again for its
     // tools, or didn't, which its card says in plain words.
     fn mcp_add_signed(i: mut Instance, user: String, server: String, error: String) ! Error {
+        try i.connect_signed(user.copy(), server.copy(), error.copy())
         var waiting = List<String>()
         for (call, a) in i.mcp_adds {
             if a.user == user and str_at(a.spec.copy(), "name") == some(server.copy()) and (a.state == "sign_in" or a.state == "later") { waiting.push(call.copy()) }
@@ -8333,6 +8436,218 @@ impl Instance {
                 i.mcp_add_tell(call.copy(), tool_text("Your person added {server}."))
             }
             _ = i.mcp_adds.remove(call)
+        }
+    }
+
+    // --- The integrations catalog (PLAN.md, "The integrations catalog") ---
+
+    // The catalog entry `user`'s server `server` came from: the one it was
+    // connected from, or the one whose fixed address or program it has, or "".
+    fn catalog_of(i: Instance, user: String, server: Json) -> String ! Error {
+        let name = str_at(server.copy(), "name") ?? String()
+        if let id = try i.store.meta("mcp_catalog/{user}/{name}") { return id }
+        for e in catalog.entries() {
+            if catalog.matches(e.copy(), server.copy()) { return str_at(e, "id") ?? String() }
+        }
+        return String()
+    }
+
+    // catalog.list: every entry, as catalog.listed gives it, with the
+    // person's servers made from it and a connect under way.
+    fn catalog_list(i: Instance, user: String) -> Answer ! Error {
+        let have = try i.secret_names_of(user.copy())
+        var from = List<(String, String)>()
+        for s in try i.store.mcp_servers(user.copy()) {
+            from.push((try i.catalog_of(user.copy(), s.copy()), str_at(s, "name") ?? String()))
+        }
+        var out = List<Json>()
+        for e in catalog.entries() {
+            let id = str_at(e.copy(), "id") ?? String()
+            var servers = List<String>()
+            for (entry, name) in from.copy() {
+                if entry == id { servers.push(name.copy()) }
+            }
+            var connecting = Json.Null
+            for (_, c) in i.connects {
+                if c.user == user and c.entry == id { connecting = c.json() }
+            }
+            out.push(catalog.listed(e, have.copy(), servers, connecting))
+        }
+        var categories = List<Json>()
+        for c in catalog.categories() { categories.push(Json.Str(c.copy())) }
+        return Answer.Value(Obj.new().j("entries", Json.Array(out)).j("categories", Json.Array(categories)).done())
+    }
+
+    // catalog.connect: the entry `id`, with the person's `fields` and
+    // `secrets`, becomes their server `name` (the entry's own, if they give
+    // none), as an agent's mcp_add card adds one: its secrets are kept, then
+    // the server, which is tried as Test tries it. The answer is the connect,
+    // at `adding`; each step after comes as a `connect` frame: `sign_in` for
+    // one that wants them to sign in, which goes on once they have, then
+    // `agents`, or `failed` with why. mcp.agents finishes it. Connecting one
+    // they have from it again, without fields, tries it again as it is.
+    fn catalog_connect(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        let id = str_at(args.copy(), "id") ?? String()
+        let entry = catalog.find(id.copy()) else return Answer.Refused(String("not_found"), "There's no {id} in the catalog.")
+        let given_name = (str_at(args.copy(), "name") ?? String()).trim().copy()
+        let server = if given_name.len() > 0 { given_name.copy() } else { str_at(entry.copy(), "server") ?? String() }
+        let existing = try i.store.mcp_server(user.copy(), server.copy())
+        var from = String()
+        if let had = existing.copy() { from = try i.catalog_of(user.copy(), had) }
+        var spec = Json.Null
+        let has_fields = at(entry.copy(), "fields") != Json.Null
+        if let had = existing.copy() {
+            if from == id and has_fields and at(args.copy(), "fields") == Json.Null { spec = had }
+        }
+        if spec == Json.Null {
+            let (made, why) = catalog.spec_of(entry.copy(), at(args.copy(), "fields"), server.copy())
+            if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
+            let (checked, bad) = mcp_spec(made)
+            if bad.len() > 0 { return Answer.Refused(String("bad_request"), bad) }
+            if let had = existing.copy() {
+                if from != id and not catalog.same_server(had, checked.copy()) { return Answer.Refused(String("exists"), "There's an MCP server named {server} already. Give this one another name.") }
+            }
+            spec = checked
+        }
+        // The secrets it names: each one given is kept, replacing one the
+        // person has, and each they don't have must be given.
+        let given = at(args, "secrets")
+        let have = try i.secret_names_of(user.copy())
+        var keep = List<(String, String)>()
+        for s in catalog.list(at(entry.copy(), "secrets")) {
+            let name = str_at(s.copy(), "name") ?? String()
+            let value = ((given.get(name.copy()) ?? Json.Null).as_str() ?? String()).trim().copy()
+            if value.len() > 0 {
+                keep.push((name, value))
+            } else if not have.contains(name.copy()) {
+                return Answer.Refused(String("bad_request"), "Fill in {str_at(s, "label") ?? name} first.")
+            }
+        }
+        for (name, value) in keep {
+            if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("secret.put"), Obj.new().s("name", name).s("value", value).done()) { return Answer.Refused(code, message) }
+        }
+        if existing != some(spec.copy()) {
+            if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("mcp.put"), spec.copy()) { return Answer.Refused(code, message) }
+        }
+        try i.store.set_meta("mcp_catalog/{user}/{server}", id.copy())
+        let key = "{user}/{server}"
+        i.connects.insert(key.copy(), Connect { user: user.copy(), server: server.copy(), entry: id, step: String("adding"), said: String(), tools: List<String>() })
+        if i.sandboxed(user.copy()) {
+            // A sandboxed person's servers run only in their sandboxes, so it isn't tried here.
+            if let c = mut i.connects.find(key.copy()) { c.step = String("agents") }
+        } else {
+            try i.test_mcp(Waiter { socket: none, id: "{CONNECT_TEST}{key}" }, user, Obj.new().s("name", server).done())
+        }
+        let c = i.connects.find(key) else return Answer.Value(Obj.new().done())
+        return Answer.Value(Obj.new().j("connect", c.json()).done())
+    }
+
+    // Moves the connect `key` to `step`, with `said`, and tells the person's devices.
+    fn connect_to(i: mut Instance, key: String, step: str, said: String) {
+        var user = String()
+        var frame = Json.Null
+        if let c = mut i.connects.find(key.copy()) {
+            c.step = String(step)
+            c.said = said.copy()
+            user = c.user.copy()
+            frame = Obj.new().s("t", String("connect")).j("connect", c.json()).done()
+        }
+        if user.len() > 0 { i.publish(user, frame) }
+    }
+
+    // What a test of a server being connected said: it works, with its tools;
+    // it wants a sign-in; or why it didn't work.
+    fn connect_tested(i: mut Instance, key: String, result: Answer) {
+        if not i.connects.contains(key.copy()) { return }
+        match result {
+            Answer.Value(v) => {
+                var offers = List<String>()
+                for n in catalog.list(at(v, "tools")) { offers.push(n.as_str() ?? String()) }
+                if let c = mut i.connects.find(key.copy()) { c.tools = offers }
+                i.connect_to(key, "agents", String())
+            },
+            Answer.Refused(code, message) => {
+                if code == "sign_in_needed" {
+                    i.connect_to(key, "sign_in", String())
+                } else {
+                    i.connect_to(key, "failed", message)
+                }
+            },
+        }
+    }
+
+    // A sign-in to a server being connected went through (`error` empty), and
+    // the server is tried again, or didn't, which the connect says.
+    fn connect_signed(i: mut Instance, user: String, server: String, error: String) ! Error {
+        let key = "{user}/{server}"
+        var step = String()
+        if let c = i.connects.find(key.copy()) { step = c.step.copy() }
+        if step != "sign_in" { return }
+        if error.len() > 0 {
+            i.connect_to(key, "sign_in", error)
+            return
+        }
+        i.connect_to(key.copy(), "adding", String())
+        try i.test_mcp(Waiter { socket: none, id: "{CONNECT_TEST}{key}" }, user, Obj.new().s("name", server).done())
+    }
+
+    // mcp.agents: the person's agents that have the server `name` are
+    // `agents` (their ids), each changed as agent.update changes it, as the
+    // device. A connect that waits for its agents is done.
+    fn give_server(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        let server = str_at(args.copy(), "name") ?? String()
+        if try i.store.mcp_server(user.copy(), server.copy()) == none { return Answer.Refused(String("not_found"), "There's no MCP server {server}.") }
+        let Json.Array(wanted) = at(args, "agents") else return Answer.Refused(String("bad_request"), String("agents is a list of agents' ids."))
+        let all = try i.store.agents(user.copy())
+        var ids = List<String>()
+        for w in wanted {
+            let id = w.as_str() else return Answer.Refused(String("bad_request"), String("agents is a list of agents' ids."))
+            var mine = false
+            for a in all.copy() {
+                if str_at(a, "id") == some(id.copy()) { mine = true }
+            }
+            if not mine { return Answer.Refused(String("not_found"), "There's no agent {id}.") }
+            if not ids.contains(id.copy()) { ids.push(id) }
+        }
+        for a in all {
+            let id = str_at(a.copy(), "id") ?? String()
+            let want = ids.contains(id.copy())
+            if want == has_server(a.copy(), server.copy()) { continue }
+            var names = List<Json>()
+            for n in catalog.list(at(a, "mcp")) {
+                if n != Json.Str(server.copy()) { names.push(n.copy()) }
+            }
+            if want { names.push(Json.Str(server.copy())) }
+            if let Answer.Refused(code, message) = try i.command(user.copy(), device.copy(), String("agent.update"), Obj.new().s("agent", id).j("mcp", Json.Array(names)).done()) { return Answer.Refused(code, message) }
+        }
+        let key = "{user}/{server}"
+        var waited = false
+        if let c = i.connects.find(key.copy()) { waited = c.step == "agents" }
+        if waited {
+            i.connect_to(key.copy(), "done", String())
+            _ = i.connects.remove(key)
+        }
+        var given = List<Json>()
+        for id in ids { given.push(Json.Str(id.copy())) }
+        return Answer.Value(Obj.new().s("server", server).j("agents", Json.Array(given)).done())
+    }
+
+    // What a test of `user`'s server `server` found, kept for mcp.list's
+    // `status`: it worked, with `tools`, or why not, and whether that was a
+    // sign-in it wants.
+    fn keep_tested(i: Instance, user: String, server: String, found: List<String>, error: String, sign_in: bool) ! Error {
+        var names = List<Json>()
+        for t in found { names.push(Json.Str(t.copy())) }
+        var o = Obj.new().i("at", now()).b("ok", error.len() == 0)
+        if error.len() == 0 { o = o.j("tools", Json.Array(names)) } else { o = o.s("error", error).b("sign_in", sign_in) }
+        try i.store.set_meta("mcp_tested/{user}/{server}", "{o.done()}")
+    }
+
+    fn tested_of(i: Instance, user: String, server: String) -> Json ! Error {
+        let text = try i.store.meta("mcp_tested/{user}/{server}") else return Json.Null
+        return match parse(text) {
+            ok(j) => j,
+            err(_) => Json.Null,
         }
     }
 
@@ -12943,6 +13258,13 @@ impl Instance {
             i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
             return
         }
+        // The catalog, and giving a server to agents: only from one of the
+        // person's devices too, as they're the person's own choices.
+        if name == "catalog.list" or name == "catalog.connect" or name == "mcp.agents" {
+            let answer = if name == "catalog.list" { try i.catalog_list(user) } else if name == "catalog.connect" { try i.catalog_connect(user, device, args) } else { try i.give_server(user, device, args) }
+            i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
+            return
+        }
         if name == "chat.ask" {
             try i.side_question(Waiter { socket: some(s), id: id }, user, device, args)
             return
@@ -12995,6 +13317,11 @@ impl Instance {
             // The test of a server an agent proposed: its card and its call hear.
             if w.id.starts_with(MCP_ADD_TEST) {
                 if let err(e) = i.mcp_add_tested(w.id[MCP_ADD_TEST.len()..].copy(), result) { eprintln("loom: a proposed MCP server's test: {e}") }
+                return
+            }
+            // The test of a server being connected from the catalog: the connect goes on.
+            if w.id.starts_with(CONNECT_TEST) {
+                i.connect_tested(w.id[CONNECT_TEST.len()..].copy(), result)
                 return
             }
             // An agent's run_command: its tool call gets the answer, and
@@ -14184,6 +14511,8 @@ impl Instance {
             let done = server.done()
             // A sign-in is for one address: a server moved elsewhere signs in again.
             if let had = try i.store.mcp_server(user.copy(), server_name.copy()) {
+                // What its last test found was for the server as it was.
+                if not catalog.same_server(had.copy(), done.copy()) { try i.store.delete_meta("mcp_tested/{user}/{server_name}") }
                 if str_at(had, "url") != str_at(done.copy(), "url") {
                     let g = i.grant_of(user.copy(), server_name.copy())
                     _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())
@@ -14198,6 +14527,9 @@ impl Instance {
         if name == "mcp.delete" {
             let server_name = str_at(args, "name") ?? String()
             if not try i.store.delete_mcp_server(user.copy(), server_name.copy()) { return Answer.Refused(String("not_found"), "There's no MCP server {server_name}.") }
+            try i.store.delete_meta("mcp_catalog/{user}/{server_name}")
+            try i.store.delete_meta("mcp_tested/{user}/{server_name}")
+            _ = i.connects.remove("{user}/{server_name}")
             let g = i.grant_of(user.copy(), server_name.copy())
             _ = try i.store.delete_mcp_auth(user.copy(), server_name.copy())
             i.revoke_sign_in(user, server_name, g)
