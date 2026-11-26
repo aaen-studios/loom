@@ -113,6 +113,7 @@
   --warn: #f2a77a;
   --find: #3b3417;
   --find-current: #94781a;
+  --drop: #9ea8ff;
   --thread-periwinkle: #9ea8ff;
   --thread-mint: #74d6a6;
   --thread-apricot: #f2a77a;
@@ -149,6 +150,7 @@
     --warn: #c2621f;
     --find: #fbefb4;
     --find-current: #f2cc3d;
+    --drop: #5763e0;
     --thread-periwinkle: #5763e0;
     --thread-mint: #18a06a;
     --thread-apricot: #e07a3d;
@@ -185,6 +187,7 @@
   --warn: #c2621f;
   --find: #fbefb4;
   --find-current: #f2cc3d;
+  --drop: #5763e0;
   --thread-periwinkle: #5763e0;
   --thread-mint: #18a06a;
   --thread-apricot: #e07a3d;

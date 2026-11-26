@@ -50,55 +50,105 @@ use emoji_ui::RowKey;
 #[path = "routines.rs"]
 mod routines;
 
-/// What dropping a dragged agent on a row does.
-type DropAgent = Box<dyn Fn(&AgentDrag, &mut Window, &mut App) + 'static>;
-
-/// An agent being dragged in the sidebar to a new place, with what its floating copy
-/// under the pointer shows: its thread in its shape, and its name.
+/// An agent or a group chat being dragged in the sidebar to a new place, with what its
+/// floating copy under the pointer shows: the row lifted, its thread in its shape (or a
+/// group chat's members' threads woven) and its name. A tile drags among the tiles, a
+/// row among the list's rows and onto folders.
 #[derive(Clone)]
-pub struct AgentDrag {
+pub struct SideDrag {
     id: String,
     name: SharedString,
     tint: Hsla,
     outline: Option<Vec<(f32, f32)>>,
+    /// A group chat's colours, for its woven threads; empty for an agent.
+    weave: Vec<Hsla>,
+    /// Whether it's a pinned agent's tile.
+    tile: bool,
+    /// The rail's: its thread alone, no name.
+    rail: bool,
     p: Palette,
 }
 
-impl AgentDrag {
+impl SideDrag {
     fn of(a: &model::Agent, p: Palette) -> Self {
-        AgentDrag {
+        SideDrag {
             id: a.id.clone(),
             name: a.name.clone().into(),
             tint: thread::color(&a.color, p.dark),
             outline: a.outline().map(<[_]>::to_vec),
+            weave: Vec::new(),
+            tile: false,
+            rail: false,
             p,
         }
     }
 
-    fn ghost(d: &AgentDrag, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<AgentDrag> {
+    fn room(r: &model::Room, colors: Vec<Hsla>, p: Palette) -> Self {
+        SideDrag {
+            id: r.id.clone(),
+            name: r.name.clone().into(),
+            tint: p.ink_3,
+            outline: None,
+            weave: colors,
+            tile: false,
+            rail: false,
+            p,
+        }
+    }
+
+    fn tile(mut self) -> Self {
+        self.tile = true;
+        self
+    }
+
+    fn rail(mut self) -> Self {
+        self.rail = true;
+        self
+    }
+
+    fn ghost(d: &SideDrag, _: Point<Pixels>, _: &mut Window, cx: &mut App) -> Entity<SideDrag> {
         let d = d.clone();
         cx.new(|_| d)
     }
 }
 
-impl Render for AgentDrag {
+impl Render for SideDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         let p = self.p;
-        div()
-            .flex()
-            .items_center()
-            .gap(px(space::M))
-            .px(px(space::M))
-            .py(px(space::S))
-            .rounded(px(radius::ROW))
-            .bg(p.raised)
-            .border_1()
-            .border_color(p.line_strong)
-            .shadow_lg()
-            .text_size(px(size::BODY))
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(p.ink)
-            .child(thread::strand(
+        if self.tile && !self.rail {
+            return div()
+                .size(px(TILE))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(space::XS))
+                .px(px(space::S))
+                .rounded(px(radius::CARD))
+                .bg(p.raised_2)
+                .shadow_lg()
+                .child(thread::strand_in(
+                    format!("drag-{}", self.id),
+                    Mood::Idle,
+                    self.tint,
+                    self.outline.as_deref(),
+                    TILE_THREAD,
+                    16.0,
+                    None,
+                ))
+                .child(
+                    div()
+                        .w_full()
+                        .text_center()
+                        .text_size(px(size::SMALL))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(p.ink)
+                        .truncate()
+                        .child(self.name.clone()),
+                );
+        }
+        let mark = if self.weave.is_empty() {
+            div().child(thread::strand(
                 format!("drag-{}", self.id),
                 Mood::Idle,
                 self.tint,
@@ -107,7 +157,31 @@ impl Render for AgentDrag {
                 10.0,
                 None,
             ))
-            .child(self.name.clone())
+        } else {
+            div()
+                .w(px(26.0))
+                .h(px(14.0))
+                .flex_none()
+                .child(thread::weave(self.weave.clone(), 0.0, 1.0, 14.0))
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .when(!self.rail, |d| {
+                d.w(px(layout::SIDEBAR - 2.0 * space::S)).px(px(space::M))
+            })
+            .when(self.rail, |d| d.size(px(RAIL_ROW)).justify_center())
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .bg(p.raised_2)
+            .shadow_lg()
+            .text_size(px(size::BODY))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink)
+            .opacity(0.96)
+            .child(mark)
+            .when(!self.rail, |d| d.child(self.name.clone()))
     }
 }
 
@@ -135,6 +209,8 @@ pub struct Palette {
     /// A match found in the chat, and the one it's on (Ctrl+F).
     pub find: Hsla,
     pub find_current: Hsla,
+    /// Where something dragged lands, such as the line between two rows in the sidebar.
+    pub drop: Hsla,
 }
 
 impl Palette {
@@ -163,6 +239,7 @@ impl Palette {
             warn: c(d::WARN, l::WARN),
             find: c(d::FIND, l::FIND),
             find_current: c(d::FIND_CURRENT, l::FIND_CURRENT),
+            drop: c(d::DROP, l::DROP),
         }
     }
 }
@@ -220,7 +297,7 @@ enum Ctx {
     Message(String, Option<String>),
     /// A server in the sidebar's foot, by its folder.
     Server(String),
-    /// The sidebar's list of agents, under its last.
+    /// The sidebar's empty space, or its + New: New group chat, New agent, New folder.
     Agents,
     /// A folder in the sidebar, by its id.
     Folder(String),
@@ -490,6 +567,10 @@ pub struct Loom {
     renaming_folder: Option<String>,
     /// Whether the sidebar's hidden agents are shown.
     hidden_open: bool,
+    /// While an agent or a group chat is dragged in the sidebar: which one, and the row
+    /// it would land beside, true for over it, where the line shows.
+    side_dragging: Option<String>,
+    side_drop: Option<(String, bool)>,
     /// Whether the agent menu shows the folders to move the agent to.
     menu_folders: bool,
     listing_hosts: bool,
@@ -1594,6 +1675,8 @@ ACTA_KEY=secret:ACTA_KEY",
             folder_in,
             renaming_folder: None,
             hidden_open: false,
+            side_dragging: None,
+            side_drop: None,
             menu_folders: false,
             listing_hosts: false,
             ssh_host_in,
@@ -3200,34 +3283,97 @@ ACTA_KEY=secret:ACTA_KEY",
         });
     }
 
-    /// What dropping a dragged agent on the agent `onto` does: puts it in that one's
-    /// place, and tells the instance the new order. Dropped on one in a folder, it goes
-    /// in that folder; on one out of them, out of its own.
-    fn drop_agent(&self, onto: &str, cx: &mut Context<Self>) -> DropAgent {
-        let onto = onto.to_string();
-        Box::new(cx.listener(move |this, d: &AgentDrag, _, cx| {
-            let into = match this.model.part_of(&onto) {
-                Some(model::SidePart::Folder { id, .. }) => Some(Some(id)),
-                Some(model::SidePart::Agents) => Some(None),
-                _ => None,
-            };
-            if let Some(f) = this.model.move_agent(&d.id, &onto) {
-                this.send(f);
-            }
-            if let Some(group) = into {
-                let from = this.model.part_of(&d.id);
-                let already = match (&from, &group) {
-                    (Some(model::SidePart::Folder { id, .. }), Some(g)) => id == g,
-                    (Some(model::SidePart::Agents), None) => true,
-                    _ => false,
+    /// Makes a row of the sidebar's list, or one of the rail's, take a dragged agent or
+    /// group chat: over its upper half it lands before the row, else after it, where a
+    /// thin line shows, and a drop puts it there (`model::Model::drop_item`). While it's
+    /// dragged, its own row stays behind faded. Tiles drag only among tiles.
+    fn droppable(
+        &self,
+        row: Stateful<Div>,
+        id: &str,
+        rail: bool,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let p = self.p;
+        let line = self
+            .side_drop
+            .as_ref()
+            .filter(|(at, _)| at == id)
+            .map(|(_, over)| *over);
+        let faded = self.side_dragging.as_deref() == Some(id);
+        let (at, dropped) = (id.to_string(), id.to_string());
+        let inset = if rail { space::S } else { space::M };
+        row.relative()
+            .when(faded, |d| d.opacity(0.35))
+            .on_drag_move(
+                cx.listener(move |this, e: &DragMoveEvent<SideDrag>, _, cx| {
+                    let (tile, id) = {
+                        let d = e.drag(cx);
+                        (d.tile, d.id.clone())
+                    };
+                    if tile {
+                        return;
+                    }
+                    let mut changed = this.side_dragging.as_deref() != Some(id.as_str());
+                    this.side_dragging = Some(id);
+                    if e.bounds.contains(&e.event.position) {
+                        let here = Some((at.clone(), e.event.position.y < e.bounds.center().y));
+                        changed |= this.side_drop != here;
+                        this.side_drop = here;
+                    }
+                    if changed {
+                        cx.notify();
+                    }
+                }),
+            )
+            .can_drop(|d, _, _| d.downcast_ref::<SideDrag>().is_some_and(|d| !d.tile))
+            .on_drop(cx.listener(move |this, d: &SideDrag, _, cx| {
+                let over = this
+                    .side_drop
+                    .as_ref()
+                    .filter(|(at, _)| *at == dropped)
+                    .is_none_or(|(_, over)| *over);
+                let to = if over {
+                    model::Drop::Before(dropped.clone())
+                } else {
+                    model::Drop::After(dropped.clone())
                 };
-                if !already {
-                    let f = this.model.group_agent(&d.id, group.as_deref());
+                for f in this.model.drop_item(&d.id, &to) {
                     this.send(f);
                 }
-            }
-            cx.notify();
-        }))
+                this.side_drop = None;
+                this.side_dragging = None;
+                cx.notify();
+            }))
+            .when_some(line, move |d, over| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(inset))
+                        .right(px(inset))
+                        .h(px(2.0))
+                        .rounded_full()
+                        .bg(p.drop)
+                        .when(over, |d| d.top(px(-2.0)))
+                        .when(!over, |d| d.bottom(px(-2.0))),
+                )
+            })
+    }
+
+    /// Makes a pinned agent's tile, on the sidebar or the rail, take another tile
+    /// dragged onto it: the dragged one goes in its place.
+    fn tile_drop(&self, tile: Stateful<Div>, id: &str, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let onto = id.to_string();
+        tile.can_drop(|d, _, _| d.downcast_ref::<SideDrag>().is_some_and(|d| d.tile))
+            .drag_over::<SideDrag>(move |s, _, _, _| s.bg(p.raised_2))
+            .on_drop(cx.listener(move |this, d: &SideDrag, _, cx| {
+                let to = this.model.onto(&d.id, &onto);
+                for f in this.model.drop_item(&d.id, &to) {
+                    this.send(f);
+                }
+                cx.notify();
+            }))
     }
 
     /// Puts a sidebar folder's name in a field in its place, chosen, to type over.
@@ -6633,9 +6779,7 @@ ACTA_KEY=secret:ACTA_KEY",
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-            .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-            .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.raised_2))
-            .on_drop(self.drop_agent(&a.id, cx))
+            .on_drag(SideDrag::of(a, p).tile(), SideDrag::ghost)
             // The same key as its row's would be, so pinning or unpinning it while it
             // works carries on its motion.
             .child(thread::strand_in(
@@ -6674,9 +6818,74 @@ ACTA_KEY=secret:ACTA_KEY",
             })
     }
 
+    /// An agent waiting on the person, under the tiles: its thread, its name with what it
+    /// asks under it on one line, and a warm dot at its end. A click opens its chat, a
+    /// right-click its menu.
+    fn waiting_row(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+            && self.screen == Screen::Chat
+            && self.model.open_room.is_none();
+        let id = a.id.clone();
+        div()
+            .id(SharedString::from(format!("waiting-{}", a.id)))
+            .role(Role::Button)
+            .aria_label(a.name.clone())
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .cursor_pointer()
+            .when(selected, |d| d.bg(p.active))
+            .when(!selected, move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let id = id.clone();
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.agent_menu_at(id.clone(), e.position, cx);
+                })
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
+            .child(thread::strand(
+                format!("side-{}", a.id),
+                self.model.mood(&a.id),
+                thread::color(&a.color, p.dark),
+                a.outline(),
+                26.0,
+                10.0,
+                self.model.finished_at(&a.id),
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(size::BODY))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(p.ink)
+                            .truncate()
+                            .child(a.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(size::CAPTION))
+                            .text_color(p.ink_3)
+                            .truncate()
+                            .child(self.model.preview(a)),
+                    ),
+            )
+            .child(div().size(px(6.0)).flex_none().rounded_full().bg(p.warn))
+    }
+
     /// An agent's row in the sidebar: its thread, its name, and what it's on after it.
-    /// A click opens its chat, a right-click its menu, and it drags into a new place, or
-    /// into a folder.
+    /// A click opens its chat, a right-click its menu.
     fn agent_row(&self, a: &model::Agent, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
         let selected = self.model.selected.as_deref() == Some(a.id.as_str())
@@ -6724,9 +6933,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 })
             })
             .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-            .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-            .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
-            .on_drop(self.drop_agent(&a.id, cx))
             .child(thread::strand(
                 format!("side-{}", a.id),
                 mood,
@@ -6833,8 +7039,9 @@ ACTA_KEY=secret:ACTA_KEY",
             })
     }
 
-    /// A folder's head: a click opens or shuts it, a right-click has Rename and Delete,
-    /// and an agent dropped on it goes in. While it's being renamed, its name is a field.
+    /// A folder's head: a click opens or shuts it, a right-click has the New menu with
+    /// Rename and Delete, and an agent or a group chat dropped on it goes in, last. While
+    /// it's being renamed, its name is a field.
     fn folder_head(
         &self,
         folder: &str,
@@ -6873,45 +7080,129 @@ ACTA_KEY=secret:ACTA_KEY",
                 this.open_ctx(e.position, Ctx::Folder(menu_id.clone()), cx);
             }),
         )
-        .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover).text_color(p.ink))
-        .on_drop(cx.listener(move |this, d: &AgentDrag, _, cx| {
-            let f = this.model.group_agent(&d.id, Some(&drop_id));
-            this.send(f);
+        .on_drag_move(cx.listener(|this, e: &DragMoveEvent<SideDrag>, _, cx| {
+            // Over a folder's name, the line goes: it goes in the folder.
+            if e.bounds.contains(&e.event.position) && this.side_drop.is_some() {
+                this.side_drop = None;
+                cx.notify();
+            }
+        }))
+        .can_drop(|d, _, _| d.downcast_ref::<SideDrag>().is_some_and(|d| !d.tile))
+        .drag_over::<SideDrag>(move |s, _, _, _| s.bg(p.hover).text_color(p.ink))
+        .on_drop(cx.listener(move |this, d: &SideDrag, _, cx| {
+            for f in this
+                .model
+                .drop_item(&d.id, &model::Drop::Folder(drop_id.clone()))
+            {
+                this.send(f);
+            }
+            this.side_drop = None;
+            this.side_dragging = None;
             cx.notify();
         }))
         .into_any_element()
     }
 
-    /// The sidebar's agents, as the core groups them (`core/sidebar.calx`): who's waiting
-    /// on the person, the pinned ones as tiles, the rest each on one line, each folder
-    /// under its name, and the hidden ones last, shut until opened.
+    /// An agent or a group chat in the sidebar's list, or in a folder: its row, which
+    /// drags into a new place, or onto a folder.
+    fn side_row(&self, it: &model::SideItem, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let p = self.p;
+        match it {
+            model::SideItem::Agent(id) => {
+                let Some(a) = self.model.agent(id) else {
+                    return Vec::new();
+                };
+                let row = self
+                    .agent_row(a, cx)
+                    .on_drag(SideDrag::of(a, p), SideDrag::ghost);
+                let mut out = vec![self.droppable(row, id, false, cx).into_any_element()];
+                out.extend(
+                    self.ask_rows(a, cx)
+                        .into_iter()
+                        .map(IntoElement::into_any_element),
+                );
+                out
+            }
+            model::SideItem::Room(id) => {
+                let Some(r) = self.model.room(id).cloned() else {
+                    return Vec::new();
+                };
+                let row = self
+                    .room_row(&r, cx)
+                    .on_drag(SideDrag::room(&r, self.room_colors(&r), p), SideDrag::ghost);
+                vec![self.droppable(row, id, false, cx).into_any_element()]
+            }
+        }
+    }
+
+    /// The quiet row that ends the list: + New, which opens New group chat, New agent and
+    /// New folder.
+    fn new_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        let p = self.p;
+        div()
+            .id("side-new")
+            .role(Role::Button)
+            .aria_label("New")
+            .flex()
+            .items_center()
+            .gap(px(space::M))
+            .px(px(space::M))
+            .py(px(space::S))
+            .rounded(px(radius::ROW))
+            .text_size(px(size::BODY))
+            .text_color(p.ink_3)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+            .child(
+                div()
+                    .w(px(26.0))
+                    .flex()
+                    .justify_center()
+                    .child(Icon::new(Ico::Plus).small()),
+            )
+            .child("New")
+            .on_click(cx.listener(|this, e: &ClickEvent, _, cx| {
+                this.open_ctx(e.position(), Ctx::Agents, cx)
+            }))
+    }
+
+    /// The thin line between who's waiting, or the tiles, and the list.
+    fn side_line(&self) -> Div {
+        div()
+            .mx(px(space::L))
+            .my(px(space::XS))
+            .h(px(1.0))
+            .bg(self.p.line)
+    }
+
+    /// The sidebar's agents and group chats, as the core groups them (`core/sidebar.calx`):
+    /// the pinned agents as tiles, who's waiting on the person under a small head, a thin
+    /// line, then one list of agents and group chats in the person's order with each
+    /// folder under its name, + New, and the hidden ones last, shut until opened.
     fn agent_list(&mut self, cx: &mut Context<Self>) -> Div {
-        let agents = self.model.agents.clone();
-        let sections = self.model.sidebar.clone();
-        let by_id: HashMap<&str, &model::Agent> =
-            agents.iter().map(|a| (a.id.as_str(), a)).collect();
-        // An agent the sidebar doesn't have yet, just made, goes with the rest.
-        let listed: HashSet<&str> = sections
-            .iter()
-            .flat_map(|s| s.agents.iter().map(String::as_str))
-            .collect();
-        let extra: Vec<&model::Agent> = agents
-            .iter()
-            .filter(|a| !listed.contains(a.id.as_str()))
-            .collect();
+        let sections = self.model.side_sections();
         let mut tiles = Vec::new();
-        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
         let mut top = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
         let mut waiting = false;
+        let mut list = div().flex().flex_col().gap(px(2.0)).px(px(space::S));
+        let mut hidden = Vec::new();
         for sec in sections.iter() {
-            let members: Vec<&model::Agent> = sec
-                .agents
-                .iter()
-                .filter_map(|id| by_id.get(id.as_str()).copied())
+            let agents: Vec<model::Agent> = sec
+                .agents()
+                .filter_map(|id| self.model.agent(id).cloned())
                 .collect();
             match &sec.part {
+                model::SidePart::Pinned => {
+                    for a in &agents {
+                        let tile = self.pinned_tile(a, cx);
+                        tiles.push(self.tile_drop(tile, &a.id, cx));
+                        // Its tile has no room under it for other agents' threads with it:
+                        // they head the list while it's open.
+                        list = list.children(self.ask_rows(a, cx));
+                    }
+                }
                 model::SidePart::Waiting => {
-                    if members.is_empty() {
+                    if agents.is_empty() {
                         continue;
                     }
                     waiting = true;
@@ -6920,23 +7211,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         "Waiting on you".into(),
                         None,
                     ));
-                    for a in members {
-                        top = top.child(self.agent_row(a, cx));
+                    for a in &agents {
+                        top = top.child(self.waiting_row(a, cx));
                         top = top.children(self.ask_rows(a, cx));
                     }
                 }
-                model::SidePart::Pinned => {
-                    for a in members {
-                        tiles.push(self.pinned_tile(a, cx));
-                        // Its tile has no room under it for other agents' threads with it:
-                        // they head the list while it's open.
-                        list = list.children(self.ask_rows(a, cx));
-                    }
-                }
-                model::SidePart::Agents => {
-                    for a in members.into_iter().chain(extra.iter().copied()) {
-                        list = list.child(self.agent_row(a, cx));
-                        list = list.children(self.ask_rows(a, cx));
+                model::SidePart::List => {
+                    for it in &sec.items {
+                        list = list.children(self.side_row(it, cx));
                     }
                 }
                 model::SidePart::Folder {
@@ -6946,77 +7228,60 @@ ACTA_KEY=secret:ACTA_KEY",
                 } => {
                     list = list.child(self.folder_head(id, name, *collapsed, cx));
                     if !collapsed {
-                        for a in members {
-                            list = list.child(self.agent_row(a, cx));
-                            list = list.children(self.ask_rows(a, cx));
+                        for it in &sec.items {
+                            list = list.children(self.side_row(it, cx));
                         }
                     }
                 }
-                model::SidePart::Hidden => {
-                    if members.is_empty() {
-                        continue;
-                    }
-                    let open = self.hidden_open;
-                    list = list.child(
-                        self.group_head("group-hidden".into(), "Hidden".into(), Some(open))
-                            .role(Role::Button)
-                            .aria_label("Hidden")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.hidden_open = !open;
-                                cx.notify();
-                            })),
-                    );
-                    if open {
-                        for a in members {
-                            list = list.child(self.agent_row(a, cx));
-                            list = list.children(self.ask_rows(a, cx));
-                        }
-                    }
-                }
+                model::SidePart::Hidden => hidden = agents,
             }
         }
-        // Before the core has grouped them: as they're listed.
-        if sections.is_empty() {
-            for a in agents.iter() {
-                if a.pinned.is_some() {
-                    tiles.push(self.pinned_tile(a, cx));
-                    list = list.children(self.ask_rows(a, cx));
-                } else {
+        list = list.child(self.new_row(cx));
+        if !hidden.is_empty() {
+            let open = self.hidden_open;
+            list = list.child(
+                self.group_head(
+                    "group-hidden".into(),
+                    format!("Hidden · {}", hidden.len()),
+                    Some(open),
+                )
+                .role(Role::Button)
+                .aria_label("Hidden")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.hidden_open = !open;
+                    cx.notify();
+                })),
+            );
+            if open {
+                for a in &hidden {
                     list = list.child(self.agent_row(a, cx));
                     list = list.children(self.ask_rows(a, cx));
                 }
             }
         }
+        let above = waiting || !tiles.is_empty();
         div()
             .flex()
             .flex_col()
             .gap(px(space::S))
-            .when_some(self.room_list(cx), |d, rooms| {
-                d.child(rooms)
-                    .child(div().px(px(space::S)).child(self.group_head(
-                        "group-agents".into(),
-                        "Agents".into(),
-                        None,
-                    )))
-            })
-            .when(waiting, |d| d.child(top))
             .when(!tiles.is_empty(), |d| {
                 d.child(
                     div()
                         .flex()
                         .flex_wrap()
-                        .justify_center()
                         .gap(px(space::XS))
                         .px(px(space::S))
                         .children(tiles),
                 )
             })
+            .when(waiting, |d| d.child(top))
+            .when(above, |d| d.child(self.side_line()))
             .child(list)
     }
 
-    /// The whole sidebar: the knot and the wordmark, the + and the collapse, search when
-    /// it's shown, the agents as the core groups them (`agent_list`), and at the foot the
-    /// server, the update icon and the gear.
+    /// The whole sidebar: the knot and the wordmark, the collapse, search when it's
+    /// shown, the agents and group chats as the core groups them (`agent_list`), and at
+    /// the foot the server, the update icon and the gear.
     fn whole_sidebar(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let searching = !self.model.query.trim().is_empty();
@@ -7067,14 +7332,7 @@ ACTA_KEY=secret:ACTA_KEY",
                                     .child("loom"),
                             ),
                     )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.0))
-                            .child(self.new_agent_button("new-agent", control::ICON_SMALL, cx))
-                            .child(self.bar_button(false, cx)),
-                    ),
+                    .child(self.bar_button(false, cx)),
             )
             .when(search_shown, |d| {
                 d.child(
@@ -7154,6 +7412,11 @@ ACTA_KEY=secret:ACTA_KEY",
         // What's in it is a view of its own, drawn again only when what it shows changes
         // (`SidebarKey`), its threads move or a hover in it fades: a frame that only
         // changes the chat, such as a reply streaming, uses it as it was.
+        // A drag let go away from the sidebar leaves no line or faded row behind.
+        if !cx.has_active_drag() {
+            self.side_dragging = None;
+            self.side_drop = None;
+        }
         let key = self.sidebar_key(railed);
         let view = match &self.side_view {
             Some(v) => v.clone(),
@@ -7233,7 +7496,15 @@ ACTA_KEY=secret:ACTA_KEY",
                 .selected
                 .clone()
                 .filter(|_| self.screen == Screen::Chat && model.open_room.is_none()),
-            rooms: model.sidebar_rooms().into_iter().cloned().collect(),
+            rooms: model.rooms.clone(),
+            rooms_unread: model
+                .rooms
+                .iter()
+                .filter(|r| model.room_unread(&r.id))
+                .map(|r| r.id.clone())
+                .collect(),
+            dragging: self.side_dragging.clone(),
+            drop_at: self.side_drop.clone(),
             room_open: model
                 .open_room
                 .clone()
@@ -7324,32 +7595,6 @@ ACTA_KEY=secret:ACTA_KEY",
                 control::ICON_SMALL,
             ))
             .on_click(cx.listener(|this, _, window, cx| this.toggle_bar(window, cx)))
-    }
-
-    /// The + that makes an agent, `size` square.
-    fn new_agent_button(
-        &self,
-        id: &'static str,
-        size: f32,
-        cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
-        let p = self.p;
-        div()
-            .id(id)
-            .role(Role::Button)
-            .aria_label("New agent")
-            .occlude()
-            .size(px(size))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::ROW))
-            .text_color(p.ink_2)
-            .cursor_pointer()
-            .soft_hover(transparent_black(), p.hover, None)
-            .child(Icon::new(IconName::Plus).small())
-            .on_click(cx.listener(|this, _, _, cx| this.open(Screen::NewAgent, cx)))
     }
 
     /// The limits of the person's plans, over the server's row: a box for each program
@@ -7468,40 +7713,129 @@ ACTA_KEY=secret:ACTA_KEY",
             }))
     }
 
-    /// The agents the rail shows: the sidebar's, in its order, without the hidden ones,
-    /// and one just made that it doesn't have yet. Before the core has grouped them, as
-    /// they're listed.
-    fn rail_agents(&self) -> Vec<model::Agent> {
-        if self.model.sidebar.is_empty() {
-            return self.model.agents.to_vec();
-        }
-        let listed: HashSet<&str> = self
-            .model
-            .sidebar
-            .iter()
-            .flat_map(|s| s.agents.iter().map(String::as_str))
-            .collect();
-        let mut out: Vec<model::Agent> = self
-            .model
-            .shown_agents()
-            .iter()
-            .filter_map(|id| self.model.agent(id).cloned())
-            .collect();
-        out.extend(
-            self.model
-                .agents
-                .iter()
-                .filter(|a| !listed.contains(a.id.as_str()))
-                .cloned(),
-        );
-        out
+    /// One agent or group chat on the rail: an agent's thread, or a group chat's members'
+    /// threads woven in its colours, its name out to its right under the pointer, a dot
+    /// while a reply waits (a warm one while the agent waits on the person), dragged
+    /// into a new place as its row would be.
+    fn rail_item(
+        &self,
+        it: &model::SideItem,
+        part: &model::SidePart,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let p = self.p;
+        let el = SharedString::from(format!("rail-{}", it.id()));
+        let hover = motion::hover_key(el.clone());
+        let base = div()
+            .id(el)
+            .role(Role::Button)
+            .relative()
+            .size(px(RAIL_ROW))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .cursor_pointer();
+        let (selected, tile) = match it {
+            model::SideItem::Agent(id) => {
+                let a = self.model.agent(id)?.clone();
+                let selected = self.model.selected.as_deref() == Some(a.id.as_str())
+                    && self.screen == Screen::Chat
+                    && self.model.open_room.is_none();
+                let waiting = *part == model::SidePart::Waiting;
+                let unread = self.model.unread.contains(&a.id);
+                let (menu, open) = (a.id.clone(), a.id.clone());
+                let mut tile = base
+                    .aria_label(a.name.clone())
+                    .children(tip_beside(
+                        p,
+                        &hover,
+                        a.name.clone().into(),
+                        RAIL_ROW,
+                        RAIL_ROW,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.agent_menu_at(menu.clone(), e.position, cx);
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.select(open.clone(), cx)))
+                    .child(thread::strand(
+                        format!("side-{}", a.id),
+                        self.model.mood(&a.id),
+                        thread::color(&a.color, p.dark),
+                        a.outline(),
+                        26.0,
+                        10.0,
+                        self.model.finished_at(&a.id),
+                    ))
+                    .when(waiting, |d| d.child(rail_dot(p).bg(p.warn)))
+                    .when(unread && !waiting, |d| d.child(rail_dot(p)));
+                tile = match part {
+                    model::SidePart::Pinned => {
+                        let t = tile.on_drag(SideDrag::of(&a, p).tile().rail(), SideDrag::ghost);
+                        self.tile_drop(t, &a.id, cx)
+                    }
+                    model::SidePart::Waiting => tile,
+                    _ => {
+                        let t = tile.on_drag(SideDrag::of(&a, p).rail(), SideDrag::ghost);
+                        self.droppable(t, &a.id, true, cx)
+                    }
+                };
+                (selected, tile)
+            }
+            model::SideItem::Room(id) => {
+                let r = self.model.room(id)?.clone();
+                let selected = self.model.open_room.as_deref() == Some(r.id.as_str())
+                    && self.screen == Screen::Chat;
+                let (menu, open) = (r.id.clone(), r.id.clone());
+                let tile = base
+                    .aria_label(r.name.clone())
+                    .children(tip_beside(
+                        p,
+                        &hover,
+                        r.name.clone().into(),
+                        RAIL_ROW,
+                        RAIL_ROW,
+                    ))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_ctx(e.position, Ctx::Room(menu.clone()), cx);
+                        }),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_room(open.clone(), cx)))
+                    .child(self.room_mark(&r, 26.0, 14.0))
+                    .when(self.model.room_unread(&r.id), |d| d.child(rail_dot(p)))
+                    .on_drag(
+                        SideDrag::room(&r, self.room_colors(&r), p).rail(),
+                        SideDrag::ghost,
+                    );
+                (selected, self.droppable(tile, &r.id, true, cx))
+            }
+        };
+        let tile = tile
+            .when(selected, |d| d.bg(p.active))
+            .when(!selected, move |d| {
+                d.soft_hover(transparent_black(), p.hover, None)
+            });
+        // The one on screen has no hover to fade, so its name keeps the pointer itself.
+        Some(if selected {
+            motion::tracks_hover(tile, hover).into_any_element()
+        } else {
+            tile.into_any_element()
+        })
     }
 
     /// The sidebar collapsed: the control that opens it (beside a Mac's traffic lights,
-    /// in the title bar), each agent as its thread, in the sidebar's order without the
-    /// hidden ones, a short line under the pinned ones, with a dot while a reply waits and its name out to its right
-    /// under the pointer, and at the foot the update icon over the gear over the server's
-    /// yarn.
+    /// in the title bar), then as the sidebar has them, without the hidden ones, the
+    /// pinned agents, who's waiting, the agents and group chats, and each folder's, a
+    /// short line between each part (`rail_item`), and at the foot the update icon over
+    /// the gear over the server's yarn.
     fn rail(&mut self, cx: &mut Context<Self>) -> Div {
         let p = self.p;
         let mut list = div()
@@ -7510,18 +7844,8 @@ ACTA_KEY=secret:ACTA_KEY",
             .items_center()
             .gap(px(2.0))
             .py(px(space::XS));
-        // In the sidebar's order, without the hidden ones.
-        let agents = self.rail_agents();
-        for (n, a) in agents.iter().enumerate() {
-            let selected = self.model.selected.as_deref() == Some(a.id.as_str())
-                && self.screen == Screen::Chat
-                && self.model.open_room.is_none();
-            let unread = self.model.unread.contains(&a.id);
-            let id = a.id.clone();
-            let el = SharedString::from(format!("rail-{}", a.id));
-            let hover = motion::hover_key(el.clone());
-            // The pinned agents come first (model.rs): a line ends them.
-            if n > 0 && agents[n - 1].pinned.is_some() && a.pinned.is_none() {
+        for (n, sec) in self.model.rail_parts().iter().enumerate() {
+            if n > 0 {
                 list = list.child(
                     div()
                         .w(px(space::L))
@@ -7531,57 +7855,11 @@ ACTA_KEY=secret:ACTA_KEY",
                         .bg(p.line_strong),
                 );
             }
-            let tile = div()
-                .id(el)
-                .role(Role::Button)
-                .aria_label(a.name.clone())
-                .relative()
-                .size(px(RAIL_ROW))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded(px(radius::ROW))
-                .cursor_pointer()
-                .when(selected, |d| d.bg(p.active))
-                .when(!selected, move |d| {
-                    d.soft_hover(transparent_black(), p.hover, None)
-                })
-                .children(tip_beside(
-                    p,
-                    &hover,
-                    a.name.clone().into(),
-                    RAIL_ROW,
-                    RAIL_ROW,
-                ))
-                .on_mouse_down(MouseButton::Right, {
-                    let id = id.clone();
-                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.agent_menu_at(id.clone(), e.position, cx);
-                    })
-                })
-                .on_click(cx.listener(move |this, _, _, cx| this.select(id.clone(), cx)))
-                .on_drag(AgentDrag::of(a, p), AgentDrag::ghost)
-                .drag_over::<AgentDrag>(move |s, _, _, _| s.bg(p.hover))
-                .on_drop(self.drop_agent(&a.id, cx))
-                .child(thread::strand(
-                    format!("side-{}", a.id),
-                    self.model.mood(&a.id),
-                    thread::color(&a.color, p.dark),
-                    a.outline(),
-                    26.0,
-                    10.0,
-                    self.model.finished_at(&a.id),
-                ))
-                .when(unread, |d| d.child(rail_dot(p)));
-            // The one on screen has no hover to fade, so its name keeps the pointer itself.
-            list = list.child(if selected {
-                motion::tracks_hover(tile, hover)
-            } else {
-                tile
-            });
+            for it in &sec.items {
+                list = list.children(self.rail_item(it, &sec.part, cx));
+            }
         }
+
         let server_open = self.popup.is_some_and(is_server);
         let settings_open = self.popup.is_some() && !server_open;
         // The other servers' yarns over the one on screen, which is at the very bottom.
@@ -9596,6 +9874,28 @@ ACTA_KEY=secret:ACTA_KEY",
         cx.notify();
     }
 
+    /// What the sidebar's + New, and a right-click on its empty space or on a folder,
+    /// offer: New group chat, New agent and New folder.
+    fn new_menu(&self, panel: Div, cx: &mut Context<Self>) -> Div {
+        panel
+            .child(
+                self.menu_item("ctx-new-room", Ico::Users, "New group chat", false)
+                    .on_click(cx.listener(|this, _, window, cx| this.new_room(window, cx))),
+            )
+            .child(
+                self.menu_item("ctx-new-agent", Ico::Bot, "New agent", false)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.ctx = None;
+                        this.open(Screen::NewAgent, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                self.menu_item("ctx-new-folder", Ico::Folder, "New folder", false)
+                    .on_click(cx.listener(|this, _, _, cx| this.new_folder(None, cx))),
+            )
+    }
+
     /// The menu a right-click opened, at the pointer, with what can be done to what was
     /// clicked: the same things its buttons and the agent menu do.
     fn ctx_menu(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -9813,26 +10113,14 @@ ACTA_KEY=secret:ACTA_KEY",
                         })),
                 );
             }
-            Ctx::Agents => {
-                panel = panel
-                    .child(
-                        self.menu_item("ctx-new-agent", Ico::Plus, "New agent", false)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.ctx = None;
-                                this.open(Screen::NewAgent, cx);
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        self.menu_item("ctx-new-folder", Ico::FolderPlus, "New folder", false)
-                            .on_click(cx.listener(|this, _, _, cx| this.new_folder(None, cx))),
-                    );
-            }
+            Ctx::Agents => panel = self.new_menu(panel, cx),
             Ctx::Room(room) => panel = self.room_menu(panel, room, cx),
             Ctx::Resend(message, agent) => panel = self.resend_menu(panel, message, agent, cx),
             Ctx::Folder(folder) => {
                 let rename = folder.clone();
-                panel = panel
+                panel = self
+                    .new_menu(panel, cx)
+                    .child(div().my(px(space::XS)).h(px(1.0)).bg(p.line))
                     .child(
                         self.menu_item("ctx-rename-folder", Ico::Pencil, "Rename", false)
                             .on_click(cx.listener(move |this, _, window, cx| {
@@ -25590,9 +25878,13 @@ struct SidebarKey {
     hidden_open: bool,
     /// The agent whose chat is on screen.
     selected: Option<String>,
-    /// The group chats, and the one on screen.
+    /// The group chats, the ones with a reply not seen, and the one on screen.
     rooms: Vec<model::Room>,
+    rooms_unread: Vec<String>,
     room_open: Option<String>,
+    /// What's being dragged in it, and the line where it would land.
+    dragging: Option<String>,
+    drop_at: Option<(String, bool)>,
     /// Another agent's thread with it, when that's on screen in its chat's place.
     ask_open: Option<String>,
     query: String,

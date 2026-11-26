@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 
 mod rooms;
 pub use rooms::{Room, RoomUsage, Routed};
+mod sidebar;
+pub use sidebar::{Drop, Section, SideItem, SidePart};
 
 /// What the app asks the core for, and when.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -79,57 +81,6 @@ fn sort_agents(agents: &mut [Agent]) {
             a.pinned.unwrap_or(0),
         )
     });
-}
-
-/// A part of the sidebar, as the core groups the agents (`core/sidebar.calx`): who's
-/// waiting on the person, the pinned ones, the rest not in a folder, each folder, and
-/// the hidden ones.
-#[derive(Clone, Debug, PartialEq)]
-pub enum SidePart {
-    Waiting,
-    Pinned,
-    Agents,
-    Folder {
-        id: String,
-        name: String,
-        collapsed: bool,
-    },
-    Hidden,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Section {
-    pub part: SidePart,
-    /// Its agents' ids, in order.
-    pub agents: Vec<String>,
-}
-
-impl Section {
-    fn of(v: &Value) -> Option<Section> {
-        let part = match v.get("kind").and_then(Value::as_str)? {
-            "waiting" => SidePart::Waiting,
-            "pinned" => SidePart::Pinned,
-            "agents" => SidePart::Agents,
-            "hidden" => SidePart::Hidden,
-            "group" => SidePart::Folder {
-                id: s(v, "id"),
-                name: s(v, "name"),
-                collapsed: v.get("collapsed").and_then(Value::as_bool).unwrap_or(false),
-            },
-            _ => return None,
-        };
-        let agents = v
-            .get("agents")
-            .and_then(Value::as_array)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Some(Section { part, agents })
-    }
 }
 
 /// A drawing as the instance keeps it: `[[x, y], ...]`.
@@ -5260,8 +5211,9 @@ pub struct Model {
     pub open_branch: Option<String>,
     /// The group chats, as the conversations list has them (PLAN.md, "Group chats").
     pub rooms: Vec<Room>,
-    /// Their order in the sidebar, as the core gives it.
-    room_order: Vec<String>,
+    /// Every agent and group chat in the person's order, as the core gives it
+    /// (`core/sidebar.calx`), for a drag to rearrange.
+    side_order: Vec<String>,
     /// The group chat the chat shows, by conversation, instead of the agent's chat.
     pub open_room: Option<String>,
     /// The room.create the app sent last, to show the group chat once it's made.
@@ -6556,9 +6508,11 @@ impl Model {
                         .map(|c| c.agent.clone())
                         .unwrap_or_else(|| s(&message, "agent"));
                     // One in another agent's thread with it marks that thread, not the
-                    // agent's chat with the person.
+                    // agent's chat with the person; one in a group chat marks that.
                     if asked {
                         self.asks_unread.insert(conversation.clone());
+                    } else if self.room(&conversation).is_some() {
+                        self.unread.insert(conversation.clone());
                     } else if !agent.is_empty() {
                         self.first_unread.entry(agent.clone()).or_insert((id, 0)).1 += 1;
                         self.unread.insert(agent);
@@ -8008,26 +7962,7 @@ impl Model {
             .cloned()
             .unwrap_or_default();
         match what {
-            List::Sidebar => {
-                let sections = f
-                    .get("items")
-                    .and_then(Value::as_array)
-                    .map(|ss| ss.iter().filter_map(Section::of).collect())
-                    .unwrap_or_default();
-                self.sidebar = Rc::new(sections);
-                // Its group chats, first, as the core orders them.
-                self.room_order = items
-                    .iter()
-                    .filter(|sec| sec.get("kind").and_then(Value::as_str) == Some("rooms"))
-                    .flat_map(|sec| {
-                        sec.get("rooms")
-                            .and_then(Value::as_array)
-                            .cloned()
-                            .unwrap_or_default()
-                    })
-                    .map(|r| s(&r, "id"))
-                    .collect();
-            }
+            List::Sidebar => self.take_sidebar(&items),
             // Offline, from the cache, until device.list says when each was last on.
             List::Devices => {
                 self.devices = items
@@ -10266,25 +10201,6 @@ impl Model {
         "You".into()
     }
 
-    /// Puts the agent `id`, dragged in the sidebar, in the place of `onto`, and gives
-    /// the instance the new order. Pinned agents stay above the rest.
-    pub fn move_agent(&mut self, id: &str, onto: &str) -> Option<Value> {
-        let from = self.agents.iter().position(|a| a.id == id)?;
-        let to = self.agents.iter().position(|a| a.id == onto)?;
-        if from == to {
-            return None;
-        }
-        let moved = Rc::make_mut(&mut self.agents).remove(from);
-        Rc::make_mut(&mut self.agents).insert(to, moved);
-        for (k, a) in Rc::make_mut(&mut self.agents).iter_mut().enumerate() {
-            a.order = Some(k as i64);
-        }
-        sort_agents(Rc::<Vec<Agent>>::make_mut(&mut self.agents));
-        let cmd = self.id("app.order");
-        let ids: Vec<&str> = self.agents.iter().map(|a| a.id.as_str()).collect();
-        Some(json!({"t": "cmd", "id": cmd, "name": "agent.order", "args": {"agents": ids}}))
-    }
-
     /// Pins the open agent to the top of the list, or takes its pin off.
     pub fn pin_agent(&mut self, pinned: bool) -> Option<Value> {
         let agent = self.selected.clone()?;
@@ -10292,25 +10208,6 @@ impl Model {
         Some(
             json!({"t": "cmd", "id": id, "name": "agent.pin", "args": {"agent": agent, "pinned": pinned}}),
         )
-    }
-
-    /// Puts an agent in a sidebar folder, or with None, out of them. It shows there at
-    /// once, and the instance tells every device.
-    pub fn group_agent(&mut self, agent: &str, group: Option<&str>) -> Value {
-        let sections = Rc::make_mut(&mut self.sidebar);
-        for sec in sections.iter_mut() {
-            sec.agents.retain(|a| a != agent);
-        }
-        let into = sections.iter_mut().find(|sec| match (&sec.part, group) {
-            (SidePart::Folder { id, .. }, Some(g)) => id == g,
-            (SidePart::Agents, None) => true,
-            _ => false,
-        });
-        if let Some(sec) = into {
-            sec.agents.push(agent.to_string());
-        }
-        let id = self.id("app.group_agent");
-        json!({"t": "cmd", "id": id, "name": "agent.group", "args": {"agent": agent, "group": group.unwrap_or_default()}})
     }
 
     /// Hides an agent in the sidebar, or shows it again.
@@ -10366,35 +10263,6 @@ impl Model {
     pub fn delete_folder(&mut self, folder: &str) -> Value {
         let id = self.id("app.folder");
         json!({"t": "cmd", "id": id, "name": "group.delete", "args": {"group": folder}})
-    }
-
-    /// The part of the sidebar an agent is in.
-    pub fn part_of(&self, agent: &str) -> Option<SidePart> {
-        self.sidebar
-            .iter()
-            .find(|sec| sec.agents.iter().any(|a| a == agent))
-            .map(|sec| sec.part.clone())
-    }
-
-    /// The sidebar's folders, each id and name, in order.
-    pub fn folders(&self) -> Vec<(String, String)> {
-        self.sidebar
-            .iter()
-            .filter_map(|sec| match &sec.part {
-                SidePart::Folder { id, name, .. } => Some((id.clone(), name.clone())),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// The agents of the sidebar, in its order, without the hidden ones: what the rail
-    /// shows, and what Ctrl+1 to 9 open.
-    pub fn shown_agents(&self) -> Vec<String> {
-        self.sidebar
-            .iter()
-            .filter(|sec| sec.part != SidePart::Hidden)
-            .flat_map(|sec| sec.agents.iter().cloned())
-            .collect()
     }
 
     /// Sets an agent's permission mode, or with None, has it follow the default.
@@ -15103,21 +14971,31 @@ mod tests {
         let mut m = Model::new();
         let asked: Vec<Value> = m.fetches();
         assert!(asked.iter().any(|f| f["what"] == "sidebar"));
-        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
-            {"kind": "waiting", "agents": ["a_3"]},
-            {"kind": "pinned", "agents": []},
-            {"kind": "agents", "agents": ["a_1"]},
-            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "agents": ["a_2"]},
-            {"kind": "hidden", "agents": ["a_4"]}
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [
+            {"id": "a_1", "name": "One"}, {"id": "a_2", "name": "Two"}, {"id": "a_3", "name": "Three"}, {"id": "a_4", "name": "Four", "hidden": 2}
         ]}));
+        m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
+            {"kind": "pinned", "agents": []},
+            {"kind": "waiting", "agents": ["a_3"]},
+            {"kind": "list", "items": [{"kind": "agent", "id": "a_1"}]},
+            {"kind": "group", "id": "g_1", "name": "Work", "collapsed": false, "items": [{"kind": "agent", "id": "a_2"}]},
+            {"kind": "hidden", "agents": ["a_4"]},
+            {"kind": "order", "items": ["a_3", "a_1", "a_2", "a_4"]}
+        ]}));
+        let shown = |m: &Model| -> Vec<String> {
+            m.rail_parts()
+                .iter()
+                .flat_map(|s| s.items.iter().map(|i| i.id().to_string()))
+                .collect()
+        };
         assert_eq!(m.folders(), [("g_1".to_string(), "Work".to_string())]);
-        assert_eq!(m.shown_agents(), ["a_3", "a_1", "a_2"]);
+        assert_eq!(shown(&m), ["a_3", "a_1", "a_2"]);
         assert_eq!(m.part_of("a_4"), Some(SidePart::Hidden));
         // Put in the folder, it's there at once.
         let f = m.group_agent("a_1", Some("g_1"));
         assert_eq!(f["name"], "agent.group");
         assert_eq!(f["args"], json!({"agent": "a_1", "group": "g_1"}));
-        assert_eq!(m.shown_agents(), ["a_3", "a_2", "a_1"]);
+        assert_eq!(shown(&m), ["a_3", "a_2", "a_1"]);
         let f = m.collapse_folder("g_1", true);
         assert_eq!(f["args"], json!({"group": "g_1", "collapsed": true}));
         assert!(m.rename_folder("g_1", "  ").is_none());
@@ -15151,7 +15029,7 @@ mod tests {
     }
 
     #[test]
-    fn agents_stay_where_they_were_dragged() {
+    fn agents_are_listed_where_they_were_dragged() {
         let mut m = Model::new();
         m.take(&json!({"t": "core.data", "what": "agents", "items": [
             {"id": "a_1", "name": "One", "order": 2},
@@ -15161,12 +15039,6 @@ mod tests {
         ]}));
         let order = |m: &Model| m.agents.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
         assert_eq!(order(&m), ["a_2", "a_4", "a_1", "a_3"]);
-        // The last one dragged onto the first takes its place.
-        let f = m.move_agent("a_3", "a_2").unwrap();
-        assert_eq!(order(&m), ["a_3", "a_2", "a_4", "a_1"]);
-        assert_eq!(f["name"], "agent.order");
-        assert_eq!(f["args"]["agents"], json!(["a_3", "a_2", "a_4", "a_1"]));
-        assert!(m.move_agent("a_3", "a_3").is_none());
     }
 
     #[test]

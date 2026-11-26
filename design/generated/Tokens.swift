@@ -124,6 +124,7 @@ enum Tokens {
         static let warn: UInt32 = 0xf2a77a
         static let find: UInt32 = 0x3b3417
         static let findCurrent: UInt32 = 0x94781a
+        static let drop: UInt32 = 0x9ea8ff
     }
 
     enum ColorLight {
@@ -146,6 +147,7 @@ enum Tokens {
         static let warn: UInt32 = 0xc2621f
         static let find: UInt32 = 0xfbefb4
         static let findCurrent: UInt32 = 0xf2cc3d
+        static let drop: UInt32 = 0x5763e0
     }
 
     enum ThreadColorDark {

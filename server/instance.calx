@@ -9547,6 +9547,25 @@ impl Instance {
         return out
     }
 
+    // `made`, a new agent or a group chat's room, at the end of the person's
+    // sidebar once they've put anything in order there (PLAN.md, "The
+    // sidebar"). Until then, everything is listed as it was made.
+    fn at_the_end(i: Instance, user: String, made: own Json) -> Json ! Error {
+        var most: i64? = none
+        for a in try i.store.agents(user.copy()) {
+            if let n = int_at(a, "order") {
+                if most == none or n > (most ?? 0) { most = some(n) }
+            }
+        }
+        for (_, room) in try i.store.rooms(user) {
+            if let n = int_at(room, "order") {
+                if most == none or n > (most ?? 0) { most = some(n) }
+            }
+        }
+        let last = most else return made
+        return merge(made, Obj.new().i("order", last + 1).done())
+    }
+
     // Keeps `user`'s group chats' members as their agents are now: Everyone,
     // made once they have two agents, has every one of them, and the others
     // lose the ones that were deleted. Each change is a conversation.created
@@ -9556,7 +9575,7 @@ impl Instance {
         if try i.store.everyone_room(user.copy()) == none and all.len() >= 2 {
             let made = try i.store.add_conversation(user.copy(), String(), String(rooms.EVERYONE))
             let id = str_at(made, "id") ?? String()
-            let room = Obj.new().s("name", String(rooms.EVERYONE)).b("everyone", true).j("members", rooms.ids_json(all.copy())).s("color", String()).s("default", String()).j("corrections", Json.Array(List<Json>())).done()
+            let room = try i.at_the_end(user.copy(), Obj.new().s("name", String(rooms.EVERYONE)).b("everyone", true).j("members", rooms.ids_json(all.copy())).s("color", String()).s("default", String()).j("corrections", Json.Array(List<Json>())).done())
             try i.store.put_room(user.copy(), id.copy(), room)
             let c = try i.store.conversation(user.copy(), id) else return
             try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
@@ -9969,7 +9988,7 @@ impl Instance {
             if why.len() > 0 { return refusal(why) }
             let made = try i.store.add_conversation(user.copy(), String(), str_at(room.copy(), "name") ?? String())
             let id = str_at(made, "id") ?? String()
-            try i.store.put_room(user.copy(), id.copy(), room)
+            try i.store.put_room(user.copy(), id.copy(), try i.at_the_end(user.copy(), room))
             let c = try i.store.conversation(user.copy(), id) else return Answer.Refused(String("not_found"), String("The group chat wasn't kept."))
             try i.event(user, "conversation.created", Obj.new().j("conversation", c.copy()).done())
             return Answer.Value(Obj.new().j("conversation", c).done())
@@ -9988,8 +10007,17 @@ impl Instance {
             return Answer.Value(Obj.new().i("tokens_today", said_today).i("tokens_month", said_month).i("router_today", picked_today).i("router_month", picked_month).done())
         }
         if name == "room.update" {
-            let (changed, why) = rooms.room_changed(room, args, all, color_ok)
+            let (made, why) = rooms.room_changed(room, args.copy(), all, color_ok)
             if why.len() > 0 { return refusal(why) }
+            // Which of the sidebar's folders it's in, as an agent's `group` is.
+            var changed = made
+            if let group = str_at(args, "group") {
+                changed = without(changed, "group")
+                if group.len() > 0 {
+                    if try i.store.group(user.copy(), group.copy()) == none { return Answer.Refused(String("not_found"), "There's no folder {group}.") }
+                    changed = merge(changed, Obj.new().s("group", group).done())
+                }
+            }
             if let title = str_at(changed.copy(), "name") { try i.store.rename_conversation(user.copy(), id.copy(), title) }
             try i.room_changed(user.copy(), id.copy(), changed)
             return Answer.Value(Obj.new().j("conversation", try i.store.conversation(user, id) ?? c).done())
@@ -13564,6 +13592,7 @@ impl Instance {
             // What its program offers, as the person's other agents on it learned it.
             let offered = try i.program_options(user.copy(), program.copy())
             if offered != Json.Null { agent = merge(agent, Obj.new().j("options", offered).done()) }
+            agent = try i.at_the_end(user.copy(), agent)
             try i.store.put_agent(user.copy(), agent.copy(), device.copy())
             i.log(user.copy(), str_at(agent.copy(), "id") ?? String(), "agent", "Made {str_at(agent.copy(), "name") ?? String()}", device.copy())
             try i.event(user, "agent.created", Obj.new().j("agent", agent.copy()).done())
@@ -14242,6 +14271,49 @@ impl Instance {
             }
             return Answer.Value(Obj.new().j("agents", Json.Array(ids)).i("moved", i64.wrap(placed.len())).done())
         }
+        if name == "sidebar.order" {
+            // The order the person dragged their agents and group chats into, one
+            // list in the sidebar (PLAN.md, "The sidebar"): each keeps its place as
+            // `order`, an agent on itself and a group chat on its room. Where one
+            // sits isn't a change to it: no revision.
+            let Json.Array(ids) = at(args.copy(), "items") else return Answer.Refused(String("bad_request"), String("items is the agents' and group chats' ids, in order."))
+            var agents = List<Json>()
+            var rooms_in = List<(String, Json)>()
+            var kinds = List<bool>()
+            for id in ids.copy() {
+                let Json.Str(s) = id else return Answer.Refused(String("bad_request"), String("items is the agents' and group chats' ids, in order."))
+                if let old = try i.store.agent(user.copy(), s.copy()) {
+                    agents.push(old)
+                    kinds.push(true)
+                    continue
+                }
+                let c = try i.store.conversation(user.copy(), s.copy()) else return Answer.Refused(String("not_found"), "There's no agent or group chat {s}.")
+                let room = at(c, "room")
+                if room == Json.Null { return Answer.Refused(String("not_found"), "There's no agent or group chat {s}.") }
+                rooms_in.push((s.copy(), room))
+                kinds.push(false)
+            }
+            var moved: i64 = 0
+            var (na, nr): (usize, usize) = (0, 0)
+            for (k, is_agent) in kinds.enumerate() {
+                let place = i64.wrap(k)
+                if is_agent {
+                    let old = agents[na].copy()
+                    na += 1
+                    if int_at(old.copy(), "order") == some(place) { continue }
+                    let agent = merge(old, Obj.new().i("order", place).done())
+                    try i.store.put_agent_json(user.copy(), agent.copy())
+                    try i.event(user.copy(), "agent.updated", Obj.new().j("agent", agent).s("by", device.copy()).done())
+                } else {
+                    let (id, room) = rooms_in[nr].copy()
+                    nr += 1
+                    if int_at(room.copy(), "order") == some(place) { continue }
+                    try i.room_changed(user.copy(), id, merge(room, Obj.new().i("order", place).done()))
+                }
+                moved += 1
+            }
+            return Answer.Value(Obj.new().j("items", Json.Array(ids)).i("moved", moved).done())
+        }
         if name == "agent.group" or name == "agent.hide" {
             // Which of the sidebar's folders an agent is in, or whether it's hidden
             // (PLAN.md, "The sidebar"). Like a pin, where an agent sits isn't a change
@@ -14304,6 +14376,11 @@ impl Instance {
                 let agent = without(a, "group")
                 try i.store.put_agent_json(user.copy(), agent.copy())
                 try i.event(user.copy(), "agent.updated", Obj.new().j("agent", agent).s("by", device.copy()).done())
+            }
+            // And its group chats.
+            for (c, room) in try i.store.rooms(user.copy()) {
+                if str_at(room.copy(), "group") != some(id.copy()) { continue }
+                try i.room_changed(user.copy(), c, without(room, "group"))
             }
             try i.store.delete_group(user.copy(), id.copy())
             try i.event(user, "group.deleted", Obj.new().s("group", id).s("by", device).done())

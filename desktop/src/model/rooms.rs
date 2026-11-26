@@ -159,6 +159,7 @@ impl Model {
                     .cloned()
             });
         self.select(lead);
+        self.unread.remove(id);
         self.open_room = Some(id.to_string());
         self.open_task = None;
         self.open_branch = None;
@@ -284,22 +285,6 @@ impl Model {
     pub fn save_for(&mut self, agent: &str, line: &str) -> Value {
         let id = self.id("app.agent_for");
         json!({"t": "cmd", "id": id, "name": "agent.update", "args": {"agent": agent, "for": line.trim()}})
-    }
-
-    /// The group chats in the sidebar's order, Everyone first, as the core puts them.
-    pub fn sidebar_rooms(&self) -> Vec<&Room> {
-        let mut out: Vec<&Room> = self
-            .room_order
-            .iter()
-            .filter_map(|id| self.room(id))
-            .collect();
-        // Made since the sidebar came.
-        for r in &self.rooms {
-            if !self.room_order.contains(&r.id) {
-                out.push(r);
-            }
-        }
-        out
     }
 }
 
