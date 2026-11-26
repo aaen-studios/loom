@@ -222,10 +222,11 @@ const BOARD_LAYERS = [
 
 	<div class="main">
 		<div class="titlebar">
-			<div class="header">
+			<!-- In a narrow window it gives way as the app's does (model/header.rs, demo.ts). -->
+			<div class="header" data-header>
 				<span class="agent-btn" aria-hidden="true">
 					<svg data-thread data-color="sky" data-head width="26" height="10"></svg>
-					<span>Juniper</span>
+					<span class="head-name">Juniper</span>
 					<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 				</span>
 				<!-- A group chat's head: its members' threads woven, its name and how many are in
@@ -234,7 +235,7 @@ const BOARD_LAYERS = [
 					<svg class="weave" width="26" height="14" viewBox="0 0 26 14">
 						{shop.colors.map((c, k) => <path d={wave(k, shop.colors.length)} style={`stroke: var(--thread-${c})`} />)}
 					</svg>
-					<span>{shop.name}</span>
+					<span class="head-name">{shop.name}</span>
 					<span class="room-count">{shop.colors.length} agents</span>
 				</span>
 				<span class="chips">
@@ -262,7 +263,7 @@ const BOARD_LAYERS = [
 					</span>
 					<span class="chip brain" aria-hidden="true">
 						{claude?.icon && <span class="brain-icon" style={`--icon: url(${claude.icon})`} />}
-						Opus 5.5 · Medium
+						<span class="brain-words">Opus 5.5<span class="brain-effort">&nbsp;· Medium</span></span>
 						<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 					</span>
 					<!-- How full Juniper's session context is, after its model, with its card under it
@@ -290,8 +291,8 @@ const BOARD_LAYERS = [
 							</div>
 						</div>
 					</span>
-					<span class="chip" aria-hidden="true">
-						Asks when it's risky
+					<span class="chip mode" aria-hidden="true">
+						<span class="mode-words">Asks when it's risky</span>
 						<svg class="i chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg>
 					</span>
 				</span>
@@ -1265,10 +1266,57 @@ const BOARD_LAYERS = [
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 8px;
+		gap: 16px;
 		flex: 1;
 		min-width: 0;
 		padding: 0 16px;
+	}
+	/* In a narrow window it gives way as the app's does (desktop/src/model/header.rs): demo.ts
+	   takes one step at a time, always in this order, until it fits: the brain chip drops its
+	   effort, a group chat's head how many are in it, the brain chip shows only its icon, the
+	   chips close up, and the chevrons go. Then the name shortens to a few letters, and then
+	   the mode's words. */
+	.header.fit-effort .brain-effort,
+	.header.fit-members .room-count,
+	.header.fit-icon .chip.brain :is(.brain-words, .chev),
+	.header.fit-chevrons :is(.agent-btn, .chip.mode) .chev {
+		display: none;
+	}
+	.header.fit-close,
+	.header.fit-close .chips {
+		gap: 8px;
+	}
+	.header.fit-close .context-at {
+		margin-left: -4px;
+	}
+	.agent-btn,
+	.room-btn {
+		min-width: 50px;
+		flex-shrink: 1000;
+	}
+	/* Its thread and about three letters of "Juniper" with the ellipsis. */
+	.agent-btn {
+		min-width: 98px;
+	}
+	.agent-btn > svg,
+	.room-btn > svg,
+	.chips > * {
+		flex: none;
+	}
+	.chips > .chip.mode {
+		flex: 0 1 auto;
+		min-width: 0;
+	}
+	.head-name,
+	.mode-words {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* While demo.ts measures it, nothing shortens. */
+	.header.fit-measuring > *,
+	.header.fit-measuring .chips > * {
+		flex-shrink: 0;
 	}
 	.agent-btn,
 	.chip {
@@ -3452,8 +3500,7 @@ const BOARD_LAYERS = [
 		}
 	}
 	@media (max-width: 560px) {
-		.side,
-		.chip.brain {
+		.side {
 			display: none;
 		}
 		.app {

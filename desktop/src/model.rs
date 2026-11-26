@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 pub mod drafts;
+pub mod header;
 mod popover;
 pub mod popup;
 mod rooms;
@@ -222,26 +223,39 @@ impl Agent {
         out
     }
     /// What the header's brain chip says, as "Opus · High"; None when there's nothing
-    /// What the header's chips say together, as "Opus · High"; None when there's nothing
     /// to pick.
     pub fn picked(&self) -> Option<String> {
-        let names: Vec<String> = self
-            .picks()
-            .iter()
-            .map(|o| {
-                let v = self.chosen(&o.id);
-                o.values
-                    .iter()
-                    .find(|(value, _)| *value == v)
-                    .map_or(v, |(_, name)| name.clone())
-            })
-            .filter(|n| !n.is_empty())
-            .collect();
+        let names: Vec<String> = self.picked_names().into_iter().map(|(_, n)| n).collect();
         if names.is_empty() {
             None
         } else {
             Some(names.join(" · "))
         }
+    }
+
+    /// What the brain chip says once a narrow header drops its effort: the model alone
+    /// (`model::header`). None when the program has no model to pick.
+    pub fn picked_model(&self) -> Option<String> {
+        self.picked_names()
+            .into_iter()
+            .find_map(|(category, name)| (category == "model").then_some(name))
+    }
+
+    /// The name of the value each of `picks` is on, the model first, with its category.
+    fn picked_names(&self) -> Vec<(String, String)> {
+        self.picks()
+            .iter()
+            .map(|o| {
+                let v = self.chosen(&o.id);
+                let name = o
+                    .values
+                    .iter()
+                    .find(|(value, _)| *value == v)
+                    .map_or(v, |(_, name)| name.clone());
+                (o.category.clone(), name)
+            })
+            .filter(|(_, n)| !n.is_empty())
+            .collect()
     }
 }
 
@@ -14914,11 +14928,22 @@ mod tests {
         let ids: Vec<String> = a.picks().iter().map(|o| o.id.clone()).collect();
         assert_eq!(ids, ["model", "effort"]);
         assert_eq!(a.picked().as_deref(), Some("Opus · High"));
+        // A narrow header's brain chip drops the effort.
+        assert_eq!(a.picked_model().as_deref(), Some("Opus"));
         let f = m.set_config("a_1", "model", "sonnet").unwrap();
         assert_eq!(f["args"]["config"]["model"], "sonnet");
         assert_eq!(
             m.agent("a_1").unwrap().picked().as_deref(),
             Some("Sonnet · High")
+        );
+        // A program with an effort and no model has nothing to show once that's dropped.
+        m.take(&json!({"t": "core.data", "what": "agents", "items": [{"id": "a_1", "name": "Main", "options": [
+            {"id": "effort", "name": "Effort", "category": "thought_level", "value": "medium", "options": [{"value": "medium", "name": "Medium"}]}
+        ]}]}));
+        let a = m.agent("a_1").unwrap();
+        assert_eq!(
+            (a.picked().as_deref(), a.picked_model()),
+            (Some("Medium"), None)
         );
         // A program that offers nothing to pick shows no picker.
         m.take(
