@@ -103,7 +103,7 @@ Point at a message, yours or an agent's, and choose **Delete** from the **⋯** 
 
 ## Long messages and tables
 
-In the desktop app, a message longer than about ten lines is cut when you open its chat, with **Show more** under it to read the rest in place and **Show less** to fold it again. A reply that comes while you're in the chat, what you send, and new replies you haven't read yet show in full.
+A message longer than about ten lines is cut when you open its chat, with **Show more** under it to read the rest in place and **Show less** to fold it again. On the iPhone, a tap on the cut words opens it too. A reply that comes while you're in the chat, what you send, and new replies you haven't read yet show in full.
 
 Under a table in an agent's reply, a quiet line says how many rows it has, with **Copy**, which copies it as CSV for a spreadsheet. Its arrow has **Copy as CSV**, **Copy as Markdown** and **Copy as text**.
 

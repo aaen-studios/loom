@@ -499,6 +499,26 @@ func insideACall(_ m: Message) -> [Bool] {
     return m.blocks.map { b in b.parent.map { calls.contains($0) } ?? false }
 }
 
+/// How a message in the open chat came to be there, which says whether a long one is cut
+/// (`folds`), as desktop/src/model.rs's `Came`.
+enum Came: Equatable, Sendable {
+    /// There when the chat opened, and read.
+    case before
+    /// Came while the person was elsewhere, and not read yet.
+    case unread
+    /// Came, or was written, while the chat is open, or is still being written.
+    case live
+}
+
+/// Whether a long message is cut after about ten lines, with Show more (PLAN.md, "Long
+/// messages and tables"), as desktop/src/model.rs's `folds`. One that was there and read
+/// when its chat opened is; one that came while it's open, or that came while the person
+/// was away and isn't read yet, shows whole. `flipped` is whether the person folded or
+/// opened it by hand since, which holds while the chat stays open.
+func folds(_ came: Came, flipped: Bool) -> Bool {
+    (came == .before) != flipped
+}
+
 struct Message: Identifiable, Equatable, Sendable {
     var id: String
     var role: String
@@ -530,6 +550,8 @@ struct Message: Identifiable, Equatable, Sendable {
     var routed: Routed?
     /// Deleted (PLAN.md, "Deleting a message"): a mark in its place, with no blocks.
     var deleted = false
+    /// How it came to the open chat, for whether a long one is cut (`Model.shown`).
+    var came = Came.before
 
     var isPerson: Bool { role == "person" }
 
@@ -1682,6 +1704,15 @@ final class Model {
     /// Replies being written, by message id: their blocks so far.
     private var live: [String: [Block]] = [:]
     private var queued: [Queued] = []
+    /// The messages that came to the open chat, or were written in it, since it opened.
+    private var cameLive: Set<String> = []
+    /// The first reply that came to each agent's chat while it wasn't open, by agent.
+    private var firstUnread: [String: String] = [:]
+    /// The open chat's first reply that came while it was shut, while it stays open.
+    private var unreadFrom: String?
+    /// The long messages in the open chat folded or opened by hand since it opened, by
+    /// their cut's key (`folds`).
+    private(set) var foldFlips: Set<String> = []
     var dirty: Set<CoreList> = []
     private var getting: [String: (key: String, open: Bool)] = [:]
     private var nextId = 0
@@ -1724,7 +1755,22 @@ final class Model {
         self.thread = thread
         messages = []
         messagesCame = false
+        chatOpened(unreadFrom: nil)
         dirty.insert(.messages)
+    }
+
+    /// A chat just opened: what it has is all there from before, read, and folded or
+    /// opened only as `folds` says, but for the replies from `unreadFrom` on.
+    func chatOpened(unreadFrom first: String?) {
+        cameLive = []
+        foldFlips = []
+        unreadFrom = first
+    }
+
+    /// Folds a long message in the open chat, by its cut's key, or opens it: so it stays
+    /// while the chat is open (`folds`).
+    func flipFold(_ key: String) {
+        if foldFlips.remove(key) == nil { foldFlips.insert(key) }
     }
 
     /// The selected chat's messages, with the replies still being written at the end.
@@ -1767,6 +1813,14 @@ final class Model {
                 c.live = out[i].live
                 out[i].blocks[j].card = c
             }
+        }
+        // How each came, for whether a long one is cut (`folds`): one still being
+        // written, waiting to go, or come since the chat opened, while it's open; one
+        // from the first that came while the chat was shut on, unread.
+        let unread = unreadFrom.flatMap { first in messages.firstIndex { $0.id == first } }.map { Set(messages[$0...].map(\.id)) } ?? []
+        for i in out.indices {
+            let m = out[i]
+            out[i].came = m.live || m.queued || cameLive.contains(m.id) ? .live : unread.contains(m.id) ? .unread : .before
         }
         return out
     }
@@ -1854,6 +1908,8 @@ final class Model {
         messagesMore = 0
         replying = nil
         jumpTo = nil
+        // The replies that came while its chat was shut are unread while it's open.
+        chatOpened(unreadFrom: agent.flatMap { firstUnread.removeValue(forKey: $0) })
         dirty.insert(.messages)
     }
 
@@ -1982,6 +2038,17 @@ final class Model {
             live[id] = nil
             if kind == "message.created" { queued.removeAll { $0.message == id } }
             if f["conversation"].string == conversation { dirty.insert(.messages) }
+            // For whether a long one is cut (`folds`). Catch-up is what came before.
+            if kind == "message.created" && synced {
+                let about = conversations.first { $0.id == f["conversation"].string }
+                if f["conversation"].string == conversation {
+                    // Came while its chat is open: it shows whole.
+                    cameLive.insert(id)
+                } else if f["message"]["role"].text == "agent", let c = about, c.isChat, c.room == nil {
+                    // A reply in an agent's chat while it's shut: unread when it opens.
+                    if firstUnread[c.agent] == nil { firstUnread[c.agent] = id }
+                }
+            }
             // A pin put on or taken off, a pinned message changed, or one gone that may
             // have been pinned: the pins are asked for again.
             if f["conversation"].string == pinsFor,

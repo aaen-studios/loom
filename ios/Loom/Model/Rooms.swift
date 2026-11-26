@@ -111,6 +111,7 @@ extension Model {
         messages = []
         messagesCame = false
         replying = nil
+        chatOpened(unreadFrom: nil)
         dirty.insert(.messages)
     }
 
