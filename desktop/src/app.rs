@@ -62,6 +62,8 @@ mod list_page;
 mod routines;
 #[path = "spools.rs"]
 mod spools;
+#[path = "watch_view.rs"]
+mod watch_view;
 use crate::model::drafts::Page as DraftPage;
 use crate::model::popup::{self, Pane};
 use list_page::ListPage;
@@ -2278,6 +2280,12 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Routines => {
                 let f = self.model.load_routines();
                 self.send(f);
+                // The person's Acta and T3 servers, for "On an event".
+                for f in self.model.load_mcp() {
+                    self.send(f);
+                }
+                let f = self.model.ask_t3_servers();
+                self.send(f);
                 self.routine_open = None;
                 _ = self.model.load_routine_runs(None);
             }
@@ -2967,6 +2975,9 @@ ACTA_KEY=secret:ACTA_KEY",
             self.core.send(&f.to_string());
         }
         for f in self.model.t3_fetches() {
+            self.core.send(&f.to_string());
+        }
+        for f in self.model.watch_fetches() {
             self.core.send(&f.to_string());
         }
     }
@@ -13288,6 +13299,9 @@ ACTA_KEY=secret:ACTA_KEY",
             }
             list = list.child(row);
         }
+        // What it follows outside loom, to take away (watch_view.rs).
+        let editing = self.model.editing.clone().unwrap_or_default();
+        let following = self.following_list(model::watch::Follower::Agent(&editing), cx);
         // The person's MCP servers, each on or off for this agent.
         let has: Vec<String> = self
             .model
@@ -13753,6 +13767,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     .child(div().mx(px(-space::L)).child(scripts))
                     .child(group("Does"))
                     .child(rows(vec![activity, routines, usage]))
+                    .when_some(following, |d, list| d.child(self.field("Following", list)))
                     .child(group("Runs"))
                     .child(div().mx(px(-space::L)).child(isolate))
                     .when(isolated, |d| {
@@ -22700,7 +22715,12 @@ fn board_icon(size: f32) -> AnyElement {
 
 /// The colour a card's status is drawn in (`model::CardInk`).
 fn card_ink(p: Palette, card: &model::ActaCard) -> Hsla {
-    match card.ink() {
+    ink_color(p, card.ink())
+}
+
+/// A card status's colour.
+fn ink_color(p: Palette, ink: model::CardInk) -> Hsla {
+    match ink {
         model::CardInk::Quiet => p.ink_3,
         model::CardInk::Sky => thread::color("sky", p.dark),
         model::CardInk::Gold => thread::color("gold", p.dark),
@@ -22721,7 +22741,7 @@ fn card_id_text(id: &str, color: Hsla) -> Div {
 /// A card's pill, in a message or the composer (PLAN.md, "Cards in messages"): its board's
 /// tile, its id in mono, its title cut to fit and a dot in its status's colour, on the
 /// bubble's fill with a line around it. Under the pointer its preview shows under it, and
-/// a click opens it in Acta. A card that isn't there, or that the person can't see, is
+/// a click opens its side preview. A card that isn't there, or that the person can't see, is
 /// its id alone, quiet; one still being looked up, its tile and its id. `cut` is the
 /// width a line too narrow for it cut it to, and whether its title still shows there
 /// (`model::pill_fit`).
@@ -22732,15 +22752,30 @@ fn card_pill(
     card: Option<&model::ActaCard>,
     cut: Option<(f32, bool)>,
 ) -> AnyElement {
+    card_pill_in(p, key, id, card, None, cut)
+}
+
+/// `card_pill`, and in a watch's line (`line_dot`, watch_view.rs): without its tile, which
+/// the line's mark already is, and its dot in the colour of the status the line is about.
+/// There, in a row, it gives way as the row narrows, and takes no `cut`.
+fn card_pill_in(
+    p: Palette,
+    key: SharedString,
+    id: &str,
+    card: Option<&model::ActaCard>,
+    line_dot: Option<Hsla>,
+    cut: Option<(f32, bool)>,
+) -> AnyElement {
     if card.is_some_and(|c| c.missing) {
         return card_id_text(id, p.ink_3).into_any_element();
     }
     let pill = div()
         .id(SharedString::from(format!("{key}-pill")))
         .h(px(control::PILL))
+        .min_w_0()
         .max_w(px(layout::PILL_TITLE + 110.0))
         .when_some(cut, |d, (w, _)| d.w(px(w)))
-        .pl(px(4.0))
+        .pl(px(if line_dot.is_some() { 7.0 } else { 4.0 }))
         .pr(px(7.0))
         .flex()
         .items_center()
@@ -22750,7 +22785,7 @@ fn card_pill(
         .border_color(p.line)
         .bg(p.bubble)
         .cursor_pointer()
-        .child(board_icon(14.0))
+        .when(line_dot.is_none(), |d| d.child(board_icon(14.0)))
         .child(card_id_text(id, p.ink_2));
     let Some(card) = card.cloned() else {
         return pill.into_any_element();
@@ -22771,16 +22806,18 @@ fn card_pill(
                 .flex_none()
                 .size(px(7.0))
                 .rounded_full()
-                .bg(card_ink(p, &card)),
+                .bg(line_dot.unwrap_or_else(|| card_ink(p, &card))),
         )
         // Its side preview, beside the chat.
         .on_click(move |_, _, cx| acta_ui::open_card(&to_open, cx));
+    // In a row (Following, the cards made from a message), it gives way, its title cut
+    // shorter; cut to a width (a watch's line, `watch_view::line_pill_cut`), it keeps it.
     gpui_kit::base::HoverCard::new(key)
+        .when(cut.is_none(), |d| d.min_w_0())
+        .when(cut.is_some(), |d| d.flex_none())
         .anchor(Anchor::TopLeft)
         .open_delay(Duration::from_millis(350))
         .close_delay(Duration::from_millis(150))
-        // In a row narrower than it, under a message, it shrinks, its title cut.
-        .min_w_0()
         .trigger(pill)
         .content(move |_, _, _| card_preview(p, &card))
         .into_any_element()
@@ -22814,8 +22851,10 @@ fn line_pill(
         .width
         .as_f32();
     let cut = (natural > line).then(|| {
-        let bare =
-            natural - (text_width(&c.title, size::SMALL, window).min(layout::PILL_TITLE) + 5.0);
+        let bare = natural
+            - (ui_text_width(&c.title, size::SMALL, FontWeight::NORMAL, window)
+                .min(layout::PILL_TITLE)
+                + 5.0);
         let w = model::pill_fit(natural, bare, line, line).unwrap_or(line);
         (w, model::pill_titled(w, bare))
     });
@@ -27136,6 +27175,7 @@ mod row_tests {
             file: None,
             card: None,
             parent: None,
+            update: None,
         };
         let mut blocks = vec![block("text", text, None)];
         if let Some(c) = call {
@@ -27229,6 +27269,7 @@ mod row_tests {
             hold_keys: Rc::default(),
             lit: false,
             found: None,
+            line_cut: None,
         }
     }
 
@@ -27744,6 +27785,8 @@ struct RowInputs {
     /// What's found in it, while the find box has matches: what was looked for, and
     /// the match it'"'"'s on when that'"'"'s in it, by its piece and which.
     found: Option<(String, Option<(usize, usize)>)>,
+    /// A watch line's card pill, cut to its row (`watch_view::line_pill_cut`).
+    line_cut: Option<(f32, bool)>,
 }
 
 impl RowInputs {
@@ -27775,6 +27818,7 @@ impl RowInputs {
             && self.hold_keys == o.hold_keys
             && self.lit == o.lit
             && self.found == o.found
+            && self.line_cut == o.line_cut
     }
 }
 
@@ -28081,6 +28125,10 @@ fn chat_list(
                         .map(|a| (a.piece, a.nth));
                 Some((f.query.clone(), at))
             }),
+            line_cut: m.and_then(|m| {
+                let line = model::watch::line_of(m)?;
+                watch_view::line_pill_cut(p, m, line, content, window, cx)
+            }),
         };
         // A reply still being written, and one with a card waiting for the person, whose
         // thread moves, are drawn at every frame rather than from a cache.
@@ -28189,6 +28237,13 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             .text_color(p.ink_3)
             .child(line)
     });
+    // A watch's line, quiet and left-aligned (watch_view.rs).
+    if let Some(line) = match &row {
+        Row::Message(m) => model::watch::line_of(m).map(|l| (m, l)),
+        _ => None,
+    } {
+        return watch_view::update_line(p, line.0, line.1, joined, column, time_line, i.line_cut);
+    }
     // A line from loom across the chat: where the context was compacted, or where a
     // fresh session started.
     if let Row::Message(m) = &row {

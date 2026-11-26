@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use super::watch::Watch;
 use super::{s, ActaCard, Model};
 
 /// The columns of a board, in order, by status.
@@ -222,6 +223,9 @@ pub struct CardPanel {
     pub status_menu: bool,
     /// What it was before a change on its way, to go back to if Acta refuses it.
     before: Option<CardDetail>,
+    /// The newest watch line about it in the chat shown when it was last looked up
+    /// (`line_refresh`).
+    line_seen: Option<String>,
 }
 
 /// The form that makes a card from a message.
@@ -277,48 +281,27 @@ enum Ask {
     Create,
     Board,
     Tasks { board: String, done: bool },
-    Watches,
-    Follow(Watch),
-    Unfollow(Watch),
+    Follow,
+    Unfollow(Box<Watch>),
 }
 
-/// A watch of the person's on an Acta board, or one card on it (PLAN.md, "Watching
-/// outside events"), as far as Follow needs it: what it follows and the chat it posts in.
+/// What Follow is on: a board, or one card on it ("" for the board), in a chat.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Watch {
-    /// "" while `watch.put` is under way.
-    pub id: String,
+pub struct FollowOn {
     pub board: String,
-    /// "" for the whole board.
     pub card: String,
     pub conversation: String,
 }
 
-impl Watch {
-    /// A watch as the instance gives it, when it's on an Acta board and not a routine's.
-    pub fn of(w: &Value) -> Option<Watch> {
-        let integration = s(w, "integration");
-        if !(integration.is_empty() || integration == "acta") {
-            return None;
-        }
-        if w.pointer("/wake/routine").is_some() {
-            return None;
-        }
-        let target = w.get("target")?;
-        let board = s(target, "board");
-        if board.is_empty() || s(w, "id").is_empty() {
-            return None;
-        }
-        Some(Watch {
-            id: s(w, "id"),
-            board,
-            card: s(target, "card"),
-            conversation: s(w, "conversation"),
-        })
-    }
-
-    fn same(&self, board: &str, card: &str, conversation: &str) -> bool {
-        self.board == board && self.card == card && self.conversation == conversation
+impl FollowOn {
+    /// Whether `w` is a watch Follow shows as following this: on Acta, on this board or
+    /// card, posting in this chat, and not a routine's.
+    fn is(&self, w: &Watch) -> bool {
+        (w.integration.is_empty() || w.integration == "acta")
+            && w.wake_routine.is_empty()
+            && w.board == self.board
+            && w.card == self.card
+            && w.conversation == self.conversation
     }
 }
 
@@ -334,9 +317,8 @@ pub struct Acta {
     pub used: Vec<String>,
     /// The messages whose pills a change here redrew, for the instance to keep them so.
     pub again: Vec<String>,
-    /// The person's watches on Acta, once `watch.list` gave them, for Follow.
-    pub watches: Option<Vec<Watch>>,
-    watches_asked: bool,
+    /// A Follow whose `watch.put` is under way, shown as following until it answers.
+    pub putting: Option<FollowOn>,
     asks: HashMap<String, Ask>,
 }
 
@@ -473,11 +455,13 @@ impl Model {
     /// Opens a card's side preview, from its pill or a board's row, and looks it up.
     pub fn open_card(&mut self, board: &str, id: &str) -> Value {
         let detail = self.pill_of(board, id).map(|c| CardDetail::known(&c));
+        let line_seen = self.newest_line(board, id);
         self.acta.panel = Some(Panel::Card(Box::new(CardPanel {
             board: board.to_string(),
             id: id.to_string(),
             detail,
             loading: true,
+            line_seen,
             ..Default::default()
         })));
         self.panel_cmd(
@@ -488,6 +472,40 @@ impl Model {
                 id: id.to_string(),
             },
         )
+    }
+
+    /// The id of the chat's newest watch line about the card (model/watch.rs).
+    fn newest_line(&self, board: &str, id: &str) -> Option<String> {
+        self.messages.iter().rev().find_map(|m| {
+            super::watch::line_of(m)
+                .filter(|l| l.board == board && l.card == id)
+                .map(|_| m.id.clone())
+        })
+    }
+
+    /// The card shown, looked up again once a watch line about it comes into the chat
+    /// after it was, so the preview says what the line says. Not while a change of the
+    /// person's is on its way, which answers with the card as it is.
+    pub fn line_refresh(&mut self) -> Option<Value> {
+        let (board, id) = match &self.acta.panel {
+            Some(Panel::Card(c)) => (c.board.clone(), c.id.clone()),
+            _ => return None,
+        };
+        let newest = self.newest_line(&board, &id);
+        let c = self.card_panel()?;
+        if c.line_seen == newest {
+            return None;
+        }
+        c.line_seen = newest;
+        if c.before.is_some() {
+            return None;
+        }
+        c.loading = true;
+        Some(self.panel_cmd(
+            "card.get",
+            json!({"board": board, "id": id}),
+            Ask::Card { board, id },
+        ))
     }
 
     fn card_panel(&mut self) -> Option<&mut CardPanel> {
@@ -835,58 +853,47 @@ impl Model {
 
     // --- Following (PLAN.md, "Watching outside events") ---
 
-    /// `watch.list`, once, the first time a panel of Acta's is open, for Follow.
-    pub fn watches_fetch(&mut self) -> Option<Value> {
-        if self.acta.panel.is_none() || self.acta.watches_asked {
-            return None;
-        }
-        self.acta.watches_asked = true;
-        Some(self.panel_cmd("watch.list", json!({}), Ask::Watches))
+    /// What Follow on the board, or its card, is in the chat shown. None with no chat.
+    fn follow_on(&self, board: &str, card: Option<&str>) -> Option<FollowOn> {
+        Some(FollowOn {
+            board: board.to_string(),
+            card: card.unwrap_or("").to_string(),
+            conversation: self.conversation()?,
+        })
     }
 
-    /// Whether the person follows the board, or its card, in the chat shown: a watch on
-    /// it posts there. None until their watches are known, or with no chat shown.
-    pub fn following(&self, board: &str, card: Option<&str>) -> Option<bool> {
-        let watches = self.acta.watches.as_ref()?;
-        let chat = self.conversation()?;
-        let card = card.unwrap_or("");
-        Some(watches.iter().any(|w| w.same(board, card, &chat)))
+    /// Whether the person follows the board, or its card, in the chat shown: one of their
+    /// watches (`self.watch`, as Following in settings has them) posts its lines there.
+    /// None with no chat shown.
+    pub fn follows(&self, board: &str, card: Option<&str>) -> Option<bool> {
+        let on = self.follow_on(board, card)?;
+        Some(self.acta.putting.as_ref() == Some(&on) || self.watch.list.iter().any(|w| on.is(w)))
     }
 
     /// Follow, or stop following, the board or its card in the chat shown: `watch.put`
     /// with this chat for its lines, or `watch.remove`. It shows at once, and goes back
-    /// as it was when the instance refuses.
+    /// as it was when the instance refuses. Pressed while a Follow is being made, nothing.
     pub fn toggle_follow(&mut self, board: &str, card: Option<&str>) -> Option<Value> {
-        let following = self.following(board, card)?;
-        let chat = self.conversation()?;
-        let card = card.unwrap_or("").to_string();
-        let watches = self.acta.watches.as_mut()?;
-        if following {
-            let at = watches.iter().position(|w| w.same(board, &card, &chat))?;
-            // While its watch.put is under way, it stays.
-            if watches[at].id.is_empty() {
-                return None;
-            }
-            let w = watches.remove(at);
+        let on = self.follow_on(board, card)?;
+        if self.acta.putting.is_some() {
+            return None;
+        }
+        if let Some(w) = self.watch.list.iter().find(|w| on.is(w)).cloned() {
+            self.watch.list.retain(|x| x.id != w.id);
             let id = w.id.clone();
-            return Some(self.panel_cmd("watch.remove", json!({"id": id}), Ask::Unfollow(w)));
+            return Some(self.panel_cmd(
+                "watch.remove",
+                json!({"id": id}),
+                Ask::Unfollow(Box::new(w)),
+            ));
         }
-        let w = Watch {
-            id: String::new(),
-            board: board.to_string(),
-            card: card.clone(),
-            conversation: chat.clone(),
-        };
-        watches.push(w.clone());
-        let mut target = json!({"board": board});
-        if !card.is_empty() {
-            target["card"] = json!(card);
+        let mut target = json!({"board": on.board});
+        if !on.card.is_empty() {
+            target["card"] = json!(on.card);
         }
-        Some(self.panel_cmd(
-            "watch.put",
-            json!({"target": target, "conversation": chat}),
-            Ask::Follow(w),
-        ))
+        let args = json!({"target": target, "conversation": on.conversation});
+        self.acta.putting = Some(on);
+        Some(self.panel_cmd("watch.put", args, Ask::Follow))
     }
 
     /// Shows Acta's words for a refused Follow on the panel open.
@@ -896,26 +903,6 @@ impl Model {
             Some(Panel::Board(b)) => b.error = Some(error),
             _ => {}
         }
-    }
-
-    /// `watch.updated` and `watch.removed`, from this device or another.
-    pub(super) fn take_watch_event(&mut self, kind: &str, f: &Value) {
-        let Some(watches) = self.acta.watches.as_mut() else {
-            return;
-        };
-        if kind == "watch.removed" {
-            let id = s(f, "watch");
-            watches.retain(|w| w.id != id);
-            return;
-        }
-        let Some(w) = f.get("watch").and_then(Watch::of) else {
-            return;
-        };
-        // Made here: it takes the place of the one shown while it was made.
-        watches.retain(|x| {
-            x.id != w.id && !(x.id.is_empty() && x.same(&w.board, &w.card, &w.conversation))
-        });
-        watches.push(w);
     }
 
     /// The answers to what Acta's panels asked. Gives whether `id` was one.
@@ -1016,30 +1003,16 @@ impl Model {
                     }
                 }
             }
-            Ask::Watches => {
-                let list = value.get("watches").and_then(Value::as_array);
-                match list.filter(|_| error.is_none()) {
-                    Some(list) => {
-                        self.acta.watches = Some(list.iter().filter_map(Watch::of).collect());
-                    }
-                    // Asked again with the next panel.
-                    None => self.acta.watches_asked = false,
-                }
-            }
-            Ask::Follow(asked) => {
+            Ask::Follow => {
+                self.acta.putting = None;
                 let made = value
                     .get("watch")
-                    .and_then(Watch::of)
-                    .filter(|_| error.is_none());
-                if let Some(watches) = self.acta.watches.as_mut() {
-                    let at = watches.iter().position(|w| w.id.is_empty() && *w == asked);
-                    // Its watch.updated, which comes first, may have put it in already.
-                    match (made, at) {
-                        (Some(w), Some(k)) => watches[k] = w,
-                        (None, Some(k)) => {
-                            watches.remove(k);
-                        }
-                        _ => {}
+                    .filter(|_| error.is_none())
+                    .map(Watch::of);
+                // Its watch.updated, which comes first, may have put it in already.
+                if let Some(w) = made.filter(|w| !w.id.is_empty()) {
+                    if !self.watch.list.iter().any(|x| x.id == w.id) {
+                        self.watch.list.push(w);
                     }
                 }
                 if let Some(e) = error {
@@ -1048,8 +1021,8 @@ impl Model {
             }
             Ask::Unfollow(w) => {
                 if let Some(e) = error {
-                    if let Some(watches) = self.acta.watches.as_mut() {
-                        watches.push(w);
+                    if !self.watch.list.iter().any(|x| x.id == w.id) {
+                        self.watch.list.push(*w);
                     }
                     self.panel_error(e);
                 }
@@ -1291,25 +1264,18 @@ mod tests {
     fn follow_makes_a_watch_for_the_chat_and_goes_back_when_refused() {
         let mut m = acta_model();
         m.open_room = Some("c_1".into());
-        // The watches are asked for once a panel is open, and once.
-        assert!(m.watches_fetch().is_none());
         let _ = m.open_card("aaen-studios/loom", "LOO-206");
-        let list = m.watches_fetch().expect("watch.list");
-        assert_eq!(list["name"], "watch.list");
-        assert!(m.watches_fetch().is_none());
-        assert_eq!(m.following("aaen-studios/loom", Some("LOO-206")), None);
-        answer(
-            &mut m,
-            &list,
-            json!({"value": {"watches": [
-                {"id": "w_1", "integration": "acta", "target": {"board": "aaen-studios/loom"}, "conversation": "c_2"},
-                {"id": "w_2", "integration": "acta", "target": {"board": "aaen-studios/loom"}, "conversation": "", "wake": {"routine": "r_1"}},
-                {"id": "w_9", "integration": "t3", "target": {"thread": "th_1"}, "conversation": "c_1"}
-            ]}}),
-        );
+        // The person's watches, as Following in settings has them (model/watch.rs).
+        m.watch.list = [
+            json!({"id": "w_1", "integration": "acta", "target": {"board": "aaen-studios/loom"}, "conversation": "c_2"}),
+            json!({"id": "w_2", "integration": "acta", "target": {"board": "aaen-studios/loom"}, "conversation": "c_1", "wake": {"routine": "r_1"}}),
+            json!({"id": "w_9", "integration": "t3", "target": {"thread": "th_1"}, "conversation": "c_1"}),
+        ]
+        .iter()
+        .map(Watch::of)
+        .collect();
         // The board's watch posts in another chat, and a routine's isn't one to follow.
-        assert_eq!(m.following("aaen-studios/loom", None), Some(false));
-        assert_eq!(m.acta.watches.as_ref().unwrap().len(), 1);
+        assert_eq!(m.follows("aaen-studios/loom", None), Some(false));
         let put = m
             .toggle_follow("aaen-studios/loom", Some("LOO-206"))
             .unwrap();
@@ -1319,45 +1285,34 @@ mod tests {
             json!({"target": {"board": "aaen-studios/loom", "card": "LOO-206"}, "conversation": "c_1"})
         );
         // Shown at once; pressed again while it's made, it stays.
-        assert_eq!(
-            m.following("aaen-studios/loom", Some("LOO-206")),
-            Some(true)
-        );
+        assert_eq!(m.follows("aaen-studios/loom", Some("LOO-206")), Some(true));
         assert!(m
             .toggle_follow("aaen-studios/loom", Some("LOO-206"))
             .is_none());
-        // Its watch.updated comes first, then the answer: one watch.
+        // Its watch.updated comes first, then the answer: one watch, in Following too.
         let made = json!({"id": "w_3", "integration": "acta", "target": {"board": "aaen-studios/loom", "card": "LOO-206"}, "conversation": "c_1"});
         m.take(&json!({"t": "event", "kind": "watch.updated", "watch": made}));
         answer(&mut m, &put, json!({"value": {"watch": made}}));
-        let ids: Vec<String> = m
-            .acta
-            .watches
-            .as_ref()
-            .unwrap()
-            .iter()
-            .map(|w| w.id.clone())
-            .collect();
-        assert_eq!(ids, ["w_1", "w_3"]);
+        let ids: Vec<&str> = m.watch.list.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["w_1", "w_2", "w_9", "w_3"]);
+        assert_eq!(
+            m.following(crate::model::watch::Follower::Room("c_1"))
+                .len(),
+            2
+        );
         // Following stops with watch.remove, and is back when that's refused.
         let remove = m
             .toggle_follow("aaen-studios/loom", Some("LOO-206"))
             .unwrap();
         assert_eq!(remove["name"], "watch.remove");
         assert_eq!(remove["args"], json!({"id": "w_3"}));
-        assert_eq!(
-            m.following("aaen-studios/loom", Some("LOO-206")),
-            Some(false)
-        );
+        assert_eq!(m.follows("aaen-studios/loom", Some("LOO-206")), Some(false));
         answer(
             &mut m,
             &remove,
             json!({"error": {"code": "not_found", "message": "There's no watch w_3."}}),
         );
-        assert_eq!(
-            m.following("aaen-studios/loom", Some("LOO-206")),
-            Some(true)
-        );
+        assert_eq!(m.follows("aaen-studios/loom", Some("LOO-206")), Some(true));
         // Following the board, refused: back as it was, with why on the panel.
         let put = m.toggle_follow("aaen-studios/loom", None).unwrap();
         answer(
@@ -1365,20 +1320,63 @@ mod tests {
             &put,
             json!({"error": {"code": "not_found", "message": "Acta isn't connected."}}),
         );
-        assert_eq!(m.following("aaen-studios/loom", None), Some(false));
+        assert_eq!(m.follows("aaen-studios/loom", None), Some(false));
         let Some(Panel::Card(c)) = &m.acta.panel else {
             panic!()
         };
         assert_eq!(c.error.as_deref(), Some("Acta isn't connected."));
-        // Taken away on another device.
+        // Taken away on another device, or from Following.
         m.take(&json!({"t": "event", "kind": "watch.removed", "watch": "w_3"}));
-        assert_eq!(
-            m.following("aaen-studios/loom", Some("LOO-206")),
-            Some(false)
-        );
+        assert_eq!(m.follows("aaen-studios/loom", Some("LOO-206")), Some(false));
         // With no chat shown, there's nothing to follow in.
         m.open_room = None;
-        assert_eq!(m.following("aaen-studios/loom", None), None);
+        assert_eq!(m.follows("aaen-studios/loom", None), None);
+    }
+
+    #[test]
+    fn a_watch_line_about_the_card_shown_looks_it_up_again() {
+        let mut m = acta_model();
+        let line = |m: &Model, id: &str, card: &str| {
+            m.message_of(&json!({
+                "id": id, "role": "loom", "at": 1, "blocks": [{
+                    "kind": "update", "integration": "acta", "watch": "w_1",
+                    "board": "aaen-studios/loom", "card": card, "event": "moved",
+                    "to": "done", "said": "moved to Done", "by": "Ola"
+                }]
+            }))
+        };
+        // A line from before it was opened doesn't.
+        let older = line(&m, "m_1", "LOO-206");
+        m.messages.push(older);
+        let get = m.open_card("aaen-studios/loom", "LOO-206");
+        assert!(m.line_refresh().is_none());
+        answer(
+            &mut m,
+            &get,
+            json!({"value": {"card": {"id": "LOO-206", "board": "aaen-studios/loom", "status": "in_progress"}}}),
+        );
+        // One about another card doesn't either; one about it does, once.
+        let other = line(&m, "m_2", "LOO-351");
+        m.messages.push(other);
+        assert!(m.line_refresh().is_none());
+        let newer = line(&m, "m_3", "LOO-206");
+        m.messages.push(newer);
+        let again = m.line_refresh().expect("card.get");
+        assert_eq!(again["name"], "card.get");
+        assert_eq!(
+            again["args"],
+            json!({"board": "aaen-studios/loom", "id": "LOO-206"})
+        );
+        assert!(m.line_refresh().is_none());
+        answer(
+            &mut m,
+            &again,
+            json!({"value": {"card": {"id": "LOO-206", "board": "aaen-studios/loom", "status": "done"}}}),
+        );
+        let Some(Panel::Card(c)) = &m.acta.panel else {
+            panic!()
+        };
+        assert_eq!(c.detail.as_ref().unwrap().card.status, "done");
     }
 
     #[test]

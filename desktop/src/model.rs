@@ -16,6 +16,7 @@ mod popover;
 pub mod popup;
 mod rooms;
 pub mod t3;
+pub mod watch;
 pub use popover::pop_under;
 pub mod spools;
 use rooms::Making;
@@ -1299,6 +1300,8 @@ pub struct Routine {
     pub conversation: String,
     /// What happens to its answer (PLAN.md, "Routine flows"): the steps after it.
     pub flow: Vec<FlowStep>,
+    /// What outside loom it runs on, if anything (PLAN.md, "Watching outside events").
+    pub event: Option<watch::RoutineEvent>,
 }
 
 /// A step of a routine's flow: its agent is asked `prompt` once the steps it comes
@@ -1383,7 +1386,8 @@ pub const WEEKDAYS: u8 = 0b001_1111;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Schedule {
     /// "hours" (every few hours or minutes), "days" (at times on chosen days), or "" for
-    /// none: a routine that only runs by webhook.
+    /// none: a routine that only runs by webhook. The routine form has "event" too, for
+    /// one that runs on an event and has no schedule.
     pub repeat: String,
     /// The days it runs on, bit 0 Monday to bit 6 Sunday.
     pub days: u8,
@@ -1547,6 +1551,7 @@ impl Routine {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().map(FlowStep::of).collect())
                 .unwrap_or_default(),
+            event: watch::RoutineEvent::of(r.get("event").unwrap_or(&Value::Null)),
         }
     }
 }
@@ -1690,6 +1695,8 @@ pub struct RoutineForm {
     pub post: String,
     /// The flow after it, or none to leave it as it is. An empty one takes it off.
     pub flow: Option<Vec<FlowStep>>,
+    /// Its event as `routine.put` takes it, null to take it off, or none to leave it.
+    pub event: Option<Value>,
 }
 
 /// One entry of the activity log.
@@ -1914,6 +1921,8 @@ pub struct Block {
     /// The subagent call a tool call, words or a thought sit inside: the call of the
     /// Task or Agent call that made them, drawn in it rather than in the reply.
     pub parent: Option<String>,
+    /// A watch's line, a `loom` message's `update` block (`model/watch.rs`).
+    pub update: Option<std::sync::Arc<watch::WatchLine>>,
 }
 
 impl Block {
@@ -1925,6 +1934,7 @@ impl Block {
             file: None,
             card: None,
             parent: None,
+            update: None,
         }
     }
 
@@ -1953,6 +1963,7 @@ impl Block {
                 None
             },
             parent: b.get("parent").and_then(Value::as_str).map(str::to_string),
+            update: (kind == "update").then(|| std::sync::Arc::new(watch::WatchLine::of(b))),
             kind,
         }
     }
@@ -4171,7 +4182,7 @@ impl Model {
     /// of the shown chat, once it shows, whose cards were looked up over 5 minutes ago,
     /// for their status as it is now.
     pub fn card_fetches(&mut self, now: i64) -> Vec<Value> {
-        let mut out: Vec<Value> = self.watches_fetch().into_iter().collect();
+        let mut out: Vec<Value> = self.line_refresh().into_iter().collect();
         if !self.boards_asking && self.boards_at.is_none_or(|t| now - t >= BOARDS_FRESH_MS) {
             self.boards_asking = true;
             let id = self.id("app.acta_boards");
@@ -5391,9 +5402,13 @@ pub fn corners(mine: bool, joined: Joined) -> Corners {
 /// How each of the chat's rows joins the ones beside it (`None` for a row that isn't a
 /// message): the person's messages next to each other, each with words, are one group,
 /// and so are those another agent sent with message_agent, each its own sender's. An
-/// agent's reply joins only its own bubbles (`parts`).
+/// agent's reply joins only its own bubbles (`parts`). A watch's lines one after
+/// another join too, so they stack tight.
 pub fn person_joins(rows: &[Option<&Message>]) -> Vec<Joined> {
     let sender = |m: &Message| {
+        if watch::line_of(m).is_some() {
+            return Some(Some(String::from("loom:watch")));
+        }
         (m.role == "person"
             && m.blocks
                 .iter()
@@ -6145,6 +6160,8 @@ pub struct Model {
     /// The person's routines, oldest first.
     pub routines: Vec<Routine>,
     routines_stale: bool,
+    /// The person's watches, and the cards their lines show (`model/watch.rs`).
+    pub watch: watch::Watches,
     /// The files sent or received lately in the person's chats, newest first, for the
     /// composer's + menu.
     pub recent_files: Vec<RecentFile>,
@@ -7431,6 +7448,7 @@ impl Model {
                 }
                 "agent" if self.editing.is_some() => self.revisions_stale = true,
                 "proposal" => self.proposals_stale = true,
+                "watch" => self.watches_changed(),
                 "plugin" if kind != "plugin.data" => self.plugins_stale = true,
                 "user" | "people" if self.people_open => self.people_stale = true,
                 _ => {}
@@ -7480,8 +7498,6 @@ impl Model {
                     self.asks.retain(|a| a.id != id);
                 }
             }
-            // The person's watches, for Follow in Acta's panels.
-            "watch" => self.take_watch_event(&kind, f),
             "account" => {
                 if let Some(has) = f.get("has_password").and_then(Value::as_bool) {
                     self.has_password = Some(has);
@@ -7610,6 +7626,7 @@ impl Model {
             "routine" => {
                 self.routines_stale = true;
             }
+            "watch" => self.watch_event(&kind, f),
             "proposal" => {
                 self.proposals_stale = true;
             }
@@ -7943,6 +7960,9 @@ impl Model {
         }
         if id.starts_with("app.room_summary") {
             self.room_usage_came(f);
+            return;
+        }
+        if self.take_watch_answer(&id, f) {
             return;
         }
         // Compact now, or Start a fresh session: the chat shows what came of it, and
@@ -9330,6 +9350,7 @@ impl Model {
                 m.routine_name = r.name.clone();
             }
         }
+        self.line_cards(&mut out);
         let conversation = self.conversation();
         for r in &self.runs {
             // A routine's quiet run shows only what its agent posts, which comes as messages.
@@ -11160,6 +11181,9 @@ impl Model {
                 .iter()
                 .map(|s| json!({"name": s.name, "agent": s.agent, "prompt": s.prompt, "after": s.after}))
                 .collect();
+        }
+        if let Some(event) = &f.event {
+            args["event"] = event.clone();
         }
         json!({"t": "cmd", "id": cmd, "name": "routine.put", "args": args})
     }

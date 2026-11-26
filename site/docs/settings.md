@@ -78,13 +78,14 @@ Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), 
 
 ## Routines
 
-A routine sends an agent a prompt on a schedule, or when something posts to its webhook. The page shows the week over your routines: days across, hours down, each routine a small block in its agent's colour at its times, and one that runs every few hours as thin ticks. Today stands out, and the arrows go to other weeks. Click a block, or a routine, to open it.
+A routine sends an agent a prompt on a schedule, when something posts to its webhook, or when something happens on an Acta board or a T3 thread. The page shows the week over your routines: days across, hours down, each routine a small block in its agent's colour at its times, and one that runs every few hours as thin ticks. Today stands out, and the arrows go to other weeks. Click a block, or a routine, to open it.
 
 On a routine's page, **Repeat** sets when it runs:
 
 - **Every few hours**: "Every 2 hours, from 08:00 to 20:00", on the days you pick. A routine an agent set every 30 minutes shows minutes here.
 - **On days**: the days, M T W T F S S, and its times, one or more. **+ Time** adds one; × takes one off. "Weekdays" or "Every day" shows beside the days when that's what's picked.
 - **Webhook**: only when something posts to its webhook. Its address and secret show under **Options** once it's saved. A routine on a schedule can have one too, with **Webhook too**.
+- **On an event**: when something happens on your Acta or T3, which shows once you have an Acta board or a T3 server connected ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). **On** picks Acta or T3 when you have both, and **Server** which one when you have several. For Acta, pick the **Board**, then the **Event**: **Moves to** a **Status** (Todo, In progress, Review, Done or Canceled), **New card**, or **Comment**. For T3, type the **Thread**'s id; the routine runs when its run finishes. The list says it in words: "When a LOO card moves to Done". What happened comes after the routine's prompt.
 
 Times are in your time zone, summer time included. Under them, **Next** says when it runs the next three times.
 

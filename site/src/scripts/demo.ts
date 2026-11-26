@@ -9,7 +9,9 @@
 // pill over them, and sent, showing them the same way; the agent thinks, uses a tool, writes,
 // asks before it deploys and waits for the yes, then finishes, starting a T3 thread for the
 // release notes whose card works and then lies straight with its pull request (desktop/src/
-// t3_view.rs, thread_card). Once it's shipped, `:tada` typed
+// t3_view.rs, thread_card). Sam then moves the notes' card to Done, which the watch on the shop
+// board says in a quiet line, its card's pill and "moved to Done · Sam", and the reply of
+// Juniper, which it woke, follows it (watch_view.rs, update_line). Once it's shipped, `:tada` typed
 // opens the emoji row over the composer, which puts 🎉 in the words as Twemoji's picture, and a
 // message of only it is big (emoji_ui.rs, emoji_row_view; PLAN.md, "Emoji"). While the turn runs, one quiet
 // line under the reply says the step it's on; once it's done, its last words are the answer and
@@ -56,6 +58,8 @@ const EFFECT = 'Runs a command';
 const SHIPPED = 'Shipped. 2.4.1 is live, and its health check answers. I started a T3 thread for its release notes.';
 /** How long the T3 thread it starts has run, as its card says it, while it works and once it's done. */
 const T3_MINUTES = 6;
+/** Juniper's reply once the watch on the shop board wakes it: Sam moved the notes' card to Done. */
+const WOKEN = 'SHOP-31 is done, so the 2.4.1 notes are in the changelog and the store listing.';
 const HELD = "Okay, I won't deploy. Main stays as it is.";
 /** What the person writes in the Shop group chat, which the router gives Biscuit, and its answer. */
 const ROOM_ASK = 'Did the October invoice go out?';
@@ -130,11 +134,12 @@ export function play(app: HTMLElement) {
 	}
 	// An Acta card's preview, which the page's CSS opens under its pill, goes over it when
 	// there's no room under it in the chat, as the app keeps a popover in the window.
-	for (const pill of app.querySelectorAll<HTMLElement>('.acta-pill')) {
+	function placed(pill: HTMLElement) {
 		const preview = pill.querySelector<HTMLElement>('.acta-preview');
-		const chat = pill.closest<HTMLElement>('.chat');
-		if (!preview || !chat) continue;
+		if (!preview) return;
 		const place = () => {
+			const chat = pill.closest<HTMLElement>('.chat');
+			if (!chat) return;
 			preview.classList.remove('up');
 			preview.style.display = 'flex';
 			const tall = preview.offsetHeight;
@@ -149,16 +154,21 @@ export function play(app: HTMLElement) {
 	// its pill's dot and preview with it; a tick ticks a subtask, and the counts follow.
 	const actaSide = app.querySelector<HTMLElement>('[data-acta-side]');
 	const sidePill = app.querySelector<HTMLElement>('.acta-pill[data-card="SHOP-31"]');
+	// Makes another of SHOP-31's pills open its side preview too: a watch's line's.
+	let opensSide = (_pill: HTMLElement) => {};
 	if (actaSide && sidePill) {
-		const show = (open: boolean) => {
+		const show = (open: boolean, pill = sidePill) => {
 			actaSide.hidden = !open;
-			if (open) sidePill.blur();
+			if (open) pill.blur();
 		};
-		sidePill.querySelector('.acta-face')!.addEventListener('click', () => show(true));
-		sidePill.querySelector('[data-acta-open]')?.addEventListener('click', (e) => {
-			e.stopPropagation();
-			show(true);
-		});
+		opensSide = (pill: HTMLElement) => {
+			pill.querySelector('.acta-face')!.addEventListener('click', () => show(true, pill));
+			pill.querySelector('[data-acta-open]')?.addEventListener('click', (e) => {
+				e.stopPropagation();
+				show(true, pill);
+			});
+		};
+		opensSide(sidePill);
 		actaSide.querySelector('[data-acta-close]')!.addEventListener('click', () => show(false));
 		// Follow, and Following with its tick, which stops it.
 		const follow = actaSide.querySelector<HTMLButtonElement>('[data-acta-follow]')!;
@@ -203,6 +213,7 @@ export function play(app: HTMLElement) {
 			});
 		}
 	}
+	for (const pill of app.querySelectorAll<HTMLElement>('.acta-pill')) placed(pill);
 	const typed = app.querySelector<HTMLElement>('.typed')!;
 	const attached = app.querySelector<HTMLElement>('[data-attached]')!;
 	const composer = app.querySelector<HTMLElement>('.composer')!;
@@ -984,6 +995,29 @@ export function play(app: HTMLElement) {
 		return at;
 	}
 
+	/** The earlier answer's SHOP-31 as its pill shows the card now: in progress, or done once
+	 * Sam has moved it. */
+	const notesPill = msgs.querySelector<HTMLElement>('.acta-pill[data-card="SHOP-31"]')!;
+	function notesDone(done: boolean) {
+		notesPill.style.setProperty('--status', done ? 'var(--ok)' : 'var(--thread-sky)');
+		notesPill.querySelector('.cp-status')!.textContent = done ? 'Done' : 'In progress';
+		notesPill.querySelector('.cp-subtasks')!.firstChild!.textContent = done ? 'Subtasks 4 of 4' : 'Subtasks 2 of 4';
+		notesPill.querySelector<HTMLElement>('.cp-bar span')!.style.width = done ? '100%' : '50%';
+	}
+
+	/** The watch on the shop board's line once Sam moves the notes' card to Done, quiet and
+	 * on the left (PLAN.md, "Watching outside events"), and the reply of Juniper, which it
+	 * woke, after it; `p` the reply's paragraph. */
+	function watched(fresh: boolean) {
+		const line = tpl('demo-watch-line');
+		const reply = tpl('demo-woken');
+		for (const row of [line, reply]) row.classList.toggle('fresh', fresh);
+		const pill = line.querySelector<HTMLElement>('.acta-pill')!;
+		placed(pill);
+		opensSide(pill);
+		return { line, reply, p: reply.querySelector<HTMLElement>('.said p')! };
+	}
+
 	/** The approval, answered by a click or, after a while, by itself. */
 	function approve(id: number) {
 		const row = tpl('demo-approval');
@@ -1078,6 +1112,7 @@ export function play(app: HTMLElement) {
 		waitingOn('Juniper', false);
 		cleared();
 		context(82);
+		notesDone(false);
 		await wait(900, id);
 		// It replies to the earlier answer, from its Reply on hover.
 		const earlier = history.find((el) => el.classList.contains('reply')) as HTMLElement;
@@ -1147,6 +1182,25 @@ export function play(app: HTMLElement) {
 			}
 			await wait(650, id);
 			t3(T3_MINUTES, true);
+			// Sam moves the notes' card to Done: the watch on the board says so in a quiet
+			// line, and wakes Juniper, whose reply follows it.
+			await wait(1400, id);
+			const woke = watched(true);
+			msgs.append(woke.line);
+			notesDone(true);
+			toBottom();
+			await wait(900, id);
+			msgs.append(woke.reply);
+			const wokeThread = threadsIn(woke.reply)[0];
+			mood('writing', wokeThread);
+			preview('Juniper', '', 'writing');
+			toBottom();
+			const said = WOKEN.split(' ');
+			for (let i = 1; i <= said.length; i++) {
+				woke.p.textContent = said.slice(0, i).join(' ');
+				await wait(45 + Math.random() * 70, id);
+			}
+			mood('idle', wokeThread);
 		} else {
 			deploy('denied');
 			mood('writing', replyThread);
@@ -1221,8 +1275,12 @@ export function play(app: HTMLElement) {
 		tool(steps, ASK)('done');
 		finish(reply, say, steps, SHIPPED);
 		context(92);
-		msgs.append(you, reply, cheer(false));
+		const woke = watched(false);
+		woke.p.textContent = WOKEN;
+		notesDone(true);
+		msgs.append(you, reply, woke.line, woke.reply, cheer(false));
 		t3Card(reply, true);
+		threadsIn(woke.reply);
 		threadsIn(reply);
 		mood('idle');
 		for (const a of byAgent.keys()) preview(a, '', 'idle');

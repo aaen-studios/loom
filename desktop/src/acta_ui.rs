@@ -391,7 +391,7 @@ impl Loom {
         card: Option<&str>,
         cx: &mut Context<Self>,
     ) -> Option<Stateful<Div>> {
-        let following = self.model.following(board, card)?;
+        let following = self.model.follows(board, card)?;
         let p = self.p;
         let label = if following { "Following" } else { "Follow" };
         let (board, card) = (board.to_string(), card.map(str::to_string));
