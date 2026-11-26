@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 mod popover;
+pub mod popup;
 mod rooms;
 pub use popover::pop_under;
 use rooms::Making;
