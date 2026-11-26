@@ -192,7 +192,8 @@ struct RoutinePage: View {
     private func form(_ saved: Routine?, _ d: Binding<RoutineDraft>) -> some View {
         let model = session.model
         let agent = model.agent(d.wrappedValue.agent)
-        return List {
+        let runsShown = saved != nil && !model.routineRuns.isEmpty && model.routineRunsFor == saved?.id
+        return ScrollViewReader { proxy in List {
             Section {
                 HStack {
                     Text("Name").font(Fonts.body).foregroundStyle(P.ink)
@@ -269,10 +270,11 @@ struct RoutinePage: View {
                     copyRow("Secret", saved.secret, shown: String(repeating: "•", count: 12))
                 }
             }
-            if let saved, !model.routineRuns.isEmpty, model.routineRunsFor == saved.id {
+            if runsShown {
                 Section("History") {
                     RunHistory(runs: model.routineRuns)
                 }
+                .id("history")
             }
             if saved != nil {
                 Section {
@@ -296,6 +298,13 @@ struct RoutinePage: View {
         .font(Fonts.body)
         .scrollContentBackground(.hidden)
         .scrollDismissesKeyboard(.interactively)
+        // `-history` at launch scrolls down to its History once it's here, for screenshots.
+        .onChange(of: runsShown, initial: true) { _, shown in
+            if shown, ProcessInfo.processInfo.arguments.contains("-history") {
+                proxy.scrollTo("history", anchor: .bottom)
+            }
+        }
+        }
     }
 
     /// The routine's model or effort: what its agent's program offers, the agent's own
