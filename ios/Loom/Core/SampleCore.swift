@@ -99,10 +99,11 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         for (k, v) in args where !["id", "webhook"].contains(k) {
             r[k] = k == "gate" && v.isNull ? .null : v
         }
-        if a["webhook"].bool == true, r["hook"]?.text.isEmpty ?? true { r["hook"] = "h_\(id)" }
+        if a["webhook"].bool == true, r["hook"]?.text.isEmpty ?? true { r["hook"] = JSON("h_\(id)") }
         if a["webhook"].bool == false { r["hook"] = .null }
         if !a["schedule"].isNull {
-            r["when"] = a["schedule"]["every"].int.map { "every \($0) minutes" } ?? "at \(a["schedule"]["times"].array.map(\.text).joined(separator: ", "))"
+            let times = a["schedule"]["times"].array.map(\.text).joined(separator: ", ")
+            r["when"] = JSON(a["schedule"]["every"].int.map { "every \($0) minutes" } ?? "at \(times)")
             r["next"] = JSON(Sample.now() + 2 * 3600 * 1000)
         } else {
             r["next"] = 0

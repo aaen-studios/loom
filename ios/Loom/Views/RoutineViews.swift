@@ -133,13 +133,20 @@ struct RoutinePage: View {
                 dismiss()
             }
         }
-        .onAppear {
-            guard draft == nil else { return }
-            if let saved {
-                draft = RoutineDraft(saved)
-            } else {
-                draft = RoutineDraft(agent: model.selected ?? listed(model.agents).first?.id ?? "")
-            }
+        .onAppear { fill() }
+        // A routine's page opened before the routines came fills once its routine has.
+        .onChange(of: saved == nil) { fill() }
+    }
+
+    /// The page's draft as it opens: the routine's as it was saved, once it's here, or a
+    /// new one's for the agent shown.
+    private func fill() {
+        guard draft == nil else { return }
+        let model = session.model
+        if routine.isEmpty {
+            draft = RoutineDraft(agent: model.selected ?? listed(model.agents).first?.id ?? "")
+        } else if let saved = model.routineList.first(where: { $0.id == routine }) {
+            draft = RoutineDraft(saved)
         }
     }
 
@@ -257,7 +264,6 @@ struct RoutinePage: View {
         Toggle(isOn: on) {
             Text(label).font(Fonts.body).foregroundStyle(P.ink)
         }
-        .tint(P.button)
     }
 
     private func menu(_ label: String, _ on: Binding<String>, _ options: [(String, String)]) -> some View {
