@@ -138,9 +138,16 @@ struct Composer: View {
         Task {
             for path in values("-attach") { await attach(path: path, name: (path as NSString).lastPathComponent) }
             for url in values("-paste") { box.view?.pasteLink(url) }
-            // What's typed, as the keyboard types it, and the emoji picker.
+            // What's typed, as the keyboard types it, and the emoji picker, with `-pick <n>`
+            // its first n emoji picked once its groups have come, as n taps pick them.
             for text in values("-type") { box.view?.insertText(text) }
-            if args.contains("-emoji") { openEmoji() }
+            if args.contains("-emoji") {
+                openEmoji()
+                if let n = values("-pick").first.flatMap(Int.init) {
+                    try? await Task.sleep(for: .seconds(1.5))
+                    for item in session.model.emoji.groups.flatMap(\.emoji).prefix(n) { pickEmoji(item) }
+                }
+            }
         }
     }
     #endif
