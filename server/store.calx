@@ -1681,6 +1681,15 @@ impl Store {
         return try self.db.execute(String("DELETE FROM skills WHERE user = ? AND name = ?"), [t(user), t(name)]) > 0
     }
 
+    // Renames `user`'s skill `was` to `name`, with the description and body it
+    // has now. The failures agents said of it and the fixes proposed for it
+    // name it by its new name.
+    pub fn rename_skill(self, user: String, was: String, name: String, description: String, body: String) ! Error {
+        _ = try self.db.execute(String("UPDATE skills SET name = ?, description = ?, body = ?, at = ? WHERE user = ? AND name = ?"), [t(name.copy()), t(description), t(body), Value.Int(now()), t(user.copy()), t(was.copy())])
+        _ = try self.db.execute(String("UPDATE OR REPLACE skill_failures SET skill = ? WHERE user = ? AND skill = ?"), [t(name.copy()), t(user.copy()), t(was.copy())])
+        _ = try self.db.execute(String("UPDATE proposals SET data = json_set(data, '$.name', ?) WHERE user = ? AND kind = 'fix' AND json_extract(data, '$.name') = ?"), [t(name), t(user), t(was)])
+    }
+
     // --- Plugins (PLAN.md, "Plugins") ---
 
     // Keeps `user`'s plugin, as JSON (its `id`, what its manifest says,
@@ -1788,6 +1797,12 @@ impl Store {
     // by SHA-256, for a light background and a dark one, each "" for none.
     pub fn put_mcp_icon(self, user: String, name: String, key: String, icon: String, dark: String) ! Error {
         _ = try self.db.execute(String("INSERT INTO mcp_icons (user, name, key, icon, dark, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (user, name) DO UPDATE SET key = excluded.key, icon = excluded.icon, dark = excluded.dark, at = excluded.at"), [t(user), t(name), t(key), t(icon), t(dark), Value.Int(now())])
+    }
+
+    // A renamed MCP server's icons, kept by its new name.
+    pub fn rename_mcp_icon(self, user: String, was: String, name: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM mcp_icons WHERE user = ? AND name = ?"), [t(user.copy()), t(name.copy())])
+        _ = try self.db.execute(String("UPDATE mcp_icons SET name = ? WHERE user = ? AND name = ?"), [t(name), t(user), t(was)])
     }
 
     // The icons kept for a person's MCP server: (key, icon, dark), or none.

@@ -6,7 +6,8 @@ module tests.protocol.servers
 // headers, and a value can be one of the person's secrets, which is filled in
 // only for the agent's process, and kept sealed. A server that's gone isn't
 // given any more. Testing one starts it as a session would, and lists its
-// tools, or says why it didn't start.
+// tools, or says why it didn't start. One saved with `was` is renamed: its
+// agents have it by its new name, with what its last test found.
 //
 //     calx tests/protocol/servers.calx
 import std.fs
@@ -37,6 +38,30 @@ fn code(answer: Json) -> String {
     return str_at(at(answer, "error"), "code") ?? String()
 }
 
+// The acta server as mcp.put takes it, named `name`; with `was`, the name
+// it's saved under, as the MCP servers page's Save sends it.
+fn acta_server(name: str, was: str) -> Json {
+    var o = Obj.new().s("name", String(name)).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("acta-mcp"))])).j("env", Obj.new().s("ACTA_URL", String("https://acta.example.com")).j("ACTA_KEY", Obj.new().s("secret", String("ACTA_KEY")).done()).done())
+    if was.len() > 0 { o = o.s("was", String(was)) }
+    return o.done()
+}
+
+fn fake_server(name: str, was: str, program: own String) -> Json {
+    var o = Obj.new().s("name", String(name)).s("command", calx()).j("args", Json.Array([Json.Str(program)])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done())
+    if was.len() > 0 { o = o.s("was", String(was)) }
+    return o.done()
+}
+
+// `name`'s entry in what mcp.list gave.
+fn listed_as(list: Json, name: str) -> Json {
+    if let Json.Array(servers) = at(at(list, "value"), "servers") {
+        for s in servers {
+            if str_at(s.copy(), "name") == some(String(name)) { return s.copy() }
+        }
+    }
+    return Json.Null
+}
+
 fn run(i: Instance) ! Error {
     var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
     _ = try app.cmd("q_s1", "secret.put", Obj.new().s("name", String("ACTA_KEY")).s("value", String("s3cret-acta-key")).done())
@@ -48,8 +73,7 @@ fn run(i: Instance) ! Error {
         if fs.exists("{i.data}/{name}") { kept.extend(try fs.read("{i.data}/{name}")) }
     }
     try check(not decode_lossy_unicode(kept.copy(), 0, kept.len()).contains("s3cret-acta-key"), "and the database has it only sealed")
-    let acta = Obj.new().s("name", String("acta")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("acta-mcp"))])).j("env", Obj.new().s("ACTA_URL", String("https://acta.example.com")).j("ACTA_KEY", Obj.new().s("secret", String("ACTA_KEY")).done()).done()).done()
-    _ = try app.cmd("q_1", "mcp.put", acta)
+    _ = try app.cmd("q_1", "mcp.put", acta_server("acta", ""))
     let web = Obj.new().s("name", String("web")).s("url", String("https://mcp.example.com/mcp")).j("headers", Obj.new().s("Authorization", String("Bearer t0")).done()).done()
     _ = try app.cmd("q_2", "mcp.put", web)
     let listed = "{try app.cmd("q_3", "mcp.list", Obj.new().done())}"
@@ -69,23 +93,36 @@ fn run(i: Instance) ! Error {
     try check(try servers_of(mut app, plain_id, "q_10") == "no servers", "and an agent without any gets only loom's own")
 
     _ = try app.cmd("q_11", "mcp.delete", Obj.new().s("name", String("web")).done())
-    let after = try servers_of(mut app, main_id, "q_12")
+    let after = try servers_of(mut app, main_id.copy(), "q_12")
     try check(after.contains("acta") and not after.contains("web"), "a server that's deleted isn't given any more")
 
     // --- Testing a server ---
     _ = try app.cmd("q_t1", "secret.put", Obj.new().s("name", String("FAKE_KEY")).s("value", String("s3cret")).done())
     let fake_main = try fs.absolute(String("tests/fake_mcp/main.calx"))
-    let fake = Obj.new().s("name", String("fake")).s("command", calx()).j("args", Json.Array([Json.Str(fake_main.copy())])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("FAKE_KEY")).done()).done()).done()
-    _ = try app.cmd("q_t2", "mcp.put", fake)
+    _ = try app.cmd("q_t2", "mcp.put", fake_server("fake", "", fake_main.copy()))
     let tested = try app.cmd("q_t3", "mcp.test", Obj.new().s("name", String("fake")).done())
     try check("{at(at(tested, "value"), "tools")}".contains("key_length"), "testing a server starts it and lists its tools")
-    let keyless = Obj.new().s("name", String("keyless")).s("command", calx()).j("args", Json.Array([Json.Str(fake_main)])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("NO_SUCH_KEY")).done()).done()).done()
+    let keyless = Obj.new().s("name", String("keyless")).s("command", calx()).j("args", Json.Array([Json.Str(fake_main.copy())])).j("env", Obj.new().j("FAKE_KEY", Obj.new().s("secret", String("NO_SUCH_KEY")).done()).done()).done()
     _ = try app.cmd("q_t4", "mcp.put", keyless)
     let lacking = try app.cmd("q_t5", "mcp.test", Obj.new().s("name", String("keyless")).done())
     try check(code(lacking.copy()) == "mcp_failed" and "{lacking}".contains("NO_SUCH_KEY"), "one whose secret isn't there says which")
     _ = try app.cmd("q_t6", "mcp.put", Obj.new().s("name", String("broken")).s("command", String("loom-no-such-program")).done())
     let broken = try app.cmd("q_t7", "mcp.test", Obj.new().s("name", String("broken")).done())
     try check(code(broken) == "mcp_failed", "and one that doesn't start says why")
+
+    // --- Renaming a server ---
+    let renamed = try app.cmd("q_r1", "mcp.put", acta_server("tracker", "acta"))
+    let list = try app.cmd("q_r2", "mcp.list", Obj.new().done())
+    try check(str_at(at(at(renamed, "value"), "server"), "name") == some(String("tracker")) and listed_as(list.copy(), "acta") == Json.Null and "{at(listed_as(list, "tracker"), "agents")}" == "[\"{main_id}\"]", "a server saved with was, its name now, is renamed, and the agents that had it have it by its new name")
+    let moved = try servers_of(mut app, main_id, "q_r3")
+    try check(moved.contains("tracker npx -y acta-mcp ACTA_URL=https://acta.example.com ACTA_KEY=s3cret-acta-key") and not moved.contains("acta npx"), "with its settings and secrets, in a new session")
+    _ = try app.cmd("q_r4", "mcp.put", fake_server("checker", "fake", fake_main.copy()))
+    let checked = listed_as(try app.cmd("q_r5", "mcp.list", Obj.new().done()), "checker")
+    try check(str_at(checked.copy(), "status") == some(String("connected")) and "{at(checked, "tools")}".contains("key_length"), "what its last test found stays with it")
+    try check(code(try app.cmd("q_r6", "mcp.put", acta_server("checker", "tracker"))) == "name_taken", "a name another server has isn't taken")
+    try check(code(try app.cmd("q_r7", "mcp.put", acta_server("other", "acta"))) == "not_found", "nor is a server that isn't there renamed")
+    let same = try app.cmd("q_r8", "mcp.put", acta_server("tracker", "tracker"))
+    try check(at(same, "ok") == Json.Bool(true) and listed_as(try app.cmd("q_r9", "mcp.list", Obj.new().done()), "tracker") != Json.Null, "and was with its own name changes it where it is")
     app.close()
 }
 
