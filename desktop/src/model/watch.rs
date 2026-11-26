@@ -445,11 +445,14 @@ impl RoutineEvent {
     }
 }
 
-/// Whether an MCP server over HTTP is the person's Acta, or a T3 server of theirs: by
-/// its address for Acta, and by its name for T3, which Spools names `t3`.
-pub fn server_is(integration: &str, name: &str, url: &str) -> bool {
+/// Whether an MCP server over HTTP is the person's Acta, or a T3 server of theirs: from
+/// Spools' entry for it (`catalog`), or else by its address for Acta and its name for T3.
+pub fn server_is(integration: &str, catalog: &str, name: &str, url: &str) -> bool {
     if url.is_empty() {
         return false;
+    }
+    if !catalog.is_empty() && catalog == integration {
+        return true;
     }
     match integration {
         "acta" => url.starts_with(&format!("https://{ACTA}/")),
@@ -585,7 +588,7 @@ impl Model {
         }
         self.mcp_servers
             .iter()
-            .filter(|m| server_is(integration, &m.name, &m.url))
+            .filter(|m| server_is(integration, &m.catalog, &m.name, &m.url))
             .map(|m| m.name.clone())
             .collect()
     }
@@ -992,16 +995,46 @@ mod tests {
 
     #[test]
     fn an_event_is_on_the_persons_acta_or_their_t3_servers() {
-        assert!(server_is("acta", "acta", "https://acta.aaenz.no/api/mcp"));
-        assert!(!server_is("acta", "acta", ""));
-        assert!(server_is("t3", "t3", "https://pc.tail1234.ts.net/mcp"));
-        assert!(server_is("t3", "T3-vps", "https://vps.tail1234.ts.net/mcp"));
+        assert!(server_is(
+            "acta",
+            "",
+            "acta",
+            "https://acta.aaenz.no/api/mcp"
+        ));
+        assert!(!server_is("acta", "", "acta", ""));
+        assert!(server_is("t3", "", "t3", "https://pc.tail1234.ts.net/mcp"));
+        assert!(server_is(
+            "t3",
+            "",
+            "T3-vps",
+            "https://vps.tail1234.ts.net/mcp"
+        ));
         assert!(!server_is(
             "t3",
+            "",
             "github",
             "https://api.githubcopilot.com/mcp/"
         ));
-        assert!(!server_is("t3", "t3", ""));
+        assert!(!server_is("t3", "", "t3", ""));
+        // From Spools' entry, under a name of the person's own.
+        assert!(server_is(
+            "t3",
+            "t3",
+            "studio",
+            "https://pc.tail1234.ts.net/mcp"
+        ));
+        assert!(server_is(
+            "acta",
+            "acta",
+            "work",
+            "https://acta.example.com/api/mcp"
+        ));
+        assert!(!server_is(
+            "t3",
+            "acta",
+            "work",
+            "https://acta.example.com/api/mcp"
+        ));
     }
 
     #[test]
