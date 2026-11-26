@@ -48,7 +48,7 @@ mod room_view;
 
 #[path = "emoji_ui.rs"]
 mod emoji_ui;
-use emoji_ui::RowKey;
+use emoji_ui::{Greeting, RowKey};
 #[path = "form_drafts.rs"]
 mod form_drafts;
 #[path = "list_page.rs"]
@@ -10945,7 +10945,13 @@ ACTA_KEY=secret:ACTA_KEY",
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let emoji_row = self.emoji_row().map(|row| self.emoji_row_view(&row, cx));
-        let emoji_picker = self.emoji_picker_view(window, cx);
+        // A new chat's greeting and composer move up for the picker under them.
+        let lift = if empty && !in_task {
+            self.hero_lift(window, cx)
+        } else {
+            0.0
+        };
+        let emoji_picker = self.emoji_picker_view(lift, window, cx);
         let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
             .then(|| self.emoji_button(cx));
         let composer_at = self.emoji_ui.composer_at.clone();
@@ -10967,9 +10973,11 @@ ACTA_KEY=secret:ACTA_KEY",
                 .relative()
                 // Where it is, for the emoji picker to open by it, and again in the next
                 // frame once it moved with the picker open, as when the window resizes.
+                // A new chat's is kept as it is down.
                 .child(
                     canvas(
                         move |b, window, _| {
+                            let b = Bounds::new(point(b.left(), b.top() + px(lift)), b.size);
                             if composer_at.replace(Some(b)) != Some(b) && picker_open {
                                 window.request_animation_frame();
                             }
@@ -11249,8 +11257,13 @@ ACTA_KEY=secret:ACTA_KEY",
                     .flex()
                     .flex_col()
                     .relative()
+                    // Up for the picker, what of the greeting would pass under the header
+                    // has faded by then (`greeting`); this keeps anything else off it.
+                    .when(lift > 0.0, |d| d.overflow_hidden())
                     .child(if empty && !in_task {
                         self.hero(agent.as_ref(), composer.take(), cx)
+                            .relative()
+                            .top(px(-lift))
                             .into_any_element()
                     } else {
                         let list_at = self.list_at.clone();
@@ -12054,13 +12067,19 @@ ACTA_KEY=secret:ACTA_KEY",
             .gap(px(space::XL))
             .px(px(space::XL))
             .pb(px(60.0))
-            .child(thread("hero", mood, tint, 140.0, 16.0, snapped))
+            .child(self.greeting(
+                Greeting::Line,
+                thread("hero", mood, tint, 140.0, 16.0, snapped),
+            ))
             .child(
-                div()
-                    .text_size(px(size::HERO))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(p.ink)
-                    .child(a.name.clone()),
+                self.greeting(
+                    Greeting::Name,
+                    div()
+                        .text_size(px(size::HERO))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(a.name.clone()),
+                ),
             )
             .when_some(composer, |d, c| {
                 // An empty chat keeps its composer at the normal width, whatever the
