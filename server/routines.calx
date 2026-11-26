@@ -385,7 +385,181 @@ pub fn hint(status: String, error: String) -> String {
 // its answer goes on to steps of the routine's flow.
 pub fn quiet_note(flow: bool) -> String {
     let on = if flow { " Your answer goes on to the routine's next steps, which the person doesn't see either." } else { "" }
-    return "[loom: Your person sees nothing of this turn: not this message, nor what you answer. When there's something worth telling them, post it with routine_post: it goes in your chat with them as your message, and they're notified. With nothing new, just finish, or end with routine_quiet. If it can't be done, say why with routine_failed, which they're told.{on}]"
+    return "[loom: Your person sees nothing of this turn: not this message, nor what you answer. It runs in a session of its own, apart from your chat with them, so none of that chat is here; search_messages finds it if you need it. When there's something worth telling them, post it with routine_post: it goes in your chat with them as your message, and they're notified. With nothing new, just finish, or end with routine_quiet. If it can't be done, say why with routine_failed, which they're told.{on}]"
+}
+
+// --- What a run is given in its own session ---
+
+// How much of what its last run posted or answered, and of what its gate
+// printed, a run is given, in bytes.
+pub const LAST_MOST: usize = 1500
+pub const GATE_SAID_MOST: usize = 8000
+
+// What a routine's run is told of its last run, which its own session doesn't
+// have: what it posted, that it found nothing, or why it didn't finish. `run`
+// is that run as the routine's runs keep it; "" before the first.
+pub fn last_note(run: Json) -> String {
+    let status = str_at(run.copy(), "status") ?? String()
+    if status.len() == 0 { return String() }
+    let when = Timestamp { unix_ms: int_at(run.copy(), "at") ?? 0 }.date_time(0).format("%Y-%m-%d %H:%M")
+    var posted = List<String>()
+    if let Json.Array(list) = at(run.copy(), "posted") {
+        for p in list {
+            if let s = p.as_str() { posted.push(cut(s, LAST_MOST)) }
+        }
+    }
+    let said = cut(str_at(run.copy(), "said") ?? String(), LAST_MOST)
+    var what = String()
+    if posted.len() > 0 {
+        what = "it posted this in your chat with your person:\n\n{posted.join("\n\n")}"
+    } else if status == "quiet" and at(run.copy(), "woke") == Json.Bool(false) {
+        what = String("its gate found nothing new, so you weren't woken.")
+    } else if status == "quiet" or status == "done" {
+        what = if said.len() > 0 { "it posted nothing. What you answered then:\n\n{said}" } else { String("it posted nothing.") }
+    } else {
+        what = "it didn't finish ({status}): {str_at(run, "error") ?? String("it stopped")}"
+    }
+    return "[loom: The last time this routine ran, {when} UTC, {what}]"
+}
+
+// What a chat's own session is told of what routines put in the chat since its
+// last turn there, which they did in sessions of their own: each message as the
+// chat keeps it, oldest first.
+pub fn posts_note(messages: List<Json>) -> String {
+    var lines = List<String>()
+    for m in messages {
+        var said = String()
+        if let Json.Array(blocks) = at(m.copy(), "blocks") {
+            for b in blocks {
+                if str_at(b.copy(), "kind") == some(String("text")) and at(b.copy(), "parent") == Json.Null { said.push_str(str_at(b, "text") ?? String()) }
+            }
+        }
+        if said.trim().len() == 0 { continue }
+        let when = Timestamp { unix_ms: int_at(m.copy(), "at") ?? 0 }.date_time(0).format("%Y-%m-%d %H:%M")
+        let whose = match str_at(m, "routine_name") {
+            some(n) => "the routine \"{n}\"",
+            none => String("a routine that failed"),
+        }
+        lines.push("From {whose}, {when} UTC:\n{cut(said, LAST_MOST)}")
+    }
+    if lines.len() == 0 { return String() }
+    return "[loom: Since your last turn here, your routines put these in this chat as your messages, from sessions of their own. Your person has seen them, and may be answering one:\n\n{lines.join("\n\n")}]"
+}
+
+// --- A routine's gate (PLAN.md, "Routines") ---
+//
+// A command that runs before its agent wakes, where the agent's own commands
+// run. Exit 0 with something printed wakes the agent, with what it printed;
+// exit 0 with nothing printed is a quiet run, and the agent never wakes; any
+// other exit, or running past its timeout, is a failed run.
+
+// How long a gate may run, in seconds, when its routine doesn't say, and the
+// most it can say; and the longest command.
+pub const GATE_SECONDS: i64 = 60
+pub const GATE_SECONDS_MOST: i64 = 600
+pub const GATE_COMMAND_MOST: usize = 4000
+
+pub struct Gate {
+    pub command: String
+    pub seconds: i64
+}
+
+// Routine `r`'s gate, when it has one.
+pub fn gate_of(r: Json) -> Gate? {
+    let g = at(r, "gate")
+    let command = (str_at(g.copy(), "command") ?? String()).trim().copy()
+    if command.len() == 0 { return none }
+    return some(Gate { command: command, seconds: int_at(g, "timeout") ?? GATE_SECONDS })
+}
+
+// A gate as routine.put takes it, as the routine keeps it (null for none, as
+// null or an empty command gives), or why it isn't one.
+pub fn read_gate(j: Json) -> (Json, String) {
+    if j == Json.Null { return (Json.Null, String()) }
+    let given = at(j.copy(), "command")
+    let command = (given.as_str() ?? String()).trim().copy()
+    if given != Json.Null and given.as_str() == none { return (Json.Null, String("A gate is \{\"command\": \"...\", \"timeout\": seconds\}.")) }
+    if command.len() == 0 { return (Json.Null, String()) }
+    if command.len() > GATE_COMMAND_MOST { return (Json.Null, "A gate's command is up to {GATE_COMMAND_MOST} bytes.") }
+    var seconds = GATE_SECONDS
+    let t = at(j, "timeout")
+    if t != Json.Null {
+        let n = t.as_i64() ?? 0
+        if n < 1 or n > GATE_SECONDS_MOST { return (Json.Null, "A gate's timeout is in seconds, 1 to {GATE_SECONDS_MOST}.") }
+        seconds = n
+    }
+    return (Obj.new().s("command", command).i("timeout", seconds).done(), String())
+}
+
+// What a gate's end means for its run: "wake", with what it printed for its
+// agent; "quiet", for a check that found nothing new; or "failed", with why.
+// `code` is its exit status (none when it was killed), `out` and `errors` what it
+// printed, and `broke` why it didn't start, or "".
+pub fn gate_outcome(code: i64?, out: String, errors: String, timed_out: bool, broke: String, seconds: i64) -> (String, String) {
+    if broke.len() > 0 { return (String("failed"), "Its gate didn't start: {broke}") }
+    if timed_out { return (String("failed"), "Its gate didn't finish in {seconds} s.") }
+    let printed = out.trim().copy()
+    let status = code ?? -1
+    if status == 0 {
+        if printed.len() == 0 { return (String("quiet"), String()) }
+        return (String("wake"), cut(printed, GATE_SAID_MOST))
+    }
+    let said = if errors.trim().len() > 0 { errors.trim().copy() } else { printed }
+    let how = if code == none { String("it was stopped") } else { "exit status {status}" }
+    if said.len() == 0 { return (String("failed"), "Its gate failed ({how}).") }
+    return (String("failed"), "Its gate failed ({how}): {cut(said, 500)}")
+}
+
+// What its agent is told of the gate that woke it.
+pub fn gate_note(command: String, said: String) -> String {
+    return "[loom: This routine's gate, the command `{command}`, found something new, so you were woken for it. What it printed:\n\n```\n{said}\n```]"
+}
+
+// The shell a gate's command runs in: `sh -c` in a sandbox and off Windows,
+// and `cmd /C` on Windows.
+pub fn gate_shell(command: String, windows: bool) -> (String, List<String>) {
+    if windows { return (String("cmd"), [String("/C"), command.copy()]) }
+    return (String("sh"), [String("-c"), command.copy()])
+}
+
+// The values an agent's program offers for its option in `category` ("model",
+// or "thought_level" for the effort), from what the agent learned of them
+// (`options`, as acp.offered gives them). Empty before it has started a session.
+pub fn offered_values(options: Json, category: str) -> List<String> {
+    var out = List<String>()
+    if let Json.Array(list) = options {
+        for o in list {
+            if str_at(o.copy(), "category") != some(String(category)) { continue }
+            if let Json.Array(values) = at(o, "options") {
+                for v in values {
+                    if let s = str_at(v, "value") { out.push(s) }
+                }
+            }
+        }
+    }
+    return out
+}
+
+// --- What a routine costs (PLAN.md, "Routines") ---
+
+// How far back what a routine costs is counted, and the tokens a day that
+// make one whose runs are mostly quiet one that wastes them.
+pub const COST_DAYS: i64 = 7
+pub const WASTED_DAY: i64 = 250000
+const DAY_MS: i64 = 86400000
+
+// What a routine costs, as routine.list gives it, from its runs that ended in
+// the last COST_DAYS: `runs` of them, `quiet` of those, the `tokens` they used,
+// and when the oldest was due. `run` is the tokens a run, gated quiet ones at
+// none; `day` the tokens a day, over the days its runs cover (one at least);
+// and `wasted` says most of its runs were quiet while it spent WASTED_DAY a day
+// or more.
+pub fn cost(runs: i64, quiet: i64, tokens: i64, oldest: i64, now: i64) -> Json {
+    let span = if now - oldest > DAY_MS { now - oldest } else { DAY_MS }
+    let per_run = if runs > 0 { tokens / runs } else { 0 }
+    let per_day = if runs > 0 { tokens * DAY_MS / span } else { 0 }
+    let wasted = runs >= 2 and quiet * 2 > runs and per_day >= WASTED_DAY
+    return Obj.new().i("run", per_run).i("day", per_day).i("runs", runs).i("quiet", quiet).b("wasted", wasted).done()
 }
 
 // Why a routine's time was skipped, as its runs keep it (PLAN.md, "Routines").
@@ -485,6 +659,69 @@ fn the_agent_is_told_the_run_is_quiet() {
     let told = quiet_note(false)
     assert(told.starts_with("[loom: ") and told.contains("routine_post") and told.contains("routine_quiet") and told.contains("routine_failed") and not told.contains("next steps"))
     assert(quiet_note(true).contains("next steps"))
+}
+
+@test
+fn a_gate_is_read_and_kept() {
+    let (kept, why) = read_gate(parse(#"{"command":"  ./check.sh "}"#)!)
+    assert(why == "" and "{kept}" == #"{"command":"./check.sh","timeout":60}"#)
+    let (timed, _) = read_gate(parse(#"{"command":"x","timeout":5}"#)!)
+    assert(int_at(timed, "timeout") == some(5))
+    let (off, none_why) = read_gate(parse(#"{"command":""}"#)!)
+    assert(off == Json.Null and none_why == "")
+    let (_, too_long) = read_gate(parse(#"{"command":"x","timeout":601}"#)!)
+    let (_, not_text) = read_gate(parse(#"{"command":3}"#)!)
+    assert(too_long.contains("1 to 600") and not_text.len() > 0)
+    let g = gate_of(Obj.new().j("gate", timed).done()) ?? Gate { command: String(), seconds: 0 }
+    assert(g.command == "x" and g.seconds == 5 and gate_of(Obj.new().done()) == none)
+}
+
+@test
+fn a_gate_wakes_its_agent_only_when_it_prints_something() {
+    let killed: i64? = none
+    assert(gate_outcome(some(0), String(" 1.21.5\n"), String(), false, String(), 60) == (String("wake"), String("1.21.5")))
+    assert(gate_outcome(some(0), String("\n"), String("a warning"), false, String(), 60) == (String("quiet"), String()))
+    assert(gate_outcome(some(3), String("out"), String("no such board\n"), false, String(), 60) == (String("failed"), String("Its gate failed (exit status 3): no such board")))
+    assert(gate_outcome(some(1), String(), String(), false, String(), 60) == (String("failed"), String("Its gate failed (exit status 1).")))
+    assert(gate_outcome(killed, String(), String(), true, String(), 5) == (String("failed"), String("Its gate didn't finish in 5 s.")))
+    assert(gate_outcome(killed, String(), String(), false, String("no sh"), 5) == (String("failed"), String("Its gate didn't start: no sh")))
+    assert(gate_shell(String("echo hi"), true) == (String("cmd"), [String("/C"), String("echo hi")]))
+    assert(gate_shell(String("echo hi"), false) == (String("sh"), [String("-c"), String("echo hi")]))
+    assert(gate_note(String("./check.sh"), String("new")).starts_with("[loom: ") and gate_note(String("./check.sh"), String("new")).contains("new\n```]"))
+}
+
+@test
+fn a_run_is_told_how_the_last_one_went() {
+    assert(last_note(Json.Null) == "")
+    let posted = last_note(parse(#"{"at":0,"status":"done","posted":["PR #8 merged."],"said":"x"}"#)!)
+    assert(posted == "[loom: The last time this routine ran, 1970-01-01 00:00 UTC, it posted this in your chat with your person:\n\nPR #8 merged.]")
+    assert(last_note(parse(#"{"at":0,"status":"quiet","woke":false}"#)!).contains("its gate found nothing new"))
+    assert(last_note(parse(#"{"at":0,"status":"quiet","said":"Still 1.21.4."}"#)!).ends_with("it posted nothing. What you answered then:\n\nStill 1.21.4.]"))
+    assert(last_note(parse(#"{"at":0,"status":"failed","error":"Its gate failed (exit status 1)."}"#)!).ends_with("it didn't finish (failed): Its gate failed (exit status 1).]"))
+}
+
+@test
+fn the_chat_is_told_what_routines_posted() {
+    let post = parse(#"{"at":0,"routine_name":"Version check","blocks":[{"kind":"text","text":"1.21.5 is out."}]}"#)!
+    let failed = parse(#"{"at":60000,"blocks":[{"kind":"tool","call":"c"},{"kind":"text","text":"The shop was down."}]}"#)!
+    let told = posts_note([post, failed])
+    assert(told.starts_with("[loom: Since your last turn here") and told.contains("From the routine \"Version check\", 1970-01-01 00:00 UTC:\n1.21.5 is out.") and told.ends_with("From a routine that failed, 1970-01-01 00:01 UTC:\nThe shop was down.]"))
+    assert(posts_note(List<Json>()) == "")
+}
+
+@test
+fn what_a_routine_costs() {
+    let day: i64 = 86400000
+    let wasteful = cost(2, 2, 800000, 10 * day, 10 * day + 5000)
+    assert("{wasteful}" == #"{"run":400000,"day":800000,"runs":2,"quiet":2,"wasted":true}"#)
+    // A week of runs every 6 hours, all quiet, 1.35 M each.
+    let watcher = cost(28, 28, 28 * 1350000, 0, 7 * day)
+    assert(int_at(watcher.copy(), "day") == some(5400000) and at(watcher, "wasted") == Json.Bool(true))
+    // Gated, its quiet runs cost nothing.
+    assert(at(cost(28, 27, 1350000, 0, 7 * day), "wasted") == Json.Bool(false))
+    // One that posts each time isn't wasted, however much it spends.
+    assert(at(cost(10, 2, 9000000, 0, day), "wasted") == Json.Bool(false))
+    assert("{cost(0, 0, 0, 0, day)}" == #"{"run":0,"day":0,"runs":0,"quiet":0,"wasted":false}"#)
 }
 
 @test

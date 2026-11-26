@@ -132,6 +132,11 @@ CREATE TABLE IF NOT EXISTS deleted_untold (
     message TEXT NOT NULL, agent TEXT NOT NULL, user TEXT NOT NULL REFERENCES users(id),
     conversation TEXT NOT NULL, role TEXT NOT NULL, said_by TEXT NOT NULL, words TEXT NOT NULL,
     at INTEGER NOT NULL, PRIMARY KEY (message, agent));
+-- What a routine put in a chat (its posts, and a failed run's answer) that the chat's own
+-- session hasn't been told of yet: a routine runs in a session of its own.
+CREATE TABLE IF NOT EXISTS posts_untold (
+    message TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), conversation TEXT NOT NULL,
+    routine TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS conversation_programs (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), program TEXT NOT NULL,
     summary_from TEXT NOT NULL DEFAULT '');
@@ -1162,6 +1167,7 @@ impl Store {
         _ = try self.db.execute(String("DELETE FROM asks WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM conversation_programs WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        _ = try self.db.execute(String("DELETE FROM posts_untold WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("DELETE FROM rooms WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
     }
@@ -2578,7 +2584,7 @@ impl Store {
 
     fn remove_rows(self, user: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM sent WHERE device IN (SELECT id FROM devices WHERE user = ?)"), [t(user.copy())])
-        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "deleted_untold", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "watches", "status_checks", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
+        for table in ["push_tokens", "link_codes", "script_grants", "resets", "agent_revisions", "agents", "activity", "secrets", "mcp_auth", "mcp_icons", "mcp_servers", "skills", "messages", "conversations", "runs", "queue", "tasks", "sides", "branches", "deleted_untold", "posts_untold", "routine_threads", "asks", "rooms", "events", "acp_sessions", "contexts", "plan_limits", "files", "profiles", "defaults", "agent_groups", "rules", "routine_runs", "routines", "flows", "watches", "status_checks", "plugin_data", "plugin_revisions", "plugins", "usage", "memories", "memories_fts", "messages_fts", "shared_rows", "shared_tables", "script_tokens", "status_tokens", "imported", "recordings", "proposals", "skill_failures", "emoji", "devices"] {
             _ = try self.db.execute("DELETE FROM {table} WHERE user = ?", [t(user.copy())])
         }
         _ = try self.db.execute(String("DELETE FROM invites WHERE by = ?"), [t(user.copy())])
@@ -2963,6 +2969,38 @@ impl Store {
 
     pub fn deleted_told(self, user: String, conversation: String, agent: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM deleted_untold WHERE user = ? AND conversation = ? AND agent = ?"), [t(user), t(conversation), t(agent)])
+    }
+
+    // Message `message`, which routine `routine` put in `conversation`, for that
+    // chat's own session to be told of with its next turn there.
+    pub fn post_untold(self, user: String, conversation: String, message: String, routine: String) ! Error {
+        _ = try self.db.execute(String("INSERT OR REPLACE INTO posts_untold (message, user, conversation, routine, at) VALUES (?, ?, ?, ?, ?)"), [t(message), t(user), t(conversation), t(routine), Value.Int(now())])
+    }
+
+    // What routines put in `conversation` that its own session hasn't been told
+    // of, oldest first: each message, as the chat keeps it. One deleted since is gone.
+    pub fn posts_to_tell(self, user: String, conversation: String) -> List<Json> ! Error {
+        var out = List<Json>()
+        for r in try self.db.query(String("SELECT m.json FROM posts_untold p JOIN messages m ON m.id = p.message AND m.user = p.user WHERE p.user = ? AND p.conversation = ? ORDER BY p.at, p.rowid"), [t(user), t(conversation)]) {
+            out.push(try parse(text(r[0].copy())))
+        }
+        return out
+    }
+
+    pub fn posts_told(self, user: String, conversation: String) ! Error {
+        _ = try self.db.execute(String("DELETE FROM posts_untold WHERE user = ? AND conversation = ?"), [t(user), t(conversation)])
+    }
+
+    // What `user`'s routines cost, from their runs that ended since `since` (Unix ms):
+    // each routine's id, with how many runs, how many of them were quiet, the
+    // tokens they used, and when the oldest was due. Only the newest runs of each
+    // are kept (ROUTINE_RUNS_KEPT). `only` is one routine's id, or "" for all of them.
+    pub fn routine_costs(self, user: String, since: i64, only: String) -> List<(String, i64, i64, i64, i64)> ! Error {
+        var out = List<(String, i64, i64, i64, i64)>()
+        for r in try self.db.query(String("SELECT rr.routine, COUNT(*), SUM(CASE WHEN json_extract(rr.json, '$.status') = 'quiet' THEN 1 ELSE 0 END), COALESCE(SUM(u.tokens), 0), MIN(rr.at) FROM routine_runs rr LEFT JOIN (SELECT run, SUM(total) AS tokens FROM usage WHERE user = ?1 AND at >= ?2 GROUP BY run) u ON u.run = rr.id WHERE rr.user = ?1 AND rr.at >= ?2 AND (?3 = '' OR rr.routine = ?3) AND json_extract(rr.json, '$.status') IN ('done', 'quiet', 'failed', 'limit', 'cancelled') GROUP BY rr.routine"), [t(user), Value.Int(since), t(only)]) {
+            out.push((text(r[0].copy()), int(r[1].copy()), int(r[2].copy()), int(r[3].copy()), int(r[4].copy())))
+        }
+        return out
     }
 
     // Up to `limit` pinned messages of a conversation, the newest pin first (and of

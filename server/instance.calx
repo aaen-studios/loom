@@ -62,6 +62,7 @@ import server.noise
 import server.plugins
 import server.push
 import server.routines
+import server.routine_gate
 import server.gate
 import server.tables
 import server.flows
@@ -418,6 +419,7 @@ struct Proc {
     program: String    // the ACP agent it runs, by loom's name for it
     resume: bool    // whether it offers session/resume
     load: bool    // whether it offers session/load
+    closes: bool    // whether it offers session/close, which a routine run's session gets once it ends
     mcp_http: bool    // whether it connects to MCP servers over HTTP itself
     boxed: bool    // whether it runs in its person's sandbox
     shared: bool    // whether it runs on the program's settings the owner shared, under a budget
@@ -558,6 +560,7 @@ pub struct Instance {
     next_due: i64    // when to look for routines that are due
     routine_runs: Map<String, RoutineRun>    // run -> the routine it's for
     routines_waiting: List<WaitingRoutine>    // routine runs waiting for their chat, oldest first
+    routine_work: RoutineWork    // routine runs' gates, and their sessions to close
     routine_marks: Map<String, (String, String)>    // a routine run -> how its agent said it went: quiet or failed, and why
     quiet_turns: Map<String, QuietTurn>    // a run the person doesn't see, a routine's or a step of its flow -> what it's for
     looking_back: Map<String, String>    // the quiet turn an agent looks back over its chat in, once it paused -> the reply it goes under
@@ -905,8 +908,40 @@ struct WaitingRoutine {
     run: String    // the run's id, given when it was due
     by: String
     came: String
+    gated: String    // what its gate printed, which woke it, or ""
     at: i64    // when it was due
     until: i64    // skipped if its chat is still busy then
+}
+
+// A routine's run whose gate is running (PLAN.md, "Routines"): its agent wakes
+// only if the gate says something is new.
+struct GateWait {
+    user: String
+    routine: String
+    conversation: String
+    by: String
+    came: String
+    at: i64    // when it was due
+    seconds: i64    // the gate's timeout
+}
+
+// What runs a routine in a session of its own needs, beside the routine's
+// runs: the gates running, what they come back on, and the ACP sessions of
+// runs that ended, to close in their programs once the loop gets to them.
+struct RoutineWork {
+    gates: Map<String, GateWait>    // by the run's id
+    done: Receiver<routine_gate.Done>
+    closing: List<(String, String)>    // a program's key in `procs`, and the session
+}
+
+// The seat (Run.seat) a routine's run, or a step of its flow, keeps its ACP
+// session under: its own, never a chat's, so no chat's session carries it.
+fn routine_seat(run: String) -> String {
+    return "routine:{run}"
+}
+
+fn routine_seat_of(seat: String) -> bool {
+    return seat.starts_with("routine:")
 }
 
 // A routine's run, or a step of its flow, which the person doesn't see
@@ -1477,6 +1512,10 @@ fn install_text(domain: String) -> String {
 fn scheduled(r: Json) -> String {
     let zone = if routines.by_clock(at(r.copy(), "schedule")) { " ({str_at(r.copy(), "tz") ?? String("UTC")} time)" } else { String() }
     var text = "Scheduled: {str_at(r.copy(), "name") ?? String()}, {str_at(r.copy(), "when") ?? String()}{zone}, as routine {str_at(r.copy(), "id") ?? String()}."
+    if let g = routines.gate_of(r.copy()) { text.push_str(" Its gate, `{g.command}`, runs first, and its agent wakes only when it prints something.") }
+    let model = str_at(r.copy(), "model") ?? String()
+    let effort = str_at(r.copy(), "effort") ?? String()
+    if model.len() > 0 or effort.len() > 0 { text.push_str(" Its runs use {if model.len() > 0 { model } else { String("its agent's model") }}, at {if effort.len() > 0 { effort } else { String("its agent's effort") }}.") }
     if let hook = str_at(r.copy(), "hook") {
         text.push_str(" Its webhook is POST /hooks/{hook} on the instance's address, with the header Authorization: Bearer {str_at(r, "secret") ?? String()}, or signed with that secret as GitHub's webhooks sign (X-Hub-Signature-256).")
     }
@@ -2345,7 +2384,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routines_waiting: List<WaitingRoutine>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -3088,6 +3127,9 @@ impl Instance {
                 }
             }
             if held { i.let_go() }
+            // Routines' gates that ended, and the sessions of routine runs that did.
+            while let d = i.routine_work.done.next() { i.gate_done(d) }
+            i.close_routine_sessions()
             i.take_stopped()
             if let err(e) = i.store.truncate_log(mut i.wal_big) { eprintln("loom: database: {e}") }
             while let d = i.install_done.next() {
@@ -5769,6 +5811,8 @@ impl Instance {
             let message = Obj.new().s("id", message_id).s("conversation", conversation.copy()).s("role", String("agent")).s("agent", g.agent.copy()).s("routine", routine_id).s("routine_name", rname.copy()).i("at", now()).s("status", String("done")).j("blocks", blocks).done()
             try i.store.put_message(g.user.copy(), message.copy())
             try i.event(g.user.copy(), "message.created", Obj.new().s("conversation", conversation.copy()).j("message", message).done())
+            // The chat's own session hears of it with its next turn (start_run_as).
+            try i.store.post_untold(g.user.copy(), conversation.copy(), message_id.copy(), routine_id.copy())
             if let q = mut i.quiet_turns.find(run_id.copy()) { q.posted.push(text.copy()) }
             i.log(g.user.copy(), g.agent.copy(), "routine", "Posted for the routine {rname}", g.agent.copy())
             if bool_at(r, "notify") == some(true) {
@@ -8131,6 +8175,9 @@ impl Instance {
         for (_, rr) in i.routine_runs {
             if rr.user == user and rr.routine == id { going = true }
         }
+        for (_, g) in i.routine_work.gates {
+            if g.user == user and g.routine == id { going = true }
+        }
         if going {
             try i.routine_skipped(user, r, conversation_id, by, t, String(routines.STILL_RUNNING), false)
             return Answer.Refused(String("busy"), String("The routine is still running from the time before."))
@@ -8141,16 +8188,111 @@ impl Instance {
             try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", w.run).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", w.by).i("at", w.at).s("status", String("skipped")).s("error", routines.gave_way(by.copy())).i("ended", t).done())
         }
         let run_id = try i.store.new_id("run")
-        // A turn goes on in the chat, the person's or another routine's: the
-        // run waits for it to end, and for what the person queued behind it.
+        // With a gate, it runs first, and the agent wakes only if it says
+        // something is new (gate_done).
+        if let checks = routines.gate_of(r.copy()) {
+            try i.open_gate(user, r, conversation_id, run_id.copy(), by, came, t, checks)
+            return Answer.Value(Obj.new().s("run", run_id).done())
+        }
+        try i.wake_routine(user, r, conversation, run_id.copy(), by, came, String(), t)
+        var ran = Obj.new().s("run", run_id.copy())
+        if i.routines_waiting.position(|w| w.run == run_id) != none { ran = ran.b("waiting", true) }
+        return Answer.Value(ran.done())
+    }
+
+    // Starts routine `r`'s run `run_id` in `conversation`, or while a turn goes
+    // on there, the person's or another routine's, has it wait for that turn to
+    // end, and for what the person queued behind it. `gated` is what its gate
+    // printed, which woke it, or "".
+    fn wake_routine(i: mut Instance, user: String, r: Json, conversation: Json, run_id: String, by: String, came: String, gated: String, t: i64) ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        let conversation_id = str_at(conversation.copy(), "id") ?? String()
         if i.chat_busy(user.copy(), conversation_id.copy()) {
             try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).s("status", String("waiting")).done())
             try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("waiting")).s("run", run_id.copy()).done()).done()))
-            i.routines_waiting.push(WaitingRoutine { user: user.copy(), routine: id, run: run_id.copy(), by: by.copy(), came: came.copy(), at: t, until: t + ROUTINE_WAIT_MINUTES * i.minute_ms })
-            return Answer.Value(Obj.new().s("run", run_id).b("waiting", true).done())
+            i.routines_waiting.push(WaitingRoutine { user: user.copy(), routine: id, run: run_id.copy(), by: by.copy(), came: came.copy(), gated: gated.copy(), at: t, until: t + ROUTINE_WAIT_MINUTES * i.minute_ms })
+            return
         }
-        try i.start_routine(user, r, conversation, run_id.copy(), by, came, t)
-        return Answer.Value(Obj.new().s("run", run_id).done())
+        try i.start_routine(user, r, conversation, run_id, by, came, gated, t)
+    }
+
+    // Runs routine `r`'s gate for its run `run_id`, due at `t`, off the loop:
+    // where its agent's own commands run, as its agent would run it. The run is
+    // kept as running, and as one that hasn't woken its agent, until the gate
+    // ends (gate_done).
+    fn open_gate(i: mut Instance, user: String, r: Json, conversation: String, run_id: String, by: String, came: String, t: i64, checks: routines.Gate) ! Error {
+        let id = str_at(r.copy(), "id") ?? String()
+        let name = str_at(r.copy(), "name") ?? String("A routine")
+        let agent_id = str_at(r.copy(), "agent") ?? String()
+        try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).b("woke", false).done())
+        try i.routine_ran(user.copy(), merge(r.copy(), Obj.new().s("conversation", conversation.copy()).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
+        i.routine_work.gates.insert(run_id.copy(), GateWait { user: user.copy(), routine: id.copy(), conversation: conversation.copy(), by: by.copy(), came: came.copy(), at: t, seconds: checks.seconds })
+        i.log(user.copy(), agent_id.copy(), "routine", "Checked the routine {name}'s gate", by)
+        let job = match i.gate_job(user.copy(), agent_id, run_id.copy(), checks.command.copy(), checks.seconds) {
+            ok(j) => j,
+            err(e) => {
+                i.gate_done(routine_gate.Done { run: run_id.copy(), code: none, out: String(), errors: String(), timed_out: false, broke: "{e}" })
+                return
+            },
+        }
+        routine_gate.start(job, i.routine_work.done.sender(), i.waker)
+    }
+
+    // How routine `run`'s gate runs `command`: where its agent's own commands
+    // run, in its folder, and in its sandbox when it has one (PLAN.md,
+    // "Sandboxes"), with the environment its program has, so the gate can do
+    // no more than its agent could.
+    fn gate_job(i: mut Instance, user: String, agent_id: String, run: String, command: String, seconds: i64) -> routine_gate.Job ! Error {
+        let agent = try i.store.agent(user.copy(), agent_id.copy()) else { fail "its agent was deleted" }
+        let program = str_at(agent.copy(), "acp_agent") ?? String()
+        let acp_agent = try i.store.acp_agent(program.copy()) else { fail "there's no ACP agent named {program}" }
+        let folder = i.agent_folder(user.copy(), agent.copy())
+        let place = i.place(user.copy(), agent.copy())
+        let (settings, names) = try i.program_settings(user.copy(), program, acp_agent.env.copy(), place != none)
+        var env = List<(String, String)>()
+        if let Json.Object(m) = settings {
+            for (k, v) in m {
+                if let s = v.as_str() { env.push((k.copy(), s)) }
+            }
+        }
+        let ms = u64.wrap(seconds) * 1000
+        if let p = place {
+            let b = i.boxes.copy() else { fail "its agent runs in a sandbox, and this instance has none" }
+            try b.ready(p.copy())
+            if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
+            let (shell, args) = routines.gate_shell(command, false)
+            let (c, a) = b.wrap(p, folder.copy(), names, shell, args)
+            return routine_gate.Job { run: run.copy(), program: c, args: a, env: env, dir: folder, ms: ms }
+        }
+        try fs.make_dir_all(folder.copy())
+        let (shell, args) = routines.gate_shell(command, os() == "windows")
+        return routine_gate.Job { run: run.copy(), program: shell, args: args, env: env, dir: folder, ms: ms }
+    }
+
+    // A routine's gate ended (`d`): its agent wakes with what it printed, or its
+    // run ends quiet or failed without it, as a run whose agent said so does.
+    fn gate_done(i: mut Instance, d: routine_gate.Done) {
+        if let err(e) = i.gate_done_in(d) { eprintln("loom: a routine's gate: {e}") }
+    }
+
+    fn gate_done_in(i: mut Instance, d: routine_gate.Done) ! Error {
+        let w = i.routine_work.gates.remove(d.run.copy()) else return
+        // Deleted while its gate ran, with its runs.
+        let r = try i.store.routine(w.user.copy(), w.routine.copy()) else return
+        let agent_id = str_at(r.copy(), "agent") ?? String()
+        let (what, said) = routines.gate_outcome(d.code, d.out, d.errors, d.timed_out, d.broke, w.seconds)
+        if what == "wake" {
+            if try i.store.agent(w.user.copy(), agent_id.copy()) == none {
+                try i.routine_done(RoutineRun { user: w.user.copy(), routine: w.routine.copy() }, d.run, agent_id, w.conversation, String("failed"), some(String("Its agent was deleted.")), String(), String(), List<String>(), String())
+                return
+            }
+            let conversation = try i.routine_chat(w.user.copy(), r.copy())
+            try i.wake_routine(w.user, r, conversation, d.run, w.by, w.came, said, w.at)
+            return
+        }
+        let name = str_at(r, "name") ?? String("A routine")
+        i.log(w.user.copy(), agent_id.copy(), "routine", if what == "quiet" { "The routine {name}'s gate found nothing new" } else { "The routine {name}'s gate failed" }, w.by.copy())
+        try i.routine_done(RoutineRun { user: w.user.copy(), routine: w.routine.copy() }, d.run, agent_id, w.conversation, String("done"), none, what, said, List<String>(), String())
     }
 
     // Whether a turn goes on in a conversation, or one just ended there and
@@ -8196,7 +8338,7 @@ impl Instance {
                 continue
             }
             let w = i.routines_waiting.remove(k)
-            try i.start_routine(user, r, conversation, w.run, w.by, w.came, w.at)
+            try i.start_routine(user, r, conversation, w.run, w.by, w.came, w.gated, w.at)
         }
     }
 
@@ -8245,15 +8387,25 @@ impl Instance {
     // Starts routine `r`'s run `run_id`, due at `t`, in `conversation`, which
     // is free. The run is quiet (PLAN.md, "Routines"): its prompt isn't kept in
     // the chat, and neither is its answer, only what its agent posts with
-    // routine_post. OpenBot's names for routine_quiet and routine_failed, in
-    // a prompt imported before they were changed on the way, are loom's.
-    fn start_routine(i: mut Instance, user: String, r: Json, conversation: Json, run_id: String, by: String, came: String, t: i64) ! Error {
+    // routine_post. It's a session of its own (start_run_as), given how the
+    // routine's last run went and, when its gate woke it, what the gate
+    // printed (`gated`). OpenBot's names for routine_quiet and routine_failed,
+    // in a prompt imported before they were changed on the way, are loom's.
+    fn start_routine(i: mut Instance, user: String, r: Json, conversation: Json, run_id: String, by: String, came: String, gated: String, t: i64) ! Error {
         let id = str_at(r.copy(), "id") ?? String()
         let name = str_at(r.copy(), "name") ?? String("A routine")
         let agent_id = str_at(r.copy(), "agent") ?? String()
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         var prompt = routines.loom_tools(str_at(r.copy(), "prompt") ?? String())
         if came.len() > 0 { prompt = "{prompt}\n\n{came}" }
+        // How its last run went, before this one is kept as its newest.
+        var last = String()
+        for run in try i.store.routine_runs(user.copy(), id.copy(), none, 10) {
+            let status = str_at(run.copy(), "status") ?? String()
+            if str_at(run.copy(), "run") == some(run_id.copy()) or status == "running" or status == "waiting" or status == "skipped" { continue }
+            last = routines.last_note(run)
+            break
+        }
         i.routine_runs.insert(run_id.copy(), RoutineRun { user: user.copy(), routine: id.copy() })
         i.quiet_turns.insert(run_id.copy(), QuietTurn { routine: id.copy(), posted: List<String>(), step: String(), of: String() })
         let how = if by == "schedule" { routines.describe(routines.read(at(r.copy(), "schedule")) ?? routines.Schedule.Every(routines.EVERY_LEAST)) } else if by == "webhook" { String("by its webhook, with what it sent below the prompt") } else if by == "event" { String("by an event outside loom it follows, with what happened below the prompt") } else { String("now, as the person asked") }
@@ -8262,14 +8414,48 @@ impl Instance {
         try i.store.put_routine_run(user.copy(), id.copy(), Obj.new().s("run", run_id.copy()).s("routine", id.copy()).s("conversation", conversation_id.copy()).s("by", by.copy()).i("at", t).i("started", now()).s("status", String("running")).done())
         try i.routine_ran(user.copy(), merge(r, Obj.new().s("conversation", conversation_id).j("last", Obj.new().i("at", t).s("status", String("running")).s("run", run_id.copy()).done()).done()))
         let from = "the person's routine \"{name}\", run {how}. The person set it up, but isn't writing this"
-        try i.start_run(user, conversation, run_id.copy(), String(), prompt, List<Json>(), from, routines.quiet_note(has_flow), if by == "webhook" or by == "event" { "webhook" } else { "routine" })
+        var note = routines.quiet_note(has_flow)
+        if last.len() > 0 { note = "{note}\n\n{last}" }
+        if gated.len() > 0 {
+            let command = if let g = routines.gate_of(r.copy()) { g.command } else { String() }
+            note = "{note}\n\n{routines.gate_note(command, gated)}"
+        }
+        try i.start_run(user, conversation, run_id.copy(), String(), prompt, List<Json>(), from, note, if by == "webhook" or by == "event" { "webhook" } else { "routine" })
         try i.store.mark_run_routine(run_id, id)
     }
 
-    // Keeps routine `r` as it is now, and tells the person's devices.
+    // The ACP sessions of routine runs that ended, closed in their programs where
+    // they offer session/close, and let go of here either way. A program that
+    // doesn't close one keeps it until the program stops.
+    fn close_routine_sessions(i: mut Instance) {
+        if i.routine_work.closing.len() == 0 { return }
+        let closing = i.routine_work.closing.copy()
+        i.routine_work.closing = List<(String, String)>()
+        for (key, session) in closing {
+            _ = i.context.remove(session.copy())
+            var p = i.procs.remove(key.copy()) else continue
+            var seats = List<String>()
+            for (seat, s) in p.sessions {
+                if s == session { seats.push(seat.copy()) }
+            }
+            for seat in seats { _ = p.sessions.remove(seat) }
+            p.forget(session.copy())
+            if p.closes and not p.stopped {
+                p.next_id += 1
+                p.to.send(Out.Send(acp.request(p.next_id, "session/close", Obj.new().s("sessionId", session).done())))
+            }
+            i.procs.insert(key.copy(), p)
+        }
+    }
+
+    // Keeps routine `r` as it is now, and tells the person's devices, with what
+    // it costs as routine.list says it.
     fn routine_ran(i: Instance, user: String, r: Json) ! Error {
         try i.store.put_routine(user.copy(), r.copy())
-        try i.event(user, "routine.updated", Obj.new().j("routine", routines.shown(r, i.minute_ms)).done())
+        let t = now()
+        var cost = routines.cost(0, 0, 0, t, t)
+        for (_, runs, quiet, tokens, oldest) in try i.store.routine_costs(user.copy(), t - routines.COST_DAYS * 86400000, str_at(r.copy(), "id") ?? String()) { cost = routines.cost(runs, quiet, tokens, oldest, t) }
+        try i.event(user, "routine.updated", Obj.new().j("routine", merge(routines.shown(r, i.minute_ms), Obj.new().j("cost", cost).done())).done())
     }
 
     // A routine's run `run_id` ended, as its turn did (`status`, with `error`):
@@ -8492,7 +8678,19 @@ impl Instance {
         if prompt.len() == 0 or prompt.len() > 20000 { return Answer.Refused(String("bad_request"), String("A routine needs a prompt, what its agent is asked each time, of up to 20,000 bytes.")) }
         let agent_key = str_at(m.copy(), "agent") ?? String()
         let agent = try i.find_agent(user.copy(), agent_key.copy()) else return Answer.Refused(String("not_found"), "There's no agent {agent_key}.")
-        let agent_id = str_at(agent, "id") ?? String()
+        let agent_id = str_at(agent.copy(), "id") ?? String()
+        // A command that says whether anything is new before its agent wakes, and
+        // a model and effort of its own, from those its agent's program offers.
+        let (gate_kept, gate_why) = routines.read_gate(at(m.copy(), "gate"))
+        if gate_why.len() > 0 { return Answer.Refused(String("bad_request"), gate_why) }
+        let model = (str_at(m.copy(), "model") ?? String()).trim().copy()
+        let effort = (str_at(m.copy(), "effort") ?? String()).trim().copy()
+        let picks: List<(String, str, str)> = [(model.copy(), "model", "model"), (effort.copy(), "thought_level", "effort")]
+        for (value, category, what) in picks {
+            if value.len() == 0 { continue }
+            let offered = routines.offered_values(at(agent.copy(), "options"), category)
+            if offered.len() > 0 and not offered.contains(value.copy()) { return Answer.Refused(String("bad_request"), "{str_at(agent.copy(), "name") ?? String("Its agent")}'s program has no {what} {value}. It offers {offered.join(", ")}.") }
+        }
         // The flow after it (PLAN.md, "Routine flows"), its steps' agents found by name or id.
         var flow = at(m.copy(), "flow")
         if flow != Json.Null {
@@ -8563,7 +8761,7 @@ impl Instance {
         let posted_before = str_at(old.copy(), "post") ?? String("chat")
         let conversation = if str_at(old.copy(), "agent") == some(agent_id.copy()) and posted_before == post { str_at(old.copy(), "conversation") ?? String() } else { String() }
         let id = if id_given.len() > 0 { id_given } else { try i.store.new_id("rt") }
-        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).j("event", event).s("by", by.copy()).i("at", t).done()
+        let r = Obj.new().s("id", id).s("name", name.copy()).s("agent", agent_id.copy()).s("prompt", prompt).j("schedule", schedule).maybe("hook", if webhook { some(hook) } else { none }).maybe("secret", if webhook { some(secret) } else { none }).s("when", when).s("tz", tz).b("on", on).b("notify", notify).b("catch_up", catch_up).s("post", post).s("conversation", conversation).i("next", next).j("last", at(old.copy(), "last")).j("flow", flow).j("event", event).j("gate", gate_kept).maybe("model", if model.len() > 0 { some(model) } else { none }).maybe("effort", if effort.len() > 0 { some(effort) } else { none }).s("by", by.copy()).i("at", t).done()
         i.log(user.copy(), agent_id, "routine", if old == Json.Null { "Made the routine {name}" } else { "Changed the routine {name}" }, by)
         try i.routine_ran(user, r.copy())
         return Answer.Value(Obj.new().j("routine", routines.shown(r, i.minute_ms)).done())
@@ -12018,7 +12216,11 @@ impl Instance {
     fn start_run_as(i: mut Instance, user: String, conversation: Json, run_id: String, answering: String, text: String, sent_files: List<Json>, from: String, first_note: String, starter: String, agent_id: String, routed: Json, handed: List<String>) ! Error {
         let conversation_id = str_at(conversation.copy(), "id") ?? String()
         let in_room = at(conversation.copy(), "room") != Json.Null
-        let seat = if in_room { "{conversation_id}/{agent_id}" } else { conversation_id.copy() }
+        // A routine's run, or a step of its flow, is a session of its own, never
+        // its chat's (PLAN.md, "Routines"): what was said in the chat isn't
+        // carried with it, and what it does isn't carried with the chat.
+        let own_session = i.quiet_turns.contains(run_id.copy())
+        let seat = if own_session { routine_seat(run_id.copy()) } else if in_room { "{conversation_id}/{agent_id}" } else { conversation_id.copy() }
         let looks_back = i.looking_back.contains(run_id.copy())
         // In a group chat: what was said there since it last answered, by who
         // said it. A member looking back over its part of the chat isn't answering.
@@ -12035,7 +12237,10 @@ impl Instance {
         let compacting = i.compacting.contains(run_id.copy())
         // A branch's first turn: the agent is handed the chat it goes on from.
         var note = given_note.copy()
-        let branch: (String, String)? = if compacting { none } else { try i.store.branch_to_hand(user.copy(), conversation_id.copy()) }
+        // What the chat's own session is to be told waits for its next turn,
+        // never a routine's session.
+        let chats_own = not compacting and not own_session
+        let branch: (String, String)? = if not chats_own { none } else { try i.store.branch_to_hand(user.copy(), conversation_id.copy()) }
         if let (chat, at_message) = branch {
             let before = try i.transcript(user.copy(), chat, some(at_message), agent_id.copy())
             let handoff = "[loom: This conversation is a branch of your chat with your person: it goes on from the last message below, apart from that chat, which goes on as it was. Your chat up to there, newest last:\n\n{if before.len() > 0 { before } else { String("(Nothing said yet.)") }}]"
@@ -12044,7 +12249,7 @@ impl Instance {
         }
         // Messages the person deleted from the chat since its last turn: gone for it too.
         // In a group chat each member is told on its own, of its replies and the others'.
-        let deleted = if compacting { List<(String, String, String, String)>() } else { try i.store.deleted_to_tell(user.copy(), conversation_id.copy(), agent_id.copy()) }
+        let deleted = if not chats_own { List<(String, String, String, String)>() } else { try i.store.deleted_to_tell(user.copy(), conversation_id.copy(), agent_id.copy()) }
         if deleted.len() > 0 {
             let names = if in_room { try i.names_of_agents(user.copy()) } else { List<(String, String)>() }
             var said = List<String>()
@@ -12062,6 +12267,17 @@ impl Instance {
             note = if note.len() > 0 { "{gone}\n\n{note}" } else { gone }
             try i.store.deleted_told(user.copy(), conversation_id.copy(), agent_id.copy())
         }
+        // What routines posted in the chat since its last turn, which they did in
+        // sessions of their own: the chat's session is told, so the person's
+        // answer to a post finds it.
+        if chats_own and not in_room {
+            let posts = try i.store.posts_to_tell(user.copy(), conversation_id.copy())
+            if posts.len() > 0 {
+                let told = routines.posts_note(posts)
+                if told.len() > 0 { note = if note.len() > 0 { "{told}\n\n{note}" } else { told } }
+                try i.store.posts_told(user.copy(), conversation_id.copy())
+            }
+        }
         // A run in a task's conversation is the task's, running again.
         let task: Json? = if compacting { none } else { try i.store.task_in(user.copy(), conversation_id.copy()) }
         if let t = task {
@@ -12075,7 +12291,7 @@ impl Instance {
         // A chat the person moved to another program: its first turn there
         // starts with loom's summary of it, and the reply says so first.
         var notice = String()
-        let moved: String? = if compacting { none } else { try i.store.summary_to_hand(user.copy(), conversation_id.copy()) }
+        let moved: String? = if not chats_own { none } else { try i.store.summary_to_hand(user.copy(), conversation_id.copy()) }
         if let moved_from = moved {
             let summary = try i.summary_of(user.copy(), conversation_id.copy(), answering.copy(), moved_from.copy(), agent_id.copy())
             note = if note.len() > 0 { "{summary}\n\n{note}" } else { summary }
@@ -12236,6 +12452,47 @@ impl Instance {
         }
     }
 
+    // The environment `user`'s agent program `program` runs in, from its
+    // settings `env`, and in a sandbox (`boxed`) the names of each variable,
+    // which go in from outside: there, the program's settings when the owner
+    // shares them, under the person's own secrets of the same names, which
+    // always win. The owner's own isolated agents get the program's settings,
+    // which are the owner's. A routine's gate runs in the same.
+    fn program_settings(i: Instance, user: String, program: String, env: Json, boxed: bool) -> (Json, List<String>) ! Error {
+        // With OpenCode's config allowing Code Mode's tools, as loom asks for
+        // each call in a script (acp.program_env).
+        if not boxed { return (acp.program_env(env), List<String>()) }
+        let shared = try i.share_for(user.copy(), program) != none
+        var theirs = Obj.new()
+        var names = List<String>()
+        if shared or not i.sandboxed(user.copy()) {
+            if let Json.Object(m) = env {
+                for (k, v) in m {
+                    if not env_name(k.copy()) { continue }
+                    theirs.m.insert(k.copy(), v.copy())
+                    names.push(k.copy())
+                }
+            }
+        }
+        if i.sandboxed(user.copy()) {
+            for s in try i.store.secret_names(user.copy()) {
+                let n = str_at(s, "name") ?? String()
+                if not env_name(n.copy()) { continue }
+                if let v = try i.secret(user.copy(), n.copy()) {
+                    theirs.m.insert(n.copy(), Json.Str(v))
+                    if not names.contains(n.copy()) { names.push(n) }
+                }
+            }
+        }
+        let settings = acp.program_env(theirs.done())
+        if let Json.Object(m) = settings.copy() {
+            for (k, _) in m {
+                if not names.contains(k.copy()) { names.push(k.copy()) }
+            }
+        }
+        return (settings, names)
+    }
+
     fn start_proc_in(i: mut Instance, user: String, agent: Json, program: String) ! Error {
         let id = str_at(agent.copy(), "id") ?? String()
         let key = proc_key(id.copy(), program.copy())
@@ -12264,36 +12521,8 @@ impl Instance {
             try b.ready(p.copy())
             i.ready_now = p.name()
             if p.closed() { _ = try i.door(user.copy(), agent.copy()) }
-            // The program's settings when the owner shares them, under the person's
-            // own secrets of the same names, which always win. The owner's own
-            // isolated agents get the program's settings, which are the owner's.
-            var theirs = Obj.new()
-            var names = List<String>()
-            if shared or not i.sandboxed(user.copy()) {
-                if let Json.Object(m) = acp_agent.env.copy() {
-                    for (k, v) in m {
-                        if not env_name(k.copy()) { continue }
-                        theirs.m.insert(k.copy(), v.copy())
-                        names.push(k.copy())
-                    }
-                }
-            }
-            if i.sandboxed(user.copy()) {
-                for s in try i.store.secret_names(user.copy()) {
-                    let n = str_at(s, "name") ?? String()
-                    if not env_name(n.copy()) { continue }
-                    if let v = try i.secret(user.copy(), n.copy()) {
-                        theirs.m.insert(n.copy(), Json.Str(v))
-                        if not names.contains(n.copy()) { names.push(n) }
-                    }
-                }
-            }
-            settings = acp.program_env(theirs.done())
-            if let Json.Object(m) = settings.copy() {
-                for (k, _) in m {
-                    if not names.contains(k.copy()) { names.push(k.copy()) }
-                }
-            }
+            let (boxed_settings, names) = try i.program_settings(user.copy(), program.copy(), acp_agent.env.copy(), true)
+            settings = boxed_settings
             let (c, a) = b.wrap(p, folder.copy(), names, command, args)
             command = c
             args = a
@@ -12323,7 +12552,7 @@ impl Instance {
         try i.put_files(place.copy(), [folder.copy()], writes)
         if let names = skill_names { i.drop_old_skills(place.copy(), folder.copy(), names.copy()) }
         let to = try acp.start(key.copy(), command, args, settings, folder, i.lines_to.copy(), i.waker, i.stopped_to.copy())
-        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>(), compactions: Map<String, String>() }
+        var p = Proc { agent: id.copy(), user: user.copy(), to: to, ready: false, images: false, program: program.copy(), resume: false, load: false, closes: false, mcp_http: false, boxed: boxed, shared: shared, next_id: 1, pending: Map<i64, Pending>(), sessions: Map<String, String>(), told: Map<String, String>(), profiled: Map<String, i64>(), configs: Map<String, Json>(), waiting: List<String>(), warm_next: List<String>(), warming: List<String>(), held: List<String>(), key: key.copy(), stopped: false, used: now(), compacts: false, turned: Map<String, i64>(), routes: List<String>(), compactions: Map<String, String>() }
         p.pending.insert(1, Pending.Init)
         p.to.send(Out.Send(acp.request(1, "initialize", acp.initialize_params())))
         i.procs.insert(key, p)
@@ -12983,7 +13212,11 @@ impl Instance {
                 p.images = bool_at(at(caps.copy(), "promptCapabilities"), "image") ?? false
                 p.load = bool_at(caps.copy(), "loadSession") ?? false
                 p.mcp_http = bool_at(at(caps.copy(), "mcpCapabilities"), "http") ?? false
-                p.resume = match at(at(caps, "sessionCapabilities"), "resume") {
+                p.resume = match at(at(caps.copy(), "sessionCapabilities"), "resume") {
+                    Json.Object(_) => true,
+                    _ => false,
+                }
+                p.closes = match at(at(caps, "sessionCapabilities"), "close") {
                     Json.Object(_) => true,
                     _ => false,
                 }
@@ -13173,8 +13406,9 @@ impl Instance {
         }
         // Kept with the tools it has, which are its agent's now: a new one's,
         // and one picked up again with the same tools (or kept before sessions
-        // kept theirs, which has them from now on).
-        try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy(), i.tools_of(user.copy(), agent))
+        // kept theirs, which has them from now on). A routine run's is never
+        // picked up again, so it isn't kept.
+        if not routine_seat_of(conversation.copy()) { try i.store.put_acp_session(user.copy(), conversation.copy(), p.program.copy(), sid.copy(), i.tools_of(user.copy(), agent)) }
         p.sessions.insert(conversation, sid.copy())
         if let Json.Array(_) = config {
             p.configs.insert(sid.copy(), config.copy())
@@ -13251,7 +13485,7 @@ impl Instance {
         }
         // On another program than its own, the agent's own picks are for its own,
         // so only the person's defaults for that program apply.
-        let wanted = match i.store.agent(p.user.copy(), p.agent.copy()) {
+        var wanted = match i.store.agent(p.user.copy(), p.agent.copy()) {
             ok(some(a)) => {
                 if str_at(a.copy(), "acp_agent") == some(p.program.copy()) {
                     defaults.config_of(a, kept)
@@ -13260,6 +13494,22 @@ impl Instance {
                 }
             },
             _ => Json.Null,
+        }
+        // A routine's own run takes the model and effort the routine picked, over
+        // its agent's (PLAN.md, "Routines").
+        if let q = i.quiet_turns.find(run.copy()) {
+            if q.step.len() == 0 and wanted != Json.Null {
+                if let ok(some(r)) = i.store.routine(p.user.copy(), q.routine.copy()) {
+                    var picked = Obj.new()
+                    let picks: List<(str, str)> = [("model", "model"), ("effort", "thought_level")]
+                    for (key, category) in picks {
+                        let value = str_at(r.copy(), key) ?? String()
+                        if value.len() == 0 { continue }
+                        if let id = acp.option_in(config.copy(), category) { picked.m.insert(id, Json.Str(value)) }
+                    }
+                    wanted = merge(wanted, picked.done())
+                }
+            }
         }
         let todo = acp.config_todo(config, wanted)
         if todo.len() == 0 {
@@ -13343,6 +13593,8 @@ impl Instance {
     // person asked to start afresh is done with: what it says now isn't kept.
     fn keep_context(i: Instance, p: Proc, session: String, used: i64, size: i64) ! Error {
         let conversation = i.session_chat(p, session) else return
+        // A routine run's session is no chat's, and ends with its run.
+        if routine_seat_of(conversation.copy()) { return }
         if try i.store.fresh_asked(p.user.copy(), conversation.copy()) { return }
         let (was, window): (i64, i64) = try i.store.context(p.user.copy(), conversation.copy()) ?? (i64(0), i64(0))
         let compacts = try i.store.context_compacts(p.user.copy(), conversation.copy())
@@ -13426,6 +13678,8 @@ impl Instance {
         let line: String? = if let v = p.compactions.find(call.copy()) { some(v.copy()) } else { none }
         if line == none and status != "completed" and before == 0 { return }
         let seat = i.session_chat(p, session.copy()) else return
+        // A routine run's session compacting is no line in its chat.
+        if routine_seat_of(seat.copy()) { return }
         let (conversation, member) = seat_parts(seat.copy())
         if line == none and before == 0 {
             let (used, _): (i64, i64) = i.context.get(session) ?? (i64(0), i64(0))
@@ -14470,6 +14724,9 @@ impl Instance {
         // A server its agent proposed: its card says how it stands in the kept reply.
         if let err(e) = i.close_mcp_adds(run_id.copy()) { eprintln("loom: ending run {run_id}: {e}") }
         let r = i.runs.remove(run_id.copy()) else return
+        // A routine run's session ends with it: closed in its program from the
+        // loop, where the program may be in the middle of being handled here.
+        if routine_seat_of(r.seat.copy()) and r.session.len() > 0 { i.routine_work.closing.push((r.proc.copy(), r.session.copy())) }
         let looked_back = i.looking_back.contains(run_id.copy())
         if let k = i.compacting.position(|x| x == run_id) { _ = i.compacting.remove(k) }
         match i.wind_up(r, status.copy(), error.copy()) {
@@ -14578,7 +14835,9 @@ impl Instance {
         let (mark, why) = i.routine_marks.remove(r.id.copy()) ?? (String(), String())
         var posted = List<String>()
         var keep = true
+        var quiet_for = String()
         if let q = i.quiet_turns.remove(r.id.copy()) {
+            quiet_for = q.routine.copy()
             posted = q.posted.copy()
             keep = status == "failed" or status == "limit" or (status == "done" and mark == "failed")
             if q.step.len() > 0 { try i.step_ran(r.user.copy(), q, r.agent.copy(), status.copy(), error.copy(), said.copy()) }
@@ -14627,6 +14886,8 @@ impl Instance {
             let message = i.with_threads(r.user.copy(), carded, r.id.copy())
             try i.store.put_message(r.user.copy(), message.copy())
             try i.event(r.user.copy(), "message.created", Obj.new().s("conversation", r.conversation.copy()).j("message", message).done())
+            // A routine's failed run, which the chat's own session hears of with its next turn.
+            if quiet_for.len() > 0 { try i.store.post_untold(r.user.copy(), r.conversation.copy(), r.message.copy(), quiet_for.copy()) }
             for (named, path, key) in pictures { i.picture_to.send(files.Picture { user: r.user.copy(), message: r.message.copy(), named: named.copy(), path: path.copy(), key: key.copy() }) }
         }
         // A run an update stopped to restart keeps its reply so far, and the restart
@@ -16380,8 +16641,14 @@ impl Instance {
             return Answer.Value(Obj.new().j("agent", agent).done())
         }
         if name == "routine.list" {
+            let t = now()
+            var costs = Map<String, Json>()
+            for (id, runs, quiet, tokens, oldest) in try i.store.routine_costs(user.copy(), t - routines.COST_DAYS * 86400000, String()) { costs.insert(id.copy(), routines.cost(runs, quiet, tokens, oldest, t)) }
             var shown = List<Json>()
-            for r in try i.store.routines(user) { shown.push(routines.shown(r, i.minute_ms)) }
+            for r in try i.store.routines(user) {
+                let cost = if let c = costs.find(str_at(r.copy(), "id") ?? String()) { c.copy() } else { routines.cost(0, 0, 0, t, t) }
+                shown.push(merge(routines.shown(r, i.minute_ms), Obj.new().j("cost", cost).done()))
+            }
             return Answer.Value(Obj.new().j("routines", Json.Array(shown)).done())
         }
         if name == "routine.put" {
