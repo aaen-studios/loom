@@ -10796,10 +10796,11 @@ ACTA_KEY=secret:ACTA_KEY",
         let picks = self.mention_picks();
         let mention_menu = (!plus_open && !picks.is_empty()).then(|| self.mention_menu(&picks, cx));
         let emoji_row = self.emoji_row().map(|row| self.emoji_row_view(&row, cx));
-        let emoji_picker = self.emoji_picker_view(cx);
+        let emoji_picker = self.emoji_picker_view(window, cx);
         let emoji_button = (self.prefs.emoji_button || self.emoji_ui.picker.is_some())
             .then(|| self.emoji_button(cx));
         let composer_at = self.emoji_ui.composer_at.clone();
+        let picker_open = self.emoji_ui.picker.is_some();
         let mut composer = Some(
             div()
                 .w_full()
@@ -10815,9 +10816,17 @@ ACTA_KEY=secret:ACTA_KEY",
                 .rounded(px(radius::COMPOSER))
                 // The plus menu opens just above the composer, from its left edge.
                 .relative()
-                // Where it is, for the emoji picker to fit over it.
+                // Where it is, for the emoji picker to open by it, and again in the next
+                // frame once it moved with the picker open, as when the window resizes.
                 .child(
-                    canvas(move |b, _, _| composer_at.set(Some(b)), |_, _, _, _| {})
+                    canvas(
+                        move |b, window, _| {
+                            if composer_at.replace(Some(b)) != Some(b) && picker_open {
+                                window.request_animation_frame();
+                            }
+                        },
+                        |_, _, _, _| {},
+                    )
                         .absolute()
                         .top_0()
                         .left_0()
@@ -10839,12 +10848,8 @@ ACTA_KEY=secret:ACTA_KEY",
                         anchored().anchor(Anchor::BottomLeft).child(row),
                     )))
                 })
-                // The emoji picker opens above it from its right edge, by the smiley.
-                .when_some(emoji_picker, |d, picker| {
-                    d.child(div().absolute().top_0().right_0().child(deferred(
-                        anchored().anchor(Anchor::BottomRight).child(picker),
-                    )))
-                })
+                // The emoji picker opens above it or below it from its right edge.
+                .when_some(emoji_picker, |d, picker| d.child(picker))
                 .when_some(reply_bar, |d, bar| d.child(bar))
                 .when_some(attached, |d, row| d.child(row))
                 .child(

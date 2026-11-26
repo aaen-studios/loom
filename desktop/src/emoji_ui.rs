@@ -6,13 +6,19 @@
 use super::*;
 use crate::emoji::{self, Item};
 
-/// The picker's size, and the least it's made to fit over the composer.
+/// The picker's size.
 const PICKER_W: f32 = 372.0;
 const PICKER_H: f32 = 400.0;
-const PICKER_LEAST: f32 = 240.0;
 /// A tile in the picker's grid, and how many to a line.
 const TILE: f32 = 37.0;
 const COLS: usize = 9;
+/// The picker's search, a tab and its foot, as tall as they are.
+const SEARCH: f32 = 30.0;
+const TAB: f32 = 30.0;
+const FOOT: f32 = 52.0;
+/// The picker around its grid: its border, the search under its margin, the tabs, the
+/// two lines and the foot, with the gaps between them.
+const CHROME: f32 = 2.0 + space::S + SEARCH + TAB + 2.0 + FOOT + 5.0 * space::XS;
 /// An emoji in a tile, in the suggestion row, and big in the picker's foot.
 const IN_TILE: f32 = 26.0;
 const IN_ROW: f32 = 22.0;
@@ -42,13 +48,33 @@ pub(super) struct EmojiUi {
     pub composer_at: Rc<Cell<Option<Bounds<Pixels>>>>,
 }
 
-/// The picker's height over a composer whose top is `top` down the window: all of it
-/// where there's room between the title bar and the composer, so it never covers the
-/// composer, and shorter where there isn't, as over a new chat's composer in the middle
-/// of a short window.
-fn picker_height(top: Option<f32>) -> f32 {
-    let room = top.map_or(PICKER_H, |t| t - layout::TITLEBAR - 2.0 * space::S);
-    room.clamp(PICKER_LEAST, PICKER_H)
+/// The side of the composer the picker opens on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Side {
+    Above,
+    Below,
+}
+
+/// Where the picker opens by a composer from `top` to `bottom` down a window `high`
+/// tall, and how tall it is. Above it, all of it, where that fits, as over a chat's
+/// composer at the window's foot. Where it doesn't, on the side with more room, as under
+/// a new chat's composer in the middle of the window, as tall as that room, so it never
+/// covers the composer or leaves the window. Where neither side has four lines of its
+/// grid, it takes the larger, and its grid scrolls.
+fn picker_place(composer: Option<(f32, f32)>, high: f32) -> (Side, f32) {
+    let Some((top, bottom)) = composer else {
+        return (Side::Above, PICKER_H);
+    };
+    // Under the title bar, with the gap over the composer.
+    let above = top - layout::TITLEBAR - 2.0 * space::S;
+    // The gap under the composer, and inside the window's foot.
+    let below = high - bottom - space::S - space::M;
+    let (side, room) = if above >= PICKER_H || above >= below {
+        (Side::Above, above)
+    } else {
+        (Side::Below, below)
+    };
+    (side, room.clamp(CHROME, PICKER_H))
 }
 
 pub(super) struct Picker {
@@ -555,9 +581,10 @@ impl Loom {
         self.find_emoji(cx);
     }
 
-    /// The picker, over the composer at its right: the search, a tab for each group, the
-    /// grid, and the foot with the emoji under the pointer and the skin tones.
-    pub(super) fn emoji_picker_view(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+    /// The picker, by the composer at its right, above it or below it (`picker_place`):
+    /// the search, a tab for each group, the grid, and the foot with the emoji under the
+    /// pointer and the skin tones.
+    pub(super) fn emoji_picker_view(&self, window: &Window, cx: &mut Context<Self>) -> Option<Div> {
         let picker = self.emoji_ui.picker.as_ref()?;
         let p = self.p;
         let k = motion::arrive(&SharedString::from("emoji-picker"), 0.16);
@@ -577,7 +604,7 @@ impl Loom {
             .mx(px(space::S))
             .mt(px(space::S))
             .px(px(space::S))
-            .h(px(30.0))
+            .h(px(SEARCH))
             .rounded(px(radius::INPUT))
             .bg(p.hover)
             .text_size(px(size::SMALL))
@@ -644,7 +671,7 @@ impl Loom {
                         .id(SharedString::from(format!("emoji-tab-{}", g.id)))
                         .role(Role::Tab)
                         .aria_label(g.name.clone())
-                        .size(px(30.0))
+                        .size(px(TAB))
                         .flex()
                         .items_center()
                         .justify_center()
@@ -676,50 +703,71 @@ impl Loom {
         .px(px(space::S));
         let empty = all.is_empty();
         let foot = self.emoji_foot(picker, cx);
-        let top = self.emoji_ui.composer_at.get().map(|b| f32::from(b.top()));
+        let composer = self
+            .emoji_ui
+            .composer_at
+            .get()
+            .map(|b| (f32::from(b.top()), f32::from(b.bottom())));
+        let (side, high) = picker_place(composer, f32::from(window.viewport_size().height));
+        // It opens from the composer's right edge, by the smiley, the gap from it growing
+        // as it comes in.
+        let gap = space::S - 6.0 * (1.0 - k);
+        let (edge, anchor, gap) = match side {
+            Side::Above => (
+                div().absolute().top_0().right_0(),
+                Anchor::BottomRight,
+                -gap,
+            ),
+            Side::Below => (div().absolute().bottom_0().right_0(), Anchor::TopRight, gap),
+        };
+        let picker = div()
+            .id("emoji-picker")
+            .occlude()
+            .opacity(k)
+            .w(px(PICKER_W))
+            .h(px(high))
+            .flex()
+            .flex_col()
+            .gap(px(space::XS))
+            .bg(p.raised)
+            .border_1()
+            .border_color(p.line_strong)
+            .rounded(px(radius::CARD))
+            .shadow_lg()
+            .overflow_hidden()
+            // A click outside shuts it, but one on the smiley, which shuts it itself.
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if !motion::hovered(&motion::hover_key(SMILEY)) {
+                    this.close_emoji_picker(cx);
+                }
+            }))
+            // The grid's scroll lights another tab.
+            .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
+            .child(search)
+            .when(!searching, |d| d.child(tabs))
+            .child(div().h(px(1.0)).bg(p.line))
+            .when(empty, |d| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_size(px(size::SMALL))
+                        .text_color(p.ink_3)
+                        .child(if searching { "No emoji found" } else { "" }),
+                )
+            })
+            .when(!empty, |d| d.child(grid))
+            .child(div().h(px(1.0)).bg(p.line))
+            .child(foot);
         Some(
-            div()
-                .id("emoji-picker")
-                .occlude()
-                .opacity(k)
-                .mb(px(space::S - 6.0 * (1.0 - k)))
-                .w(px(PICKER_W))
-                .h(px(picker_height(top)))
-                .flex()
-                .flex_col()
-                .gap(px(space::XS))
-                .bg(p.raised)
-                .border_1()
-                .border_color(p.line_strong)
-                .rounded(px(radius::CARD))
-                .shadow_lg()
-                .overflow_hidden()
-                // A click outside shuts it, but one on the smiley, which shuts it itself.
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    if !motion::hovered(&motion::hover_key(SMILEY)) {
-                        this.close_emoji_picker(cx);
-                    }
-                }))
-                // The grid's scroll lights another tab.
-                .on_scroll(cx.listener(|_, _, _, cx| cx.notify()))
-                .child(search)
-                .when(!searching, |d| d.child(tabs))
-                .child(div().h(px(1.0)).bg(p.line))
-                .when(empty, |d| {
-                    d.child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink_3)
-                            .child(if searching { "No emoji found" } else { "" }),
-                    )
-                })
-                .when(!empty, |d| d.child(grid))
-                .child(div().h(px(1.0)).bg(p.line))
-                .child(foot),
+            edge.child(deferred(
+                anchored()
+                    .anchor(anchor)
+                    .offset(point(px(0.0), px(gap)))
+                    .child(picker),
+            )),
         )
     }
 
@@ -729,7 +777,7 @@ impl Loom {
         let p = self.p;
         let tone = self.prefs.skin_tone.min(5) as usize;
         let mut foot = div()
-            .h(px(52.0))
+            .h(px(FOOT))
             .flex_none()
             .flex()
             .items_center()
@@ -1360,18 +1408,47 @@ impl Loom {
 
 #[cfg(test)]
 mod tests {
-    use super::{lines, picker_height, unpieced, Line, COLS, PICKER_H, PICKER_LEAST};
+    use super::{lines, picker_place, unpieced, Line, Side, CHROME, COLS, PICKER_H, TILE};
     use crate::emoji::{Group, Item};
 
     #[test]
-    fn the_picker_fits_between_the_title_bar_and_the_composer() {
-        // A chat's composer at the foot of the window: all of it.
-        assert_eq!(picker_height(Some(700.0)), PICKER_H);
-        // A new chat's, in the middle of a short window: what room there is.
-        assert_eq!(picker_height(Some(370.0)), 370.0 - 48.0 - 16.0);
-        // No room: the least, over the composer.
-        assert_eq!(picker_height(Some(200.0)), PICKER_LEAST);
-        assert_eq!(picker_height(None), PICKER_H);
+    fn the_picker_opens_on_the_side_of_the_composer_with_more_room() {
+        // How many lines of its grid a picker so tall shows.
+        let shown = |h: f32| ((h - CHROME) / TILE).floor();
+        // A chat's composer at the foot of the window: above it, all of it.
+        assert_eq!(
+            picker_place(Some((690.0, 740.0)), 752.0),
+            (Side::Above, PICKER_H)
+        );
+        // And in a short window, as tall as fits under the title bar.
+        assert_eq!(
+            picker_place(Some((410.0, 460.0)), 472.0),
+            (Side::Above, 410.0 - 48.0 - 16.0)
+        );
+        // A new chat's composer in the middle of the window, as it is at the default
+        // height: below it, with four lines of its grid.
+        let (side, h) = picker_place(Some((370.0, 420.0)), 752.0);
+        assert_eq!((side, h), (Side::Below, 752.0 - 420.0 - 8.0 - 12.0));
+        assert!(shown(h) >= 4.0);
+        // Room for all of it below and not above: below, all of it.
+        assert_eq!(
+            picker_place(Some((300.0, 350.0)), 1000.0),
+            (Side::Below, PICKER_H)
+        );
+        // A new chat in a tall window, with room for all of it above: above.
+        assert_eq!(
+            picker_place(Some((520.0, 570.0)), 1052.0),
+            (Side::Above, PICKER_H)
+        );
+        // Neither side with four lines, at the window's least height: the larger, and
+        // its grid scrolls.
+        let (side, h) = picker_place(Some((234.0, 284.0)), 480.0);
+        assert_eq!((side, h), (Side::Below, 480.0 - 284.0 - 20.0));
+        assert!(shown(h) < 4.0);
+        // Never shorter than what's round its grid.
+        assert_eq!(picker_place(Some((100.0, 150.0)), 200.0).1, CHROME);
+        // Before the composer is laid out: above, all of it.
+        assert_eq!(picker_place(None, 752.0), (Side::Above, PICKER_H));
     }
 
     fn item(e: &str) -> Item {
