@@ -19,6 +19,7 @@ mod popover;
 pub mod popup;
 mod rooms;
 pub mod routine_off;
+pub mod spool_card;
 pub mod t3;
 pub mod watch;
 pub use popover::pop_under;
@@ -2372,6 +2373,27 @@ pub enum CardBody {
         sending: bool,
         error: String,
     },
+    /// One of Spools' entries an agent asked its person to connect with spool_connect
+    /// (loom's own card; `model/spool_card.rs`): the entry, its name and mark, the
+    /// server it becomes and its address, the agents it's for, the keys the person
+    /// types, how it stands (`asking`, `connecting`, `sign_in`, `connected` or
+    /// `failed`), why, its tools, the reply it's in, whether Sign in is on its way, and
+    /// what the instance said to one it refused.
+    SpoolConnect {
+        entry: String,
+        name: String,
+        icon_svg: String,
+        server: String,
+        address: String,
+        agents: Vec<String>,
+        secrets: Vec<spool_card::Secret>,
+        state: String,
+        said: String,
+        tools: Vec<String>,
+        message: String,
+        sending: bool,
+        error: String,
+    },
 }
 
 /// A field the person fills in on a card: what it's for, whether it's hidden as it's
@@ -2550,6 +2572,7 @@ impl Card {
             },
             "routine_off" => routine_off::body_of(v),
             "draft" => draft_card::body_of(v),
+            "spool_connect" => spool_card::body_of(v),
             "secret_ask" => CardBody::SecretAsk {
                 call: s(v, "call"),
                 agent: s(v, "agent"),
@@ -3382,8 +3405,12 @@ impl Message {
                         answers.is_none() && self.takes_answers(newest)
                     }
                     Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
-                    Some(CardBody::McpAdd { state, .. }) => {
-                        matches!(state.as_str(), "asking" | "adding" | "sign_in")
+                    Some(CardBody::McpAdd { state, .. })
+                    | Some(CardBody::SpoolConnect { state, .. }) => {
+                        matches!(
+                            state.as_str(),
+                            "asking" | "adding" | "connecting" | "sign_in"
+                        )
                     }
                     _ => false,
                 })
@@ -6400,6 +6427,10 @@ pub struct Model {
     routine_off: routine_off::Turning,
     /// What the app keeps of the chat's draft cards (`model/draft_card.rs`).
     draft_ui: draft_card::DraftUi,
+    /// Sign in on the cards of spools agents asked to connect (`model/spool_card.rs`).
+    spool: spool_card::Pending,
+    /// MCP servers whose sign-in a spool card wants opened here, in the person's browser.
+    pub spool_sign_ins: Vec<String>,
     /// The person's watches, and the cards their lines show (`model/watch.rs`).
     pub watch: watch::Watches,
     /// The files sent or received lately in the person's chats, newest first, for the
@@ -7855,6 +7886,9 @@ impl Model {
 
     fn event(&mut self, f: &Value) {
         let kind = s(f, "kind");
+        if kind == "message.updated" {
+            self.spool_cards_in(&f["message"]);
+        }
         let (family, _) = kind.split_once('.').unwrap_or((kind.as_str(), ""));
         match family {
             "table" => {
@@ -8111,6 +8145,7 @@ impl Model {
         let Some(card) = f.get("card").and_then(Card::of) else {
             return;
         };
+        self.spool_seen(&f["card"]);
         // Whether the person signed in since, for a sign-in card, and the servers and
         // secrets as they are once one an agent proposed is added.
         if matches!(card.body, CardBody::SignIn { .. } | CardBody::McpAdd { .. }) {
@@ -8426,6 +8461,10 @@ impl Model {
         }
         // A card for the composer, the person's boards, or a refresh of cards.
         if self.take_card_answer(&id, f) {
+            return;
+        }
+        // Sign in on a spool card (src/model/spool_card.rs).
+        if self.take_spool_answer(&id, f) {
             return;
         }
         // Turn on, on a routine's card (src/model/routine_off.rs).
@@ -9868,6 +9907,16 @@ impl Model {
                         }
                         *sending = self.form_sending.values().any(|v| *v == key);
                         *error = self.form_errors.get(&key).cloned().unwrap_or_default();
+                    }
+                    // A spool card's Sign in goes with the reply it's in.
+                    Some(CardBody::SpoolConnect {
+                        message,
+                        sending,
+                        error,
+                        ..
+                    }) => {
+                        *message = reply.clone();
+                        (*sending, *error) = self.spool_sending(&card_id);
                     }
                     // A proposed server's card left waiting for a sign-in says Signed in
                     // once the person has, too.

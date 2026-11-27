@@ -1577,6 +1577,10 @@ ACTA_KEY=secret:ACTA_KEY",
                     for url in to_browse {
                         cx.open_url(&url);
                     }
+                    // A spool card this app signed in from, waiting for the sign-in.
+                    for server in std::mem::take(&mut loom.model.spool_sign_ins) {
+                        loom.sign_in_mcp(&server, cx);
+                    }
                     // A frame is decoded off this thread, and drawn once it is.
                     if std::mem::take(&mut loom.model.page_moved) {
                         loom.decode_frame(cx);
@@ -6221,6 +6225,19 @@ ACTA_KEY=secret:ACTA_KEY",
                         }
                     }
                 }
+                // A spool card's keys, while Sign in can still be pressed.
+                model::CardBody::SpoolConnect { secrets, state, .. }
+                    if state == "asking" || state == "failed" =>
+                {
+                    for k in secrets {
+                        wanted.push((
+                            format!("{}/{}", card.id, k.name),
+                            k.placeholder.clone(),
+                            true,
+                            String::new(),
+                        ));
+                    }
+                }
                 // A form not sent: a box for each text and number field, with what it
                 // starts as.
                 model::CardBody::Form {
@@ -6288,6 +6305,43 @@ ACTA_KEY=secret:ACTA_KEY",
         };
         let f = self.model.answer_mcp_add(call, answer, &secrets);
         self.send(f);
+        cx.notify();
+    }
+
+    /// Sign in, or Try again, on a spool card: the instance connects it, with the keys
+    /// typed on the card, and the browser opens once it waits for the sign-in. One
+    /// waiting for it already opens the browser again.
+    fn spool_sign_in(
+        &mut self,
+        message: &str,
+        card: &str,
+        server: &str,
+        state: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if state == "sign_in" {
+            self.sign_in_mcp(server, cx);
+            return;
+        }
+        let prefix = format!("{card}/");
+        let secrets: Vec<(String, String)> = self
+            .card_secrets
+            .iter()
+            .filter_map(|(key, input)| {
+                key.strip_prefix(&prefix)
+                    .map(|name| (name.to_string(), input.read(cx).value().to_string()))
+            })
+            .collect();
+        let f = self.model.spool_sign_in(message, card, server, &secrets);
+        self.send(f);
+        self.rows_dirty = true;
+        cx.notify();
+    }
+
+    /// Change… on a spool card: the entry, in Spools.
+    fn open_spool_entry(&mut self, entry: &str, cx: &mut Context<Self>) {
+        self.open(Screen::Spools, cx);
+        self.model.spool_open(entry);
         cx.notify();
     }
 
@@ -21439,6 +21493,8 @@ struct Show {
 /// The widest a card in the chat grows: past that, its few lines would sit far apart
 /// from its buttons in a wide column.
 const CARD_MOST: f32 = 600.0;
+/// A spool card in the chat: as wide as one of Spools' featured cards.
+const SPOOL_CARD_W: f32 = 420.0;
 /// A service's badge at a card's start, and a step's, smaller, and an answered card's.
 const BADGE: f32 = control::ICON_LARGE;
 /// A brain's tile on its row under Brains, which its open rows are set in under.
@@ -22136,6 +22192,7 @@ fn card_view(
         CardBody::SignIn { .. } => sign_in_card(p, card, key, tint, scale, this),
         CardBody::McpAdd { .. } => mcp_add_card(p, card, key, name, tint, scale, secrets, this),
         CardBody::SecretAsk { .. } => secret_ask_card(p, card, key, tint, scale, secrets, this),
+        CardBody::SpoolConnect { .. } => spool_connect_card(p, card, key, scale, secrets, this),
         CardBody::Form { .. } => form_card(p, card, key, tint, show, secrets, this),
         CardBody::Draft(_) => draft_view::card(p, card, key, scale, this),
         _ => shown_card(p, card, tint, scale),
@@ -22583,6 +22640,181 @@ fn mcp_add_card(
         _ => {}
     }
     div().max_w(px(CARD_MOST)).child(frame.draw(p, scale))
+}
+
+/// Loom's own card for one of Spools' entries an agent asked its person to connect
+/// (spool_connect): Spools' featured card itself, loom's knot tied to the entry's logo by
+/// a thread that hangs slack and dashed until it's connected and runs taut in ink once
+/// it is; its name and address; then whom it's for with Sign in (and a masked field for
+/// each key it takes), Connecting…, Connected · N tools with Change…, or why it failed
+/// with Try again.
+fn spool_connect_card(
+    p: Palette,
+    card: &model::Card,
+    key: &str,
+    scale: f32,
+    secrets: &HashMap<String, Entity<InputState>>,
+    this: WeakEntity<Loom>,
+) -> Div {
+    use model::spool_card::{self, Foot};
+    let model::CardBody::SpoolConnect {
+        entry,
+        name,
+        icon_svg,
+        server,
+        address,
+        agents,
+        secrets: keys,
+        state,
+        said,
+        tools,
+        message,
+        sending,
+        error,
+    } = &card.body
+    else {
+        return div();
+    };
+    let taut = state == "connected";
+    let link = spools::spool_link(
+        p,
+        &format!("spool-card-tie/{key}"),
+        entry,
+        (!icon_svg.is_empty()).then_some(icon_svg.as_str()),
+        name,
+        taut,
+    );
+    let head = div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .child(
+            div()
+                .text_size(px(size::BODY * scale))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.ink)
+                .truncate()
+                .child(name.clone()),
+        )
+        .child(
+            div()
+                .font_family(crate::prefs::mono_font())
+                .text_size(px(size::SMALL * scale))
+                .text_color(p.ink_2)
+                .truncate()
+                .child(spool_card::short_address(address)),
+        );
+    // A key it takes, typed in here, while Sign in can still be pressed.
+    let asks = matches!(state.as_str(), "asking" | "failed");
+    let mut fields = div().flex().flex_col().gap(px(space::S));
+    let mut typing = false;
+    for k in keys {
+        if let Some(input) = secrets.get(&format!("{}/{}", card.id, k.name)) {
+            if asks {
+                typing = true;
+                fields = fields.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(space::XS))
+                        .child(
+                            div()
+                                .text_size(px(size::CAPTION))
+                                .text_color(p.ink_3)
+                                .child(k.label.clone()),
+                        )
+                        .child(Input::new(input).small().mask_toggle()),
+                );
+            }
+        }
+    }
+    let foot = spool_card::foot(state, agents, said, tools.len(), error);
+    let words = match &foot {
+        Foot::For(who) => div().text_color(p.ink_3).child(who.clone()),
+        Foot::Connecting => div().text_color(p.ink_3).child("Connecting…"),
+        Foot::SigningIn => div()
+            .text_color(p.ink_3)
+            .child("Waiting for you to sign in…"),
+        Foot::Connected(n) => div()
+            .flex()
+            .items_center()
+            .gap(px(space::XS + 2.0))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(p.ink)
+            .child(div().size(px(6.0)).flex_none().rounded_full().bg(p.ink))
+            .child(spool_card::connected_line(*n)),
+        Foot::Failed(why) => div().text_color(p.bad).child(why.clone()),
+    };
+    let press = {
+        let this = this.clone();
+        let (message, card_id, server, state) = (
+            message.clone(),
+            card.id.clone(),
+            server.clone(),
+            state.clone(),
+        );
+        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            let _ = this.update(cx, |loom, cx| {
+                loom.spool_sign_in(&message, &card_id, &server, &state, cx)
+            });
+        }
+    };
+    let button = match &foot {
+        Foot::Connecting => None,
+        Foot::Connected(_) => {
+            let this = this.clone();
+            let entry = entry.clone();
+            Some(
+                card_button(p, format!("spool-change-{key}"), "Change…", false).on_click(
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |loom, cx| loom.open_spool_entry(&entry, cx));
+                    },
+                ),
+            )
+        }
+        Foot::Failed(_) if state != "sign_in" => {
+            Some(card_button(p, format!("spool-again-{key}"), "Try again", false).on_click(press))
+        }
+        _ => Some(
+            card_button(
+                p,
+                format!("spool-sign-in-{key}"),
+                if *sending { "Signing in…" } else { "Sign in" },
+                true,
+            )
+            .on_click(press),
+        ),
+    };
+    let foot_row = div()
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap(px(space::S))
+        .min_h(px(control::BUTTON_SMALL))
+        .child(
+            words
+                .min_w_0()
+                .flex_1()
+                .truncate()
+                .text_size(px(size::SMALL * scale)),
+        )
+        .children(button);
+    div().max_w(px(SPOOL_CARD_W)).child(
+        div()
+            .id(SharedString::from(format!("spool-connect-{key}")))
+            .p(px(space::L))
+            .flex()
+            .flex_col()
+            .gap(px(space::M))
+            .rounded(px(radius::CARD))
+            .border_1()
+            .border_color(p.line)
+            .bg(if p.dark { p.raised } else { p.side })
+            .child(link)
+            .child(head)
+            .when(typing, |d| d.child(fields))
+            .child(foot_row),
+    )
 }
 
 /// Loom's own card for something an agent's page wants that only the person knows: the
@@ -23085,6 +23317,7 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         | CardBody::SecretAsk { .. }
         | CardBody::RoutineOff { .. }
         | CardBody::Draft(_)
+        | CardBody::SpoolConnect { .. }
         | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.

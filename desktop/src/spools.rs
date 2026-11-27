@@ -400,32 +400,7 @@ impl Loom {
     /// One of loom's own entries' logos on a tile in ink, black in light and white in
     /// dark, as the featured cards and an open entry draw it: its mark, or its initial.
     fn spool_mark_ink(&self, e: &Entry, size: f32) -> Div {
-        let p = self.p;
-        let tile = div()
-            .size(px(size))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(if size >= BADGE {
-                radius::CARD
-            } else {
-                radius::ROW
-            }))
-            .bg(p.button)
-            .text_color(p.button_ink);
-        match e.icon_svg.as_deref() {
-            Some(mark) => tile.child(
-                svg()
-                    .path(crate::runtime_svg(&format!("spools/{}.svg", e.id), mark))
-                    .size(px((size * 0.56).round()))
-                    .text_color(p.button_ink),
-            ),
-            None => tile
-                .text_size(px(size * 0.42))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(e.name.chars().next().unwrap_or('?').to_string()),
-        }
+        mark_ink(self.p, &e.id, e.icon_svg.as_deref(), &e.name, size)
     }
 
     /// One of loom's own as a wide card, in black and white as the rest of the app: loom's
@@ -437,32 +412,16 @@ impl Loom {
         let p = self.p;
         let status = spools::card_status(e, &self.model.mcp_servers);
         let taut = matches!(status, Some((_, Dot::Ok)));
-        let tint = if taut { p.ink } else { p.ink_3 };
         let fill = self.card_fill();
         let edge = p.line;
-        let knot = div()
-            .size(px(BADGE))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded(px(radius::CARD))
-            .border_1()
-            .border_color(p.line_strong)
-            .bg(p.bg)
-            .child(svg().path("logo/knot.svg").size(px(20.0)).text_color(p.ink));
-        let link = div()
-            .flex()
-            .items_center()
-            .gap(px(space::XS))
-            .child(knot)
-            .child(thread::tie(
-                format!("spool-tie/{}", e.id),
-                taut,
-                tint,
-                MARK_H * 2.0,
-            ))
-            .child(self.spool_mark_ink(e, BADGE));
+        let link = spool_link(
+            p,
+            &format!("spool-tie/{}", e.id),
+            &e.id,
+            e.icon_svg.as_deref(),
+            &e.name,
+            taut,
+        );
         let id = e.id.clone();
         let mut actions = div().flex().items_center().gap(px(space::S));
         if e.connected() {
@@ -1345,4 +1304,69 @@ fn community_mark(p: Palette) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(p.ink_2)
         .child("Community")
+}
+
+/// An entry's logo on a tile in ink, black in light and white in dark, as the featured
+/// cards, an open entry and a spool card in the chat draw it: its mark, or its initial.
+pub(super) fn mark_ink(p: Palette, id: &str, mark: Option<&str>, name: &str, size: f32) -> Div {
+    let tile = div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(if size >= BADGE {
+            radius::CARD
+        } else {
+            radius::ROW
+        }))
+        .bg(p.button)
+        .text_color(p.button_ink);
+    match mark {
+        Some(mark) => tile.child(
+            svg()
+                .path(crate::runtime_svg(&format!("spools/{id}.svg"), mark))
+                .size(px((size * 0.56).round()))
+                .text_color(p.button_ink),
+        ),
+        None => tile
+            .text_size(px(size * 0.42))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(name.chars().next().unwrap_or('?').to_string()),
+    }
+}
+
+/// loom's knot tied to an entry's logo by a thread that hangs grey, slack and dashed
+/// until it's connected, and is pulled taut in ink once it is (`taut`).
+pub(super) fn spool_link(
+    p: Palette,
+    key: &str,
+    id: &str,
+    mark: Option<&str>,
+    name: &str,
+    taut: bool,
+) -> Div {
+    let knot = div()
+        .size(px(BADGE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::CARD))
+        .border_1()
+        .border_color(p.line_strong)
+        .bg(p.bg)
+        .child(svg().path("logo/knot.svg").size(px(20.0)).text_color(p.ink));
+    div()
+        .flex()
+        .items_center()
+        .gap(px(space::XS))
+        .child(knot)
+        .child(thread::tie(
+            key.to_string(),
+            taut,
+            if taut { p.ink } else { p.ink_3 },
+            MARK_H * 2.0,
+        ))
+        .child(mark_ink(p, id, mark, name, BADGE))
 }
