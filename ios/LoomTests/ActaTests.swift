@@ -246,7 +246,7 @@ import Testing
         #expect(!s.loading)
         #expect(d.description == "## Why")
         #expect(d.checklist.count == 2)
-        #expect(d.chips == ["High"])
+        #expect(priorityBars(d.priority) == 3 && d.subtasksLine == "Subtasks · 1 of 2")
         #expect(commentDay(d.comments[0].at) == "25 Nov")
         // Moved at once, and back as it was when Acta refuses.
         #expect(m.moveCard("in_progress") == nil)
@@ -260,6 +260,46 @@ import Testing
         let tick = try #require(m.toggleSubtask("s2"))
         #expect(tick["args"] == ["board": "aaen-studios/loom", "id": "LOO-206", "subtask": "s2", "done": true])
         #expect(m.acta.sheet?.detail?.card.subtasksDone == 2)
+    }
+
+    @Test func theSheetHasItsPullRequestActivityAndComments() throws {
+        let m = actaModel()
+        let get = m.openCard(board: "aaen-studios/loom", id: "LOO-206")
+        let card: JSON = ["id": "LOO-206", "board": "aaen-studios/loom", "title": "Usage", "status": "todo",
+                          "comments": [["id": "c1", "by": "ola", "at": "2026-11-25T10:00:00Z", "body": "Hi"]],
+                          "activity": [["by": "Ola", "at": "2026-11-24T09:00:00Z", "text": "created the task"]],
+                          "pull_request": ["number": "349", "title": "Usage rings", "state": "open", "checks": "failure", "url": "https://github.com/a/b/pull/349"],
+                          "branch": "loo-206-usage", "can_comment": true]
+        answer(m, get, ["value": ["card": card]])
+        let d = try #require(m.acta.sheet?.detail)
+        #expect(d.commentsTab == "Comments · 1")
+        #expect(d.comments[0].initial == "O")
+        #expect(d.activity[0].text == "created the task")
+        #expect(d.branch == "loo-206-usage" && d.canComment)
+        let pr = try #require(d.pullRequest)
+        #expect(pr.checksWords == ("✕ checks", .bad))
+        #expect(PullRequest(state: "merged").checksWords == ("Merged", .quiet))
+        #expect(PullRequest(state: "open", checks: "pending").checksWords == ("checks", .quiet))
+        #expect(priorityBars("urgent") == 3 && priorityBars("none") == 0 && initialOf("") == "?")
+        // A comment: none with no words, none twice while it's on its way, and its box
+        // empties once Acta has it.
+        #expect(m.commentCard("  ") == nil)
+        let sent = try #require(m.commentCard(" Same on the iPhone. "))
+        #expect(sent["name"] == "card.comment")
+        #expect(sent["args"] == ["board": "aaen-studios/loom", "id": "LOO-206", "body": "Same on the iPhone."])
+        #expect(m.commentCard("again") == nil)
+        answer(m, sent, ["error": ["code": "mcp_failed", "message": "This key can only read."]])
+        #expect(m.acta.sheet?.error == "This key can only read." && m.acta.sheet?.commented == 0)
+        let again = try #require(m.commentCard("Same on the iPhone."))
+        guard case .object(var now) = card else { return }
+        now["comments"] = [["id": "c1", "by": "ola", "at": "2026-11-25T10:00:00Z", "body": "Hi"], ["id": "c2", "by": "Kari", "at": "2026-11-27T10:00:00Z", "body": "Same on the iPhone."]]
+        answer(m, again, ["value": ["card": .object(now)]])
+        #expect(m.acta.sheet?.detail?.comments.count == 2 && m.acta.sheet?.commented == 1 && m.acta.sheet?.commenting == false)
+        // Where the person's Acta only reads, no comment goes.
+        now["can_comment"] = false
+        let reread = m.openCard(board: "aaen-studios/loom", id: "LOO-206")
+        answer(m, reread, ["value": ["card": .object(now)]])
+        #expect(m.commentCard("Hi") == nil)
     }
 
     @Test func aCardThatChangedChangesItsPills() throws {

@@ -535,54 +535,96 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		</div>
 	</div>
 	<!-- A card's side preview beside the chat, from its pill or Open in its preview (PLAN.md,
-	     "Acta beside the chat"; acta_ui.rs, card_side): the status chip's menu moves it, and a
-	     tick ticks a subtask. -->
+	     "Acta beside the chat"; acta_ui.rs, card_side): its head with Open in Acta and ⋯, its
+	     title, its properties as chips, and the tabs Details, Comments and Activity. The status
+	     chip's menu moves it, a tick ticks a subtask, and Comment adds a comment. -->
 	<aside class="acta-side" data-acta-side aria-label="SHOP-31" hidden>
 		<div class="as-head">
 			<span class="acta-tile" set:html={ACTA} />
-			<span class="as-place">shop · SHOP-31</span>
-			<button type="button" class="icon-btn as-close" data-acta-close aria-label="Close" title="Close"
+			<span class="as-place">shop · <button type="button" class="as-id" title="Copy">SHOP-31</button></span>
+			<span class="as-open">Open in Acta</span>
+			<span class="as-more-at">
+				<button type="button" class="icon-btn as-icon" data-acta-more aria-expanded="false" aria-label="More" title="More"
+					><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle><circle cx="5" cy="12" r="1"></circle></svg></button
+				>
+				<span class="as-menu as-more" data-acta-more-menu role="menu" hidden>
+					<button type="button" role="menuitem" class="as-follow" aria-pressed="false" data-acta-follow
+						><svg class="i i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"></path><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"></path></svg><svg class="i i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span data-follow-words>Follow</span></button
+					>
+					<button type="button" role="menuitem"
+						><svg class="i" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>Copy link</button
+					>
+					<button type="button" role="menuitem"
+						><svg class="i" viewBox="0 0 24 24"><line x1="6" x2="6" y1="3" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>Copy branch</button
+					>
+					<button type="button" role="menuitem"
+						><svg class="i" viewBox="0 0 24 24"><path d="m7 11 2-2-2-2"></path><path d="M11 13h4"></path><rect width="18" height="18" x="3" y="3" rx="2" ry="2"></rect></svg>Make a thread</button
+					>
+				</span>
+			</span>
+			<button type="button" class="icon-btn as-icon" data-acta-close aria-label="Close" title="Close"
 				><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></button
 			>
 		</div>
 		<div class="as-body">
-			<div class="as-title">Write the release notes for 2.4</div>
-			<div class="as-chips">
-				<span class="as-status-at">
-					<button type="button" class="as-chip as-status" data-acta-status aria-expanded="false" style="--status: var(--thread-sky)"
-						><span class="as-words">In progress</span><svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button
-					>
-					<span class="as-menu" data-acta-menu role="menu" hidden>
-						<button type="button" role="menuitem" data-status="todo" data-words="Todo" data-color="var(--ink-3)"><i style="background: var(--ink-3)"></i>Todo</button>
-						<button type="button" role="menuitem" class="on" data-status="in_progress" data-words="In progress" data-color="var(--thread-sky)"><i style="background: var(--thread-sky)"></i>In progress</button>
-						<button type="button" role="menuitem" data-status="review" data-words="Review" data-color="var(--thread-gold)"><i style="background: var(--thread-gold)"></i>Review</button>
-						<button type="button" role="menuitem" data-status="done" data-words="Done" data-color="var(--ok)"><i style="background: var(--ok)"></i>Done</button>
-						<button type="button" role="menuitem" data-status="canceled" data-words="Canceled" data-color="var(--ink-3)"><i style="background: var(--ink-3)"></i>Canceled</button>
+			<div class="as-top">
+				<div class="as-title">Write the release notes for 2.4</div>
+				<div class="as-chips">
+					<span class="as-status-at">
+						<button type="button" class="as-chip as-status" data-acta-status aria-expanded="false" style="--status: var(--thread-sky)"
+							><i class="as-dot"></i><span class="as-words">In progress</span><svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button
+						>
+						<span class="as-menu" data-acta-menu role="menu" hidden>
+							<button type="button" role="menuitem" data-status="todo" data-words="Todo" data-color="var(--ink-3)"><i style="background: var(--ink-3)"></i>Todo</button>
+							<button type="button" role="menuitem" class="on" data-status="in_progress" data-words="In progress" data-color="var(--thread-sky)"><i style="background: var(--thread-sky)"></i>In progress</button>
+							<button type="button" role="menuitem" data-status="review" data-words="Review" data-color="var(--thread-gold)"><i style="background: var(--thread-gold)"></i>Review</button>
+							<button type="button" role="menuitem" data-status="done" data-words="Done" data-color="var(--ok)"><i style="background: var(--ok)"></i>Done</button>
+							<button type="button" role="menuitem" data-status="canceled" data-words="Canceled" data-color="var(--ink-3)"><i style="background: var(--ink-3)"></i>Canceled</button>
+						</span>
 					</span>
-				</span>
-				<span class="as-chip">Sam</span><span class="as-chip">S</span><span class="as-chip">release</span><span class="as-chip">High</span>
+					<span class="as-chip"><span class="as-bars" aria-hidden="true"><i class="on"></i><i class="on"></i><i class="on"></i></span>High</span>
+					<span class="as-chip"><span class="as-avatar" aria-hidden="true">S</span>Sam</span>
+					<span class="as-chip">S</span>
+				</div>
 			</div>
-			<div class="as-text">
-				<p>What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</p>
-				<ul>
-					<li>Features and fixes from the merged pull requests</li>
-					<li>The store listing's <b>What's new</b></li>
-				</ul>
+			<div class="as-tabs" role="tablist">
+				<button type="button" role="tab" aria-selected="true" data-acta-tab="details">Details</button>
+				<button type="button" role="tab" aria-selected="false" data-acta-tab="comments">Comments · <span data-acta-comment-count>2</span></button>
+				<button type="button" role="tab" aria-selected="false" data-acta-tab="activity">Activity</button>
 			</div>
-			<div class="as-subtasks">
-				<div class="as-label" data-acta-count>Subtasks 2 of 4</div>
-				<button type="button" class="as-tick done" role="checkbox" aria-checked="true" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>List the merged pull requests</button>
-				<button type="button" class="as-tick done" role="checkbox" aria-checked="true" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Write the changelog</button>
-				<button type="button" class="as-tick" role="checkbox" aria-checked="false" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Add the billing fix</button>
-				<button type="button" class="as-tick" role="checkbox" aria-checked="false" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Update the store listing</button>
+			<div class="as-pane" data-acta-pane="details">
+				<div class="as-text">
+					<p>What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</p>
+					<ul>
+						<li>Features and fixes from the merged pull requests</li>
+						<li>The store listing's <b>What's new</b></li>
+					</ul>
+				</div>
+				<div class="as-labels"><span>release</span><span>docs</span></div>
+				<div class="as-subtasks">
+					<div class="as-label" data-acta-count>Subtasks · 2 of 4</div>
+					<button type="button" class="as-tick done" role="checkbox" aria-checked="true" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>List the merged pull requests</button>
+					<button type="button" class="as-tick done" role="checkbox" aria-checked="true" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Write the changelog</button>
+					<button type="button" class="as-tick" role="checkbox" aria-checked="false" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Add the billing fix</button>
+					<button type="button" class="as-tick" role="checkbox" aria-checked="false" data-tick><span class="as-box"><svg class="i" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg></span>Update the store listing</button>
+				</div>
+				<div class="as-pr"><span class="as-pr-number">#412</span><span class="as-pr-title">Release notes for 2.4</span><span class="as-checks">✓ checks</span></div>
 			</div>
-			<div class="as-comments">
-				<div class="as-label">Comments</div>
-				<div class="as-comment"><div class="as-who">Sam · 25 Nov</div><p>The draft is in the release doc.</p></div>
-				<div class="as-comment"><div class="as-who">Juniper · 26 Nov</div><p>The billing fix is waiting on review, so it goes in last.</p></div>
+			<div class="as-pane as-comments" data-acta-pane="comments" data-acta-comments hidden>
+				<div class="as-comment"><span class="as-avatar">S</span><div><div class="as-who"><b>Sam</b> · 25 Nov</div><p>The draft is in the release doc.</p></div></div>
+				<div class="as-comment"><span class="as-avatar">J</span><div><div class="as-who"><b>Juniper</b> · 26 Nov</div><p>The billing fix is waiting on review, so it goes in last.</p></div></div>
+			</div>
+			<div class="as-pane as-activity" data-acta-pane="activity" hidden>
+				<p><b>Juniper</b> commented <span>· 26 Nov</span></p>
+				<p><b>Sam</b> moved it to In progress <span>· 25 Nov</span></p>
+				<p><b>Sam</b> commented <span>· 25 Nov</span></p>
+				<p><b>Sam</b> created the task <span>· 24 Nov</span></p>
 			</div>
 		</div>
-		<div class="as-foot"><span class="cp-button">Open in Acta</span><button type="button" class="cp-button as-follow" aria-pressed="false" data-acta-follow><svg class="i i-bell" viewBox="0 0 24 24"><path d="M10.268 21a2 2 0 0 0 3.464 0"></path><path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"></path></svg><svg class="i i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"></path></svg><span data-follow-words>Follow</span></button></div>
+		<form class="as-foot" data-acta-reply hidden>
+			<textarea rows="2" placeholder="Comment…" aria-label="Comment" data-acta-reply-words></textarea>
+			<button type="submit" class="as-send">Comment</button>
+		</form>
 	</aside>
 </div>
 
@@ -1773,10 +1815,11 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 	.cp-button:hover {
 		background: var(--hover);
 	}
-	/* A card's side preview beside the chat (acta_ui.rs, card_side): the head with
-	   Acta's mark, board · id in mono and close; the title as a heading, the chips, the
-	   description, the subtasks with their ticks and the last comments; Open in Acta and
-	   Follow at the foot. 36% of the window, as the app's panel beside the chat. */
+	/* A card's side preview beside the chat (acta_ui.rs, card_side), in black and white but
+	   for its status's dot: the head with Acta's mark, board · id, Open in Acta, ⋯ and
+	   close; the title and its properties as chips; then Details, Comments · N and Activity,
+	   with the box to comment in at the foot under Comments. 36% of the window, as the
+	   app's panel beside the chat. */
 	.acta-side {
 		display: flex;
 		flex-direction: column;
@@ -1799,8 +1842,8 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		flex: none;
 	}
 	.as-head .acta-tile {
-		width: 16px;
-		height: 16px;
+		width: 15px;
+		height: 15px;
 		margin: 0;
 	}
 	.as-place {
@@ -1809,24 +1852,58 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-		font-family: var(--mono);
 		font-size: var(--size-small);
 		color: var(--ink-2);
 	}
-	.as-close {
+	.as-id {
+		padding: 0 2px;
+		border-radius: 4px;
+		font-family: var(--mono);
+		font-size: inherit;
+		color: inherit;
+		cursor: pointer;
+	}
+	.as-id:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	.as-open {
+		flex: none;
+		height: 24px;
+		padding: 0 6px;
+		display: inline-flex;
+		align-items: center;
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.as-open:hover {
+		background: var(--hover);
+	}
+	.as-icon {
 		width: var(--control-icon);
 		height: var(--control-icon);
 		color: var(--ink-3);
 		cursor: pointer;
 	}
+	.as-more-at {
+		position: relative;
+		flex: none;
+	}
 	.as-body {
 		flex: 1;
 		min-height: 0;
 		overflow-y: auto;
+		padding-bottom: var(--space-xl);
+	}
+	.as-top {
 		display: flex;
 		flex-direction: column;
-		gap: var(--space-l);
-		padding: var(--space-s) var(--space-l) var(--space-xl);
+		gap: var(--space-s);
+		padding: 2px var(--space-l) var(--space-m);
 	}
 	.as-title {
 		font-size: var(--size-heading);
@@ -1842,11 +1919,12 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 	.as-chip {
 		display: inline-flex;
 		align-items: center;
-		gap: 4px;
+		gap: 5px;
 		height: 22px;
 		padding: 0 8px;
-		border: 1px solid var(--line-strong);
-		border-radius: 11px;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		background: var(--bg);
 		font-size: var(--size-caption);
 		color: var(--ink-2);
 		white-space: nowrap;
@@ -1854,11 +1932,52 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 	.as-chip .i {
 		width: 12px;
 		height: 12px;
+		color: var(--ink-3);
 	}
 	.as-status {
-		color: var(--status);
-		border-color: color-mix(in srgb, var(--status) 60%, transparent);
+		font-family: inherit;
 		cursor: pointer;
+	}
+	.as-dot {
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--status);
+	}
+	.as-bars {
+		display: inline-flex;
+		align-items: flex-end;
+		gap: 1.5px;
+		height: 10px;
+	}
+	.as-bars i {
+		width: 2.5px;
+		border-radius: 0.5px;
+		background: var(--line-strong);
+	}
+	.as-bars i:nth-child(1) {
+		height: 4px;
+	}
+	.as-bars i:nth-child(2) {
+		height: 7px;
+	}
+	.as-bars i:nth-child(3) {
+		height: 10px;
+	}
+	.as-bars i.on {
+		background: var(--ink-2);
+	}
+	.as-avatar {
+		display: inline-grid;
+		place-items: center;
+		width: 14px;
+		height: 14px;
+		flex: none;
+		border-radius: 50%;
+		background: var(--active);
+		font-size: 8px;
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
 	}
 	.as-status-at {
 		position: relative;
@@ -1877,6 +1996,12 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		border-radius: var(--radius-card);
 		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.25);
 	}
+	.as-menu.as-more {
+		left: auto;
+		right: 0;
+		top: calc(var(--control-icon) + 2px);
+		width: 200px;
+	}
 	.as-menu[hidden] {
 		display: none;
 	}
@@ -1886,9 +2011,17 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		gap: var(--space-s);
 		padding: 6px var(--space-m);
 		border-radius: var(--radius-row);
+		font-family: inherit;
 		font-size: var(--size-small);
 		text-align: left;
+		color: var(--ink);
 		cursor: pointer;
+	}
+	.as-more button {
+		gap: var(--space-m);
+	}
+	.as-more .i {
+		color: var(--ink-2);
 	}
 	.as-menu button:hover {
 		background: var(--hover);
@@ -1903,6 +2036,35 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		margin-left: auto;
 		color: var(--ink-2);
 	}
+	.as-tabs {
+		display: flex;
+		gap: var(--space-l);
+		padding: 0 var(--space-l);
+		border-bottom: 1px solid var(--line);
+	}
+	.as-tabs button {
+		padding: 8px 0;
+		margin-bottom: -1px;
+		border-bottom: 2px solid transparent;
+		font-family: inherit;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+		white-space: nowrap;
+		cursor: pointer;
+	}
+	.as-tabs button[aria-selected='true'] {
+		color: var(--ink);
+		border-bottom-color: var(--ink);
+	}
+	.as-pane {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-m);
+		padding: var(--space-m) var(--space-l) 0;
+	}
+	.as-pane[hidden] {
+		display: none;
+	}
 	.as-text {
 		font-size: var(--size-body);
 		line-height: var(--line-body);
@@ -1915,26 +2077,39 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 	.as-text ul {
 		padding-left: 20px;
 	}
-	.as-label {
-		padding-bottom: var(--space-xs);
-		font-size: var(--size-small);
-		font-weight: var(--weight-medium);
+	.as-labels {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+	}
+	.as-labels span {
+		display: inline-flex;
+		align-items: center;
+		height: 20px;
+		padding: 0 7px;
+		border: 1px solid var(--line);
+		border-radius: 5px;
+		font-size: var(--size-caption);
 		color: var(--ink-2);
 	}
-	.as-subtasks,
-	.as-comments {
+	.as-label {
+		padding-bottom: var(--space-xs);
+		font-size: var(--size-caption);
+		font-weight: var(--weight-medium);
+		color: var(--ink-3);
+	}
+	.as-subtasks {
 		display: flex;
 		flex-direction: column;
-	}
-	.as-comments {
-		gap: var(--space-m);
 	}
 	.as-tick {
 		display: flex;
 		align-items: flex-start;
 		gap: var(--space-s);
-		padding: 5px var(--space-xs);
+		margin: 0 calc(-1 * var(--space-xs));
+		padding: 4px var(--space-xs);
 		border-radius: var(--radius-row);
+		font-family: inherit;
 		font-size: var(--size-small);
 		line-height: var(--line-body);
 		text-align: left;
@@ -1947,9 +2122,9 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 	.as-box {
 		display: grid;
 		place-items: center;
-		width: 16px;
-		height: 16px;
-		margin-top: 2px;
+		width: 14px;
+		height: 14px;
+		margin-top: 3px;
 		flex: none;
 		box-sizing: border-box;
 		border: 1px solid var(--line-strong);
@@ -1957,23 +2132,58 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		color: var(--bg);
 	}
 	.as-box .i {
-		width: 11px;
-		height: 11px;
+		width: 10px;
+		height: 10px;
 		visibility: hidden;
 	}
-	.as-tick.done {
-		color: var(--ink-3);
-	}
 	.as-tick.done .as-box {
-		background: var(--ok);
-		border-color: var(--ok);
+		background: var(--ink);
+		border-color: var(--ink);
 	}
 	.as-tick.done .as-box .i {
 		visibility: visible;
 	}
+	.as-pr {
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		font-size: var(--size-small);
+	}
+	.as-pr-number {
+		flex: none;
+		font-family: var(--mono);
+		color: var(--ink-2);
+	}
+	.as-pr-title {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--ink);
+	}
+	.as-checks {
+		flex: none;
+		font-size: var(--size-caption);
+		color: var(--ok);
+	}
+	.as-comment {
+		display: flex;
+		align-items: flex-start;
+		gap: var(--space-s);
+	}
+	.as-comment .as-avatar {
+		width: 18px;
+		height: 18px;
+		font-size: 10px;
+	}
 	.as-who {
 		font-size: var(--size-caption);
 		color: var(--ink-3);
+	}
+	.as-who b {
+		font-weight: var(--weight-semibold);
+		color: var(--ink);
 	}
 	.as-comment p {
 		margin: 2px 0 0;
@@ -1981,28 +2191,61 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		line-height: var(--line-body);
 		color: var(--ink);
 	}
+	.as-activity {
+		gap: 6px;
+	}
+	.as-activity p {
+		margin: 0;
+		font-size: var(--size-small);
+		line-height: var(--line-body);
+		color: var(--ink-2);
+	}
+	.as-activity b {
+		font-weight: var(--weight-regular);
+		color: var(--ink);
+	}
+	.as-activity span {
+		color: var(--ink-3);
+	}
 	.as-foot {
 		display: flex;
+		flex-direction: column;
 		gap: var(--space-s);
 		padding: var(--space-m) var(--space-l);
 		border-top: 1px solid var(--line);
 		flex: none;
 	}
-	.as-foot .cp-button {
+	.as-foot[hidden] {
+		display: none;
+	}
+	.as-foot textarea {
+		min-height: 52px;
+		padding: 7px 10px;
+		resize: none;
+		border: 1px solid var(--line);
+		border-radius: 8px;
+		background: var(--bg);
+		font-family: inherit;
+		font-size: var(--size-small);
+		line-height: var(--line-body);
+		color: var(--ink);
+	}
+	.as-foot textarea::placeholder {
+		color: var(--ink-3);
+	}
+	.as-send {
+		align-self: flex-end;
 		height: var(--control-button);
 		padding: 0 var(--space-l);
-		font-size: var(--size-small);
-	}
-	/* Follow with its bell, and Following with a tick (acta_ui.rs, follow_button). */
-	.as-follow {
-		gap: 6px;
-		background: none;
+		border-radius: var(--radius-button);
+		background: var(--button);
 		font-family: inherit;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--button-ink);
+		cursor: pointer;
 	}
-	.as-follow .i {
-		width: 12px;
-		height: 12px;
-	}
+	/* Follow with its bell, and Following with a tick (acta_ui.rs, card_menu). */
 	.as-follow .i-check,
 	.as-follow[aria-pressed='true'] .i-bell {
 		display: none;

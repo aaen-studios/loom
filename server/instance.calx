@@ -7023,6 +7023,13 @@ impl Instance {
             i.acta_ask(w, user, "panel.card", board.copy(), id.copy(), "get_task", Obj.new().s("board", board).s("task", id).done(), String())
             return
         }
+        if name == "card.comment" {
+            match acta_panels.comment_args(board.copy(), id.copy(), args) {
+                ok(a) => i.acta_ask(w, user, "panel.comment", board, id, "add_comment", a, String()),
+                err(e) => i.answer_cmd(w, Answer.Refused(String("bad_request"), "{e}")),
+            }
+            return
+        }
         match acta_panels.update_args(board.copy(), id.copy(), args) {
             ok(a) => i.acta_ask(w, user, "panel.update", board, id, "update_task", a, String()),
             err(e) => i.answer_cmd(w, Answer.Refused(String("bad_request"), "{e}")),
@@ -7054,12 +7061,12 @@ impl Instance {
         let got = mcpcall.json_of(d.result.copy())
         var boards = List<acta.Board>()
         if let b = i.acta_boards.find(c.user.copy()) { boards = b.boards.copy() }
-        let name = acta.board_name(boards, c.board.copy())
+        let name = acta.board_name(boards.copy(), c.board.copy())
         if c.kind == "panel.board" {
             i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("board", acta_panels.board_of(got)).done()))
         } else if c.kind == "panel.tasks" {
             i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("tasks", acta_panels.tasks_of(got)).done()))
-        } else if c.kind == "panel.update" {
+        } else if c.kind == "panel.update" or c.kind == "panel.comment" {
             i.acta_ask(wait.waiter, c.user.copy(), "panel.card", c.board.copy(), c.id.copy(), "get_task", Obj.new().s("board", c.board.copy()).s("task", c.id.copy()).done(), String())
         } else if c.kind == "panel.card" {
             if str_at(got.copy(), "id") == none {
@@ -7068,7 +7075,8 @@ impl Instance {
             }
             // The next message that names it has it as it is now.
             i.acta_cards.insert("{c.user}\n{c.id}", acta.card_of(got.copy(), c.board.copy(), name.copy(), now()))
-            i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("card", acta_panels.detail_of(got, c.board.copy(), name, now())).done()))
+            let writes = acta.writes(boards, c.board.copy())
+            i.answer_cmd(wait.waiter, Answer.Value(Obj.new().j("card", acta_panels.detail_of(got, c.board.copy(), name, now(), writes)).done()))
         } else if c.kind == "panel.create" {
             let card = acta_panels.made_card(got, wait.asked.copy(), c.board.copy(), name, now()) else {
                 i.answer_cmd(wait.waiter, Answer.Refused(String("unavailable"), String("Acta didn't say which card it made.")))
@@ -16334,7 +16342,7 @@ impl Instance {
             return
         }
         // Acta beside the chat (PLAN.md, "Acta beside the chat"): only from a device.
-        if name == "card.get" or name == "card.update" or name == "card.create" or name == "acta.board" or name == "acta.tasks" {
+        if name == "card.get" or name == "card.update" or name == "card.comment" or name == "card.create" or name == "acta.board" or name == "acta.tasks" {
             i.acta_panel_cmd(Waiter { socket: some(s), id: id }, user.copy(), name.copy(), args)
             return
         }
