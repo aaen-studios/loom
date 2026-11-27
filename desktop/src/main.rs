@@ -384,8 +384,11 @@ gpui_kit::assets::icon_assets!(
         // Acta beside the chat: Boards in the + menu and its board picker, and Make a card.
         Layers,
         LayersPlus,
-        // Settings › Voice: a service's tile.
-        Cloud
+        // Settings › Voice: a service's tile; and live mode's button and its Text and Mute.
+        Cloud,
+        AudioLines,
+        TextAlignStart,
+        MicOff
     ]
 );
 

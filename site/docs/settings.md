@@ -16,7 +16,7 @@ What's about the server rather than you (Add a device, People, Move, Add a serve
 
 ## This device's settings
 
-Appearance, Chat, App & notifications, the options under your emoji in Emoji, and Voice's Shortcut and Hold to talk belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
+Appearance, Chat, App & notifications, the options under your emoji in Emoji, and Voice's two Shortcuts and Hold to talk belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
 
 Everything else in Settings is kept on the instance, so every device you sign in on has it.
 
@@ -102,7 +102,7 @@ Under **Dictation**:
 
 - **ElevenLabs Scribe**, **Deepgram Nova-3** and **OpenAI** (gpt-4o-transcribe) write the words as you say them. **Groq** (Whisper large v3) writes them once you stop.
 - **Language**: Detect, or one of twenty.
-- **Shortcut**: Ctrl+Shift+Space starts and stops dictation, or Off.
+- **Shortcut**: Ctrl+Shift+Space starts and stops dictation, or Off. Off to start with, as the key is live mode's; picking it here sets Live's Shortcut to Off.
 - **Hold to talk**: the mic records while you hold it, and stops when you let go. Off.
 
 Under **Speech**:
@@ -111,6 +111,13 @@ Under **Speech**:
 - **Voice**: one of the service's voices, and its play button to hear it.
 - **Speed**: 0.8× to 1.2×. 1× to start with.
 - **Read replies aloud**: Never, Only in live, or Always, which reads a reply aloud as it comes in the chat in front of you. Never to start with.
+
+Under **Live**, for live mode, which **Live** beside the composer's mic starts in an agent's chat: you talk with the agent, and the talk is left in the chat as messages when you press **End**.
+
+- **Shortcut**: Ctrl+Shift+Space starts and ends live mode, or Off. Ctrl+Shift+Space to start with; picking it here sets Dictation's Shortcut to Off.
+- **Talk over a reply to stop it**: speaking while the agent speaks stops its reply and starts your turn. On.
+- **Send when I stop talking**: after 0.5 s, 0.8 s or 1.2 s of quiet, what you said goes to the agent. 0.8 s to start with.
+- **Show what's said**: the words show under the thread as they're said. On.
 
 An agent can set these up for you: its card in the reply has the same tile and rows, and asks for a key there when the service needs one it doesn't have. Agents never see a key.
 

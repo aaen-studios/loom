@@ -7,7 +7,8 @@
 // thread with Juniper opens from its row. Its sizes, colours and words are the app's
 // (desktop/src/app.rs, design/tokens.toml); the script that plays it is src/scripts/demo.ts. The
 // card's pill, the context ring, the pins, a message's Reply and ⋯, the + and the sidebar's
-// control open what they open in the app.
+// control open what they open in the app, and the composer's Live starts live mode in the chat's
+// place.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
 import actaMark from '../../../server/catalog/acta.svg?raw';
@@ -330,6 +331,16 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 					</span>
 				</span>
 			</div>
+			<!-- Live mode's head, in the header's place while it runs: the agent, what it's doing and
+			     how long it has run. -->
+			<div class="live-head" data-live-head>
+				<button type="button" class="icon-btn small head-bar" aria-label="Open the sidebar"
+					><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M9 3v18m5-12 3 3-3 3"></path></svg></button
+				>
+				<span class="live-name" data-live-name>Juniper</span>
+				<span class="live-state" data-live-state>Listening</span>
+				<span class="live-time" data-live-time>0:00</span>
+			</div>
 			<div class="winctl" aria-hidden="true">
 				<span><svg class="i" viewBox="0 0 24 24"><path d="M5 12h14"></path></svg></span>
 				<span><svg class="i" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"></rect></svg></span>
@@ -640,11 +651,37 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 							><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg
 						></span
 					>
+					<!-- Live: talking with the agent, in the chat's place while it runs (demo.ts). -->
+					<button type="button" class="icon-btn c live-start" data-live-btn aria-label="Live" title="Live"
+						><svg class="i" viewBox="0 0 24 24"><path d="M2 10v3"></path><path d="M6 6v11"></path><path d="M10 3v18"></path><path d="M14 8v7"></path><path d="M18 5v13"></path><path d="M22 10v3"></path></svg></button
+					>
 					<span class="send">
 						<svg class="i up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"></path></svg>
 						<svg class="i stop" viewBox="0 0 24 24"><rect width="14" height="14" x="5" y="5" rx="2"></rect></svg>
 					</span>
 				</div>
+			</div>
+		</div>
+		<!-- Live mode (PLAN.md, "Live mode"; desktop/src/model/live.rs), in place of the chat and its
+		     composer while it runs: one thread held at both ends across the view, waving in ink by
+		     the speech's level while the agent speaks and lightly in grey by the mic's while you talk,
+		     the words being said under it, and Text, Mute and End (demo.ts). -->
+		<div class="live" data-live>
+			<div class="live-wave"><canvas data-live-wave aria-hidden="true"></canvas></div>
+			<div class="live-words" data-live-words></div>
+			<div class="live-buttons">
+				<button type="button" class="live-btn" data-live-text aria-pressed="true" aria-label="Text" title="Text"
+					><svg class="i" viewBox="0 0 24 24"><path d="M15 12H3"></path><path d="M17 18H3"></path><path d="M21 6H3"></path></svg></button
+				>
+				<button type="button" class="live-btn" data-live-mute aria-pressed="false" aria-label="Mute" title="Mute"
+					><svg class="i" viewBox="0 0 24 24"
+						><path d="m2 2 20 20"></path><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"></path><path d="M5 10v2a7 7 0 0 0 12 5"></path><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"></path><path
+							d="M9 9v3a3 3 0 0 0 5.12 2.12"></path><path d="M12 19v3"></path></svg
+					></button
+				>
+				<button type="button" class="live-btn end" data-live-end aria-label="End" title="End"
+					><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18"></path><path d="m6 6 12 12"></path></svg></button
+				>
 			</div>
 		</div>
 	</div>
@@ -792,6 +829,30 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
      the program compacted the context. -->
 <template id="demo-loom-line">
 	<div class="loom-line fresh-in"><span></span></div>
+</template>
+<!-- A live talk's turn, left in the chat once End is pressed: what the person said and the agent's
+     reply, as the chat draws any other messages (demo.ts). -->
+<template id="demo-live-you">
+	<div class="row you" data-msg data-when="Today 11:32">
+		<div class="bubble"></div>
+		<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+		<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+		<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
+		<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+	</div>
+</template>
+<template id="demo-live-reply">
+	<div class="row reply" data-msg data-when="Today 11:32">
+		<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+		<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+		<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
+		<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+		<svg data-thread width="14" height="10" class="reply-thread head"></svg>
+		<div class="body">
+			<div class="who"></div>
+			<div class="said"><p></p></div>
+		</div>
+	</div>
 </template>
 
 <style>
@@ -3961,6 +4022,133 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
 
+	/* Live mode (desktop/src/model/live.rs): the composer's Live, beside the mic, which an agent's
+	   chat has and a group chat hasn't; and while it runs, its head in the header's place and
+	   its view in the chat's and the composer's, the sidebar still beside them. */
+	.live-start {
+		cursor: pointer;
+	}
+	.app.in-room .live-start {
+		display: none;
+	}
+	.live-head,
+	.live {
+		display: none;
+	}
+	.app.living :is(.header, .chat, .composer-wrap) {
+		display: none;
+	}
+	.app.living .live-head,
+	.app.living .live {
+		display: flex;
+	}
+	.live-head {
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+		min-width: 0;
+		align-self: stretch;
+		padding: 0 16px;
+		white-space: nowrap;
+	}
+	.live-name {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		font-weight: var(--weight-medium);
+	}
+	.live-state,
+	.live-time {
+		flex: none;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.live-time {
+		margin-left: auto;
+		font-variant-numeric: tabular-nums;
+	}
+	:global(html[data-os='mac']) .app.railed .live-head {
+		padding-left: 60px;
+	}
+	.live {
+		flex: 1;
+		min-height: 0;
+		flex-direction: column;
+	}
+	/* The thread across the view, between its insets, drawn on a canvas (demo.ts). */
+	.live-wave {
+		position: relative;
+		flex: 1;
+		min-height: 0;
+	}
+	.live-wave canvas {
+		position: absolute;
+		inset: 0;
+		display: block;
+		width: 100%;
+		height: 100%;
+	}
+	/* The words being said: those said already in ink, the rest of the sentence faint. Text
+	   hides them and keeps their room. */
+	.live-words {
+		flex: none;
+		box-sizing: border-box;
+		width: 100%;
+		max-width: 560px;
+		min-height: calc(3 * 1.5em);
+		margin: 0 auto;
+		padding: 0 24px;
+		text-align: center;
+		font-size: 15px;
+		line-height: 1.5;
+		color: var(--ink-3);
+		overflow-wrap: anywhere;
+	}
+	.live-words :global(.on) {
+		color: var(--ink);
+	}
+	.live-words.off {
+		visibility: hidden;
+	}
+	.live-buttons {
+		flex: none;
+		display: flex;
+		justify-content: center;
+		gap: 16px;
+		padding: 20px 0 28px;
+	}
+	.live-btn {
+		display: grid;
+		place-items: center;
+		width: 44px;
+		height: 44px;
+		border: 1px solid var(--line-strong);
+		border-radius: 50%;
+		color: var(--ink-2);
+		cursor: pointer;
+		transition:
+			background-color 0.12s,
+			color 0.12s;
+	}
+	.live-btn .i {
+		width: 18px;
+		height: 18px;
+	}
+	.live-btn:hover,
+	.live-btn[aria-pressed='true'] {
+		background: var(--hover);
+		color: var(--ink);
+	}
+	/* End, filled in ink, its cross in the background's colour. */
+	.live-btn.end {
+		border-color: var(--button);
+		background: var(--button);
+		color: var(--bg);
+	}
+	.live-btn.end:hover {
+		background: color-mix(in srgb, var(--button) 86%, var(--bg));
+	}
+
 	/* A narrower window: the sidebar is a rail beside the chat (demo.ts), as the app's is. */
 	/* The window's buttons stay at every width, as the app's do; the header gives way before
 	   them (demo.ts, fitHeader). */
@@ -4039,8 +4227,14 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 			color: var(--ink);
 		}
 		/* On a Mac the header's control comes after the traffic lights. */
-		:global(html[data-os='mac']) .app.railed .header {
+		:global(html[data-os='mac']) .app.railed :is(.header, .live-head) {
 			padding-left: 84px;
+		}
+		.live-head {
+			padding: 0 14px 0 8px;
+		}
+		.live-words {
+			padding: 0 16px;
 		}
 		.app {
 			height: 560px;

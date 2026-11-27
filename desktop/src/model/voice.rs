@@ -19,6 +19,7 @@ pub enum Tab {
     #[default]
     Dictation,
     Speech,
+    Live,
 }
 
 impl Tab {
@@ -26,6 +27,7 @@ impl Tab {
         match self {
             Tab::Dictation => "dictation",
             Tab::Speech => "speech",
+            Tab::Live => "live",
         }
     }
 }
@@ -315,6 +317,7 @@ impl Voice {
         match tab {
             Tab::Dictation => &self.dictation,
             Tab::Speech => &self.speech,
+            Tab::Live => &[],
         }
     }
 
@@ -341,6 +344,17 @@ impl Voice {
     /// The speed speech goes at.
     pub fn speed(&self) -> f64 {
         self.settings["speech"]["speed"].as_f64().unwrap_or(1.0)
+    }
+
+    /// One of live mode's switches, Talk over a reply to stop it (`barge_in`) or Show
+    /// what's said (`captions`), on unless the settings say otherwise.
+    pub fn live_switch(&self, key: &str) -> bool {
+        self.settings["live"][key].as_bool().unwrap_or(true)
+    }
+
+    /// How long live mode waits after the person stops talking, in seconds.
+    pub fn pause(&self) -> f64 {
+        self.settings["live"]["pause"].as_f64().unwrap_or(0.8)
     }
 
     /// The voice speech speaks in, by its name, or the first of the engine's.
@@ -476,6 +490,7 @@ pub struct Card {
 /// The rows a card's settings show, as the page names them.
 pub fn card_rows(kind: Tab, settings: &Value) -> Vec<(String, String)> {
     match kind {
+        Tab::Live => Vec::new(),
         Tab::Dictation => {
             let code = s(settings, "language");
             let name = LANGUAGES
@@ -516,6 +531,9 @@ pub fn speed_label(speed: f64) -> String {
 
 /// The speeds, as the Speed row offers them.
 pub const SPEEDS: [f64; 5] = [0.8, 0.9, 1.0, 1.1, 1.2];
+
+/// How long live mode waits before it sends, as Send when I stop talking offers it.
+pub const PAUSES: [f64; 3] = [0.5, 0.8, 1.2];
 
 /// The languages dictation hears, as shared/voice.calx has them, for a card whose page
 /// hasn't loaded them.
