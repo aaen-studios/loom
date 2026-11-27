@@ -106,6 +106,11 @@ const ICON: Record<string, string> = {
 	settings: '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>',
 	file: '<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4M16 13H8M16 17H8M10 9H8"/>',
 	image: '<rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/>',
+	loader: '<path d="M12 2v4"/><path d="m16.2 7.8 2.9-2.9"/><path d="M18 12h4"/><path d="m16.2 16.2 2.9 2.9"/><path d="M12 18v4"/><path d="m4.9 19.1 2.9-2.9"/><path d="M2 12h4"/><path d="m4.9 4.9 2.9 2.9"/>',
+	check: '<path d="M20 6 9 17l-5-5"/>',
+	external: '<path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
+	pencil: '<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/>',
+	square: '<rect width="18" height="18" x="3" y="3" rx="2"/>',
 };
 
 // GitHub's mark, as its site icon on the reply's link.
@@ -456,10 +461,11 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 				</div>
 			</div>
 			<!-- Moss's chat, opened from its row: the reply starts a T3 thread, whose card works
-			     and then lies straight with its pull request (t3_view.rs, thread_card): the strand
-			     beside its title in the colour of where it is, its time at the title's end in the
-			     same colour, `T3 · project · model · effort` in mono under the title, then its
-			     latest step while it works, or its pull request. -->
+			     and then is done with its pull request (t3_view.rs, thread_card): a band over it
+			     with its state, the run and its steps, and the time; T3's mark and the title;
+			     where it runs, the project, branch, model and effort; then the step going now in
+			     plain words with its call under it, or once done what it said and its pull
+			     request with its checks; and Open, Send, Stop while it works, and ⋯. -->
 			<div class="msgs moss" aria-live="off" style="--tint: var(--thread-mint)">
 				<!-- Earlier, Moss put T3 on the VPS, then Spools' card for T3 Code in its reply
 				     (app.rs, spool_connect_card): loom's knot tied to T3's logo by a slack, dashed
@@ -531,16 +537,36 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 						</div>
 						<div class="said"><p>I started a T3 thread for it.</p></div>
 						<div class="t3 done">
-							<div class="t3-head">
-								<svg data-thread data-color="sky" width="26" height="14" class="t3-strand" aria-hidden="true"></svg>
-								<div class="t3-titles">
-									<div class="t3-title">Fix the typo on the checkout button</div>
-									<div class="t3-sub">T3 · shop · Opus 5.5 · high</div>
-								</div>
-								<span class="t3-side" data-t3-time>4 m</span>
+							<div class="t3-band">
+								<svg class="i t3-going" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.loader} />
+								<svg class="i t3-did" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.check} />
+								<span class="t3-state" data-t3-state>Done</span>
+								<span class="t3-run" data-t3-run>Run 1 · 3 steps</span>
+								<span class="t3-time" data-t3-time>just now</span>
 							</div>
-							<div class="t3-step"><span class="prompt">›_</span><span data-t3-step>bun test checkout</span></div>
-							<div class="t3-chips"><span class="t3-chip">PR #215</span></div>
+							<div class="t3-main">
+								<div class="t3-head">
+									<span class="t3-mark" set:html={t3Mark} />
+									<span class="t3-title">Fix the typo on the checkout button</span>
+								</div>
+								<div class="t3-meta">t3-vps · shop · fix-checkout-typo · Opus 5.5 · high</div>
+								<div class="t3-doing">
+									<span data-t3-doing>Running the checkout tests</span>
+									<span class="t3-raw" data-t3-raw>bun test checkout</span>
+								</div>
+								<div class="t3-summary">Fixed “Contiune” on the checkout button, and the checkout tests pass. Opened #215.</div>
+								<div class="t3-pr">
+									<span class="t3-pr-n">#215</span>
+									<span class="t3-pr-title">Fix “Contiune” on the checkout button</span>
+									<span class="t3-checks">✓ Checks pass</span>
+								</div>
+								<div class="t3-foot">
+									<button type="button" class="t3-tool" aria-label="Open in T3" title="Open in T3"><svg class="i" viewBox="0 0 24 24" set:html={ICON.external} /></button>
+									<button type="button" class="t3-tool" aria-label="Send" title="Send"><svg class="i" viewBox="0 0 24 24" set:html={ICON.pencil} /></button>
+									<button type="button" class="t3-tool t3-stop" aria-label="Stop" title="Stop"><svg class="i" viewBox="0 0 24 24" set:html={ICON.square} /></button>
+									<button type="button" class="t3-tool t3-more" aria-label="More" title="More"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+								</div>
+							</div>
 						</div>
 					</div>
 				</div>
@@ -1525,6 +1551,13 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 	.reply {
 		display: flex;
 		gap: 12px;
+	}
+	/* Its thread hangs out left of the column, so its bubble starts on the column's edge as
+	   the person's ends on the other (app.rs, REPLY_HANG). */
+	@media (min-width: 641px) {
+		.row.reply {
+			margin-left: -26px;
+		}
 	}
 	/* Beside the agent's name over the first reply after a time line, and level with the
 	   bubble's first line beside the rest. */
@@ -3198,50 +3231,100 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		color: var(--ok);
 	}
 	.t3 {
-		--tone: var(--thread-sky);
 		display: flex;
 		flex-direction: column;
-		gap: 12px;
-		max-width: 600px;
-		padding: 16px;
+		overflow: hidden;
 		background: var(--card-fill);
-		border: 1px solid color-mix(in srgb, var(--tone) 35%, transparent);
+		border: 1px solid var(--card-edge);
 		border-radius: var(--radius-bubble);
 		box-shadow: var(--card-shadow);
 	}
 	.t3[hidden] {
 		display: none;
 	}
-	.t3.done {
-		--tone: var(--ok);
-		border-color: var(--card-edge);
+	/* Its state, the run and its steps, and the time, over the card. */
+	.t3-band {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		height: 30px;
+		padding: 0 16px;
+		border-bottom: 1px solid var(--line);
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.t3-state {
+		color: var(--ink);
+		font-weight: var(--weight-semibold);
+	}
+	.t3-band .i {
+		width: 12px;
+		height: 12px;
+		margin-right: -4px;
+		color: var(--ink);
+	}
+	.t3-going {
+		animation: t3-spin 1.6s linear infinite;
+	}
+	@keyframes t3-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+	.t3.done .t3-going,
+	.t3:not(.done) .t3-did {
+		display: none;
+	}
+	.t3-time {
+		margin-left: auto;
+	}
+	.t3-main {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		padding: 14px 16px 16px;
 	}
 	.t3-head {
 		display: flex;
-		align-items: flex-start;
-		gap: 12px;
+		align-items: center;
+		gap: 10px;
 	}
-	/* Level with the title's first line, in the colour of where the thread is. */
-	.t3-strand {
-		flex: none;
-		margin-top: 2px;
-	}
-	.t3 [data-thread] :global(path) {
-		stroke: var(--tone) !important;
-	}
-	.t3-titles {
+	.t3-mark {
 		display: flex;
-		flex: 1;
-		flex-direction: column;
-		gap: 2px;
-		min-width: 0;
+		flex: none;
+		align-items: center;
+		justify-content: center;
+		width: 22px;
+		height: 22px;
+		border-radius: 6px;
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.t3-mark :global(svg) {
+		width: 62%;
+		height: 62%;
 	}
 	.t3-title {
+		min-width: 0;
 		color: var(--ink);
 		font-weight: var(--weight-semibold);
 		line-height: 1.35;
 	}
-	.t3-sub {
+	.t3-meta {
+		overflow: hidden;
+		margin-top: -4px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.t3-doing {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		color: var(--ink);
+	}
+	.t3-raw {
 		overflow: hidden;
 		font-family: var(--mono);
 		font-size: var(--size-caption);
@@ -3249,14 +3332,10 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		white-space: nowrap;
 		text-overflow: ellipsis;
 	}
-	.t3-side {
-		flex: none;
-		font-size: var(--size-small);
-		font-weight: var(--weight-semibold);
-		color: var(--tone);
-		line-height: 1.5;
+	.t3-summary {
+		color: var(--ink-2);
 	}
-	.t3-step {
+	.t3-pr {
 		display: flex;
 		align-items: center;
 		gap: 8px;
@@ -3265,30 +3344,45 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		border-radius: var(--radius-row);
 		background: var(--card-inset);
 		font-size: var(--size-small);
-		color: var(--ink-2);
+		color: var(--ink);
 	}
-	.t3-step .prompt {
-		font-family: var(--mono);
+	.t3-pr-n {
 		color: var(--ink-3);
 	}
-	.t3-chips {
+	.t3-pr-title {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.t3-checks {
+		flex: none;
+		color: var(--ink-2);
+	}
+	.t3.done .t3-doing,
+	.t3.done .t3-stop,
+	.t3:not(.done) .t3-summary,
+	.t3:not(.done) .t3-pr {
 		display: none;
+	}
+	.t3-foot {
+		display: flex;
 		gap: 8px;
 	}
-	.t3.done .t3-step {
-		display: none;
-	}
-	.t3.done .t3-chips {
+	.t3-tool {
 		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 30px;
+		height: 30px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-button);
+		background: var(--bg);
+		color: var(--ink);
 	}
-	.t3-chip {
-		padding: 2px 8px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-row);
-		background: var(--card-inset);
-		font-family: var(--mono);
-		font-size: var(--size-caption);
-		color: var(--ink-2);
+	.t3-more {
+		margin-left: auto;
 	}
 
 	/* Spools' card for an entry an agent asked to connect (app.rs, spool_connect_card; spools.rs,

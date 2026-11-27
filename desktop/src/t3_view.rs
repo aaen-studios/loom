@@ -1,14 +1,36 @@
 //! T3 Code's threads in the chat (PLAN.md, "T3 threads"): each thread a message names or
-//! started, as a card with its strand beside the title, and the panel beside the chat
-//! that starts one. `model::t3` says what each shows and what to send; this draws it.
+//! started, as a card (LOO-435, option C) with a band across its top saying where it is,
+//! and the panel beside the chat that starts one. `model::t3` says what each shows and
+//! what to send; this draws it, in black and white as Spools and the Acta panel are.
 
 use super::*;
-use model::t3::{Act, Quiet, ThreadCard, Tone};
+use model::t3::{Act, Body, ThreadCard, ThreadState, Tool};
+
+/// T3 Code's mark, as Spools draws it (`server/catalog/t3.svg`).
+const T3_MARK: &str = include_str!("../../server/catalog/t3.svg");
+/// The size of the mark's tile at a card's head.
+const MARK_TILE: f32 = 22.0;
+
+/// What the cards show of their own, by card (`t3-{message}-{thread}`): the one whose
+/// Send box is open, the one whose ⋯ menu is open, those whose steps are shown, and the
+/// Send box's field, which `T3Ui` makes.
+#[derive(Default)]
+struct CardUi {
+    sending: Option<String>,
+    menu: Option<String>,
+    steps: HashSet<String>,
+    send_in: Option<Entity<InputState>>,
+}
 
 thread_local! {
     /// Where each thread drawn so far opens in T3's app, by its id, for a link to one
     /// in a message's words (`open_card_link`).
     static PAGES: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static UI: RefCell<CardUi> = RefCell::new(CardUi::default());
+}
+
+fn ui<R>(f: impl FnOnce(&mut CardUi) -> R) -> R {
+    UI.with(|u| f(&mut u.borrow_mut()))
 }
 
 /// Where a link to a T3 thread opens: its page in T3's app, once its card has been drawn.
@@ -17,21 +39,12 @@ pub(super) fn page_of(url: &str) -> Option<String> {
     PAGES.with(|p| p.borrow().get(id).cloned())
 }
 
-/// A tone's colour: the sky thread's while working, and the palette's warn, ok and bad.
-fn tone(p: Palette, t: Tone) -> Hsla {
-    match t {
-        Tone::Sky => thread::color("sky", p.dark),
-        Tone::Warn => p.warn,
-        Tone::Ok => p.ok,
-        Tone::Bad => p.bad,
-    }
-}
-
 /// A message's T3 threads, one card under another, or none.
 pub(super) fn thread_cards(
     p: Palette,
     m: &Message,
     scale: f32,
+    wide: bool,
     this: &WeakEntity<Loom>,
 ) -> Option<Div> {
     if m.threads.is_empty() {
@@ -40,7 +53,7 @@ pub(super) fn thread_cards(
     let now = model::now_ms();
     let mut out = div()
         .w_full()
-        .max_w(px(CARD_MOST))
+        .when(!wide, |d| d.max_w(px(CARD_MOST)))
         .flex()
         .flex_col()
         .gap(px(space::S));
@@ -55,25 +68,166 @@ pub(super) fn thread_cards(
     Some(out)
 }
 
-/// A quiet box in a card: its latest step, or why it failed.
-fn quiet_box(p: Palette, scale: f32) -> Div {
+/// T3's mark on a tile in ink, its logo in the card's fill.
+fn t3_mark(p: Palette) -> Div {
+    div()
+        .size(px(MARK_TILE))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::ROW))
+        .bg(p.button)
+        .child(
+            svg()
+                .path(crate::runtime_svg("spools/t3.svg", T3_MARK))
+                .size(px((MARK_TILE * 0.6).round()))
+                .text_color(p.button_ink),
+        )
+}
+
+/// A small square button at a card's foot with an icon, named for a screen reader.
+fn tool_button(p: Palette, id: String, ico: Ico, name: &str, on: bool) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id))
+        .role(Role::Button)
+        .aria_label(name.to_string())
+        .size(px(control::BUTTON_SMALL))
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .rounded(px(radius::BUTTON))
+        .border_1()
+        .border_color(if on { p.ink } else { p.line_strong })
+        .text_color(p.ink)
+        .cursor_pointer()
+        .soft_hover(transparent_black(), p.hover, None)
+        .child(Icon::new(ico).small())
+}
+
+/// The band across a card's top: where it is in words, beside an icon of it, filled with
+/// ink while it waits on the person; its run and steps, which show its last steps when
+/// pressed; and its time.
+fn band_row(
+    p: Palette,
+    key: &str,
+    c: &ThreadCard,
+    now: i64,
+    scale: f32,
+    this: &WeakEntity<Loom>,
+) -> Div {
+    let band = c.band(now);
+    let shown = ui(|u| u.steps.contains(key));
+    let (bg, ink, quiet) = if band.ink {
+        (p.ink, p.bg, p.bg.opacity(0.75))
+    } else {
+        (transparent_black(), p.ink, p.ink_2)
+    };
+    let icon = match c.state {
+        ThreadState::Working => Ico::Loader,
+        ThreadState::Waiting => Ico::Hand,
+        ThreadState::Done => Ico::Check,
+        ThreadState::Failed => Ico::X,
+    };
+    let can = !c.steps.is_empty();
+    let toggle = key.to_string();
+    let this = this.clone();
+    let run = div()
+        .id(SharedString::from(format!("{key}/run")))
+        .when(can, |d| {
+            d.cursor_pointer()
+                .role(Role::Button)
+                .aria_label(if shown { "Hide steps" } else { "Show steps" })
+                .hover(move |s| s.text_color(ink))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    ui(|u| {
+                        if !u.steps.remove(&toggle) {
+                            u.steps.insert(toggle.clone());
+                        }
+                    });
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+        })
+        .child(band.run.clone());
     div()
         .flex()
         .items_center()
-        .gap(px(space::S))
-        .px(px(space::M))
-        .py(px(space::S))
-        .rounded(px(radius::ROW))
-        .border_1()
-        .border_color(p.line)
-        .bg(card_inset(p))
+        .gap(px(space::S + 2.0))
+        .h(px(control::BUTTON_SMALL))
+        .px(px(space::L))
+        .bg(bg)
+        // The card's clip is square, so the band rounds its own top inside the
+        // card's border.
+        .rounded_t(px(radius::BUBBLE - 1.0))
+        .border_b_1()
+        .border_color(if band.ink { p.ink } else { p.line })
         .text_size(px(size::SMALL * scale))
+        .text_color(quiet)
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(space::XS + 2.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(ink)
+                .child(Icon::new(icon).xsmall())
+                .child(band.state),
+        )
+        .when(!band.run.is_empty(), |d| d.child(run))
+        .child(div().ml_auto().child(band.time))
 }
 
-/// One thread's card (option C): the strand beside its title in the colour of where it
-/// is, the time or what it waits on at the title's end, and under the title
-/// `T3 · project · model · effort`. Then its step, its question, its pull requests or
-/// why it failed, and its buttons. The card opens the thread in T3's app.
+/// What a card says under its head, as where it is has it.
+fn body_view(p: Palette, body: Body, scale: f32) -> Div {
+    match body {
+        Body::Doing { words, raw } => div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(size::BODY * scale))
+                    .text_color(p.ink)
+                    .child(words),
+            )
+            .when(!raw.is_empty(), |d| {
+                d.child(
+                    div()
+                        .truncate()
+                        .font_family(crate::prefs::mono_font())
+                        .text_size(px(size::CAPTION * scale))
+                        .text_color(p.ink_3)
+                        .child(raw),
+                )
+            }),
+        Body::Asks(q) => div()
+            .border_l_2()
+            .border_color(p.ink)
+            .pl(px(space::M))
+            .text_size(px(size::BODY * scale))
+            .line_height(relative(1.45))
+            .text_color(p.ink)
+            .child(q),
+        Body::Summary(words) => div()
+            .line_clamp(2)
+            .text_size(px(size::BODY * scale))
+            .line_height(relative(1.45))
+            .text_color(p.ink_2)
+            .child(words),
+        Body::Failed(why) => div()
+            .text_size(px(size::BODY * scale))
+            .text_color(p.ink)
+            .child(why),
+    }
+}
+
+/// One thread's card: its band; T3's mark and the title; where it runs, its project,
+/// branch, model and effort; what it's doing in plain words with the step as it came,
+/// what it asks, its summary or why it failed; its last steps while the band's count is
+/// pressed; its pull requests with how their checks stand; the buttons that answer it;
+/// and Open in T3, Send, Stop and ⋯ (Copy link). The card opens the thread in T3's app.
 fn thread_card(
     p: Palette,
     message: &str,
@@ -82,126 +236,329 @@ fn thread_card(
     scale: f32,
     this: &WeakEntity<Loom>,
 ) -> Stateful<Div> {
-    let (mood, t) = c.strand();
-    let color = tone(p, t);
     let key = format!("t3-{message}-{}", c.thread);
-    // Level with the title's first line.
-    let strand = div()
-        .flex_none()
-        .h(px(size::BODY * scale * 1.35))
+    let (sending, menu, show_steps) = ui(|u| {
+        (
+            u.sending.as_deref() == Some(key.as_str()),
+            u.menu.as_deref() == Some(key.as_str()),
+            u.steps.contains(&key),
+        )
+    });
+    let waits = c.state == ThreadState::Waiting;
+    let mut inner = div()
         .flex()
-        .items_center()
-        .child(thread::thread(
-            SharedString::from(format!("{key}/strand")),
-            mood,
-            color,
-            MARK_W,
-            MARK_H,
-            None,
-        ));
-    let mut frame = CardFrame::new()
-        .lead(strand)
-        .title(c.title.clone())
-        .sub(c.sub());
-    let side = c.side(now);
-    if !side.is_empty() {
-        frame = frame.side(
+        .flex_col()
+        .gap(px(space::M))
+        .p(px(space::L))
+        .child(
             div()
-                .text_size(px(size::SMALL * scale))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(color)
-                .child(side),
+                .flex()
+                .items_center()
+                .gap(px(space::S + 2.0))
+                .child(t3_mark(p))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(size::BODY * scale))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(p.ink)
+                        .child(c.title.clone()),
+                ),
+        );
+    let meta = c.meta();
+    if !meta.is_empty() {
+        inner = inner.child(
+            div()
+                .truncate()
+                .text_size(px(size::CAPTION * scale))
+                .text_color(p.ink_3)
+                .child(meta.join("  ·  ")),
         );
     }
-    match c.quiet() {
-        Some(Quiet::Step(step)) => {
-            frame = frame.row(
-                quiet_box(p, scale)
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_family(crate::prefs::mono_font())
-                            .text_color(p.ink_3)
-                            .child("›_"),
-                    )
-                    .child(div().min_w_0().truncate().text_color(p.ink_2).child(step)),
+    if let Some(body) = c.body() {
+        inner = inner.child(body_view(p, body, scale));
+    }
+    if show_steps && !c.steps.is_empty() {
+        let mut list = div().flex().flex_col().gap(px(2.0));
+        for s in &c.steps {
+            list = list.child(
+                div()
+                    .flex()
+                    .gap(px(space::S))
+                    .text_size(px(size::SMALL * scale))
+                    .text_color(p.ink_2)
+                    .child(div().text_color(p.ink_3).child("·"))
+                    .child(div().min_w_0().truncate().child(s.clone())),
             );
         }
-        Some(Quiet::Reason(why)) => {
-            frame =
-                frame.row(quiet_box(p, scale).child(div().min_w_0().text_color(p.bad).child(why)));
-        }
-        None => {}
+        inner = inner.child(list);
     }
-    if let Some(q) = c.asks() {
-        frame = frame.row(
+    for (i, pr) in c.prs.iter().enumerate() {
+        let url = pr.url.clone();
+        let label = if pr.title.is_empty() {
+            format!("Pull request #{}", pr.number)
+        } else {
+            pr.title.clone()
+        };
+        inner = inner.child(
             div()
-                .border_l_2()
-                .border_color(p.warn)
-                .pl(px(space::M))
-                .text_size(px(size::BODY * scale))
-                .line_height(relative(1.45))
-                .text_color(p.ink)
-                .child(q.to_string()),
+                .id(SharedString::from(format!("{key}/pr-{i}")))
+                .role(Role::Link)
+                .aria_label(format!("#{} {label}", pr.number))
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .px(px(space::M))
+                .h(px(control::BUTTON_SMALL + 4.0))
+                .rounded(px(radius::ROW))
+                .border_1()
+                .border_color(p.line)
+                .bg(card_inset(p))
+                .text_size(px(size::SMALL * scale))
+                .cursor_pointer()
+                .hover(move |s| s.border_color(p.line_strong))
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                })
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(p.ink_3)
+                        .child(format!("#{}", pr.number)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(p.ink)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(size::CAPTION * scale))
+                        .text_color(p.ink_2)
+                        .child(pr.standing()),
+                ),
         );
     }
-    let chips = c.chips();
-    if !chips.is_empty() {
-        let mut row = div().flex().flex_wrap().gap(px(space::S));
-        for (i, (label, url)) in chips.into_iter().enumerate() {
+    let buttons = c.buttons();
+    if !buttons.is_empty() || c.in_t3() {
+        let mut row = div().flex().flex_wrap().items_center().gap(px(space::S));
+        for (i, b) in buttons.into_iter().enumerate() {
+            let this = this.clone();
+            let card = c.clone();
+            row = row.child(
+                card_button(p, format!("{key}/b{i}"), &b.label, b.main).on_click(
+                    move |_, _, cx| {
+                        cx.stop_propagation();
+                        let _ =
+                            this.update(cx, |loom, cx| loom.t3_press(&card, &b.act, &b.label, cx));
+                    },
+                ),
+            );
+        }
+        if c.in_t3() {
             row = row.child(
                 div()
-                    .id(SharedString::from(format!("{key}/chip-{i}")))
-                    .role(Role::Link)
-                    .aria_label(label.clone())
-                    .px(px(space::S))
-                    .py(px(2.0))
-                    .rounded(px(radius::ROW))
-                    .border_1()
-                    .border_color(p.line)
-                    .bg(card_inset(p))
-                    .font_family(crate::prefs::mono_font())
-                    .text_size(px(size::CAPTION * scale))
+                    .text_size(px(size::SMALL * scale))
                     .text_color(p.ink_2)
-                    .cursor_pointer()
-                    .hover(move |s| s.text_color(p.ink).border_color(p.line_strong))
-                    .on_click(move |_, _, cx| {
-                        cx.stop_propagation();
-                        cx.open_url(&url);
-                    })
-                    .child(label),
+                    .child("Approve in T3"),
             );
         }
-        frame = frame.row(row);
+        inner = inner.child(row);
     }
-    if c.in_t3() {
-        frame = frame.action(
-            div()
-                .text_size(px(size::SMALL * scale))
-                .text_color(p.ink_2)
-                .child("Approve in T3"),
-        );
+    inner = inner.child(foot(p, &key, c, sending, menu, this));
+    if sending {
+        if let Some(row) = send_box(p, &key, c, this) {
+            inner = inner.child(row);
+        }
     }
-    for (i, b) in c.buttons().into_iter().enumerate() {
-        let this = this.clone();
-        let card = c.clone();
-        let button = card_button(p, format!("{key}/b{i}"), &b.label, b.main);
-        frame = frame.action(button.on_click(move |_, _, cx| {
-            cx.stop_propagation();
-            let _ = this.update(cx, |loom, cx| loom.t3_press(&card, &b.act, &b.label, cx));
-        }));
+    if menu {
+        inner = inner.child(more_menu(p, &key, c, this));
     }
-    frame.edge = c.edge().map(|(t, a)| tone(p, t).opacity(a));
+
     let url = c.url.clone();
-    frame
-        .draw(p, scale)
-        .id(SharedString::from(key))
+    div()
+        .id(SharedString::from(key.clone()))
         .role(Role::Group)
-        .aria_label(c.title.clone())
+        .aria_label(format!("{}, {}", c.title, c.band(now).state))
+        .w_full()
+        .flex()
+        .flex_col()
+        .overflow_hidden()
+        .rounded(px(radius::BUBBLE))
+        .border_1()
+        .border_color(if waits {
+            p.ink
+        } else if p.dark {
+            p.line
+        } else {
+            p.line_strong
+        })
+        .bg(card_fill(p))
+        .shadow(card_shadow(p))
+        .child(band_row(p, &key, c, now, scale, this))
+        .child(inner)
         .when(!url.is_empty(), |d| {
             d.cursor_pointer()
                 .on_click(move |_, _, cx| cx.open_url(&url))
         })
+}
+
+/// A card's foot: Open in T3, Send, Stop, and ⋯ at its end.
+fn foot(
+    p: Palette,
+    key: &str,
+    c: &ThreadCard,
+    sending: bool,
+    menu: bool,
+    this: &WeakEntity<Loom>,
+) -> Div {
+    let mut row = div().flex().items_center().gap(px(space::S));
+    for t in c.tools() {
+        let (ico, name, id) = match t {
+            Tool::Open => (Ico::ExternalLink, "Open in T3", "open"),
+            Tool::Send => (Ico::Pencil, "Send a message", "send"),
+            Tool::Stop => (Ico::Square, "Stop", "stop"),
+        };
+        let this = this.clone();
+        let card = c.clone();
+        let k = key.to_string();
+        row = row.child(
+            tool_button(
+                p,
+                format!("{key}/{id}"),
+                ico,
+                name,
+                t == Tool::Send && sending,
+            )
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                match t {
+                    Tool::Open => cx.open_url(&card.url),
+                    Tool::Send => {
+                        let open = ui(|u| {
+                            u.menu = None;
+                            if u.sending.as_deref() == Some(k.as_str()) {
+                                u.sending = None;
+                                false
+                            } else {
+                                u.sending = Some(k.clone());
+                                true
+                            }
+                        });
+                        if open {
+                            if let Some(input) = ui(|u| u.send_in.clone()) {
+                                input.update(cx, |s, cx| {
+                                    s.set_value("", window, cx);
+                                    s.focus(window, cx);
+                                });
+                            }
+                        }
+                        let _ = this.update(cx, |_, cx| cx.notify());
+                    }
+                    Tool::Stop => {
+                        let _ = this
+                            .update(cx, |loom, cx| loom.t3_press(&card, &Act::Stop, "Stop", cx));
+                    }
+                }
+            }),
+        );
+    }
+    let this = this.clone();
+    let k = key.to_string();
+    row.child(div().ml_auto().child(
+        tool_button(p, format!("{key}/more"), Ico::Ellipsis, "More", menu).on_click(
+            move |_, _, cx| {
+                cx.stop_propagation();
+                ui(|u| {
+                    u.sending = None;
+                    u.menu = if u.menu.as_deref() == Some(k.as_str()) {
+                        None
+                    } else {
+                        Some(k.clone())
+                    };
+                });
+                let _ = this.update(cx, |_, cx| cx.notify());
+            },
+        ),
+    ))
+}
+
+/// The Send box under a card's foot while it's open: what to send the thread, and Send.
+fn send_box(p: Palette, key: &str, c: &ThreadCard, this: &WeakEntity<Loom>) -> Option<Div> {
+    let input = ui(|u| u.send_in.clone())?;
+    let this = this.clone();
+    let card = c.clone();
+    let field = input.clone();
+    Some(
+        div()
+            .flex()
+            .items_center()
+            .gap(px(space::S))
+            .child(div().flex_1().min_w_0().child(Input::new(&input)))
+            .child(
+                card_button(p, format!("{key}/send-now"), "Send", true).on_click(
+                    move |_, window, cx| {
+                        cx.stop_propagation();
+                        let text = field.read(cx).value().to_string();
+                        if text.trim().is_empty() {
+                            return;
+                        }
+                        field.update(cx, |s, cx| s.set_value("", window, cx));
+                        ui(|u| u.sending = None);
+                        let _ = this.update(cx, |loom, cx| {
+                            loom.t3_press(&card, &Act::Send(text), "Send", cx)
+                        });
+                    },
+                ),
+            ),
+    )
+}
+
+/// The ⋯ menu under a card's foot while it's open: Copy link.
+fn more_menu(p: Palette, key: &str, c: &ThreadCard, this: &WeakEntity<Loom>) -> Div {
+    let url = c.url.clone();
+    let this = this.clone();
+    div()
+        .flex()
+        .flex_col()
+        .p(px(space::XS))
+        .rounded(px(radius::INPUT))
+        .border_1()
+        .border_color(p.line)
+        .bg(p.raised)
+        .child(
+            div()
+                .id(SharedString::from(format!("{key}/copy")))
+                .role(Role::MenuItem)
+                .aria_label("Copy link")
+                .h(px(control::BUTTON_SMALL))
+                .px(px(space::S))
+                .flex()
+                .items_center()
+                .gap(px(space::S))
+                .rounded(px(radius::ROW))
+                .text_size(px(size::SMALL))
+                .text_color(if url.is_empty() { p.ink_3 } else { p.ink })
+                .cursor_pointer()
+                .soft_hover(transparent_black(), p.hover, None)
+                .child(Icon::new(Ico::Copy).small())
+                .child("Copy link")
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    if !url.is_empty() {
+                        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                    }
+                    ui(|u| u.menu = None);
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }),
+        )
 }
 
 /// The start form's lists, each open in place under its field.
@@ -228,6 +585,9 @@ impl T3Ui {
         // Start turns on as the task is typed.
         cx.observe(&task_in, |_: &mut Loom, _, cx| cx.notify())
             .detach();
+        // The field a card's Send box shows, one for every card, since one is open at once.
+        let send_in = cx.new(|cx| InputState::new(window, cx).placeholder("Message the thread"));
+        ui(|u| u.send_in = Some(send_in));
         T3Ui {
             task_in,
             open: None,

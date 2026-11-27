@@ -64,7 +64,7 @@ extension SampleCore {
                 answer(f, ["card": made])
                 madeCard(made, message: a["message"].text)
             }
-        case "cards.refresh", "t3.view", "t3.retry":
+        case "cards.refresh", "t3.view", "t3.retry", "t3.send", "t3.stop":
             answer(f, [:])
         case "watch.list":
             answer(f, ["watches": .array(kept.watches)])
@@ -234,24 +234,29 @@ extension Sample {
          "cards": ["LOO-371": pill("LOO-371")], "made_cards": [["id": "LOO-371", "board": "aaen-studios/loom"]]],
         ["id": "msg_15", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_14", "at": 1795186960000,
          "blocks": [["kind": "text", "text": "The build fix is done, and one thread needs you to approve a command in T3."]],
-         "threads": ["th_3": ["thread": "th_3", "server": "t3", "title": "Fix the release build", "project": "loom", "model": "Opus 5.5", "effort": "high", "state": "done",
-                              "started": 1795183000000, "ended": 1795184080000, "prs": [["number": 331, "url": "https://github.com/aaen-studios/loom/pull/331"], ["number": 332, "url": "https://github.com/aaen-studios/loom/pull/332"]],
+         "threads": ["th_3": ["thread": "th_3", "server": "t3-vps", "title": "Fix the release build", "project": "loom", "branch": "fix-release-build", "model": "Opus 5.5", "effort": "high", "state": "done",
+                              "run": 1, "step_count": 14, "summary": "The release build signs the app again. Opened #331 and #332.",
+                              "started": 1795183000000, "ended": 1795184080000,
+                              "prs": [["number": 331, "url": "https://github.com/aaen-studios/loom/pull/331", "title": "Sign the release build", "state": "open", "checks": "success"],
+                                      ["number": 332, "url": "https://github.com/aaen-studios/loom/pull/332", "title": "Keep the signing key in CI", "state": "open", "checks": "pending"]],
                               "url": "https://t3.example.com/threads/th_3"],
-                     "th_5": ["thread": "th_5", "server": "t3", "title": "Update the Docker image", "project": "loom", "model": "Opus 5.5", "effort": "medium", "state": "waiting",
-                              "started": 1795186000000, "ask": ["kind": "approval", "request": "", "text": "Run docker buildx push?", "in_t3": true],
+                     "th_5": ["thread": "th_5", "server": "t3-vps", "title": "Update the Docker image", "project": "loom", "branch": "docker-image", "model": "Opus 5.5", "effort": "medium", "state": "waiting",
+                              "run": 1, "step_count": 6, "started": JSON(now() - 240_000), "ask": ["kind": "approval", "request": "", "text": "Run docker buildx push?", "in_t3": true],
                               "url": "https://t3.example.com/threads/th_5"]]],
         // The line a thread the person started lands in.
         ["id": "msg_16", "conversation": "c_2", "role": "loom", "at": 1795187000000,
          "blocks": [["kind": "text", "text": "Started a T3 thread"]],
-         "threads": ["th_1": ["thread": "th_1", "server": "t3", "title": "Fix the flaky upload test", "project": "loom", "model": "Opus 5.5", "effort": "high", "state": "working",
-                              "step": "Running swift test --filter UploadTests", "started": JSON(now() - 1_080_000), "url": "https://t3.example.com/threads/th_1"]]],
+         "threads": ["th_1": ["thread": "th_1", "server": "t3-vps", "title": "Fix the flaky upload test", "project": "loom", "branch": "fix-upload-test", "model": "Opus 5.5", "effort": "high", "state": "working",
+                              "step": "swift test --filter UploadTests", "doing": "Running the upload tests again to see where they wait",
+                              "steps": ["Read UploadTests.swift", "Searched for retry", "Ran the upload tests"], "step_count": 9, "run": 2,
+                              "started": JSON(now() - 1_080_000), "url": "https://t3.example.com/threads/th_1"]]],
         ["id": "msg_17", "conversation": "c_2", "role": "agent", "agent": "a_2", "run": "run_16", "at": 1795187100000,
          "blocks": [["kind": "text", "text": "Two more from this morning: one asks you, and the docs one failed."]],
-         "threads": ["th_2": ["thread": "th_2", "server": "t3", "title": "Tidy the upload retries", "project": "loom", "model": "Sonnet 5.5", "effort": "medium", "state": "waiting",
-                              "started": 1795185000000, "ask": ["kind": "question", "request": "q_1", "text": "Keep the old retry loop, or drop it now that uploads resume?", "choices": ["Drop it", "Keep it"]],
+         "threads": ["th_2": ["thread": "th_2", "server": "t3-vps", "title": "Tidy the upload retries", "project": "loom", "branch": "upload-retries", "model": "Sonnet 5.5", "effort": "medium", "state": "waiting",
+                              "run": 1, "step_count": 4, "started": JSON(now() - 420_000), "ask": ["kind": "question", "request": "q_1", "text": "Keep the old retry loop, or drop it now that uploads resume?", "choices": ["Drop it", "Keep it"]],
                               "url": "https://t3.example.com/threads/th_2"],
-                     "th_4": ["thread": "th_4", "server": "t3", "title": "Write the 0.3 docs", "project": "loom", "model": "Opus 5.5", "effort": "low", "state": "failed",
-                              "started": 1795182000000, "ended": 1795182400000, "reason": "The T3 server stopped before the run finished.",
+                     "th_4": ["thread": "th_4", "server": "t3-vps", "title": "Write the 0.3 docs", "project": "loom", "branch": "docs-0-3", "model": "Opus 5.5", "effort": "low", "state": "failed",
+                              "run": 1, "step_count": 3, "started": 1795182000000, "ended": 1795182400000, "reason": "The T3 server stopped before the run finished.",
                               "url": "https://t3.example.com/threads/th_4"]]],
     ]
 

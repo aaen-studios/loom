@@ -86,10 +86,13 @@ fn link(id: String, title: String) -> String {
 
 // A thread as the fake keeps it: what t3_thread_read gives, and what it waits on.
 fn new_thread(id: String, title: String, project: str, model: str, status: str, step: str) -> Json {
-    let t = object([("threadId", Json.Str(id.copy())), ("projectId", text(project)), ("title", Json.Str(title.copy())), ("link", Json.Str(link(id, title))), ("status", text(status)), ("providerInstanceId", text("claudeAgent")), ("model", text(model)), ("pullRequests", Json.Array(List<Json>())), ("pendingRequestCount", Json.Int(0))])
+    let t = object([("threadId", Json.Str(id.copy())), ("projectId", text(project)), ("title", Json.Str(title.copy())), ("link", Json.Str(link(id, title))), ("status", text(status)), ("providerInstanceId", text("claudeAgent")), ("model", text(model)), ("branch", text("fix-sign-in-test")), ("runCount", Json.Int(2)), ("pullRequests", Json.Array(List<Json>())), ("pendingRequestCount", Json.Int(0))])
     let run = object([("status", text(status)), ("startedAt", text("2026-11-26T02:00:00.000Z")), ("completedAt", Json.Null)])
+    // A file read, then what the agent said it would do, then the step it took.
+    let read = object([("position", Json.Int(-1)), ("type", text("dynamic_tool")), ("status", text("completed")), ("title", text("Read tests/protocol/signin.calx")), ("text", text(#"{"toolName":"Read"}"#))])
+    let said = object([("position", Json.Int(0)), ("type", text("assistant_message")), ("text", text("Let me run the sign-in test again to see where it waits."))])
     let item = object([("position", Json.Int(1)), ("type", text("command_execution")), ("status", text("completed")), ("title", Json.Null), ("text", Json.Str("$ {step}\nok"))])
-    return object([("thread", t), ("recentRuns", Json.Array([run])), ("items", Json.Array([item])), ("asks", Json.Null), ("told", Json.Array(List<Json>()))])
+    return object([("thread", t), ("recentRuns", Json.Array([run])), ("items", Json.Array([read, said, item])), ("asks", Json.Null), ("told", Json.Array(List<Json>()))])
 }
 
 impl Fake {
@@ -111,10 +114,18 @@ impl Fake {
         var th = t.get(String("thread")) ?? Json.Null
         th = with(th, "status", Json.Str(status.copy()))
         if status != "running" { th = with(th, "pendingRequestCount", Json.Int(0)) }
-        if status == "completed" { th = with(th, "pullRequests", Json.Array([object([("number", Json.Int(295)), ("url", text("https://github.com/aaen-studios/loom/pull/295")), ("state", text("open"))])])) }
+        if status == "completed" { th = with(th, "pullRequests", Json.Array([object([("number", Json.Int(295)), ("url", text("https://github.com/aaen-studios/loom/pull/295")), ("state", text("open")), ("title", text("The sign-in test waits for the port")), ("checks", text("success"))])])) }
         var run = object([("status", Json.Str(status.copy())), ("startedAt", text("2026-11-26T02:00:00.000Z")), ("completedAt", if status == "running" { Json.Null } else { text("2026-11-26T02:18:00.000Z") })])
         if status == "running" { run = with(run, "completedAt", Json.Null) }
         var items = t.get(String("items")) ?? Json.Null
+        // Done: its last word, which its card sums it up with.
+        if status == "completed" {
+            if let Json.Array(xs) = items.copy() {
+                var more = xs.copy()
+                more.push(object([("position", Json.Int(4)), ("type", text("assistant_message")), ("text", text("The test now waits for the port before it signs in, so it no longer fails one run in five. Opened #295."))]))
+                items = Json.Array(more)
+            }
+        }
         if status == "failed" {
             if let Json.Array(xs) = items.copy() {
                 var more = xs.copy()

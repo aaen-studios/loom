@@ -12,6 +12,7 @@ module server.t3
 import std.json.{Json, parse}
 import std.time.{Timestamp}
 import shared.obj.{Obj, at, int_at, str_at}
+import server.steps
 
 // How a T3 thread link starts, then the environment's id, a slash and the thread's.
 pub const LINK: str = "t3-thread://v2/"
@@ -19,6 +20,8 @@ pub const LINK: str = "t3-thread://v2/"
 pub const MOST: usize = 6
 // The longest a step, a reason or a question is kept on a card.
 const TEXT_MOST: usize = 240
+// The most steps a card keeps, the newest.
+const STEPS_MOST: usize = 5
 
 /// A thread a message names: the T3 environment its link names ("" when only its
 /// id is known), and its id.
@@ -177,6 +180,18 @@ pub fn step_of(item: Json) -> String {
 }
 
 // Whether an activity item is a step a card shows: what the thread did, not what it thought.
+// A step in plain words (server/steps.calx): what it's doing and what it did,
+// from what the agent said just before it (`said`), or else from the step.
+fn step_words(item: Json, said: String) -> steps.Words {
+    let kind = str_at(item.copy(), "type") ?? String()
+    let tool_kind = if kind == "command_execution" { "execute" } else if kind == "file_change" { "edit" } else if kind == "file_search" { "search" } else if kind == "web_search" { "fetch" } else { "" }
+    var name = String()
+    if kind == "dynamic_tool" or kind == "mcp_tool" {
+        if let ok(j) = parse(str_at(item.copy(), "text") ?? String()) { name = str_at(j, "toolName") ?? String() }
+    }
+    return steps.words(said, step_of(item), name, String(tool_kind), Json.Null)
+}
+
 fn is_step(kind: String) -> bool {
     return kind == "command_execution" or kind == "dynamic_tool" or kind == "mcp_tool" or kind == "file_change" or kind == "file_search" or kind == "web_search" or kind == "subagent" or kind == "assistant_message"
 }
@@ -266,17 +281,49 @@ pub fn card_of(read: Json, ask: Json, server: String, origin: String, project: S
     o = o.s("model", model_name(str_at(t.copy(), "model") ?? String()))
     if effort.len() > 0 { o = o.s("effort", effort) }
     o = o.s("state", state.copy())
-    // The latest step, while it works or once it's done.
+    // The latest step, while it works or once it's done, as it came (`step`) and
+    // in plain words (`doing`); the last few it did, in plain words (`steps`),
+    // how many it took (`step_count`), and its last message (`summary`).
     var step = String()
+    var doing = String()
     var reason = String()
+    var said = String()
+    var last_said = String()
+    var did = List<String>()
+    var count: i64 = 0
     for x in items(read.copy()) {
         let kind = str_at(x.copy(), "type") ?? String()
+        if kind == "assistant_message" {
+            said = str_at(x.copy(), "text") ?? String()
+            if said.trim().len() > 0 { last_said = said.copy() }
+        }
         if is_step(kind.copy()) { step = step_of(x.copy()) }
+        if is_step(kind.copy()) and kind != "assistant_message" {
+            let w = step_words(x.copy(), said.copy())
+            doing = w.doing.copy()
+            did.push(w.did.copy())
+            count += 1
+            said = String()
+        }
         if kind == "error" { reason = cut(first_line(str_at(x, "text") ?? String()), TEXT_MOST) }
     }
     if step.len() > 0 and state != "failed" { o = o.s("step", step) }
-    // Its run's time: the latest run's start, and its end once it has.
+    if doing.len() > 0 and state == "working" { o = o.s("doing", doing) }
+    if count > 0 {
+        var recent = List<Json>()
+        let from = if did.len() > STEPS_MOST { did.len() - STEPS_MOST } else { 0 }
+        for w in did[from..] { recent.push(Json.Str(w.copy())) }
+        o = o.j("steps", Json.Array(recent)).i("step_count", count)
+    }
+    if state == "done" and last_said.trim().len() > 0 { o = o.s("summary", cut(last_said, TEXT_MOST)) }
+    if let branch = str_at(t.copy(), "branch") {
+        if branch.len() > 0 { o = o.s("branch", branch) }
+    }
+    // Its run's time: the latest run's start, and its end once it has; and
+    // which run it is, as T3 counts them or as many as it gave.
     if let Json.Array(runs) = at(read.copy(), "recentRuns") {
+        let run = int_at(t.copy(), "runCount") ?? i64.wrap(u64(runs.len()))
+        if run > 0 { o = o.i("run", run) }
         if runs.len() > 0 {
             let r = runs[0].copy()
             let started = ms_of(str_at(r.copy(), "startedAt") ?? str_at(r.copy(), "requestedAt") ?? String())
@@ -289,7 +336,8 @@ pub fn card_of(read: Json, ask: Json, server: String, origin: String, project: S
     if let Json.Array(given) = at(t.copy(), "pullRequests") {
         for p in given {
             let n = int_at(p.copy(), "number") ?? 0
-            if n > 0 { prs.push(Obj.new().i("number", n).s("url", str_at(p.copy(), "url") ?? String()).s("state", str_at(p, "state") ?? String()).done()) }
+            // With its title and its checks (`success`, `failure` or `pending`) where T3 gives them.
+            if n > 0 { prs.push(Obj.new().i("number", n).s("url", str_at(p.copy(), "url") ?? String()).s("state", str_at(p.copy(), "state") ?? String()).maybe("title", str_at(p.copy(), "title")).maybe("checks", str_at(p, "checks")).done()) }
         }
     }
     if prs.len() > 0 { o = o.j("prs", Json.Array(prs)) }
@@ -460,7 +508,21 @@ fn reads_a_threads_state() {
 fn makes_a_card() {
     let read = parse(###"{"thread":{"threadId":"mcp:1","projectId":"p1","title":"Fix the flaky sign-in test","link":"[Fix](t3-thread://v2/env-1/mcp:1)","status":"running","model":"claude-opus-5-5","pullRequests":[{"number":295,"url":"https://github.com/a/b/pull/295","state":"open"}],"pendingRequestCount":0},"recentRuns":[{"status":"running","startedAt":"2026-11-26T02:09:17.000Z","completedAt":null}],"items":[{"position":5,"type":"reasoning","text":"Hm"},{"position":4,"type":"command_execution","text":"$ calx tests/protocol/signin.calx\nok"},{"position":3,"type":"dynamic_tool","text":"{\"toolName\":\"Read\"}"}]}"###)!
     let card = card_of(read.copy(), Json.Null, String("t3-pc"), String("https://pc.example.ts.net"), String("loom"), String("high"), 9)
-    assert("{card}" == #"{"thread":"mcp:1","server":"t3-pc","title":"Fix the flaky sign-in test","project":"loom","model":"Opus 5.5","effort":"high","state":"working","step":"calx tests/protocol/signin.calx","started":1795658957000,"prs":[{"number":295,"url":"https://github.com/a/b/pull/295","state":"open"}],"url":"https://pc.example.ts.net/env-1/mcp:1","at":9}"#)
+    assert("{card}" == #"{"thread":"mcp:1","server":"t3-pc","title":"Fix the flaky sign-in test","project":"loom","model":"Opus 5.5","effort":"high","state":"working","step":"calx tests/protocol/signin.calx","doing":"Running a command","steps":["Read a file","Ran a command"],"step_count":2,"run":1,"started":1795658957000,"prs":[{"number":295,"url":"https://github.com/a/b/pull/295","state":"open"}],"url":"https://pc.example.ts.net/env-1/mcp:1","at":9}"#)
+    // What it's doing in the agent's own words before the step, its branch, its
+    // run as T3 counts them, a pull request's title and checks, and only the
+    // newest steps.
+    var many = List<String>()
+    for k in 0..7 { many.push("\{\"position\":{k + 10},\"type\":\"command_execution\",\"text\":\"$ ls {k}\"\}") }
+    let rich = parse("\{\"thread\":\{\"threadId\":\"mcp:2\",\"title\":\"T\",\"status\":\"running\",\"branch\":\"loo-434-t3\",\"runCount\":3,\"pullRequests\":[\{\"number\":353,\"url\":\"u\",\"state\":\"open\",\"title\":\"Spools knows T3\",\"checks\":\"pending\"\}]\},\"recentRuns\":[],\"items\":[{many.join(",")},\{\"position\":30,\"type\":\"assistant_message\",\"text\":\"Let me check how Spools matches servers to the catalog.\"\},\{\"position\":31,\"type\":\"dynamic_tool\",\"text\":\"\{\\\"toolName\\\":\\\"Read\\\"\}\"\}]\}")!
+    let r = card_of(rich, Json.Null, String("t3-vps"), String(), String("loom"), String(), 1)
+    assert(str_at(r.copy(), "doing") == some(String("Checking how Spools matches servers to the catalog")) and str_at(r.copy(), "branch") == some(String("loo-434-t3")) and int_at(r.copy(), "run") == some(3) and int_at(r.copy(), "step_count") == some(8))
+    assert("{at(r.copy(), "steps")}" == #"["Ran a command","Ran a command","Ran a command","Ran a command","Checked how Spools matches servers to the catalog"]"#)
+    assert("{at(r, "prs")}" == #"[{"number":353,"url":"u","state":"open","title":"Spools knows T3","checks":"pending"}]"#)
+    // Done: its last message is its summary, and it isn't doing anything.
+    let done = parse(###"{"thread":{"threadId":"mcp:3","title":"T","status":"completed"},"items":[{"position":1,"type":"command_execution","text":"$ git push"},{"position":2,"type":"assistant_message","text":"Opened #353: Spools knows a T3 added by hand.\nIt tests after each sign-in."}]}"###)!
+    let d = card_of(done, Json.Null, String("t3"), String(), String(), String(), 1)
+    assert(str_at(d.copy(), "summary") == some(String("Opened #353: Spools knows a T3 added by hand. It tests after each sign-in.")) and str_at(d, "doing") == none)
     // Waiting on a question, with its choices.
     let q = question_of(parse(#"{"requestId":"r1","questions":[{"id":"q1","question":"Keep the retry, or make the test wait for the port instead?","options":[{"label":"Wait for the port"},{"label":"Keep the retry"}]}]}"#)!)
     assert("{q}" == #"{"kind":"question","request":"r1","question":"q1","text":"Keep the retry, or make the test wait for the port instead?","choices":["Wait for the port","Keep the retry"]}"#)

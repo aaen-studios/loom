@@ -16397,10 +16397,10 @@ impl Instance {
             }
             return
         }
-        if c.kind == "t3_respond" or c.kind == "t3_retry" {
+        if c.kind == "t3_respond" or c.kind == "t3_retry" or c.kind == "t3_send" or c.kind == "t3_stop" {
             let w = i.t3.answering.remove(c.board.copy()) else return
             if failed {
-                let what = if c.kind == "t3_retry" { "T3 didn't try again" } else { "T3 didn't take the answer" }
+                let what = if c.kind == "t3_retry" { "T3 didn't try again" } else if c.kind == "t3_send" { "T3 didn't take the message" } else if c.kind == "t3_stop" { "T3 didn't stop it" } else { "T3 didn't take the answer" }
                 i.answer_cmd(w, Answer.Refused(String("unavailable"), "{what}: {said}"))
                 return
             }
@@ -16713,6 +16713,10 @@ impl Instance {
             i.t3_retry(w, user, args)
             return
         }
+        if name == "t3.send" or name == "t3.stop" {
+            i.t3_tell(w, user, name == "t3.stop", args)
+            return
+        }
         if name == "t3.servers" {
             var names = List<Json>()
             for s in i.t3_servers(user.copy()) { names.push(Json.Str(s.name.copy())) }
@@ -16740,6 +16744,39 @@ impl Instance {
         i.t3.answering.insert(k.copy(), w.copy())
         let a = Obj.new().s("threadId", thread.copy()).s("message", String("Try again.")).done()
         if not i.t3_call(user, server, "t3_retry", thread, k.copy(), "t3_thread_send", a) {
+            if let held = i.t3.answering.remove(k) { i.answer_cmd(held, Answer.Refused(String("not_found"), String("T3 isn't connected."))) }
+        }
+    }
+
+    // t3.send and t3.stop: a message the person sends a thread from its card
+    // (`text`, with t3_thread_send), or the thread stopped (t3_thread_interrupt),
+    // as them. Its card is looked up again once T3 took it.
+    fn t3_tell(i: mut Instance, w: own Waiter, user: String, stop: bool, args: Json) {
+        let thread = (str_at(args.copy(), "thread") ?? String()).trim().copy()
+        let text = (str_at(args, "text") ?? String()).trim().copy()
+        var server = String()
+        var state = String()
+        if let c = i.t3.known.find("{user}\n{thread}") {
+            server = str_at(c.copy(), "server") ?? String()
+            state = str_at(c.copy(), "state") ?? String()
+        }
+        if thread.len() == 0 or server.len() == 0 {
+            i.answer_cmd(w, Answer.Refused(String("not_found"), String("There's no such thread.")))
+            return
+        }
+        if stop and state != "working" and state != "waiting" {
+            i.answer_cmd(w, Answer.Refused(String("not_now"), String("It isn't working.")))
+            return
+        }
+        if not stop and text.len() == 0 {
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), String("Write the message first.")))
+            return
+        }
+        i.next_job += 1
+        let k = "tell{i.next_job}"
+        i.t3.answering.insert(k.copy(), w.copy())
+        let (kind, tool, a) = if stop { ("t3_stop", "t3_thread_interrupt", Obj.new().s("threadId", thread.copy()).done()) } else { ("t3_send", "t3_thread_send", Obj.new().s("threadId", thread.copy()).s("message", text).done()) }
+        if not i.t3_call(user, server, kind, thread, k.copy(), tool, a) {
             if let held = i.t3.answering.remove(k) { i.answer_cmd(held, Answer.Refused(String("not_found"), String("T3 isn't connected."))) }
         }
     }

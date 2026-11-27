@@ -128,6 +128,7 @@ fn run(i: Instance, fake: String) ! Error {
     let c = try card_when(mut app, said_id.copy(), "mcp:fix", any_card)
     try check(str_at(c.copy(), "title") == some(String("Fix the flaky sign-in test")) and str_at(c.copy(), "project") == some(String("loom")) and str_at(c.copy(), "model") == some(String("Opus 5.5")) and str_at(c.copy(), "server") == some(String("t3")), "a thread's link comes as its card, with its title, project and model")
     try check(str_at(c.copy(), "state") == some(String("working")) and str_at(c.copy(), "step") == some(String("calx tests/protocol/signin.calx")) and (int_at(c.copy(), "started") ?? 0) > 0, "working, with its latest step and when its run started")
+    try check(str_at(c.copy(), "doing") == some(String("Running the sign-in test again to see where it waits")) and str_at(c.copy(), "branch") == some(String("fix-sign-in-test")) and int_at(c.copy(), "run") == some(2) and int_at(c.copy(), "step_count") == some(2), "what it's doing in plain words, from what the agent said, its branch, its run and its steps")
     try check(str_at(c, "url") == some("{fake}/env-test/mcp:fix"), "and its page in T3's app")
     let echoed = try created(mut app, mut seen, chat.copy(), "agent")
     _ = try card_when(mut app, str_at(echoed, "id") ?? String(), "mcp:fix", any_card)
@@ -177,7 +178,8 @@ fn run(i: Instance, fake: String) ! Error {
     // --- Done ---
     _ = try fetch_json("{fake}/test/set?thread=mcp:fix&status=completed")
     let d = try card_when(mut app, said_id.copy(), "mcp:fix", done)
-    try check("{at(d.copy(), "prs")}".contains(#""number":295"#) and (int_at(d.copy(), "ended") ?? 0) - (int_at(d.copy(), "started") ?? 0) == 1080000 and at(d, "ask") == Json.Null, "once it's done, it's done, with its pull request and how long it took")
+    try check("{at(d.copy(), "prs")}".contains(#""number":295"#) and (int_at(d.copy(), "ended") ?? 0) - (int_at(d.copy(), "started") ?? 0) == 1080000 and at(d.copy(), "ask") == Json.Null, "once it's done, it's done, with its pull request and how long it took")
+    try check((str_at(d.copy(), "summary") ?? String()).starts_with("The test now waits for the port") and "{at(d, "prs")}".contains(#""title":"The sign-in test waits for the port","checks":"success""#), "with its last message as its summary, and its pull request's title and checks")
 
     // --- The start form ---
     let form = try app.cmd("q_9", "t3.form", Obj.new().done())
