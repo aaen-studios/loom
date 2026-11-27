@@ -141,6 +141,24 @@ struct StillThread: Shape {
     }
 }
 
+/// Voice mode's icon on the composer's main button (LOO-443): one wave, as the thread live
+/// mode draws, `M2 12c2.5 0 3-5 6-5s3.5 10 7 10 3.5-5 7-5` on a 24 grid, fitted into the
+/// view. SF Symbols has nothing like it.
+struct ThreadGlyph: Shape {
+    func path(in rect: CGRect) -> Path {
+        let k = min(rect.width, rect.height) / 24
+        let x0 = rect.midX - 12 * k
+        let y0 = rect.midY - 12 * k
+        func p(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x0 + x * k, y: y0 + y * k) }
+        var path = Path()
+        path.move(to: p(2, 12))
+        path.addCurve(to: p(8, 7), control1: p(4.5, 12), control2: p(5, 7))
+        path.addCurve(to: p(15, 17), control1: p(11, 7), control2: p(11.5, 17))
+        path.addCurve(to: p(22, 12), control1: p(18.5, 17), control2: p(18.5, 12))
+        return path
+    }
+}
+
 /// An agent's thread in its shape (PLAN.md, "Its shape"): `points`, in a box from -1 to
 /// 1, fitted into the view. Each mood bends it along its own line, as ThreadView bends
 /// a straight thread, by a little less, so the shape still reads.

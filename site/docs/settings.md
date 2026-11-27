@@ -112,7 +112,7 @@ Under **Speech**:
 - **Speed**: 0.8× to 1.2×. 1× to start with.
 - **Read replies aloud**: Never, Only in live, or Always, which reads a reply aloud as it comes in the chat in front of you. Never to start with.
 
-Under **Live**, for live mode, which **Live** beside the composer's mic starts in an agent's chat: you talk with the agent, and the talk is left in the chat as messages when you press **End**.
+Under **Live**, for live mode, which the black button at the end of the message box starts in an agent's chat while the box is empty, when it shows a wave in place of its arrow: you talk with the agent, and the talk is left in the chat as messages when you press **End**.
 
 - **Shortcut**: Ctrl+Shift+Space starts and ends live mode, or Off. Ctrl+Shift+Space to start with; picking it here sets Dictation's Shortcut to Off.
 - **Talk over a reply to stop it**: speaking while the agent speaks stops its reply and starts your turn. On.

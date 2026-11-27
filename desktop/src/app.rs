@@ -11566,10 +11566,14 @@ ACTA_KEY=secret:ACTA_KEY",
         let empty = self.rows.is_empty() && self.model.chat_known();
         // A task or a branch shows its strip over the list, even before it has messages.
         let in_task = self.model.task_open().is_some() || self.model.open_branch.is_some();
-        // While the agent answers, the button stops it, unless there's something to send: that waits in the queue.
-        let busy = self.model.busy()
-            && self.composer.read(cx).value().trim().is_empty()
-            && self.model.attachments.is_empty();
+        // The main button: voice mode while the composer is empty in an agent's chat, and
+        // while the agent answers, Stop, unless there's something to send: that waits in
+        // the queue (LOO-443).
+        let main = model::live::Main::of(
+            self.model.busy(),
+            self.composer.read(cx).value().trim().is_empty() && self.model.attachments.is_empty(),
+            self.model.room_open().is_none(),
+        );
         let who = agent
             .as_ref()
             .map(|a| a.name.as_str())
@@ -11834,50 +11838,10 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .child(self.composer_textarea(cx)),
                         )
                         .when_some(emoji_button, |d, b| d.child(b))
-                        // Dictation: loom's own, into the composer at the caret; and live
-                        // mode beside it.
+                        // Dictation: loom's own, into the composer at the caret; then the
+                        // main button, voice mode, Send or Stop.
                         .child(self.composer_mic(cx))
-                        .child(self.composer_live(cx))
-                        .child(
-                            div()
-                                .id("send")
-                                .role(Role::Button)
-                                .aria_label(if busy { "Stop" } else { "Send" })
-                                .size(px(control::ICON_COMPOSER))
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(radius::BUTTON))
-                                .soft_hover(p.button, motion::mix(p.button, p.bg, 0.18), None)
-                                .text_color(p.button_ink)
-                                .cursor_pointer()
-                                .child(
-                                    Icon::new(if busy {
-                                        IconName::Square
-                                    } else {
-                                        IconName::ArrowUp
-                                    })
-                                    .small(),
-                                )
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    if busy {
-                                        if let Some(f) = this.model.cancel() {
-                                            this.send(f);
-                                        }
-                                        return;
-                                    }
-                                    let text = composer_text(this.composer.read(cx));
-                                    if let Some(frame) = this.model.send(&text) {
-                                        this.send(frame);
-                                        this.composer
-                                            .update(cx, |s, cx| s.set_value("", window, cx));
-                                        if this.emoji_ui.picker.is_some() {
-                                            this.close_emoji_picker(cx);
-                                        }
-                                    }
-                                })),
-                        ),
+                        .child(self.composer_main(main, cx)),
                 ),
         );
         let continue_button = match agent.as_ref() {

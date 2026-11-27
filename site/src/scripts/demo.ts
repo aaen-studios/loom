@@ -22,7 +22,9 @@
 // answered in the group chat, and the mic's Dictation on and off, around loom's own dictation
 // writing the words into the composer as they're said.
 //
-// The composer's Live, beside the mic, starts live mode in an agent's chat, only once it's clicked
+// The composer's main button is voice mode while the composer is empty in an agent's chat, Send
+// once something's typed, and Stop while the agent answers, its icon fading and growing into the
+// next (desktop/src/live_ui.rs, composer_main). Voice mode starts live mode, only once it's clicked
 // (desktop/src/model/live.rs): its view takes the chat's place, one thread across it that waves in
 // ink by the speech's level while the agent speaks and in grey by the mic's while you talk, the
 // words under it, and Text, Mute and End. The talk is scripted: you ask, the agent thinks and
@@ -287,6 +289,23 @@ export function play(app: HTMLElement) {
 		}
 	}
 	const typed = app.querySelector<HTMLElement>('.typed')!;
+
+	// The composer's main button (desktop/src/model/live.rs, Main): Stop while the agent answers
+	// and nothing's typed, voice mode while nothing's typed in an agent's chat, and Send otherwise,
+	// with its name following it.
+	const mainBtn = app.querySelector<HTMLButtonElement>('[data-main-btn]')!;
+	function drawMain() {
+		const empty = (typed.textContent ?? '').trim() === '';
+		const main = app.classList.contains('busy') && empty ? 'stop' : empty && !app.classList.contains('in-room') ? 'live' : 'send';
+		if (mainBtn.dataset.main === main) return;
+		mainBtn.dataset.main = main;
+		const name = main === 'live' ? 'Start voice mode' : main === 'stop' ? 'Stop' : 'Send';
+		mainBtn.setAttribute('aria-label', name);
+		mainBtn.title = name;
+	}
+	new MutationObserver(drawMain).observe(typed, { childList: true, characterData: true, subtree: true });
+	new MutationObserver(drawMain).observe(app, { attributes: true, attributeFilter: ['class'] });
+	drawMain();
 
 	// How full the open chat's session context is, after its model, in thousands of tokens of
 	// its 200k (app.rs, context_ring; model.rs, ContextFill), with the plan's limits under it in
@@ -1312,7 +1331,7 @@ export function play(app: HTMLElement) {
 		{ capture: true },
 	);
 
-	// Live mode (PLAN.md, "Live mode"; desktop/src/model/live.rs), from the composer's Live, in an
+	// Live mode (PLAN.md, "Live mode"; desktop/src/model/live.rs), from the composer's voice mode, in an
 	// agent's chat: its view in the chat's place, its head in the header's, and a talk on a clock
 	// of its own, which stops off screen and in a hidden tab. You ask, a word at a time, the thread
 	// moving lightly in grey by a mic's level; quiet for 0.8 s sends it, and the agent thinks for a
@@ -1481,8 +1500,8 @@ export function play(app: HTMLElement) {
 		redraw();
 	});
 
-	app.querySelector('[data-live-btn]')!.addEventListener('click', () => {
-		if (living || chat === 'shop') return;
+	mainBtn.addEventListener('click', () => {
+		if (living || chat === 'shop' || mainBtn.dataset.main !== 'live') return;
 		if (!pop.hidden) showPins(false);
 		showCard(false);
 		openPlus(false);

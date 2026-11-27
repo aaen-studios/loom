@@ -5,6 +5,30 @@ import Foundation
 // (`core.live`, core/live.calx); the phone records the mic, plays each piece it's told to,
 // and draws the thread, the words and the buttons from what it said.
 
+/// What the composer's main button is (LOO-443), as the desktop's `model::live::Main`:
+/// Stop while the agent answers and there's nothing to send, voice mode while the composer
+/// is empty in an agent's chat, and Send otherwise.
+enum MainButton: Equatable, Sendable {
+    case stop, send, live
+
+    /// `empty` is no words but spaces and nothing attached; `live` is whether live mode can
+    /// start here, as it can in an agent's chat and not in a group chat.
+    static func of(busy: Bool, empty: Bool, live: Bool) -> MainButton {
+        if busy && empty { return .stop }
+        if empty && live { return .live }
+        return .send
+    }
+
+    /// Its name, for VoiceOver.
+    var name: String {
+        switch self {
+        case .stop: "Stop"
+        case .send: "Send"
+        case .live: "Start voice mode"
+        }
+    }
+}
+
 /// A piece of the reply playing, as `core.live`'s `play` gives it: its file, its words and
 /// when each starts (ms into it), and its level each `step` ms, from 0 to 1.
 struct LivePiece: Equatable, Sendable {

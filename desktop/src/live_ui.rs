@@ -7,8 +7,15 @@
 //! (core/live.calx); this records, plays and draws (`crate::voice`, `model::live`).
 
 use super::*;
-use crate::model::live::{self as live_model, Live, State as LiveState};
+use crate::model::live::{self as live_model, Live, Main, State as LiveState};
 use crate::model::voice::{self as voice_model, Tab};
+
+/// Voice mode's icon on the composer's main button: one wave, as the thread live mode
+/// draws, on Lucide's 24 grid with its stroke (LOO-443).
+const THREAD_ICON: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12c2.5 0 3-5 6-5s3.5 10 7 10 3.5-5 7-5"/></svg>"#;
+/// The main button's icons, as big as `Icon::small`, and how long one takes to swap.
+const ICON: f32 = 14.0;
+const ICON_SWAP: f32 = 0.13;
 
 /// The room the thread has to swing in, and its share of the view's height.
 const THREAD_ROOM: f32 = 220.0;
@@ -32,34 +39,103 @@ impl Loom {
                 .is_some_and(|c| c == l.conversation)
     }
 
-    /// The composer's button beside the mic: live mode starts with the agent here.
-    pub(super) fn composer_live(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// The composer's main button (LOO-443): voice mode while the composer is empty,
+    /// which starts live mode with the agent here, Send once there's something to send,
+    /// and Stop while the agent answers. Each icon fades and grows into the next, in the
+    /// same place.
+    pub(super) fn composer_main(&self, main: Main, cx: &mut Context<Self>) -> Stateful<Div> {
         let p = self.p;
-        let tip_words = if self.prefs.live_shortcut {
-            if cfg!(target_os = "macos") {
-                "Live  ⌃⇧Space"
-            } else {
-                "Live  Ctrl+Shift+Space"
+        let tip_words = match main {
+            Main::Live if self.prefs.live_shortcut => {
+                if cfg!(target_os = "macos") {
+                    "Start voice mode  ⌃⇧Space"
+                } else {
+                    "Start voice mode  Ctrl+Shift+Space"
+                }
             }
-        } else {
-            "Live"
+            _ => main.name(),
         };
+        // How far each icon is in: its opacity, and its size from 60% to whole.
+        let level = |which: Main| {
+            motion::level(
+                &SharedString::from(format!("composer-main-{which:?}")),
+                main == which,
+                ICON_SWAP,
+            )
+        };
+        let grow = |k: f32| Transformation::scale(size(0.6 + 0.4 * k, 0.6 + 0.4 * k));
+        let layer = |k: f32, icon: AnyElement| {
+            div()
+                .absolute()
+                .inset_0()
+                .flex()
+                .items_center()
+                .justify_center()
+                .opacity(k)
+                .child(icon)
+        };
+        let (stop, send, live) = (level(Main::Stop), level(Main::Send), level(Main::Live));
         div()
-            .id("live")
+            .id("send")
             .role(Role::Button)
-            .aria_label("Live")
+            .aria_label(main.name())
+            .relative()
             .size(px(control::ICON_COMPOSER))
             .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
             .rounded(px(radius::BUTTON))
+            .soft_hover(p.button, motion::mix(p.button, p.bg, 0.18), None)
+            .text_color(p.button_ink)
             .cursor_pointer()
-            .text_color(p.ink_2)
-            .soft_hover(transparent_black(), p.hover, None)
             .tooltip(tip(tip_words))
-            .child(Icon::new(Ico::AudioLines).small())
-            .on_click(cx.listener(|this, _, _, cx| this.start_live(cx)))
+            .when(stop > 0.0, |d| {
+                d.child(layer(
+                    stop,
+                    Icon::new(IconName::Square)
+                        .small()
+                        .transform(grow(stop))
+                        .into_any_element(),
+                ))
+            })
+            .when(send > 0.0, |d| {
+                d.child(layer(
+                    send,
+                    Icon::new(IconName::ArrowUp)
+                        .small()
+                        .transform(grow(send))
+                        .into_any_element(),
+                ))
+            })
+            .when(live > 0.0, |d| {
+                d.child(layer(
+                    live,
+                    svg()
+                        .path(crate::runtime_svg("loom/thread.svg", THREAD_ICON))
+                        .flex_none()
+                        .size(px(ICON))
+                        .text_color(p.button_ink)
+                        .with_transformation(grow(live))
+                        .into_any_element(),
+                ))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| match main {
+                Main::Stop => {
+                    if let Some(f) = this.model.cancel() {
+                        this.send(f);
+                    }
+                }
+                Main::Live => this.start_live(cx),
+                Main::Send => {
+                    let text = composer_text(this.composer.read(cx));
+                    if let Some(frame) = this.model.send(&text) {
+                        this.send(frame);
+                        this.composer
+                            .update(cx, |s, cx| s.set_value("", window, cx));
+                        if this.emoji_ui.picker.is_some() {
+                            this.close_emoji_picker(cx);
+                        }
+                    }
+                }
+            }))
     }
 
     /// Starts live mode with the agent open, in its chat. Dictation stops first.
