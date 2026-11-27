@@ -17,7 +17,7 @@
 // over the chat from the header. The header gives way in a narrow window as the app's does (model/header.rs).
 //
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
-import { threadOf, threadsIn, yarnsIn, type Mood, type Thread } from './thread';
+import { threadOf, threadsIn, tieOf, tiesIn, yarnsIn, type Mood, type Thread } from './thread';
 
 type Chat = 'juniper' | 'shop' | 'moss';
 /** How full each chat's session is, in thousands of tokens of 200k, what its card's title
@@ -472,6 +472,10 @@ export function play(app: HTMLElement) {
 		chat = to;
 		app.classList.toggle('in-room', to === 'shop');
 		app.classList.toggle('in-moss', to === 'moss');
+		if (to === 'moss') {
+			if (spool) tiesIn(spool);
+			setTimeout(() => connectSpool(false), 1200);
+		}
 		const agent = to === 'moss' ? { name: 'Moss', color: 'mint' } : { name: 'Juniper', color: 'sky' };
 		headName.textContent = agent.name;
 		phName.textContent = agent.name;
@@ -484,6 +488,37 @@ export function play(app: HTMLElement) {
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => openChat('shop'));
 	app.querySelector('.agent[data-agent="Moss"]')?.addEventListener('click', () => openChat('moss'));
 	app.querySelector('.agent[data-agent="Juniper"]')?.addEventListener('click', () => openChat('juniper'));
+
+	// Moss's earlier reply: Spools' card for T3 Code (app.rs, spool_connect_card). Sign in, pressed
+	// a moment after Moss's chat first opens or by the visitor, connects it: Connecting…, then the
+	// tie pulls taut in ink and it says Connected · 12 tools, with Change…. Its tie is made once
+	// Moss's chat shows, so it's measured at the width it has there.
+	const spool = app.querySelector<HTMLElement>('[data-spool-card]');
+	const spoolState = spool?.querySelector<HTMLElement>('[data-spool-state]');
+	const spoolBtn = spool?.querySelector<HTMLButtonElement>('[data-spool-btn]');
+	let spoolGone = false;
+	const spoolConnected = () => {
+		if (!spoolState || !spoolBtn) return;
+		// Not drawn yet when Moss's chat hasn't been open: it starts taut once it is.
+		const svg = spool?.querySelector('svg[data-tie]') ?? null;
+		const tie = tieOf(svg);
+		if (tie) tie.pull();
+		else svg?.setAttribute('data-taut', '');
+		spoolState.textContent = 'Connected · 12 tools';
+		spoolState.classList.add('on');
+		spoolBtn.textContent = 'Change…';
+		spoolBtn.classList.remove('primary');
+		spoolBtn.hidden = false;
+	};
+	const connectSpool = (now: boolean) => {
+		if (spoolGone || !spoolState || !spoolBtn) return;
+		spoolGone = true;
+		if (now) return spoolConnected();
+		spoolState.textContent = 'Connecting…';
+		spoolBtn.hidden = true;
+		setTimeout(spoolConnected, 900);
+	};
+	spoolBtn?.addEventListener('click', () => connectSpool(false));
 
 	// The chat's pins (PLAN.md, "Pinned messages"): the header's pin opens them in a popover under
 	// it, the newest first, each drawn as the chat draws its message under who said it and when,
@@ -1000,6 +1035,7 @@ export function play(app: HTMLElement) {
 		app.classList.remove('busy');
 		head.set('idle');
 		for (const s of scenes) end(s);
+		connectSpool(true);
 		drawPins();
 		drawContext();
 	}

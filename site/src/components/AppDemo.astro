@@ -11,6 +11,8 @@
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
 import actaMark from '../../../server/catalog/acta.svg?raw';
+import t3Mark from '../../../server/catalog/t3.svg?raw';
+import Knot from './Knot.astro';
 
 const agents = [
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
@@ -405,6 +407,37 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 			     same colour, `T3 · project · model · effort` in mono under the title, then its
 			     latest step while it works, or its pull request. -->
 			<div class="msgs moss" aria-live="off" style="--tint: var(--thread-mint)">
+				<!-- Earlier, Moss put T3 on the VPS, then Spools' card for T3 Code in its reply
+				     (app.rs, spool_connect_card): loom's knot tied to T3's logo by a slack, dashed
+				     tie, its name, its address and whom it's for, with Sign in. Signed in, the tie
+				     pulls taut in ink and it says Connected · 12 tools, with Change…. -->
+				<div class="time-line">Today 10:52</div>
+				<div class="row reply" data-msg data-by="Moss" data-when="Today 10:52">
+					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
+					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
+					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
+					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread head"></svg>
+					<div class="body">
+						<div class="who">Moss</div>
+						<div class="said"><p>T3 is reachable now. Sign in and I'll start the thread.</p></div>
+						<div class="spool" data-spool-card>
+							<div class="spool-tie">
+								<span class="spool-knot"><Knot size={20} /></span>
+								<svg data-tie height="28" aria-hidden="true"></svg>
+								<span class="spool-mark" set:html={t3Mark} />
+							</div>
+							<div class="spool-text">
+								<span class="spool-name">T3 Code</span>
+								<span class="spool-addr">vps.tail1234.ts.net:8444</span>
+							</div>
+							<div class="spool-foot">
+								<span class="spool-state" data-spool-state>For Moss</span>
+								<button type="button" class="spool-btn primary" data-spool-btn>Sign in</button>
+							</div>
+						</div>
+					</div>
+				</div>
 				<div class="time-line">Today 11:15</div>
 				<div class="row you unsent" data-msg data-scene="ask" data-when="Today 11:15">
 					<div class="bubble">The checkout button says “Contiune”. Can you fix it?</div>
@@ -2585,6 +2618,127 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		font-family: var(--mono);
 		font-size: var(--size-caption);
 		color: var(--ink-2);
+	}
+
+	/* Spools' card for an entry an agent asked to connect (app.rs, spool_connect_card; spools.rs,
+	   spool_link): loom's knot, the tie and the logo on a tile in ink, its name and address, and
+	   whom it's for with Sign in, or Connected · N tools with Change…. */
+	.spool {
+		display: flex;
+		flex-direction: column;
+		gap: 12px;
+		max-width: 420px;
+		padding: 16px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--side);
+	}
+	@media (prefers-color-scheme: dark) {
+		:root:not([data-theme='light']) .spool {
+			background: var(--raised);
+		}
+	}
+	:root[data-theme='dark'] .spool {
+		background: var(--raised);
+	}
+	.spool-tie {
+		display: flex;
+		align-items: center;
+		gap: 4px;
+	}
+	.spool-tie svg[data-tie] {
+		flex: 1;
+		min-width: 0;
+		height: 28px;
+	}
+	.spool-knot,
+	.spool-mark {
+		flex: none;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--control-icon-large);
+		height: var(--control-icon-large);
+		border-radius: var(--radius-card);
+	}
+	.spool-knot {
+		border: 1px solid var(--line-strong);
+		background: var(--bg);
+		color: var(--ink);
+	}
+	.spool-mark {
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.spool-mark :global(svg) {
+		width: 56%;
+		height: 56%;
+	}
+	.spool-text {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 0;
+	}
+	.spool-name {
+		color: var(--ink);
+		font-weight: var(--weight-semibold);
+	}
+	.spool-addr {
+		overflow: hidden;
+		font-family: var(--mono);
+		font-size: var(--size-small);
+		color: var(--ink-2);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.spool-foot {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		min-height: var(--control-button-small);
+	}
+	.spool-state {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		min-width: 0;
+		font-size: var(--size-small);
+		color: var(--ink-3);
+	}
+	.spool-state.on {
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+	}
+	.spool-state.on::before {
+		content: '';
+		flex: none;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--ink);
+	}
+	.spool-btn {
+		flex: none;
+		height: var(--control-button-small);
+		padding: 0 14px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-button);
+		background: transparent;
+		font: inherit;
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+		cursor: pointer;
+	}
+	.spool-btn.primary {
+		border-color: var(--button);
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.spool-btn[hidden] {
+		display: none;
 	}
 
 	/* The composer: the reply bar over the words, then the + , the words and the buttons. */
