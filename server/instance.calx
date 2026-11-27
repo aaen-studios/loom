@@ -10911,7 +10911,12 @@ impl Instance {
             let asked = str_at(args, "engine") ?? String()
             let engine = if asked.len() > 0 { asked.copy() } else { in_use.copy() }
             let found = voice_engines.engine(kind.copy(), engine.copy()) else return Answer.Refused(String("no_engine"), if kind == "dictation" { String("Set up dictation in Settings › Voice first.") } else { String("Set up speech in Settings › Voice first.") })
-            let key = try i.secret(user.copy(), voice_engines.key_name(engine.copy())) else return Answer.Refused(String("no_key"), "Add your {found.name} key in Settings › Voice.")
+            // A model on the device needs no key: the device downloads and runs it.
+            var key = String()
+            if not found.on_device {
+                let secret = try i.secret(user.copy(), voice_engines.key_name(engine.copy())) else return Answer.Refused(String("no_key"), "Add your {found.name} key in Settings › Voice.")
+                key = secret
+            }
             var value = Obj.new().s("engine", engine.copy()).s("key", key)
             if kind == "dictation" {
                 value = value.s("language", str_at(kept, "language") ?? String())
@@ -10937,7 +10942,7 @@ impl Instance {
         let in_use = str_at(at(old.copy(), kind_key(kind.copy())), "engine") ?? String()
         let asked = (str_at(args.copy(), "engine") ?? String()).trim().to_lower_root()
         let engine = if asked.len() > 0 { asked } else { in_use }
-        if engine.len() == 0 { return tool_error(if kind == "dictation" { String("Name an engine: elevenlabs, deepgram, openai or groq.") } else { String("Name an engine: elevenlabs, fish or openai.") }) }
+        if engine.len() == 0 { return tool_error(if kind == "dictation" { String("Name an engine: elevenlabs, deepgram, openai, groq, parakeet or whisper.") } else { String("Name an engine: elevenlabs, fish, openai or kokoro.") }) }
         var change = Obj.new().s("engine", engine.copy())
         for field in ["language", "voice", "read_aloud"] {
             if let v = str_at(args.copy(), field) { change = change.s(field, v.trim().copy()) }
@@ -10950,8 +10955,10 @@ impl Instance {
         let run_id = i.calling_run(g.copy())
         if run_id.len() == 0 { return rule_refusal("needs-a-chat", String("That needs your person to see a card, which they only see in a chat with you.")) }
         let keys = try i.voice_keys(g.user.copy())
-        let have = keys.contains(engine.copy())
         let found = voice_engines.engine(kind.copy(), engine.copy()) else return tool_error("There's no {kind} engine {engine}.")
+        // A model on the device needs no key, so it's set at once; each of the person's
+        // computers downloads it, the one they're at as the card comes.
+        let have = found.on_device or keys.contains(engine.copy())
         let settings = at(next.copy(), kind_key(kind.copy()))
         let call = try i.store.new_id("tc")
         if have {

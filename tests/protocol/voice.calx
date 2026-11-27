@@ -1,7 +1,9 @@
 module tests.protocol.voice
 
 // loom's voice through the core against a real instance and the fake services
-// (tests/fake_voice; PLAN.md, "Voice"): with no engine the mic opens the settings;
+// (tests/fake_voice; PLAN.md, "Voice"): with no engine the mic opens the settings,
+// as it does for a model on the device this core has nowhere to keep, which needs no
+// key;
 // a key kept with voice.key and an engine picked with voice.put reach every device
 // as voice.updated, and never a key; dictation streams to Deepgram, ElevenLabs
 // Scribe and OpenAI, the words coming as they're said, with Dictation on and off at
@@ -238,14 +240,25 @@ fn run(i: Instance, fake: String) ! Error {
     let first = value_of(try app.cmd("v_1", "voice.get", Obj.new().done()))
     try check(str_at(at(at(at(first.copy(), "voice"), "settings"), "dictation"), "engine") == some(String("")) and "{at(at(first.copy(), "voice"), "keys")}" == #"{"elevenlabs":false,"deepgram":false,"openai":false,"groq":false,"fish":false}"#, "voice.get starts with no engine and no keys")
     let dictation_tiles = items(at(at(at(first, "voice"), "engines"), "dictation"))
-    try check(dictation_tiles.len() == 4, "with the four dictation engines' tiles")
+    try check(dictation_tiles.len() == 6, "with the six dictation engines' tiles")
     var marked = true
+    var on_device = 0
     for t in dictation_tiles {
-        if not (str_at(t.copy(), "icon_svg") ?? String()).contains("currentColor") or str_at(t, "mark") == none { marked = false }
+        if not (str_at(t.copy(), "icon_svg") ?? String()).contains("currentColor") or str_at(t.copy(), "mark") == none { marked = false }
+        // Parakeet and Whisper run on the device: no key, and this core has no folder
+        // to keep them in, so it says they can't run here.
+        if bool_at(t.copy(), "key") == some(false) and str_at(t.copy(), "icon") == some(String("laptop")) and bool_at(t.copy(), "have") == some(false) and str_at(at(t, "model"), "state") == some(String("unavailable")) { on_device += 1 }
     }
     try check(marked, "each with its maker's mark in currentColor, and the mark's name")
+    try check(on_device == 2, "the two models on the device need no key, and the core says where they can't run")
     let (none_set, none_sounds) = try app.dictate(1)
     try check(last_state(none_set) == "no_engine" and none_sounds.len() == 0, "with no engine, the mic is told to open Settings › Voice, with no sound")
+
+    // --- A model on the device, which this core can't run ---
+    let local = try put(mut app, "v_1b", dictation_engine("parakeet", ""))
+    try check(str_at(at(at(local, "settings"), "dictation"), "engine") == some(String("parakeet")), "a model on the device is picked with no key")
+    let (not_here, not_here_sounds) = try app.dictate(1)
+    try check(last_state(not_here.copy()) == "no_engine" and (str_at(not_here[not_here.len() - 1].copy(), "why") ?? String()).len() > 0 and not_here_sounds.len() == 0, "and the mic opens the settings, saying why it can't run")
 
     // --- Deepgram, streaming ---
     _ = try put(mut app, "v_2a", dictation_engine("deepgram", "no"))

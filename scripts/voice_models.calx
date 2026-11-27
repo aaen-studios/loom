@@ -1,0 +1,166 @@
+// Runs the voice models on this computer through the core, as the app does (PLAN.md,
+// "Voice", "On the device"), to check sherpa-onnx's pins and the models end to end:
+//
+//     calx scripts/voice_models.calx DIR fetch ENGINE     download ENGINE's models into DIR
+//     calx scripts/voice_models.calx DIR hear ENGINE WAV  dictate WAV with ENGINE, as the mic would
+//     calx scripts/voice_models.calx DIR say TEXT OUT     speak TEXT with Kokoro into OUT, a WAV
+//     calx scripts/voice_models.calx DIR delete ENGINE    remove ENGINE's models from DIR
+//
+// ENGINE is parakeet, whisper or kokoro.
+module scripts.voice_models
+
+import std.env
+import std.fs
+import std.json.{Json}
+import std.thread
+import std.wave.{Wave}
+import shared.obj.{Obj, at, int_at, str_at}
+import shared.voice as engines
+import core.voice.{Voice}
+
+fn kind_of(engine: String) -> String {
+    return if engine == "kokoro" { String("speech") } else { String("dictation") }
+}
+
+// What the app is told since, printed: each model's download as it changes, and
+// dictation's words. Gives the first of them `done` says was waited for.
+fn drain(v: mut Voice, last: mut Map<String, String>, done: fn(Json) -> bool) -> Json? {
+    v.poll()
+    while v.to_app.len() > 0 {
+        let m = v.to_app.remove(0)
+        let t = str_at(m.copy(), "t") ?? String()
+        if t == "core.voice" {
+            for kind in ["dictation", "speech"] {
+                if let Json.Array(tiles) = at(at(at(m.copy(), "voice"), "engines"), kind) {
+                    for tile in tiles {
+                        let model = at(tile.copy(), "model")
+                        if model == Json.Null { continue }
+                        let id = str_at(tile, "id") ?? String()
+                        let line = "{str_at(model.copy(), "state") ?? String()} {int_at(model.copy(), "percent") ?? 0}% {str_at(model, "why") ?? String()}"
+                        let was = if let l = last.find(id.copy()) { l.copy() } else { String() }
+                        if was != line {
+                            println("{id}: {line}")
+                            last.insert(id, line)
+                        }
+                    }
+                }
+            }
+        } else if t == "core.dictation" {
+            println("  {str_at(m.copy(), "state") ?? String()}: {str_at(m.copy(), "text") ?? String()}")
+        }
+        if done(m.copy()) { return some(m) }
+    }
+    return none
+}
+
+fn nothing(m: Json) -> bool {
+    return m == Json.Null
+}
+
+// Polls until `done` says the app was told what it waited for.
+fn wait_for(v: mut Voice, done: fn(Json) -> bool, most_ms: u64) -> Json ! String {
+    var waited: u64 = 0
+    var last = Map<String, String>()
+    loop {
+        if let m = drain(mut v, mut last, done) { return m }
+        if waited >= most_ms { fail "nothing came in {most_ms / 1000} s" }
+        unsafe { thread.sleep(50000000) }
+        waited += 50
+    }
+}
+
+fn ready_or_failed(m: Json) -> bool {
+    if str_at(m.copy(), "t") != some(String("core.voice")) { return false }
+    for kind in ["dictation", "speech"] {
+        if let Json.Array(tiles) = at(at(at(m.copy(), "voice"), "engines"), kind) {
+            for tile in tiles {
+                let state = str_at(at(tile, "model"), "state") ?? String()
+                if state == "downloading" { return false }
+            }
+        }
+    }
+    return true
+}
+
+fn dictated(m: Json) -> bool {
+    let state = str_at(m.copy(), "state") ?? String()
+    return str_at(m, "t") == some(String("core.dictation")) and (state == "done" or state == "failed" or state == "no_engine")
+}
+
+fn spoken(m: Json) -> bool {
+    return str_at(m, "t") == some(String("core.speak"))
+}
+
+fn main() ! String {
+    let a = env.args()
+    if a.len() < 3 { fail String("calx scripts/voice_models.calx DIR fetch|hear|say|delete ...") }
+    let dir = match fs.absolute(a[0].copy()) {
+        ok(d) => d,
+        err(e) => fail "{e}",
+    }
+    var v = Voice.new()
+    v.models.root = some(dir.copy())
+    v.files = some(dir.copy())
+    let what = a[1].copy()
+    let engine = a[2].copy()
+    let dictation = Obj.new().s("engine", if what == "hear" { engine.copy() } else { String() }).done()
+    let speech = Obj.new().s("engine", String("kokoro")).s("voice", String("af_heart")).done()
+    v.settings = try engines.apply(Json.Null, Obj.new().j("dictation", dictation).j("speech", speech).done())
+    // The tiles, as voice.get gives them, so the downloads are told with them.
+    let listed = engines.listed(v.settings.copy(), List<String>())
+    v.keep_listed(listed)
+    if what == "fetch" {
+        v.model(engine.copy(), kind_of(engine), String("download"))
+        let m = try wait_for(mut v, ready_or_failed, 3600000)
+        _ = m
+        return
+    }
+    if what == "delete" {
+        v.model(engine.copy(), kind_of(engine), String("delete"))
+        println("deleted {engine}")
+        return
+    }
+    if what == "hear" {
+        let w = match Wave.open(a[3].copy()) {
+            ok(x) => x,
+            err(e) => fail "{e}",
+        }
+        println("{a[3]}: {w.duration()} s at {w.rate} Hz")
+        v.listen()
+        // A tenth of a second at a time, as the mic sends it, as it's said.
+        let step = usize(w.rate / 10 * w.channels * 2)
+        var last = Map<String, String>()
+        var i: usize = 0
+        while i < w.frames.len() {
+            let end = if i + step < w.frames.len() { i + step } else { w.frames.len() }
+            var piece = List<u8>()
+            for k in i..end { piece.push(w.frames[k]) }
+            v.audio(piece, w.rate, w.channels)
+            _ = drain(mut v, mut last, nothing)
+            unsafe { thread.sleep(100000000) }
+            i = end
+        }
+        v.stop()
+        let m = try wait_for(mut v, dictated, 600000)
+        println("heard: {str_at(m, "text") ?? String()}")
+        return
+    }
+    if what == "say" {
+        let out = a[3].copy()
+        v.speak(engine.copy(), String("check"), String(), String())
+        let m = try wait_for(mut v, spoken, 600000)
+        if let why = str_at(m.copy(), "error") { fail why }
+        let file = str_at(m, "file") ?? String()
+        match fs.copy(file, out.copy()) {
+            ok => {},
+            err(e) => fail "{e}",
+        }
+        let w = match Wave.open(out.copy()) {
+            ok(x) => x,
+            err(e) => fail "{e}",
+        }
+        println("said it: {out}, {w.duration()} s at {w.rate} Hz")
+        return
+    }
+    fail "no such thing as {what}"
+}

@@ -1,0 +1,519 @@
+module core.models
+
+// The voice models this device runs itself (PLAN.md, "Voice", "On the device"):
+// Parakeet v2 and Whisper large v3 turbo for dictation, Kokoro for speech, and what they
+// all need, sherpa-onnx's C library for this system, and Silero's voice detector, which
+// cuts dictation into the short pieces the models write. Each is downloaded once, into
+// the app's models folder, a piece at a time, each piece checked by its size and its
+// SHA-256 before it's kept. A model is used only once every piece of it is there and
+// checked, which its folder's `.ready` says.
+//
+// Every address is pinned: sherpa-onnx v2.0.3's release, its model releases on GitHub,
+// and its author's model repositories on Hugging Face at a commit. The sizes and hashes
+// are those files' own, checked by downloading each one in November 2026.
+import std.bytes
+import std.env
+import std.fs
+import std.hash.{Algorithm, Digest}
+import std.http
+import std.http.server.{Server}
+import std.net.{Waker}
+import std.tar.{Tar}
+import std.thread.{Task, sleep}
+import shared.obj.{Obj, str_at}
+import std.json.{Json}
+
+/// The sherpa-onnx release every piece comes from, or goes with.
+pub const SHERPA: str = "2.0.3"
+
+/// A file a model is made of: where it comes from, its size and its SHA-256, and where
+/// it goes in the model's folder. An archive (`unpack`, its top folder's name) is
+/// opened into the folder once it's checked, and isn't kept.
+pub struct Piece {
+    pub model: str
+    pub url: str
+    pub file: str
+    pub size: u64
+    pub sha256: str
+    pub unpack: str
+}
+
+/// Every piece, by the model it's part of. `runtime-SYSTEM-ARCH` is sherpa-onnx's
+/// shared library for that system, with ONNX Runtime beside it.
+pub const PIECES: [Piece; 13] = [
+    Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/encoder.int8.onnx", file: "encoder.int8.onnx", size: 652282309, sha256: "92a10bd9c23936ea0566c29f963bc57c2a5df4261b6a8921c39abea66557ca8b", unpack: "" },
+    Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/decoder.int8.onnx", file: "decoder.int8.onnx", size: 7257753, sha256: "4d097bae3bac5c96018d5293ba39f1b657296102b142affda40378f38b020f41", unpack: "" },
+    Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/joiner.int8.onnx", file: "joiner.int8.onnx", size: 1739080, sha256: "77a29f3e5ac7d37074e0af465391b80f314015d5b97f0f90c6c7767f1d56f428", unpack: "" },
+    Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/tokens.txt", file: "tokens.txt", size: 9384, sha256: "ec182b70dd42113aff6c5372c75cac58c952443eb22322f57bbd7f53977d497d", unpack: "" },
+    Piece { model: "whisper", url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/2ca6ff69fc878651b770880507669577ac41c2ff/turbo-encoder.int8.onnx", file: "turbo-encoder.int8.onnx", size: 674716297, sha256: "b02dcdf54f348741e93fe732b67d933c8dcb6735655f710640143081db38878b", unpack: "" },
+    Piece { model: "whisper", url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/2ca6ff69fc878651b770880507669577ac41c2ff/turbo-decoder.int8.onnx", file: "turbo-decoder.int8.onnx", size: 361080764, sha256: "20accd02388482eb3a46bd615631adfdc85e1eb2c7db9ea3f02a40ffe6b81547", unpack: "" },
+    Piece { model: "whisper", url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/2ca6ff69fc878651b770880507669577ac41c2ff/turbo-tokens.txt", file: "turbo-tokens.txt", size: 816730, sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126", unpack: "" },
+    Piece { model: "kokoro", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2", file: "kokoro-multi-lang-v1_0.tar.bz2", size: 349886476, sha256: "60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4", unpack: "kokoro-multi-lang-v1_0" },
+    Piece { model: "vad", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx", file: "silero_vad.onnx", size: 643854, sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6", unpack: "" },
+    Piece { model: "runtime-windows-x86_64", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-v2.0.3-win-x64-shared-MT-Release-lib.tar.bz2", file: "runtime.tar.bz2", size: 8551938, sha256: "61a0b0371b54554c65068f994c83de482e78928fa9d0b7dfb7c35a451595e7fb", unpack: "sherpa-onnx-v2.0.3-win-x64-shared-MT-Release-lib" },
+    Piece { model: "runtime-windows-aarch64", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-v2.0.3-win-arm64-shared-MT-Release-lib.tar.bz2", file: "runtime.tar.bz2", size: 8128614, sha256: "5c6067347a1e9a48bda537e450f3ea6f7156e6d48b661cae730c4acd912ad09f", unpack: "sherpa-onnx-v2.0.3-win-arm64-shared-MT-Release-lib" },
+    Piece { model: "runtime-macos-aarch64", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-v2.0.3-osx-arm64-shared-lib.tar.bz2", file: "runtime.tar.bz2", size: 8997173, sha256: "632ea83f617d9995f01a889cc61f19579e64b0964f67e84a3526a94a049d0c70", unpack: "sherpa-onnx-v2.0.3-osx-arm64-shared-lib" },
+    Piece { model: "runtime-macos-x86_64", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-v2.0.3-osx-x64-shared-lib.tar.bz2", file: "runtime.tar.bz2", size: 10281635, sha256: "eb9aaf3fcad6d81d38425356dacaaddc507516c8f8b222128d0f473c5199ca2a", unpack: "sherpa-onnx-v2.0.3-osx-x64-shared-lib" },
+]
+
+/// The runtime's model name on this system, or why there's none.
+pub fn runtime_model() -> String ! String {
+    let os = env.os()
+    if os == "ios" { fail "Runs on your computer, not on iPhone." }
+    if os != "windows" and os != "macos" { fail "Runs on Windows and macOS." }
+    return "runtime-{os}-{env.arch()}"
+}
+
+/// The sherpa-onnx library in the runtime's folder.
+pub fn library(root: String) -> String ! String {
+    let rt = try runtime_model()
+    let name = if env.os() == "windows" { "sherpa-onnx-c-api.dll" } else { "libsherpa-onnx-c-api.dylib" }
+    return "{root}/{rt}/lib/{name}"
+}
+
+/// The models an engine needs: its own, the voice detector for dictation, and the
+/// runtime.
+pub fn needs(engine: String, kind: String) -> List<String> ! String {
+    var out: List<String> = [engine.copy()]
+    if kind == "dictation" { out.push(String("vad")) }
+    out.push(try runtime_model())
+    return out
+}
+
+/// What a model's `.ready` holds once every piece is there: the release, and each
+/// piece's hash, so a model pinned again is downloaded again.
+fn mark(model: String, pieces: List<Piece>) -> String {
+    var lines: List<String> = ["loom voice model {model}", "sherpa-onnx {SHERPA}"]
+    for p in pieces {
+        if p.model == model { lines.push("{p.file} {p.sha256}") }
+    }
+    return "{lines.join("\n")}\n"
+}
+
+/// Whether a model is here, whole and checked.
+pub fn ready(root: String, model: String, pieces: List<Piece>) -> bool {
+    return match fs.read_text("{root}/{model}/.ready") {
+        ok(some(t)) => t == mark(model, pieces),
+        _ => false,
+    }
+}
+
+/// A model's pieces' sizes, together.
+pub fn size_of(model: String, pieces: List<Piece>) -> u64 {
+    var n: u64 = 0
+    for p in pieces {
+        if p.model == model { n += p.size }
+    }
+    return n
+}
+
+/// What a download says as it goes, from its thread.
+pub enum Got {
+    Progress(String, u64, u64)    // the engine, the bytes that came, of how many
+    Done(String)
+    Failed(String, String)        // why
+    Cancelled(String)
+}
+
+/// An engine's models downloaded on a thread of their own, a piece at a time: each into
+/// its model's staging folder, `.NAME.part`, its hash worked out as it comes, kept once
+/// its size and hash are right, and the staging folder put in the model's place with
+/// its `.ready` once every piece is.
+struct Fetching {
+    engine: String
+    root: String
+    models: List<String>
+    pieces: List<Piece>
+    place: String?      // a fake host in place of each piece's, for tests
+    cancel: Receiver<bool>
+    out: Sender<Got>
+    waker: Waker?
+}
+
+impl Task for Fetching {
+    fn run(own self) {
+        var me = self
+        let engine = me.engine.copy()
+        var total: u64 = 0
+        for m in me.models { total += size_of(m.copy(), me.pieces.copy()) }
+        var came: u64 = 0
+        var why = String()
+        for m in me.models.copy() {
+            match me.fetch_model(m, mut came, total) {
+                ok(true) => {},
+                ok(false) => {
+                    me.out.send(Got.Cancelled(engine.copy()))
+                    me.wake()
+                    return
+                },
+                err(e) => {
+                    why = e
+                    break
+                },
+            }
+        }
+        me.out.send(if why.len() > 0 { Got.Failed(engine, why) } else { Got.Done(engine) })
+        me.wake()
+    }
+}
+
+impl Fetching {
+    fn wake(self) {
+        if let w = self.waker { w.wake() }
+    }
+
+    fn url_of(self, p: Piece) -> String {
+        let u = String(p.url)
+        let place = self.place else return u
+        // https://host/path, with the fake host in its place.
+        let after = u[8..].copy()
+        let slash = after.find("/") ?? after.len()
+        return "{place}{after[slash..]}"
+    }
+
+    // One model, unless it's here: true once it is, false if it was cancelled.
+    fn fetch_model(mut self, model: String, came: mut u64, total: u64) -> bool ! String {
+        if ready(self.root.copy(), model.copy(), self.pieces.copy()) { return true }
+        let stage = "{self.root}/.{model}.part"
+        let home = "{self.root}/{model}"
+        if fs.exists(stage.copy()) { if let err(e) = fs.remove_dir_all(stage.copy()) { fail "can't clear {stage}: {e}" } }
+        if let err(e) = fs.make_dir_all(stage.copy()) { fail "can't make {stage}: {e}" }
+        var unpacked = String()
+        for p in self.pieces.copy() {
+            if p.model != model { continue }
+            let path = "{stage}/{p.file}"
+            let whole = try self.fetch_piece(p, path.copy(), mut came, total)
+            if not whole {
+                if let err(_) = fs.remove_dir_all(stage.copy()) {}
+                return false
+            }
+            if p.unpack.len() > 0 {
+                // Checked, so opened: its top folder is the model's.
+                let archive = match fs.read(path.copy()) {
+                    ok(b) => b,
+                    err(e) => fail "can't read {path}: {e}",
+                }
+                let t = try Tar.open(archive)
+                try t.extract(stage.copy())
+                if let err(e) = fs.remove_file(path.copy()) { fail "can't remove {path}: {e}" }
+                unpacked = "{stage}/{p.unpack}"
+            }
+        }
+        let from = if unpacked.len() > 0 { unpacked.copy() } else { stage.copy() }
+        if let err(e) = fs.write_text("{from}/.ready", mark(model.copy(), self.pieces.copy())) { fail "can't write {from}/.ready: {e}" }
+        if fs.exists(home.copy()) { if let err(e) = fs.remove_dir_all(home.copy()) { fail "can't clear {home}: {e}" } }
+        if let err(e) = fs.rename(from.copy(), home.copy()) { fail "can't put {model} in {home}: {e}" }
+        if unpacked.len() > 0 { if let err(_) = fs.remove_dir_all(stage) {} }
+        return true
+    }
+
+    // One piece, written as it comes and checked: true once it's whole, false if it
+    // was cancelled.
+    fn fetch_piece(mut self, p: Piece, path: String, came: mut u64, total: u64) -> bool ! String {
+        let u = self.url_of(p)
+        var s = http.stream_get(u.copy(), List<http.Header>(), 60000, 120000)
+        let head = match s.head() {
+            ok(h) => h,
+            err(e) => fail "can't download {p.file}: {e}",
+        }
+        if head.status != 200 { fail "can't download {p.file}: {head.status} from {u}" }
+        var f = match fs.create(path.copy()) {
+            ok(x) => x,
+            err(e) => fail "can't write {path}: {e}",
+        }
+        var d = Digest.new(Algorithm.Sha256)
+        var n: u64 = 0
+        var told: u64 = 101
+        loop {
+            if let _ = self.cancel.next() {
+                s.close()
+                if let err(_) = f.close() {}
+                return false
+            }
+            let piece = match s.read() {
+                ok(some(b)) => b,
+                ok(none) => break,
+                err(e) => fail "can't download {p.file}: {e}",
+            }
+            n += u64(piece.len())
+            if n > p.size { fail "{p.file} is bigger than it should be" }
+            d.add(piece.copy())
+            if let err(e) = f.write(piece) { fail "can't write {path}: {e}" }
+            let pct = if total == 0 { 0u64 } else { (came + n) * 100 / total }
+            if pct != told {
+                told = pct
+                self.out.send(Got.Progress(self.engine.copy(), came + n, total))
+                self.wake()
+            }
+        }
+        if let err(e) = f.close() { fail "can't write {path}: {e}" }
+        if n != p.size { fail "{p.file} came with {n} bytes of its {p.size}" }
+        let sha = bytes.hex(d.finish())
+        if sha != p.sha256 { fail "{p.file} isn't the file it should be: its SHA-256 is {sha}" }
+        came += n
+        return true
+    }
+}
+
+/// Where an engine's models are on this device.
+pub enum State {
+    Absent
+    Downloading(u64, u64)    // the bytes that came, of how many
+    Ready
+    Failed(String)
+    Unavailable(String)      // why they can't run here
+}
+
+/// The models on this device: which are here, the downloads under way, and what they
+/// said since.
+pub struct Models {
+    pub root: String?           // the app's models folder; none where models don't run
+    pub place: String?          // a fake host for every piece, for tests
+    pub pieces: List<Piece>     // the manifest, PIECES but for tests
+    pub waker: Waker?
+    downloading: Map<String, (u64, u64)>
+    failed: Map<String, String>
+    cancels: Map<String, Sender<bool>>
+    got: Receiver<Got>
+}
+
+impl Models {
+    pub fn new() -> Models {
+        var pieces = List<Piece>()
+        for p in PIECES { pieces.push(p) }
+        return Models { root: none, place: none, pieces: pieces, waker: none, downloading: Map<String, (u64, u64)>(), failed: Map<String, String>(), cancels: Map<String, Sender<bool>>(), got: Receiver<Got>() }
+    }
+
+    /// Where `engine`'s models are, of `kind`.
+    pub fn state(self, engine: String, kind: String) -> State {
+        let models = match needs(engine.copy(), kind) {
+            ok(m) => m,
+            err(why) => return State.Unavailable(why),
+        }
+        let root = self.root.copy() ?? String()
+        if root.len() == 0 { return State.Unavailable(String("This app has no folder for models.")) }
+        if let (n, of) = self.downloading.find(engine.copy()) { return State.Downloading(n, of) }
+        if let why = self.failed.find(engine.copy()) { return State.Failed(why.copy()) }
+        for m in models {
+            if not ready(root.copy(), m, self.pieces.copy()) { return State.Absent }
+        }
+        return State.Ready
+    }
+
+    /// Whether `engine`'s models are all here.
+    pub fn is_ready(self, engine: String, kind: String) -> bool {
+        return match self.state(engine, kind) {
+            State.Ready => true,
+            _ => false,
+        }
+    }
+
+    /// Starts downloading `engine`'s models, unless they're here or coming.
+    pub fn download(mut self, engine: String, kind: String) {
+        let root = self.root.copy() ?? String()
+        if root.len() == 0 or self.downloading.contains(engine.copy()) { return }
+        let models = match needs(engine.copy(), kind) {
+            ok(m) => m,
+            err(_) => return,
+        }
+        if let err(e) = fs.make_dir_all(root.copy()) {
+            self.failed.insert(engine.copy(), "can't make {root}: {e}")
+            return
+        }
+        var total: u64 = 0
+        for m in models { if not ready(root.copy(), m.copy(), self.pieces.copy()) { total += size_of(m, self.pieces.copy()) } }
+        _ = self.failed.remove(engine.copy())
+        self.downloading.insert(engine.copy(), (0u64, total))
+        let cancel = Receiver<bool>()
+        self.cancels.insert(engine.copy(), cancel.sender())
+        let task = Fetching { engine: engine.copy(), root: root, models: models, pieces: self.pieces.copy(), place: self.place.copy(), cancel: cancel, out: self.got.sender(), waker: self.waker }
+        _ = unsafe { Thread.spawn(task) }
+    }
+
+    /// Stops `engine`'s download, and what of it came goes.
+    pub fn cancel(mut self, engine: String) {
+        if let s = mut self.cancels.find(engine.copy()) { s.send(true) }
+    }
+
+    /// Removes `engine`'s own model; and the runtime and the voice detector too, once
+    /// no engine of the device's is left that needs them.
+    pub fn delete(mut self, engine: String) ! String {
+        let root = self.root.copy() ?? String()
+        if root.len() == 0 or self.downloading.contains(engine.copy()) { return }
+        if not is_model(engine.copy()) { return }
+        _ = self.failed.remove(engine.copy())
+        let home = "{root}/{engine}"
+        if fs.exists(home.copy()) {
+            if let err(e) = fs.remove_dir_all(home.copy()) { fail "can't remove {home}: {e}" }
+        }
+        var left = false
+        for e in ["parakeet", "whisper", "kokoro"] {
+            if ready(root.copy(), String(e), self.pieces.copy()) { left = true }
+        }
+        if left { return }
+        var shared: List<String> = [String("vad")]
+        if let ok(rt) = runtime_model() { shared.push(rt) }
+        for m in shared {
+            let at = "{root}/{m}"
+            if fs.exists(at.copy()) {
+                if let err(e) = fs.remove_dir_all(at.copy()) { fail "can't remove {at}: {e}" }
+            }
+        }
+    }
+
+    /// What the downloads said since: the engines whose state changed.
+    pub fn poll(mut self) -> List<String> {
+        var changed = List<String>()
+        while let g = self.got.next() {
+            match g {
+                Got.Progress(e, n, of) => {
+                    if self.downloading.contains(e.copy()) { self.downloading.insert(e.copy(), (n, of)) }
+                    changed.push(e)
+                },
+                Got.Done(e) => {
+                    _ = self.downloading.remove(e.copy())
+                    _ = self.cancels.remove(e.copy())
+                    changed.push(e)
+                },
+                Got.Failed(e, why) => {
+                    _ = self.downloading.remove(e.copy())
+                    _ = self.cancels.remove(e.copy())
+                    self.failed.insert(e.copy(), why)
+                    changed.push(e)
+                },
+                Got.Cancelled(e) => {
+                    _ = self.downloading.remove(e.copy())
+                    _ = self.cancels.remove(e.copy())
+                    changed.push(e)
+                },
+            }
+        }
+        return changed
+    }
+
+    /// The state a tile shows: `model`, with `state` (`absent`, `downloading`, `ready`,
+    /// `failed` or `unavailable`), `percent` while it downloads, `size` in bytes, and
+    /// `why` for a failure or for a system that runs none.
+    pub fn shown(self, engine: String, kind: String) -> Json {
+        var size: u64 = 0
+        if let ok(models) = needs(engine.copy(), kind.copy()) {
+            let root = self.root.copy() ?? String()
+            for m in models { if not ready(root.copy(), m.copy(), self.pieces.copy()) { size += size_of(m, self.pieces.copy()) } }
+        }
+        let o = Obj.new()
+        return match self.state(engine, kind) {
+            State.Absent => o.s("state", String("absent")).i("size", i64.wrap(size)).done(),
+            State.Downloading(n, of) => o.s("state", String("downloading")).i("percent", i64.wrap(if of == 0 { 0u64 } else { n * 100 / of })).i("size", i64.wrap(of)).done(),
+            State.Ready => o.s("state", String("ready")).done(),
+            State.Failed(why) => o.s("state", String("failed")).s("why", why).i("size", i64.wrap(size)).done(),
+            State.Unavailable(why) => o.s("state", String("unavailable")).s("why", why).done(),
+        }
+    }
+}
+
+/// Whether `engine` is one of the models, by its folder's name.
+fn is_model(engine: String) -> bool {
+    return engine == "parakeet" or engine == "whisper" or engine == "kokoro"
+}
+
+/// A model's file, in its folder.
+pub fn file(root: String, model: str, name: str) -> String {
+    return "{root}/{model}/{name}"
+}
+
+// A host for the tests' pieces: `dir`'s files, on a thread.
+struct Serving {
+    server: Server
+    dir: String
+}
+
+impl Task for Serving {
+    fn run(own self) {
+        var s = self
+        s.server.serve(s.dir.copy())
+    }
+}
+
+// Parakeet, the voice detector and every system's runtime, each a few bytes, from
+// `encoder` on the tests' host; the runtime is the same on each.
+fn test_pieces(encoder: str) -> List<Piece> {
+    var out: List<Piece> = [
+        Piece { model: "parakeet", url: encoder, file: "encoder.int8.onnx", size: 18, sha256: "cd2894b2be6d67522d11771a340c281f66dcd5edd23e3b76b2c6685b874b30f3", unpack: "" },
+        Piece { model: "vad", url: "https://example.com/silero", file: "silero_vad.onnx", size: 6, sha256: "4610c229a70a8fcb538134ac71982d549674b8d49ae00352d0ac8575ffa09a25", unpack: "" },
+    ]
+    for rt in ["runtime-windows-x86_64", "runtime-windows-aarch64", "runtime-macos-aarch64", "runtime-macos-x86_64"] {
+        out.push(Piece { model: rt, url: "https://example.com/sherpa", file: "sherpa-onnx.dll", size: 11, sha256: "5ef336669c62a841b4fd2180d29da334e19223ead28ad07b4447206a69335adf", unpack: "" })
+    }
+    return out
+}
+
+// Models in a folder of their own, downloading from a host that serves the pieces,
+// and a wrong encoder of the same size beside them.
+fn test_models(encoder: str) -> Models {
+    let dir = fs.temp_dir()!
+    fs.make_dir_all("{dir}/served")!
+    fs.write_text("{dir}/served/parakeet", String("parakeet's encoder"))!
+    fs.write_text("{dir}/served/wrong", String("parakeet's ENCODER"))!
+    fs.write_text("{dir}/served/silero", String("silero"))!
+    fs.write_text("{dir}/served/sherpa", String("sherpa-onnx"))!
+    var srv = Server.listen(0)!
+    srv.log = false
+    let base = srv.url()[..srv.url().len() - 1].copy()
+    _ = unsafe { Thread.spawn(Serving { server: srv, dir: "{dir}/served" }) }
+    var m = Models.new()
+    m.root = some("{dir}/models")
+    m.place = some(base)
+    m.pieces = test_pieces(encoder)
+    return m
+}
+
+// Polls until `engine` isn't downloading.
+fn test_wait(m: mut Models, engine: str) {
+    var waited = 0
+    loop {
+        _ = m.poll()
+        match m.state(String(engine), String("dictation")) {
+            State.Downloading(_, _) => {},
+            _ => return,
+        }
+        waited += 1
+        if waited > 400 { panic("the download didn't end") }
+        unsafe { sleep(25000000) }
+    }
+}
+
+@test
+fn a_model_is_used_only_once_its_whole_and_checked() {
+    var m = test_models("https://example.com/parakeet")
+    if env.os() != "windows" and env.os() != "macos" {
+        assert("{m.shown(String("parakeet"), String("dictation"))}" == #"{"state":"unavailable","why":"Runs on Windows and macOS."}"#)
+        return
+    }
+    let root = m.root.copy() ?? String()
+    assert("{m.shown(String("parakeet"), String("dictation"))}" == #"{"state":"absent","size":35}"#)
+    m.download(String("parakeet"), String("dictation"))
+    test_wait(mut m, "parakeet")
+    assert("{m.shown(String("parakeet"), String("dictation"))}" == #"{"state":"ready"}"#)
+    assert(fs.read_text("{root}/parakeet/encoder.int8.onnx")! == some(String("parakeet's encoder")))
+    assert(fs.exists("{root}/vad/silero_vad.onnx") and not fs.exists("{root}/.parakeet.part"))
+    // Kokoro needs the runtime, which is here, and its own model, which isn't.
+    assert("{m.shown(String("kokoro"), String("speech"))}" == #"{"state":"absent","size":0}"#)
+    // Deleting the last model takes the runtime and the voice detector with it.
+    m.delete(String("parakeet"))!
+    assert(not fs.exists("{root}/parakeet") and not fs.exists("{root}/vad") and not fs.exists("{root}/{runtime_model()!}"))
+    assert("{m.shown(String("parakeet"), String("dictation"))}" == #"{"state":"absent","size":35}"#)
+}
+
+@test
+fn a_file_thats_not_the_pinned_one_is_never_kept() {
+    var m = test_models("https://example.com/wrong")
+    if env.os() != "windows" and env.os() != "macos" { return }
+    let root = m.root.copy() ?? String()
+    m.download(String("parakeet"), String("dictation"))
+    test_wait(mut m, "parakeet")
+    let shown = m.shown(String("parakeet"), String("dictation"))
+    assert(str_at(shown.copy(), "state") == some(String("failed")))
+    assert(str_at(shown, "why") == some(String("encoder.int8.onnx isn't the file it should be: its SHA-256 is 607a4534a090d0133a647f9528342c3e89be3975367d19e961733da4adcd6c16")))
+    assert(not fs.exists("{root}/parakeet"))
+    assert(not m.is_ready(String("parakeet"), String("dictation")))
+}
