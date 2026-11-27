@@ -440,6 +440,20 @@ impl TextViewState {
         self.selected_text_in(None)
     }
 
+    /// loom: the box around everything the selection's colour was painted over in this
+    /// view at its last paint, in the window, or `None` when nothing was.
+    pub fn painted_selection(&self) -> Option<Bounds<Pixels>> {
+        self.painted_selection_boxes()
+            .into_iter()
+            .reduce(|a, b| a.union(&b))
+    }
+
+    /// loom: each box the selection's colour was painted over in this view at its last
+    /// paint, in the window, the gaps between its rows filled included.
+    pub fn painted_selection_boxes(&self) -> Vec<Bounds<Pixels>> {
+        self.selection_adapter.selection_boxes()
+    }
+
     /// Return the original Markdown source byte range corresponding to the
     /// rendered selection.
     ///

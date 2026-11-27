@@ -5,7 +5,7 @@ use crate::{
     TextSelectionEvent, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun,
     TextSelectionSnapshot,
 };
-use gpui::{App, Bounds, EntityId, Hitbox, Pixels, Point, WeakEntity, Window};
+use gpui::{App, Bounds, EntityId, Hitbox, Hsla, Pixels, Point, WeakEntity, Window, point, px};
 
 use super::{
     TextViewState, inline::InlineSelectionProjection,
@@ -103,6 +103,66 @@ struct PaintedText {
     /// The caret boxes at the first and last selected character painted this
     /// frame, where the touch handles go.
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
+    /// loom: each box the selection's colour was painted in this frame, in paint order
+    /// (`fill_selection`).
+    selection_boxes: Vec<Bounds<Pixels>>,
+}
+
+/// loom: paints the selection's colour over `rect`, its edges on whole device pixels so
+/// boxes that meet leave no seam between them, and keeps the box for the view the paint
+/// is in (`TextViewState::painted_selection`).
+pub(super) fn fill_selection(rect: Bounds<Pixels>, color: Hsla, window: &mut Window, cx: &App) {
+    let rect = snap_to_pixels(rect, window.scale_factor()).intersect(&window.content_mask().bounds);
+    if rect.size.width <= Pixels::ZERO || rect.size.height <= Pixels::ZERO {
+        return;
+    }
+    window.paint_quad(gpui::fill(rect, color));
+    if let Some(view) = GlobalState::global(cx).text_view_state() {
+        view.read(cx)
+            .selection_adapter
+            .frame
+            .borrow_mut()
+            .selection_boxes
+            .push(rect);
+    }
+}
+
+/// loom: `rect` with each edge moved to the nearest device pixel.
+pub(super) fn snap_to_pixels(rect: Bounds<Pixels>, scale: f32) -> Bounds<Pixels> {
+    let snap = |v: Pixels| px((v.as_f32() * scale).round() / scale);
+    Bounds::from_corners(
+        point(snap(rect.left()), snap(rect.top())),
+        point(snap(rect.right()), snap(rect.bottom())),
+    )
+}
+
+/// loom: what fills the space between one painted row of a selection and the next, so
+/// a selection over several paragraphs or list items reads as one, as a system text
+/// view's does: for each two rows one above the other with a gap between them no taller
+/// than a row, the gap, as wide as both rows share. Boxes that overlap from top to
+/// bottom are one row.
+pub(super) fn selection_gaps(boxes: &[Bounds<Pixels>]) -> Vec<Bounds<Pixels>> {
+    let mut sorted = boxes.to_vec();
+    sorted.sort_by(|a, b| a.top().as_f32().total_cmp(&b.top().as_f32()));
+    let mut rows: Vec<Bounds<Pixels>> = Vec::new();
+    for b in sorted {
+        match rows.last_mut() {
+            Some(row) if b.top() < row.bottom() - px(0.5) => *row = row.union(&b),
+            _ => rows.push(b),
+        }
+    }
+    rows.windows(2)
+        .filter_map(|pair| {
+            let (above, below) = (pair[0], pair[1]);
+            let gap = below.top() - above.bottom();
+            let tallest = above.size.height.max(below.size.height);
+            let left = above.left().max(below.left());
+            let right = above.right().min(below.right());
+            (gap > Pixels::ZERO && gap <= tallest && right > left).then(|| {
+                Bounds::from_corners(point(left, above.bottom()), point(right, below.top()))
+            })
+        })
+        .collect()
 }
 
 pub(super) enum CopyProjection {
@@ -322,6 +382,26 @@ impl TextViewSelectionAdapter {
         frame.text_runs.clear();
         frame.copy_projections.clear();
         frame.selection_edges = None;
+        frame.selection_boxes.clear();
+    }
+
+    /// loom: the boxes the selection's colour was painted in at the view's last paint.
+    pub(super) fn selection_boxes(&self) -> Vec<Bounds<Pixels>> {
+        self.frame.borrow().selection_boxes.clone()
+    }
+
+    /// loom: fills the gaps between the rows of the selection painted this frame
+    /// (`selection_gaps`), and keeps them with its boxes.
+    pub(super) fn fill_selection_gaps(&self, color: Hsla, window: &mut Window) {
+        let gaps = selection_gaps(&self.frame.borrow().selection_boxes);
+        let mask = window.content_mask().bounds;
+        for gap in gaps {
+            let gap = gap.intersect(&mask);
+            if gap.size.width > Pixels::ZERO && gap.size.height > Pixels::ZERO {
+                window.paint_quad(gpui::fill(gap, color));
+                self.frame.borrow_mut().selection_boxes.push(gap);
+            }
+        }
     }
 
     /// Records one inline's painted selection ends. Inlines paint in document

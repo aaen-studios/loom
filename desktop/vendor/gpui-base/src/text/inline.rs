@@ -1403,7 +1403,21 @@ impl Element for Inline {
                 selection.start.min(selection.end)..selection.start.max(selection.end),
                 window.content_mask().bounds,
                 &mut state.selection_rows,
-                |rect| window.paint_quad(gpui::fill(rect, color)),
+                |rect| {
+                    // loom: a piece of a line with an inline object in it, a card's pill
+                    // or a picture, is laid out on the line's whole height, taller than
+                    // its own text's: its selection fills that height, as the object's
+                    // does, so the line's selection is one even band
+                    // (`super::selection_adapter::fill_selection`).
+                    let rect = match self.selection_bounds {
+                        Some(row) => Bounds::from_corners(
+                            point(rect.left(), row.top()),
+                            point(rect.right(), row.bottom()),
+                        ),
+                        None => rect,
+                    };
+                    super::selection_adapter::fill_selection(rect, color, window, cx);
+                },
             );
             if let Some((start, end)) = Self::selection_edges(&selection, &text_layout)
                 && let Some(text_view_state) = GlobalState::global(cx).text_view_state()
