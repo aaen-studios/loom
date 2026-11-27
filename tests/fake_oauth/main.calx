@@ -20,7 +20,8 @@ module tests.fake_oauth.main
 //               it from the repository's root)
 //
 // /mcp, /mcp2 and /mcp3 offer one tool, `whoami`, to a request with a live access
-// token for them, and answer 401 to any other; /api/mcp offers `lights`. Signing in checks what OAuth 2.1 and MCP
+// token for them, and answer 401 to any other; /api/mcp offers `lights`. /mcp's
+// metadata names it T3 Code (`resource_name`), as T3 Code's server does. Signing in checks what OAuth 2.1 and MCP
 // ask: a known client and its redirect, a PKCE challenge (S256) that the code's
 // verifier matches, the server as `resource`, a code used once. Its consent
 // page is a link to the redirect, for a test to follow as the person's
@@ -205,6 +206,7 @@ impl Fake {
     // --- Metadata ---
 
     fn resource_metadata(self, path: str, server: String) -> Response {
+        if path == "/mcp" { return json(200, object([("resource", Json.Str("{self.base}{path}")), ("resource_name", text("T3 Code")), ("authorization_servers", Json.Array([Json.Str(server.copy())])), ("scopes_supported", strings(["tools"]))])) }
         return json(200, object([("resource", Json.Str("{self.base}{path}")), ("authorization_servers", Json.Array([Json.Str(server.copy())])), ("scopes_supported", strings(["tools"]))]))
     }
 
