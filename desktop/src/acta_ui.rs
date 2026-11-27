@@ -4,7 +4,7 @@
 //! What each shows, and what a change sends, is the model's (`model::acta`).
 
 use super::*;
-use crate::model::acta::{self as panels, BoardTab, Panel};
+use crate::model::acta::{self as panels, BoardTab, CardTab, Panel};
 
 thread_local! {
     /// The window, for a card's pill and its preview, which draw outside it, to open the
@@ -12,6 +12,8 @@ thread_local! {
     static OPENER: RefCell<Option<WeakEntity<Loom>>> = const { RefCell::new(None) };
     /// The form's and the list's fields, made the first time they show.
     static FIELDS: RefCell<Option<Fields>> = const { RefCell::new(None) };
+    /// The card the comment box was last shown for, `board#id`.
+    static COMMENT_ON: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 #[derive(Clone)]
@@ -19,6 +21,73 @@ struct Fields {
     title: Entity<InputState>,
     description: Entity<TextareaState>,
     search: Entity<InputState>,
+    comment: Entity<TextareaState>,
+}
+
+/// Acta's words for what it refused, under the chips.
+fn error_line(p: Palette, e: &str) -> Div {
+    div()
+        .text_size(px(size::SMALL))
+        .text_color(p.bad)
+        .child(e.to_string())
+}
+
+/// One of a card's properties as a chip under its title: its status, priority,
+/// assignee or size.
+fn prop_chip(p: Palette) -> Div {
+    div()
+        .h(px(22.0))
+        .px(px(8.0))
+        .flex()
+        .items_center()
+        .gap(px(5.0))
+        .rounded(px(6.0))
+        .border_1()
+        .border_color(p.line)
+        .bg(p.bg)
+        .text_size(px(size::CAPTION))
+        .text_color(p.ink_2)
+        .whitespace_nowrap()
+}
+
+/// A priority as three bars, rising, `filled` of them in ink.
+fn priority_icon(p: Palette, filled: u8) -> Div {
+    let mut icon = div()
+        .flex_none()
+        .h(px(10.0))
+        .flex()
+        .items_end()
+        .gap(px(1.5));
+    for (k, h) in [4.0, 7.0, 10.0].into_iter().enumerate() {
+        icon = icon.child(
+            div()
+                .w(px(2.5))
+                .h(px(h))
+                .rounded(px(0.5))
+                .bg(if (k as u8) < filled {
+                    p.ink_2
+                } else {
+                    p.line_strong
+                }),
+        );
+    }
+    icon
+}
+
+/// A person as a round avatar with their initial, `d` across.
+fn avatar(p: Palette, initial: &str, d: f32) -> Div {
+    div()
+        .flex_none()
+        .size(px(d))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(p.active)
+        .text_color(p.ink)
+        .text_size(px((d * 0.55).max(8.0)))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(initial.to_string())
 }
 
 /// Keeps the window, for the pills to open Acta's panels from.
@@ -63,24 +132,6 @@ fn status_ink(p: Palette, status: &str) -> Hsla {
             ..Default::default()
         },
     )
-}
-
-/// A small chip, as a card's preview has them: a status in its colour, an assignee,
-/// a size or a label.
-fn small_chip(words: String, color: Hsla, edge: Hsla) -> Div {
-    div()
-        .h(px(22.0))
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .rounded(px(11.0))
-        .border_1()
-        .border_color(edge)
-        .text_size(px(size::CAPTION))
-        .text_color(color)
-        .whitespace_nowrap()
-        .child(words)
 }
 
 /// A menu over everything, under what opened it.
@@ -175,6 +226,11 @@ impl Loom {
                     .placeholder("Description")
             }),
             search: cx.new(|cx| InputState::new(window, cx).placeholder("Search")),
+            comment: cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .auto_grow(2, 8)
+                    .placeholder("Comment…")
+            }),
         };
         FIELDS.with(|f| *f.borrow_mut() = Some(fields.clone()));
         fields
@@ -238,7 +294,7 @@ impl Loom {
         let w = window.viewport_size().width.as_f32();
         let width = side_width(self.acta_wide(), w, self.bar_width(w), self.side_w);
         let (head, body, foot) = match self.model.acta.panel.clone() {
-            Some(Panel::Card(c)) => self.card_side(*c, cx),
+            Some(Panel::Card(c)) => self.card_side(*c, window, cx),
             Some(Panel::Make(f)) => self.make_side(f, window, cx),
             Some(Panel::Board(b)) => self.board_side(b, window, cx),
             // The card was made, and its form went: the side closes with the next frame.
@@ -281,45 +337,51 @@ impl Loom {
     fn card_side(
         &mut self,
         c: panels::CardPanel,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Div, Div, Option<Div>) {
         let p = self.p;
+        let fields = self.acta_fields(window, cx);
+        // A comment that went through, or another card: the box starts empty.
+        let other = COMMENT_ON.with(|on| {
+            let mut on = on.borrow_mut();
+            let key = format!("{}#{}", c.board, c.id);
+            let other = *on != key;
+            *on = key;
+            other
+        });
+        if self.model.take_commented() || other {
+            fields
+                .comment
+                .update(cx, |s, cx| s.set_value("", window, cx));
+        }
         let board_name = c
             .detail
             .as_ref()
             .map(|d| d.card.board_name.clone())
             .filter(|n| !n.is_empty())
             .unwrap_or_else(|| self.model.board_name(&c.board));
-        let head = div()
-            .flex()
-            .items_center()
-            .gap(px(space::S))
-            .child(board_icon(p, 16.0))
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_family(font::MONO)
-                    .text_size(px(size::SMALL))
-                    .text_color(p.ink_2)
-                    .child(format!("{board_name} · {}", c.id)),
-            );
-        let mut page = div().flex().flex_col().gap(px(space::L));
+        let link = c
+            .detail
+            .as_ref()
+            .map(|d| d.card.link())
+            .unwrap_or_else(|| format!("https://{}/{}#{}", model::ACTA, c.board, c.id));
+        let head = self.card_head(&c, &board_name, &link, cx);
+        let mut page = div().flex().flex_col();
+        let mut foot = None;
         match &c.detail {
             None => {
                 if let Some(e) = &c.error {
-                    page = page.child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.bad)
-                            .child(e.clone()),
-                    );
+                    page = page.child(div().px(px(space::L)).child(error_line(p, e)));
                 }
             }
             Some(d) => {
                 page = page
                     .child(
                         div()
+                            .px(px(space::L))
+                            .pt(px(2.0))
+                            .pb(px(space::S))
                             .text_size(px(size::HEADING))
                             .line_height(px(size::HEADING * 1.3))
                             .font_weight(FontWeight::SEMIBOLD)
@@ -327,26 +389,29 @@ impl Loom {
                             .when(d.card.struck(), |t| t.line_through())
                             .child(d.card.title.clone()),
                     )
-                    .child(self.card_chips(&c, d, cx));
+                    .child(
+                        div()
+                            .px(px(space::L))
+                            .pb(px(space::M))
+                            .child(self.card_chips(&c, d, cx)),
+                    );
                 if let Some(e) = &c.error {
                     page = page.child(
                         div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.bad)
-                            .child(e.clone()),
+                            .px(px(space::L))
+                            .pb(px(space::M))
+                            .child(error_line(p, e)),
                     );
                 }
-                if !d.description.trim().is_empty() {
-                    let key = SharedString::from(format!("acta-desc-{}-{}", c.board, c.id));
-                    page = page.child(div().text_size(px(size::BODY)).text_color(p.ink).child(
-                        KeptText::new(key, d.description.clone(), |v| v.selectable(true)),
-                    ));
-                }
-                if !d.checklist.is_empty() {
-                    page = page.child(self.card_subtasks(d, cx));
-                }
-                if !d.comments.is_empty() {
-                    page = page.child(self.card_comments(&c, d));
+                page = page.child(self.card_tabs(&c, d, cx));
+                let tab = match c.tab {
+                    CardTab::Details => self.card_details(&c, d, cx),
+                    CardTab::Comments => self.card_comments(&c, d),
+                    CardTab::Activity => self.card_activity(d),
+                };
+                page = page.child(tab.px(px(space::L)).pt(px(space::M)));
+                if c.tab == CardTab::Comments && d.can_comment {
+                    foot = Some(self.comment_box(&c, &fields, cx));
                 }
             }
         }
@@ -355,31 +420,177 @@ impl Loom {
                 .id("acta-card")
                 .size_full()
                 .overflow_y_scroll()
-                .px(px(space::L))
-                .pt(px(space::S))
                 .pb(px(space::XL))
                 .child(page),
         );
-        let link = c
-            .detail
-            .as_ref()
-            .map(|d| d.card.link())
-            .unwrap_or_else(|| format!("https://{}/{}#{}", model::ACTA, c.board, c.id));
-        let foot = div()
+        (head, body, foot)
+    }
+
+    /// The side preview's head: Acta's mark, the board's name and the card's id, which a
+    /// click copies, then Open in Acta and ⋯.
+    fn card_head(
+        &self,
+        c: &panels::CardPanel,
+        board_name: &str,
+        link: &str,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let id = c.id.clone();
+        let open = link.to_string();
+        let more = div()
+            .id("acta-card-more")
+            .role(Role::Button)
+            .aria_label("More")
+            .size(px(control::ICON))
             .flex_none()
             .flex()
             .items_center()
+            .justify_center()
+            .rounded(px(radius::ROW))
+            .text_color(p.ink_3)
+            .cursor_pointer()
+            .soft_hover(transparent_black(), p.hover, Some((p.ink_3, p.ink)))
+            .tooltip(tip("More"))
+            .child(Icon::new(Ico::Ellipsis).small())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.model.toggle_card_menu();
+                cx.notify();
+            }));
+        let menu = c.more_menu.then(|| self.card_menu(c, link, cx));
+        div()
+            .flex()
+            .items_center()
             .gap(px(space::S))
-            .px(px(space::L))
-            .py(px(space::M))
-            .border_t_1()
-            .border_color(p.line)
+            .child(board_icon(p, 15.0))
             .child(
-                self.button("acta-open", "Open in Acta", false)
-                    .on_click(move |_, _, cx| cx.open_url(&link)),
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .text_size(px(size::SMALL))
+                    .text_color(p.ink_2)
+                    .child(div().min_w_0().truncate().child(format!("{board_name} ·")))
+                    .child(
+                        div()
+                            .id("acta-card-id")
+                            .role(Role::Button)
+                            .aria_label(format!("Copy {}", c.id))
+                            .flex_none()
+                            .px(px(2.0))
+                            .rounded(px(4.0))
+                            .font_family(font::MONO)
+                            .cursor_pointer()
+                            .soft_hover(transparent_black(), p.hover, Some((p.ink_2, p.ink)))
+                            .tooltip(tip("Copy"))
+                            .child(c.id.clone())
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))
+                            }),
+                    ),
             )
-            .children(self.follow_button("acta-follow-card", &c.board, Some(&c.id), cx));
-        (head, body, Some(foot))
+            .child(
+                div()
+                    .id("acta-open")
+                    .role(Role::Link)
+                    .aria_label("Open in Acta")
+                    .flex_none()
+                    .h(px(24.0))
+                    .px(px(6.0))
+                    .flex()
+                    .items_center()
+                    .rounded(px(radius::ROW))
+                    .text_size(px(size::SMALL))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.ink)
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .soft_hover(transparent_black(), p.hover, None)
+                    .child("Open in Acta")
+                    .on_click(move |_, _, cx| cx.open_url(&open)),
+            )
+            .child(div().relative().child(more).when_some(menu, |d, menu| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(control::ICON + 2.0))
+                        .right_0()
+                        .child(deferred(anchored().anchor(Anchor::TopRight).child(menu))),
+                )
+            }))
+    }
+
+    /// The head's ⋯ menu: Follow, Copy link, Copy branch where Acta gives one, and Make a
+    /// thread with a T3 server connected.
+    fn card_menu(&self, c: &panels::CardPanel, link: &str, cx: &mut Context<Self>) -> Div {
+        let mut menu = drop_menu(self.p, 200.0).on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.model.toggle_card_menu();
+            cx.notify();
+        }));
+        if let Some(following) = self.model.follows(&c.board, Some(&c.id)) {
+            let (board, id) = (c.board.clone(), c.id.clone());
+            let (icon, label) = if following {
+                (Ico::Check, "Following")
+            } else {
+                (Ico::Bell, "Follow")
+            };
+            menu = menu.child(
+                self.menu_item("acta-menu-follow", icon, label, false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.model.toggle_card_menu();
+                        if let Some(f) = this.model.toggle_follow(&board, Some(&id)) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+            );
+        }
+        let link = link.to_string();
+        menu = menu.child(
+            self.menu_item("acta-menu-link", Ico::Copy, "Copy link", false)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.model.toggle_card_menu();
+                    cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                    cx.notify();
+                })),
+        );
+        let Some(d) = c.detail.as_ref() else {
+            return menu;
+        };
+        if !d.branch.is_empty() {
+            let branch = d.branch.clone();
+            menu = menu.child(
+                self.menu_item("acta-menu-branch", Ico::GitBranch, "Copy branch", false)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.model.toggle_card_menu();
+                        cx.write_to_clipboard(ClipboardItem::new_string(branch.clone()));
+                        cx.notify();
+                    })),
+            );
+        }
+        if !self.model.t3.servers.is_empty() {
+            let task = d.thread_task();
+            menu = menu.child(
+                self.menu_item(
+                    "acta-menu-thread",
+                    Ico::SquareTerminal,
+                    "Make a thread",
+                    false,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.model.toggle_card_menu();
+                    this.open_t3_start(window, cx);
+                    let task = task.clone();
+                    this.t3_ui
+                        .task_in
+                        .update(cx, |s, cx| s.set_value(task, window, cx));
+                    cx.notify();
+                })),
+            );
+        }
+        menu
     }
 
     /// Follow with a bell, or Following with a tick, for a board or one card on it in the chat
@@ -426,7 +637,7 @@ impl Loom {
     }
 
     /// The side preview's chips: its status, which opens a menu to move it, its
-    /// assignee, size and labels.
+    /// priority, its assignee and its size, each its own look.
     fn card_chips(
         &self,
         c: &panels::CardPanel,
@@ -435,14 +646,21 @@ impl Loom {
     ) -> Div {
         let p = self.p;
         let ink = card_ink(p, &d.card);
-        let status = small_chip(d.card.status_words(), ink, ink.opacity(0.6))
-            .child(Icon::new(Ico::ChevronDown).xsmall());
         let status = div()
             .id("acta-status")
             .role(Role::Button)
             .aria_label(format!("Status: {}", d.card.status_words()))
             .cursor_pointer()
-            .child(status)
+            .child(
+                prop_chip(p)
+                    .child(div().flex_none().size(px(7.0)).rounded_full().bg(ink))
+                    .child(d.card.status_words())
+                    .child(
+                        div()
+                            .text_color(p.ink_3)
+                            .child(Icon::new(Ico::ChevronDown).xsmall()),
+                    ),
+            )
             .on_click(cx.listener(|this, _, _, cx| {
                 this.model.toggle_status_menu();
                 cx.notify();
@@ -508,29 +726,174 @@ impl Loom {
                             .child(deferred(anchored().child(menu))),
                     )
                 }));
-        for chip in d.card.chips() {
-            chips = chips.child(small_chip(chip, p.ink_2, p.line_strong));
+        let bars = panels::priority_bars(&d.priority);
+        if bars > 0 {
+            chips = chips.child(
+                prop_chip(p)
+                    .child(priority_icon(p, bars))
+                    .child(panels::priority_name(&d.priority)),
+            );
         }
-        if !d.priority.is_empty() && d.priority != "none" {
-            chips = chips.child(small_chip(
-                panels::priority_name(&d.priority).to_string(),
-                p.ink_2,
-                p.line_strong,
-            ));
+        if !d.card.assignee.is_empty() {
+            chips = chips.child(
+                prop_chip(p)
+                    .child(avatar(p, &panels::initial(&d.card.assignee), 14.0))
+                    .child(d.card.assignee.clone()),
+            );
+        }
+        if !d.card.size.is_empty() {
+            chips = chips.child(prop_chip(p).child(d.card.size.to_uppercase()));
         }
         chips
     }
 
-    /// Its subtasks, each with a tick that toggles it.
+    /// Details, Comments · N and Activity, the one shown underlined.
+    fn card_tabs(
+        &self,
+        c: &panels::CardPanel,
+        d: &panels::CardDetail,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let mut row = div()
+            .flex()
+            .gap(px(space::L))
+            .px(px(space::L))
+            .border_b_1()
+            .border_color(p.line);
+        for (tab, label, id) in [
+            (CardTab::Details, "Details".to_string(), "acta-tab-details"),
+            (CardTab::Comments, d.comments_tab(), "acta-tab-comments"),
+            (
+                CardTab::Activity,
+                "Activity".to_string(),
+                "acta-tab-activity",
+            ),
+        ] {
+            let on = c.tab == tab;
+            row = row.child(
+                div()
+                    .id(id)
+                    .role(Role::Tab)
+                    .aria_label(label.clone())
+                    .py(px(8.0))
+                    .border_b_2()
+                    .border_color(if on { p.ink } else { transparent_black() })
+                    .text_size(px(size::SMALL))
+                    .text_color(if on { p.ink } else { p.ink_3 })
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.model.card_tab(tab);
+                        cx.notify();
+                    })),
+            );
+        }
+        row
+    }
+
+    /// Details: its description, its labels, its subtasks and its pull request.
+    fn card_details(
+        &self,
+        c: &panels::CardPanel,
+        d: &panels::CardDetail,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let p = self.p;
+        let mut page = div().flex().flex_col().gap(px(space::M));
+        if !d.description.trim().is_empty() {
+            let key = SharedString::from(format!("acta-desc-{}-{}", c.board, c.id));
+            page = page.child(div().text_size(px(size::BODY)).text_color(p.ink).child(
+                KeptText::new(key, d.description.clone(), |v| v.selectable(true)),
+            ));
+        }
+        let labels: Vec<&String> = d.card.labels.iter().filter(|l| !l.is_empty()).collect();
+        if !labels.is_empty() {
+            let mut row = div().flex().flex_wrap().gap(px(6.0));
+            for l in labels {
+                row = row.child(
+                    div()
+                        .h(px(20.0))
+                        .px(px(7.0))
+                        .flex()
+                        .items_center()
+                        .rounded(px(5.0))
+                        .border_1()
+                        .border_color(p.line)
+                        .text_size(px(size::CAPTION))
+                        .text_color(p.ink_2)
+                        .whitespace_nowrap()
+                        .child(l.clone()),
+                );
+            }
+            page = page.child(row);
+        }
+        if !d.checklist.is_empty() {
+            page = page.child(self.card_subtasks(d, cx));
+        }
+        if let Some(pr) = &d.pull_request {
+            let (words, tone) = pr.checks_words();
+            let url = pr.url.clone();
+            page = page.child(
+                div()
+                    .id("acta-pr")
+                    .role(Role::Link)
+                    .aria_label(format!("Pull request #{}", pr.number))
+                    .flex()
+                    .items_center()
+                    .gap(px(space::S))
+                    .mx(px(-space::XS))
+                    .px(px(space::XS))
+                    .py(px(4.0))
+                    .rounded(px(radius::ROW))
+                    .text_size(px(size::SMALL))
+                    .when(!url.is_empty(), |d| {
+                        d.cursor_pointer()
+                            .soft_hover(transparent_black(), p.hover, None)
+                            .on_click(move |_, _, cx| cx.open_url(&url))
+                    })
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(font::MONO)
+                            .text_color(p.ink_2)
+                            .child(format!("#{}", pr.number)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(p.ink)
+                            .child(pr.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(size::CAPTION))
+                            .text_color(match tone {
+                                panels::Tone::Ok => p.ok,
+                                panels::Tone::Bad => p.bad,
+                                panels::Tone::Quiet => p.ink_3,
+                            })
+                            .child(words),
+                    ),
+            );
+        }
+        page
+    }
+
+    /// Its subtasks, "Subtasks · 1 of 3", each with a tick that toggles it.
     fn card_subtasks(&self, d: &panels::CardDetail, cx: &mut Context<Self>) -> Div {
         let p = self.p;
-        let mut list = div().flex().flex_col().gap(px(2.0)).child(
+        let mut list = div().flex().flex_col().child(
             div()
                 .pb(px(space::XS))
-                .text_size(px(size::SMALL))
+                .text_size(px(size::CAPTION))
                 .font_weight(FontWeight::MEDIUM)
-                .text_color(p.ink_2)
-                .child(d.card.subtasks_line().unwrap_or_else(|| "Subtasks".into())),
+                .text_color(p.ink_3)
+                .child(d.subtasks_line()),
         );
         for t in &d.checklist {
             let sid = t.id.clone();
@@ -542,24 +905,25 @@ impl Loom {
                     .flex()
                     .items_start()
                     .gap(px(space::S))
+                    .mx(px(-space::XS))
                     .px(px(space::XS))
-                    .py(px(5.0))
+                    .py(px(4.0))
                     .rounded(px(radius::ROW))
                     .cursor_pointer()
                     .soft_hover(transparent_black(), p.hover, None)
                     .child(
                         div()
-                            .mt(px(1.0))
+                            .mt(px(2.0))
                             .flex_none()
-                            .size(px(16.0))
+                            .size(px(14.0))
                             .flex()
                             .items_center()
                             .justify_center()
                             .rounded(px(4.0))
                             .border_1()
-                            .border_color(if t.done { p.ok } else { p.line_strong })
+                            .border_color(if t.done { p.ink } else { p.line_strong })
                             .when(t.done, |d| {
-                                d.bg(p.ok)
+                                d.bg(p.ink)
                                     .text_color(p.bg)
                                     .child(Icon::new(Ico::Check).xsmall())
                             }),
@@ -570,7 +934,7 @@ impl Loom {
                             .min_w_0()
                             .text_size(px(size::SMALL))
                             .line_height(px(size::SMALL * line::BODY))
-                            .text_color(if t.done { p.ink_3 } else { p.ink })
+                            .text_color(p.ink)
                             .child(t.title.clone()),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -584,44 +948,112 @@ impl Loom {
         list
     }
 
-    /// Its last three comments, oldest first: who and when, then what they said.
+    /// Its comments, oldest first: who's initial, who and the day, then what they said.
     fn card_comments(&self, c: &panels::CardPanel, d: &panels::CardDetail) -> Div {
         let p = self.p;
-        let mut list = div().flex().flex_col().gap(px(space::M)).child(
-            div()
-                .text_size(px(size::SMALL))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(p.ink_2)
-                .child("Comments"),
-        );
+        let mut list = div().flex().flex_col().gap(px(space::M));
         for (n, m) in d.comments.iter().enumerate() {
             let day = panels::comment_day(&m.at);
-            let who = if day.is_empty() {
-                m.by.clone()
-            } else {
-                format!("{} · {day}", m.by)
-            };
-            let key = SharedString::from(format!("acta-comment-{}-{}-{n}-{}", c.board, c.id, m.at));
+            let key = SharedString::from(format!(
+                "acta-comment-{}-{}-{n}-{}-{}",
+                c.board, c.id, m.id, m.at
+            ));
             list = list.child(
                 div()
                     .flex()
-                    .flex_col()
-                    .gap(px(2.0))
+                    .items_start()
+                    .gap(px(space::S))
+                    .child(avatar(p, &m.initial(), 18.0))
                     .child(
                         div()
-                            .text_size(px(size::CAPTION))
-                            .text_color(p.ink_3)
-                            .child(who),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(size::SMALL))
-                            .text_color(p.ink)
-                            .child(KeptText::new(key, m.body.clone(), |v| v.selectable(true))),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.0))
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(4.0))
+                                    .text_size(px(size::CAPTION))
+                                    .child(
+                                        div()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(p.ink)
+                                            .child(m.by.clone()),
+                                    )
+                                    .when(!day.is_empty(), |d| {
+                                        d.child(div().text_color(p.ink_3).child(format!("· {day}")))
+                                    }),
+                            )
+                            .child(
+                                div().text_size(px(size::SMALL)).text_color(p.ink).child(
+                                    KeptText::new(key, m.body.clone(), |v| v.selectable(true)),
+                                ),
+                            ),
                     ),
             );
         }
         list
+    }
+
+    /// Its activity, newest first: who, what in Acta's words, and the day.
+    fn card_activity(&self, d: &panels::CardDetail) -> Div {
+        let p = self.p;
+        let mut list = div().flex().flex_col().gap(px(6.0));
+        for a in d.activity.iter().rev() {
+            let day = panels::comment_day(&a.at);
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(4.0))
+                    .text_size(px(size::SMALL))
+                    .line_height(px(size::SMALL * line::BODY))
+                    .child(div().text_color(p.ink).child(a.by.clone()))
+                    .child(div().text_color(p.ink_2).child(a.text.clone()))
+                    .when(!day.is_empty(), |d| {
+                        d.child(div().text_color(p.ink_3).child(format!("· {day}")))
+                    }),
+            );
+        }
+        list
+    }
+
+    /// The box to comment in, under the comments, with Comment.
+    fn comment_box(&self, c: &panels::CardPanel, fields: &Fields, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap(px(space::S))
+            .px(px(space::L))
+            .py(px(space::M))
+            .border_t_1()
+            .border_color(p.line)
+            .child(Textarea::new(&fields.comment))
+            .child(
+                div().flex().justify_end().child(
+                    self.button(
+                        "acta-comment",
+                        if c.commenting {
+                            "Commenting…"
+                        } else {
+                            "Comment"
+                        },
+                        true,
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        let fields = this.acta_fields(window, cx);
+                        let body = fields.comment.read(cx).value().to_string();
+                        if let Some(f) = this.model.comment_card(&body) {
+                            this.send(f);
+                        }
+                        cx.notify();
+                    })),
+                ),
+            )
     }
 
     // --- Making a card ---
