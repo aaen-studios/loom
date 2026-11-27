@@ -352,31 +352,17 @@ impl Loom {
             .child(label.to_string())
     }
 
-    /// An integration's logo, `size` square: the icon its server gave of its own, once
-    /// it's fetched (`own`, a server's, before its entry's); else its entry's mark, drawn
-    /// on the badge's colour as its initial would be; else its initial.
-    fn spool_logo(
-        &self,
-        own: Option<&model::Badge>,
-        entry: Option<&Entry>,
-        server: &str,
-        size: f32,
-    ) -> Div {
+    /// An integration's logo in a box `size` square, in black and white: filled in ink
+    /// with the mark in the ink on it once it's connected (`filled`), else outlined with
+    /// the mark in ink. Its mark is the one the instance gave, one colour; else its
+    /// initial, drawn the same way.
+    fn spool_logo(&self, mark: Option<&str>, name: &str, size: f32, filled: bool) -> Div {
         let p = self.p;
-        let base = entry.and_then(|e| e.badge.as_ref());
-        let fetched = |b: &&model::Badge| badge_icon(b.icon_for(p.dark)).is_some();
-        if let Some(b) = own.filter(fetched).or(base.filter(fetched)) {
-            return badge_view(p, b, size);
-        }
-        let Some((id, mark)) = entry.and_then(|e| Some((e.id.as_str(), e.icon_svg.as_deref()?)))
-        else {
-            return server_badge(p, base.or(own), server, size);
+        let (bg, edge, ink) = if filled {
+            (p.button, p.button, p.button_ink)
+        } else {
+            (p.bg, p.line, p.ink)
         };
-        let fill = match base.filter(|b| !b.color.is_empty()) {
-            Some(b) => thread::color(&b.color, p.dark),
-            None => p.ink_3,
-        };
-        let path = crate::runtime_svg(&format!("spools/{id}.svg"), mark);
         div()
             .size(px(size))
             .flex_none()
@@ -388,13 +374,10 @@ impl Loom {
             } else {
                 radius::ROW
             }))
-            .bg(fill)
-            .child(
-                svg()
-                    .path(path)
-                    .size(px((size * 0.56).round()))
-                    .text_color(motion::ink_on(fill, p.button_ink, p.button)),
-            )
+            .border_1()
+            .border_color(edge)
+            .bg(bg)
+            .child(mark_glyph(mark, name, (size * 0.56).round(), ink))
     }
 
     /// One of loom's own entries' logos on a tile in ink, black in light and white in
@@ -536,23 +519,29 @@ impl Loom {
             .into_any_element()
     }
 
-    /// An entry as a tile in the grid: its logo, a check once it's connected (or a dot
-    /// in the colour of how else it stands), and its name. It opens the entry's pane.
+    /// An entry as a tile in the grid, in black and white: outlined, with its logo in
+    /// ink and no box behind it, until it's connected; then the whole tile is filled in
+    /// ink, with its logo, its name and a check in a ring in the ink on it (or a dot, for
+    /// one that needs a sign-in or is failing). It opens the entry's pane.
     fn spool_tile(&self, e: &Entry, picked: bool, cx: &mut Context<Self>) -> AnyElement {
         let p = self.p;
-        let fill = self.card_fill();
         let id = e.id.clone();
+        let filled = spools::tile_filled(e);
+        let ink = if filled { p.button_ink } else { p.ink };
         let mark = spools::card_status(e, &self.model.mcp_servers).map(|(_, dot)| match dot {
-            Dot::Ok => div().text_color(p.ok).child(Icon::new(Ico::Check).xsmall()),
-            Dot::Quiet | Dot::Warn | Dot::Bad => div()
-                .mt(px(space::XS))
-                .size(px(6.0))
+            Dot::Ok => div()
+                .size(px(16.0))
+                .flex()
+                .items_center()
+                .justify_center()
                 .rounded_full()
-                .bg(match dot {
-                    Dot::Warn => p.warn,
-                    Dot::Bad => p.bad,
-                    _ => p.ink_3,
-                }),
+                .border_1()
+                .border_color(ink)
+                .text_color(ink)
+                .child(Icon::new(Ico::Check).xsmall()),
+            Dot::Quiet | Dot::Warn | Dot::Bad => {
+                div().mt(px(space::XS)).size(px(6.0)).rounded_full().bg(ink)
+            }
         });
         div()
             .id(SharedString::from(format!("spool-tile-{id}")))
@@ -567,16 +556,27 @@ impl Loom {
             .rounded(px(radius::CARD))
             .border_1()
             .cursor_pointer()
-            .when(picked, |d| d.border_color(p.line_strong).bg(p.active))
-            .when(!picked, |d| {
-                d.border_color(p.line).soft_hover(fill, p.hover, None)
+            .when(filled, |d| {
+                d.bg(p.button)
+                    .border_color(if picked { p.line_strong } else { p.button })
+            })
+            .when(!filled && picked, |d| {
+                d.border_color(p.line_strong).bg(p.active)
+            })
+            .when(!filled && !picked, |d| {
+                d.border_color(p.line).soft_hover(p.bg, p.hover, None)
             })
             .child(
                 div()
                     .flex()
                     .items_start()
                     .justify_between()
-                    .child(self.spool_logo(None, Some(e), &e.server, BADGE_STEP + 4.0))
+                    .child(mark_glyph(
+                        e.icon_svg.as_deref(),
+                        &e.name,
+                        BADGE_STEP + 2.0,
+                        ink,
+                    ))
                     .child(
                         div()
                             .flex()
@@ -590,7 +590,7 @@ impl Loom {
                 div()
                     .text_size(px(size::SMALL))
                     .font_weight(FontWeight::MEDIUM)
-                    .text_color(p.ink)
+                    .text_color(ink)
                     .truncate()
                     .child(e.name.clone()),
             )
@@ -620,7 +620,12 @@ impl Loom {
             .child(if e.featured() {
                 self.spool_mark_ink(e, BADGE)
             } else {
-                self.spool_logo(None, Some(e), &e.server, BADGE)
+                self.spool_logo(
+                    e.icon_svg.as_deref(),
+                    &e.name,
+                    BADGE,
+                    spools::tile_filled(e),
+                )
             })
             .child(
                 div()
@@ -1245,15 +1250,9 @@ impl Loom {
         let Some(row) = self.model.installed_rows().get(ix).cloned() else {
             return div().into_any_element();
         };
-        let m = &self.model.mcp_servers[row.server];
-        let name = m.name.clone();
+        let name = self.model.mcp_servers[row.server].name.clone();
         let logo = self
-            .spool_logo(
-                m.badge.as_ref(),
-                row.entry.map(|e| &self.model.spools.entries[e]),
-                &name,
-                control::LEAD,
-            )
+            .spool_logo(row.mark.as_deref(), &row.title, control::LEAD, row.filled)
             .into_any_element();
         self.list_row(
             format!("installed-{name}"),
@@ -1278,7 +1277,7 @@ impl Loom {
         let entry = row.entry.map(|e| self.model.spools.entries[e].clone());
         let under = spools::installed_under(&m, entry.as_ref());
         let logo = self
-            .spool_logo(m.badge.as_ref(), entry.as_ref(), &m.name, BADGE)
+            .spool_logo(row.mark.as_deref(), &row.title, BADGE, row.filled)
             .into_any_element();
         let mut out = vec![self.pane_head(
             Some(logo),
@@ -1304,6 +1303,43 @@ fn community_mark(p: Palette) -> Div {
         .font_weight(FontWeight::MEDIUM)
         .text_color(p.ink_2)
         .child("Community")
+}
+
+/// A spool's mark alone, `size` square, in `ink`: its SVG in one colour, kept by what
+/// it is, so a server's own and an entry's never share a path; else its initial.
+pub(super) fn mark_glyph(mark: Option<&str>, name: &str, size: f32, ink: Hsla) -> Div {
+    let place = div()
+        .size(px(size))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(ink);
+    match mark {
+        Some(mark) => {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            mark.hash(&mut h);
+            place.child(
+                svg()
+                    .path(crate::runtime_svg(
+                        &format!("spools/mark-{:016x}.svg", h.finish()),
+                        mark,
+                    ))
+                    .size(px(size))
+                    .text_color(ink),
+            )
+        }
+        None => place
+            .text_size(px((size * 0.8).round()))
+            .font_weight(FontWeight::SEMIBOLD)
+            .child(
+                name.chars()
+                    .find(|c| c.is_alphanumeric())
+                    .map_or('?', |c| c.to_ascii_uppercase())
+                    .to_string(),
+            ),
+    }
 }
 
 /// An entry's logo on a tile in ink, black in light and white in dark, as the featured

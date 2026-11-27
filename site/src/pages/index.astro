@@ -12,7 +12,7 @@ import actaMark from '../../../server/catalog/acta.svg?raw';
 import githubMark from '../../../server/catalog/github.svg?raw';
 import notionMark from '../../../server/catalog/notion.svg?raw';
 import linearMark from '../../../server/catalog/linear.svg?raw';
-import vercelMark from '../../../server/catalog/vercel.svg?raw';
+import composioMark from '../../../server/catalog/composio.svg?raw';
 import t3Mark from '../../../server/catalog/t3.svg?raw';
 
 // The Brains page as the app draws it (desktop/src/app.rs, programs_page): one column, Your brains
@@ -90,19 +90,21 @@ const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
 
 // Spools' Find tab as the app draws it (desktop/src/spools.rs): Acta and T3 Code as wide cards in
 // black and white, each with loom's knot tied to its own logo on a tile in ink, the category pills,
-// and the rest as tiles four to a row, in the catalog's own words, each with its badge's colour and
-// its mark (server/catalog.calx, server/catalog/, shared/badge.calx). When the panel comes into
-// view, T3 Code connects: its tie pulls taut and Installed counts it.
+// and the rest as tiles four to a row, in the catalog's own words, each with its mark in black and
+// white (server/catalog.calx, server/catalog/): outlined with its logo in ink until it's connected,
+// then the whole tile in ink with its logo and name in the ink on it (spools.rs, spool_tile).
+// Composio is connected. When the panel comes into view, T3 Code connects: its tie pulls taut and
+// Installed counts it.
 const featured = [
 	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', mark: actaMark, connected: true },
 	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', mark: t3Mark, connected: false },
 ];
 const PILLS = ['All', 'Work', 'Code', 'Mail & calendar', 'Files', 'Home', 'Fun'];
 const tiles = [
-	{ name: 'GitHub', color: 'pink', mark: githubMark },
-	{ name: 'Notion', color: 'pink', mark: notionMark },
-	{ name: 'Linear', color: 'mint', mark: linearMark },
-	{ name: 'Vercel', color: 'sky', mark: vercelMark },
+	{ name: 'GitHub', mark: githubMark, connected: false },
+	{ name: 'Notion', mark: notionMark, connected: false },
+	{ name: 'Linear', mark: linearMark, connected: false },
+	{ name: 'Composio', mark: composioMark, connected: true },
 ];
 
 // Each with an agent's thread, which works while the item is hovered.
@@ -407,7 +409,7 @@ const faq = {
 						<span class="page-title">Spools</span>
 						<span class="tabs">
 							<span class="tab on">Find</span>
-							<span class="tab" data-installed="1">Installed · 1</span>
+							<span class="tab" data-installed="2">Installed · 2</span>
 						</span>
 					</div>
 					<div class="find">
@@ -444,8 +446,15 @@ const faq = {
 					<div class="spool-tiles">
 						{
 							tiles.map((t) => (
-								<div class="spool-tile">
-									<span class="badge small" style={`--tint: var(--thread-${t.color})`} set:html={t.mark} />
+								<div class:list={['spool-tile', { on: t.connected }]}>
+									<span class="spool-tile-top">
+										<span class="tile-mark" set:html={t.mark} />
+										{t.connected && (
+											<span class="tile-check">
+												<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6 9 17l-5-5"></path></svg>
+											</span>
+										)}
+									</span>
 									<span class="spool-tile-name">{t.name}</span>
 								</div>
 							))
@@ -1243,11 +1252,6 @@ const faq = {
 		font-weight: var(--weight-semibold);
 		color: var(--button-ink);
 	}
-	.badge.small {
-		--size: 26px;
-		border-radius: var(--radius-row);
-		font-size: 11px;
-	}
 	/* One of loom's own, Acta or T3 Code: its logo on a tile in ink, black in light and white in
 	   dark (spools.rs, spool_mark_ink). */
 	.badge.ink {
@@ -1349,12 +1353,46 @@ const faq = {
 		padding: var(--space-m);
 		border: 1px solid var(--line);
 		border-radius: var(--radius-card);
-		background: var(--card);
+		background: var(--bg);
+		color: var(--ink);
+	}
+	/* Connected: the whole tile in ink, its logo and name in the ink on it. */
+	.spool-tile.on {
+		border-color: var(--button);
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.spool-tile-top {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+	}
+	/* Its logo alone, with no box behind it. */
+	.tile-mark {
+		display: flex;
+		width: 24px;
+		height: 24px;
+	}
+	.tile-mark :global(svg) {
+		width: 100%;
+		height: 100%;
+	}
+	.tile-check {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 16px;
+		height: 16px;
+		border: 1px solid currentColor;
+		border-radius: 999px;
+	}
+	.spools .tile-check .i {
+		width: 10px;
+		height: 10px;
 	}
 	.spool-tile-name {
 		font-size: var(--size-small);
 		font-weight: var(--weight-medium);
-		color: var(--ink);
 	}
 	/* Where it's narrow, the cards go one under the other and the tiles two to a row. */
 	@media (max-width: 560px) {

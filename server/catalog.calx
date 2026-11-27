@@ -35,6 +35,7 @@ module server.catalog
 // `description`, a secret's `description` and `optional`, and `unsupported`,
 // why it can't be connected, in place of how it's reached.
 import std.json.{Json, parse}
+import std.url.{Url}
 import shared.badge
 import shared.obj.{Obj, at, bool_at, str_at}
 
@@ -49,9 +50,33 @@ const VERCEL: [u8; 121] = embed("catalog/vercel.svg")
 const CLOUDFLARE: [u8; 1163] = embed("catalog/cloudflare.svg")
 const HOME_ASSISTANT: [u8; 662] = embed("catalog/home-assistant.svg")
 const T3: [u8; 869] = embed("catalog/t3.svg")
+const PLAYWRIGHT: [u8; 4902] = embed("catalog/playwright.svg")
+const COMPOSIO: [u8; 1511] = embed("catalog/composio.svg")
 // Marks of services a draft is sent through (server/drafts.calx), which no entry has.
 const GMAIL: [u8; 328] = embed("catalog/gmail.svg")
 const DISCORD: [u8; 1361] = embed("catalog/discord.svg")
+
+// The marks loom knows a server by when it isn't an entry, or is a registry
+// server with no logo of its own: each file in catalog/, the names it goes by
+// (a server's name, or the last part of its registry name, such as
+// `com.foreverworks/notion`, or a word of either) and the hosts its servers
+// are at (a host or one under it).
+const KNOWN: str = #"
+    [
+      {"logo": "acta.svg", "names": ["acta"], "hosts": ["acta.aaenz.no"]},
+      {"logo": "t3.svg", "names": ["t3", "t3code"], "hosts": []},
+      {"logo": "github.svg", "names": ["github"], "hosts": ["github.com", "githubcopilot.com"]},
+      {"logo": "notion.svg", "names": ["notion"], "hosts": ["notion.com", "notion.so"]},
+      {"logo": "linear.svg", "names": ["linear"], "hosts": ["linear.app"]},
+      {"logo": "vercel.svg", "names": ["vercel"], "hosts": ["vercel.com"]},
+      {"logo": "cloudflare.svg", "names": ["cloudflare"], "hosts": ["cloudflare.com"]},
+      {"logo": "playwright.svg", "names": ["playwright"], "hosts": ["playwright.dev"]},
+      {"logo": "home-assistant.svg", "names": ["home-assistant", "homeassistant", "hass"], "hosts": ["home-assistant.io", "nabu.casa"]},
+      {"logo": "composio.svg", "names": ["composio", "rube"], "hosts": ["composio.dev", "rube.app"]},
+      {"logo": "gmail.svg", "names": ["gmail"], "hosts": ["gmail.com"]},
+      {"logo": "discord.svg", "names": ["discord"], "hosts": ["discord.com"]}
+    ]
+    "#
 
 // The SVG of the mark an entry's `logo` names, or none.
 pub fn logo_svg(name: String) -> String? {
@@ -71,6 +96,10 @@ pub fn logo_svg(name: String) -> String? {
         String.from_utf8(HOME_ASSISTANT[..])
     } else if name == "t3.svg" {
         String.from_utf8(T3[..])
+    } else if name == "playwright.svg" {
+        String.from_utf8(PLAYWRIGHT[..])
+    } else if name == "composio.svg" {
+        String.from_utf8(COMPOSIO[..])
     } else if name == "gmail.svg" {
         String.from_utf8(GMAIL[..])
     } else if name == "discord.svg" {
@@ -79,6 +108,209 @@ pub fn logo_svg(name: String) -> String? {
         return none
     }
     return some((text ?? String()).trim().copy())
+}
+
+// The host of `address`, lowercased, or "".
+pub fn host_of(address: String) -> String {
+    return match Url.parse(address.trim().copy()) {
+        ok(u) => u.host.copy() ?? String(),
+        err(_) => String(),
+    }
+}
+
+// Whether `host` is `known` or a host under it.
+fn under(host: String, known: String) -> bool {
+    return host.len() > 0 and (host == known or host.ends_with(".{known}"[..]))
+}
+
+// The words of a name, split at anything that isn't a letter or a digit.
+fn words_of(name: String) -> List<String> {
+    var out = List<String>()
+    var word = String()
+    for r in name.to_lower_root().runes() {
+        if (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') {
+            word.push(r)
+        } else if word.len() > 0 {
+            out.push(word.copy())
+            word = String()
+        }
+    }
+    if word.len() > 0 { out.push(word) }
+    return out
+}
+
+// The file of the mark loom knows a server by (KNOWN): first by the host of
+// its address, then by its name, whole or by a word of it; or none.
+pub fn known_logo(name: String, address: String) -> String? {
+    let known = match parse(String(KNOWN)) {
+        ok(Json.Array(xs)) => xs,
+        _ => List<Json>(),
+    }
+    let host = host_of(address)
+    for k in known.copy() {
+        for h in names(at(k.copy(), "hosts")) {
+            if under(host.copy(), h) { return str_at(k, "logo") }
+        }
+    }
+    // A registry name's last part (`io.github.x/notion-mcp`) is its own name.
+    let parts = name.to_lower_root().split("/")
+    let last = parts[parts.len() - 1].copy()
+    let whole = last.replace("_", "-")
+    let words = words_of(last)
+    for k in known {
+        for n in names(at(k.copy(), "names")) {
+            if whole == n or words.contains(n.copy()) or (n.contains("-") and whole.contains(n[..])) { return str_at(k, "logo") }
+        }
+    }
+    return none
+}
+
+// `svg` made one colour, drawn in currentColor, for a server's icon that has
+// colours of its own (a registry server's): every fill and stroke that's a
+// colour becomes currentColor, the root fills in it where it says nothing, and
+// a background as wide and high as the picture is left out, since it would
+// fill the whole tile. None for one that isn't an SVG, or that has a picture
+// or a script in it, which can't be one colour.
+pub fn mono(svg: String) -> String? {
+    let text = svg.trim().copy()
+    let lower = text.to_lower_root()
+    let start = lower.find("<svg") else return none
+    if not lower.ends_with("</svg>") { return none }
+    for bad in ["<image", "<script", "<foreignobject", "<use"] {
+        if lower.contains(bad) { return none }
+    }
+    var out = text[start..].copy()
+    out = without_background(out)
+    for attr in ["fill", "stroke"] {
+        out = recoloured(out, attr)
+    }
+    // The root draws in currentColor unless it says otherwise.
+    let root_end = out.find(">") else return none
+    let root = out[..root_end].copy()
+    if not root.contains(" fill=") and not root.contains("fill:") {
+        out = "{out[..4]} fill=\"currentColor\"{out[4..]}"
+    }
+    return some(out)
+}
+
+// `text` with each `attr="…"`, and `attr:…` in a style, that's a colour made
+// currentColor; `none` and `transparent` stay.
+fn recoloured(text: String, attr: str) -> String {
+    var out = text.copy()
+    for (open, close) in [("{attr}=\"", "\""), ("{attr}='", "'"), ("{attr}:", ";")] {
+        var made = String()
+        var rest = out.copy()
+        while let at_key = rest.find(open[..]) {
+            // Only the attribute itself, not one whose name ends in it (`data-fill`).
+            let before: u8 = if at_key == 0 { 32 } else { rest.byte_at(at_key - 1) }
+            let after = rest[at_key + open.len()..].copy()
+            made.push_str(rest[..at_key + open.len()])
+            let quoted = close != ";"
+            let end = if quoted { after.find(close[..]) ?? after.len() } else {
+                var e = after.len()
+                for stop in [";", "\"", "'"] {
+                    if let k = after.find(stop) { if k < e { e = k } }
+                }
+                e
+            }
+            let value = after[..end].trim().to_lower_root()
+            // A space, a line break, a tab, a quote or a `;` before it.
+            let named = before == 32 or before == 10 or before == 9 or before == 13 or before == 34 or before == 39 or before == 59
+            if named and value != "none" and value != "transparent" and value != "currentcolor" and value.len() > 0 {
+                made.push_str("currentColor")
+            } else {
+                made.push_str(after[..end])
+            }
+            rest = after[end..].copy()
+        }
+        made.push_str(rest[..])
+        out = made
+    }
+    return out
+}
+
+// The width and height of `svg`'s picture, from its viewBox, as written.
+fn view_size(svg: String) -> (String, String) {
+    let root_end = svg.find(">") ?? svg.len()
+    let root = svg[..root_end].copy()
+    let at_box = root.find("viewBox=\"") else return (String(), String())
+    let rest = root[at_box + 9..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    let parts = rest[..end].replace(",", " ").split_whitespace()
+    if parts.len() != 4 { return (String(), String()) }
+    return (parts[2].copy(), parts[3].copy())
+}
+
+// The value of `name="…"` in the tag `tag`, or "".
+fn attr_of(tag: String, name: str) -> String {
+    let key = " {name}=\""
+    let k = tag.find(key[..]) else return String()
+    let rest = tag[k + key.len()..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    return rest[..end].trim().copy()
+}
+
+// `svg` without each `<rect>` that covers the whole picture.
+fn without_background(svg: String) -> String {
+    let (w, h) = view_size(svg.copy())
+    var made = String()
+    var rest = svg.copy()
+    while let k = rest.find("<rect") {
+        let tail = rest[k..].copy()
+        let close = tail.find(">") else break
+        let tag = tail[..close + 1].copy()
+        let width = attr_of(tag.copy(), "width")
+        let height = attr_of(tag.copy(), "height")
+        let x = attr_of(tag.copy(), "x")
+        let y = attr_of(tag.copy(), "y")
+        let whole = (width == "100%" or (w.len() > 0 and width == w)) and (height == "100%" or (h.len() > 0 and height == h)) and (x.len() == 0 or x == "0") and (y.len() == 0 or y == "0")
+        made.push_str(rest[..k])
+        if whole {
+            var skip = close + 1
+            if not tag.ends_with("/>") {
+                if let e = tail.find("</rect>") { skip = e + 7 }
+            }
+            rest = tail[skip..].copy()
+        } else {
+            made.push_str(tag[..])
+            rest = tail[close + 1..].copy()
+        }
+    }
+    made.push_str(rest[..])
+    return made
+}
+
+// The mark a tile and a row draw for `entry`, one colour in currentColor, and
+// its file in catalog/ where it's one of loom's own ("" for another), in this
+// order: the entry's own `logo`; the mark loom knows its server by
+// (known_logo), by its address's host or its name; its server's own SVG icon
+// (`icon_svg`, a registry server's) made one colour (mono); or none, where the
+// apps draw its initial in the same black and white.
+pub fn mark_of(entry: Json) -> (String?, String) {
+    if let logo = str_at(entry.copy(), "logo") {
+        if let svg = logo_svg(logo.copy()) { return (some(svg), logo) }
+    }
+    let name = str_at(entry.copy(), "registry") ?? str_at(entry.copy(), "server") ?? str_at(entry.copy(), "id") ?? String()
+    let address = str_at(entry.copy(), "url") ?? String()
+    if let logo = known_logo(name, address) {
+        if let svg = logo_svg(logo.copy()) { return (some(svg), logo) }
+    }
+    if let svg = str_at(entry, "icon_svg") {
+        if let one = mono(svg) { return (some(one), String()) }
+    }
+    return (none, String())
+}
+
+// The mark the Installed list draws for the person's server `server`: its
+// entry's (mark_of), where it's one of an entry's, else the one loom knows it
+// by, by its address's host or its name; with its file, as mark_of gives it.
+pub fn server_mark(entry: Json, server: Json) -> (String?, String) {
+    if entry != Json.Null {
+        let (svg, file) = mark_of(entry)
+        if svg != none { return (svg, file) }
+    }
+    let logo = known_logo(str_at(server.copy(), "name") ?? String(), str_at(server, "url") ?? String()) else return (none, String())
+    return (logo_svg(logo.copy()), logo)
 }
 
 const DATA: str = #"
@@ -167,6 +399,26 @@ const DATA: str = #"
         "tools_checked": false
       },
       {
+        "id": "composio",
+        "name": "Composio",
+        "category": "Work",
+        "description": "Gmail, Outlook, Slack, GitHub and hundreds more apps through one server.",
+        "maker": "Composio",
+        "website": "https://composio.dev",
+        "logo": "composio.svg",
+        "server": "composio",
+        "url": "{address}",
+        "fields": [{"name": "address", "label": "MCP address", "placeholder": "https://backend.composio.dev/v3/mcp/…", "kind": "url"}],
+        "hosts": ["composio.dev", "rube.app"],
+        "sign_in": "secret",
+        "secrets": [{"name": "COMPOSIO_API_KEY", "label": "API key", "placeholder": "ak_…", "in": "header", "key": "x-api-key", "optional": true}],
+        "note": "Leave the key empty for a rube.app address, which signs in instead.",
+        "reads": ["COMPOSIO_SEARCH_TOOLS"],
+        "changes": ["COMPOSIO_MULTI_EXECUTE_TOOL", "COMPOSIO_MANAGE_CONNECTIONS", "COMPOSIO_REMOTE_WORKBENCH", "COMPOSIO_REMOTE_BASH_TOOL"],
+        "tools_from": "https://docs.composio.dev/docs/mcp-quickstart",
+        "tools_checked": false
+      },
+      {
         "id": "vercel",
         "name": "Vercel",
         "category": "Code",
@@ -205,6 +457,7 @@ const DATA: str = #"
         "description": "Microsoft's Playwright browser, run on the instance.",
         "maker": "Microsoft",
         "website": "https://github.com/microsoft/playwright-mcp",
+        "logo": "playwright.svg",
         "server": "playwright",
         "package": {"registry": "npm", "name": "@playwright/mcp", "version": "latest"},
         "sign_in": "none",
@@ -300,9 +553,26 @@ fn field_values(entry: Json, given: Json) -> (List<(String, String)>, String) {
             let after = value.find("://") ?? 0
             if value[after + 3..].contains("/") { return (List<(String, String)>(), "{label} is only the server's address, such as https://pc.tail1234.ts.net, with no path.") }
         }
+        // A whole address, path and all, at one of the entry's hosts where it names them.
+        if str_at(f, "kind") == some(String("url")) {
+            if not value.starts_with("https://") { return (List<(String, String)>(), "{label} is an address starting with https://.") }
+            if not at_hosts(entry.copy(), value.copy()) { return (List<(String, String)>(), "{label} is an address at {names(at(entry.copy(), "hosts")).join(" or ")}.") }
+        }
         out.push((name, value))
     }
     return (out, String())
+}
+
+// Whether `address` is at one of the hosts `entry` names (`hosts`), or a
+// host under one; true for an entry that names none.
+fn at_hosts(entry: Json, address: String) -> bool {
+    let hosts = names(at(entry, "hosts"))
+    if hosts.is_empty() { return true }
+    let host = host_of(address)
+    for h in hosts {
+        if under(host.copy(), h) { return true }
+    }
+    return false
 }
 
 fn filled(text: String, values: List<(String, String)>) -> String {
@@ -438,6 +708,7 @@ pub fn matches(entry: Json, server: Json) -> bool {
 pub fn fields_of(entry: Json, url: String) -> Json? {
     let template = str_at(entry.copy(), "url") else return none
     if list(at(entry.copy(), "fields")).is_empty() { return none }
+    if not at_hosts(entry.copy(), url.copy()) { return none }
     let wanted = url.trim().trim_suffix("/").copy()
     var rest = template.copy()
     var left = wanted.copy()
@@ -491,10 +762,12 @@ pub fn recognised(entry: Json, resource_name: String, tools: List<String>) -> bo
 
 // Whether the person's server `server`, added by hand or by an agent, is one of
 // `entry`'s with fields, by its shape: its address fits the entry's, and
-// recognised says so of it.
+// recognised says so of it, or, for an entry that names its hosts (Composio's
+// backend.composio.dev and rube.app), it's at one of them, which says so alone.
 pub fn matches_by_shape(entry: Json, server: Json, resource_name: String, tools: List<String>) -> bool {
     let address = str_at(server, "url") else return false
     if fields_of(entry.copy(), address) == none { return false }
+    if not names(at(entry.copy(), "hosts")).is_empty() { return true }
     return recognised(entry, resource_name, tools)
 }
 
@@ -505,13 +778,11 @@ pub fn matches_by_shape(entry: Json, server: Json, resource_name: String, tools:
 // `connecting`, a connect under way for it, or null.
 pub fn listed(entry: Json, have: List<String>, servers: List<String>, icons: (String, String), connecting: Json) -> Json {
     let e = entry.copy()
-    // Its mark: the catalog's own, or, for one from the MCP Registry, the icon its
-    // server.json gave (`icon_svg`).
-    let mark = match str_at(e.copy(), "logo") {
-        some(name) => logo_svg(name),
-        none => str_at(e.copy(), "icon_svg"),
-    }
+    // Its mark, in one colour (mark_of), and its file's name without .svg where
+    // it's one of loom's own, which the iPhone has built in.
+    let (mark, file) = mark_of(e.copy())
     var o = Obj.new().s("id", str_at(e.copy(), "id") ?? String()).s("name", str_at(e.copy(), "name") ?? String()).s("category", str_at(e.copy(), "category") ?? String()).s("description", str_at(e.copy(), "description") ?? String()).s("maker", str_at(e.copy(), "maker") ?? String()).maybe("website", str_at(e.copy(), "website")).maybe("icon_svg", mark)
+    if file.len() > 0 { o = o.s("mark", file.trim_suffix(".svg").copy()) }
     o = o.j("badge", badge.badge(str_at(e.copy(), "server") ?? String(), icons.0.copy(), icons.1.copy())).s("server", str_at(e.copy(), "server") ?? String()).s("runs", runs(e.copy()))
     // One from the MCP Registry (server/mcpregistry.calx).
     if bool_at(e.copy(), "community") == some(true) {
@@ -609,8 +880,10 @@ fn every_entry_is_whole() {
         assert(bool_at(e.copy(), "tools_checked") != none)
         // Each converts, with a value for every field.
         var given = Obj.new()
+        let hosts = names(at(e.copy(), "hosts"))
+        let host = if hosts.is_empty() { String("example.com") } else { hosts[0].copy() }
         for f in list(at(e.copy(), "fields")) {
-            given.m.insert(str_at(f, "name") ?? String(), Json.Str(String("https://example.com")))
+            given.m.insert(str_at(f, "name") ?? String(), Json.Str("https://{host}"))
         }
         let (spec, why) = spec_of(e.copy(), given.done(), String())
         assert(why.len() == 0)
@@ -624,6 +897,11 @@ fn every_entry_is_whole() {
     }
     assert(logo_svg(String("nothing.svg")) == none)
     assert(categories() == [String("Work"), String("Code"), String("Home")])
+    // Every entry has a mark of its own.
+    for e in entries() {
+        let (svg, file) = mark_of(e.copy())
+        assert(svg != none and file == (str_at(e, "logo") ?? String()))
+    }
 }
 
 @test
@@ -699,10 +977,72 @@ fn lists_an_entry() {
     // The icon the person's server gave is on its badge.
     let iconed = listed(github, List<String>(), [String("github")], (String("ab12"), String("cd34")), Json.Null)
     assert("{at(iconed, "badge")}" == "{badge.badge(String("github"), String("ab12"), String("cd34"))}")
-    // One without a mark has its initial.
+    // Playwright's mark, and the name the iPhone has it by.
     let p = listed(find(String("playwright"))!, List<String>(), List<String>(), (String(), String()), Json.Null)
-    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p.copy(), "connected") == some(false) and str_at(p.copy(), "icon_svg") == none and bool_at(p, "several") == none)
+    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p.copy(), "connected") == some(false) and str_at(p.copy(), "icon_svg") == logo_svg(String("playwright.svg")) and str_at(p.copy(), "mark") == some(String("playwright")) and bool_at(p, "several") == none)
     // One with fields can be connected once for each of them.
     let t = listed(find(String("t3"))!, List<String>(), [String("t3-vps"), String("t3-pc")], (String(), String()), Json.Null)
     assert(bool_at(t.copy(), "several") == some(true) and "{at(t, "servers")}" == #"["t3-vps","t3-pc"]"#)
+}
+
+@test
+fn finds_a_mark_in_order() {
+    // The entry's own logo first.
+    let (github, file) = mark_of(find(String("github"))!)
+    assert(github == logo_svg(String("github.svg")) and file == "github.svg")
+    // Then the one loom knows the server by: by its host, then by its name.
+    assert(known_logo(String("x"), String("https://mcp.notion.com/mcp")) == some(String("notion.svg")))
+    assert(known_logo(String("io.github.someone/linear-mcp"), String()) == some(String("linear.svg")))
+    assert(known_logo(String("hass_mcp"), String()) == some(String("home-assistant.svg")))
+    assert(known_logo(String("mcp-home-assistant"), String()) == some(String("home-assistant.svg")))
+    assert(known_logo(String("io.github.x/lights"), String("https://lights.example.com/mcp")) == none)
+    assert(known_logo(String("notionist"), String()) == none and known_logo(String("x"), String("https://evilnotion.com")) == none)
+    let registry = Obj.new().s("id", String("registry:com.foreverworks/notion")).s("registry", String("com.foreverworks/notion")).s("server", String("notion")).s("url", String("https://notion.foreverworks.com/mcp")).s("icon_svg", String(#"<svg viewBox="0 0 1 1"><path fill="red" d="M0 0"/></svg>"#)).done()
+    let (n, nf) = mark_of(registry)
+    assert(n == logo_svg(String("notion.svg")) and nf == "notion.svg")
+    // Then its own icon, in one colour.
+    let lights = Obj.new().s("id", String("registry:io.github.x/lights")).s("registry", String("io.github.x/lights")).s("url", String("https://lights.example.com/mcp")).s("icon_svg", String(#"<svg viewBox="0 0 24 24"><rect width="24" height="24" fill="white"/><path fill="rgb(255,136,0)" stroke='red' d="M1 1"/><circle style="fill:#0a0;stroke:none" data-fill="x"/></svg>"#)).done()
+    let (l, lf) = mark_of(lights)
+    assert(lf.len() == 0)
+    assert(l == some(String(#"<svg fill="currentColor" viewBox="0 0 24 24"><path fill="currentColor" stroke='currentColor' d="M1 1"/><circle style="fill:currentColor;stroke:none" data-fill="x"/></svg>"#)))
+    // Else nothing, and the apps draw its initial.
+    let pictured = Obj.new().s("id", String("registry:io.github.x/pic")).s("registry", String("io.github.x/pic")).s("icon_svg", String(#"<svg><image href="a.png"/></svg>"#)).done()
+    let (p, _) = mark_of(pictured)
+    assert(p == none and mono(String("not a picture")) == none)
+    let (bare, _) = mark_of(parse(String(#"{"id":"registry:io.github.x/bare","registry":"io.github.x/bare"}"#))!)
+    assert(bare == none)
+    // A server of the person's that's no entry's has the one loom knows it by.
+    let (s, sf) = server_mark(Json.Null, Obj.new().s("name", String("my-gmail")).s("url", String("https://mail.example.com/mcp")).done())
+    assert(s == logo_svg(String("gmail.svg")) and sf == "gmail.svg")
+    let (none_known, _) = server_mark(Json.Null, Obj.new().s("name", String("things")).done())
+    assert(none_known == none)
+}
+
+@test
+fn knows_composio_by_its_host() {
+    let composio = find(String("composio"))!
+    let backend = Obj.new().s("name", String("composio")).s("url", String("https://backend.composio.dev/v3/mcp/0f1e2d3c-aaaa/mcp?user_id=me")).j("headers", Obj.new().j("x-api-key", Obj.new().s("secret", String("COMPOSIO_API_KEY")).done()).done()).done()
+    let rube = Obj.new().s("name", String("composio")).s("url", String("https://rube.app/mcp")).j("headers", Obj.new().done()).done()
+    for s in [backend.copy(), rube.copy()] {
+        assert(matches_by_shape(composio.copy(), s, String(), List<String>()))
+    }
+    // Not one somewhere else, nor one that isn't https.
+    for bad in ["https://mcp.example.com/mcp", "https://composio.dev.example.com/mcp", "http://rube.app/mcp"] {
+        let other = Obj.new().s("name", String("composio")).s("url", String(bad)).done()
+        assert(not matches_by_shape(composio.copy(), other, String("Composio"), List<String>()))
+    }
+    // No other entry takes them.
+    for e in entries() {
+        if str_at(e.copy(), "id") == some(String("composio")) { continue }
+        assert(not matches(e.copy(), backend.copy()) and not matches_by_shape(e.copy(), backend.copy(), String(), List<String>()))
+        assert(not matches_by_shape(e, rube.copy(), String(), List<String>()))
+    }
+    // Connecting one: the address as it's given, with the key as its x-api-key header.
+    let (spec, why) = spec_of(composio.copy(), Obj.new().s("address", String("https://backend.composio.dev/v3/mcp/abc/mcp?user_id=me")).done(), String())
+    assert(why.len() == 0 and "{spec}" == #"{"name":"composio","url":"https://backend.composio.dev/v3/mcp/abc/mcp?user_id=me","headers":{"x-api-key":{"secret":"COMPOSIO_API_KEY"}}}"#)
+    assert("{without_secrets(spec, [String("COMPOSIO_API_KEY")])}" == #"{"name":"composio","url":"https://backend.composio.dev/v3/mcp/abc/mcp?user_id=me","headers":{}}"#)
+    let (_, elsewhere) = spec_of(composio.copy(), Obj.new().s("address", String("https://mcp.example.com/mcp")).done(), String())
+    assert(elsewhere == "MCP address is an address at composio.dev or rube.app.")
+    let (_, plain) = spec_of(composio, Obj.new().s("address", String("http://rube.app/mcp")).done(), String())
+    assert(plain == "MCP address is an address starting with https://.")
 }

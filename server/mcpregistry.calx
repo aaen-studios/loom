@@ -710,7 +710,8 @@ fn finds_a_servers_svg_icon() {
     let item = Obj.new().j("server", sample_server("notion.json", "com.foreverworks/notion")).s("icon_svg", String("<svg/>")).done()
     let (entries, _) = found(Obj.new().j("servers", Json.Array([item])).done(), String("notion"))
     assert(str_at(entries[0].copy(), "icon_svg") == some(String("<svg/>")))
-    assert(str_at(catalog.listed(entries[0].copy(), List<String>(), List<String>(), (String(), String()), Json.Null), "icon_svg") == some(String("<svg/>")))
+    // Listed, a server named for one loom knows has that one's mark.
+    assert(str_at(catalog.listed(entries[0].copy(), List<String>(), List<String>(), (String(), String()), Json.Null), "icon_svg") == catalog.logo_svg(String("notion.svg")))
 }
 
 @test

@@ -2127,12 +2127,14 @@ fn sign_in_aad(user: String, name: String) -> List<u8> {
     return "loom mcp sign-in {user}/{name}".to_bytes()
 }
 
-// Whether an MCP server's headers give an Authorization of the person's own,
-// a key, so it's never signed in to.
+// Whether an MCP server's headers give a key of the person's own, as its
+// Authorization or as an API key (`x-api-key`, as Composio's takes it), so
+// it's never signed in to.
 fn own_auth(server: Json) -> bool {
     if let Json.Object(m) = at(server, "headers") {
         for (k, _) in m {
-            if k.to_lower_root() == "authorization" { return true }
+            let header = k.to_lower_root()
+            if header == "authorization" or header == "x-api-key" { return true }
         }
     }
     return false
@@ -5093,10 +5095,12 @@ impl Instance {
             for a in agents.copy() {
                 if has_server(a.copy(), name.copy()) { having.push(Json.Str(str_at(a, "id") ?? String())) }
             }
-            let from = try i.catalog_of(user.copy(), s)
+            let from = try i.catalog_of(user.copy(), s.copy())
             let (icon, dark) = i.icon_of(user.copy(), name.copy())
+            // Its mark, one colour: its entry's, or the one loom knows it by.
+            let (mark, file) = catalog.server_mark(catalog.find(from.copy()) ?? Json.Null, s)
             shown = merge(shown, server_status(signed, try i.tested_of(user.copy(), name.copy())))
-            shown = merge(shown, Obj.new().j("agents", Json.Array(having)).maybe("catalog", if from.len() > 0 { some(from) } else { none }).j("badge", badge.badge(name, icon, dark)).done())
+            shown = merge(shown, Obj.new().j("agents", Json.Array(having)).maybe("catalog", if from.len() > 0 { some(from) } else { none }).j("badge", badge.badge(name, icon, dark)).maybe("icon_svg", mark).maybe("mark", if file.len() > 0 { some(file.trim_suffix(".svg").copy()) } else { none }).done())
             out.push(shown)
         }
         return out
@@ -5118,7 +5122,7 @@ impl Instance {
             return
         }
         if own_auth(server.copy()) {
-            i.answer_cmd(w, Answer.Refused(String("bad_request"), "{name} sends a key of yours as its Authorization header, so it doesn't sign in."))
+            i.answer_cmd(w, Answer.Refused(String("bad_request"), "{name} sends a key of yours in a header, so it doesn't sign in."))
             return
         }
         if not redirect.starts_with("http://127.0.0.1:") and not redirect.starts_with("http://localhost:") and not redirect.starts_with("https://") and not redirect.starts_with("loom:") {
@@ -10940,13 +10944,16 @@ impl Instance {
     // As the instance starts: each server of the person's that has the shape
     // of an entry with fields, but isn't known to be one, and that has never
     // listed its tools, is tried, so one added by hand or by an agent before
-    // loom knew it by its shape, such as a T3 Code, shows as its entry.
+    // loom knew it by its shape, such as a T3 Code, shows as its entry. One known
+    // by its host alone, such as a Composio, is tried once it has never been,
+    // so it shows how it stands rather than not tried yet.
     fn try_shaped(i: mut Instance) ! Error {
         for u in try i.store.users() {
             if i.sandboxed(u.id.copy()) { continue }
             for s in try i.store.mcp_servers(u.id.copy()) {
                 let name = str_at(s.copy(), "name") ?? String()
-                if shaped_entries(s.copy()).is_empty() or try i.catalog_of(u.id.copy(), s.copy()) != "" { continue }
+                if shaped_entries(s.copy()).is_empty() { continue }
+                if try i.catalog_of(u.id.copy(), s.copy()) != "" and try i.tested_of(u.id.copy(), name.copy()) != Json.Null { continue }
                 if bool_at(try i.tested_of(u.id.copy(), name.copy()), "ok") == some(true) { continue }
                 // One that waits for a sign-in waits for it; trying it wouldn't tell.
                 if not own_auth(s.copy()) and not oauth.signed_in(i.grant_of(u.id.copy(), name.copy())) { continue }

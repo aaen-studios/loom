@@ -183,7 +183,7 @@ struct SpoolsView: View {
                         InstalledDetail(server: r.server.name)
                     } label: {
                         HStack(spacing: Tokens.Space.m) {
-                            BadgeView(badge: r.server.badge ?? r.entry?.badge, name: r.title, size: Tokens.Control.lead, mark: r.entry?.mark)
+                            SpoolLogo(mark: r.mark, name: r.title, size: Tokens.Control.lead, filled: r.filled)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(r.title).font(Fonts.body).foregroundStyle(P.ink).lineLimit(1)
                                 if !r.line.isEmpty {
@@ -231,7 +231,7 @@ private struct SpoolCard: View {
                     .frame(width: Tokens.Control.iconLarge, height: Tokens.Control.iconLarge)
                 SpanView(taut: status?.dot == .ok, tint: tint, dashed: true)
                     .frame(width: 56)
-                BadgeView(badge: entry.badge, name: entry.name, mark: entry.mark)
+                SpoolLogo(mark: entry.mark, name: entry.name, filled: true)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(entry.name).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink).lineLimit(1)
@@ -282,8 +282,51 @@ private struct SpoolCard: View {
     }
 }
 
-/// An entry as a tile in the grid: its badge, a tick once it's connected (or a dot in the
-/// colour of how else it stands), and its name.
+/// A spool's mark alone, `size` square, in the ink it's drawn in: the app's copy of it
+/// (`mark-composio`), else its initial.
+struct SpoolGlyph: View {
+    var mark: String?
+    var name: String
+    var size: CGFloat
+
+    var body: some View {
+        if let glyph = mark.flatMap({ UIImage(named: "mark-\($0)") }) {
+            Image(uiImage: glyph)
+                .renderingMode(.template)
+                .resizable()
+                .scaledToFit()
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        } else {
+            Text(name.first(where: { $0.isLetter || $0.isNumber }).map { String($0).uppercased() } ?? "?")
+                .font(Fonts.ui((size * 0.8).rounded(), .semibold))
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+/// A spool's logo in a box, in black and white: filled in ink with its mark in the ink on
+/// it once it's connected, else outlined with its mark in ink.
+struct SpoolLogo: View {
+    var mark: String?
+    var name: String
+    var size: CGFloat = Tokens.Control.iconLarge
+    var filled: Bool
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: size >= Tokens.Control.iconLarge ? Tokens.Radius.card : Tokens.Radius.row, style: .continuous)
+        SpoolGlyph(mark: mark, name: name, size: (size * 0.56).rounded())
+            .foregroundStyle(filled ? P.buttonInk : P.ink)
+            .frame(width: size, height: size)
+            .background(shape.fill(filled ? P.button : P.bg).overlay(shape.strokeBorder(filled ? P.button : P.line, lineWidth: 1)))
+    }
+}
+
+/// An entry as a tile in the grid, in black and white: outlined, with its logo in ink and
+/// no box behind it, until it's connected; then the whole tile is filled in ink, with its
+/// logo, its name and a check in a ring in the ink on it (or a dot, for one that needs a
+/// sign-in or is failing).
 private struct SpoolTile: View {
     @Environment(Session.self) private var session
     var entry: Entry
@@ -291,34 +334,38 @@ private struct SpoolTile: View {
     var body: some View {
         let model = session.model
         let status = model.entryStatus(entry)
+        let filled = entry.tileFilled
+        let ink = filled ? P.buttonInk : P.ink
         let shape = RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
         Button {
             model.spoolOpen(entry.id)
         } label: {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .top, spacing: Tokens.Space.xs) {
-                    BadgeView(badge: entry.badge, name: entry.name, size: 28, mark: entry.mark)
+                    SpoolGlyph(mark: entry.mark, name: entry.name, size: 22)
                     Spacer(minLength: 0)
                     if let status {
                         if status.dot == .ok {
-                            Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(P.ok)
+                            Image(systemName: "checkmark").font(.system(size: 8, weight: .bold))
+                                .frame(width: 16, height: 16)
+                                .overlay(Circle().strokeBorder(ink, lineWidth: 1))
                         } else {
-                            Circle().fill(status.dot.color).frame(width: 6, height: 6).padding(.top, Tokens.Space.xs)
+                            Circle().fill(ink).frame(width: 6, height: 6).padding(.top, Tokens.Space.xs)
                         }
                     }
                 }
                 Spacer(minLength: Tokens.Space.xs)
                 Text(entry.name)
                     .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
-                    .foregroundStyle(P.ink)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .foregroundStyle(ink)
             .padding(Tokens.Space.m)
             .frame(height: Tokens.Control.tile)
-            .background(P.cardFill, in: shape)
-            .overlay(shape.strokeBorder(P.line, lineWidth: 1))
+            .background(filled ? P.button : P.bg, in: shape)
+            .overlay(shape.strokeBorder(filled ? P.button : P.line, lineWidth: 1))
             .overlay(alignment: .topTrailing) {
                 if entry.community && status == nil {
                     CommunityMark().padding(Tokens.Space.s)
@@ -377,7 +424,7 @@ private struct SpoolDetailSheet: View {
     private func page(_ e: Entry, _ flow: SpoolFlow) -> some View {
         VStack(alignment: .leading, spacing: Tokens.Space.l) {
             HStack(spacing: Tokens.Space.m) {
-                BadgeView(badge: e.badge, name: e.name, mark: e.mark)
+                SpoolLogo(mark: e.mark, name: e.name, filled: e.tileFilled)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(e.name).font(Fonts.ui(Tokens.PhoneSize.body + 2, .semibold)).foregroundStyle(P.ink).lineLimit(1)
                     HStack(spacing: Tokens.Space.s) {
@@ -556,7 +603,7 @@ private struct InstalledDetail: View {
             if let row {
                 VStack(alignment: .leading, spacing: Tokens.Space.l) {
                     HStack(spacing: Tokens.Space.m) {
-                        BadgeView(badge: row.server.badge ?? row.entry?.badge, name: row.title, mark: row.entry?.mark)
+                        SpoolLogo(mark: row.mark, name: row.title, filled: row.filled)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(row.title).font(Fonts.ui(Tokens.PhoneSize.body + 2, .semibold)).foregroundStyle(P.ink).lineLimit(1)
                             let under = installedUnder(row.server, row.entry)

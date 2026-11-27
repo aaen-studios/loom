@@ -530,6 +530,9 @@ pub struct McpServer {
     pub catalog: String,
     /// Its badge, with the icons it gave of its own once it has.
     pub badge: Option<Badge>,
+    /// Its mark, one colour in currentColor: its entry's, or the one loom knows it by,
+    /// by its host or its name; none for one loom knows nothing of.
+    pub icon_svg: Option<String>,
 }
 
 /// How one of the person's MCP servers stands, as `mcp.list` says.
@@ -618,6 +621,11 @@ impl McpServer {
             agents: names("agents"),
             catalog: s(v, "catalog"),
             badge: v.get("badge").and_then(Badge::of),
+            icon_svg: v
+                .get("icon_svg")
+                .and_then(Value::as_str)
+                .filter(|svg| !svg.is_empty())
+                .map(str::to_string),
         }
     }
 
