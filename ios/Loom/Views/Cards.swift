@@ -511,6 +511,7 @@ struct CardView: View {
         case "secret_ask": SecretAskCard(card: card, tint: tint)
         case "spool_connect": SpoolConnectCard(card: card)
         case "form": FormCard(card: card, tint: tint)
+        case "draft": DraftCard(card: card)
         case "checklist": checklist
         case "progress": progress
         case "facts":

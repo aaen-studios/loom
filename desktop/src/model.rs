@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 
 pub mod acta;
 pub mod context;
+pub mod draft_card;
 pub mod drafts;
 pub mod header;
 pub mod pools;
@@ -2354,6 +2355,9 @@ pub enum CardBody {
         sending: bool,
         error: String,
     },
+    /// An email or a message an agent drafted, for the person to send, edit or reject
+    /// (loom's own card; `model/draft_card.rs`).
+    Draft(Box<draft_card::Draft>),
     /// A routine turned off by something other than its person (loom's own card, in a
     /// `loom` message; `model/routine_off.rs`): which routine, why, the agent that
     /// paused it (its id, and its name) or how many failures did, how it stands (`off`,
@@ -2567,6 +2571,7 @@ impl Card {
                 tools: strings(v.get("tools")),
             },
             "routine_off" => routine_off::body_of(v),
+            "draft" => draft_card::body_of(v),
             "spool_connect" => spool_card::body_of(v),
             "secret_ask" => CardBody::SecretAsk {
                 call: s(v, "call"),
@@ -6420,6 +6425,8 @@ pub struct Model {
     /// Turn on, on the cards routines leave when they turn off on their own
     /// (`model/routine_off.rs`).
     routine_off: routine_off::Turning,
+    /// What the app keeps of the chat's draft cards (`model/draft_card.rs`).
+    draft_ui: draft_card::DraftUi,
     /// Sign in on the cards of spools agents asked to connect (`model/spool_card.rs`).
     spool: spool_card::Pending,
     /// MCP servers whose sign-in a spool card wants opened here, in the person's browser.
@@ -8464,6 +8471,10 @@ impl Model {
         if self.take_routine_on_answer(&id, f) {
             return;
         }
+        // An answer on a draft card (src/model/draft_card.rs).
+        if self.take_draft_answer(&id, f) {
+            return;
+        }
         // A T3 thread's answer, the start form's, or the threads followed (src/model/t3.rs).
         if self.take_t3_answer(&id, f) {
             return;
@@ -9806,6 +9817,7 @@ impl Model {
         }
         self.line_cards(&mut out);
         self.routine_off_cards(&mut out);
+        self.draft_cards(&mut out);
         let conversation = self.conversation();
         for r in &self.runs {
             // A routine's quiet run shows only what its agent posts, which comes as messages.

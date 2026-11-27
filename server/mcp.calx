@@ -700,7 +700,11 @@ impl Code {
         }
         // The instance says whether it may: by the agent's permission mode, or
         // the person's yes, which this waits for.
-        let allowed = link.send("/api/mcp/allow", Obj.new().s("server", t.server.copy()).s("tool", t.name.copy()).b("read_only", t.read_only).j("arguments", args.copy()).done())
+        // With what it takes and what it says it sends, for loom to know a tool
+        // that sends an email or a message, which goes on a draft card (PLAN.md, "Drafts").
+        var props = List<Json>()
+        for p in at(t.input.copy(), "properties").keys() { props.push(Json.Str(p.copy())) }
+        let allowed = link.send("/api/mcp/allow", Obj.new().s("server", t.server.copy()).s("tool", t.name.copy()).b("read_only", t.read_only).j("arguments", args.copy()).j("props", Json.Array(props)).s("sends", t.sends.copy()).done())
         if is_error(allowed.copy()) { fail "{codemode.error_of(allowed)}" }
         let act = int_at(allowed, "act") ?? 0
         var server = self.servers.remove(t.server.copy()) else { fail "{t.server} isn't running." }

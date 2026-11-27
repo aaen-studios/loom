@@ -12,6 +12,10 @@ module tests.fake_mcp.main
 //
 // Its serverInfo gives the icons FAKE_ICON names (`icons`).
 //
+// With FAKE_SENT set to a file, it offers `send_email {to, subject, body, cc?}`
+// too, for draft cards (PLAN.md, "Drafts"), which adds a line of JSON with what
+// it was given to that file, or fails for an address with "bounce" in it.
+//
 // With FAKE_GROW set, it says its tools change (`listChanged`) and offers
 // `grow`, after whose answer it offers `grown` too and says so with
 // notifications/tools/list_changed: in the legacy era at once, and in the
@@ -62,6 +66,7 @@ module tests.fake_mcp.main
 //     calx tests/fake_mcp/main.calx [--http]
 import std.bytes
 import std.env
+import std.fs
 import std.http.server.{EventStream, Request, Response, Server}
 import std.image.{Color, Image, Kind}
 import std.io
@@ -254,6 +259,9 @@ impl Fake {
             let bad = object([("type", text("number")), ("x-mcp-header", text("Amount"))])
             list.push(tool("header_bad", "Has a header MCP doesn't allow.", schema([("amount", bad)], List<str>()), true))
         }
+        if env.variable(String("FAKE_SENT")) != none {
+            list.push(tool("send_email", "Sends an email.", schema([("to", prop("string", "Who it goes to.")), ("cc", prop("string", "Who gets a copy.")), ("subject", prop("string", "Its subject.")), ("body", prop("string", "What it says."))], ["to", "subject", "body"]), false))
+        }
         if self.grows {
             list.push(tool("grow", "Offers one tool more.", schema(List<(str, Json)>(), List<str>()), false))
             if self.grown { list.push(tool("grown", "Is there once grow was called.", schema(List<(str, Json)>(), List<str>()), true)) }
@@ -298,6 +306,12 @@ impl Fake {
         if name == "key_length" {
             let key = env.variable(String("FAKE_KEY")) ?? String()
             return object([("content", content("{key.len()}"))])
+        }
+        if name == "send_email" {
+            if str_of(args.copy(), "to").contains("bounce") { return object([("content", content(String("Mailbox not found"))), ("isError", Json.Bool(true))]) }
+            let file = env.variable(String("FAKE_SENT")) ?? String()
+            if let err(e) = fs.append_text(file, "{args}\n") { return object([("content", content("{e}")), ("isError", Json.Bool(true))]) }
+            return object([("content", content(String("Sent.")))])
         }
         if name == "spoke" { return object([("content", content(version))]) }
         if name == "grow" { return object([("content", content(String("grown")))]) }

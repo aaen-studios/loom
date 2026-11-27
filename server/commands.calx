@@ -139,6 +139,7 @@ pub fn access(name: String) -> Access {
     if name == "secret.sites" { return Access.Never(String("Where a secret may be filled in is your person's to say: browser_fill_secret asks them the first time on a site.")) }
     if name == "mcp.sign_in" or name == "mcp.signed_in" { return Access.Never(String("Only your person signs in to an MCP server, in the app: loom shows them Sign in when a server needs it. Don't sign in yourself, in a browser or any other way.")) }
     if name == "mcp.add_answer" { return Access.Never(String("Only your person answers an MCP server you proposed, on its card. To propose one, use add_mcp_server.")) }
+    if name == "draft.answer" { return Access.Never(String("Only your person sends, edits or rejects a draft, on its card. To make one, use draft_message.")) }
     if name.starts_with("catalog.") or name == "mcp.agents" or name == "spool.connect" { return Access.Never(String("Your person connects servers from Spools and picks the agents that get them, in the app. To propose a server, use spool_connect for one of Spools' entries, or add_mcp_server.")) }
     if name == "plugin.allow" { return Access.Never(String("Only your person allows what a plugin asks for, in the app.")) }
     if name == "plugin.message" or name == "chat.ask" { return Access.Never(String("Use message_agent.")) }
@@ -189,7 +190,7 @@ fn reading_runs_and_harm_asks() {
     assert(access(String("acp.install")) == Access.Asks(String("other")))
     assert(access(String("instance.move")) == Access.Asks(String("move")))
     assert(access(String("something.new")) == Access.Asks(String("other")))
-    for never in ["secret.put", "secret.sites", "mcp.sign_in", "mcp.signed_in", "mcp.add_answer", "catalog.list", "catalog.search", "catalog.connect", "mcp.agents", "spool.connect", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
+    for never in ["secret.put", "secret.sites", "mcp.sign_in", "mcp.signed_in", "mcp.add_answer", "draft.answer", "catalog.list", "catalog.search", "catalog.connect", "mcp.agents", "spool.connect", "plugin.allow", "plugin.message", "account.delete", "browser.open", "browser.record", "queue.steer", "proposal.keep", "proposal.ask"] {
         if let Access.Never(_) = access(String(never)) {} else { panic("an agent could run {never}") }
     }
     for c in COMMANDS {

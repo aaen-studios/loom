@@ -99,6 +99,7 @@ module tests.fake_agent.main
 //                         and /mcp hints each one's name and annotations, a line each
 //     /mcpkeep TOOL JSON  the same, through one loom mcp the session keeps, started
 //                         at its first /mcpkeep, as a real agent keeps its servers
+//     /mcpquiet TOOL JSON the same as /mcpkeep, saying nothing of what it gave
 //     /mcpnew TOOL JSON   the same as /mcp, as a client of MCP 2026-07-28 would:
 //                         no initialize, and each request says its version in
 //                         _meta; it says "TOOL (RESULTTYPE): RESULT". /mcpnew
@@ -204,6 +205,7 @@ pub enum Step {
     Context
     Mcp(String, String)
     McpKeep(String, String)
+    McpQuiet(String, String)
     McpNew(String, String)
     Env(String)
     Net(String)
@@ -288,12 +290,12 @@ pub fn script(text: String) -> List<Step> {
             steps.push(Step.Crash)
         } else if word == "/files" {
             steps.push(Step.Files)
-        } else if word == "/mcp" or word == "/mcpkeep" or word == "/mcpnew" {
+        } else if word == "/mcp" or word == "/mcpkeep" or word == "/mcpquiet" or word == "/mcpnew" {
             let (tool, args) = match rest.find(" ") {
                 some(at) => (rest[..at].copy(), rest[at + 1..].copy()),
                 none => (rest.copy(), String(#"{}"#)),
             }
-            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else if word == "/mcpkeep" { Step.McpKeep(tool, args) } else { Step.McpNew(tool, args) })
+            steps.push(if word == "/mcp" { Step.Mcp(tool, args) } else if word == "/mcpkeep" { Step.McpKeep(tool, args) } else if word == "/mcpquiet" { Step.McpQuiet(tool, args) } else { Step.McpNew(tool, args) })
         } else if word == "/context" {
             steps.push(Step.Context)
         } else if word == "/uptime" {
@@ -1239,6 +1241,9 @@ impl Agent {
                 Step.Context => chunk(session.copy(), "agent_message_chunk", if context.len() > 0 { context.copy() } else { String("no context") }),
                 Step.Mcp(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_loom(session.copy(), tool, args)),
                 Step.McpKeep(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_kept(session.copy(), tool, args)),
+                Step.McpQuiet(tool, args) => {
+                    _ = a.call_kept(session.copy(), tool, args)
+                },
                 Step.McpNew(tool, args) => chunk(session.copy(), "agent_message_chunk", a.call_modern(session.copy(), tool, args)),
                 Step.Link(path) => {
                     var content = LinkedMap<String, Json>()

@@ -29,7 +29,7 @@ import tests.kit.{Instance, calx, check}
 const LONG: u32 = 600000
 
 // What loom mcp lists in Code Mode.
-const DIRECT: str = "tools: search_tools, run_code, search_messages, propose_note, skill_failed, fix_skill, list_devices, use_device, show_card, add_server, install_server, add_mcp_server"
+const DIRECT: str = "tools: search_tools, run_code, search_messages, propose_note, skill_failed, fix_skill, list_devices, use_device, show_card, draft_message, add_server, install_server, add_mcp_server"
 
 fn reply_in(app: mut Session, conversation: String) -> String ! Error {
     loop {

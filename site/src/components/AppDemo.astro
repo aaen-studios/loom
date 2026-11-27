@@ -11,6 +11,7 @@
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
 import actaMark from '../../../server/catalog/acta.svg?raw';
+import gmailMark from '../../../server/catalog/gmail.svg?raw';
 import t3Mark from '../../../server/catalog/t3.svg?raw';
 import Knot from './Knot.astro';
 
@@ -113,6 +114,10 @@ const GITHUB =
 // Acta's own mark before a card's id, in one colour, the chat's ink, with no tile (app.rs,
 // board_icon; server/catalog/acta.svg).
 const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
+// Gmail's mark on the draft card, in the quiet ink (server/catalog/gmail.svg).
+const GMAIL = gmailMark.replace('<svg ', '<svg aria-hidden="true" ');
+// The email Biscuit drafted, line by line as it goes out.
+const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. It's marked paid on our side.\nSam";
 ---
 
 <div class="app" data-demo role="region" aria-label="loom's desktop app, with an agent at work">
@@ -397,7 +402,56 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 								><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</span
 							><span>· invoices</span></div
 						>
-						<div class="said"><p>It did, on 1 November. Northwind paid it on the 14th.</p></div>
+						<div class="said"><p>It did, on 1 November. Northwind paid it on the 14th, so I drafted a thank-you.</p></div>
+						<!-- The email Biscuit drafted, for the visitor to send, edit or reject (draft_view.rs):
+						     its head with Gmail's mark and the thread it replies in, From, To and Subject as
+						     rows, the body, the message it answers folded, and Reject, Edit, Send and Send
+						     later. Sent, it's one line with Undo while the five seconds last (draft.ts). -->
+						<div class="draft" data-draft hidden>
+							<div class="draft-open">
+								<div class="draft-head">
+									<span class="draft-mark" set:html={GMAIL} /><span class="draft-title">Draft email</span><span class="draft-thread">· replying in “October invoice”</span>
+								</div>
+								<div class="draft-rows">
+									<div class="draft-row"><span class="draft-label">From</span><span class="draft-value">billing@example.com <span class="draft-via">(Gmail)</span></span></div>
+									<div class="draft-row"><span class="draft-label">To</span><span class="draft-value" data-field="to">accounts@example.com</span></div>
+									<div class="draft-row draft-cc"><span class="draft-label">Cc</span><span class="draft-value" data-field="cc"></span></div>
+									<div class="draft-row"><span class="draft-label">Subject</span><span class="draft-value" data-field="subject">Thanks for the October payment</span></div>
+								</div>
+								<div class="draft-body" data-field="body" set:text={DRAFT_BODY} />
+								<div class="draft-answers" hidden>Hi Sam, we've paid invoice 1042 today. Could you confirm it arrived? Ana</div>
+								<div class="draft-foot">
+									<button type="button" class="draft-fold" data-draft-fold>› The message it answers</button>
+									<span class="draft-buttons">
+										<button type="button" class="draft-ghost" data-draft="reject">Reject</button>
+										<button type="button" class="draft-outline" data-draft="edit">Edit</button>
+										<span class="draft-split"
+											><button type="button" class="draft-send" data-draft="send">Send</button><button type="button" class="draft-send draft-more" data-draft="later" aria-label="Send later" aria-haspopup="menu"
+												><svg class="i" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></svg></button
+											></span
+										>
+									</span>
+								</div>
+								<div class="draft-later" role="menu" hidden>
+									<div class="draft-later-head">Send later</div>
+									<button type="button" role="menuitem" data-later="In 1 hour">In 1 hour</button>
+									<button type="button" role="menuitem" data-later="In 3 hours">In 3 hours</button>
+									<button type="button" role="menuitem" data-later="Tomorrow at 08:00">Tomorrow at 08:00</button>
+								</div>
+								<div class="draft-note" hidden>
+									<input type="text" placeholder="A note for the agent" aria-label="A note for the agent" />
+									<button type="button" class="draft-ghost" data-draft="cancel">Cancel</button>
+									<button type="button" class="draft-send" data-draft="rejected">Reject</button>
+								</div>
+							</div>
+							<div class="draft-line" hidden>
+								<span class="draft-mark" set:html={GMAIL} /><span class="draft-what" data-draft-what></span><span class="draft-to" data-draft-to></span><span class="draft-how" data-draft-how></span><button
+									type="button"
+									class="draft-ghost"
+									data-draft="undo">Undo</button
+								>
+							</div>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -2892,6 +2946,257 @@ const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 		--card-shadow: 0 10px 28px -16px rgb(0 0 0 / 0.1);
 	}
 	/* A T3 thread's card: the card frame, its edge lightly in sky while the thread works. */
+	/* A draft card (draft_view.rs): the whole email as it goes out, then one line once it's
+	   sent, set to go later or rejected. */
+	.draft {
+		position: relative;
+		max-width: 600px;
+		margin-top: 12px;
+		font-size: var(--size-small);
+	}
+	.draft[hidden],
+	.draft [hidden] {
+		display: none !important;
+	}
+	.draft-open,
+	.draft-line {
+		background: var(--card-fill);
+		border: 1px solid var(--card-edge);
+		border-radius: var(--radius-bubble);
+		box-shadow: var(--card-shadow);
+	}
+	.draft-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 16px;
+		border-bottom: 1px solid var(--line);
+	}
+	.draft-mark {
+		display: inline-flex;
+		flex: none;
+		width: 14px;
+		height: 14px;
+		color: var(--ink-2);
+	}
+	.draft-mark :global(svg) {
+		width: 100%;
+		height: 100%;
+	}
+	.draft-title {
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+	}
+	.draft-thread {
+		overflow: hidden;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.draft-rows {
+		padding: 6px 16px;
+		border-bottom: 1px solid var(--line);
+	}
+	.draft-row {
+		display: flex;
+		align-items: center;
+		min-height: 30px;
+	}
+	.draft-cc {
+		display: none;
+	}
+	.draft.editing .draft-cc {
+		display: flex;
+	}
+	.draft-label {
+		flex: none;
+		width: 72px;
+		color: var(--ink-3);
+	}
+	.draft-value {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		color: var(--ink);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.draft-via {
+		color: var(--ink-3);
+	}
+	.draft-body {
+		padding: 10px 16px;
+		color: var(--ink);
+		line-height: 1.6;
+		white-space: pre-line;
+	}
+	/* Edit makes the rows and the body editable where they are, each in its box. */
+	.draft.editing [data-field] {
+		padding: 4px 8px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-row);
+		outline: none;
+		background: var(--bg);
+		white-space: pre-wrap;
+		text-overflow: clip;
+	}
+	.draft.editing .draft-body {
+		margin: 10px 16px;
+		padding: 8px;
+	}
+	.draft.editing [data-field]:focus {
+		border-color: var(--ink-3);
+	}
+	.draft-answers {
+		margin: 0 16px 10px;
+		padding-left: 12px;
+		border-left: 2px solid var(--line-strong);
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+	}
+	.draft-foot,
+	.draft-note {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 16px;
+		border-top: 1px solid var(--line);
+	}
+	.draft-fold {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+		text-align: left;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.draft-fold:hover {
+		color: var(--ink-2);
+	}
+	.draft-buttons {
+		display: flex;
+		flex: none;
+		align-items: center;
+		gap: 8px;
+	}
+	.draft-ghost,
+	.draft-outline,
+	.draft-send {
+		display: inline-flex;
+		align-items: center;
+		height: 28px;
+		padding: 0 12px;
+		border-radius: var(--radius-button);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		white-space: nowrap;
+		cursor: pointer;
+		transition: background-color 120ms ease;
+	}
+	.draft-ghost {
+		color: var(--ink-2);
+	}
+	.draft-ghost:hover,
+	.draft-outline:hover {
+		background: var(--hover);
+	}
+	.draft-outline {
+		border: 1px solid var(--line-strong);
+		color: var(--ink);
+	}
+	.draft-send {
+		background: var(--ink);
+		color: var(--bg);
+	}
+	.draft-send:hover {
+		opacity: 0.88;
+	}
+	.draft-split {
+		display: inline-flex;
+	}
+	.draft-split .draft-send:first-child {
+		border-radius: var(--radius-button) 0 0 var(--radius-button);
+	}
+	.draft-more {
+		padding: 0 8px;
+		border-left: 1px solid color-mix(in srgb, var(--bg) 25%, transparent);
+		border-radius: 0 var(--radius-button) var(--radius-button) 0;
+	}
+	.draft-more .i {
+		width: 14px;
+		height: 14px;
+	}
+	.draft-later {
+		position: absolute;
+		right: 16px;
+		bottom: 44px;
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		min-width: 180px;
+		padding: 4px;
+		background: var(--card-fill);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: var(--card-shadow);
+	}
+	.draft-later-head {
+		padding: 6px 10px 4px;
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.draft-later button {
+		padding: 6px 10px;
+		border-radius: var(--radius-row);
+		color: var(--ink);
+		text-align: left;
+	}
+	.draft-later button:hover {
+		background: var(--hover);
+	}
+	.draft-note input {
+		flex: 1;
+		min-width: 0;
+		height: 28px;
+		padding: 0 8px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-row);
+		background: var(--bg);
+		color: var(--ink);
+		font: inherit;
+		outline: none;
+	}
+	.draft-line {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 8px 16px;
+	}
+	.draft-what {
+		overflow: hidden;
+		color: var(--ink);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.draft-to {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		color: var(--ink-3);
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+	.draft-how {
+		flex: none;
+		font-size: var(--size-caption);
+		color: var(--ink-2);
+	}
+	.draft-how.sent {
+		color: var(--ok);
+	}
 	.t3 {
 		--tone: var(--thread-sky);
 		display: flex;

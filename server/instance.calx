@@ -35,6 +35,7 @@ import server.acp.{Line, Out}
 import server.announce
 import server.browser
 import server.cards
+import server.drafts
 import server.catalog
 import server.codemode
 import server.commands
@@ -619,6 +620,7 @@ pub struct Instance {
     device_calls: Map<String, DeviceCall>    // tc_ id -> a call sent to a device
     setups: Map<String, Setup>    // tc_ id -> loom going onto one of the person's hosts
     mcp_adds: LinkedMap<String, McpAdd>    // tc_ id -> an MCP server an agent proposed, while its turn goes on
+    drafts_due: List<DraftDue>    // drafts the person sent, or set to send later, waiting for their time (PLAN.md, "Drafts")
     connects: LinkedMap<String, Connect>    // user/server -> a server being connected from the catalog
     spool_asks: Map<String, SpoolAsk>    // user/server -> the spool_connect card a connect under way follows
     mcp_registry_at: String    // the MCP Registry's address
@@ -902,6 +904,15 @@ struct Poll {
     ending: (String, String)
 }
 
+// A draft the person sent, or set to send later, waiting for its time
+// (PLAN.md, "Drafts"): whose, the reply it's in, its card's id, and when.
+struct DraftDue {
+    user: String
+    message: String
+    card: String
+    at: i64
+}
+
 // An agent a watch woke, until its chat is free.
 struct Wake {
     user: String
@@ -909,7 +920,8 @@ struct Wake {
     conversation: String
     came: String
     until: i64
-    from: String    // what the turn says it comes from, or "" for a watch
+    from: String    // who it says the prompt is from, or "" for a watch's event (WOKEN_FROM)
+    told: String    // the note it's given, or "" for a watch's (WOKEN_NOTE)
 }
 
 // A status.since under way: who waits, and what for.
@@ -932,6 +944,11 @@ fn new_watches() -> Watches {
 // What a turn a watch woke an agent for says it comes from, and what it's told.
 const WOKEN_FROM: str = "an event outside loom that your person follows (a watch they set up, or one you set up by starting a T3 thread); your person isn't writing this"
 const WOKEN_NOTE: str = "[loom: Your person sees your answer in this chat, under a line that says what came. Say what matters about it, or do what it calls for; with nothing to say, say so in a few words.]"
+// Who a draft's wake says its prompt is from, and the note it's given (PLAN.md, "Drafts").
+const DRAFT_FROM: str = "loom, saying what your person did with a draft you made; your person isn't writing this"
+const DRAFT_NOTE: str = "[loom: Your person sees your answer in this chat, under the draft's card. Say what matters about it in a few words, or do what it calls for. Don't send the draft again.]"
+// How long sending a draft through the person's MCP server may take.
+const DRAFT_MS: u64 = 60000
 
 // How much of the chat a wake in a session of its own is given: its newest
 // messages, each cut to WAKE_CHAT_EACH bytes, and all of them to WAKE_CHAT_MOST.
@@ -2514,7 +2531,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2527,6 +2544,8 @@ impl Instance {
         try i.drop_mcp_browser()
         try i.drop_everyone()
         try i.keep_waiting_notes()
+        // Drafts sent, or set to send later, go when their time comes.
+        for (user, message, card, when) in try i.store.drafts_due() { i.drafts_due.push(DraftDue { user: user.copy(), message: message.copy(), card: card.copy(), at: when }) }
         i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
         // runs; a queue the person left waiting by stopping a turn still waits.
@@ -5817,6 +5836,35 @@ impl Instance {
                 none => none,
             }
         }
+        // A tool that sends an email or a message (PLAN.md, "Drafts") goes on a
+        // draft card at the end of the reply instead, for the person to send,
+        // edit or reject, and loom sends it as them. Only a rule that allows the
+        // tool, their Always allow for that account, lets the agent send it
+        // itself; one that denies still refuses.
+        if not read_only {
+            let run_id = i.calling_run(g.copy())
+            var props = List<String>()
+            if let Json.Array(xs) = at(body.copy(), "props") {
+                for x in xs {
+                    if let p = x.as_str() { props.push(p) }
+                }
+            }
+            let says = str_at(body.copy(), "sends") ?? String()
+            if run_id.len() > 0 and i.sends(g.user.copy(), server.copy(), tool.copy(), args.copy(), props.copy(), says.copy()) {
+                var sending = rules.act()
+                sending.tool = some("{server}.{tool}")
+                sending.effect = String("write")
+                let said = try i.judge(g.user.copy(), g.agent.copy(), run_id.copy(), sending)
+                if said.then == "deny" { return some(json_response(200, tool_error(said.why))) }
+                if said.then != "allow" {
+                    let (id, why) = try i.put_draft(g.user.copy(), run_id, server.copy(), tool.copy(), args.copy(), props, says, String(), String())
+                    if why.len() == 0 {
+                        i.log(g.user.copy(), g.agent.copy(), "tool", "Put {server}: {tool} on a draft card, {id}", g.agent.copy())
+                        return some(json_response(200, tool_error("Not sent: loom put it on a draft card, {id}, at the end of your reply, for your person to send, edit or reject; loom sends it as them if they do, and you're woken with what they did. Don't send it again, this way or another.")))
+                    }
+                }
+            }
+        }
         // As the agent program's own request would be: one that only reads is
         // of kind read, and the rest other.
         let kind = if read_only { "read" } else { "other" }
@@ -6104,6 +6152,9 @@ impl Instance {
         }
         if name == "show_card" {
             return some(try i.show_card(g, args))
+        }
+        if name == "draft_message" {
+            return some(try i.draft_message(g, args))
         }
         if name == "attach_files" {
             return some(try i.attach_files(g, args))
@@ -6858,6 +6909,8 @@ impl Instance {
             try i.watch_called(c, d)
         } else if c.kind.starts_with("t3_") {
             try i.t3_called(c, d)
+        } else if c.kind == "draft" {
+            try i.draft_sent(c, d)
         } else if c.kind.starts_with("panel.") {
             try i.acta_panel_came(c, d)
         }
@@ -8506,6 +8559,8 @@ impl Instance {
         if let err(e) = i.pending_import() { eprintln("loom: a staged import: {e}") }
         // Chats that have paused: their agents look back over them.
         i.paused_now(t)
+        // Drafts whose time has come.
+        i.drafts_now(t)
         let due = match i.store.due_routines(t) {
             ok(d) => d,
             err(e) => {
@@ -9491,7 +9546,7 @@ impl Instance {
         if try i.store.agent(user.copy(), agent.copy()) == none { return }
         var conversation = try i.store.conversation(user.copy(), str_at(w, "conversation") ?? String()) ?? Json.Null
         if str_at(conversation.copy(), "agent") != some(agent.copy()) { conversation = try i.agent_chat(user.copy(), agent.copy(), String()) }
-        i.watch.wakes.push(Wake { user: user.copy(), agent: agent, conversation: str_at(conversation, "id") ?? String(), came: came.copy(), until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String() })
+        i.watch.wakes.push(Wake { user: user.copy(), agent: agent, conversation: str_at(conversation, "id") ?? String(), came: came.copy(), until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String(), told: String() })
         try i.wakes_waited()
     }
 
@@ -9518,15 +9573,17 @@ impl Instance {
             // In the chat's session while its prompt cache is warm; otherwise in
             // a session of its own, given the chat's newest messages, so the
             // whole chat isn't sent again for one event.
-            var note = String(WOKEN_NOTE)
+            let told = if woken.told.len() > 0 { woken.told.copy() } else { String(WOKEN_NOTE) }
+            var note = told.copy()
             var where = String("in its chat's session")
             if not try i.chat_warm(user.copy(), conversation.copy()) {
                 i.watch.alone.push(run_id.copy())
                 let said = try i.transcript_cut(user.copy(), conversation_id, none, woken.agent.copy(), WAKE_CHAT_MESSAGES, WAKE_CHAT_EACH, WAKE_CHAT_MOST)
-                note = "{wake_alone_note(said)}\n\n{WOKEN_NOTE}"
+                note = "{wake_alone_note(said)}\n\n{told}"
                 where = String("in a session of its own, its chat's having gone quiet")
             }
-            i.log(user.copy(), woken.agent.copy(), "routine", "Woken by a watch, {where}: {cut_short(woken.came.copy(), 120)}", String("watch"))
+            let (by, kind) = if woken.from == DRAFT_FROM { ("a draft's card", "draft") } else if woken.from.len() > 0 { ("a spool's card", "watch") } else { ("a watch", "watch") }
+            i.log(user.copy(), woken.agent.copy(), "routine", "Woken by {by}, {where}: {cut_short(woken.came.copy(), 120)}", String(kind))
             let from = if woken.from.len() > 0 { woken.from.copy() } else { String(WOKEN_FROM) }
             try i.start_run(user, conversation, run_id, String(), woken.came, List<Json>(), from, note, "webhook")
         }
@@ -10063,6 +10120,248 @@ impl Instance {
         return true
     }
 
+    // --- Drafts (PLAN.md, "Drafts") ---
+
+    // The person's MCP server `name` as the instance calls it as them: its spec,
+    // their sign-in to it, and whether its headers carry a key of their own. A
+    // sandboxed person's only over https, as their sign-ins are.
+    fn callable_server(i: Instance, user: String, name: String) -> (Json, Json, bool)? {
+        let s = match i.store.mcp_server(user.copy(), name.copy()) {
+            ok(some(s)) => s,
+            _ => return none,
+        }
+        if i.sandboxed(user.copy()) and not (str_at(s.copy(), "url") ?? String()).starts_with("https://") { return none }
+        let keyed = own_auth(s.copy())
+        let grant = if keyed { Json.Null } else { i.grant_of(user.copy(), name.copy()) }
+        let spec = i.session_server(user, s, true) else return none
+        return some((spec, grant, keyed))
+    }
+
+    // Whether the call to `tool` on the person's server `server` sends an email
+    // or a message, as server/drafts.calx knows one: by its name, its
+    // arguments' names (`props`, from its schema) or what it says itself.
+    fn sends(i: Instance, user: String, server: String, tool: String, args: Json, props: List<String>, says: String) -> bool {
+        let s = match i.store.mcp_server(user.copy(), server.copy()) {
+            ok(some(s)) => s,
+            _ => return false,
+        }
+        let from = match i.catalog_of(user, s) {
+            ok(f) => f,
+            err(_) => String(),
+        }
+        let (_, kind, _) = drafts.send_of(server.copy(), from, tool.copy(), args.copy(), props.copy(), says.copy())
+        return kind.len() > 0
+    }
+
+    // A draft at the end of the run `run_id`'s reply, made from the call that
+    // sends (`tool` on the person's server `server`, with `args`), shown once
+    // the reply's done, as a question is: its card's id, or why it can't be.
+    fn put_draft(i: mut Instance, user: String, run_id: String, server: String, tool: String, args: Json, props: List<String>, says: String, thread: String, answers: String) -> (String, String) ! Error {
+        let name = i.server_now(user.copy(), server.copy())
+        let s = try i.store.mcp_server(user.copy(), name.copy()) else return (String(), "Your person has no MCP server named {server}. mcp.list names theirs.")
+        let from = try i.catalog_of(user.copy(), s)
+        let (send, kind, why) = drafts.send_of(name.copy(), from, tool.copy(), args.copy(), props.copy(), says.copy())
+        if why.len() > 0 { return (String(), why) }
+        let (icon, dark) = i.icon_of(user, name)
+        let id = try i.store.new_id("draft")
+        let card = drafts.card_of(id.copy(), kind, send, thread, answers, icon, dark)
+        if let r = mut i.runs.find(run_id) {
+            var b = new_block("card")
+            b.card = card
+            r.ending.push(b)
+            return (id, String())
+        }
+        return (String(), String("The reply ended before the draft could go in it."))
+    }
+
+    // draft_message: the email or the message the agent proposes goes at the
+    // end of its reply as a card, which its person sends, edits or rejects.
+    // Nothing goes out until they do, and then loom sends it, as them, and wakes
+    // the agent with what they did. An agent can always draft.
+    fn draft_message(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
+        let run_id = i.calling_run(g.copy())
+        if run_id.len() == 0 { return tool_error(String("You aren't answering in a chat right now, so there's nowhere to put the draft.")) }
+        let server = (str_at(args.copy(), "server") ?? String()).trim().copy()
+        let tool = (str_at(args.copy(), "tool") ?? String()).trim().copy()
+        if server.len() == 0 or tool.len() == 0 { return tool_error(String("Give server and tool: your person's MCP server and its tool that sends it, such as gmail and send_email.")) }
+        let given = at(args.copy(), "arguments")
+        if let Json.Object(_) = given {} else { return tool_error(String("arguments is the send tool's arguments, as an object, exactly as they'd go out.")) }
+        let (id, why) = try i.put_draft(g.user.copy(), run_id, server, tool, given, List<String>(), String(), str_at(args.copy(), "thread") ?? String(), str_at(args, "answers") ?? String())
+        if why.len() > 0 { return tool_error(why) }
+        return tool_text("It's a draft card, {id}, at the end of your reply, and nothing has gone out. Your person sends it, edits it or rejects it there, and loom sends it as them; you're woken with what they did. Don't send it yourself, and don't ask them whether to send it.")
+    }
+
+    // A draft's card and the reply it's in, by the reply's id and the card's.
+    fn draft_card(i: Instance, user: String, message: String, card: String) -> (Json, Json)? ! Error {
+        let m = try i.store.message(user, message) else return none
+        if let Json.Array(blocks) = at(m.copy(), "blocks") {
+            for b in blocks {
+                let c = at(b.copy(), "card")
+                if str_at(b, "kind") == some(String("card")) and str_at(c.copy(), "type") == some(String("draft")) and str_at(c.copy(), "id") == some(card.copy()) { return some((m.copy(), c)) }
+            }
+        }
+        return none
+    }
+
+    // The reply `m` with its draft `card` as it is now, kept, and every device told.
+    fn put_draft_card(i: Instance, user: String, m: Json, card: Json) ! Error {
+        let id = str_at(card.copy(), "id") ?? String()
+        var blocks = List<Json>()
+        if let Json.Array(bs) = at(m.copy(), "blocks") {
+            for b in bs {
+                let c = at(b.copy(), "card")
+                if str_at(c.copy(), "type") == some(String("draft")) and str_at(c, "id") == some(id.copy()) {
+                    blocks.push(merge(b.copy(), Obj.new().j("card", card.copy()).done()))
+                } else {
+                    blocks.push(b.copy())
+                }
+            }
+        }
+        let changed = merge(m.copy(), Obj.new().j("blocks", Json.Array(blocks)).done())
+        try i.store.put_message(user.copy(), changed.copy())
+        try i.event(user, "message.updated", Obj.new().s("conversation", str_at(m, "conversation") ?? String()).j("message", changed).done())
+    }
+
+    // The draft `card` of `message` goes at `when`.
+    fn draft_due(i: mut Instance, user: String, message: String, card: String, when: i64) ! Error {
+        i.draft_not_due(user.copy(), message.copy(), card.copy())
+        try i.store.set_draft_due(user.copy(), message.copy(), card.copy(), when)
+        i.drafts_due.push(DraftDue { user: user.copy(), message: message.copy(), card: card.copy(), at: when })
+    }
+
+    fn draft_not_due(i: mut Instance, user: String, message: String, card: String) {
+        var k: usize = 0
+        while k < i.drafts_due.len() {
+            if i.drafts_due[k].user == user and i.drafts_due[k].message == message and i.drafts_due[k].card == card {
+                _ = i.drafts_due.remove(k)
+            } else {
+                k += 1
+            }
+        }
+        if let err(e) = i.store.clear_draft_due(user, message, card) { eprintln("loom: a draft: {e}") }
+    }
+
+    // draft.answer, from one of the person's devices: Send, with their edits,
+    // which goes once Undo's few seconds are up; Send later, at a time;
+    // Reject, with a note, which the agent hears at once; Undo, while it hasn't
+    // gone; and Try again, for one that couldn't be sent, which goes at once.
+    fn draft_answer(i: mut Instance, user: String, args: Json) -> Answer ! Error {
+        let message_id = str_at(args.copy(), "message") ?? String()
+        let card_id = str_at(args.copy(), "card") ?? String()
+        let answer = str_at(args.copy(), "answer") ?? String()
+        var m = Json.Null
+        var card = Json.Null
+        if let (mm, cc) = try i.draft_card(user.copy(), message_id.copy(), card_id.copy()) {
+            m = mm
+            card = cc
+        }
+        if card == Json.Null { return Answer.Refused(String("not_found"), String("There's no such draft.")) }
+        let why = drafts.refusal(str_at(card.copy(), "state") ?? String(), answer.copy())
+        if why.len() > 0 { return Answer.Refused(String(if why.starts_with("answer is") { "bad_request" } else { "not_now" }), why) }
+        let t = now()
+        // Once Undo's seconds are up the tool is being called, and it can't be taken back.
+        if answer == "undo" and str_at(card.copy(), "state") == some(String("sending")) and drafts.ms_at(card.copy(), "until") <= t {
+            return Answer.Refused(String("not_now"), String("That draft can't be taken back now."))
+        }
+        var next = Json.Null
+        if answer == "send" or answer == "later" {
+            let (changed, _, bad) = drafts.edited(card.copy(), at(args.copy(), "edits"))
+            if bad.len() > 0 { return Answer.Refused(String("bad_request"), bad) }
+            if answer == "send" {
+                next = drafts.in_state(changed, "sending", t, t + drafts.UNDO_MS, String(), String())
+                try i.draft_due(user.copy(), message_id.copy(), card_id.copy(), t + drafts.UNDO_MS)
+            } else {
+                let when = int_at(args.copy(), "at") ?? 0
+                if when <= t or when > t + drafts.LATER_MOST_MS { return Answer.Refused(String("bad_request"), String("at is when to send it, in milliseconds since 1970: after now, and within 30 days.")) }
+                next = drafts.in_state(changed, "later", when, 0, String(), String())
+                try i.draft_due(user.copy(), message_id.copy(), card_id.copy(), when)
+            }
+        } else if answer == "undo" {
+            i.draft_not_due(user.copy(), message_id.copy(), card_id.copy())
+            next = drafts.in_state(card.copy(), "draft", 0, 0, String(), String())
+        } else if answer == "retry" {
+            next = drafts.in_state(card.copy(), "sending", t, 0, String(), String())
+        } else {
+            next = drafts.in_state(card.copy(), "rejected", 0, 0, String(), (str_at(args.copy(), "note") ?? String()).trim().copy())
+        }
+        try i.put_draft_card(user.copy(), m.copy(), next.copy())
+        if answer == "retry" { try i.send_draft(user.copy(), message_id.copy(), card_id.copy()) }
+        if answer == "reject" {
+            i.log(user.copy(), str_at(m.copy(), "agent") ?? String(), "tool", "Rejected the draft {card_id}", String("you"))
+            try i.wake_for_draft(user, m, next.copy())
+        }
+        return Answer.Value(Obj.new().j("card", next).done())
+    }
+
+    // Drafts whose time has come go.
+    fn drafts_now(i: mut Instance, t: i64) {
+        var k: usize = 0
+        while k < i.drafts_due.len() {
+            if i.drafts_due[k].at > t {
+                k += 1
+                continue
+            }
+            let d = i.drafts_due.remove(k)
+            if let err(e) = i.send_draft(d.user.copy(), d.message.copy(), d.card.copy()) { eprintln("loom: sending a draft: {e}") }
+        }
+    }
+
+    // Sends the draft `card_id` of `message`, as its person, through their MCP
+    // server's tool, off the loop (OutCall `draft`). Its card says Sent once
+    // the tool has answered, or why it couldn't go.
+    fn send_draft(i: mut Instance, user: String, message: String, card_id: String) ! Error {
+        try i.store.clear_draft_due(user.copy(), message.copy(), card_id.copy())
+        var m = Json.Null
+        var card = Json.Null
+        if let (mm, cc) = try i.draft_card(user.copy(), message.copy(), card_id.copy()) {
+            m = mm
+            card = cc
+        }
+        let state = str_at(card.copy(), "state") ?? String()
+        if state != "sending" and state != "later" { return }
+        let (s, _) = drafts.send_in(card.copy())
+        let name = i.server_now(user.copy(), s.server.copy())
+        let sent_at = if state == "later" { now() } else { drafts.ms_at(card.copy(), "at") }
+        if let (spec, grant, keyed) = i.callable_server(user.copy(), name.copy()) {
+            try i.put_draft_card(user.copy(), m, drafts.in_state(card, "sending", sent_at, 0, String(), String()))
+            i.log(user.copy(), String(), "tool", "Sent a draft through {name}: {drafts.sender(s.copy())}", String("you"))
+            i.next_job += 1
+            i.calls_out.insert(i.next_job, OutCall { user: user.copy(), server: name.copy(), own_auth: keyed, kind: String("draft"), id: message.copy(), board: card_id.copy() })
+            i.call_to.send(mcpcall.Job { id: i.next_job, key: "{user}/{name}", spec: spec, grant: grant, tool: s.tool.copy(), arguments: drafts.arguments_of(s), ms: DRAFT_MS, fresh_ms: 0 })
+            return
+        }
+        let failed = drafts.in_state(card, "failed", 0, 0, "There's no MCP server {s.server} to send it through.", String())
+        try i.put_draft_card(user.copy(), m.copy(), failed.copy())
+        try i.wake_for_draft(user, m, failed)
+    }
+
+    // The send tool answered: the card says Sent, or why it couldn't go, and
+    // the agent that drafted it hears which.
+    fn draft_sent(i: mut Instance, c: OutCall, d: mcpcall.Done) ! Error {
+        var m = Json.Null
+        var card = Json.Null
+        if let (mm, cc) = try i.draft_card(c.user.copy(), c.id.copy(), c.board.copy()) {
+            m = mm
+            card = cc
+        }
+        if card == Json.Null { return }
+        var why = d.error.copy()
+        if d.sign_in and not c.own_auth { why = "{c.server} needs you to sign in again." }
+        if why.len() == 0 { why = drafts.failure_of(d.result.copy()) }
+        let done = if why.len() > 0 { drafts.in_state(card.copy(), "failed", 0, 0, why, String()) } else { drafts.in_state(card.copy(), "sent", drafts.ms_at(card.copy(), "at"), 0, String(), String()) }
+        try i.put_draft_card(c.user.copy(), m.copy(), done.copy())
+        try i.wake_for_draft(c.user, m, done)
+    }
+
+    // The agent that made the draft in `m` hears what came of it, with a turn
+    // in its chat once that's free, as a watch wakes it.
+    fn wake_for_draft(i: mut Instance, user: String, m: Json, card: Json) ! Error {
+        let agent = str_at(m.copy(), "agent") ?? String()
+        if agent.len() == 0 or try i.store.agent(user.copy(), agent.copy()) == none { return }
+        i.watch.wakes.push(Wake { user: user.copy(), agent: agent, conversation: str_at(m, "conversation") ?? String(), came: drafts.outcome(card), until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String(DRAFT_FROM), told: String(DRAFT_NOTE) })
+        try i.wakes_waited()
+    }
+
     // --- An MCP server an agent proposes (add_mcp_server) ---
 
     // The names of `user`'s secrets.
@@ -10553,7 +10852,7 @@ impl Instance {
         let offered = if offers.len() == 1 { ", with 1 tool: {offers[0]}" } else if offers.len() > 1 { ", with {offers.len()} tools: {offers.join(", ")}" } else { String() }
         let why = if said.ends_with(".") { said.copy() } else { "{said}." }
         let came = if step == "done" { "Your person signed in on your card, and {name} is connected as {server}{offered}." } else { "Connecting {name} as {server} failed: {why} Your person can try again on your card." }
-        i.watch.wakes.push(Wake { user: user, agent: agent, conversation: conversation, came: came, until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String(SPOOL_WOKEN_FROM) })
+        i.watch.wakes.push(Wake { user: user, agent: agent, conversation: conversation, came: came, until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String(SPOOL_WOKEN_FROM), told: String() })
         try i.wakes_waited()
     }
 
@@ -16499,6 +16798,12 @@ impl Instance {
         // scripts reach.
         if name == "mcp.add_answer" {
             let answer = try i.mcp_add_answer(user, device, args)
+            i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
+            return
+        }
+        // The person's answer on a draft's card: only from one of their devices too.
+        if name == "draft.answer" {
+            let answer = try i.draft_answer(user, args)
             i.answer_cmd(Waiter { socket: some(s), id: id }, answer)
             return
         }

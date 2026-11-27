@@ -244,6 +244,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["skills": .array(Sample.skills)]])
             case "routine.list":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["routines": .array(routines)]])
+            case "draft.answer":
+                answerDraft(f)
             case "routine.put":
                 putRoutine(f)
             case "routine.delete":
@@ -499,6 +501,59 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             return
         }
         tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": JSON("There's no message \(id.text).")]])
+    }
+
+    /// The person's answer on a draft card (`draft.answer`), as the instance gives it:
+    /// Send waits Undo's five seconds and then says Sent, Send later says when, Reject
+    /// and Undo change it at once, each with message.updated.
+    private func answerDraft(_ f: JSON) {
+        let args = f["args"]
+        let answer = args["answer"].text
+        let now = Sample.now()
+        let changed = setDraft(args["message"].text, args["card"].text) { card in
+            switch answer {
+            case "send", "retry":
+                card["state"] = "sending"; card["at"] = JSON(now); card["until"] = JSON(now + 5000)
+                if case .object(let edits) = args["edits"], let body = edits["body"] { card["body"] = body; card["edited"] = true }
+            case "later": card["state"] = "later"; card["at"] = args["at"]
+            case "undo": card["state"] = "draft"; card["at"] = nil; card["until"] = nil
+            default: card["state"] = "rejected"
+            }
+        }
+        guard let card = changed else {
+            tell(["t": "result", "id": f["id"], "ok": false, "error": ["code": "not_found", "message": "There's no such draft."]])
+            return
+        }
+        tell(["t": "result", "id": f["id"], "ok": true, "value": ["card": card]])
+        if answer == "send" || answer == "retry" {
+            later(5.2) { [self] in
+                _ = setDraft(args["message"].text, args["card"].text) { card in
+                    guard card["state"]?.text == "sending" else { return }
+                    card["state"] = "sent"; card["until"] = nil
+                }
+            }
+        }
+    }
+
+    /// Changes the draft card `card` of message `message` with `change`, and tells every
+    /// device: the card as it is now, or none when there's no such draft.
+    private func setDraft(_ message: String, _ cardId: String, _ change: (inout [String: JSON]) -> Void) -> JSON? {
+        for (c, list) in messages {
+            for (i, m) in list.enumerated() where m["id"].text == message {
+                guard case .object(var o) = m, case .array(var blocks) = m["blocks"],
+                      let k = blocks.firstIndex(where: { $0["card"]["type"].text == "draft" && $0["card"]["id"].text == cardId }),
+                      case .object(var b) = blocks[k], case .object(var card) = b["card"] else { continue }
+                change(&card)
+                b["card"] = .object(card)
+                blocks[k] = .object(b)
+                o["blocks"] = .array(blocks)
+                messages[c]![i] = .object(o)
+                seq += 1
+                tell(["t": "event", "kind": "message.updated", "seq": JSON(seq), "at": JSON(Sample.now()), "conversation": JSON(c), "message": .object(o)])
+                return .object(card)
+            }
+        }
+        return nil
     }
 
     /// A routine turned on (`routine.put` with `on`), as the instance does: the card it
@@ -893,6 +948,17 @@ enum Sample {
             ["id": "msg_14", "conversation": "c_1", "role": "loom", "at": 1795187129000,
              "blocks": [["kind": "card", "card": ["id": "msg_14", "type": "routine_off", "title": "Running shoe prices", "routine": "rt_3",
                                                   "why": "XXL's product page didn't load (503)", "failures": 5, "state": "off"]]]],
+            // A draft the agent made, for the person to send, edit or reject.
+            ["id": "msg_15", "conversation": "c_1", "role": "agent", "agent": "a_1", "run": "run_4", "at": 1795187130000,
+             "blocks": [["kind": "text", "text": "Here's the follow-up to Example Co."],
+                        ["kind": "card", "card": ["id": "draft_1", "type": "draft", "title": "Draft email", "kind": "email", "service": "gmail",
+                                                  "badge": ["name": "gmail", "initial": "G", "color": "sky"], "thread": "Partnership",
+                                                  "answers": "Hi Sam, thanks for the call last week. Would Thursday or Friday suit you for a follow-up? Mira",
+                                                  "rows": [["key": "from", "label": "From", "value": "sam@example.com", "edit": false],
+                                                           ["key": "to", "label": "To", "value": "hello@example.com", "edit": true],
+                                                           ["key": "subject", "label": "Subject", "value": "Re: Partnership", "edit": true]],
+                                                  "body": "Hi Mira,\nThanks for getting back to me. Thursday works; I'll send an invite for 14:00.\nSam",
+                                                  "state": "draft"]]]],
         ],
         "c_2": [
             ["id": "msg_10", "conversation": "c_2", "role": "person", "from": "d_1", "at": 1795100000000,

@@ -326,6 +326,9 @@ struct Card: Equatable, Sendable {
     var routine = ""
     var why = ""
     var failures = 0
+    /// For `draft` (Drafts.swift): the email or message an agent drafted, for the person
+    /// to send, edit or reject; `message`, `sending` and `error` are its answer's.
+    var draft: Draft?
     /// For `spool_connect` (SpoolCard.swift): the Spools entry, its name, the address it's
     /// reached at, the agents it's for and the keys the person types. `server`, `state`,
     /// `said` and `tools` are its server's, and `message`, `sending` and `error` its Sign in's.
@@ -373,7 +376,8 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "spool_connect"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "draft", "spool_connect"].contains(type) else { return nil }
+        draft = type == "draft" ? Draft(c) : nil
         entry = c["entry"].text
         name = c["name"].text
         address = c["address"].text
@@ -1792,6 +1796,10 @@ final class Model {
     /// (RoutineOff.swift).
     var routineOnSending: Set<String> = []
     var routineOnErrors: [String: String] = [:]
+    /// The answers on draft cards on their way, by `message/card`, and what the instance
+    /// said to ones it refused (Drafts.swift).
+    var draftSending: Set<String> = []
+    var draftErrors: [String: String] = [:]
     /// Sign in on the cards of spools agents asked to connect (SpoolCard.swift): the ones
     /// on their way and what the instance said to ones it refused, by card, and the cards
     /// this phone signed in from, with their server, whose sign-in page opens here.
@@ -2023,6 +2031,12 @@ final class Model {
                 if c.type == "routine_off" {
                     c.sending = routineOnSending.contains(c.routine)
                     c.error = routineOnErrors[c.routine] ?? ""
+                }
+                if c.type == "draft" {
+                    let key = "\(out[i].id)/\(c.id)"
+                    c.message = out[i].id
+                    c.sending = draftSending.contains(key)
+                    c.error = draftErrors[key] ?? ""
                 }
                 if c.type == "form" {
                     let key = "\(out[i].id)/\(c.id)"
@@ -2465,6 +2479,8 @@ final class Model {
                     pending.append(frame)
                 }
             }
+        case let id where id.hasPrefix(draftAnswer):
+            takeDraftAnswer(id, error: error)
         case let id where id.hasPrefix(spoolAnswer):
             spoolAnswered(id, error: error)
         case let id where id.hasPrefix(routineOnAnswer):

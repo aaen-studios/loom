@@ -1,7 +1,8 @@
 // Plays the live copy of the app (src/components/AppDemo.astro) once, as three short scenes,
 // each in its own chat: the person's message typed and sent, then the reply written in. Juniper
 // answers with an Acta card's pill (app.rs, card_pill); in the Shop group chat the router picks
-// who answers, and the line over the reply names it (room_view.rs, route_line); Moss starts a
+// who answers, and the line over the reply names it (room_view.rs, route_line), and Biscuit's
+// reply ends with an email it drafted, to send, edit or reject (draft.ts); Moss starts a
 // T3 thread, whose card works and then lies straight with its pull request (t3_view.rs,
 // thread_card). After a few seconds' rest the next chat opens from its row in the sidebar, and
 // after the last it stays still. A click in it ends every scene where it would end, and each
@@ -17,6 +18,7 @@
 // over the chat from the header. The header gives way in a narrow window as the app's does (model/header.rs).
 //
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
+import { draft, type Draft } from './draft';
 import { threadOf, threadsIn, tieOf, tiesIn, yarnsIn, type Mood, type Thread } from './thread';
 
 type Chat = 'juniper' | 'shop' | 'moss';
@@ -938,12 +940,15 @@ export function play(app: HTMLElement) {
 		words: ReturnType<typeof writing>;
 		thread?: Thread;
 		t3: HTMLElement | null;
+		draft?: Draft;
 		steps: HTMLElement | null;
 	};
 	const scenes: Scene[] = (['juniper', 'shop', 'moss'] as const).map((c) => {
 		const ask = lists[c].querySelector<HTMLElement>('[data-scene="ask"]')!;
 		const reply = lists[c].querySelector<HTMLElement>('[data-scene="reply"]')!;
+		const card = reply.querySelector<HTMLElement>('.draft');
 		return {
+			draft: card ? draft(card) : undefined,
 			chat: c,
 			by: reply.dataset.by!,
 			ask,
@@ -1003,6 +1008,7 @@ export function play(app: HTMLElement) {
 		s.thread?.set('idle');
 		preview(s.by, '', 'idle');
 		if (s.chat === 'shop') fills.shop = BISCUIT_FILL;
+		s.draft?.shown(true);
 		if (s.steps) {
 			stepsAt(s.steps);
 			s.reply.querySelector<HTMLElement>('.said')!.hidden = false;
@@ -1086,6 +1092,11 @@ export function play(app: HTMLElement) {
 			fills.shop = BISCUIT_FILL;
 			drawContext();
 		}
+		// Its draft comes under it, for the visitor to send, edit or reject.
+		if (s.draft) {
+			await wait(500, id);
+			s.draft.shown(true);
+		}
 		// Its T3 thread's card comes under it, works a step a minute, and lies straight once done.
 		if (s.t3) {
 			await wait(600, id);
@@ -1108,6 +1119,8 @@ export function play(app: HTMLElement) {
 			for (const row of [s.ask, s.reply]) row.classList.add('unsent');
 			s.words.clear();
 			if (s.t3) s.t3.hidden = true;
+			s.draft?.reset();
+			s.draft?.shown(false);
 		}
 		drawPins();
 		try {

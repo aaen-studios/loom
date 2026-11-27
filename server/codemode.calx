@@ -65,6 +65,7 @@ pub struct Tool {
     pub input: Json           // its arguments, as JSON Schema
     pub output: Json          // what it gives, where it says
     pub read_only: bool       // its readOnlyHint
+    pub sends: String         // what it says it sends, as its `_meta`'s `loom/sends` (server/drafts.calx), or ""
 }
 
 // A name as a script writes it: each character that can't be in a
@@ -97,7 +98,7 @@ pub fn tools_of(server: String, listed: List<Json>) -> List<Tool> {
     for t in listed {
         let name = str_at(t.copy(), "name") ?? String()
         if name.len() == 0 { continue }
-        out.push(Tool { path: "{space}.{ident(name.copy())}", server: server.copy(), name: name, description: str_at(t.copy(), "description") ?? String(), input: at(t.copy(), "inputSchema"), output: at(t.copy(), "outputSchema"), read_only: bool_at(at(t, "annotations"), "readOnlyHint") ?? false })
+        out.push(Tool { path: "{space}.{ident(name.copy())}", server: server.copy(), name: name, description: str_at(t.copy(), "description") ?? String(), input: at(t.copy(), "inputSchema"), output: at(t.copy(), "outputSchema"), read_only: bool_at(at(t.copy(), "annotations"), "readOnlyHint") ?? false, sends: str_at(at(t, "_meta"), "loom/sends") ?? String() })
     }
     return out
 }

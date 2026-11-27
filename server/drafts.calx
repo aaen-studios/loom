@@ -1,0 +1,701 @@
+module server.drafts
+
+// Draft cards (PLAN.md, "Drafts"): an email or a message an agent proposes,
+// which its person sends, edits or rejects on a card in the reply, and which
+// loom sends as them, through the person's own MCP server's tool that sends.
+//
+// What's here only reads and changes JSON: which tools send, and what; the
+// rows a draft shows and the arguments an edit gives; the card; and what the
+// agent is told once the person has answered it. The instance keeps the card
+// in the reply and does the sending.
+import std.json.{Json}
+import shared.obj.{Obj, at, int_at, merge, str_at}
+import shared.badge
+import server.catalog
+
+// The kinds of draft: an email, a Slack or Discord message, a text message
+// and a comment on a GitHub issue or pull request.
+pub const KINDS: str = "email slack discord sms comment"
+// Composio's tool that runs other tools, as steps (`tools`, each a
+// `tool_slug` and its `arguments`).
+pub const COMPOSIO_RUN: str = "COMPOSIO_MULTI_EXECUTE_TOOL"
+// The most bytes a row's value keeps, and a body.
+const VALUE_MOST: usize = 2000
+const BODY_MOST: usize = 100000
+// What the agent may say of the thread a reply goes in and the message it answers.
+const THREAD_MOST: usize = 120
+const ANSWERS_MOST: usize = 4000
+// How long Outgoing waits before it really sends, so Undo can take it back.
+pub const UNDO_MS: i64 = 5000
+// How far ahead Outgoing later may be.
+pub const LATER_MOST_MS: i64 = 30 * 24 * 3600000
+
+// Where each field of a kind is among a send tool's arguments: the names
+// tools give it, the first that's there being the one.
+const FROM_ARGS: str = "from from_email sender from_number"
+const TO_EMAIL_ARGS: str = "recipient_email to to_email to_recipients toRecipients recipients recipient to_address"
+const TO_SMS_ARGS: str = "to to_number phone_number recipient"
+const CHANNEL_ARGS: str = "channel channel_id channel_name conversation_id"
+const CC_ARGS: str = "cc cc_emails cc_recipients ccRecipients"
+const BCC_ARGS: str = "bcc bcc_emails bcc_recipients bccRecipients"
+const SUBJECT_ARGS: str = "subject"
+const BODY_EMAIL_ARGS: str = "body message_body html_body text content message"
+const BODY_MESSAGE_ARGS: str = "text markdown_text content message body"
+const BODY_COMMENT_ARGS: str = "body comment text"
+
+// A call that sends: the server and tool the agent named, and for Composio's
+// COMPOSIO_MULTI_EXECUTE_TOOL the step that sends (`slug`), with what it's
+// given (`args`, the step's own arguments, or the tool's). `outer` is the
+// tool's whole arguments, which a step's are put back into.
+pub struct Outgoing {
+    pub server: String
+    pub tool: String
+    pub slug: String
+    pub args: Json
+    pub outer: Json
+}
+
+// The tool that does the sending: the step's slug, or the tool itself.
+pub fn sender(s: Outgoing) -> String {
+    return if s.slug.len() > 0 { s.slug.copy() } else { s.tool.copy() }
+}
+
+fn lower(t: String) -> String {
+    return t.to_lower_root()
+}
+
+fn has_any(text: String, words: str) -> bool {
+    for w in words.split(" ") {
+        if text.contains(w) { return true }
+    }
+    return false
+}
+
+fn first_in(names: List<String>, wanted: str) -> String? {
+    for w in wanted.split(" ") {
+        if names.contains(w.copy()) { return some(w.copy()) }
+    }
+    return none
+}
+
+// What `tool` sends, or "" for a tool that doesn't: one of KINDS. `server` is
+// the server's name and `from` the catalog entry it came from, if it did;
+// `props` are its arguments' names, from its schema or from a call's own
+// arguments; `says` is what the tool says it sends itself (its `_meta`'s
+// `loom/sends`), which comes first. A tool that makes a draft, or sends one
+// made elsewhere, isn't one: its card couldn't show what goes out.
+pub fn kind_of(server: String, from: String, tool: String, props: List<String>, says: own String) -> String {
+    if says.len() > 0 and has_kind(says.copy()) { return says }
+    let n = lower(tool)
+    let where = "{n} {lower(server)} {lower(from)}"
+    if n.contains("draft") { return String() }
+    for w in words_in(n.copy()) {
+        if " list get search read fetch delete schedule scheduled ".contains(" {w} ") { return String() }
+    }
+    let sends = has_any(n.copy(), "send post reply forward create_message")
+    if not sends and not n.contains("comment") { return String() }
+    if where.contains("slack") and sends and has_any(n.copy(), "message chat reply post") { return String("slack") }
+    if where.contains("discord") and sends and n.contains("message") { return String("discord") }
+    if n.contains("sms") or (where.contains("twilio") and sends) { return String("sms") }
+    if n.contains("comment") and has_any(n.copy(), "create add post") and (where.contains("github") or has_any(n.copy(), "issue pull pr_")) { return String("comment") }
+    if sends and n.contains("mail") { return String("email") }
+    if sends and has_any(n.copy(), "reply thread") and has_any(where.copy(), "gmail outlook mail") { return String("email") }
+    // By its arguments: one that sends to someone, with words to send.
+    let to = first_in(props.copy(), TO_EMAIL_ARGS) != none
+    let words = first_in(props.copy(), BODY_EMAIL_ARGS) != none
+    if sends and to and words and props.contains(String("subject")) { return String("email") }
+    return String()
+}
+
+// The words of a tool's name, split at anything but letters and digits.
+fn words_in(name: String) -> List<String> {
+    var out = List<String>()
+    var word = String()
+    for r in name.runes() {
+        if (r >= 'a' and r <= 'z') or (r >= '0' and r <= '9') {
+            word.push(r)
+        } else if word.len() > 0 {
+            out.push(word.copy())
+            word = String()
+        }
+    }
+    if word.len() > 0 { out.push(word) }
+    return out
+}
+
+fn has_kind(kind: String) -> bool {
+    for k in KINDS.split(" ") {
+        if kind == k { return true }
+    }
+    return false
+}
+
+// The call the agent made, as a draft: Composio's runner with one step that
+// sends is that step; a send tool called on Composio's server by its slug is
+// put in a runner's step, as Composio takes it. `from` is the catalog entry
+// the server came from. Or why it can't be a draft.
+pub fn send_of(server: own String, from: String, tool: own String, args: own Json, props: own List<String>, says: own String) -> (Outgoing, String, String) {
+    let none_yet = Outgoing { server: server.copy(), tool: tool.copy(), slug: String(), args: Json.Null, outer: Json.Null }
+    if tool == COMPOSIO_RUN {
+        var steps = List<Json>()
+        if let Json.Array(xs) = at(args.copy(), "tools") { steps = xs.copy() }
+        if steps.len() != 1 { return (none_yet, String(), "A draft is one message: give {COMPOSIO_RUN} one step, the tool that sends it, such as GMAIL_SEND_EMAIL.") }
+        let step = steps[0].copy()
+        let slug = str_at(step.copy(), "tool_slug") ?? String()
+        let inner = at(step, "arguments")
+        let kind = kind_of(server.copy(), from.copy(), slug.copy(), inner.keys(), String())
+        if kind.len() == 0 { return (none_yet, String(), "{slug} isn't a tool loom knows sends an email or a message, so it can't be a draft.") }
+        return (Outgoing { server: server, tool: tool, slug: slug, args: inner, outer: args }, kind, String())
+    }
+    let named = if props.len() > 0 { props } else { args.keys() }
+    let kind = kind_of(server.copy(), from.copy(), tool.copy(), named, says)
+    if kind.len() == 0 { return (none_yet, String(), "{tool} isn't a tool loom knows sends an email or a message, so it can't be a draft. Ask your person before you call it instead.") }
+    // A Composio tool by its slug: sent as a step of Composio's runner.
+    if lower(server.copy()).contains("composio") or from == "composio" {
+        if tool.to_upper_root() == tool and tool != COMPOSIO_RUN {
+            let step = Obj.new().s("tool_slug", tool.copy()).j("arguments", args.copy()).done()
+            return (Outgoing { server: server, tool: String(COMPOSIO_RUN), slug: tool, args: args, outer: Obj.new().j("tools", Json.Array([step])).done() }, kind, String())
+        }
+    }
+    return (Outgoing { server: server, tool: tool, slug: String(), args: args.copy(), outer: args }, kind, String())
+}
+
+// The tool's whole arguments, with what the step that sends is given now.
+pub fn arguments_of(s: Outgoing) -> Json {
+    if s.slug.len() == 0 { return s.args.copy() }
+    var steps = List<Json>()
+    if let Json.Array(xs) = at(s.outer.copy(), "tools") {
+        for x in xs {
+            if steps.len() == 0 {
+                steps.push(merge(x.copy(), Obj.new().j("arguments", s.args.copy()).done()))
+            } else {
+                steps.push(x.copy())
+            }
+        }
+    }
+    return merge(s.outer.copy(), Obj.new().j("tools", Json.Array(steps)).done())
+}
+
+// A value as the card shows it: text as it is, a list of addresses as
+// "a, b" (each a string, or an object with an address, as Microsoft Graph's
+// `{"emailAddress": {"address"}}`), a number or a bool as JSON writes it,
+// and anything else as its JSON.
+pub fn words_of(v: Json) -> String {
+    if let s = v.as_str() { return s }
+    if v == Json.Null { return String() }
+    if let Json.Array(xs) = v {
+        var parts = List<String>()
+        var plain = true
+        for x in xs {
+            if let s = x.as_str() {
+                parts.push(s)
+            } else if let a = address_in(x.copy()) {
+                parts.push(a)
+            } else {
+                plain = false
+            }
+        }
+        if plain { return parts.join(", ") }
+    }
+    if let Json.Object(_) = v {
+        if let a = address_in(v.copy()) { return a }
+    }
+    return "{v}"
+}
+
+fn address_in(x: Json) -> String? {
+    if let a = str_at(at(x.copy(), "emailAddress"), "address") { return some(a) }
+    if let a = str_at(x.copy(), "address") { return some(a) }
+    return str_at(x, "email")
+}
+
+// `text` put back in the shape `was` had: a list of addresses split at
+// commas, each as `was`'s items were, or text.
+pub fn value_like(was: Json, text: own String) -> Json {
+    if let Json.Array(xs) = was {
+        var shaped = String("text")
+        if xs.len() > 0 {
+            if at(xs[0].copy(), "emailAddress") != Json.Null {
+                shaped = String("graph")
+            } else if str_at(xs[0].copy(), "address") != none {
+                shaped = String("address")
+            } else if str_at(xs[0].copy(), "email") != none {
+                shaped = String("email")
+            }
+        }
+        var out = List<Json>()
+        for part in text.split(",") {
+            let a = part.trim().copy()
+            if a.len() == 0 { continue }
+            if shaped == "graph" {
+                out.push(Obj.new().j("emailAddress", Obj.new().s("address", a).done()).done())
+            } else if shaped == "address" {
+                out.push(Obj.new().s("address", a).done())
+            } else if shaped == "email" {
+                out.push(Obj.new().s("email", a).done())
+            } else {
+                out.push(Json.Str(a))
+            }
+        }
+        return Json.Array(out)
+    }
+    return Json.Str(text)
+}
+
+fn cut(text: own String, most: usize) -> String {
+    if text.len() <= most { return text }
+    var out = String()
+    for r in text.runes() {
+        if out.len() >= most { break }
+        out.push(r)
+    }
+    out.push_str("…")
+    return out
+}
+
+// A row of the card: its field (`key`: from, to, cc, bcc, subject; or the
+// argument's own name for the rest), its label, the argument it's in, and
+// whether Edit changes it.
+pub struct Row {
+    pub key: String
+    pub label: String
+    pub arg: String
+    pub value: String
+    pub edit: bool
+}
+
+fn to_label(kind: String) -> String {
+    if kind == "slack" or kind == "discord" { return String("Channel") }
+    if kind == "comment" { return String("On") }
+    return String("To")
+}
+
+fn to_args(kind: String) -> str {
+    if kind == "sms" { return TO_SMS_ARGS }
+    if kind == "slack" or kind == "discord" { return CHANNEL_ARGS }
+    return TO_EMAIL_ARGS
+}
+
+fn body_args(kind: String) -> str {
+    if kind == "email" or kind == "sms" { return BODY_EMAIL_ARGS }
+    if kind == "comment" { return BODY_COMMENT_ARGS }
+    return BODY_MESSAGE_ARGS
+}
+
+// Whether `v` sends nothing: null, false, "", an empty list or object.
+fn empty(v: Json) -> bool {
+    if v == Json.Null or v == Json.Bool(false) { return true }
+    if let s = v.as_str() { return s.trim().len() == 0 }
+    if let Json.Array(xs) = v { return xs.len() == 0 }
+    if let Json.Object(m) = v { return m.len() == 0 }
+    return false
+}
+
+// The draft's rows, in the card's order, and its body's argument: From, To
+// (or the channel, or where a comment goes), Cc, Bcc and Subject, then every
+// other argument it's given that sends something, by its own name, so
+// nothing that goes out is hidden. A Gmail tool's `user_id` of `me` is the
+// account itself, so it isn't a row. `server` names the account when no
+// argument does.
+pub fn rows_of(kind: String, args: Json, server: String) -> (List<Row>, String) {
+    let names = args.keys()
+    var rows = List<Row>()
+    var used = List<String>()
+    let body_arg = first_in(names.copy(), body_args(kind.copy())) ?? String()
+    if body_arg.len() > 0 { used.push(body_arg.copy()) }
+    var from = first_in(names.copy(), FROM_ARGS)
+    if from == none and str_at(args.copy(), "user_id") != none and str_at(args.copy(), "user_id") != some(String("me")) { from = some(String("user_id")) }
+    if let f = from {
+        used.push(f.copy())
+        rows.push(Row { key: String("from"), label: String("From"), arg: f.copy(), value: cut(words_of(member(args.copy(), f.copy())), VALUE_MOST), edit: false })
+    } else {
+        rows.push(Row { key: String("from"), label: String("From"), arg: String(), value: server.copy(), edit: false })
+    }
+    if str_at(args.copy(), "user_id") == some(String("me")) { used.push(String("user_id")) }
+    if kind == "comment" {
+        var on = List<String>()
+        for a in ["owner", "repo", "repository", "issue_number", "pull_number", "number"] {
+            if let v = args.get(String(a)) {
+                used.push(String(a))
+                on.push(words_of(v))
+            }
+        }
+        rows.push(Row { key: String("to"), label: String("On"), arg: String(), value: on.join(" "), edit: false })
+    } else if let to = first_in(names.copy(), to_args(kind.copy())) {
+        used.push(to.copy())
+        rows.push(Row { key: String("to"), label: to_label(kind.copy()), arg: to.copy(), value: cut(words_of(member(args.copy(), to.copy())), VALUE_MOST), edit: true })
+    }
+    if kind == "email" {
+        for (key, label, wanted) in [("cc", "Cc", CC_ARGS), ("bcc", "Bcc", BCC_ARGS), ("subject", "Subject", SUBJECT_ARGS)] {
+            if let a = first_in(names.copy(), wanted) {
+                used.push(a.copy())
+                let v = member(args.copy(), a.copy())
+                // An empty Cc or Bcc sends nothing, so it's no row.
+                if key != "subject" and empty(v.copy()) { continue }
+                rows.push(Row { key: String(key), label: String(label), arg: a.copy(), value: cut(words_of(v), VALUE_MOST), edit: true })
+            }
+        }
+    }
+    for n in names {
+        if used.contains(n.copy()) { continue }
+        let v = member(args.copy(), n.copy())
+        if empty(v.copy()) { continue }
+        rows.push(Row { key: n.copy(), label: n.copy(), arg: n.copy(), value: cut(words_of(v), VALUE_MOST), edit: false })
+    }
+    return (rows, body_arg)
+}
+
+// What a draft's card is titled, by its kind.
+pub fn title_of(kind: String) -> String {
+    if kind == "slack" { return String("Draft Slack message") }
+    if kind == "discord" { return String("Draft Discord message") }
+    if kind == "sms" { return String("Draft text message") }
+    if kind == "comment" { return String("Draft GitHub comment") }
+    return String("Draft email")
+}
+
+// The service a draft goes out through, for its mark and its badge's name:
+// Gmail, Outlook, Slack, Discord, GitHub, or the server's own name.
+pub fn service_of(kind: String, s: Outgoing) -> String {
+    let n = lower("{sender(s.copy())} {s.server}")
+    if n.contains("gmail") { return String("gmail") }
+    if n.contains("outlook") or n.contains("microsoft") { return String("outlook") }
+    if kind == "slack" { return String("slack") }
+    if kind == "discord" { return String("discord") }
+    if kind == "comment" or n.contains("github") { return String("github") }
+    if n.contains("twilio") { return String("twilio") }
+    return s.server.copy()
+}
+
+// The mark a service has, one colour in currentColor, or "".
+pub fn mark_of(service: String) -> String {
+    for known in ["gmail", "discord", "github"] {
+        if service == known { return catalog.logo_svg("{known}.svg") ?? String() }
+    }
+    return String()
+}
+
+// The card for a draft, made fresh from the call: `id` is its card's id in
+// the reply, `thread` and `answers` what the agent said of the thread a reply
+// goes in and the message it answers (only shown, never sent), and `icon`,
+// `dark` the server's own icons. Its state starts as `draft`.
+pub fn card_of(id: String, kind: String, s: Outgoing, thread: String, answers: String, icon: String, dark: String) -> Json {
+    let service = service_of(kind.copy(), s.copy())
+    let mark = mark_of(service.copy())
+    let call = Obj.new().s("server", s.server.copy()).s("tool", s.tool.copy()).maybe("slug", if s.slug.len() > 0 { some(s.slug.copy()) } else { none }).j("arguments", arguments_of(s.copy())).done()
+    var card = Obj.new().s("id", id).s("type", String("draft")).s("title", title_of(kind.copy())).s("kind", kind).s("service", service.copy()).j("badge", badge.badge(service, icon, dark))
+    if mark.len() > 0 { card = card.s("icon_svg", mark) }
+    card = card.s("thread", cut(thread.trim().copy(), THREAD_MOST)).s("answers", cut(answers.trim().copy(), ANSWERS_MOST)).j("call", call).s("state", String("draft"))
+    return shown(card.done())
+}
+
+// The card with its rows and body made from its call as it is now.
+pub fn shown(card: Json) -> Json {
+    let (s, kind) = send_in(card.copy())
+    let (rows, body_arg) = rows_of(kind, s.args.copy(), s.server.copy())
+    var list = List<Json>()
+    for r in rows {
+        list.push(Obj.new().s("key", r.key).s("label", r.label).s("value", r.value).b("edit", r.edit).done())
+    }
+    let body = if body_arg.len() > 0 { cut(words_of(member(s.args.copy(), body_arg.copy())), BODY_MOST) } else { String() }
+    return merge(card, Obj.new().j("rows", Json.Array(list)).s("body", body).done())
+}
+
+// The call a card keeps, and its kind.
+pub fn send_in(card: Json) -> (Outgoing, String) {
+    let call = at(card.copy(), "call")
+    let server = str_at(call.copy(), "server") ?? String()
+    let tool = str_at(call.copy(), "tool") ?? String()
+    let slug = str_at(call.copy(), "slug") ?? String()
+    let outer = at(call, "arguments")
+    var args = outer.copy()
+    if slug.len() > 0 {
+        args = at((at(outer.copy(), "tools").at(0) ?? Json.Null), "arguments")
+    }
+    return (Outgoing { server: server, tool: tool, slug: slug, args: args, outer: outer }, str_at(card, "kind") ?? String("email"))
+}
+
+// The card with the person's edits made to its call (`edits`, by field:
+// to, cc, bcc, subject and body, each text), and whether any changed what
+// goes out; or why they can't be.
+pub fn edited(card: own Json, edits: Json) -> (Json, bool, String) {
+    if edits == Json.Null { return (card, false, String()) }
+    let (s, kind) = send_in(card.copy())
+    let (rows, body_arg) = rows_of(kind.copy(), s.args.copy(), s.server.copy())
+    var args = s.args.copy()
+    var changed = false
+    for key in edits.keys() {
+        let text = member(edits.copy(), key.copy()).as_str() else return (Json.Null, false, "{key} isn't text.")
+        var arg = String()
+        if key == "body" {
+            arg = body_arg.copy()
+        } else {
+            for r in rows {
+                if r.key == key and r.edit { arg = r.arg.copy() }
+            }
+            // A Cc or a Bcc the draft didn't have yet goes in as the tool names it.
+            if arg.len() == 0 and kind == "email" and (key == "cc" or key == "bcc") and text.trim().len() > 0 {
+                arg = key.copy()
+            }
+        }
+        if arg.len() == 0 {
+            if text.trim().len() == 0 { continue }
+            return (Json.Null, false, "{key} can't be changed on this draft.")
+        }
+        let was = member(args.copy(), arg.copy())
+        if key == "body" {
+            if text == words_of(was.copy()) { continue }
+        } else if text.trim() == words_of(was.copy()).trim() {
+            continue
+        }
+        let now = if key == "body" { Json.Str(text) } else if was == Json.Null and (key == "cc" or key == "bcc") { value_like(member(args.copy(), first_in(args.keys(), TO_EMAIL_ARGS) ?? String()), text.trim().copy()) } else { value_like(was, text.trim().copy()) }
+        args = with(args, arg.copy(), now)
+        changed = true
+    }
+    if not changed { return (card, false, String()) }
+    let again = Outgoing { server: s.server.copy(), tool: s.tool.copy(), slug: s.slug.copy(), args: args, outer: s.outer.copy() }
+    let call = merge(at(card.copy(), "call"), Obj.new().j("arguments", arguments_of(again)).done())
+    return (shown(merge(card, Obj.new().j("call", call).b("edited", true).done())), true, String())
+}
+
+// The draft's line once it's gone or going: its subject, or the start of its
+// body, and where it goes. "Re: Partnership → hello@example.com".
+pub fn line_of(card: Json) -> (String, String) {
+    var what = String()
+    var to = String()
+    if let Json.Array(rows) = at(card.copy(), "rows") {
+        for r in rows {
+            let key = str_at(r.copy(), "key") ?? String()
+            if key == "subject" { what = str_at(r.copy(), "value") ?? String() }
+            if key == "to" { to = str_at(r, "value") ?? String() }
+        }
+    }
+    if what.len() == 0 {
+        let body = str_at(card, "body") ?? String()
+        what = cut(body.lines().join(" ").trim().copy(), 60)
+    }
+    return (what, to)
+}
+
+// What the agent is told once its person has answered the draft: sent as it
+// wrote it, sent edited with what went out, rejected with their note (or
+// without one), or that it couldn't be sent, with why.
+pub fn outcome(card: Json) -> String {
+    let state = str_at(card.copy(), "state") ?? String()
+    let kind = str_at(card.copy(), "kind") ?? String("email")
+    let what = if kind == "email" { "draft email" } else if kind == "comment" { "draft comment" } else { "draft message" }
+    let (subject, to) = line_of(card.copy())
+    let named = if subject.len() > 0 { " “{subject}”" } else { String() }
+    let card_id = str_at(card.copy(), "id") ?? String()
+    if state == "rejected" {
+        let note = (str_at(card.copy(), "note") ?? String()).trim().copy()
+        if note.len() == 0 { return "Your person rejected your {what}{named} ({card_id}), without a note. It wasn't sent." }
+        return "Your person rejected your {what}{named} ({card_id}). It wasn't sent. Their note: {note}"
+    }
+    if state == "failed" {
+        let why = (str_at(card.copy(), "why") ?? String()).trim().copy()
+        let stop = if why.ends_with(".") or why.ends_with("!") or why.ends_with("?") { "" } else { "." }
+        return "Your {what}{named} to {to} ({card_id}) couldn't be sent: {why}{stop} Your person can try again from its card; don't send it yourself."
+    }
+    if bool_at_or(card.copy(), "edited") {
+        var lines = List<String>()
+        if let Json.Array(rows) = at(card.copy(), "rows") {
+            for r in rows {
+                let v = str_at(r.copy(), "value") ?? String()
+                if v.len() > 0 { lines.push("{str_at(r, "label") ?? String()}: {v}") }
+            }
+        }
+        return "Your person edited your {what} ({card_id}) and sent it. What went out:\n{lines.join("\n")}\n\n{str_at(card, "body") ?? String()}"
+    }
+    return "Your person sent your {what}{named} to {to} ({card_id}) as you wrote it."
+}
+
+fn bool_at_or(j: Json, key: str) -> bool {
+    return at(j, key) == Json.Bool(true)
+}
+
+// The card in `state`, with what goes with it: `at` (when it was sent, or
+// will be), `until` (while it can still be taken back), `why` (a failure's)
+// and `note` (a rejection's). A state that's left takes its fields with it.
+pub fn in_state(card: Json, state: str, at_ms: i64, until: i64, why: own String, note: own String) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = card {
+        for (k, v) in o {
+            if k != "at" and k != "until" and k != "why" and k != "note" and k != "state" { m.insert(k.copy(), v.copy()) }
+        }
+    }
+    m.insert(String("state"), Json.Str(String(state)))
+    if at_ms > 0 { m.insert(String("at"), Json.Int(at_ms)) }
+    if until > 0 { m.insert(String("until"), Json.Int(until)) }
+    if why.len() > 0 { m.insert(String("why"), Json.Str(why)) }
+    if note.len() > 0 { m.insert(String("note"), Json.Str(note)) }
+    return Json.Object(m)
+}
+
+// Why `answer` can't be given to a card in `state`, or "".
+pub fn refusal(state: String, answer: String) -> String {
+    if answer == "send" or answer == "reject" or answer == "later" {
+        if state == "draft" { return String() }
+        return String("That draft has been answered already.")
+    }
+    if answer == "undo" {
+        if state == "sending" or state == "later" { return String() }
+        return String("That draft can't be taken back now.")
+    }
+    if answer == "retry" {
+        if state == "failed" { return String() }
+        return String("Only a draft that couldn't be sent is tried again.")
+    }
+    return "answer is \"{answer}\": it's send, later, reject, undo or retry."
+}
+
+// The text of a send tool's failure, from its MCP result, or "" when it sent.
+pub fn failure_of(result: Json) -> String {
+    if at(result.copy(), "isError") != Json.Bool(true) {
+        // Composio says a step failed in its result's text, as JSON.
+        let text = text_of(result.copy())
+        if text.contains("\"successful\":false") or text.contains("\"successful\": false") {
+            return cut(if text.len() > 0 { text } else { String("It failed.") }, 300)
+        }
+        return String()
+    }
+    let text = text_of(result)
+    return cut(if text.len() > 0 { text } else { String("The tool said it failed.") }, 300)
+}
+
+fn text_of(result: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(xs) = at(result, "content") {
+        for x in xs {
+            if let t = str_at(x, "text") { out.push(t) }
+        }
+    }
+    return out.join("\n").trim().copy()
+}
+
+// Member `key`, or null.
+fn member(j: Json, key: String) -> Json {
+    return j.get(key) ?? Json.Null
+}
+
+// `j` with member `key` set to `v`.
+fn with(j: Json, key: own String, v: own Json) -> Json {
+    var m = LinkedMap<String, Json>()
+    if let Json.Object(o) = j {
+        for (k, x) in o { m.insert(k.copy(), x.copy()) }
+    }
+    m.insert(key, v)
+    return Json.Object(m)
+}
+
+// `int_at` for what a card keeps, or 0.
+pub fn ms_at(card: Json, key: str) -> i64 {
+    return int_at(card, key) ?? 0
+}
+
+@test
+fn knows_the_tools_that_send() {
+    let none_props = List<String>()
+    assert(kind_of(String("composio"), String(), String("GMAIL_SEND_EMAIL"), none_props.copy(), String()) == "email")
+    assert(kind_of(String("composio"), String(), String("GMAIL_REPLY_TO_THREAD"), none_props.copy(), String()) == "email")
+    assert(kind_of(String("composio"), String(), String("OUTLOOK_OUTLOOK_SEND_EMAIL"), none_props.copy(), String()) == "email")
+    assert(kind_of(String("gmail"), String(), String("send_email"), none_props.copy(), String()) == "email")
+    assert(kind_of(String("outlook"), String(), String("reply_to_thread"), none_props.copy(), String()) == "email")
+    assert(kind_of(String("slack"), String(), String("slack_post_message"), none_props.copy(), String()) == "slack")
+    assert(kind_of(String("composio"), String(), String("SLACK_SENDS_A_MESSAGE_TO_A_SLACK_CHANNEL"), none_props.copy(), String()) == "slack")
+    assert(kind_of(String("discord"), String(), String("send_message"), none_props.copy(), String()) == "discord")
+    assert(kind_of(String("twilio"), String(), String("send_message"), none_props.copy(), String()) == "sms")
+    assert(kind_of(String("github"), String(), String("add_issue_comment"), none_props.copy(), String()) == "comment")
+    // A draft, a read, or something else isn't sending.
+    assert(kind_of(String("composio"), String(), String("GMAIL_CREATE_EMAIL_DRAFT"), none_props.copy(), String()) == "")
+    assert(kind_of(String("composio"), String(), String("GMAIL_SEND_DRAFT"), none_props.copy(), String()) == "")
+    assert(kind_of(String("gmail"), String(), String("search_emails"), none_props.copy(), String()) == "")
+    assert(kind_of(String("github"), String(), String("list_issue_comments"), none_props.copy(), String()) == "")
+    assert(kind_of(String("acta"), String(), String("create_tasks"), none_props.copy(), String()) == "")
+    // By its schema: a tool that sends, to someone, with a subject and words.
+    let props: List<String> = [String("to"), String("subject"), String("body")]
+    assert(kind_of(String("mailer"), String(), String("deliver_now_send"), props.copy(), String()) == "email")
+    assert(kind_of(String("mailer"), String(), String("deliver"), props, String()) == "")
+    // A server that says so itself.
+    assert(kind_of(String("x"), String(), String("go"), none_props, String("sms")) == "sms")
+}
+
+fn gmail_send() -> Json {
+    return Obj.new().s("recipient_email", String("hello@example.com")).s("subject", String("Re: Partnership")).s("body", String("Hi Mira,\nThursday works.")).s("user_id", String("me")).b("is_html", false).s("thread_id", String("18c2")).done()
+}
+
+@test
+fn reads_a_composio_step_and_puts_edits_back() {
+    let step = Obj.new().s("tool_slug", String("GMAIL_SEND_EMAIL")).j("arguments", gmail_send()).done()
+    let call = Obj.new().j("tools", Json.Array([step])).s("thought", String("send it")).done()
+    let (s, kind, why) = send_of(String("composio"), String(), String(COMPOSIO_RUN), call, List<String>(), String())
+    assert(why == "" and kind == "email" and s.slug == "GMAIL_SEND_EMAIL")
+    let card = card_of(String("draft_1"), kind, s, String("Partnership"), String("Can we meet?"), String(), String())
+    assert(str_at(card.copy(), "service") == some(String("gmail")) and str_at(card.copy(), "icon_svg") != none)
+    assert(str_at(card.copy(), "title") == some(String("Draft email")) and str_at(card.copy(), "body") == some(String("Hi Mira,\nThursday works.")))
+    // From, To, Subject, then what else goes out; user_id me and a false is_html don't.
+    let rows = "{at(card.copy(), "rows")}"
+    assert(rows == #"[{"key":"from","label":"From","value":"composio","edit":false},{"key":"to","label":"To","value":"hello@example.com","edit":true},{"key":"subject","label":"Subject","value":"Re: Partnership","edit":true},{"key":"thread_id","label":"thread_id","value":"18c2","edit":false}]"#)
+    let (changed, any, w) = edited(card.copy(), Obj.new().s("body", String("Hi Mira,\nFriday works.")).s("cc", String("ola@example.com")).s("subject", String("Re: Partnership")).done())
+    assert(w == "" and any and bool_at_or(changed.copy(), "edited"))
+    let sent = at(at(changed.copy(), "call"), "arguments")
+    let inner = at(at(sent.copy(), "tools").at(0) ?? Json.Null, "arguments")
+    assert(str_at(inner.copy(), "body") == some(String("Hi Mira,\nFriday works.")) and str_at(inner.copy(), "cc") == some(String("ola@example.com")))
+    assert(str_at(sent, "thought") == some(String("send it")) and str_at(inner, "thread_id") == some(String("18c2")))
+    assert(outcome(in_state(changed.copy(), "sent", 1, 0, String(), String())).contains("Cc: ola@example.com"))
+    let (_, nothing, _) = edited(card.copy(), Obj.new().s("subject", String("Re: Partnership ")).done())
+    assert(not nothing)
+    let (_, _, bad) = edited(card, Obj.new().s("thread_id", String("x")).done())
+    assert(bad == "thread_id can't be changed on this draft.")
+}
+
+@test
+fn a_slug_on_composio_goes_in_its_runner() {
+    let (s, kind, why) = send_of(String("composio"), String(), String("GMAIL_SEND_EMAIL"), gmail_send(), List<String>(), String())
+    assert(why == "" and kind == "email" and s.tool == COMPOSIO_RUN and s.slug == "GMAIL_SEND_EMAIL")
+    assert(str_at(at(arguments_of(s), "tools").at(0) ?? Json.Null, "tool_slug") == some(String("GMAIL_SEND_EMAIL")))
+    let (_, _, two) = send_of(String("composio"), String(), String(COMPOSIO_RUN), Obj.new().j("tools", Json.Array([Json.Null, Json.Null])).done(), List<String>(), String())
+    assert(two.contains("one step"))
+    let (_, _, not_one) = send_of(String("acta"), String(), String("create_tasks"), Obj.new().done(), List<String>(), String())
+    assert(not_one.starts_with("create_tasks isn't a tool loom knows sends"))
+}
+
+@test
+fn keeps_the_shape_of_addresses() {
+    let graph = Json.Array([Obj.new().j("emailAddress", Obj.new().s("address", String("a@example.com")).done()).done()])
+    assert(words_of(graph.copy()) == "a@example.com")
+    assert("{value_like(graph, String("a@example.com, b@example.com"))}" == #"[{"emailAddress":{"address":"a@example.com"}},{"emailAddress":{"address":"b@example.com"}}]"#)
+    assert("{value_like(Json.Array([Json.Str(String("a"))]), String("x, y"))}" == #"["x","y"]"#)
+    assert("{value_like(Json.Str(String("a")), String("x, y"))}" == #""x, y""#)
+}
+
+@test
+fn other_kinds_have_their_fields() {
+    let slack = Obj.new().s("channel", String("launch")).s("text", String("We're live.")).done()
+    let (s, kind, _) = send_of(String("slack"), String(), String("slack_post_message"), slack, List<String>(), String())
+    let card = card_of(String("draft_1"), kind, s, String(), String(), String(), String())
+    assert(str_at(card.copy(), "title") == some(String("Draft Slack message")) and "{at(card.copy(), "rows")}".contains(##""label":"Channel","value":"launch""##))
+    assert(line_of(card) == (String("We're live."), String("launch")))
+    let comment = Obj.new().s("owner", String("example")).s("repo", String("site")).i("issue_number", 12).s("body", String("Fixed in #13.")).done()
+    let (c, ck, _) = send_of(String("github"), String(), String("add_issue_comment"), comment, List<String>(), String())
+    let ccard = card_of(String("draft_2"), ck, c, String(), String(), String(), String())
+    assert("{at(ccard.copy(), "rows")}".contains(#""label":"On","value":"example site 12""#) and str_at(ccard, "service") == some(String("github")))
+}
+
+@test
+fn says_what_came_of_it() {
+    let (s, kind, _) = send_of(String("gmail"), String(), String("send_email"), Obj.new().s("to", String("hello@example.com")).s("subject", String("Hi")).s("body", String("Hello.")).done(), List<String>(), String())
+    let card = card_of(String("draft_1"), kind, s, String(), String(), String(), String())
+    assert(outcome(in_state(card.copy(), "sent", 1, 0, String(), String())) == "Your person sent your draft email “Hi” to hello@example.com (draft_1) as you wrote it.")
+    assert(outcome(in_state(card.copy(), "rejected", 0, 0, String(), String("Too formal."))).ends_with("Their note: Too formal."))
+    assert(outcome(in_state(card.copy(), "rejected", 0, 0, String(), String())).contains("without a note"))
+    assert(outcome(in_state(card.copy(), "failed", 0, 0, String("Quota."), String())).contains("couldn't be sent: Quota."))
+    assert(outcome(in_state(card.copy(), "failed", 0, 0, String("Bad address"), String())).contains("couldn't be sent: Bad address. Your person"))
+    let sending = in_state(card.copy(), "sending", 5, 10, String(), String())
+    assert(ms_at(sending.copy(), "until") == 10 and ms_at(in_state(sending, "sent", 5, 0, String(), String()), "until") == 0)
+    assert(refusal(String("draft"), String("send")) == "" and refusal(String("sent"), String("send")).len() > 0)
+    assert(refusal(String("sending"), String("undo")) == "" and refusal(String("sent"), String("undo")).len() > 0)
+    assert(refusal(String("failed"), String("retry")) == "" and refusal(String("draft"), String("nope")).contains("send, later"))
+    let failed = Obj.new().b("isError", true).j("content", Json.Array([Obj.new().s("type", String("text")).s("text", String("Bad address")).done()])).done()
+    assert(failure_of(failed) == "Bad address" and failure_of(Obj.new().j("content", Json.Array(List<Json>())).done()) == "")
+}
