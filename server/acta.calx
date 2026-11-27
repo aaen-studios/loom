@@ -27,6 +27,7 @@ pub struct Board {
     pub board: String    // "aaen-studios/loom"
     pub prefix: String    // "LOO"
     pub name: String    // "loom"
+    pub writes: bool    // the person's Acta lets them change its cards and comment
 }
 
 fn upper(c: u8) -> bool {
@@ -164,22 +165,34 @@ pub fn refs_in(text: String) -> List<Ref> {
     return out
 }
 
-/// The person's boards, from what list_boards answered.
+/// The person's boards, from what list_boards answered: each writable unless their
+/// key only reads or they're a viewer in its workspace.
 pub fn boards_of(listed: Json) -> List<Board> {
     var out = List<Board>()
+    let key_reads = str_at(at(listed.copy(), "key"), "access") == some(String("read"))
     if let Json.Array(spaces) = at(listed, "workspaces") {
         for w in spaces {
+            let viewer = str_at(w.copy(), "your_role") == some(String("viewer"))
             if let Json.Array(boards) = at(w, "boards") {
                 for b in boards {
                     let board = str_at(b.copy(), "board") ?? String()
                     let prefix = str_at(b.copy(), "task_prefix") ?? String()
                     if board.len() == 0 or prefix.len() == 0 { continue }
-                    out.push(Board { board: board.copy(), prefix: prefix, name: str_at(b, "name") ?? board })
+                    out.push(Board { board: board.copy(), prefix: prefix, name: str_at(b, "name") ?? board, writes: not key_reads and not viewer })
                 }
             }
         }
     }
     return out
+}
+
+/// Whether the person may comment on a card on `board`: yes unless it's one of their
+/// boards that they only read. Acta has the last word.
+pub fn writes(boards: List<Board>, board: String) -> bool {
+    for b in boards {
+        if b.board == board { return b.writes }
+    }
+    return true
 }
 
 /// The board a bare id's prefix is on, among the person's boards.
@@ -313,7 +326,11 @@ fn reads_boards_and_cards() {
     assert(boards.len() == 2)
     assert((board_for(boards.copy(), String("CLX-450")) ?? boards[0].copy()).name == "calx")
     assert(board_for(boards.copy(), String("UTF-8")) == none)
-    assert(board_name(boards.copy(), String("aaen-studios/clx")) == "calx" and board_name(boards, String("someone/else")) == "else")
+    assert(board_name(boards.copy(), String("aaen-studios/clx")) == "calx" and board_name(boards.copy(), String("someone/else")) == "else")
+    assert(writes(boards, String("aaen-studios/loom")))
+    let read_only = boards_of(parse(#"{"key":{"access":"read"},"workspaces":[{"workspace":"a","your_role":"owner","boards":[{"board":"a/x","name":"x","task_prefix":"X"}]}]}"#)!)
+    let viewer = boards_of(parse(#"{"key":{"access":"write"},"workspaces":[{"workspace":"a","your_role":"viewer","boards":[{"board":"a/x","name":"x","task_prefix":"X"}]},{"workspace":"b","your_role":"member","boards":[{"board":"b/y","name":"y","task_prefix":"Y"}]}]}"#)!)
+    assert(not writes(read_only, String("a/x")) and not writes(viewer.copy(), String("a/x")) and writes(viewer.copy(), String("b/y")) and writes(viewer, String("c/z")))
     let task = parse(###"{"id":"LOO-206","title":"Show agents' usage limits","status":"in_progress","assignee":"Elliot","size":"m","labels":["desktop"],"url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","description":"## Why\n\nThe plan's **usage limits** that [Claude](https://claude.ai) reports.\n- as rings\n- with when each resets\n- and more","subtasks":[{"title":"a","done":true},{"title":"b","done":false},{"title":"c","done":true}]}"###)!
     let card = card_of(task, String("aaen-studios/loom"), String("loom"), 5)
     assert("{card}" == #"{"id":"LOO-206","board":"aaen-studios/loom","board_name":"loom","title":"Show agents' usage limits","status":"in_progress","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","assignee":"Elliot","size":"m","labels":["desktop"],"text":"Why The plan's usage limits that Claude reports. as rings","subtasks":3,"subtasks_done":2,"at":5}"#)

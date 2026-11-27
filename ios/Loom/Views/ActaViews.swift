@@ -2,30 +2,8 @@ import SwiftUI
 
 // Acta beside the chat, on the phone (PLAN.md, "Acta beside the chat"): a card's preview
 // in a sheet, the form that makes a card from a message in a sheet, and a board pushed as
-// a screen of its own, with Follow on the sheet and the board. The model (Acta.swift)
+// a screen of its own, with Follow in the sheet's ⋯ and on the board. The model (Acta.swift)
 // says what each shows and what the person's changes send.
-
-/// A small chip, as a card's preview has them: its status in its colour, its assignee,
-/// its size, a label or its priority.
-struct SmallChip: View {
-    var words: String
-    var ink: Color = P.ink2
-    var edge: Color = P.lineStrong
-    var chevron = false
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Text(words)
-            if chevron { Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)) }
-        }
-        .font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption))
-        .foregroundStyle(ink)
-        .lineLimit(1)
-        .padding(.horizontal, 8)
-        .frame(minHeight: Tokens.Control.pill)
-        .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.chip, style: .continuous).strokeBorder(edge, lineWidth: 1))
-    }
-}
 
 /// A choice that's on or off, as the form's labels are: filled while it's on.
 struct ChoiceChip: View {
@@ -91,69 +69,118 @@ struct Segments: View {
     }
 }
 
-/// Follow with a bell, or Following with a tick, for a board or one card on it in the chat
-/// shown: a watch whose lines come there. Nothing until the person's watches are known.
-struct FollowButton: View {
-    @Environment(Session.self) private var session
-    var board: String
-    var card: String?
+// MARK: A card's preview
+
+/// One of a card's properties as a chip under its title: its status, priority, assignee
+/// or size.
+private struct PropChip<Content: View>: View {
+    @ViewBuilder var content: Content
 
     var body: some View {
-        if let following = session.model.following(board: board, card: card) {
-            Button {
-                session.send(session.model.toggleFollow(board: board, card: card))
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: following ? "checkmark" : "bell").font(.system(size: 12, weight: .semibold))
-                    Text(following ? "Following" : "Follow")
-                }
-            }
-            .buttonStyle(.loomQuiet)
-        }
+        HStack(spacing: 5) { content }
+            .font(Fonts.ui(Tokens.PhoneSize.caption, .medium, relativeTo: .caption))
+            .foregroundStyle(P.ink2)
+            .lineLimit(1)
+            .padding(.horizontal, 8)
+            .frame(minHeight: Tokens.Control.pill)
+            .background(P.bg, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(P.line, lineWidth: 1))
     }
 }
 
-// MARK: A card's preview
+/// A priority as three bars, rising, `filled` of them in ink.
+private struct PriorityBars: View {
+    var filled: Int
 
-/// A card's preview, in a sheet from its pill or a board's row: its board and id, its
-/// title, its chips with its status's menu that moves it, its description, its subtasks
-/// with ticks, its last comments, and Open in Acta and Follow.
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 1.5) {
+            ForEach(0..<3, id: \.self) { k in
+                RoundedRectangle(cornerRadius: 0.5)
+                    .fill(k < filled ? P.ink2 : P.lineStrong)
+                    .frame(width: 2.5, height: [4, 7, 10][k])
+            }
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// A person as a round avatar with their initial.
+private struct Avatar: View {
+    var initial: String
+    var side: CGFloat
+
+    var body: some View {
+        Text(initial)
+            .font(.system(size: max(side * 0.55, 8), weight: .semibold))
+            .foregroundStyle(P.ink)
+            .frame(width: side, height: side)
+            .background(P.active, in: Circle())
+            .accessibilityHidden(true)
+    }
+}
+
+/// A card's preview, in a sheet from its pill or a board's row: Acta's mark, its board
+/// and id, Open in Acta, ⋯ and close; its title; its status, priority, assignee and size
+/// as chips, the status's a menu that moves it; then Details, Comments and Activity.
 struct CardSheetView: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @State private var draft = ""
 
     var body: some View {
         let model = session.model
         let s = model.acta.sheet
-        NavigationStack {
+        VStack(spacing: 0) {
+            if let s { head(s) }
             ScrollView {
                 if let s { page(s) }
             }
-            .background(P.bg)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .principal) {
-                    if let s {
-                        HStack(spacing: Tokens.Space.s) {
-                            Pill.mark(16).accessibilityHidden(true)
-                            Text("\(boardLabel(s)) · \(s.id)")
-                                .font(Fonts.mono(Tokens.PhoneSize.small - 1))
-                                .foregroundStyle(P.ink2)
-                                .lineLimit(1)
-                        }
-                    }
-                }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if let s { foot(s) }
-            }
+        }
+        .background(P.bg)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let s, s.tab == .comments, s.detail?.canComment == true { commentBox(s) }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
+        .onChange(of: s?.commented ?? 0) { _, _ in draft = "" }
+        .onChange(of: s?.id ?? "") { _, _ in draft = "" }
+    }
+
+    /// Acta's mark, the board and the id, which a tap copies, then Open in Acta, ⋯ and close.
+    private func head(_ s: CardSheet) -> some View {
+        HStack(spacing: Tokens.Space.s) {
+            Pill.mark(15).accessibilityHidden(true)
+            HStack(spacing: 4) {
+                Text("\(boardLabel(s)) ·").font(Fonts.small).lineLimit(1)
+                Button(s.id) { UIPasteboard.general.string = s.id }
+                    .font(Fonts.mono(Tokens.PhoneSize.small - 1))
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .accessibilityLabel("Copy \(s.id)")
+            }
+            .foregroundStyle(P.ink2)
+            Spacer(minLength: Tokens.Space.s)
+            Button("Open in Acta") {
+                if let url = URL(string: link(s)) { openURL(url) }
+            }
+            .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+            .foregroundStyle(P.ink)
+            .buttonStyle(.plain)
+            .fixedSize()
+            more(s).frame(width: 32, height: 32)
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)).foregroundStyle(P.ink3).frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+        }
+        .padding(.leading, Tokens.PhoneSpace.gutter)
+        .padding(.trailing, Tokens.PhoneSpace.gutter - 6)
+        .padding(.top, Tokens.Space.l)
+        .padding(.bottom, Tokens.Space.s)
     }
 
     private func boardLabel(_ s: CardSheet) -> String {
@@ -161,34 +188,70 @@ struct CardSheetView: View {
         return session.model.boardName(s.board)
     }
 
+    private func link(_ s: CardSheet) -> String {
+        s.detail?.card.link ?? "https://\(actaHost)/\(s.board)#\(s.id)"
+    }
+
+    /// ⋯: Follow, Copy link, and Copy branch where Acta gives one.
+    private func more(_ s: CardSheet) -> some View {
+        let model = session.model
+        return Menu {
+            if let following = model.following(board: s.board, card: s.id) {
+                Button {
+                    session.send(model.toggleFollow(board: s.board, card: s.id))
+                } label: {
+                    Label(following ? "Following" : "Follow", systemImage: following ? "checkmark" : "bell")
+                }
+            }
+            Button {
+                UIPasteboard.general.string = link(s)
+            } label: {
+                Label("Copy link", systemImage: "doc.on.doc")
+            }
+            if let branch = s.detail?.branch, !branch.isEmpty {
+                Button {
+                    UIPasteboard.general.string = branch
+                } label: {
+                    Label("Copy branch", systemImage: "arrow.triangle.branch")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis").font(.system(size: 15, weight: .semibold)).foregroundStyle(P.ink3)
+        }
+        .accessibilityLabel("More")
+    }
+
     @ViewBuilder
     private func page(_ s: CardSheet) -> some View {
-        VStack(alignment: .leading, spacing: Tokens.Space.l) {
+        VStack(alignment: .leading, spacing: 0) {
             if let d = s.detail {
-                Text(d.card.title)
-                    .font(Fonts.ui(Tokens.Size.heading, .semibold, relativeTo: .title2))
-                    .foregroundStyle(d.card.struck ? P.ink3 : P.ink)
-                    .strikethrough(d.card.struck)
-                    .fixedSize(horizontal: false, vertical: true)
-                chips(d)
-                if let e = s.error { Text(e).font(Fonts.small).foregroundStyle(P.bad) }
-                let words = d.description.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !words.isEmpty {
-                    Text(words)
-                        .font(Fonts.body)
-                        .foregroundStyle(P.ink)
-                        .textSelection(.enabled)
+                VStack(alignment: .leading, spacing: Tokens.Space.s) {
+                    Text(d.card.title)
+                        .font(Fonts.ui(Tokens.Size.heading, .semibold, relativeTo: .title2))
+                        .foregroundStyle(d.card.struck ? P.ink3 : P.ink)
+                        .strikethrough(d.card.struck)
                         .fixedSize(horizontal: false, vertical: true)
+                    chips(d)
+                    if let e = s.error { Text(e).font(Fonts.small).foregroundStyle(P.bad) }
                 }
-                if !d.checklist.isEmpty { subtasks(d) }
-                if !d.comments.isEmpty { comments(d) }
+                .padding(.horizontal, Tokens.PhoneSpace.gutter)
+                .padding(.bottom, Tokens.Space.m)
+                tabs(s, d)
+                Group {
+                    switch s.tab {
+                    case .details: details(d)
+                    case .comments: comments(d)
+                    case .activity: activity(d)
+                    }
+                }
+                .padding(.horizontal, Tokens.PhoneSpace.gutter)
+                .padding(.top, Tokens.Space.m)
             } else if let e = s.error {
-                Text(e).font(Fonts.small).foregroundStyle(P.bad)
+                Text(e).font(Fonts.small).foregroundStyle(P.bad).padding(.horizontal, Tokens.PhoneSpace.gutter)
             } else {
                 ProgressView().frame(maxWidth: .infinity)
             }
         }
-        .padding(.horizontal, Tokens.PhoneSpace.gutter)
         .padding(.top, Tokens.Space.s)
         .padding(.bottom, Tokens.Space.xl)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -196,7 +259,6 @@ struct CardSheetView: View {
 
     private func chips(_ d: CardDetail) -> some View {
         let model = session.model
-        let ink = d.card.ink.color
         return Flow(spacing: 6) {
             Menu {
                 ForEach(cardStatuses, id: \.self) { status in
@@ -211,20 +273,89 @@ struct CardSheetView: View {
                     }
                 }
             } label: {
-                SmallChip(words: d.card.statusWords, ink: ink, edge: ink.opacity(0.6), chevron: true)
+                PropChip {
+                    Circle().fill(d.card.ink.color).frame(width: 7, height: 7)
+                    Text(d.card.statusWords)
+                    Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold)).foregroundStyle(P.ink3)
+                }
             }
             .accessibilityLabel("Status: \(d.card.statusWords)")
-            ForEach(Array(d.chips.enumerated()), id: \.offset) { _, chip in
-                SmallChip(words: chip)
+            let bars = priorityBars(d.priority)
+            if bars > 0 {
+                PropChip {
+                    PriorityBars(filled: bars)
+                    Text(priorityName(d.priority))
+                }
+            }
+            if !d.card.assignee.isEmpty {
+                PropChip {
+                    Avatar(initial: initialOf(d.card.assignee), side: 14)
+                    Text(d.card.assignee)
+                }
+            }
+            if !d.card.size.isEmpty {
+                PropChip { Text(d.card.size.uppercased()) }
             }
         }
     }
 
+    /// Details, Comments · N and Activity, the one shown underlined.
+    private func tabs(_ s: CardSheet, _ d: CardDetail) -> some View {
+        HStack(spacing: Tokens.Space.l) {
+            ForEach(CardTab.allCases, id: \.self) { tab in
+                let on = s.tab == tab
+                let label = tab == .details ? "Details" : tab == .comments ? d.commentsTab : "Activity"
+                Button {
+                    session.model.acta.sheet?.tab = tab
+                } label: {
+                    Text(label)
+                        .font(Fonts.small)
+                        .foregroundStyle(on ? P.ink : P.ink3)
+                        .padding(.vertical, 8)
+                        .overlay(alignment: .bottom) {
+                            Rectangle().fill(on ? P.ink : Color.clear).frame(height: 2)
+                        }
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(on ? .isSelected : [])
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Tokens.PhoneSpace.gutter)
+        .overlay(alignment: .bottom) { Rectangle().fill(P.line).frame(height: 1) }
+    }
+
+    /// Its description, its labels, its subtasks and its pull request.
+    private func details(_ d: CardDetail) -> some View {
+        VStack(alignment: .leading, spacing: Tokens.Space.m) {
+            let words = d.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !words.isEmpty {
+                MarkdownView(words, font: Fonts.body).textSelection(.enabled)
+            }
+            let labels = d.card.labels.filter { !$0.isEmpty }
+            if !labels.isEmpty {
+                Flow(spacing: 6) {
+                    ForEach(labels, id: \.self) { l in
+                        Text(l)
+                            .font(Fonts.caption)
+                            .foregroundStyle(P.ink2)
+                            .lineLimit(1)
+                            .padding(.horizontal, 7)
+                            .frame(minHeight: 20)
+                            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(P.line, lineWidth: 1))
+                    }
+                }
+            }
+            if !d.checklist.isEmpty { subtasks(d) }
+            if let pr = d.pullRequest { pullRequest(pr) }
+        }
+    }
+
     private func subtasks(_ d: CardDetail) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(d.card.subtasksLine ?? "Subtasks")
-                .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
-                .foregroundStyle(P.ink2)
+        VStack(alignment: .leading, spacing: 0) {
+            Text(d.subtasksLine)
+                .font(Fonts.ui(Tokens.PhoneSize.caption, .medium))
+                .foregroundStyle(P.ink3)
                 .padding(.bottom, Tokens.Space.xs)
             ForEach(d.checklist) { t in
                 Button {
@@ -232,8 +363,8 @@ struct CardSheetView: View {
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: Tokens.Space.s + 2) {
                         let box = RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        box.fill(t.done ? P.ok : Color.clear)
-                            .overlay(box.strokeBorder(t.done ? P.ok : P.lineStrong, lineWidth: 1))
+                        box.fill(t.done ? P.ink : Color.clear)
+                            .overlay(box.strokeBorder(t.done ? P.ink : P.lineStrong, lineWidth: 1))
                             .overlay {
                                 if t.done { Image(systemName: "checkmark").font(.system(size: 10, weight: .bold)).foregroundStyle(P.bg) }
                             }
@@ -241,7 +372,7 @@ struct CardSheetView: View {
                             .alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 5 }
                         Text(t.title)
                             .font(Fonts.small)
-                            .foregroundStyle(t.done ? P.ink3 : P.ink)
+                            .foregroundStyle(P.ink)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -255,34 +386,72 @@ struct CardSheetView: View {
         }
     }
 
+    private func pullRequest(_ pr: PullRequest) -> some View {
+        let (words, tone) = pr.checksWords
+        return Button {
+            if let url = URL(string: pr.url), !pr.url.isEmpty { openURL(url) }
+        } label: {
+            HStack(spacing: Tokens.Space.s) {
+                Text("#\(pr.number)").font(Fonts.mono(Tokens.PhoneSize.small - 1)).foregroundStyle(P.ink2)
+                Text(pr.title).font(Fonts.small).foregroundStyle(P.ink).lineLimit(1)
+                Spacer(minLength: Tokens.Space.s)
+                Text(words)
+                    .font(Fonts.caption)
+                    .foregroundStyle(tone == .ok ? P.ok : tone == .bad ? P.bad : P.ink3)
+            }
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Pull request #\(pr.number), \(pr.title)")
+    }
+
+    /// Its comments, oldest first: who's initial, who and the day, then what they said.
     private func comments(_ d: CardDetail) -> some View {
         VStack(alignment: .leading, spacing: Tokens.Space.m) {
-            Text("Comments")
-                .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
-                .foregroundStyle(P.ink2)
             ForEach(Array(d.comments.enumerated()), id: \.offset) { _, c in
                 let day = commentDay(c.at)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(day.isEmpty ? c.by : "\(c.by) · \(day)").font(Fonts.caption).foregroundStyle(P.ink3)
-                    Text(c.body)
-                        .font(Fonts.small)
-                        .foregroundStyle(P.ink)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+                HStack(alignment: .top, spacing: Tokens.Space.s) {
+                    Avatar(initial: c.initial, side: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 4) {
+                            Text(c.by).font(Fonts.ui(Tokens.PhoneSize.caption, .semibold)).foregroundStyle(P.ink)
+                            if !day.isEmpty { Text("· \(day)").font(Fonts.caption).foregroundStyle(P.ink3) }
+                        }
+                        MarkdownView(c.body, font: Fonts.small).textSelection(.enabled)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
     }
 
-    private func foot(_ s: CardSheet) -> some View {
-        let link = s.detail?.card.link ?? "https://\(actaHost)/\(s.board)#\(s.id)"
-        return HStack(spacing: Tokens.Space.s) {
-            Button("Open in Acta") {
-                if let url = URL(string: link) { openURL(url) }
+    /// Its activity, newest first: who, what in Acta's words, and the day.
+    private func activity(_ d: CardDetail) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(d.activity.reversed().enumerated()), id: \.offset) { _, a in
+                let day = commentDay(a.at)
+                (Text(a.by).foregroundStyle(P.ink) + Text(" \(a.text)").foregroundStyle(P.ink2) + Text(day.isEmpty ? "" : " · \(day)").foregroundStyle(P.ink3))
+                    .font(Fonts.small)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .buttonStyle(.loomQuiet)
-            FollowButton(board: s.board, card: s.id)
-            Spacer(minLength: 0)
+        }
+    }
+
+    /// The box to comment in, under the comments, with Comment.
+    private func commentBox(_ s: CardSheet) -> some View {
+        HStack(alignment: .bottom, spacing: Tokens.Space.s) {
+            TextField("Comment…", text: $draft, axis: .vertical)
+                .font(Fonts.small)
+                .lineLimit(1...6)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(P.line, lineWidth: 1))
+            Button(s.commenting ? "Commenting…" : "Comment") {
+                session.send(session.model.commentCard(draft))
+            }
+            .buttonStyle(.loom)
+            .disabled(s.commenting || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .padding(.horizontal, Tokens.PhoneSpace.gutter)
         .padding(.vertical, Tokens.Space.m)

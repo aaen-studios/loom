@@ -425,7 +425,11 @@ struct ChatView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 let model = session.model
                 if let id = value("-jump") { model.jumpTo = id }
-                if let id = value("-card") { session.send(model.openCard(board: "aaen-studios/loom", id: id)) }
+                if let id = value("-card") {
+                    session.send(model.openCard(board: "aaen-studios/loom", id: id))
+                    // `-cardTab comments` or `activity` shows that tab of its preview.
+                    if let tab = value("-cardTab").flatMap(CardTab.init(rawValue:)) { model.acta.sheet?.tab = tab }
+                }
                 if let id = value("-make"), let m = model.messages.first(where: { $0.id == id }) { session.send(model.startCard(message: m.id, text: m.text)) }
                 if args.contains("-board") { for f in model.openBoard() { session.send(f) } }
                 if args.contains("-t3start") { session.send(model.openT3Form()) }

@@ -10,7 +10,9 @@ import shared.obj.{Obj, at, merge, str_at}
 import server.acta
 
 // The most comments a card's preview has: its last ones.
-const COMMENTS_MOST: usize = 3
+const COMMENTS_MOST: usize = 100
+// The longest comment card.comment posts, as add_comment takes it.
+const COMMENT_LONGEST: usize = 10000
 // The most tasks one acta.tasks asks for, as list_tasks takes them.
 const TASKS_MOST: i64 = 200
 
@@ -82,6 +84,14 @@ pub fn update_args(board: String, id: String, args: Json) -> Json ! Error {
     if subtask.len() == 0 { fail "subtask is empty" }
     o = o.j(if done { "complete_subtasks" } else { "reopen_subtasks" }, texts([subtask]))
     return o.done()
+}
+
+/// add_comment's arguments for card.comment: its words, as Markdown.
+pub fn comment_args(board: String, id: String, args: Json) -> Json ! Error {
+    let body = (str_at(args, "body") ?? String()).trim().copy()
+    if body.len() == 0 { fail "A comment needs words." }
+    if body.len() > COMMENT_LONGEST { fail "The comment is longer than 10,000 bytes." }
+    return Obj.new().s("board", board).s("task", id).s("body", body).done()
 }
 
 /// create_tasks' arguments for card.create: one card with its title, and its
@@ -156,14 +166,45 @@ pub fn tasks_of(listed: Json) -> Json {
     return Json.Array(out)
 }
 
+// A card's pull request, from get_task's `github`: its open one (or draft) if it
+// has one, else the newest, as `{number, title?, state?, checks?, review?, url?}`.
+fn pull_request_of(github: Json) -> Json? {
+    let Json.Array(links) = github else return none
+    var picked = Json.Null
+    for l in links {
+        if str_at(l.copy(), "kind") != some(String("pull_request")) { continue }
+        let state = str_at(l.copy(), "state") ?? String()
+        if picked == Json.Null or ((state == "open" or state == "draft") and not (str_at(picked.copy(), "state") == some(String("open")) or str_at(picked.copy(), "state") == some(String("draft")))) { picked = l.copy() }
+    }
+    if picked == Json.Null { return none }
+    let number = str_at(picked.copy(), "ref") ?? String()
+    if number.len() == 0 { return none }
+    var o = Obj.new().s("number", number.trim_prefix("#").copy())
+    for k in ["title", "state", "checks", "review", "url"] {
+        o = o.maybe(k, str_at(picked.copy(), k))
+    }
+    return some(o.done())
+}
+
 /// A card as its side preview shows it, from get_task's answer: as a message
 /// keeps it (`acta.card_of`), with its whole description, its priority and
-/// project, its subtasks as a `checklist` of `{id, title, done}`, and its last
-/// three comments, oldest first, each `{by, at, body}`.
-pub fn detail_of(task: Json, board: String, name: String, at_ms: i64) -> Json {
+/// project, its subtasks as a `checklist` of `{id, title, done}`, its comments
+/// (its last 100), oldest first, each `{id, by, at, body}`, its `activity`
+/// as Acta gives it, oldest first, each `{by, at, text}`, its pull request when
+/// Acta gives one (`pull_request_of`), the branch to work in on a board linked
+/// to GitHub, and whether the person may comment.
+pub fn detail_of(task: Json, board: String, name: String, at_ms: i64, can_comment: bool) -> Json {
     let card = acta.card_of(task.copy(), board, name, at_ms)
     var o = Obj.new().s("description", str_at(task.copy(), "description") ?? String())
-    o = o.maybe("priority", str_at(task.copy(), "priority")).maybe("project", str_at(task.copy(), "project"))
+    o = o.maybe("priority", str_at(task.copy(), "priority")).maybe("project", str_at(task.copy(), "project")).maybe("branch", str_at(task.copy(), "branch"))
+    if let pr = pull_request_of(at(task.copy(), "github")) { o = o.j("pull_request", pr) }
+    var activity = List<Json>()
+    if let Json.Array(all) = at(task.copy(), "activity") {
+        for a in all {
+            activity.push(Obj.new().s("by", str_at(a.copy(), "by") ?? String()).s("at", str_at(a.copy(), "at") ?? String()).s("text", str_at(a, "text") ?? String()).done())
+        }
+    }
+    o = o.j("activity", Json.Array(activity)).b("can_comment", can_comment)
     var checklist = List<Json>()
     if let Json.Array(subtasks) = at(task.copy(), "subtasks") {
         for s in subtasks {
@@ -177,7 +218,7 @@ pub fn detail_of(task: Json, board: String, name: String, at_ms: i64) -> Json {
         for c in all {
             n += 1
             if n + COMMENTS_MOST <= all.len() { continue }
-            comments.push(Obj.new().s("by", str_at(c.copy(), "by") ?? String()).s("at", str_at(c.copy(), "at") ?? String()).s("body", str_at(c, "body") ?? String()).done())
+            comments.push(Obj.new().s("id", str_at(c.copy(), "id") ?? String()).s("by", str_at(c.copy(), "by") ?? String()).s("at", str_at(c.copy(), "at") ?? String()).s("body", str_at(c, "body") ?? String()).done())
         }
     }
     return merge(card, o.j("checklist", Json.Array(checklist)).j("comments", Json.Array(comments)).done())
@@ -286,12 +327,43 @@ fn reads_boards_tasks_and_cards() {
     assert("{board}" == #"{"board":"aaen-studios/loom","name":"loom","prefix":"LOO","labels":["Feature","desktop"],"people":["Elliot"]}"#)
     let tasks = tasks_of(parse(#"{"tasks":[{"id":"LOO-25","title":"Build the chat","status":"in_progress","assignee":"Elliot","labels":["desktop"],"size":"l","subtasks":"10/12"},{"id":"LOO-26","title":"Bare","status":"todo","labels":[]}],"shown":2,"total":2}"#)!)
     assert("{tasks}" == #"[{"id":"LOO-25","title":"Build the chat","status":"in_progress","assignee":"Elliot","size":"l","labels":["desktop"],"subtasks":12,"subtasks_done":10},{"id":"LOO-26","title":"Bare","status":"todo"}]"#)
-    let task = parse(###"{"id":"LOO-206","title":"Usage","status":"todo","priority":"medium","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","description":"## Why\n\nRings.","subtasks":[{"id":"s1","title":"a","done":true},{"id":"s2","title":"b","done":false}],"comments":[{"by":"A","at":"1","body":"one"},{"by":"B","at":"2","body":"two"},{"by":"C","at":"3","body":"three"},{"by":"D","at":"4","body":"four"}]}"###)!
-    let detail = detail_of(task, String("aaen-studios/loom"), String("loom"), 9)
+    let task = parse(###"{"id":"LOO-206","title":"Usage","status":"todo","priority":"medium","url":"https://acta.aaenz.no/aaen-studios/loom#LOO-206","description":"## Why\n\nRings.","subtasks":[{"id":"s1","title":"a","done":true},{"id":"s2","title":"b","done":false}],"comments":[{"id":"c1","by":"A","at":"1","body":"one"},{"id":"c2","by":"B","via":"web","at":"2","body":"two"}],"activity":[{"by":"A","via":"web","at":"1","text":"created the task"},{"by":"B","at":"2","text":"commented"}],"github":[{"kind":"branch","ref":"loo-206-usage","url":"https://github.com/a/b/tree/loo-206-usage"},{"kind":"pull_request","ref":"340","title":"Old try","state":"closed","url":"https://github.com/a/b/pull/340"},{"kind":"pull_request","ref":"349","title":"Usage rings","state":"open","checks":"success","review":"approved","url":"https://github.com/a/b/pull/349"}],"branch":"loo-206-usage"}"###)!
+    let detail = detail_of(task, String("aaen-studios/loom"), String("loom"), 9, true)
     assert(str_at(detail.copy(), "description") == some(String("## Why\n\nRings.")) and str_at(detail.copy(), "priority") == some(String("medium")))
     assert("{at(detail.copy(), "checklist")}" == #"[{"id":"s1","title":"a","done":true},{"id":"s2","title":"b","done":false}]"#)
-    assert("{at(detail.copy(), "comments")}" == #"[{"by":"B","at":"2","body":"two"},{"by":"C","at":"3","body":"three"},{"by":"D","at":"4","body":"four"}]"#)
+    assert("{at(detail.copy(), "comments")}" == #"[{"id":"c1","by":"A","at":"1","body":"one"},{"id":"c2","by":"B","at":"2","body":"two"}]"#)
+    assert("{at(detail.copy(), "activity")}" == #"[{"by":"A","at":"1","text":"created the task"},{"by":"B","at":"2","text":"commented"}]"#)
+    assert("{at(detail.copy(), "pull_request")}" == #"{"number":"349","title":"Usage rings","state":"open","checks":"success","review":"approved","url":"https://github.com/a/b/pull/349"}"#)
+    assert(at(detail.copy(), "can_comment") == Json.Bool(true) and str_at(detail.copy(), "branch") == some(String("loo-206-usage")))
     assert(str_at(detail.copy(), "text") == some(String("Why Rings.")) and at(detail, "subtasks_done").as_i64() == some(1))
+    // With no pull request, none; with only closed ones, the newest.
+    let bare = detail_of(parse(#"{"id":"LOO-1","title":"x","status":"todo"}"#)!, String("a/b"), String("b"), 1, false)
+    assert(at(bare.copy(), "pull_request") == Json.Null and "{at(bare.copy(), "activity")}" == "[]" and at(bare, "can_comment") == Json.Bool(false))
+    let closed = detail_of(parse(#"{"id":"LOO-1","title":"x","status":"done","github":[{"kind":"pull_request","ref":"12","state":"merged"},{"kind":"pull_request","ref":"9","state":"closed"}]}"#)!, String("a/b"), String("b"), 1, true)
+    assert("{at(closed, "pull_request")}" == #"{"number":"12","state":"merged"}"#)
+    // The last 100 comments, oldest first.
+    var many = List<Json>()
+    for n in 0..105 {
+        many.push(Obj.new().s("id", "c{n}").s("by", String("A")).s("at", "{n}").s("body", "n{n}").done())
+    }
+    let long = detail_of(Obj.new().s("id", String("LOO-2")).j("comments", Json.Array(many)).done(), String("a/b"), String("b"), 1, true)
+    let Json.Array(kept) = at(long, "comments") else panic("no comments")
+    assert(kept.len() == 100 and str_at(kept[0].copy(), "id") == some(String("c5")))
+}
+
+@test
+fn checks_a_comment() {
+    let b = String("aaen-studios/loom")
+    assert("{comment_args(b.copy(), String("LOO-1"), parse(#"{"body":"  Same on the iPhone.\n"}"#)!)!}" == #"{"board":"aaen-studios/loom","task":"LOO-1","body":"Same on the iPhone."}"#)
+    let empty = match comment_args(b.copy(), String("LOO-1"), parse(#"{"body":"  "}"#)!) {
+        ok(_) => false,
+        err(_) => true,
+    }
+    let long = match comment_args(b, String("LOO-1"), Obj.new().s("body", String("x").repeat(10001)).done()) {
+        ok(_) => false,
+        err(_) => true,
+    }
+    assert(empty and long)
 }
 
 @test
