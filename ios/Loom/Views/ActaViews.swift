@@ -131,51 +131,56 @@ struct CardSheetView: View {
     var body: some View {
         let model = session.model
         let s = model.acta.sheet
-        NavigationStack {
+        VStack(spacing: 0) {
+            if let s { head(s) }
             ScrollView {
                 if let s { page(s) }
             }
-            .background(P.bg)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                if let s {
-                    ToolbarItem(placement: .topBarLeading) {
-                        HStack(spacing: 6) {
-                            Pill.mark(15).accessibilityHidden(true)
-                            Text("\(boardLabel(s)) ·").foregroundStyle(P.ink2)
-                            Button(s.id) { UIPasteboard.general.string = s.id }
-                                .font(Fonts.mono(Tokens.PhoneSize.small - 1))
-                                .foregroundStyle(P.ink2)
-                                .buttonStyle(.plain)
-                                .accessibilityLabel("Copy \(s.id)")
-                        }
-                        .font(Fonts.small)
-                        .lineLimit(1)
-                    }
-                    ToolbarItemGroup(placement: .topBarTrailing) {
-                        Button("Open in Acta") {
-                            if let url = URL(string: link(s)) { openURL(url) }
-                        }
-                        .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
-                        .foregroundStyle(P.ink)
-                        more(s)
-                        Button {
-                            dismiss()
-                        } label: {
-                            Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)).foregroundStyle(P.ink3)
-                        }
-                        .accessibilityLabel("Close")
-                    }
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if let s, s.tab == .comments, s.detail?.canComment == true { commentBox(s) }
-            }
+        }
+        .background(P.bg)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if let s, s.tab == .comments, s.detail?.canComment == true { commentBox(s) }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
         .onChange(of: s?.commented ?? 0) { _, _ in draft = "" }
         .onChange(of: s?.id ?? "") { _, _ in draft = "" }
+    }
+
+    /// Acta's mark, the board and the id, which a tap copies, then Open in Acta, ⋯ and close.
+    private func head(_ s: CardSheet) -> some View {
+        HStack(spacing: Tokens.Space.s) {
+            Pill.mark(15).accessibilityHidden(true)
+            HStack(spacing: 4) {
+                Text("\(boardLabel(s)) ·").font(Fonts.small).lineLimit(1)
+                Button(s.id) { UIPasteboard.general.string = s.id }
+                    .font(Fonts.mono(Tokens.PhoneSize.small - 1))
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .accessibilityLabel("Copy \(s.id)")
+            }
+            .foregroundStyle(P.ink2)
+            Spacer(minLength: Tokens.Space.s)
+            Button("Open in Acta") {
+                if let url = URL(string: link(s)) { openURL(url) }
+            }
+            .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+            .foregroundStyle(P.ink)
+            .buttonStyle(.plain)
+            .fixedSize()
+            more(s).frame(width: 32, height: 32)
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark").font(.system(size: 13, weight: .semibold)).foregroundStyle(P.ink3).frame(width: 32, height: 32)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close")
+        }
+        .padding(.leading, Tokens.PhoneSpace.gutter)
+        .padding(.trailing, Tokens.PhoneSpace.gutter - 6)
+        .padding(.top, Tokens.Space.l)
+        .padding(.bottom, Tokens.Space.s)
     }
 
     private func boardLabel(_ s: CardSheet) -> String {
