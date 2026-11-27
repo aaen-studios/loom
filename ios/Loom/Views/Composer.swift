@@ -174,8 +174,10 @@ struct Composer: View {
     /// after.
     private var composerBox: some View {
         let model = session.model
-        let busy = model.busy
-        let idle = box.typed.isEmpty && model.attachments.isEmpty
+        let empty = box.typed.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && model.attachments.isEmpty
+        let main = MainButton.of(busy: model.busy, empty: empty, live: model.room == nil)
+        // One icon fades and grows into the next, in the same place.
+        let swap = AnyTransition.scale(scale: 0.6).combined(with: .opacity)
         return VStack(alignment: .leading, spacing: Tokens.Space.s) {
             if let r = model.replyingHere {
                 ReplyBar(reply: r) { model.replying = nil }
@@ -235,41 +237,49 @@ struct Composer: View {
 
                 mic
 
-                // Live mode with the agent, in an agent's chat (PLAN.md, "Live mode").
-                if model.room == nil {
-                    Button {
+                // The main button (LOO-443): voice mode while the composer is empty, which
+                // starts live mode with the agent (PLAN.md, "Live mode"), Send once there's
+                // something to send, and Stop while the agent answers.
+                Button {
+                    switch main {
+                    case .stop:
+                        session.send(model.cancel())
+                    case .live:
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         box.view?.resignFirstResponder()
                         model.emoji.shutPicker()
                         session.startLive()
-                    } label: {
-                        Image(systemName: "waveform")
-                            .font(.system(size: 17, weight: .medium))
-                            .foregroundStyle(P.ink2)
-                            .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
-                            .contentShape(Circle())
-                    }
-                    .accessibilityLabel("Live")
-                }
-
-                Button {
-                    if busy && idle {
-                        session.send(model.cancel())
-                    } else if let frame = model.send(composerText(box.parts())) {
-                        session.send(frame)
-                        box.clear()
-                        sent()
+                    case .send:
+                        if let frame = model.send(composerText(box.parts())) {
+                            session.send(frame)
+                            box.clear()
+                            sent()
+                        }
                     }
                 } label: {
-                    Image(systemName: busy && idle ? "stop.fill" : "arrow.up")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(P.buttonInk)
-                        .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
-                        .background(P.button, in: Circle())
-                        .opacity(canSend || busy ? 1 : 0.35)
+                    ZStack {
+                        switch main {
+                        case .stop:
+                            Image(systemName: "stop.fill").transition(swap)
+                        case .send:
+                            Image(systemName: "arrow.up").transition(swap)
+                        case .live:
+                            ThreadGlyph()
+                                .stroke(P.buttonInk, style: StrokeStyle(lineWidth: 1.8, lineCap: .round, lineJoin: .round))
+                                .frame(width: 17, height: 17)
+                                .transition(swap)
+                        }
+                    }
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(P.buttonInk)
+                    .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
+                    .background(P.button, in: Circle())
+                    .opacity(main != .send || canSend ? 1 : 0.35)
+                    .animation(.easeOut(duration: 0.13), value: main)
                 }
-                .disabled(!(canSend || busy))
-                .accessibilityLabel(busy && idle ? "Stop" : "Send")
+                .disabled(main == .send && !canSend)
+                .accessibilityLabel(main.name)
+                .accessibilityIdentifier("send")
                 .padding(.bottom, 1)
             }
         }

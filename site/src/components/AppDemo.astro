@@ -7,8 +7,8 @@
 // thread with Juniper opens from its row. Its sizes, colours and words are the app's
 // (desktop/src/app.rs, design/tokens.toml); the script that plays it is src/scripts/demo.ts. The
 // card's pill, the context ring, the pins, a message's Reply and ⋯, the + and the sidebar's
-// control open what they open in the app, and the composer's Live starts live mode in the chat's
-// place.
+// control open what they open in the app, and the composer's main button, while the composer is
+// empty, starts live mode in the chat's place.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
 import actaMark from '../../../server/catalog/acta.svg?raw';
@@ -651,14 +651,14 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 							><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"></path></svg
 						></span
 					>
-					<!-- Live: talking with the agent, in the chat's place while it runs (demo.ts). -->
-					<button type="button" class="icon-btn c live-start" data-live-btn aria-label="Live" title="Live"
-						><svg class="i" viewBox="0 0 24 24"><path d="M2 10v3"></path><path d="M6 6v11"></path><path d="M10 3v18"></path><path d="M14 8v7"></path><path d="M18 5v13"></path><path d="M22 10v3"></path></svg></button
-					>
-					<span class="send">
+					<!-- The main button (desktop/src/live_ui.rs, composer_main): voice mode while the composer is
+					     empty in an agent's chat, which starts live mode in the chat's place (demo.ts), Send once
+					     something's typed, and Stop while the agent answers. -->
+					<button type="button" class="send" data-main="live" data-main-btn aria-label="Start voice mode" title="Start voice mode">
 						<svg class="i up" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7M12 19V5"></path></svg>
 						<svg class="i stop" viewBox="0 0 24 24"><rect width="14" height="14" x="5" y="5" rx="2"></rect></svg>
-					</span>
+						<svg class="i wave" viewBox="0 0 24 24"><path d="M2 12c2.5 0 3-5 6-5s3.5 10 7 10 3.5-5 7-5"></path></svg>
+					</button>
 				</div>
 			</div>
 		</div>
@@ -3869,22 +3869,37 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		background: var(--button);
 		color: var(--button-ink);
 		flex: none;
+		border: 0;
+		padding: 0;
 	}
+	/* One icon at a time, fading and growing into the next in the same place (demo.ts, drawMain). */
 	.send .i {
 		grid-area: 1 / 1;
+		opacity: 0;
+		transform: scale(0.6);
+		transition:
+			opacity 0.13s ease-out,
+			transform 0.13s ease-out;
+	}
+	.send[data-main='send'] .up,
+	.send[data-main='stop'] .stop,
+	.send[data-main='live'] .wave {
+		opacity: 1;
+		transform: none;
+	}
+	.send[data-main='live'] {
+		cursor: pointer;
 	}
 	.send .stop {
-		display: none;
 		width: 12px;
 		height: 12px;
 		fill: currentColor;
 		stroke: none;
 	}
-	.app.busy .send .stop {
-		display: block;
-	}
-	.app.busy .send .up {
-		display: none;
+	@media (prefers-reduced-motion: reduce) {
+		.send .i {
+			transition: none;
+		}
 	}
 
 	/* The + menu, 8px over the composer from its left edge (app.rs, plus_menu, PLUS_WIDE), and
@@ -4022,15 +4037,9 @@ const DRAFT_BODY = "Hi Ana,\nThanks for paying the October invoice so quickly. I
 		animation: rise 0.28s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
 
-	/* Live mode (desktop/src/model/live.rs): the composer's Live, beside the mic, which an agent's
-	   chat has and a group chat hasn't; and while it runs, its head in the header's place and
-	   its view in the chat's and the composer's, the sidebar still beside them. */
-	.live-start {
-		cursor: pointer;
-	}
-	.app.in-room .live-start {
-		display: none;
-	}
+	/* Live mode (desktop/src/model/live.rs), from the composer's main button while the composer is
+	   empty in an agent's chat: its head in the header's place and its view in the chat's and the
+	   composer's, the sidebar still beside them. */
 	.live-head,
 	.live {
 		display: none;

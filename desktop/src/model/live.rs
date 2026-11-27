@@ -36,6 +36,39 @@ impl State {
     }
 }
 
+/// What the composer's main button is (LOO-443): Stop while the agent answers and
+/// there's nothing to send, voice mode while the composer is empty in an agent's chat,
+/// and Send otherwise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Main {
+    Stop,
+    Send,
+    Live,
+}
+
+impl Main {
+    /// `empty` is no words but spaces and nothing attached; `live` is whether live mode
+    /// can start here, as it can in an agent's chat and not in a group chat.
+    pub fn of(busy: bool, empty: bool, live: bool) -> Main {
+        if busy && empty {
+            Main::Stop
+        } else if empty && live {
+            Main::Live
+        } else {
+            Main::Send
+        }
+    }
+
+    /// Its name, for its tooltip and for a screen reader.
+    pub fn name(self) -> &'static str {
+        match self {
+            Main::Stop => "Stop",
+            Main::Send => "Send",
+            Main::Live => "Start voice mode",
+        }
+    }
+}
+
 /// A piece of the reply playing: its words, when each starts, and its level each
 /// `step` ms, from when it started.
 #[derive(Clone, Debug)]
@@ -378,6 +411,19 @@ mod tests {
         );
         assert_eq!(Live::end(), json!({"t": "live.end"}));
         assert_eq!(l.clock(l.since.unwrap() + Duration::from_secs(75)), "1:15");
+    }
+
+    #[test]
+    fn the_main_button_is_voice_mode_while_the_composer_is_empty() {
+        assert_eq!(Main::of(false, true, true), Main::Live);
+        assert_eq!(Main::of(false, false, true), Main::Send);
+        // A group chat has no live mode, so its button stays Send.
+        assert_eq!(Main::of(false, true, false), Main::Send);
+        // While a reply streams, Stop comes first, unless there's something to queue.
+        assert_eq!(Main::of(true, true, true), Main::Stop);
+        assert_eq!(Main::of(true, false, true), Main::Send);
+        assert_eq!(Main::Live.name(), "Start voice mode");
+        assert_eq!(Main::Send.name(), "Send");
     }
 
     #[test]

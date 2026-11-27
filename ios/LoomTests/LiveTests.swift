@@ -25,6 +25,17 @@ import Testing
         #expect(m.liveStart() == ["t": "live.start", "agent": "a_1", "conversation": "c_1"])
     }
 
+    @Test func theMainButtonIsVoiceModeWhileTheComposerIsEmpty() {
+        #expect(MainButton.of(busy: false, empty: true, live: true) == .live)
+        #expect(MainButton.of(busy: false, empty: false, live: true) == .send)
+        // A group chat has no live mode, so its button stays Send.
+        #expect(MainButton.of(busy: false, empty: true, live: false) == .send)
+        // While a reply streams, Stop comes first, unless there's something to queue.
+        #expect(MainButton.of(busy: true, empty: true, live: true) == .stop)
+        #expect(MainButton.of(busy: true, empty: false, live: true) == .send)
+        #expect(MainButton.live.name == "Start voice mode" && MainButton.send.name == "Send")
+    }
+
     @Test func takesCoreLive() {
         let m = caughtUp()
         let start = Date(timeIntervalSince1970: 1_000)
