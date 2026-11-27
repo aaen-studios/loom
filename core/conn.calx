@@ -1084,6 +1084,14 @@ impl Conn {
         } else if t == "delta" {
             self.delta(f, text)
             return
+        } else if t == "say" {
+            // An agent's short update, said in live mode and never shown as a message:
+            // the app hears of it only as what live mode plays.
+            if self.synced and self.live.on {
+                self.live.said(f, now())
+                self.voice_out()
+            }
+            return
         } else if t == "ack" {
             match self.cache.sent(str_at(f, "cid") ?? String()) {
                 ok => {},

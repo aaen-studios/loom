@@ -1,0 +1,101 @@
+module tests.protocol.live_turns
+
+// A turn said in live mode, as the agent gets it (PLAN.md, "Live mode"; LOO-444): a
+// `send` with `live` tells the agent its reply is spoken, with that turn only, and a
+// typed one is told nothing. A turn of plain talk runs at low effort, and the session
+// goes back to its effort on the next typed turn, the agent's pick never changed; one
+// that asks for work keeps it. `say` sends the person's devices a `say` frame during a
+// live turn, kept nowhere, and does nothing in a typed one.
+//
+//     calx tests/protocol/live_turns.calx
+import std.json.{Json}
+import std.process.{exit}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, check}
+
+const NOTE: str = "Your person is in live voice mode"
+
+fn items(j: Json) -> List<Json> {
+    if let Json.Array(xs) = j { return xs.copy() }
+    return List<Json>()
+}
+
+// Sends `text` into `conversation`, said in live mode or typed, and gives the reply's text.
+fn say(app: mut Session, conversation: String, cid: str, text: str, live: bool) -> String ! Error {
+    var frame = Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", String(text))
+    if live { frame = frame.b("live", true) }
+    try app.send(frame.done())
+    loop {
+        let m = try app.reply()
+        if str_at(m.copy(), "conversation") == some(conversation.copy()) { return reply_text(m) }
+    }
+}
+
+fn run(i: Instance) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    let made = try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).s("permission", String("auto")).done())
+    let agent = str_at(at(at(made, "value"), "agent"), "id") ?? String()
+    let chat = str_at(at(try app.cmd("q_2", "conversation.create", Obj.new().s("agent", agent.copy()).done()), "value"), "conversation") ?? String()
+
+    // --- The note, with a live turn only ---
+    let spoken = try say(mut app, chat.copy(), "m_1", "/context\n/config", true)
+    try check(spoken.contains(NOTE) and spoken.contains("Lead with the answer in one to three short spoken sentences") and spoken.contains("details are in the chat") and spoken.contains("Ask at most one question"), "a turn said in live mode tells the agent its reply is spoken, and how to answer")
+    try check(spoken.contains("effort=low"), "a turn of plain talk runs at low effort")
+    let typed = try say(mut app, chat.copy(), "m_2", "/context\n/config", false)
+    try check(not typed.contains(NOTE), "a typed turn is told nothing of it")
+    try check(typed.contains("effort=medium"), "and runs at the effort the session had")
+
+    // --- Work keeps its effort; the agent's pick is never changed ---
+    let work = try say(mut app, chat.copy(), "m_3", "/config\nfix the tests", true)
+    try check(work.contains("effort=medium"), "a live turn that asks for work keeps its effort")
+    let picked = try app.cmd("q_3", "agent.update", Obj.new().s("agent", agent.copy()).j("config", Obj.new().s("effort", String("high")).done()).done())
+    try check(str_at(at(at(at(picked, "value"), "agent"), "config"), "effort") == some(String("high")), "the person picks high")
+    let after_pick = app.frames.len()
+    let low = try say(mut app, chat.copy(), "m_4", "/config", true)
+    let back = try say(mut app, chat.copy(), "m_5", "/config", false)
+    try check(low.contains("effort=low") and back.contains("effort=high"), "plain talk in live mode runs low, and the next typed turn at their pick")
+    var changed = false
+    for f in app.frames[after_pick..].copy() {
+        if str_at(f.copy(), "kind") == some(String("agent.updated")) and str_at(at(at(f, "agent"), "config"), "effort") != some(String("high")) { changed = true }
+    }
+    try check(not changed, "which stays as they picked it")
+
+    // --- say ---
+    let mark = app.frames.len()
+    let said = try say(mut app, chat.copy(), "m_6", #"/mcp say {"text":"Found the card, writing it now."}"#, true)
+    try check(said.contains("say: Said."), "say in a live turn is said")
+    var frame = Json.Null
+    for f in app.frames[mark..].copy() {
+        if str_at(f.copy(), "t") == some(String("say")) { frame = f.copy() }
+    }
+    try check(str_at(frame.copy(), "text") == some(String("Found the card, writing it now.")) and str_at(frame.copy(), "conversation") == some(chat.copy()) and str_at(frame, "agent") == some(agent.copy()), "as a say frame to the person's devices, with its chat")
+    let mark2 = app.frames.len()
+    let quiet = try say(mut app, chat.copy(), "m_7", #"/mcp say {"text":"Not now."}"#, false)
+    var more = false
+    for f in app.frames[mark2..].copy() {
+        if str_at(f, "t") == some(String("say")) { more = true }
+    }
+    try check(quiet.contains("Not said") and not more, "and in a typed turn it does nothing")
+    let listed = try app.cmd("q_5", "messages.list", Obj.new().s("conversation", chat.copy()).done())
+    var kept = false
+    for m in items(at(at(listed, "value"), "messages")) {
+        if reply_text(m.copy()).contains("Found the card, writing it now.") and not reply_text(m).contains("/mcp") { kept = true }
+    }
+    try check(not kept, "what it said is kept as no message")
+    app.close()
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let failure: String? = match run(inst.copy()) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nlive_turns: all good")
+}

@@ -263,26 +263,27 @@ fn claude_code_keeps_its_cache_an_hour() {
 }
 
 // Loom's tools an agent program is told not to ask about: Code Mode's, and
-// what an agent keeps from a chat, which loom keeps or asks about itself.
+// what an agent keeps from a chat, which loom keeps or asks about itself, and
+// say, which changes nothing.
 fn allowed_tools() -> List<String> {
     var out = List<String>()
-    for t in "{tools.CODE_TOOLS} {tools.LEARNING_TOOLS}".split(" ") { out.push(t.copy()) }
+    for t in "{tools.CODE_TOOLS} {tools.LEARNING_TOOLS} {tools.SPOKEN_TOOLS}".split(" ") { out.push(t.copy()) }
     return out
 }
 
 @test
 fn code_tools_are_allowed_in_each_program() {
     let meta = "{session_meta()}"
-    assert(meta == #"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code","mcp__loom__propose_note","mcp__loom__skill_failed","mcp__loom__fix_skill"]}}}"#)
+    assert(meta == #"{"claudeCode":{"options":{"allowedTools":["mcp__loom__search_tools","mcp__loom__run_code","mcp__loom__propose_note","mcp__loom__skill_failed","mcp__loom__fix_skill","mcp__loom__say"]}}}"#)
     let fresh = program_env(Obj.new().s("KEY", String("k")).done())
     assert(str_at(fresh.copy(), "KEY") == some(String("k")))
-    assert(str_at(fresh, OPENCODE_CONFIG) == some(String(#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow"}}"#)))
+    assert(str_at(fresh, OPENCODE_CONFIG) == some(String(#"{"permission":{"loom_search_tools":"allow","loom_run_code":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow","loom_say":"allow"}}"#)))
     // The person's own config keeps its rules, its own for run_code among them,
     // and a rule for everything stays first, as OpenCode's last match wins.
     let theirs = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"model":"m","permission":{"loom_run_code":"ask"}}"#)).done())
-    assert(str_at(theirs, OPENCODE_CONFIG) == some(String(#"{"model":"m","permission":{"loom_run_code":"ask","loom_search_tools":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow"}}"#)))
+    assert(str_at(theirs, OPENCODE_CONFIG) == some(String(#"{"model":"m","permission":{"loom_run_code":"ask","loom_search_tools":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow","loom_say":"allow"}}"#)))
     let all = program_env(Obj.new().s(OPENCODE_CONFIG, String(#"{"permission":"ask"}"#)).done())
-    assert(str_at(all, OPENCODE_CONFIG) == some(String(#"{"permission":{"*":"ask","loom_search_tools":"allow","loom_run_code":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow"}}"#)))
+    assert(str_at(all, OPENCODE_CONFIG) == some(String(#"{"permission":{"*":"ask","loom_search_tools":"allow","loom_run_code":"allow","loom_propose_note":"allow","loom_skill_failed":"allow","loom_fix_skill":"allow","loom_say":"allow"}}"#)))
     let broken = program_env(Obj.new().s(OPENCODE_CONFIG, String("not json")).done())
     assert(str_at(broken.copy(), OPENCODE_CONFIG) == some(String("not json")))
     // Claude Code keeps its prompt cache for an hour, unless the settings say otherwise.

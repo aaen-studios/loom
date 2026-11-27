@@ -233,6 +233,25 @@ fn run(i: Instance, fake: String) ! Error {
     let asked_speech = str_at(try seen_by(fake.copy()), "speech") ?? String()
     try check(asked_speech.contains(#""input":"Anything else?""#), "the speech engine was asked for each piece as words")
 
+    // --- Progress while it works ---
+    try fake_says(fake.copy(), "/test/words", String("/tool Read notes.md\n/sleep 1500\n/say Done."))
+    let mark_work = app.seen.len()
+    app.mic(600, 0.3)
+    app.mic(700, 0.0)
+    let work_wait = unsafe { Instant.now() }
+    loop {
+        if unsafe { Instant.now() }.nanos_since(work_wait) > 30000000000 { fail "the work's progress and reply weren't spoken" }
+        let f = try app.next(30000)
+        if str_at(f.copy(), "t") == some(String("core.live")) and str_at(f.copy(), "state") == some(String("listening")) and plays(app.seen[mark_work..].copy()).len() >= 2 { break }
+    }
+    let worked = plays(app.seen[mark_work..].copy())
+    try check("{at(worked[0].copy(), "words")}".starts_with(#"["Reading","notes"#) and "{at(worked[worked.len() - 1].copy(), "words")}" == #"["Done."]"#, "a step is said as it starts, in plain words, before the answer")
+    var as_message = false
+    for f in app.seen[mark_work..].copy() {
+        if str_at(f.copy(), "kind") == some(String("message.created")) and reply_text(at(f, "message")).contains("Reading notes") { as_message = true }
+    }
+    try check(not as_message, "and it's no message")
+
     // --- Talking over a reply ---
     try fake_says(fake.copy(), "/test/speech", String("3000"))
     try fake_says(fake.copy(), "/test/words", String("/say This answer goes on for a while, as long answers do. It has a second sentence too."))
