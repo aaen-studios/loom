@@ -363,6 +363,52 @@ pub fn secrets_missing(spec: Json, have: List<String>) -> List<String> {
     return out
 }
 
+// How a spool an agent asked to connect stands (PLAN.md, "An agent connects a
+// spool"): `asking` (Sign in), `connecting` (being added and tried),
+// `sign_in` (waiting for the person's browser), `connected` (with its tools)
+// and `failed` (with why, and Try again).
+pub const SPOOL_STATES: str = "asking connecting sign_in connected failed"
+
+// The card loom puts in a reply for spool_connect: Spools' card for the
+// catalog entry `entry` (as catalog.listed gives it, with its mark), the
+// server it becomes (`spec`, as mcp.put takes it) and the `fields` the agent
+// filled in, the agents that get it (`agents`, each `{id, name}`), the
+// entry's secrets the person doesn't have yet (by name, label and
+// placeholder, never a value), and how it stands.
+pub fn spool_card(call: String, entry: Json, spec: Json, fields: Json, agents: List<Json>, state: String, said: String, tools: List<String>) -> Json {
+    let name = str_at(entry.copy(), "name") ?? String()
+    var card = Obj.new().s("id", "spool_{call}").s("type", String("spool_connect")).s("title", tidy("Connect {name}", TITLE_MOST)).s("call", call).s("entry", str_at(entry.copy(), "id") ?? String()).s("name", tidy(name, OPTION_MOST)).j("badge", at(entry.copy(), "badge")).maybe("icon_svg", str_at(entry.copy(), "icon_svg")).s("server", str_at(spec.copy(), "name") ?? String())
+    var address = str_at(spec.copy(), "url") ?? String()
+    if address.len() == 0 {
+        var line: List<String> = [str_at(spec.copy(), "command") ?? String()]
+        for a in list(at(spec.copy(), "args")) { line.push(words(a)) }
+        address = line.join(" ")
+    }
+    card = card.s("address", tidy(address, CELL_MOST)).j("fields", fields).j("agents", Json.Array(agents.copy()))
+    var secrets = List<Json>()
+    for s in list(at(entry.copy(), "secrets")) {
+        if bool_at(s.copy(), "have") == some(true) { continue }
+        secrets.push(Obj.new().s("name", str_at(s.copy(), "name") ?? String()).s("label", str_at(s.copy(), "label") ?? String()).s("placeholder", str_at(s, "placeholder") ?? String()).done())
+    }
+    var named = List<Json>()
+    for t in tools {
+        if named.len() < TOOLS_MOST { named.push(Json.Str(tidy(t, OPTION_MOST))) }
+    }
+    return card.j("secrets", Json.Array(secrets)).s("state", state).s("said", tidy(said, CELL_MOST)).j("tools", Json.Array(named)).done()
+}
+
+@test
+fn makes_the_spool_card() {
+    let entry = Obj.new().s("id", String("t3")).s("name", String("T3 Code")).j("badge", Json.Null).j("secrets", Json.Array(List<Json>())).done()
+    let spec = Obj.new().s("name", String("t3-vps")).s("url", String("https://vps.example.com:8444/mcp")).done()
+    let agents: List<Json> = [Obj.new().s("id", String("a_1")).s("name", String("Casper")).done()]
+    let card = spool_card(String("tc_9"), entry.copy(), spec.copy(), Obj.new().s("address", String("https://vps.example.com:8444")).done(), agents.copy(), String("asking"), String(), List<String>())
+    assert("{card}" == #"{"id":"spool_tc_9","type":"spool_connect","title":"Connect T3 Code","call":"tc_9","entry":"t3","name":"T3 Code","badge":null,"server":"t3-vps","address":"https://vps.example.com:8444/mcp","fields":{"address":"https://vps.example.com:8444"},"agents":[{"id":"a_1","name":"Casper"}],"secrets":[],"state":"asking","said":"","tools":[]}"#)
+    let keyed = Obj.new().s("id", String("ha")).s("name", String("Home Assistant")).j("secrets", Json.Array([Obj.new().s("name", String("HA_TOKEN")).s("label", String("Token")).b("have", false).done(), Obj.new().s("name", String("HAD")).s("label", String("Had")).b("have", true).done()])).done()
+    let asks = spool_card(String("tc_10"), keyed, Obj.new().s("name", String("ha")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("ha-mcp"))])).done(), Json.Null, agents, String("connected"), String(), [String("lights")])
+    assert("{at(asks.copy(), "secrets")}" == #"[{"name":"HA_TOKEN","label":"Token","placeholder":""}]"# and str_at(asks.copy(), "address") == some(String("npx -y ha-mcp")) and "{at(asks, "tools")}" == #"["lights"]"#)
+}
+
 @test
 fn makes_the_mcp_add_card() {
     let spec = Obj.new().s("name", String("acta")).s("command", String("npx")).j("args", Json.Array([Json.Str(String("-y")), Json.Str(String("@acta/mcp"))])).j("env", Obj.new().j("ACTA_KEY", Obj.new().s("secret", String("ACTA_KEY")).done()).s("ACTA_URL", String("https://acta.example")).done()).done()

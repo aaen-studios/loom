@@ -1,0 +1,219 @@
+module tests.protocol.spool_connect
+
+// An agent connects a spool (PLAN.md, "An agent connects a spool"): its
+// spool_connect puts Spools' card for T3 Code in its reply, at the address it
+// filled in, for the agent it names, and nothing is kept until the person
+// signs in there. Their Sign in (spool.connect) connects it as
+// catalog.connect does, the card following it in the kept reply: waiting for
+// the sign-in at the fake OAuth server (tests/fake_oauth), then connected
+// with its tools, given to the agents the card names. The agent that asked is
+// woken in its chat. One whose address doesn't answer fails, with why, and
+// wakes the agent too. An unknown entry, a field that isn't right, an agent
+// that isn't there and a name another server has are refused, and an agent
+// can't sign in for its person.
+//
+//     calx tests/protocol/spool_connect.calx
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json}
+import std.process.{Child, Command, Stdio, exit}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session, reply_text}
+import tests.kit.{Instance, calx, check}
+
+const REDIRECT: str = "http://127.0.0.1:9/callback"
+
+fn fetch_text(address: String) -> String ! Error {
+    var req = get(address, List<Header>(), 30000, 1048576)
+    let r = try req.wait()
+    return String.from_utf8(r.body) ?? String()
+}
+
+// What the browser brings back: the consent page's link, to the redirect.
+fn consent(address: String) -> String ! Error {
+    let page = try fetch_text(address)
+    let at_link = page.find("href=\"") else { fail "the sign-in page has no link: {page}" }
+    let rest = page[at_link + 6..].copy()
+    let end = rest.find("\"") ?? rest.len()
+    return rest[..end].copy()
+}
+
+fn query_of(link: String) -> String {
+    let q = link.find("?") ?? link.len()
+    return if q < link.len() { link[q + 1..].copy() } else { String() }
+}
+
+fn ok_of(r: Json) -> bool {
+    return at(r, "ok") == Json.Bool(true)
+}
+
+fn code_of(r: Json) -> String {
+    return str_at(at(r, "error"), "code") ?? String()
+}
+
+fn items(j: Json) -> List<Json> {
+    if let Json.Array(xs) = j { return xs.copy() }
+    return List<Json>()
+}
+
+fn server_in(listed: Json, name: str) -> Json {
+    for s in items(at(at(listed, "value"), "servers")) {
+        if str_at(s.copy(), "name") == some(String(name)) { return s.copy() }
+    }
+    return Json.Null
+}
+
+// The spool card in a message, or null.
+fn spool_card(message: Json) -> Json {
+    for b in items(at(message, "blocks")) {
+        let c = at(b, "card")
+        if str_at(c.copy(), "type") == some(String("spool_connect")) { return c }
+    }
+    return Json.Null
+}
+
+// The agent's next reply in `conversation`: among the frames from `mark` on,
+// or those still to come.
+fn reply_in(app: mut Session, mark: usize, conversation: String) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            let m = at(f.copy(), "message")
+            if str_at(f, "kind") == some(String("message.created")) and str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+        }
+        _ = try app.until("event", "message.created", 120000)
+    }
+}
+
+fn say(app: mut Session, conversation: String, cid: str, text: String) -> Json ! Error {
+    let mark = app.frames.len()
+    try app.send(Obj.new().s("t", String("send")).s("cid", String(cid)).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, mark, conversation)
+}
+
+// The spool card of message `id` once it's in `state`: among the frames from
+// `mark` on, or those still to come.
+fn card_in(app: mut Session, mark: usize, id: String, state: str) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.frames.len() {
+            let f = app.frames[k].copy()
+            k += 1
+            if str_at(f.copy(), "kind") != some(String("message.updated")) { continue }
+            let m = at(f, "message")
+            let c = spool_card(m.copy())
+            if str_at(m, "id") == some(id.copy()) and str_at(c.copy(), "state") == some(String(state)) { return c }
+        }
+        _ = try app.until("event", "message.updated", 120000)
+    }
+}
+
+fn ask(entry: str, fields: Json, name: str, agents: List<String>) -> String {
+    var named = List<Json>()
+    for a in agents { named.push(Json.Str(a.copy())) }
+    return "/mcpkeep spool_connect {Obj.new().s("entry", String(entry)).j("fields", fields).s("name", String(name)).j("agents", Json.Array(named)).done()}"
+}
+
+fn address_is(where: String) -> Json {
+    return Obj.new().s("address", where).done()
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    var app = try Session.connect(i.base.copy(), i.token.copy(), 0)
+    var ids = List<String>()
+    for (n, name) in [("q_1", "Builder"), ("q_2", "Helper")] {
+        let made = try app.cmd(n, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).b("code_mode", false).done())
+        ids.push(str_at(at(at(made, "value"), "agent"), "id") ?? String())
+    }
+    let builder = ids[0].copy()
+    let helper = ids[1].copy()
+    let chat = str_at(at(try app.cmd("q_3", "conversation.create", Obj.new().s("agent", builder.copy()).done()), "value"), "conversation") ?? String()
+
+    // --- What's refused ---
+    let unknown = reply_text(try say(mut app, chat.copy(), "m_1", ask("nope", Json.Null, "", List<String>())))
+    try check(unknown.contains("spool_connect failed: There's no nope in Spools"), "an entry that isn't in Spools is refused")
+    let bad_field = reply_text(try say(mut app, chat.copy(), "m_2", ask("t3", address_is(String("ftp://x")), "", List<String>())))
+    try check(bad_field.contains("spool_connect failed: Address is an address"), "a field that isn't right is refused, saying why")
+    let no_agent = reply_text(try say(mut app, chat.copy(), "m_3", ask("t3", address_is("{fake}/"), "", [String("Nobody")])))
+    try check(no_agent.contains("spool_connect failed: Your person has no agent Nobody."), "an agent that isn't there is refused")
+
+    // --- The card, and nothing kept ---
+    let asked = try say(mut app, chat.copy(), "m_4", ask("t3", address_is("{fake}/"), "t3-fake", [String("Helper"), builder.copy()]))
+    try check(reply_text(asked.copy()).contains("spool_connect: Your person has a card in your reply to connect T3 Code as t3-fake for Helper, Builder"), "the agent hears its person has a card, and doesn't wait")
+    let card = spool_card(asked.copy())
+    let message = str_at(asked.copy(), "id") ?? String()
+    try check(str_at(card.copy(), "state") == some(String("asking")) and str_at(card.copy(), "name") == some(String("T3 Code")) and str_at(card.copy(), "address") == some("{fake}/mcp") and str_at(card.copy(), "server") == some(String("t3-fake")) and "{at(card.copy(), "agents")}" == "[\{\"id\":\"{helper}\",\"name\":\"Helper\"\},\{\"id\":\"{builder}\",\"name\":\"Builder\"\}]" and (str_at(card.copy(), "icon_svg") ?? String()).starts_with("<svg "), "Spools' card for T3 Code is in the reply: its logo, the address, and the agents it's for")
+    try check(server_in(try app.cmd("q_4", "mcp.list", Obj.new().done()), "t3-fake") == Json.Null, "nothing is kept before the person signs in")
+
+    // --- An agent can't sign in for its person ---
+    let refused = reply_text(try say(mut app, chat.copy(), "m_5", "/mcpkeep run_command {Obj.new().s("name", String("spool.connect")).j("args", Obj.new().s("message", message.copy()).s("card", str_at(card.copy(), "id") ?? String()).done()).done()}"))
+    try check(refused.contains("run_command failed") and server_in(try app.cmd("q_5", "mcp.list", Obj.new().done()), "t3-fake") == Json.Null, "an agent can't press Sign in itself")
+
+    // --- Sign in ---
+    var mark = app.frames.len()
+    let started = try app.cmd("q_6", "spool.connect", Obj.new().s("message", message.copy()).s("card", str_at(card.copy(), "id") ?? String()).done())
+    try check(ok_of(started.copy()) and str_at(at(at(started, "value"), "connect"), "step") == some(String("adding")), "Sign in connects it as catalog.connect does")
+    _ = try card_in(mut app, mark, message.copy(), "sign_in")
+    let began = try app.cmd("q_7", "mcp.sign_in", Obj.new().s("name", String("t3-fake")).s("redirect", String(REDIRECT)).done())
+    let link = try consent(str_at(at(began, "value"), "url") ?? String())
+    mark = app.frames.len()
+    try check(ok_of(try app.cmd("q_8", "mcp.signed_in", Obj.new().s("query", query_of(link)).done())), "the person signs in, in their browser")
+    let connected = try card_in(mut app, mark, message.copy(), "connected")
+    try check(items(at(connected, "tools")).len() > 0, "the card says it's connected, with its tools")
+    let kept = server_in(try app.cmd("q_9", "mcp.list", Obj.new().done()), "t3-fake")
+    try check("{at(kept.copy(), "agents")}" == "[\"{builder}\",\"{helper}\"]" and str_at(kept, "catalog") == some(String("t3")), "the agents the card named have it, from the catalog's T3")
+    let woken = reply_text(try reply_in(mut app, mark, chat.copy()))
+    try check(woken.contains("T3 Code is connected as t3-fake, with"), "the agent that asked is woken in its chat")
+    try check(code_of(try app.cmd("q_10", "spool.connect", Obj.new().s("message", message.copy()).s("card", String("spool_nope")).done())) == "not_found", "a card that isn't there is not_found")
+
+    // --- One that fails ---
+    let taken = reply_text(try say(mut app, chat.copy(), "m_6", ask("acta", Json.Null, "t3-fake", List<String>())))
+    try check(taken.contains("spool_connect failed: Your person has an MCP server named t3-fake already"), "a name another server has is refused")
+    let down = try say(mut app, chat.copy(), "m_7", ask("t3", address_is(String("http://127.0.0.1:9")), "t3-down", List<String>()))
+    let down_card = spool_card(down.copy())
+    let down_id = str_at(down, "id") ?? String()
+    mark = app.frames.len()
+    _ = try app.cmd("q_11", "spool.connect", Obj.new().s("message", down_id.copy()).s("card", str_at(down_card, "id") ?? String()).done())
+    let failed = try card_in(mut app, mark, down_id, "failed")
+    try check((str_at(failed, "said") ?? String()).len() > 0, "one whose address doesn't answer fails, saying why, for Try again")
+    let told = reply_text(try reply_in(mut app, mark, chat))
+    try check(told.contains("Connecting T3 Code as t3-down failed:"), "and the agent is woken to hear it")
+    app.close()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_oauth/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake oauth: "), 120000) else {
+        child.kill()
+        fail "the fake OAuth server didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nspool_connect: all good")
+}
