@@ -18,55 +18,65 @@ import Testing
     }
 
     @Test func aCardReadsItsState() {
-        let working = card(["thread": "mcp:1", "server": "t3", "title": "Fix the flaky sign-in test", "project": "loom", "model": "Opus 5.5", "effort": "high", "state": "working",
-                            "step": "Running tests/protocol/signin.calx", "started": 1_000, "url": "https://pc/env/mcp:1", "at": 1])
-        #expect(working.strand == .waves)
-        #expect(working.sub == "T3 · loom · Opus 5.5 · high")
-        #expect(working.side(241_000) == "4 m")
-        #expect(working.quiet == .step("Running tests/protocol/signin.calx"))
-        #expect(working.edge?.strand == .waves && working.edge?.opacity == 0.35)
-        #expect(working.buttons.isEmpty && working.chips.isEmpty && working.moving)
+        let working = card(["thread": "mcp:1", "server": "t3-vps", "title": "Fix the flaky sign-in test", "project": "loom", "branch": "loo-434-t3", "model": "Opus 5.5", "effort": "high",
+                            "state": "working", "step": "Read server/catalog.calx", "doing": "Checking how Spools matches servers to the catalog", "steps": ["Read a file", "Ran a command"],
+                            "step_count": 18, "run": 2, "started": 1_000, "url": "https://pc/env/mcp:1",
+                            "prs": [["number": 353, "url": "u", "title": "Spools knows T3", "state": "open", "checks": "pending"]], "at": 1])
+        #expect(working.band(241_000) == ThreadBand(state: "Working", run: "Run 2 · 18 steps", time: "4 m", ink: false))
+        #expect(working.meta == ["t3-vps", "loom", "loo-434-t3", "Opus 5.5 · high"])
+        #expect(working.body == .doing(words: "Checking how Spools matches servers to the catalog", raw: "Read server/catalog.calx"))
+        #expect(working.steps == ["Read a file", "Ran a command"])
+        #expect(working.prs[0].standing == "● Checks running")
+        #expect(working.prs[0].title == "Spools knows T3")
+        #expect(working.buttons.isEmpty && working.moving)
+        #expect(working.tools == [.open, .send, .stop])
+        // Without plain words, the step as it came, once.
+        let plain = card(["state": "working", "step": "git push"])
+        #expect(plain.body == .doing(words: "git push", raw: ""))
+        #expect(plain.band(0).run == "")
 
-        let done = card(["thread": "mcp:1", "title": "T", "project": "loom", "model": "Opus 5.5", "state": "done", "step": "git push", "started": 1_000, "ended": 1_081_000,
-                         "prs": [["number": 295, "url": "https://github.com/a/b/pull/295"]]])
-        #expect(done.strand == .straight)
-        #expect(done.side(5) == "18 m")
-        #expect(done.quiet == nil)
-        #expect(done.chips.map(\.label) == ["PR #295"])
-        #expect(done.chips.map(\.url) == ["https://github.com/a/b/pull/295"])
-        #expect(done.edge == nil)
-        #expect(done.sub == "T3 · loom · Opus 5.5")
+        let done = card(["thread": "mcp:1", "title": "T", "project": "loom", "model": "Opus 5.5", "state": "done", "summary": "Opened #353.", "step_count": 1, "started": 1_000, "ended": 1_081_000,
+                         "prs": [["number": 353, "url": "https://github.com/a/b/pull/353", "state": "open", "checks": "success"]]])
+        let band = done.band(1_081_000 + 180_000)
+        #expect(band.state == "Done" && band.run == "1 step" && band.time == "3 min ago")
+        #expect(done.body == .summary("Opened #353."))
+        #expect(done.meta == ["loom", "Opus 5.5"])
+        #expect(done.prs[0].standing == "✓ Checks pass")
+        #expect(done.tools == [.send])
 
-        let failed = card(["thread": "mcp:1", "state": "failed", "reason": "Usage limit reached · resets 15:30", "started": 1])
-        #expect(failed.strand == .sags)
-        #expect(failed.side(9) == "Failed")
-        #expect(failed.quiet == .reason("Usage limit reached · resets 15:30"))
-        #expect(failed.buttons == [ThreadButton(label: "Try again", act: .retry, main: false)])
+        let failed = card(["thread": "mcp:1", "state": "failed", "reason": "Usage limit reached · resets 15:30", "started": 1, "ended": 60_001, "url": "u"])
+        #expect(failed.band(60_001).state == "Failed")
+        #expect(failed.band(60_001).time == "just now")
+        #expect(failed.body == .failed("Usage limit reached · resets 15:30"))
+        #expect(failed.buttons == [ThreadButton(label: "Try again", act: .retry, main: true)])
         #expect(!failed.moving)
+        #expect(failed.tools == [.open])
+        #expect(ThreadPR(number: 1, url: "", state: "merged", checks: "failure").standing == "Merged")
+        #expect(ThreadPR(number: 1, url: "", state: "open").standing == "Open")
     }
 
     @Test func aWaitingCardOffersItsAnswers() {
-        let q = card(["thread": "mcp:1", "state": "waiting", "ask": ["kind": "question", "request": "r1", "text": "Keep the retry, or make the test wait for the port instead?",
-                                                                    "choices": ["Wait for the port", "Keep the retry"]]])
-        #expect(q.strand == .knots)
-        #expect(q.side(0) == "Asks you")
-        #expect(q.asks == "Keep the retry, or make the test wait for the port instead?")
-        #expect(q.edge?.strand == .knots && q.edge?.opacity == 0.6)
+        let q = card(["thread": "mcp:1", "state": "waiting", "started": 0, "ask": ["kind": "question", "request": "r1", "text": "Keep the retry, or make the test wait for the port instead?",
+                                                                                  "choices": ["Wait for the port", "Keep the retry"]]])
+        let band = q.band(0)
+        #expect(band.ink && band.state == "Waiting on you")
+        #expect(q.body == .asks("Keep the retry, or make the test wait for the port instead?"))
         let b = q.buttons
         #expect(b.count == 2)
         #expect(b[0].main && !b[1].main)
         #expect(b[0].act == .answer("Wait for the port"))
         #expect(!q.inT3)
+        #expect(q.tools == [.send, .stop])
 
         let a = card(["thread": "mcp:1", "state": "waiting", "ask": ["kind": "approval", "request": "ap1", "text": "Run rm -rf build", "choices": ["Approve", "Decline"]]])
         #expect(a.buttons.map(\.label) == ["Approve", "Decline"])
         #expect(a.buttons.map(\.main) == [true, false])
         #expect(a.buttons[0].act == .decide("accept"))
 
-        // One loom couldn't answer: Open, to approve in T3.
+        // One loom couldn't answer: Open in T3, to approve it there.
         let inT3 = card(["thread": "mcp:1", "state": "waiting", "ask": ["kind": "approval", "request": "ap1", "text": "Run rm -rf build", "in_t3": true]])
         #expect(inT3.inT3)
-        #expect(inT3.buttons == [ThreadButton(label: "Open", act: .open, main: true)])
+        #expect(inT3.buttons == [ThreadButton(label: "Open in T3", act: .open, main: true)])
         // An ask on a card that isn't waiting is left out.
         #expect(card(["state": "done", "ask": ["kind": "question"]]).ask == nil)
     }
@@ -77,6 +87,10 @@ import Testing
         #expect(took(3_600_000) == "1 h")
         #expect(took(3_900_000) == "1 h 5 m")
         #expect(took(-5) == "0 s")
+        #expect(ago(30_000) == "just now")
+        #expect(ago(180_000) == "3 min ago")
+        #expect(ago(7_200_000) == "2 h ago")
+        #expect(ago(3 * 86_400_000) == "3 d ago")
     }
 
     @Test func aMessagesThreadsComeInTheOrderItsWordsLinkThem() {
@@ -150,7 +164,19 @@ import Testing
         answer(m, d, ["error": ["code": "unavailable", "message": "T3 didn't take the answer"]])
         #expect(m.notice == "T3 didn't take the answer")
         #expect(m.t3Act(q, .open, label: "Open") == nil)
-        #expect(m.t3Act(q, .retry, label: "Try again")?["name"] == "t3.retry")
+        let retry = try #require(m.t3Act(q, .retry, label: "Try again"))
+        #expect(retry["name"] == "t3.retry")
+        answer(m, retry, ["value": [:]])
+        // A message written on the card, and Stop; an empty message sends nothing.
+        #expect(m.t3Act(q, .send("  "), label: "Send") == nil)
+        let said = try #require(m.t3Act(q, .send(" Use the port. "), label: "Send"))
+        #expect(said["name"] == "t3.send")
+        #expect(said["args"] == ["thread": "mcp:1", "text": "Use the port."])
+        answer(m, said, ["value": [:]])
+        let stop = try #require(m.t3Act(q, .stop, label: "Stop"))
+        #expect(stop["name"] == "t3.stop")
+        #expect(stop["args"] == ["thread": "mcp:1"])
+        answer(m, stop, ["value": [:]])
 
         // The form.
         let ask = m.openT3Form()

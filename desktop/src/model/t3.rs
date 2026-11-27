@@ -1,8 +1,9 @@
 //! T3 Code's threads in the chat (PLAN.md, "T3 threads"): a thread a message names, or
 //! one an agent's T3 tool call started, as the instance keeps it on the message
-//! (`threads`), and what its card shows: the strand beside its title and how it moves,
-//! the line under the title, the time or what it waits on at the title's end, its
-//! latest step or why it failed, its pull requests, and the buttons that answer it. And
+//! (`threads`), and what its card shows (LOO-435): a band across its top with where it
+//! is in words, its run, its steps and its time; T3's mark and its title; where it runs,
+//! its project, branch, model and effort; what it's doing in plain words, what it asks,
+//! its summary or why it failed; its pull requests; and its buttons. And
 //! the form that starts a thread. The instance looks threads up, follows them and
 //! answers them; this reads what it kept and says what to send.
 
@@ -11,7 +12,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 
-use super::{s, Message, Model, Mood};
+use super::{s, Message, Model};
 
 /// How long a thread's id can sit before the start of its link in a message's words
 /// for the two to be read together: `t3-thread://v2/ENV/` comes first.
@@ -28,22 +29,30 @@ pub enum ThreadState {
     Failed,
 }
 
-/// The colour a card's strand, its time and its edge are drawn in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tone {
-    /// Working: the sky thread colour.
-    Sky,
-    /// Waiting on the person.
-    Warn,
-    Ok,
-    Bad,
-}
-
-/// A pull request the thread opened.
+/// A pull request the thread opened: its number, title, state (`open`, `merged`,
+/// `closed`) and checks (`success`, `failure`, `pending`), as T3 gives them.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Pr {
     pub number: i64,
     pub url: String,
+    pub title: String,
+    pub state: String,
+    pub checks: String,
+}
+
+impl Pr {
+    /// How it stands, in a word or two: its checks while it's open, else its state.
+    pub fn standing(&self) -> String {
+        match (self.state.as_str(), self.checks.as_str()) {
+            ("merged", _) => "Merged".into(),
+            ("closed", _) => "Closed".into(),
+            (_, "success") => "✓ Checks pass".into(),
+            (_, "failure") => "✕ Checks fail".into(),
+            (_, "pending") => "● Checks running".into(),
+            ("open", _) => "Open".into(),
+            _ => String::new(),
+        }
+    }
 }
 
 /// What a thread waits on.
@@ -62,13 +71,24 @@ pub struct Ask {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ThreadCard {
     pub thread: String,
+    /// The T3 server it's on, the person's spool (`t3-vps`).
     pub server: String,
     pub title: String,
     pub project: String,
+    pub branch: String,
     pub model: String,
     pub effort: String,
     pub state: ThreadState,
+    /// Its latest step as it came, and in plain words while it works.
     pub step: String,
+    pub doing: String,
+    /// Its last few steps in plain words, the newest last, and how many it took.
+    pub steps: Vec<String>,
+    pub step_count: i64,
+    /// Which run it's on, as T3 counts them, or 0.
+    pub run: i64,
+    /// Its last message, once it's done.
+    pub summary: String,
     /// When its latest run started and ended, in Unix ms, or 0.
     pub started: i64,
     pub ended: i64,
@@ -92,6 +112,10 @@ pub enum Act {
     Open,
     /// Asks it to try again.
     Retry,
+    /// Sends it a message the person wrote on the card.
+    Send(String),
+    /// Stops it.
+    Stop,
 }
 
 /// A button on a card, the main one filled.
@@ -102,11 +126,32 @@ pub struct Button {
     pub main: bool,
 }
 
-/// The line in a quiet box under a card's head: its latest step, or why it failed.
+/// The band across a card's top: where it is, in words, its run and steps, and its
+/// time; `ink` fills it while the thread waits on the person.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Quiet {
-    Step(String),
-    Reason(String),
+pub struct Band {
+    pub state: &'static str,
+    pub run: String,
+    pub time: String,
+    pub ink: bool,
+}
+
+/// What a card says under its head: what it's doing in plain words with the step as it
+/// came, what it asks, its summary, or why it failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Body {
+    Doing { words: String, raw: String },
+    Asks(String),
+    Summary(String),
+    Failed(String),
+}
+
+/// The icon buttons at a card's foot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    Open,
+    Send,
+    Stop,
 }
 
 impl ThreadCard {
@@ -121,29 +166,27 @@ impl ThreadCard {
             kind: s(a, "kind"),
             request: s(a, "request"),
             text: s(a, "text"),
-            choices: a
-                .get("choices")
-                .and_then(Value::as_array)
-                .map(|c| {
-                    c.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default(),
+            choices: strings(a.get("choices")),
             in_t3: a.get("in_t3").and_then(Value::as_bool).unwrap_or(false),
         });
+        let int = |k: &str| v.get(k).and_then(Value::as_i64).unwrap_or(0);
         ThreadCard {
             thread: s(v, "thread"),
             server: s(v, "server"),
             title: s(v, "title"),
             project: s(v, "project"),
+            branch: s(v, "branch"),
             model: s(v, "model"),
             effort: s(v, "effort"),
             state,
             step: s(v, "step"),
-            started: v.get("started").and_then(Value::as_i64).unwrap_or(0),
-            ended: v.get("ended").and_then(Value::as_i64).unwrap_or(0),
+            doing: s(v, "doing"),
+            steps: strings(v.get("steps")),
+            step_count: int("step_count"),
+            run: int("run"),
+            summary: s(v, "summary"),
+            started: int("started"),
+            ended: int("ended"),
             prs: v
                 .get("prs")
                 .and_then(Value::as_array)
@@ -152,6 +195,9 @@ impl ThreadCard {
                         .map(|p| Pr {
                             number: p.get("number").and_then(Value::as_i64).unwrap_or(0),
                             url: s(p, "url"),
+                            title: s(p, "title"),
+                            state: s(p, "state"),
+                            checks: s(p, "checks"),
                         })
                         .filter(|p| p.number > 0)
                         .collect()
@@ -168,77 +214,91 @@ impl ThreadCard {
         }
     }
 
-    /// How its strand moves, and its colour: it waves while working, knots while it
-    /// waits, lies straight once done and sags when it failed. Nothing is added to it.
-    pub fn strand(&self) -> (Mood, Tone) {
-        match self.state {
-            ThreadState::Working => (Mood::Writing, Tone::Sky),
-            ThreadState::Waiting => (Mood::Waiting, Tone::Warn),
-            ThreadState::Done => (Mood::Idle, Tone::Ok),
-            ThreadState::Failed => (Mood::Failed, Tone::Bad),
+    /// Its band: "Working", "Waiting on you", "Done" or "Failed", in words and in its
+    /// shape, so it never rests on colour alone; "Run 2 · 18 steps"; how long it has
+    /// run, or how long ago it ended; and filled with ink while it waits on the person.
+    pub fn band(&self, now: i64) -> Band {
+        let state = match self.state {
+            ThreadState::Working => "Working",
+            ThreadState::Waiting => "Waiting on you",
+            ThreadState::Done => "Done",
+            ThreadState::Failed => "Failed",
+        };
+        let mut run = Vec::new();
+        if self.run > 0 {
+            run.push(format!("Run {}", self.run));
         }
-    }
-
-    /// The mono line under its title: `T3 · loom · Opus 5.5 · high`.
-    pub fn sub(&self) -> String {
-        let mut parts = vec!["T3"];
-        for p in [&self.project, &self.model, &self.effort] {
-            if !p.is_empty() {
-                parts.push(p);
-            }
+        match self.step_count {
+            0 => {}
+            1 => run.push("1 step".into()),
+            n => run.push(format!("{n} steps")),
         }
-        parts.join(" · ")
-    }
-
-    /// What sits at the title's end, in its tone: how long it has run or ran, "Asks
-    /// you", or "Failed".
-    pub fn side(&self, now: i64) -> String {
-        match self.state {
-            ThreadState::Waiting => "Asks you".into(),
-            ThreadState::Failed => "Failed".into(),
-            ThreadState::Working if self.started > 0 => took(now - self.started),
-            ThreadState::Done if self.started > 0 && self.ended >= self.started => {
-                took(self.ended - self.started)
+        let time = match self.state {
+            ThreadState::Working | ThreadState::Waiting if self.started > 0 => {
+                took(now - self.started)
             }
+            ThreadState::Done | ThreadState::Failed if self.ended > 0 => ago(now - self.ended),
             _ => String::new(),
+        };
+        Band {
+            state,
+            run: run.join(" · "),
+            time,
+            ink: self.state == ThreadState::Waiting,
         }
     }
 
-    /// The line in a quiet box: the step it's on while it works, or why it failed.
-    pub fn quiet(&self) -> Option<Quiet> {
+    /// The quiet line under its title: where it runs (its spool), its project, branch,
+    /// and model · effort.
+    pub fn meta(&self) -> Vec<String> {
+        let model = [self.model.as_str(), self.effort.as_str()]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        [&self.server, &self.project, &self.branch, &model]
+            .into_iter()
+            .filter(|p| !p.is_empty())
+            .cloned()
+            .collect()
+    }
+
+    /// What it says under its head, as where it is has it.
+    pub fn body(&self) -> Option<Body> {
         match self.state {
-            ThreadState::Working if !self.step.is_empty() => Some(Quiet::Step(self.step.clone())),
-            ThreadState::Failed => Some(Quiet::Reason(if self.reason.is_empty() {
+            ThreadState::Working => {
+                let words = if self.doing.is_empty() {
+                    self.step.clone()
+                } else {
+                    self.doing.clone()
+                };
+                let raw = if self.step == words {
+                    String::new()
+                } else {
+                    self.step.clone()
+                };
+                (!words.is_empty()).then_some(Body::Doing { words, raw })
+            }
+            ThreadState::Waiting => self
+                .ask
+                .as_ref()
+                .map(|a| a.text.clone())
+                .filter(|t| !t.is_empty())
+                .map(Body::Asks),
+            ThreadState::Done => {
+                (!self.summary.is_empty()).then(|| Body::Summary(self.summary.clone()))
+            }
+            ThreadState::Failed => Some(Body::Failed(if self.reason.is_empty() {
                 "Failed".into()
             } else {
                 self.reason.clone()
             })),
-            _ => None,
         }
     }
 
-    /// What it asks, beside a warn line, while it waits.
-    pub fn asks(&self) -> Option<&str> {
-        self.ask
-            .as_ref()
-            .map(|a| a.text.as_str())
-            .filter(|t| !t.is_empty())
-    }
-
-    /// Its pull requests as chips, once it's done: "PR #295" and where it opens.
-    pub fn chips(&self) -> Vec<(String, String)> {
-        if self.state != ThreadState::Done {
-            return Vec::new();
-        }
-        self.prs
-            .iter()
-            .map(|p| (format!("PR #{}", p.number), p.url.clone()))
-            .collect()
-    }
-
-    /// Its buttons, the main one first: a question's choices, an approval's Approve
-    /// and Decline, Open where the person approves in T3 itself, Try again once it
-    /// failed.
+    /// The buttons that answer it, the main one first: a question's choices, an
+    /// approval's Approve and Decline, Open where the person approves in T3 itself, Try
+    /// again once it failed.
     pub fn buttons(&self) -> Vec<Button> {
         let b = |label: &str, act: Act, main: bool| Button {
             label: label.into(),
@@ -253,13 +313,13 @@ impl ThreadCard {
                 .map(|(i, c)| b(c, Act::Answer(c.clone()), i == 0))
                 .collect(),
             (ThreadState::Waiting, Some(a)) if a.in_t3 || a.request.is_empty() => {
-                vec![b("Open", Act::Open, true)]
+                vec![b("Open in T3", Act::Open, true)]
             }
             (ThreadState::Waiting, Some(_)) => vec![
                 b("Approve", Act::Decide("accept"), true),
                 b("Decline", Act::Decide("decline"), false),
             ],
-            (ThreadState::Failed, _) => vec![b("Try again", Act::Retry, false)],
+            (ThreadState::Failed, _) => vec![b("Try again", Act::Retry, true)],
             _ => Vec::new(),
         }
     }
@@ -271,19 +331,48 @@ impl ThreadCard {
             .is_some_and(|a| a.kind == "approval" && (a.in_t3 || a.request.is_empty()))
     }
 
-    /// Its edge: tinted lightly in sky while it works, warn while it waits.
-    pub fn edge(&self) -> Option<(Tone, f32)> {
-        match self.state {
-            ThreadState::Working => Some((Tone::Sky, 0.35)),
-            ThreadState::Waiting => Some((Tone::Warn, 0.6)),
-            _ => None,
+    /// Its icon buttons: Open in T3 where it has a page, Send a message while it isn't
+    /// failed, and Stop while it works or waits.
+    pub fn tools(&self) -> Vec<Tool> {
+        let mut out = Vec::new();
+        if !self.url.is_empty() {
+            out.push(Tool::Open);
         }
+        if self.state != ThreadState::Failed {
+            out.push(Tool::Send);
+        }
+        if self.moving() {
+            out.push(Tool::Stop);
+        }
+        out
     }
 
-    /// Whether its strand moves, so the window keeps drawing frames, and its time
-    /// counts up.
+    /// Whether it's working or waiting, so its time counts up.
     pub fn moving(&self) -> bool {
         matches!(self.state, ThreadState::Working | ThreadState::Waiting)
+    }
+}
+
+fn strings(v: Option<&Value>) -> Vec<String> {
+    v.and_then(Value::as_array)
+        .map(|c| {
+            c.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How long ago something was, as a card's band says it: "just now", "3 min ago", "2 h
+/// ago", "4 d ago".
+pub fn ago(ms: i64) -> String {
+    let mins = (ms / 60_000).max(0);
+    match mins {
+        0 => "just now".into(),
+        1..=59 => format!("{mins} min ago"),
+        60..=1439 => format!("{} h ago", mins / 60),
+        _ => format!("{} d ago", mins / 1440),
     }
 }
 
@@ -618,7 +707,12 @@ impl Model {
             ),
             Act::Decide(d) => ("t3.answer", json!({"thread": card.thread, "decision": d})),
             Act::Retry => ("t3.retry", json!({"thread": card.thread})),
-            Act::Open => return None,
+            Act::Send(text) if !text.trim().is_empty() => (
+                "t3.send",
+                json!({"thread": card.thread, "text": text.trim()}),
+            ),
+            Act::Stop => ("t3.stop", json!({"thread": card.thread})),
+            Act::Open | Act::Send(_) => return None,
         };
         let id = self.id("app.t3_act");
         self.t3.busy.insert(card.thread.clone(), label.into());
@@ -734,71 +828,97 @@ mod tests {
     #[test]
     fn a_card_reads_its_state() {
         let working = card(
-            json!({"thread": "mcp:1", "server": "t3", "title": "Fix the flaky sign-in test", "project": "loom", "model": "Opus 5.5", "effort": "high", "state": "working", "step": "Running tests/protocol/signin.calx", "started": 1_000, "url": "https://pc/env/mcp:1", "at": 1}),
+            json!({"thread": "mcp:1", "server": "t3-vps", "title": "Fix the flaky sign-in test", "project": "loom", "branch": "loo-434-t3", "model": "Opus 5.5", "effort": "high", "state": "working", "step": "Read server/catalog.calx", "doing": "Checking how Spools matches servers to the catalog", "steps": ["Read a file", "Ran a command"], "step_count": 18, "run": 2, "started": 1_000, "url": "https://pc/env/mcp:1", "prs": [{"number": 353, "url": "u", "title": "Spools knows T3", "state": "open", "checks": "pending"}], "at": 1}),
         );
-        assert_eq!(working.strand(), (Mood::Writing, Tone::Sky));
-        assert_eq!(working.sub(), "T3 · loom · Opus 5.5 · high");
-        assert_eq!(working.side(241_000), "4 m");
         assert_eq!(
-            working.quiet(),
-            Some(Quiet::Step("Running tests/protocol/signin.calx".into()))
+            working.band(241_000),
+            Band {
+                state: "Working",
+                run: "Run 2 · 18 steps".into(),
+                time: "4 m".into(),
+                ink: false
+            }
         );
-        assert_eq!(working.edge(), Some((Tone::Sky, 0.35)));
-        assert!(working.buttons().is_empty() && working.chips().is_empty() && working.moving());
+        assert_eq!(
+            working.meta(),
+            vec!["t3-vps", "loom", "loo-434-t3", "Opus 5.5 · high"]
+        );
+        assert_eq!(
+            working.body(),
+            Some(Body::Doing {
+                words: "Checking how Spools matches servers to the catalog".into(),
+                raw: "Read server/catalog.calx".into()
+            })
+        );
+        assert_eq!(working.steps, vec!["Read a file", "Ran a command"]);
+        assert_eq!(working.prs[0].standing(), "● Checks running");
+        assert_eq!(working.prs[0].title, "Spools knows T3");
+        assert!(working.buttons().is_empty() && working.moving());
+        assert_eq!(working.tools(), vec![Tool::Open, Tool::Send, Tool::Stop]);
+        // Without plain words, the step as it came, once.
+        let plain = card(json!({"state": "working", "step": "git push"}));
+        assert_eq!(
+            plain.body(),
+            Some(Body::Doing {
+                words: "git push".into(),
+                raw: String::new()
+            })
+        );
+        assert_eq!(plain.band(0).run, "");
 
         let done = card(
-            json!({"thread": "mcp:1", "title": "T", "project": "loom", "model": "Opus 5.5", "state": "done", "step": "git push", "started": 1_000, "ended": 1_081_000, "prs": [{"number": 295, "url": "https://github.com/a/b/pull/295"}]}),
+            json!({"thread": "mcp:1", "title": "T", "project": "loom", "model": "Opus 5.5", "state": "done", "summary": "Opened #353.", "step_count": 1, "started": 1_000, "ended": 1_081_000, "prs": [{"number": 353, "url": "https://github.com/a/b/pull/353", "state": "open", "checks": "success"}]}),
         );
-        assert_eq!(done.strand(), (Mood::Idle, Tone::Ok));
-        assert_eq!(done.side(5), "18 m");
-        assert_eq!(done.quiet(), None);
+        let band = done.band(1_081_000 + 180_000);
         assert_eq!(
-            done.chips(),
-            vec![(
-                "PR #295".to_string(),
-                "https://github.com/a/b/pull/295".to_string()
-            )]
+            (band.state, band.run.as_str(), band.time.as_str()),
+            ("Done", "1 step", "3 min ago")
         );
-        assert_eq!(done.edge(), None);
-        assert_eq!(done.sub(), "T3 · loom · Opus 5.5");
+        assert_eq!(done.body(), Some(Body::Summary("Opened #353.".into())));
+        assert_eq!(done.meta(), vec!["loom", "Opus 5.5"]);
+        assert_eq!(done.prs[0].standing(), "✓ Checks pass");
+        assert_eq!(done.tools(), vec![Tool::Send]);
 
         let failed = card(
-            json!({"thread": "mcp:1", "state": "failed", "reason": "Usage limit reached · resets 15:30", "started": 1}),
+            json!({"thread": "mcp:1", "state": "failed", "reason": "Usage limit reached · resets 15:30", "started": 1, "ended": 60_001, "url": "u"}),
         );
-        assert_eq!(failed.strand(), (Mood::Failed, Tone::Bad));
-        assert_eq!(failed.side(9), "Failed");
+        assert_eq!(failed.band(60_001).state, "Failed");
+        assert_eq!(failed.band(60_001).time, "just now");
         assert_eq!(
-            failed.quiet(),
-            Some(Quiet::Reason("Usage limit reached · resets 15:30".into()))
+            failed.body(),
+            Some(Body::Failed("Usage limit reached · resets 15:30".into()))
         );
         assert_eq!(
             failed.buttons(),
             vec![Button {
                 label: "Try again".into(),
                 act: Act::Retry,
-                main: false
+                main: true
             }]
         );
         assert!(!failed.moving());
+        assert_eq!(failed.tools(), vec![Tool::Open]);
     }
 
     #[test]
     fn a_waiting_card_offers_its_answers() {
         let q = card(
-            json!({"thread": "mcp:1", "state": "waiting", "ask": {"kind": "question", "request": "r1", "text": "Keep the retry, or make the test wait for the port instead?", "choices": ["Wait for the port", "Keep the retry"]}}),
+            json!({"thread": "mcp:1", "state": "waiting", "started": 0, "ask": {"kind": "question", "request": "r1", "text": "Keep the retry, or make the test wait for the port instead?", "choices": ["Wait for the port", "Keep the retry"]}}),
         );
-        assert_eq!(q.strand(), (Mood::Waiting, Tone::Warn));
-        assert_eq!(q.side(0), "Asks you");
+        let band = q.band(0);
+        assert!(band.ink && band.state == "Waiting on you");
         assert_eq!(
-            q.asks(),
-            Some("Keep the retry, or make the test wait for the port instead?")
+            q.body(),
+            Some(Body::Asks(
+                "Keep the retry, or make the test wait for the port instead?".into()
+            ))
         );
-        assert_eq!(q.edge(), Some((Tone::Warn, 0.6)));
         let b = q.buttons();
         assert_eq!(b.len(), 2);
         assert!(b[0].main && !b[1].main);
         assert_eq!(b[0].act, Act::Answer("Wait for the port".into()));
         assert!(!q.in_t3());
+        assert_eq!(q.tools(), vec![Tool::Send, Tool::Stop]);
 
         let a = card(
             json!({"thread": "mcp:1", "state": "waiting", "ask": {"kind": "approval", "request": "ap1", "text": "Run rm -rf build", "choices": ["Approve", "Decline"]}}),
@@ -812,7 +932,7 @@ mod tests {
         );
         assert_eq!(a.buttons()[0].act, Act::Decide("accept"));
 
-        // One loom couldn't answer: Open, to approve in T3.
+        // One loom couldn't answer: Open in T3, to approve it there.
         let in_t3 = card(
             json!({"thread": "mcp:1", "state": "waiting", "ask": {"kind": "approval", "request": "ap1", "text": "Run rm -rf build", "in_t3": true}}),
         );
@@ -820,7 +940,7 @@ mod tests {
         assert_eq!(
             in_t3.buttons(),
             vec![Button {
-                label: "Open".into(),
+                label: "Open in T3".into(),
                 act: Act::Open,
                 main: true
             }]
@@ -839,8 +959,11 @@ mod tests {
         assert_eq!(took(3_600_000), "1 h");
         assert_eq!(took(3_900_000), "1 h 5 m");
         assert_eq!(took(-5), "0 s");
+        assert_eq!(ago(30_000), "just now");
+        assert_eq!(ago(180_000), "3 min ago");
+        assert_eq!(ago(7_200_000), "2 h ago");
+        assert_eq!(ago(3 * 86_400_000), "3 d ago");
     }
-
     #[test]
     fn a_messages_threads_come_in_the_order_its_words_link_them() {
         let m = json!({"blocks": [{"kind": "text", "text": "First [b](t3-thread://v2/env/mcp:b), then [a](t3-thread://v2/env/mcp:a)."}],
@@ -928,10 +1051,23 @@ mod tests {
         assert!(m.take_t3_answer(&id, &json!({"ok": false, "error": {"code": "unavailable", "message": "T3 didn't take the answer"}})));
         assert_eq!(m.notices, vec!["T3 didn't take the answer".to_string()]);
         assert!(m.t3_act(&q, &Act::Open, "Open").is_none());
+        let retry = m.t3_act(&q, &Act::Retry, "Try again").unwrap();
+        assert_eq!(retry["name"], "t3.retry");
+        assert!(m.take_t3_answer(retry["id"].as_str().unwrap(), &json!({"ok": true})));
+        // A message written on the card, and Stop; an empty message sends nothing.
+        assert!(m.t3_act(&q, &Act::Send("  ".into()), "Send").is_none());
+        let sent = m
+            .t3_act(&q, &Act::Send(" Use the port. ".into()), "Send")
+            .unwrap();
+        assert_eq!(sent["name"], "t3.send");
         assert_eq!(
-            m.t3_act(&q, &Act::Retry, "Try again").unwrap()["name"],
-            "t3.retry"
+            sent["args"],
+            json!({"thread": "mcp:1", "text": "Use the port."})
         );
+        assert!(m.take_t3_answer(sent["id"].as_str().unwrap(), &json!({"ok": true})));
+        let stop = m.t3_act(&q, &Act::Stop, "Stop").unwrap();
+        assert_eq!(stop["name"], "t3.stop");
+        assert!(m.take_t3_answer(stop["id"].as_str().unwrap(), &json!({"ok": true})));
 
         // The form.
         let ask = m.open_t3_form(None);

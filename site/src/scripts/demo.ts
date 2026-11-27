@@ -3,7 +3,7 @@
 // answers with an Acta card's pill (app.rs, card_pill); in the Shop group chat the router picks
 // who answers, and the line over the reply names it (room_view.rs, route_line), and Biscuit's
 // reply ends with an email it drafted, to send, edit or reject (draft.ts); Moss starts a
-// T3 thread, whose card works and then lies straight with its pull request (t3_view.rs,
+// T3 thread, whose card works and then is done with its pull request (t3_view.rs,
 // thread_card). After a few seconds' rest the next chat opens from its row in the sidebar, and
 // after the last it stays still. A click in it ends every scene where it would end, and each
 // chat's row opens it.
@@ -28,8 +28,13 @@ type Chat = 'juniper' | 'shop' | 'moss';
 type Fill = { used: number; title: string; line: string; turn: string; day: string; who?: string };
 /** The Shop group chat's context once Biscuit has answered there. */
 const BISCUIT_FILL: Fill = { used: 61, title: "Biscuit's context", line: '', turn: '58k', day: '1.2M', who: 'Biscuit' };
-/** The steps of Moss's T3 thread, a minute apart as its card counts them, before it's done. */
-const T3_STEPS = ['rg -n Contiune src', 'Edit src/checkout/PayButton.tsx', 'bun test checkout'];
+/** The steps of Moss's T3 thread, a minute apart as its card counts them, before it's done:
+ * what it does in plain words, and its call. */
+const T3_STEPS: [string, string][] = [
+	["Searching the shop's code for “Contiune”", 'rg -n Contiune src'],
+	['Editing PayButton.tsx', 'Edit src/checkout/PayButton.tsx'],
+	['Running the checkout tests', 'bun test checkout'],
+];
 
 /** Lucide's crossed-out pin, as the app's Unpin has it (Ico::PinOff). */
 const UNPIN_ICON =
@@ -986,14 +991,17 @@ export function play(app: HTMLElement) {
 			step.querySelector('.step-line')!.addEventListener('click', () => (call.hidden = !call.hidden));
 		}
 	}
-	/** Moss's T3 thread as its card shows it: working, its strand waving in sky, the minutes it
-	 * has run at its title's end and its latest step under it; or, with no step, done, straight
-	 * in the ok colour with its pull request. */
-	const t3 = (at: HTMLElement, minutes: number, step?: string) => {
+	/** Moss's T3 thread as its card shows it: Working, with the minutes it has run and the step
+	 * going now, or, with no step, Done with what it said and its pull request. */
+	const t3 = (at: HTMLElement, steps: number, step?: [string, string]) => {
 		at.classList.toggle('done', !step);
-		at.querySelector('[data-t3-time]')!.textContent = `${minutes} m`;
-		if (step) at.querySelector('[data-t3-step]')!.textContent = step;
-		threadOf(at.querySelector('svg[data-thread]'))?.set(step ? 'writing' : 'idle');
+		at.querySelector('[data-t3-state]')!.textContent = step ? 'Working' : 'Done';
+		at.querySelector('[data-t3-run]')!.textContent = `Run 1 · ${steps} ${steps === 1 ? 'step' : 'steps'}`;
+		at.querySelector('[data-t3-time]')!.textContent = step ? `${steps} m` : 'just now';
+		if (step) {
+			at.querySelector('[data-t3-doing]')!.textContent = step[0];
+			at.querySelector('[data-t3-raw]')!.textContent = step[1];
+		}
 	};
 	/** A message comes into its chat, and its pin with it. */
 	const send = (row: HTMLElement) => {
@@ -1015,7 +1023,7 @@ export function play(app: HTMLElement) {
 		}
 		if (s.t3) {
 			s.t3.hidden = false;
-			t3(s.t3, T3_STEPS.length + 1);
+			t3(s.t3, T3_STEPS.length);
 		}
 	};
 
@@ -1097,7 +1105,7 @@ export function play(app: HTMLElement) {
 			await wait(500, id);
 			s.draft.shown(true);
 		}
-		// Its T3 thread's card comes under it, works a step a minute, and lies straight once done.
+		// Its T3 thread's card comes under it, works a step a minute, and then is done.
 		if (s.t3) {
 			await wait(600, id);
 			t3(s.t3, 1, T3_STEPS[0]);
@@ -1107,7 +1115,7 @@ export function play(app: HTMLElement) {
 				t3(s.t3, m + 1, T3_STEPS[m]);
 			}
 			await wait(1500, id);
-			t3(s.t3, T3_STEPS.length + 1);
+			t3(s.t3, T3_STEPS.length);
 		}
 	}
 

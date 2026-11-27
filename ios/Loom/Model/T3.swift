@@ -2,9 +2,10 @@ import Foundation
 
 // T3 Code's threads in the chat (PLAN.md, "T3 threads"), as desktop/src/model/t3.rs has
 // them: a thread a message names, or one an agent's T3 tool call started, as the instance
-// keeps it on the message (`threads`), and what its card shows: how the strand beside its
-// title lies, the line under the title, the time or what it waits on at the title's end,
-// its latest step or why it failed, its pull requests, and the buttons that answer it.
+// keeps it on the message (`threads`), and what its card shows (LOO-435): a band across
+// its top with where it is in words, its run, its steps and its time; T3's mark and its
+// title; where it runs, its project, branch, model and effort; what it's doing in plain
+// words, what it asks, its summary or why it failed; its pull requests; and its buttons.
 // And the sheet that starts a thread. The instance looks threads up, follows them and
 // answers them; this reads what it kept and says what to send.
 
@@ -20,17 +21,27 @@ enum ThreadState: Equatable, Sendable {
     case failed
 }
 
-/// How a card's strand lies, and the colour it, its time and its edge are drawn in: it
-/// waves in sky while working, knots in warn while it waits, lies straight in ok once
-/// done and sags in bad when it failed. Nothing is added to it.
-enum Strand: Equatable, Sendable {
-    case waves, knots, straight, sags
-}
-
-/// A pull request the thread opened.
+/// A pull request the thread opened: its number, title, state (`open`, `merged`,
+/// `closed`) and checks (`success`, `failure`, `pending`), as T3 gives them.
 struct ThreadPR: Equatable, Sendable {
     var number: Int
     var url: String
+    var title = ""
+    var state = ""
+    var checks = ""
+
+    /// How it stands, in a word or two: its checks while it's open, else its state.
+    var standing: String {
+        switch (state, checks) {
+        case ("merged", _): "Merged"
+        case ("closed", _): "Closed"
+        case (_, "success"): "✓ Checks pass"
+        case (_, "failure"): "✕ Checks fail"
+        case (_, "pending"): "● Checks running"
+        case ("open", _): "Open"
+        default: ""
+        }
+    }
 }
 
 /// What a thread waits on.
@@ -54,6 +65,10 @@ enum ThreadAct: Equatable, Sendable {
     case open
     /// Asks it to try again.
     case retry
+    /// Sends it a message the person wrote on the card.
+    case send(String)
+    /// Stops it.
+    case stop
 }
 
 /// A button on a card, the main one filled.
@@ -63,22 +78,50 @@ struct ThreadButton: Equatable, Sendable {
     var main: Bool
 }
 
-/// The line in a quiet box under a card's head: its latest step, or why it failed.
-enum ThreadQuiet: Equatable, Sendable {
-    case step(String)
-    case reason(String)
+/// The band across a card's top: where it is, in words, its run and steps, and its
+/// time; `ink` fills it while the thread waits on the person.
+struct ThreadBand: Equatable, Sendable {
+    var state: String
+    var run: String
+    var time: String
+    var ink: Bool
+}
+
+/// What a card says under its head: what it's doing in plain words with the step as it
+/// came, what it asks, its summary, or why it failed.
+enum ThreadBody: Equatable, Sendable {
+    case doing(words: String, raw: String)
+    case asks(String)
+    case summary(String)
+    case failed(String)
+}
+
+/// The icon buttons at a card's foot.
+enum ThreadTool: Equatable, Sendable {
+    case open, send, stop
 }
 
 /// A thread as a message keeps it (protocol.md, "T3 threads").
 struct ThreadCard: Equatable, Sendable, Identifiable {
     var thread: String
+    /// The T3 server it's on, the person's spool (`t3-vps`).
     var server = ""
     var title = ""
     var project = ""
+    var branch = ""
     var model = ""
     var effort = ""
     var state = ThreadState.working
+    /// Its latest step as it came, and in plain words while it works.
     var step = ""
+    var doing = ""
+    /// Its last few steps in plain words, the newest last, and how many it took.
+    var steps: [String] = []
+    var stepCount = 0
+    /// Which run it's on, as T3 counts them, or 0.
+    var run = 0
+    /// Its last message, once it's done.
+    var summary = ""
     /// When its latest run started and ended, in Unix ms, or 0.
     var started = 0
     var ended = 0
@@ -103,12 +146,20 @@ struct ThreadCard: Equatable, Sendable, Identifiable {
         server = v["server"].text
         title = v["title"].text
         project = v["project"].text
+        branch = v["branch"].text
         model = v["model"].text
         effort = v["effort"].text
         step = v["step"].text
+        doing = v["doing"].text
+        steps = v["steps"].array.compactMap(\.string)
+        stepCount = v["step_count"].int ?? 0
+        run = v["run"].int ?? 0
+        summary = v["summary"].text
         started = v["started"].int ?? 0
         ended = v["ended"].int ?? 0
-        prs = v["prs"].array.map { ThreadPR(number: $0["number"].int ?? 0, url: $0["url"].text) }.filter { $0.number > 0 }
+        prs = v["prs"].array.map {
+            ThreadPR(number: $0["number"].int ?? 0, url: $0["url"].text, title: $0["title"].text, state: $0["state"].text, checks: $0["checks"].text)
+        }.filter { $0.number > 0 }
         let a = v["ask"]
         if state == .waiting, case .object = a {
             ask = ThreadAsk(kind: a["kind"].text, request: a["request"].text, text: a["text"].text, choices: a["choices"].array.compactMap(\.string), inT3: a["in_t3"].bool ?? false)
@@ -118,87 +169,102 @@ struct ThreadCard: Equatable, Sendable, Identifiable {
         missing = v["missing"].bool ?? false
     }
 
-    /// How its strand lies.
-    var strand: Strand {
+    /// Its band: "Working", "Waiting on you", "Done" or "Failed", in words and in its
+    /// shape, so it never rests on colour alone; "Run 2 · 18 steps"; how long it has
+    /// run, or how long ago it ended; and filled with ink while it waits on the person.
+    func band(_ now: Int) -> ThreadBand {
+        let word = switch state {
+        case .working: "Working"
+        case .waiting: "Waiting on you"
+        case .done: "Done"
+        case .failed: "Failed"
+        }
+        var run: [String] = []
+        if self.run > 0 { run.append("Run \(self.run)") }
+        switch stepCount {
+        case 0: break
+        case 1: run.append("1 step")
+        default: run.append("\(stepCount) steps")
+        }
+        let time = switch state {
+        case .working where started > 0, .waiting where started > 0: took(now - started)
+        case .done where ended > 0, .failed where ended > 0: ago(now - ended)
+        default: ""
+        }
+        return ThreadBand(state: word, run: run.joined(separator: " · "), time: time, ink: state == .waiting)
+    }
+
+    /// The quiet line under its title: where it runs (its spool), its project, branch,
+    /// and model · effort.
+    var meta: [String] {
+        let m = [model, effort].filter { !$0.isEmpty }.joined(separator: " · ")
+        return [server, project, branch, m].filter { !$0.isEmpty }
+    }
+
+    /// What it says under its head, as where it is has it.
+    var body: ThreadBody? {
         switch state {
-        case .working: .waves
-        case .waiting: .knots
-        case .done: .straight
-        case .failed: .sags
+        case .working:
+            let words = doing.isEmpty ? step : doing
+            return words.isEmpty ? nil : .doing(words: words, raw: step == words ? "" : step)
+        case .waiting:
+            guard let t = ask?.text, !t.isEmpty else { return nil }
+            return .asks(t)
+        case .done:
+            return summary.isEmpty ? nil : .summary(summary)
+        case .failed:
+            return .failed(reason.isEmpty ? "Failed" : reason)
         }
     }
 
-    /// The mono line under its title: `T3 · loom · Opus 5.5 · high`.
-    var sub: String {
-        (["T3"] + [project, model, effort].filter { !$0.isEmpty }).joined(separator: " · ")
-    }
-
-    /// What sits at the title's end, in its colour: how long it has run or ran, "Asks
-    /// you", or "Failed".
-    func side(_ now: Int) -> String {
-        switch state {
-        case .waiting: return "Asks you"
-        case .failed: return "Failed"
-        case .working where started > 0: return took(now - started)
-        case .done where started > 0 && ended >= started: return took(ended - started)
-        default: return ""
-        }
-    }
-
-    /// The line in a quiet box: the step it's on while it works, or why it failed.
-    var quiet: ThreadQuiet? {
-        switch state {
-        case .working where !step.isEmpty: .step(step)
-        case .failed: .reason(reason.isEmpty ? "Failed" : reason)
-        default: nil
-        }
-    }
-
-    /// What it asks, beside a warn line, while it waits.
-    var asks: String? {
-        guard let t = ask?.text, !t.isEmpty else { return nil }
-        return t
-    }
-
-    /// Its pull requests as chips, once it's done: "PR #295" and where it opens.
-    var chips: [(label: String, url: String)] {
-        state == .done ? prs.map { ("PR #\($0.number)", $0.url) } : []
-    }
-
-    /// Its buttons, the main one first: a question's choices, an approval's Approve and
-    /// Decline, Open where the person approves in T3 itself, Try again once it failed.
+    /// The buttons that answer it, the main one first: a question's choices, an
+    /// approval's Approve and Decline, Open in T3 where the person approves in T3 itself,
+    /// Try again once it failed.
     var buttons: [ThreadButton] {
         switch (state, ask) {
         case (.waiting, .some(let a)) where a.kind == "question":
             return a.choices.enumerated().map { ThreadButton(label: $1, act: .answer($1), main: $0 == 0) }
         case (.waiting, .some(let a)) where a.inT3 || a.request.isEmpty:
-            return [ThreadButton(label: "Open", act: .open, main: true)]
+            return [ThreadButton(label: "Open in T3", act: .open, main: true)]
         case (.waiting, .some):
             return [ThreadButton(label: "Approve", act: .decide("accept"), main: true), ThreadButton(label: "Decline", act: .decide("decline"), main: false)]
         case (.failed, _):
-            return [ThreadButton(label: "Try again", act: .retry, main: false)]
+            return [ThreadButton(label: "Try again", act: .retry, main: true)]
         default:
             return []
         }
     }
 
-    /// An approval the person answers in T3: "Approve in T3" beside Open.
+    /// The words beside Open, for an approval the person answers in T3.
     var inT3: Bool {
         guard let a = ask else { return false }
         return a.kind == "approval" && (a.inT3 || a.request.isEmpty)
     }
 
-    /// Its edge: tinted lightly in sky while it works, warn while it waits.
-    var edge: (strand: Strand, opacity: Double)? {
-        switch state {
-        case .working: (.waves, 0.35)
-        case .waiting: (.knots, 0.6)
-        default: nil
-        }
+    /// Its icon buttons: Open in T3 where it has a page, Send a message while it isn't
+    /// failed, and Stop while it works or waits.
+    var tools: [ThreadTool] {
+        var out: [ThreadTool] = []
+        if !url.isEmpty { out.append(.open) }
+        if state != .failed { out.append(.send) }
+        if moving { out.append(.stop) }
+        return out
     }
 
-    /// Whether its strand moves, and its time counts up.
+    /// Whether it's working or waiting, so its time counts up.
     var moving: Bool { state == .working || state == .waiting }
+}
+
+/// How long ago something was, as a card's band says it: "just now", "3 min ago", "2 h
+/// ago", "4 d ago".
+func ago(_ ms: Int) -> String {
+    let mins = max(ms / 60_000, 0)
+    switch mins {
+    case 0: return "just now"
+    case 1...59: return "\(mins) min ago"
+    case 60...1439: return "\(mins / 60) h ago"
+    default: return "\(mins / 1440) d ago"
+    }
 }
 
 /// How long a run took, as a card says it: "45 s", "18 m", "1 h 5 m".
@@ -363,7 +429,7 @@ struct T3State {
     /// The person's T3 servers, as the + sheet last asked: with none, it has no "Start a
     /// T3 thread".
     var servers: [String] = []
-    /// t3.answer and t3.retry asked, by the command's id: the thread.
+    /// t3.answer, t3.retry, t3.send and t3.stop asked, by the command's id: the thread.
     fileprivate var asked: [String: String] = [:]
 }
 
@@ -388,9 +454,9 @@ extension Model {
         ["t": "cmd", "id": JSON(id("app.t3_servers")), "name": "t3.servers", "args": [:]]
     }
 
-    /// What a card's button sends: the answer to a question or an approval, or Try again.
-    /// Nil for Open, which the app opens itself, and while an answer to the thread is on
-    /// its way.
+    /// What a card's button sends: the answer to a question or an approval, Try again, a
+    /// message written on the card, or Stop. Nil for Open, which the app opens itself, for
+    /// an empty message, and while an answer to the thread is on its way.
     func t3Act(_ card: ThreadCard, _ act: ThreadAct, label: String) -> JSON? {
         guard t3.busy[card.thread] == nil else { return nil }
         let call: (name: String, args: JSON)
@@ -401,6 +467,12 @@ extension Model {
             call = ("t3.answer", ["thread": JSON(card.thread), "decision": JSON(d)])
         case .retry:
             call = ("t3.retry", ["thread": JSON(card.thread)])
+        case .send(let text):
+            let said = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if said.isEmpty { return nil }
+            call = ("t3.send", ["thread": JSON(card.thread), "text": JSON(said)])
+        case .stop:
+            call = ("t3.stop", ["thread": JSON(card.thread)])
         case .open:
             return nil
         }

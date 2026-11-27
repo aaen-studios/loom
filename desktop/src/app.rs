@@ -23416,6 +23416,11 @@ const STEP_ROW: f32 = 22.0;
 
 /// How tall a reply's thread is beside it (`reply`).
 const REPLY_THREAD: f32 = 10.0;
+/// How wide a reply's thread is beside it.
+const REPLY_THREAD_W: f32 = 14.0;
+/// How far a reply's thread hangs out left of the column, past a gap, so its bubble
+/// starts on the column's edge as the person's ends on the other one.
+const REPLY_HANG: f32 = REPLY_THREAD_W + space::M;
 
 /// Words with a band of light running over them, left to right, as the step a turn is
 /// on shows: `base` with `lit` at the band's middle.
@@ -25722,7 +25727,7 @@ fn reply(
     }
     // The T3 threads it started or names, each a card.
     if show.pin.is_none() {
-        if let Some(cards) = t3_view::thread_cards(p, m, show.text_scale, &this) {
+        if let Some(cards) = t3_view::thread_cards(p, m, show.text_scale, false, &this) {
             body = body.child(cards);
         }
     }
@@ -25751,13 +25756,14 @@ fn reply(
     };
     div()
         .w_full()
+        .ml(px(-REPLY_HANG))
         .flex()
         .gap(px(space::M))
         .child(div().pt(px(thread_at)).child(thread(
             format!("msg-{}", m.id),
             mood,
             tint,
-            14.0,
+            REPLY_THREAD_W,
             REPLY_THREAD,
             None,
         )))
@@ -25814,7 +25820,7 @@ fn approval(
     } else {
         s.title.clone()
     };
-    let place = div().ml(px(26.0)).max_w(px(CARD_MOST + 26.0));
+    let place = div().max_w(px(CARD_MOST));
     if let Some((allow, always)) = a.answered {
         let (icon, how) = match (allow, always) {
             (false, _) => (Ico::X, "Denied"),
@@ -29345,11 +29351,14 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
                 .px(px(space::XL))
                 .children(time_line)
                 .child(
+                    // Across the column, where a reply's bubble starts.
                     div()
                         .w_full()
-                        .max_w(px(column))
+                        .max_w(px(column + 2.0 * HOVER_REACH))
+                        .mx(px(-HOVER_REACH))
+                        .px(px(HOVER_REACH))
                         .py(px(space::S))
-                        .children(t3_view::thread_cards(p, m, show.text_scale, &this)),
+                        .children(t3_view::thread_cards(p, m, show.text_scale, true, &this)),
                 );
         }
         if m.role == "loom" {
@@ -29446,7 +29455,7 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             this.clone(),
             None,
         )
-        .children(t3_view::thread_cards(p, m, show.text_scale, &this)),
+        .children(t3_view::thread_cards(p, m, show.text_scale, false, &this)),
         Row::Message(m) => reply(
             p,
             m,
