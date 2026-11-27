@@ -1089,7 +1089,7 @@ struct Tool: Equatable, Sendable {
 }
 
 /// A done turn's fold line: how many steps it took.
-func took(_ n: Int) -> String {
+func tookSteps(_ n: Int) -> String {
     n == 1 ? "Took 1 step" : "Took \(n) steps"
 }
 
@@ -1197,7 +1197,7 @@ func parts(_ m: Message, tools: [Tool]) -> [Part] {
     }
     var out: [Part] = []
     if !steps.isEmpty {
-        out.append(.fold(words: took(steps.count), working: false, parts: layOut(m, steps)))
+        out.append(.fold(words: tookSteps(steps.count), working: false, parts: layOut(m, steps)))
     }
     return out + layOut(m, kept)
 }
