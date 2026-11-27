@@ -50,6 +50,9 @@ struct McpServer: Equatable, Sendable, Identifiable {
     /// The id of the catalog entry it came from, or whose fixed address it has.
     var catalog = ""
     var badge: Badge?
+    /// The name of its mark as the app has it built in (`mark-composio`): its entry's,
+    /// or the one loom knows it by, by its host or its name.
+    var mark = ""
 
     var id: String { name }
 
@@ -79,6 +82,7 @@ struct McpServer: Equatable, Sendable, Identifiable {
         agents = s["agents"].array.compactMap(\.string)
         catalog = s["catalog"].text
         badge = Badge(s["badge"])
+        mark = s["mark"].text
     }
 }
 
@@ -114,8 +118,10 @@ struct Entry: Equatable, Sendable, Identifiable {
     var description = ""
     var maker = ""
     var badge: Badge?
-    /// Its mark, an SVG in currentColor, drawn on its badge until a server gives an icon.
+    /// Its mark, an SVG in currentColor.
     var iconSvg = ""
+    /// Its mark's name, as the app has it built in (`mark`).
+    var markName = ""
     /// The name its server is added as, unless the person gives another.
     var server = ""
     /// Reached over HTTP, or a program the instance starts.
@@ -167,13 +173,15 @@ struct Entry: Equatable, Sendable, Identifiable {
         registry = v["registry"].text
         version = v["version"].text
         unsupported = v["unsupported"].text
+        markName = v["mark"].text
     }
 
-    /// The mark the app has for it, by its id, as scripts/ios.calx bundles the catalog's
-    /// (`mark-acta`): one of the catalog's with a mark. A registry server's own SVG isn't
-    /// bundled, so it keeps its initial.
+    /// The mark the app has for it, by the name the instance gives, as scripts/ios.calx
+    /// bundles server/catalog's (`mark-composio`): its own, or the one loom knows it by,
+    /// for a registry server too. One whose only mark is its own SVG isn't bundled, so it
+    /// has its initial.
     var mark: String? {
-        community || iconSvg.isEmpty ? nil : id
+        markName.isEmpty ? nil : markName
     }
 
     static func == (a: Entry, b: Entry) -> Bool {
@@ -184,6 +192,10 @@ struct Entry: Equatable, Sendable, Identifiable {
     var featured: Bool { featuredEntries.contains(id) }
 
     var connected: Bool { !servers.isEmpty }
+
+    /// Whether its tile on Find is filled in ink (LOO-436): once the person has a server
+    /// from it, however that stands; outlined until then.
+    var tileFilled: Bool { connected }
 
     /// Whether the person can connect more than one: a curated entry reached at an
     /// address they give, such as T3 on each of their computers.
@@ -351,6 +363,14 @@ struct InstalledRow: Equatable, Sendable, Identifiable {
     var dot: StandingDot
 
     var id: String { server.name }
+
+    /// Its mark, as the app has it built in: the server's, else its entry's.
+    var mark: String? {
+        server.mark.isEmpty ? entry?.mark : server.mark
+    }
+
+    /// Whether its logo's box is filled in ink, as it is once it's connected (LOO-436).
+    var filled: Bool { dot == .ok }
 }
 
 /// A search of the MCP Registry (`catalog.search`): what it's for, the command asked, and

@@ -14,7 +14,8 @@ module tests.protocol.catalog
 // left out, an unknown entry and an agent running them are refused. A T3 Code
 // added by hand is known as the catalog's T3 by its shape once it's signed in
 // to, and the sign-in's answer waits until it's been tried, so it's connected
-// with its tools.
+// with its tools. A Composio added by hand, at its backend or at Rube, is the
+// catalog's Composio by its host alone.
 //
 //     calx tests/protocol/catalog.calx
 import std.bytes
@@ -130,8 +131,10 @@ fn run(i: Instance, fake: String) ! Error {
     let listed = try app.cmd("q_3", "catalog.list", Obj.new().done())
     let first = items(at(at(listed.copy(), "value"), "entries"))[0].copy()
     try check(str_at(first, "id") == some(String("acta")) and "{at(at(listed.copy(), "value"), "categories")}" == #"["Work","Code","Home"]"#, "catalog.list starts with Acta, and gives the categories that have entries")
+    try check(str_at(entry_in(listed.copy(), "composio"), "category") == some(String("Work")), "Composio is in it, under Work")
     let acta_mark = str_at(entry_in(listed.copy(), "acta"), "icon_svg") ?? String()
-    try check(acta_mark.starts_with("<svg ") and acta_mark.contains("currentColor") and str_at(entry_in(listed.copy(), "playwright"), "icon_svg") == none, "an entry with a mark gives it as an SVG in currentColor, and one without has none")
+    let playwright_mark = str_at(entry_in(listed.copy(), "playwright"), "icon_svg") ?? String()
+    try check(acta_mark.starts_with("<svg ") and acta_mark.contains("currentColor") and playwright_mark.contains("currentColor") and str_at(entry_in(listed.copy(), "playwright"), "mark") == some(String("playwright")), "each entry gives its mark as an SVG in currentColor, with the name the iPhone has it by")
     let github = entry_in(listed.copy(), "github")
     let github_tools = "{at(github.copy(), "tools")}"
     try check(str_at(github.copy(), "sign_in") == some(String("secret")) and "{at(github.copy(), "secrets")}" == #"[{"name":"GITHUB_TOKEN","label":"Personal access token","placeholder":"github_pat_…","have":false}]"# and str_at(github.copy(), "runs") == some(String("remote")), "GitHub takes a personal access token as a secret, and runs remotely")
@@ -224,6 +227,19 @@ fn run(i: Instance, fake: String) ! Error {
     try check(str_at(hand_t3.copy(), "status") == some(String("connected")) and "{at(hand_t3.copy(), "tools")}" == #"["whoami"]"# and str_at(hand_t3, "catalog") == some(String("t3")), "so it's connected with its tools, not untried, and its metadata's name makes it T3's")
     let both = entry_in(try app.cmd("q_45", "catalog.list", Obj.new().done()), "t3")
     try check("{at(both.copy(), "servers")}" == #"["t3","t3-vps"]"# and bool_at(both.copy(), "connected") == some(true) and bool_at(both, "several") == some(true), "and Spools' T3 has both, as one that can be connected more than once")
+
+    // --- A Composio added by hand is the catalog's Composio, by its host ---
+    _ = try app.cmd("q_46", "mcp.put", Obj.new().s("name", String("composio")).s("url", String("https://backend.composio.dev/v3/mcp/0f1e2d3c/mcp?user_id=me")).j("headers", Obj.new().s("x-api-key", String("ak_test")).done()).done())
+    _ = try app.cmd("q_47", "mcp.put", Obj.new().s("name", String("rube")).s("url", String("https://rube.app/mcp")).done())
+    let servers_now = try app.cmd("q_48", "mcp.list", Obj.new().done())
+    let hand_composio = server_in(servers_now.copy(), "composio")
+    try check(str_at(hand_composio.copy(), "catalog") == some(String("composio")) and str_at(server_in(servers_now.copy(), "rube"), "catalog") == some(String("composio")), "a server at Composio's backend or at Rube is Composio's, by its host alone")
+    try check((str_at(hand_composio, "icon_svg") ?? String()).contains("currentColor") and str_at(server_in(servers_now, "rube"), "mark") == some(String("composio")), "with Composio's mark in mcp.list")
+    let composio = entry_in(try app.cmd("q_49", "catalog.list", Obj.new().done()), "composio")
+    try check("{at(composio.copy(), "servers")}" == #"["composio","rube"]"# and bool_at(composio, "connected") == some(true), "so Spools' Composio is connected")
+    for (n, name) in [("q_50", "composio"), ("q_51", "rube")] {
+        _ = try app.cmd(n, "mcp.delete", Obj.new().s("name", String(name)).done())
+    }
 
     // --- An agent can't ---
     let chat = str_at(at(try app.cmd("q_37", "conversation.create", Obj.new().s("agent", builder.copy()).done()), "value"), "conversation") ?? String()

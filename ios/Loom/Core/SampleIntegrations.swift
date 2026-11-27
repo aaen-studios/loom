@@ -304,30 +304,33 @@ extension Sample {
     /// The person's MCP servers, as `mcp.list` gives them.
     static let servers: [JSON] = [
         ["name": "acta", "url": "https://acta.aaenz.no/api/mcp", "catalog": "acta", "sign_in": "signed_in", "signed_in_as": "Elliot", "status": "connected",
-         "tools": ["list_tasks", "get_task", "search_tasks", "create_tasks", "update_task", "add_comment"], "agents": ["a_1", "a_2"], "badge": ["name": "acta", "initial": "A", "color": "lavender"]],
+         "tools": ["list_tasks", "get_task", "search_tasks", "create_tasks", "update_task", "add_comment"], "agents": ["a_1", "a_2"], "badge": ["name": "acta", "initial": "A", "color": "lavender"], "mark": "acta"],
         ["name": "vercel", "url": "https://mcp.vercel.com", "headers": [:], "sign_in": "needed", "status": "sign_in", "agents": ["a_1"], "catalog": "vercel",
-         "badge": ["name": "vercel", "initial": "V", "color": "sky"]],
+         "badge": ["name": "vercel", "initial": "V", "color": "sky"], "mark": "vercel"],
         ["name": "github", "url": "https://api.githubcopilot.com/mcp/", "catalog": "github", "status": "failing", "why": "Its token was revoked", "agents": ["a_1"],
-         "badge": ["name": "github", "initial": "G", "color": "grey"]],
+         "badge": ["name": "github", "initial": "G", "color": "grey"], "mark": "github"],
+        ["name": "composio", "url": "https://backend.composio.dev/v3/mcp/0f1e2d3c/mcp", "catalog": "composio", "status": "connected", "tools": ["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_MULTI_EXECUTE_TOOL"],
+         "agents": ["a_1"], "badge": ["name": "composio", "initial": "C", "color": "plum"], "mark": "composio"],
     ]
 
-    /// Spools, as server/catalog.calx has it: loom's own first, then the rest, those with a
-    /// mark in server/catalog saying so (`icon_svg`; the app draws its own copy).
+    /// Spools, as server/catalog.calx has it: loom's own first, then the rest, each with its
+    /// mark (`icon_svg`) and the name the app has its copy by (`mark`).
     static let entries: [JSON] = [
         ["id": "acta", "name": "Acta", "category": "Work", "description": "Boards, tasks and comments in Acta.", "maker": "Aaen Studios", "server": "acta", "runs": "remote",
-         "url": "https://acta.aaenz.no/api/mcp", "fields": [], "sign_in": "oauth", "secrets": [], "badge": ["name": "acta", "initial": "A", "color": "lavender"], "icon_svg": "<svg/>", "tools_checked": true,
+         "url": "https://acta.aaenz.no/api/mcp", "fields": [], "sign_in": "oauth", "secrets": [], "badge": ["name": "acta", "initial": "A", "color": "lavender"], "icon_svg": "<svg/>", "mark": "acta", "tools_checked": true,
          "tools": [["name": "list_tasks", "kind": "read"], ["name": "get_task", "kind": "read"], ["name": "search_tasks", "kind": "read"], ["name": "create_tasks", "kind": "change"],
                    ["name": "update_task", "kind": "change"], ["name": "add_comment", "kind": "change"]]],
         ["id": "t3", "name": "T3 Code", "category": "Code", "description": "Projects and coding threads in T3 Code.", "maker": "T3 Tools", "server": "t3", "runs": "remote",
          "url": "{address}/mcp", "fields": [["name": "address", "label": "Address", "placeholder": "https://my-computer.tail1234.ts.net"]], "sign_in": "oauth", "secrets": [],
-         "badge": ["name": "t3", "initial": "T", "color": "sky"], "tools_checked": true,
+         "badge": ["name": "t3", "initial": "T", "color": "sky"], "icon_svg": "<svg/>", "mark": "t3", "tools_checked": true,
          "tools": [["name": "list_threads", "kind": "read"], ["name": "get_thread", "kind": "read"], ["name": "start_thread", "kind": "change"], ["name": "answer_thread", "kind": "change"]]],
         entry("github", "GitHub", "Code", "Repositories, issues and pull requests on GitHub.", "GitHub", "grey", mark: true),
         entry("notion", "Notion", "Work", "Pages, databases and comments in Notion.", "Notion", "grey", mark: true),
         entry("linear", "Linear", "Work", "Issues, projects and cycles in Linear.", "Linear", "periwinkle", mark: true),
+        entry("composio", "Composio", "Work", "Gmail, Outlook, Slack, GitHub and hundreds more apps through one server.", "Composio", "plum", mark: true),
         entry("vercel", "Vercel", "Code", "Projects, deployments and their logs on Vercel.", "Vercel", "sky", mark: true),
         entry("cloudflare", "Cloudflare", "Code", "Your Cloudflare account through its API, and Cloudflare's docs.", "Cloudflare", "apricot", mark: true),
-        entry("playwright", "Playwright", "Code", "Microsoft's Playwright browser, run on the instance.", "Microsoft", "mint", mark: false),
+        entry("playwright", "Playwright", "Code", "Microsoft's Playwright browser, run on the instance.", "Microsoft", "mint", mark: true),
         entry("home-assistant", "Home Assistant", "Home", "Lights, devices and what's on at home, through Home Assistant.", "Open Home Foundation", "sky", mark: true),
     ]
 
@@ -335,7 +338,10 @@ extension Sample {
         var e: [String: JSON] = ["id": JSON(id), "name": JSON(name), "category": JSON(category), "description": JSON(line), "maker": JSON(maker), "server": JSON(id), "runs": "remote",
                                  "url": JSON("https://mcp.\(id).example.com/mcp"), "fields": [], "sign_in": "oauth", "secrets": [], "tools": [["name": "search", "kind": "read"]], "tools_checked": false,
                                  "badge": ["name": JSON(id), "initial": JSON(String(name.prefix(1))), "color": JSON(color)]]
-        if mark { e["icon_svg"] = "<svg/>" }
+        if mark {
+            e["icon_svg"] = "<svg/>"
+            e["mark"] = JSON(id)
+        }
         return .object(e)
     }
 

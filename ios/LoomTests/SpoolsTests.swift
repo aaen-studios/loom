@@ -10,7 +10,7 @@ import Testing
     var catalog: JSON {
         ["entries": [
             ["id": "acta", "name": "Acta", "category": "Work", "description": "Boards, tasks and comments in Acta.", "maker": "Aaen Studios",
-             "badge": ["name": "acta", "initial": "A", "color": "plum", "icon": "ab12"], "icon_svg": "<svg/>", "server": "acta", "runs": "remote",
+             "badge": ["name": "acta", "initial": "A", "color": "plum", "icon": "ab12"], "icon_svg": "<svg/>", "mark": "acta", "server": "acta", "runs": "remote",
              "url": "https://acta.aaenz.no/api/mcp", "fields": [], "sign_in": "oauth", "secrets": [],
              "tools": [["name": "list_tasks", "kind": "read"], ["name": "create_tasks", "kind": "change"]], "tools_from": "x", "tools_checked": true, "servers": ["acta"], "connected": true],
             ["id": "t3", "name": "T3 Code", "category": "Code", "description": "Projects and coding threads in T3 Code.", "maker": "T3 Tools", "server": "t3", "runs": "remote",
@@ -60,14 +60,30 @@ import Testing
 
     @Test func anEntryWithAMarkDrawsTheAppsCopyOfIt() throws {
         let m = withCatalog()
-        // The catalog's marks are bundled by id (`mark-acta`); one without keeps its initial.
+        // The app's copy is by the name the instance gives (`mark-acta`); one without has
+        // its initial.
         #expect(m.entry("acta")?.mark == "acta")
         #expect(m.entry("t3")?.mark == nil)
-        // A registry server's own SVG isn't bundled, whatever its id.
-        var found = Entry(["id": "acta", "name": "acta", "community": true, "icon_svg": "<svg/>"])
-        #expect(found.mark == nil)
-        found.community = false
-        #expect(found.mark == "acta")
+        // A registry server the instance knows by its name has that one's.
+        let known = Entry(["id": "registry:com.foreverworks/notion", "name": "notion", "community": true, "icon_svg": "<svg/>", "mark": "notion"])
+        #expect(known.mark == "notion")
+        // One whose only mark is its own SVG has its initial.
+        #expect(Entry(["id": "registry:io.x/lights", "name": "lights", "community": true, "icon_svg": "<svg/>"]).mark == nil)
+    }
+
+    @Test func aTileIsFilledOnceThePersonHasAServerFromIt() throws {
+        let m = withCatalog()
+        #expect(try #require(m.entry("acta")).tileFilled)
+        #expect(try !#require(m.entry("t3")).tileFilled)
+    }
+
+    @Test func anInstalledRowHasItsServersMarkAndIsFilledOnceConnected() {
+        var composio = McpServer(["name": "composio", "url": "https://rube.app/mcp", "catalog": "composio", "status": "connected", "mark": "composio"])
+        var row = InstalledRow(server: composio, entry: nil, title: "Composio", line: "Connected", dot: .ok)
+        #expect(row.mark == "composio" && row.filled)
+        composio.mark = ""
+        row = InstalledRow(server: composio, entry: Entry(["id": "acta", "mark": "acta"]), title: "Acta", line: "Not tried yet", dot: .quiet)
+        #expect(row.mark == "acta" && !row.filled)
     }
 
     @Test func anEntrySaysWhereItRunsAndHowItSignsIn() {

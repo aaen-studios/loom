@@ -387,7 +387,9 @@ pub enum Act {
 }
 
 /// One of the person's servers as the Installed tab lists it: its place in the
-/// model's servers, the entry it came from, its name, the line under it, and its dot.
+/// model's servers, the entry it came from, its name, the line under it, its dot, its
+/// mark (the server's, one colour: its entry's or the one loom knows it by), and whether
+/// its logo's box is filled, in ink, as it is once it's connected (LOO-436).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Row {
     pub server: usize,
@@ -395,6 +397,8 @@ pub struct Row {
     pub title: String,
     pub line: String,
     pub dot: Option<Dot>,
+    pub mark: Option<String>,
+    pub filled: bool,
 }
 
 /// Spools as the model keeps it.
@@ -492,6 +496,12 @@ pub fn found(
         }
     }
     (cards, tiles)
+}
+
+/// Whether an entry's tile on Find is filled in ink (LOO-436): once the person has a
+/// server from it, however that stands; outlined until then.
+pub fn tile_filled(entry: &Entry) -> bool {
+    entry.connected()
 }
 
 /// How an entry's card stands: none until the person has a server from it, then the
@@ -606,6 +616,11 @@ pub fn installed(
                 title: e.map_or_else(|| m.name.clone(), |e| e.name.clone()),
                 line,
                 dot: Some(if going { Dot::Quiet } else { status_dot(m) }),
+                mark: m
+                    .icon_svg
+                    .clone()
+                    .or_else(|| e.and_then(|e| e.icon_svg.clone())),
+                filled: !going && status_dot(m) == Dot::Ok,
             }
         })
         .collect();
@@ -1712,6 +1727,30 @@ mod tests {
         );
         assert_eq!(rows[0].entry, Some(0));
         assert_eq!(rows[4].entry, None);
+        // Only a connected one's logo is filled; each has its entry's mark, or none.
+        let filled: Vec<bool> = rows.iter().map(|r| r.filled).collect();
+        assert_eq!(filled, [true, true, false, false, true, false]);
+        assert_eq!(rows[0].mark.as_deref(), Some("<svg/>"));
+        assert_eq!(rows[5].mark, None);
+    }
+
+    #[test]
+    fn a_server_gives_its_own_mark_before_its_entrys() {
+        let mut m = with_catalog();
+        m.mcp_servers = vec![McpServer {
+            icon_svg: Some("<svg id=\"composio\"/>".into()),
+            ..server("composio", "", McpStatus::Untested)
+        }];
+        let rows = m.installed_rows();
+        assert_eq!(rows[0].mark.as_deref(), Some("<svg id=\"composio\"/>"));
+        assert!(!rows[0].filled);
+    }
+
+    #[test]
+    fn a_tile_is_filled_once_the_person_has_a_server_from_it() {
+        let m = with_catalog();
+        assert!(tile_filled(m.entry("acta").unwrap()));
+        assert!(!tile_filled(m.entry("t3").unwrap()));
     }
 
     #[test]
