@@ -30,6 +30,10 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
     /// A model on the device, as this device's core has it: why it can't run here
     /// (`unavailable`, which an iPhone always says, or `failed`), or none.
     var why: String?
+    /// A service's models, newest first, and the one it uses: the one kept, else its
+    /// first.
+    var models: [VoiceModelChoice] = []
+    var picked = ""
 
     init(_ j: JSON) {
         id = j["id"].text
@@ -43,7 +47,12 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
         inUse = j["in_use"].bool ?? false
         let state = j["model"]["state"].text
         why = state == "unavailable" || state == "failed" ? j["model"]["why"].text : nil
+        models = j["models"].array.map { VoiceModelChoice(id: $0["id"].text, name: $0["name"].text, line: $0["line"].text) }
+        picked = j["picked"].text
     }
+
+    /// Whether its line is the model chip: the one in use, with more than one model.
+    var picksModel: Bool { inUse && models.count > 1 }
 
     /// The button beside it: Use, Add key or Change key, or none for one in use that
     /// needs no key, or a model that can't run here.
@@ -53,6 +62,13 @@ struct VoiceTile: Equatable, Sendable, Identifiable {
         if inUse { return key ? .changeKey : nil }
         return .use
     }
+}
+
+/// One of a service's models, in the chip's menu: its name and one quiet line.
+struct VoiceModelChoice: Equatable, Sendable, Identifiable {
+    var id: String
+    var name: String
+    var line: String
 }
 
 enum VoiceTileButton: Equatable {
@@ -166,7 +182,13 @@ struct VoiceState {
         came = true
         settings = VoiceSettings(v["settings"])
         dictation = v["engines"]["dictation"].array.map(VoiceTile.init)
+        let was = speech
         speech = v["engines"]["speech"].array.map(VoiceTile.init)
+        // A speech engine on another model has other voices (Deepgram's are its models'),
+        // so the ones it had go.
+        for t in speech where was.contains(where: { $0.id == t.id && $0.picked != t.picked }) {
+            voices[t.id] = nil
+        }
         let langs = v["languages"].array.map { VoiceLanguage(code: $0["code"].text, name: $0["name"].text) }
         if !langs.isEmpty { languages = langs }
         let sp = v["speeds"].array.compactMap(\.double)
@@ -258,6 +280,11 @@ extension Model {
     /// A change to the settings, `voice.put` with `dictation`, `speech` or `live`.
     func voicePut(_ kind: String, _ change: [String: JSON]) -> JSON {
         ["t": "cmd", "id": JSON("\(voiceAnswer)_put"), "name": "voice.put", "args": [kind: .object(change)]]
+    }
+
+    /// A model from the chip on the tile in use.
+    func voiceModel(_ kind: String, _ model: String) -> JSON {
+        voicePut(kind, ["model": JSON(model)])
     }
 
     /// Use on a tile.

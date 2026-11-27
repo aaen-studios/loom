@@ -32,7 +32,7 @@ struct VoiceView: View {
                 }
                 ForEach(voice.tiles(tab)) { t in
                     VStack(alignment: .leading, spacing: Tokens.Space.s) {
-                        VoiceTileView(tile: t) { tapped(t) }
+                        VoiceTileView(tile: t, act: { tapped(t) }, pick: { m in session.send(model.voiceModel(tab, m)) })
                         if editing == "\(tab)/\(t.id)" {
                             VoiceKeyField(adding: "Save", sending: voice.keySending.contains(t.id), cancel: { editing = nil }) { key in
                                 session.send(model.voiceKey(t.id, key, use: t.inUse ? nil : tab))
@@ -212,11 +212,55 @@ struct VoiceView: View {
 
 /// An engine's tile, in black and white: its maker's mark on a tile in ink, its name and one quiet
 /// line, and its button, or none on a card. The engine in use is outlined in ink, with a
-/// check and In use.
+/// check and In use, and where it has more than one model its line is a chip with the
+/// model's name, which opens a menu of them.
 struct VoiceTileView: View {
     var tile: VoiceTile
     /// Its button's action, or none for a tile that's only shown.
     var act: (() -> Void)?
+    /// A model picked from the chip, or none for a tile that's only shown.
+    var pick: ((String) -> Void)?
+
+    /// The model in use's name, or the default's.
+    private var modelName: String {
+        tile.models.first { $0.id == tile.picked }?.name ?? tile.models.first?.name ?? tile.line
+    }
+
+    /// The chip on the tile in use, and its menu: each model, newest first, with its quiet
+    /// line, and a check on the one in use.
+    private func chip(_ pick: @escaping (String) -> Void) -> some View {
+        Menu {
+            ForEach(tile.models) { m in
+                Button {
+                    pick(m.id)
+                } label: {
+                    if m.id == tile.picked {
+                        Label {
+                            Text(m.name)
+                            Text(m.line)
+                        } icon: {
+                            Image(systemName: "checkmark")
+                        }
+                    } else {
+                        Text(m.name)
+                        Text(m.line)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Text(modelName).lineLimit(1)
+                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            }
+            .font(Fonts.ui(Tokens.PhoneSize.small, .medium))
+            .foregroundStyle(P.ink)
+            .padding(.horizontal, 8)
+            .frame(minHeight: Tokens.Control.pill)
+            .overlay(RoundedRectangle(cornerRadius: Tokens.Radius.chip, style: .continuous).strokeBorder(P.lineStrong, lineWidth: 1))
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel("Model, \(modelName)")
+    }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: Tokens.Radius.card, style: .continuous)
@@ -243,7 +287,11 @@ struct VoiceTileView: View {
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(tile.name).font(Fonts.ui(Tokens.PhoneSize.body, .semibold)).foregroundStyle(P.ink).lineLimit(1)
-                Text(tile.line).font(Fonts.small).foregroundStyle(P.ink3).lineLimit(2)
+                if let pick, tile.picksModel {
+                    chip(pick).padding(.top, 2)
+                } else {
+                    Text(tile.line).font(Fonts.small).foregroundStyle(P.ink3).lineLimit(2)
+                }
                 if let why = tile.why {
                     Text(why).font(Fonts.small).foregroundStyle(P.ink2).lineLimit(2)
                 }
