@@ -24,7 +24,9 @@ module tests.fake_voice.main
 // A wrong key gets 401, or for a WebSocket, a refused handshake. Each WebSocket says the
 // language the URL or session asked for in its words, so a test can see it: "(no)".
 // GET /test/seen gives what each service was sent, as JSON: the audio bytes each stream
-// got, and the last speech request's body.
+// got, and the last speech request's body. POST /test/words sets what the streams hear
+// ("hello world" until then: its first word as a partial, then all of it), and POST
+// /test/speech how long the speech OpenAI gives is, in ms (200 until then).
 //
 //     calx tests/fake_voice/main.calx
 import std.http.server.{Response, Server, ServerSocket}
@@ -63,8 +65,13 @@ fn query_value(query: String, name: str) -> String {
     return String()
 }
 
-fn words(base: str, language: String) -> String {
-    return if language.len() > 0 and language != "multi" { "{base} ({language})" } else { String(base) }
+fn first_word(text: String) -> String {
+    let all = text.split_whitespace()
+    return if all.len() > 0 { all[0].copy() } else { String() }
+}
+
+fn words(base: String, language: String) -> String {
+    return if language.len() > 0 and language != "multi" { "{base} ({language})" } else { base.copy() }
 }
 
 fn main() ! Error {
@@ -75,6 +82,8 @@ fn main() ! Error {
     var streams = List<Stream>()
     var seen = Obj.new()
     var last_speech = String()
+    var said = String("hello world")
+    var speech_ms: usize = 200
     loop {
         let e = server.next_event() else continue
         match e {
@@ -82,6 +91,16 @@ fn main() ! Error {
                 let path = req.path.copy()
                 if path == "/test/seen" {
                     server.respond(req, Response.json("{seen.copy().j("speech", Json.Str(last_speech.copy())).done()}"))
+                    continue
+                }
+                if path == "/test/words" {
+                    said = (String.from_utf8(req.body.copy()) ?? String()).trim().copy()
+                    server.respond(req, Response.json(String(#"{}"#)))
+                    continue
+                }
+                if path == "/test/speech" {
+                    speech_ms = usize.parse((String.from_utf8(req.body.copy()) ?? String()).trim().copy()) ?? 200
+                    server.respond(req, Response.json(String(#"{}"#)))
                     continue
                 }
                 let auth = req.header(String("Authorization")) ?? String()
@@ -158,7 +177,7 @@ fn main() ! Error {
                         continue
                     }
                     last_speech = "openai {ascii(req.body.copy())}"
-                    server.respond(req, Response.new(200, String("application/octet-stream"), pcm(9600)))
+                    server.respond(req, Response.new(200, String("application/octet-stream"), pcm(speech_ms * 48)))
                     continue
                 }
                 server.respond(req, Response.error(404))
@@ -181,7 +200,7 @@ fn main() ! Error {
                         seen = seen.j("deepgram_audio", Json.Int(i64.wrap(streams[at_stream].audio)))
                         if not streams[at_stream].spoke {
                             streams[at_stream].spoke = true
-                            _ = server.send_text(s, "{Obj.new().s("type", String("Results")).b("is_final", false).j("channel", Obj.new().j("alternatives", Json.Array([Obj.new().s("transcript", words("hello", language.copy())).done()])).done()).done()}")
+                            _ = server.send_text(s, "{Obj.new().s("type", String("Results")).b("is_final", false).j("channel", Obj.new().j("alternatives", Json.Array([Obj.new().s("transcript", words(first_word(said.copy()), language.copy())).done()])).done()).done()}")
                         }
                     },
                     Message.Text(t) => {
@@ -192,7 +211,7 @@ fn main() ! Error {
                         if service == "deepgram" {
                             let kind = str_at(j, "type") ?? String()
                             if kind == "Finalize" {
-                                _ = server.send_text(s, "{Obj.new().s("type", String("Results")).b("is_final", true).b("from_finalize", true).j("channel", Obj.new().j("alternatives", Json.Array([Obj.new().s("transcript", words("hello world", language.copy())).done()])).done()).done()}")
+                                _ = server.send_text(s, "{Obj.new().s("type", String("Results")).b("is_final", true).b("from_finalize", true).j("channel", Obj.new().j("alternatives", Json.Array([Obj.new().s("transcript", words(said.copy(), language.copy())).done()])).done()).done()}")
                             } else if kind == "CloseStream" {
                                 _ = server.send_text(s, String(#"{"type":"Metadata","request_id":"r1"}"#))
                                 server.close_socket(s)

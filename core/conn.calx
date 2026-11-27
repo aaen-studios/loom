@@ -39,6 +39,8 @@ import shared.release.{newer}
 import shared.stop.{Stop}
 import core.device.{Device}
 import core.voice.{Voice}
+import core.live.{Live}
+import core.live.{Do as LiveDo}
 import core.voice as voices
 import shared.voice as voice_settings
 import std.fs
@@ -215,6 +217,7 @@ pub struct Conn {
     sounds: sounds.Prefs  // this device's sound prefs, as the app last gave them (`app.sounds`)
     front: String         // the conversation the app shows, or "" for none (`app.front`)
     pub voice: Voice      // dictation and speech on this device (core/voice.calx)
+    pub live: Live        // talking with an agent in live mode (core/live.calx)
 }
 
 impl Conn {
@@ -297,6 +300,7 @@ impl Conn {
             sounds: sounds.prefs(Json.Null),
             front: String(),
             voice: Voice.new(),
+            live: Live.new(),
         }
     }
 
@@ -667,6 +671,12 @@ impl Conn {
         }
         if pos + piece.len() <= have { return }
         self.have.insert(key, pos + piece.len())
+        // Live mode says the reply as it's written: only what's new of the piece.
+        if self.live.on {
+            let fresh = if pos < have { piece[have - pos..].copy() } else { piece.copy() }
+            self.live.delta(str_at(f.copy(), "message") ?? String(), int_at(f.copy(), "block") ?? 0, str_at(f.copy(), "kind") ?? String(), str_at(f, "parent") != none, fresh, now())
+            self.voice_out()
+        }
         self.to_app.send(ToApp.Text(text))
     }
 
@@ -733,7 +743,12 @@ impl Conn {
             let pcm = bytes.from_base64(str_at(m.copy(), "pcm") ?? String()) ?? List<u8>()
             let rate = u32.try_from(int_at(m.copy(), "rate") ?? 24000) ?? 24000
             let channels = u32.try_from(int_at(m, "channels") ?? 1) ?? 1
-            self.voice.audio(pcm, rate, channels)
+            // In live mode the mic is live mode's ear (core/live.calx).
+            if self.live.on {
+                self.live.audio(pcm, rate, channels)
+            } else {
+                self.voice.audio(pcm, rate, channels)
+            }
         } else if t == "voice.stop" {
             self.voice.stop()
         } else if t == "voice.speak" {
@@ -754,23 +769,86 @@ impl Conn {
         self.voice_out()
     }
 
-    /// What the voice has for the instance, the app and the speaker. A command while
-    /// the connection is down is answered at once, as refused.
-    fn voice_out(mut self) {
-        while self.voice.cues.len() > 0 {
-            let on = self.voice.cues.remove(0)
-            self.own_sound(String("dictation"), on)
-        }
-        while self.voice.to_instance.len() > 0 {
-            let cmd = self.voice.to_instance.remove(0)
-            if self.state != State.Live or not self.put("{cmd}") {
-                let down = Obj.new().s("t", String("error")).maybe("id", str_at(cmd, "id")).s("code", String("offline")).s("message", String("loom can't reach your instance right now.")).done()
-                _ = self.voice.answer(down)
+    /// Live mode (core/live.calx): it starts with an agent in its chat (`live.start`,
+    /// with `agent` and `conversation`), the mic is muted or let go (`live.mute`, with
+    /// `on`), and it ends (`live.end`).
+    fn live_frame(mut self, t: String, m: Json) {
+        if t == "live.start" {
+            let agent = str_at(m.copy(), "agent") ?? String()
+            var conversation = str_at(m.copy(), "conversation") ?? String()
+            if conversation.len() == 0 {
+                if let ok(some(c)) = self.cache.conversation_for(agent.copy()) { conversation = c }
             }
+            let name = match self.cache.agent(agent.copy()) {
+                ok(some(a)) => str_at(a, "name") ?? String(),
+                _ => String(),
+            }
+            self.live.start(self.voice.settings.copy(), agent, name, conversation, now())
+        } else if t == "live.mute" {
+            self.live.mute(bool_at(m, "on") ?? true)
+        } else if t == "live.end" {
+            self.live.end()
         }
-        while self.voice.to_app.len() > 0 {
-            let m = self.voice.to_app.remove(0)
-            self.tell(m)
+        self.voice_out()
+    }
+
+    /// What the voice and live mode have for the instance, the app and the speaker, until
+    /// neither has more. A command while the connection is down is answered at once, as
+    /// refused. While live mode is on, the dictation and speech it asked for are its own:
+    /// they go to it, not the app, and dictation makes no sound.
+    fn voice_out(mut self) {
+        loop {
+            while self.live.to_voice.len() > 0 {
+                match self.live.to_voice.remove(0) {
+                    LiveDo.Listen => self.voice.listen(),
+                    LiveDo.Hear(pcm) => self.voice.audio(pcm, 24000, 1),
+                    LiveDo.Stop => self.voice.stop(),
+                    LiveDo.Speak(text, id) => self.voice.speak(text, id, String(), String()),
+                    LiveDo.Hush => self.voice.hush(),
+                }
+            }
+            while self.voice.cues.len() > 0 {
+                let on = self.voice.cues.remove(0)
+                if not self.live.owns_ear() { self.own_sound(String("dictation"), on) }
+            }
+            while self.voice.to_instance.len() > 0 {
+                let cmd = self.voice.to_instance.remove(0)
+                if self.state != State.Live or not self.put("{cmd}") {
+                    let down = Obj.new().s("t", String("error")).maybe("id", str_at(cmd, "id")).s("code", String("offline")).s("message", String("loom can't reach your instance right now.")).done()
+                    _ = self.voice.answer(down)
+                }
+            }
+            while self.voice.to_app.len() > 0 {
+                let m = self.voice.to_app.remove(0)
+                let t = str_at(m.copy(), "t") ?? String()
+                if t == "core.dictation" and self.live.owns_ear() {
+                    self.live.dictation(m)
+                } else if t == "core.speak" and Live.is_mine(str_at(m.copy(), "id") ?? String()) {
+                    let file = str_at(m.copy(), "file") ?? String()
+                    let (wav, failed) = if file.len() == 0 { (List<u8>(), String()) } else {
+                        match fs.read(file.copy()) {
+                            ok(b) => (b, String()),
+                            err(e) => (List<u8>(), "can't read {file}: {e}"),
+                        }
+                    }
+                    self.live.spoke(m, wav, failed, now())
+                } else {
+                    self.tell(m)
+                }
+            }
+            while self.live.sends.len() > 0 {
+                let f = self.live.sends.remove(0)
+                if str_at(f.copy(), "t") == some(String("send")) {
+                    self.send(f)
+                } else if self.state == State.Live {
+                    _ = self.put("{f}")
+                }
+            }
+            while self.live.to_app.len() > 0 {
+                let m = self.live.to_app.remove(0)
+                self.tell(m)
+            }
+            if self.live.to_voice.len() == 0 { break }
         }
     }
 
@@ -961,7 +1039,7 @@ impl Conn {
             if (str_at(f, "kind") ?? String()) == "message.created" {
                 self.forget_streaming(str_at(at(f, "message"), "id") ?? String())
                 // A reply in the chat in front, read aloud when the person has it so.
-                if self.synced and voices.reads_aloud(self.voice.settings.copy(), at(f.copy(), "message"), self.active, self.front.copy()) {
+                if self.synced and not self.live.on and voices.reads_aloud(self.voice.settings.copy(), at(f.copy(), "message"), self.active, self.front.copy()) {
                     let message = at(f.copy(), "message")
                     self.voice.speak(voices.answer_of(message.copy()), str_at(message, "id") ?? String(), String(), String())
                     self.voice_out()
@@ -977,6 +1055,11 @@ impl Conn {
             // A quiet routine's reply never comes as message.created: its streaming goes
             // when its run ends.
             if ended.len() > 0 { self.forget_streaming(ended) }
+            // Live mode hears its chat's replies start, finish and end.
+            if self.synced and self.live.on {
+                self.live.event(f.copy(), now())
+                self.voice_out()
+            }
             // Catching up, the app hears of it at synced, with every other: the cache has
             // it, and one refresh then is far less work for the app than one a batch.
             if not self.synced {
@@ -1271,6 +1354,10 @@ impl Conn {
         }
         if t.starts_with("voice.") {
             self.voice_frame(t, m)
+            return true
+        }
+        if t.starts_with("live.") {
+            self.live_frame(t, m)
             return true
         }
         if t == "sound.try" {
@@ -2255,12 +2342,16 @@ impl Conn {
         if let left = self.voice.due_ms() {
             if left < ms { ms = left }
         }
+        if let left = self.live.due_ms(now()) {
+            if left < ms { ms = left }
+        }
         return ms
     }
 
     /// What the voice's streams and requests brought.
     fn poll_voice(mut self) {
         self.voice.poll()
+        self.live.tick(now())
         self.voice_out()
     }
 

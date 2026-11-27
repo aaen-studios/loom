@@ -1,0 +1,304 @@
+module tests.protocol.live
+
+// Live mode through the core against a real instance, the fake agent and the fake voice
+// services (tests/fake_voice; PLAN.md, "Live mode"): the mic's PCM, a tone for speech
+// and a hum for the room, goes in as voice.audio; the core hears the turn start, sends
+// it once the person has been quiet for the pause, says the reply sentence by sentence
+// with the speech engine, each piece played after the one before with its words and
+// levels, and listens again. Talking over a reply stops it, Mute stops the ear, and
+// ending it leaves the talk in the chat as messages, the person's and the agent's.
+// Dictation makes no sound in live mode, and with no engine live mode opens the
+// settings.
+//
+// Run it from the repository's root:
+//
+//     calx tests/protocol/live.calx
+import std.bytes
+import std.fs
+import std.http.{Header, get, post}
+import std.json.{Json, parse}
+import std.math.{sin}
+import std.net.{Waker}
+import std.process.{Child, Command, Stdio, exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.voice as engines
+import core.cache.{Cache}
+import core.conn.{Conn, ToApp}
+import shared.client.{reply_text}
+import tests.kit.{Instance, calx, check}
+
+fn items(j: Json) -> List<Json> {
+    if let Json.Array(xs) = j { return xs.copy() }
+    return List<Json>()
+}
+
+// The app's side of a running connection, as in tests/protocol/voice.calx.
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<ToApp>
+    wakers: Receiver<Waker>
+    waker: Waker?
+    thread: Thread?
+    seen: List<Json>
+}
+
+impl App {
+    fn start(base: String, token: String, cache: String, fake: String, files: String) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<ToApp>()
+        let wakers = Receiver<Waker>()
+        var random = Random.system()
+        var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        conn.wakers_to = some(wakers.sender())
+        conn.tz = some(String("UTC"))
+        conn.voice.at = some(fake.copy())
+        conn.voice.files = some(files.copy())
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, wakers: wakers, waker: none, thread: some(t), seen: List<Json>() }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+        while let w = self.wakers.next() { self.waker = some(w) }
+        if let w = self.waker { w.wake() }
+    }
+
+    fn next(mut self, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "nothing came in {ms} ms" }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            self.seen.push(f.copy())
+            return f
+        }
+    }
+
+    // Reads until a frame whose `t` is `t` and, if `field` isn't empty, whose `field`
+    // is `value`.
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let f = try self.next(ms - waited)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    // Reads until a core.live with `key` in it.
+    fn live_with(mut self, field: str, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no core.live with {field} came in {ms} ms" }
+            let f = try self.next(ms - waited)
+            if str_at(f.copy(), "t") == some(String("core.live")) and f.get(String(field)) != none { return f }
+        }
+    }
+
+    fn cmd(mut self, id: str, name: str, args: Json) -> Json ! Error {
+        self.send(Obj.new().s("t", String("cmd")).s("id", String(id)).s("name", String(name)).j("args", args).done())
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 15000 { fail "{name} wasn't answered" }
+            let f = try self.next(15000 - waited)
+            let t = str_at(f.copy(), "t") ?? String()
+            if (t == "result" or t == "error") and str_at(f.copy(), "id") == some(String(id)) { return f }
+        }
+    }
+
+    // `ms` of the mic: a tone for speech, or with `loud` 0, the room's hum, as 100 ms
+    // pieces of 24 kHz PCM.
+    fn mic(mut self, ms: usize, loud: f64) {
+        var at_ms: usize = 0
+        while at_ms < ms {
+            var out = List<i16>()
+            for i in 0..2400 {
+                let hum = if i % 2 == 0 { 3i16 } else { -3i16 }
+                out.push(if loud > 0.0 { i16.wrap(i32.saturate(loud * 32767.0 * sin(f64(i) * 0.13))) } else { hum })
+            }
+            self.send(Obj.new().s("t", String("voice.audio")).s("pcm", bytes.base64(engines.le_bytes(out))).i("rate", 24000).i("channels", 1).done())
+            at_ms += 100
+        }
+    }
+
+    fn stop(mut self) {
+        self.send(Obj.new().s("t", String("core.stop")).done())
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn value_of(f: Json) -> Json {
+    return at(f, "value")
+}
+
+fn fake_says(fake: String, path: str, body: String) ! Error {
+    var r = post("{fake}{path}", List<Header>(), body.to_bytes(), 5000, 65536)
+    _ = try r.wait()
+}
+
+fn seen_by(fake: String) -> Json ! Error {
+    var r = get("{fake}/test/seen", List<Header>(), 5000, 1048576)
+    let resp = try r.wait()
+    return try parse(String.from_utf8(resp.body) ?? String())
+}
+
+fn put(app: mut App, id: str, args: Json) ! Error {
+    let r = try app.cmd(id, "voice.put", args)
+    if str_at(r.copy(), "t") != some(String("result")) { fail "voice.put: {r}" }
+}
+
+fn key(app: mut App, id: str, service: str, value: str) ! Error {
+    let r = try app.cmd(id, "voice.key", Obj.new().s("service", String(service)).s("key", String(value)).done())
+    if str_at(r.copy(), "t") != some(String("result")) { fail "voice.key {service}: {r}" }
+}
+
+// The plays and the states core.live gave among `frames`.
+fn plays(frames: List<Json>) -> List<Json> {
+    var out = List<Json>()
+    for f in frames {
+        if str_at(f.copy(), "t") == some(String("core.live")) and at(f.copy(), "play") != Json.Null { out.push(at(f, "play")) }
+    }
+    return out
+}
+
+fn states(frames: List<Json>) -> List<String> {
+    var out = List<String>()
+    for f in frames {
+        if str_at(f.copy(), "t") != some(String("core.live")) { continue }
+        let s = str_at(f, "state") ?? String()
+        if out.len() == 0 or out[out.len() - 1] != s { out.push(s) }
+    }
+    return out
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    let files = "{try fs.temp_dir()}/live-files"
+    var app = try App.start(i.base.copy(), i.token.copy(), "{try fs.temp_dir()}/core.db", fake.copy(), files)
+    _ = try app.until("synced", "", String(), 30000)
+    let agent = str_at(at(value_of(try app.cmd("l_1", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).b("code_mode", false).done())), "agent"), "id") ?? String()
+    let chat = str_at(value_of(try app.cmd("l_2", "conversation.create", Obj.new().s("agent", agent.copy()).done())), "conversation") ?? String()
+    let start = Obj.new().s("t", String("live.start")).s("agent", agent.copy()).s("conversation", chat.copy()).done()
+
+    // --- Nothing set up ---
+    app.send(start.copy())
+    let none_set = try app.until("core.live", "", String(), 10000)
+    try check(str_at(none_set.copy(), "state") == some(String("no_engine")) and str_at(none_set, "kind") == some(String("dictation")), "with no engine, live mode opens Settings › Voice")
+
+    // --- Set up: Deepgram hears, OpenAI speaks, only in live ---
+    try key(mut app, "l_3", "deepgram", "dg-key")
+    try key(mut app, "l_4", "openai", "oa-key")
+    try put(mut app, "l_5", Obj.new().j("dictation", Obj.new().s("engine", String("deepgram")).done()).j("speech", Obj.new().s("engine", String("openai")).s("read_aloud", String("live")).done()).j("live", Obj.new().j("pause", Json.Float(0.5)).done()).done())
+    let kept = value_of(try app.cmd("l_6", "voice.get", Obj.new().done()))
+    try check("{at(at(at(kept.copy(), "voice"), "settings"), "live")}" == #"{"barge_in":true,"pause":0.5,"captions":true}"# and items(at(at(kept, "voice"), "pauses")).len() == 3, "live mode's settings are the person's, with the pauses to pick from")
+
+    // --- A turn, and its reply spoken ---
+    try fake_says(fake.copy(), "/test/words", String("/say Sure. The build passed on main, in two minutes. Anything else?"))
+    let mark = app.seen.len()
+    app.send(start.copy())
+    let on = try app.until("core.live", "", String(), 10000)
+    try check(str_at(on.copy(), "state") == some(String("listening")) and str_at(on.copy(), "name") == some(String("Juniper")) and str_at(on, "conversation") == some(chat.copy()), "live mode starts listening, with the agent's name")
+    app.mic(300, 0.0)
+    app.mic(600, 0.3)
+    app.mic(700, 0.0)
+    let thinking = try app.until("core.live", "state", String("thinking"), 15000)
+    try check((str_at(thinking, "words") ?? String()).starts_with("/say Sure."), "the turn goes once the person is quiet for the pause, its words shown")
+    // Its two pieces, played one after the other, and then it listens again.
+    let start_wait = unsafe { Instant.now() }
+    loop {
+        if unsafe { Instant.now() }.nanos_since(start_wait) > 30000000000 { fail "the reply wasn't spoken" }
+        let f = try app.next(30000)
+        if str_at(f.copy(), "t") == some(String("core.live")) and str_at(f.copy(), "state") == some(String("listening")) and plays(app.seen[mark..].copy()).len() >= 2 { break }
+    }
+    let said = plays(app.seen[mark..].copy())
+    try check("{at(said[0].copy(), "words")}" == #"["Sure.","The","build","passed","on","main,","in","two","minutes."]"# and "{at(said[1].copy(), "words")}" == #"["Anything","else?"]"#, "the reply is spoken sentence by sentence, as it's written")
+    let first_file = str_at(said[0].copy(), "file") ?? String()
+    try check(fs.exists(first_file) and at(said[0].copy(), "ms") == Json.Int(200) and items(at(said[0], "levels")).len() == 10, "each piece with its file, its length and its level each 20 ms")
+    try check(states(app.seen[mark..].copy()) == [String("listening"), String("thinking"), String("speaking"), String("listening")], "Listening, Thinking, Speaking, and Listening again")
+    var sounded = false
+    for f in app.seen[mark..].copy() {
+        if str_at(f.copy(), "t") == some(String("core.sound")) and str_at(f, "cue") == some(String("dictation")) { sounded = true }
+    }
+    try check(not sounded, "dictation makes no sound in live mode")
+    let asked_speech = str_at(try seen_by(fake.copy()), "speech") ?? String()
+    try check(asked_speech.contains(#""input":"Anything else?""#), "the speech engine was asked for each piece as words")
+
+    // --- Talking over a reply ---
+    try fake_says(fake.copy(), "/test/speech", String("3000"))
+    try fake_says(fake.copy(), "/test/words", String("/say This answer goes on for a while, as long answers do. It has a second sentence too."))
+    let mark2 = app.seen.len()
+    app.mic(500, 0.3)
+    app.mic(700, 0.0)
+    _ = try app.live_with("play", 30000)
+    app.mic(500, 0.3)
+    let stopped = try app.live_with("stop", 10000)
+    try check(str_at(stopped, "state") == some(String("listening")), "talking over the reply stops it, and listens")
+    app.mic(700, 0.0)
+    _ = try app.until("core.live", "state", String("thinking"), 15000)
+    try check(plays(app.seen[mark2..].copy()).len() == 1, "and what was still to be said isn't")
+    try fake_says(fake.copy(), "/test/speech", String("200"))
+
+    // --- Mute, and ending it ---
+    app.send(Obj.new().s("t", String("live.mute")).b("on", true).done())
+    loop {
+        let f = try app.live_with("muted", 10000)
+        if bool_at(f, "muted") == some(true) { break }
+    }
+    try check(true, "Mute stops the ear")
+    app.send(Obj.new().s("t", String("live.end")).done())
+    _ = try app.until("core.live", "state", String("ended"), 10000)
+    let listed = value_of(try app.cmd("l_7", "messages.list", Obj.new().s("conversation", chat.copy()).done()))
+    var mine = 0
+    var replies = 0
+    for m in items(at(listed, "messages")) {
+        if str_at(m.copy(), "role") == some(String("person")) and reply_text(m.copy()).starts_with("/say ") { mine += 1 }
+        if str_at(m, "role") == some(String("agent")) { replies += 1 }
+    }
+    try check(mine >= 2 and replies >= 2, "ending it leaves the talk in the chat as messages, the person's and the agent's")
+    app.stop()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_voice/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake voice: "), 120000) else {
+        child.kill()
+        fail "the fake voice services didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nlive: all good")
+}
