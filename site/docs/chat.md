@@ -15,9 +15,9 @@ The sidebar lists, from the top:
 
 Your order, folders and hidden agents are kept on the server, so every device shows the same. On the iPhone, long-press an agent or a group chat and drag it to move it, or let go for Move to folder and Hide; long-press a folder's name to rename or delete it.
 
-At the bottom of the sidebar, over the server, a box shows your plan's limits as the agent program reports them: its icon and the plan's name, such as "Claude Max", then how much of the session and of the week is used, each a small ring with when it resets ("42% · 15:30", "78% · Mon"). A ring turns orange from 75% and red from 90%. Click the box to open the program under **Brains**. There's a box for each program your agents run on that reports its limits. Claude does; Codex doesn't, and a program on an API key has no plan, so neither has a box. The iPhone app doesn't show them yet.
-
 When one agent messages another, they talk in a thread of their own, never in your chat with either. While the agent it went to is open, the thread is a row under it, "From Biscuit", which opens it in the chat's place, and the arrow at its top takes you back to your chat. On the iPhone, the chat's **•••** menu lists these threads. The thread is only read: where you'd write, **Continue in your own chat** opens your chat with the agent, ready to write.
+
+A conversation an agent makes for itself, to keep a long job apart, is a thread under it too, named by its title, and never takes your chat's place. You can write in it, and the agent's row brings your chat back.
 
 ## Back to the newest
 
@@ -29,7 +29,7 @@ On the desktop, a chat opens on its newest 200 messages. Scroll near the top and
 
 ## How full the chat is
 
-The chat never ends, but the agent program's session under it does. None of this shows until you turn on **Show context** in Settings → Chat. Then the ring in the chat's header, right after the model, fills with the session's context, orange from 70% and red from 90%. Under the pointer it shows a card: **Context** with its tokens of the window ("82k of 200k"), a bar, what the chat costs, your last turn's tokens and the last 24 hours' of every turn in it (**Last turn** 410k, **Last 24 hours** 6.2M), and when the program last compacted the session ("Compacted 2 h ago"). **Compact now** has the program compact the session, where it can when asked, as Claude's can, and **Start a fresh session** sends your next message to a fresh one. A click on the ring keeps the card open until you click outside it, press Esc or click the ring again. In a group chat the ring and the card are for the agent that answered last, "Ledger's context".
+The chat never ends, but the agent program's session under it does. None of this shows until you turn on **Show context** in Settings → Chat. Then the ring in the chat's header, right after the model, fills with the session's context, orange from 70% and red from 90%. Under the pointer it shows a card: **Context** with its tokens of the window ("82k of 200k"), a bar, what the chat costs, your last turn's tokens and the last 24 hours' of every turn in it (**Last turn** 410k, **Last 24 hours** 6.2M), and when the program last compacted the session ("Compacted 2 h ago"). **Compact now** has the program compact the session, where it can when asked, as Claude's can, and **Start a fresh session** sends your next message to a fresh one. Under them is your plan, where the program reports it, as Claude does and Codex doesn't: its icon and name, such as "Claude Max", and how much of the session and of the week is used, each a small ring with when it resets ("42% · 15:30", "78% · Mon"), orange from 75% and red from 90%. The program's page under **Brains** in Settings shows them too, as bars, with Show context on or off. A click on the ring keeps the card open until you click outside it, press Esc or click the ring again. In a group chat the ring and the card are for the agent that answered last, "Ledger's context".
 
 Once the session is 80% full, your next message goes to a fresh session, which is given the newest of the chat and can search the rest, so nothing is lost. A long chat, 100,000 tokens or more, moves to a fresh session sooner, when it costs least: on your first message an hour or more after the last, once the program's prompt cache has gone. The agent wrote a summary of the chat for it while you were away, which the fresh session is given with the newest of the chat, so it carries on where you left off. Your message doesn't wait for the summary, and nothing shows in the chat. With Show context on, a quiet line across the chat says where that happened, "A fresh session starts here", or where the program compacted its context, "Context compacted · 182k → 16k". In a group chat the line names the agent whose session it was: "Ledger's fresh session starts here", "Ledger's context compacted · 120k → 76k".
 
@@ -57,9 +57,9 @@ The picking is done by a small, fast model: Claude Haiku 5.5, unless you pick an
 
 Point at a message, yours or an agent's, and choose **Reply** by its corner, or right-click it and choose **Reply**. With the message box empty, ↑ replies to the newest message. On the iPhone, swipe right on a message, or long-press it and choose **Reply**.
 
-Select words in a message for a small bar with **Copy**, **Quote** and, in an agent's reply, **Ask about this**. These are in the right-click menu too. Quote and Ask about this quote only the words you selected. On the iPhone, long-press a message and choose **Select text**; the selection has Quote and Ask about this.
+Select words in a message for a small bar with **Copy**, **Quote** and, in an agent's reply, **Ask about this**. These are in the right-click menu too. Quote and Ask about this quote only the words you selected. On the desktop the keyboard selects too: click in a message's words, then Shift with the arrows, Home or End moves the selection's end, on into the next message, Ctrl+A (⌘A) selects the whole message, and Ctrl+C (⌘C) copies. On the iPhone, long-press a message and choose **Select text**; the selection has Quote and Ask about this.
 
-What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it on one line over the bubble: who said it and the start of what. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
+What you reply to shows over the message box, "Replying to Juniper" with its first line, until you send or take it away with its × or Esc. Once sent, your message shows it on one line over the bubble: who said it and the start of what, fading out where it's cut (on the iPhone, ending in "…"). On the desktop its words can be selected and copied as a message's can. Click it to go back to the original, even far back in the chat. The agent gets what you quoted with your message, so it knows what you're answering.
 
 ## Finding in a chat
 
@@ -145,6 +145,7 @@ The **+** before the message box, or `/` in an empty one, opens a menu with a se
 - **Attach files** (Ctrl+U, or Cmd+U on a Mac), **Paste image** when you've copied one, and **Recent files**, the files sent or received lately in any of your chats, which go again without uploading.
 - **Skills**: pick one and it sits in your message, as a mention does. The agent reads it before it answers.
 - **Routines**: pick one to run it now, after **Run**.
+- **Spools…**, which opens Spools in Settings to connect a server for the agent; **Start a T3 thread**, with a T3 server connected; and **Boards**, with Acta connected, which opens a board beside the chat.
 
 Type to find a file, skill or routine in any of them. The arrows move, → opens a list and ← goes back, Enter takes a row, and Esc shuts the menu. Each list ends with a link to its settings page.
 
@@ -154,7 +155,7 @@ On an iPhone, **+** opens a sheet with the same lists, and your newest photos in
 
 Type a colon and the start of a name, such as `:so`, and a row of matching emoji opens over the message box, your own first. The arrows move through it, Tab or Enter takes one, a click takes one, and Esc shuts it. Typing the whole name with its closing colon, `:sob:`, turns it into 😭 straight away. Nothing is turned inside `code`.
 
-The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box where it fits there, and otherwise below it, as in a new chat, where the message box moves up to make room for it. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
+The smiley beside the microphone opens the picker: search at the top, a tab for each group (Recently used, Your emoji, then Unicode's), and the emoji under the pointer big at the bottom, with its names and the skin-tone hand. It opens above the message box where it fits there, and otherwise on the side with more room, as below a new chat's message box, which moves up to make room for it when it fits on neither side. A click puts an emoji in and the picker stays open for the next; Esc, a click outside it, the smiley again or sending shuts it. Right-click the smiley for **Hide emoji button**. Names and **Emoji** in the + menu still work without it.
 
 A message of only one to three emoji shows them big. Under the pointer an emoji shows its name. Right-click one of your own for **Copy name**.
 
@@ -188,9 +189,11 @@ To have every message steer at once, set **A message while it answers** on the a
 
 ## Routines in the chat
 
-A routine runs out of sight: its prompt and the agent's answer stay out of the chat. The agent posts in the chat only when there's something to tell you, with "From the routine" and the routine's name over the post, and with **Notify me** on, the post comes as a notification too. A run that fails shows the agent's answer, so you see why.
+A routine runs out of sight, in a short session of its own, so a run doesn't send the whole chat again: its prompt and the agent's answer stay out of the chat. The agent posts in the chat only when there's something to tell you, with "From the routine" and the routine's name over the post, and with **Notify me** on, the post comes as a notification too. A run that fails leaves nothing in the chat; with Notify me on, a notification says why.
 
-A routine due while the agent is answering you waits until it's done, and until the messages you queued have gone. If the chat is still busy after 10 minutes, or the routine's next time comes first, that run is skipped.
+A routine runs while the agent is answering you. What it posts waits for that reply to end, and goes in after it. If the routine's own last run hasn't finished, that time is skipped.
+
+When a routine turns itself off, after five failures in a row, or because its agent paused it, a card in the chat it posts in says so, with why, and **Turn on** turns it back on from its next time.
 
 Each routine's **History**, on its page under **Routines**, says how every run ended (posted, quiet, failed, or skipped and why) and what the agent posted or answered ([Settings](settings.md#routines)).
 

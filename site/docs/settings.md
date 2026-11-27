@@ -3,10 +3,12 @@
 The gear at the bottom of the sidebar opens Settings, as a popup over the chat. Its pages are down the left, under three headings:
 
 - **You**: About you, Appearance, Chat, Emoji, and App & notifications.
-- **Agents**: Defaults, Rules, Brains, Skills, Proposals, MCP servers, Secrets and Plugins.
+- **Agents**: Defaults, Rules, Brains, Skills, Proposals, Spools, MCP servers, Secrets and Plugins.
 - **Work**: Routines and Tasks.
 
-Import sits under them. Click outside the popup, or press Esc, to close it.
+Import sits under them. Click outside the popup, or press Esc, to close it. Drag its bottom-right corner to make it bigger or smaller, and it opens at that size next time.
+
+Brains, Skills, Proposals, MCP servers and Routines list theirs down the left, with the one you pick beside them. What you change in one stays, with a dot on its row, until you **Save** or **Cancel**, even if you pick another or close Settings. A new name in an MCP server's or a skill's form renames it.
 
 The search at the top finds a page by its name or by what's on it: "dark" finds Appearance, and "steer" or "group chats" finds Defaults.
 
@@ -89,5 +91,7 @@ On a routine's page, **Repeat** sets when it runs:
 - **On an event**: when something happens on your Acta or T3, which shows once you have an Acta board or a T3 server connected ([MCP servers and secrets](agents.md#mcp-servers-and-secrets)). **On** picks Acta or T3 when you have both, and **Server** which one when you have several. For Acta, pick the **Board**, then the **Event**: **Moves to** a **Status** (Todo, In progress, Review, Done or Canceled), **New card**, or **Comment**. For T3, type the **Thread**'s id; the routine runs when its run finishes. The list says it in words: "When a LOO card moves to Done". What happened comes after the routine's prompt.
 
 Times are in your time zone, summer time included. Under them, **Next** says when it runs the next three times.
+
+Under the prompt, **Gate** is a command that runs first, with the seconds it may take: when it prints something, the agent wakes with that after the prompt, and when it prints nothing, the run ends quiet without waking the agent. **Model** and **Effort** pick what its runs use, from what its agent's program offers, the agent's own marked default. Under its name, what it costs, from the last 7 days: "1.4M tokens a run · 5.4M a day · mostly quiet", in orange when it spends a lot for nothing, as its row in the list says too.
 
 Its **History** has a strip of its last 30 runs, each coloured by how it ended: green posted, grey quiet, red failed, orange skipped. Under it is every run: when, how it ended, the first line of what it posted or why it failed or was skipped, and how long it took. Click a run, or its mark, to see what the agent posted and answered, or why it failed and what to do about it.

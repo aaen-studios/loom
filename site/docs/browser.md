@@ -46,9 +46,9 @@ A fix follows the agent's [permission mode](permissions.md#permission-modes):
 - **Doesn't ask**: the agent puts it in on its own. A line under its reply says so, such as "Fixed the skill post-release-notes". Open it to see the change, with **Undo**.
 - **Asks first** or **Asks when it's risky**: a card under the reply says why the skill failed and shows the lines it removes and adds, with **Keep the fix**, **Change it** and **Drop**.
 
-Notes that were waiting from before keep their card, with **Keep** and **Not now**.
+Notes that were waiting from before are kept when loom starts, and their reply's line says so.
 
-What you don't answer, or put off with **Not now**, waits on the **Proposals** page, under Agents in Settings, with skills written from a recording. Open one to read and change it before you **Keep** or **Drop** it. **Ask**, with the agent's name, asks the agent on screen to look over its chats for more.
+A fix you don't answer waits on the **Proposals** page, under Agents in Settings, with the skills agents propose, from a recording or on their own. Open one to read and change it before you **Keep** or **Drop** it. **Ask**, with the agent's name, asks the agent on screen to look over its chats for more.
 
 Every note and fix that was kept is in the agent's activity log, with **Undo**. An agent can't keep, drop or undo its own.
 

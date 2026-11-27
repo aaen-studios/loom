@@ -97,6 +97,7 @@ const ICON: Record<string, string> = {
 	clock: '<circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/>',
 	spool: '<path d="M17 13.44 4.442 17.082A2 2 0 0 0 4.982 21H19a2 2 0 0 0 .558-3.921l-1.115-.32A2 2 0 0 1 17 14.837V7.66"/><path d="m7 10.56 12.558-3.642A2 2 0 0 0 19.018 3H5a2 2 0 0 0-.558 3.921l1.115.32A2 2 0 0 1 7 9.163v7.178"/>',
 	terminal: '<path d="m7 11 2-2-2-2"/><path d="M11 13h4"/><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/>',
+	layers: '<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>',
 	search: '<path d="m21 21-4.34-4.34"/><circle cx="11" cy="11" r="8"/>',
 	right: '<path d="m9 18 6-6-6-6"/>',
 	settings: '<path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/><circle cx="12" cy="12" r="3"/>',
@@ -371,11 +372,13 @@ const BOARD_LAYERS = [
 					<div class="bubble">What's on my plate today?</div>
 					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 				</div>
 				<div class="row reply unsent" data-msg data-scene="reply" data-by="Juniper" data-pin="1" data-when="Today 09:02">
 					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
@@ -417,11 +420,13 @@ const BOARD_LAYERS = [
 					<div class="bubble">Did the October invoice go out?</div>
 					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 				</div>
 				<div class="row reply unsent" data-msg data-scene="reply" data-by="Biscuit" data-when="Today 10:40">
 					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="apricot" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
@@ -445,11 +450,13 @@ const BOARD_LAYERS = [
 					<div class="bubble">The checkout button says “Contiune”. Can you fix it?</div>
 					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 				</div>
 				<div class="row reply unsent" data-msg data-scene="reply" data-by="Moss" data-when="Today 11:15">
 					<button type="button" class="pin-btn" aria-label="Pin" title="Pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg></button>
 					<button type="button" class="reply-btn" aria-label="Reply" title="Reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg></button>
+					<button type="button" class="branch-btn" aria-label="Branch from here" title="Branch from here"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg></button>
 					<button type="button" class="more-btn" aria-label="More" title="More" aria-haspopup="menu"><svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1"></circle><circle cx="12" cy="12" r="1"></circle><circle cx="19" cy="12" r="1"></circle></svg></button>
 					<svg data-thread data-color="mint" width="14" height="10" class="reply-thread head"></svg>
 					<div class="body">
@@ -480,7 +487,8 @@ const BOARD_LAYERS = [
 					<button type="button" class="rb-x" data-reply-x aria-label="Cancel reply"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></button>
 				</div>
 				<!-- The + menu, over the composer from its left edge (app.rs, plus_menu): its search,
-				     what adds to the message, a line, and what it does. A row with › opens its list
+				     what adds to the message, a line, and what it does, Start a T3 thread with a T3 server
+				     and Boards with Acta, as both are connected here. A row with › opens its list
 				     beside it (plus_sub), which ends in its settings page. -->
 				<div class="plus" data-plus role="menu" aria-label="Add" hidden>
 					<div class="plus-search"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.search} /><span class="plus-ph">Find a file, skill or routine…</span></div>
@@ -493,6 +501,7 @@ const BOARD_LAYERS = [
 					<button type="button" role="menuitem" class="plus-row" data-plus-row="routines" data-opens="routines"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.clock} /><span class="plus-title">Routines</span><span class="plus-chev"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.right} /></span></button>
 					<button type="button" role="menuitem" class="plus-row" data-plus-row="spools"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.spool} /><span class="plus-title">Spools…</span></button>
 					<button type="button" role="menuitem" class="plus-row" data-plus-row="t3"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.terminal} /><span class="plus-title">Start a T3 thread</span></button>
+					<button type="button" role="menuitem" class="plus-row" data-plus-row="boards"><svg class="i" viewBox="0 0 24 24" aria-hidden="true" set:html={ICON.layers} /><span class="plus-title">Boards</span></button>
 				</div>
 				{
 					Object.entries(PLUS_LISTS).map(([which, rows]) => (
@@ -633,13 +642,15 @@ const BOARD_LAYERS = [
 	</div>
 </template>
 <!-- A message's menu, from the ⋯ by its corner (app.rs, ctx_menu): Reply, Copy, Pin or Unpin,
-     and Delete in red, after a line, which goes at once and leaves a quiet mark where it was
+     Branch from here, Make a card…, as Acta is connected, and Delete in red, after a line, which goes at once and leaves a quiet mark where it was
      (deleted_mark). -->
 <template id="demo-more">
 	<div class="msg-menu" role="menu">
 		<button type="button" role="menuitem" data-act="reply"><svg class="i" viewBox="0 0 24 24"><path d="m9 17-5-5 5-5"></path><path d="M20 18v-2a4 4 0 0 0-4-4H4"></path></svg>Reply</button>
 		<button type="button" role="menuitem" data-act="copy"><svg class="i" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2"></rect><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path></svg>Copy</button>
 		<button type="button" role="menuitem" data-act="pin"><svg class="i" viewBox="0 0 24 24"><path d="M12 17v5"></path><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path></svg><span>Pin</span></button>
+		<button type="button" role="menuitem" data-act="branch"><svg class="i" viewBox="0 0 24 24"><path d="M15 6a9 9 0 0 0-9 9V3"></path><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle></svg>Branch from here</button>
+		<button type="button" role="menuitem" data-act="card"><svg class="i" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 .83.18 2 2 0 0 0 .83-.18l8.58-3.9a1 1 0 0 0 0-1.831z"></path><path d="M16 17h6"></path><path d="M19 14v6"></path><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 .825.178"></path><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l2.116-.962"></path></svg>Make a card…</button>
 		<div class="menu-line" role="separator"></div>
 		<button type="button" role="menuitem" data-act="delete" class="danger"><svg class="i" viewBox="0 0 24 24"><path d="M3 6h18"></path><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"></path><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"></path></svg>Delete</button>
 	</div>
@@ -2106,7 +2117,7 @@ const BOARD_LAYERS = [
 
 	/* Replying (PLAN.md, "Replying to a message"). By a message's corner, just outside the
 	   column, as the app has them (app.rs, chat_row): its pin, there while it's pinned and on
-	   hover to pin it, then Reply and the ⋯ under it, on hover. */
+	   hover to pin it, then Reply, Branch from here and the ⋯ under it, on hover. */
 	.msgs .row[data-msg] {
 		position: relative;
 		border-radius: var(--radius-bubble);
@@ -2145,7 +2156,8 @@ const BOARD_LAYERS = [
 		background: var(--hover);
 		color: var(--ink);
 	}
-	.reply-btn {
+	.reply-btn,
+	.branch-btn {
 		position: absolute;
 		top: 32px;
 		right: -32px;
@@ -2162,15 +2174,19 @@ const BOARD_LAYERS = [
 		opacity: 0;
 		transition: opacity 0.12s, background-color 0.12s, color 0.12s;
 	}
+	.branch-btn {
+		top: 60px;
+	}
 	.reply-btn .i,
+	.branch-btn .i,
 	.more-btn .i {
 		width: 14px;
 		height: 14px;
 	}
-	/* Under Reply, the ⋯ that opens the message's menu. */
+	/* Under Branch from here, the ⋯ that opens the message's menu. */
 	.more-btn {
 		position: absolute;
-		top: 60px;
+		top: 88px;
 		right: -32px;
 		display: grid;
 		place-items: center;
@@ -2187,11 +2203,14 @@ const BOARD_LAYERS = [
 	}
 	.row:hover > .reply-btn,
 	.reply-btn:focus-visible,
+	.row:hover > .branch-btn,
+	.branch-btn:focus-visible,
 	.row:hover > .more-btn,
 	.more-btn:focus-visible {
 		opacity: 1;
 	}
 	.reply-btn:hover,
+	.branch-btn:hover,
 	.more-btn:hover {
 		background: var(--hover);
 		color: var(--ink);
@@ -2199,6 +2218,7 @@ const BOARD_LAYERS = [
 	@media (max-width: 640px) {
 		.pin-btn,
 		.reply-btn,
+		.branch-btn,
 		.more-btn {
 			display: none;
 		}
