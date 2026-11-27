@@ -394,7 +394,7 @@ impl Element for CustomBlockElement {
         self.content.paint(window, cx);
         if selection == Some(BlockSelection::Full) {
             let color = view.as_ref().unwrap().read(cx).text_view_style.selection();
-            window.paint_quad(gpui::fill(bounds, color));
+            super::selection_adapter::fill_selection(bounds, color, window, cx);
         }
     }
 }

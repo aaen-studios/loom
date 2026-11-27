@@ -62,6 +62,8 @@ mod form_drafts;
 mod list_page;
 #[path = "live_ui.rs"]
 mod live_ui;
+#[path = "picked_ui.rs"]
+mod picked_ui;
 #[path = "routine_off_view.rs"]
 mod routine_off_view;
 #[path = "routines.rs"]
@@ -350,11 +352,11 @@ enum Ctx {
     EmojiButton,
 }
 
-/// Words selected in a message, and where the selection ended: a small bar there has
-/// Copy, Quote and, in an agent's reply, Ask about this (LOO-200).
+/// Words selected in a message, and where the selection was painted: a small bar over it
+/// has Copy, Quote and, in an agent's reply, Ask about this (LOO-200, LOO-447).
 #[derive(Clone)]
 struct Picked {
-    at: Point<Pixels>,
+    sel: Bounds<Pixels>,
     message: String,
     text: String,
     agent: bool,
@@ -490,9 +492,12 @@ pub struct Loom {
     menu_at: Option<Point<Pixels>>,
     /// A menu a right-click opened, where and on what.
     ctx: Option<(Point<Pixels>, Ctx)>,
-    /// What was selected in a message, with what can be done with it, by where the
-    /// selection ended (LOO-200).
+    /// What was selected in a message, with what can be done with it, over where the
+    /// selection is (LOO-200).
     picked: Option<Picked>,
+    /// Whether the primary button went down on the chat's list itself, not on something
+    /// over it: once it's up, what it selected there gets the bar (LOO-447).
+    picking: bool,
     /// The message a quote jumped to, lit for a moment.
     lit: Option<String>,
     /// The message a quote jumps to, once the chat has reached back to it.
@@ -1754,6 +1759,7 @@ ACTA_KEY=secret:ACTA_KEY",
             menu_at: None,
             ctx: None,
             picked: None,
+            picking: false,
             lit: None,
             jumping: None,
             pins: None,
@@ -11905,6 +11911,12 @@ ACTA_KEY=secret:ACTA_KEY",
                                     this.auto_press(e.position, true, window, cx);
                                 }),
                             )
+                            // A press on the list, not on what's over it: what it selects
+                            // gets the bar once it's up (`pointer_catcher`, LOO-447).
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _: &MouseDownEvent, _, _| this.picking = true),
+                            )
                             .child(list)
                             .when(self.model.reaching_back(), |d| {
                                 d.child(
@@ -16357,12 +16369,24 @@ ACTA_KEY=secret:ACTA_KEY",
                     });
                 });
                 let up = this.clone();
-                window.on_mouse_event(move |e: &MouseUpEvent, phase, _, cx| {
+                window.on_mouse_event(move |e: &MouseUpEvent, phase, window, cx| {
                     if phase != DispatchPhase::Capture {
                         return;
                     }
                     let _ = up.update(cx, |this, cx| match e.button {
-                        MouseButton::Left => this.let_go(cx),
+                        MouseButton::Left => {
+                            this.let_go(cx);
+                            // Up wherever it is, in the chat or past it: what the press
+                            // in the chat selected gets the bar, once the selection has
+                            // taken the button's up too (LOO-447).
+                            if std::mem::take(&mut this.picking) {
+                                let at = e.position;
+                                cx.defer_in(window, move |this, window, cx| {
+                                    let words = TextSelection::selected_text(window, cx);
+                                    this.picked_in(words, at, cx);
+                                });
+                            }
+                        }
                         MouseButton::Middle if this.auto.held() => {
                             this.auto.release();
                             cx.notify();
@@ -19417,36 +19441,64 @@ ACTA_KEY=secret:ACTA_KEY",
     }
 
     /// Words were selected in a message, ending at `at`: the small bar there says what can
-    /// be done with them. Words that aren't the message's, as a selection that ran on past
-    /// it, have no bar.
-    fn picked_in(
-        &mut self,
-        message: &str,
-        words: String,
-        at: Point<Pixels>,
-        cx: &mut Context<Self>,
-    ) {
+    /// be done with them, from the texts the selection took words of (`selected_pieces`):
+    /// every piece of one message's words and nothing else, across its paragraphs, list
+    /// items, bold words and card pills alike. Words that aren't the message's, as a
+    /// selection that ran on past it, have no bar. The bar goes over where the selection
+    /// was painted, or by the pointer, `at`, while that isn't known (LOO-447).
+    fn picked_in(&mut self, words: String, at: Point<Pixels>, cx: &mut Context<Self>) {
         let words = words.trim().to_string();
-        let found = self.rows.iter().find_map(|r| match r {
-            Row::Message(m) if m.id == message && !m.live && !m.queued => Some(m),
-            _ => None,
-        });
-        self.picked = found
-            .filter(|m| !words.is_empty() && model::selected_in(m, &words))
-            .map(|m| Picked {
-                at,
-                message: message.to_string(),
+        let owner = (!words.is_empty())
+            .then(|| picked_ui::owner_of(&selected_pieces(cx), &words))
+            .flatten();
+        self.picked = owner.and_then(|(message, whole, painted)| {
+            let m = self.rows.iter().find_map(|r| match r {
+                Row::Message(m) if m.id == message && !m.live && !m.queued => Some(m),
+                _ => None,
+            })?;
+            // Words of its own that the window copies another way still count.
+            (whole || model::selected_in(m, &words)).then(|| Picked {
+                sel: painted.unwrap_or(Bounds::new(at, gpui::size(px(0.0), px(0.0)))),
+                message,
                 text: words,
                 agent: m.role == "agent",
-            });
+            })
+        });
         cx.notify();
     }
 
     /// The bar over words selected in a message: Copy, Quote, and Ask about this in an
-    /// agent's reply (LOO-200).
-    fn picked_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let p = self.p;
+    /// agent's reply (LOO-200). It's centred over them, above or below the selection
+    /// and inside the chat's list (`picked_ui::bar_at`).
+    fn picked_bar(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picked = self.picked.clone()?;
+        let mut measured = self.picked_bar_of(&picked, cx).into_any_element();
+        let bar = measured.layout_as_root(
+            gpui::size(
+                gpui::AvailableSpace::MaxContent,
+                gpui::AvailableSpace::MaxContent,
+            ),
+            window,
+            cx,
+        );
+        let column = self
+            .list_at
+            .get()
+            .unwrap_or(Bounds::new(point(px(0.0), px(0.0)), window.viewport_size()));
+        Some(
+            deferred(
+                anchored()
+                    .position(picked_ui::bar_at(picked.sel, bar, column))
+                    .snap_to_window_with_margin(px(space::S))
+                    .child(self.picked_bar_of(&picked, cx)),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    fn picked_bar_of(&self, picked: &Picked, cx: &mut Context<Self>) -> Div {
+        let p = self.p;
         let mut bar = div()
             .occlude()
             .flex()
@@ -19486,16 +19538,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     })),
             );
         }
-        Some(
-            deferred(
-                anchored()
-                    .position(point(picked.at.x, picked.at.y + px(space::S)))
-                    .snap_to_window_with_margin(px(space::S))
-                    .child(bar),
-            )
-            .with_priority(1)
-            .into_any_element(),
-        )
+        bar
     }
 
     /// Over the composer's words while a reply is written: whom it replies to and the
@@ -23404,8 +23447,29 @@ fn tool_line(p: Palette, b: &model::Block, tools: &model::Tools, live: bool) -> 
 /// How many message texts stay parsed while out of view.
 const KEPT_TEXTS: usize = 300;
 
-/// Each kept text state by its key, with when it was last drawn.
-type KeptStates = HashMap<SharedString, (Entity<TextViewState>, u64)>;
+/// Each kept text state by its key, with when it was last drawn and the message it's a
+/// piece of, if it's one's words.
+type KeptStates = HashMap<SharedString, (Entity<TextViewState>, u64, Option<String>)>;
+
+/// The words selected in the kept texts, each with the message it's a piece of and where
+/// the selection was painted in it (`picked_ui::owner_of`).
+fn selected_pieces(cx: &App) -> Vec<picked_ui::Piece> {
+    TEXTS.with(|t| {
+        t.borrow()
+            .0
+            .values()
+            .filter_map(|(state, _, owner)| {
+                let s = state.read(cx);
+                let words = s.selected_text();
+                (!words.trim().is_empty()).then(|| picked_ui::Piece {
+                    owner: owner.clone(),
+                    words,
+                    painted: s.painted_selection(),
+                })
+            })
+            .collect()
+    })
+}
 
 thread_local! {
     /// Each message text's parsed state, by its key, with when it was last drawn. A
@@ -24760,12 +24824,17 @@ impl KeptText {
 
 impl RenderOnce for KeptText {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        // The message it's a piece of, for words selected in it (`picked_ui::owner_of`).
+        let owner = self.found_in.as_ref().map(|(m, _, _)| m.clone());
         let kept = TEXTS.with(|t| {
             let mut t = t.borrow_mut();
             t.1 += 1;
             let now = t.1;
-            t.0.get_mut(&self.key).map(|(state, used)| {
+            t.0.get_mut(&self.key).map(|(state, used, of)| {
                 *used = now;
+                if *of != owner {
+                    of.clone_from(&owner);
+                }
                 state.clone()
             })
         });
@@ -24783,11 +24852,11 @@ impl RenderOnce for KeptText {
                 TEXTS.with(|t| {
                     let mut t = t.borrow_mut();
                     let now = t.1;
-                    t.0.insert(self.key.clone(), (state.clone(), now));
+                    t.0.insert(self.key.clone(), (state.clone(), now, owner));
                     // The least recently drawn go, a batch at a time.
                     if t.0.len() > KEPT_TEXTS + KEPT_TEXTS / 4 {
                         let mut by_use: Vec<(u64, SharedString)> =
-                            t.0.iter().map(|(k, (_, u))| (*u, k.clone())).collect();
+                            t.0.iter().map(|(k, (_, u, _))| (*u, k.clone())).collect();
                         by_use.sort_unstable();
                         for (_, k) in by_use.into_iter().take(KEPT_TEXTS / 4) {
                             t.0.remove(&k);
@@ -27356,7 +27425,7 @@ impl Render for Loom {
         });
         let menu_scrim = self.menu_scrim(cx);
         let ctx_menu = self.ctx_menu(cx);
-        let picked_bar = self.picked_bar(cx);
+        let picked_bar = self.picked_bar(window, cx);
         let popup = self.popup_view(window, cx);
         let ask = self.ask_view(cx);
         let browser_full = self.browser_full(window, cx);
@@ -29621,14 +29690,6 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
             });
         }
     });
-    // Words selected in it, once the button's up: the bar over them (LOO-200).
-    let on_picked = branch_at.clone().map(|id| {
-        let this = this.clone();
-        move |e: &MouseUpEvent, window: &mut Window, cx: &mut App| {
-            let words = TextSelection::selected_text(window, cx);
-            let _ = this.update(cx, |loom, cx| loom.picked_in(&id, words, e.position, cx));
-        }
-    });
     // Beside it, on hover, a way to reply to it, and its menu (LOO-208).
     let reply_at = branch_at.clone();
     let to_reply = this.clone();
@@ -29663,7 +29724,6 @@ fn chat_row(i: &RowInputs, this: WeakEntity<Loom>) -> Stateful<Div> {
         .items_center()
         .px(px(space::XL))
         .when_some(on_right, |d, f| d.on_mouse_down(MouseButton::Right, f))
-        .when_some(on_picked, |d, f| d.on_mouse_up(MouseButton::Left, f))
         .children(divider)
         .children(time_line)
         .child(

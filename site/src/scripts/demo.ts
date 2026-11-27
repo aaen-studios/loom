@@ -431,13 +431,15 @@ export function play(app: HTMLElement) {
 		row.classList.add('lit');
 		setTimeout(() => row.classList.remove('lit'), 1800);
 	};
-	// Words selected in a message have a small bar where the selection ended.
+	// Words selected in a message have a small bar over them: centred above the selection, or
+	// below it when there's no room above, inside the chat (app.rs, picked_ui::bar_at).
 	let picked: HTMLElement | null = null;
 	const unpick = () => {
 		picked?.remove();
 		picked = null;
 	};
-	app.querySelector<HTMLElement>('.chat')!.addEventListener('mouseup', (e) => {
+	const chatPane = app.querySelector<HTMLElement>('.chat')!;
+	chatPane.addEventListener('mouseup', () => {
 		setTimeout(() => {
 			unpick();
 			const sel = getSelection();
@@ -446,9 +448,18 @@ export function play(app: HTMLElement) {
 			if (!words || !row || !row.contains(sel!.focusNode)) return;
 			picked = tpl('demo-picked');
 			if (!row.classList.contains('reply')) picked.querySelector('[data-pick="ask"]')!.remove();
+			app.append(picked);
 			const at = app.getBoundingClientRect();
-			picked.style.left = `${Math.min(e.clientX - at.left, at.width - 280)}px`;
-			picked.style.top = `${e.clientY - at.top + 10}px`;
+			const column = chatPane.getBoundingClientRect();
+			const r = sel!.getRangeAt(0).getBoundingClientRect();
+			const [w, h, gap] = [picked.offsetWidth, picked.offsetHeight, 8];
+			const left = column.left + gap;
+			const x = Math.min(Math.max(r.left + r.width / 2 - w / 2, left), Math.max(column.right - gap - w, left));
+			const [top, bottom] = [column.top + gap, Math.max(column.bottom - gap - h, column.top + gap)];
+			const [above, below] = [r.top - gap - h, r.bottom + gap];
+			const y = above >= top ? above : below <= bottom ? below : top;
+			picked.style.left = `${x - at.left}px`;
+			picked.style.top = `${y - at.top}px`;
 			for (const b of picked.querySelectorAll<HTMLButtonElement>('[data-pick]')) {
 				b.addEventListener('click', () => {
 					if (b.dataset.pick === 'copy') navigator.clipboard?.writeText(words).catch(() => {});
@@ -457,7 +468,6 @@ export function play(app: HTMLElement) {
 					unpick();
 				});
 			}
-			app.append(picked);
 		});
 	});
 	document.addEventListener('pointerdown', (e) => {

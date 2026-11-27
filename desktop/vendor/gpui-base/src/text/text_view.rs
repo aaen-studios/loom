@@ -1115,6 +1115,18 @@ impl Element for TextView {
         }
 
         GlobalState::global(cx).push_text_view_state(state.clone());
+        // loom: the gaps between the selection's rows are filled once they're all
+        // painted (`selection_gaps`).
+        let (selectable, view) = (self.selectable, state.clone());
+        let paint = |element: &mut AnyElement, window: &mut Window, cx: &mut App| {
+            element.paint(window, cx);
+            if selectable {
+                let state = view.read(cx);
+                state
+                    .selection_adapter
+                    .fill_selection_gaps(state.text_view_style.selection(), window);
+            }
+        };
         if let Some(clip_bottom) = prepaint.clip_bottom {
             // Snap the `max_lines` clip to the last whole line that fits, so a
             // line of glyphs is never cut in half.
@@ -1122,10 +1134,10 @@ impl Element for TextView {
                 bounds: Bounds::from_corners(bounds.origin, point(bounds.right(), clip_bottom)),
             };
             window.with_content_mask(Some(mask), |window| {
-                request_layout.element.paint(window, cx);
+                paint(&mut request_layout.element, window, cx);
             });
         } else {
-            request_layout.element.paint(window, cx);
+            paint(&mut request_layout.element, window, cx);
         }
         GlobalState::global(cx).pop_text_view_state();
 

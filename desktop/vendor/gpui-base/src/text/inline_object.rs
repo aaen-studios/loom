@@ -8,7 +8,7 @@ use gpui::{
     AnyElement, App, AvailableSpace, Bounds, CursorStyle, Element, ElementId, GlobalElementId,
     Hitbox, HitboxBehavior, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent,
     ParentElement, Pixels, Refineable as _, Role, SharedString, Size, Styled, StyledText,
-    TextStyle, Window, div, px, size,
+    TextStyle, Window, div, point, px, size,
 };
 
 use super::{
@@ -386,9 +386,19 @@ impl Element for InlineObject {
         if let Ok(mut value) = self.selected.lock() {
             *value = selected;
         }
-        if selected {
-            let color = view.as_ref().unwrap().read(cx).text_view_style.selection();
-            window.paint_quad(gpui::fill(bounds, color));
+        // loom: selected, it's one unit with the words beside it: the selection's colour
+        // fills its line's whole height around it, as theirs does, and lies over it once
+        // it's drawn, so a pill with a background of its own shows it's selected.
+        let color = selected.then(|| view.as_ref().unwrap().read(cx).text_view_style.selection());
+        if let Some(color) = color {
+            let row = self.selection_bounds;
+            let (left, right) = (bounds.left(), bounds.right());
+            for (top, bottom) in [(row.top(), bounds.top()), (bounds.bottom(), row.bottom())] {
+                if bottom > top {
+                    let strip = Bounds::from_corners(point(left, top), point(right, bottom));
+                    super::selection_adapter::fill_selection(strip, color, window, cx);
+                }
+            }
         }
         if let Some(link) = self.link.clone() {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
@@ -492,6 +502,9 @@ impl Element for InlineObject {
             });
         }
         self.content.paint(window, cx);
+        if let Some(color) = color {
+            super::selection_adapter::fill_selection(bounds, color, window, cx);
+        }
     }
 }
 
@@ -627,7 +640,7 @@ impl Element for EmojiPicture {
         }
         if selected {
             let color = view.as_ref().unwrap().read(cx).text_view_style.selection();
-            window.paint_quad(gpui::fill(self.selection_bounds, color));
+            super::selection_adapter::fill_selection(self.selection_bounds, color, window, cx);
         }
         if let Some(view) = view.filter(|_| selectable) {
             let adapter = &view.read(cx).selection_adapter;
