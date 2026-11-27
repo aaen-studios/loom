@@ -3,18 +3,20 @@ module tests.protocol.voice
 // loom's voice through the core against a real instance and the fake services
 // (tests/fake_voice; PLAN.md, "Voice"): with no engine the mic opens the settings,
 // as it does for a model on the device this core has nowhere to keep, which needs no
-// key;
-// a key kept with voice.key and an engine picked with voice.put reach every device
-// as voice.updated, and never a key; dictation streams to Deepgram, ElevenLabs
-// Scribe and OpenAI, the words coming as they're said, with Dictation on and off at
-// the real start and stop, and Groq writes the recording once the mic is let go; a
-// key the service refuses fails, saying why; speech asks OpenAI, ElevenLabs and Fish
-// Audio for PCM, written to a WAV for the app, in the voice and at the speed set,
-// with each engine's voices for the picker; a reply in the chat in front is read
-// aloud when that's set; and an agent sets voice up with voice_setup: at once, on a
-// card that shows it, when the person has the key, and once they add it on the
-// card (voice.card) when they don't, which wakes the agent. An agent never sees a
-// key, and can't keep or open one.
+// key; a key kept with voice.key and an engine picked with voice.put reach every
+// device as voice.updated, and never a key; each service uses its newest model
+// until another is picked; dictation streams to Deepgram (Nova-3, and Flux on
+// /v2/listen), ElevenLabs Scribe and OpenAI, the words coming as they're said, with
+// Dictation on and off at the real start and stop, and Groq writes the recording once
+// the mic is let go; a key the service refuses fails, saying why; speech asks OpenAI
+// over its Realtime API, ElevenLabs over its Text to Dialogue socket (v4) or its
+// text-to-speech (the others), Fish Audio, and Deepgram (Flux and Aura-2) for PCM,
+// written to a WAV for the app, in the voice and at the speed set, with each engine's
+// voices for the picker; a reply in the chat in front is read aloud when that's set;
+// and an agent sets voice up with voice_setup, a model too: at once, on a card that
+// shows it, when the person has the key, and once they add it on the card
+// (voice.card) when they don't, which wakes the agent. An agent never sees a key, and
+// can't keep or open one.
 //
 // Run it from the repository's root:
 //
@@ -240,17 +242,24 @@ fn run(i: Instance, fake: String) ! Error {
     let first = value_of(try app.cmd("v_1", "voice.get", Obj.new().done()))
     try check(str_at(at(at(at(first.copy(), "voice"), "settings"), "dictation"), "engine") == some(String("")) and "{at(at(first.copy(), "voice"), "keys")}" == #"{"elevenlabs":false,"deepgram":false,"openai":false,"groq":false,"fish":false}"#, "voice.get starts with no engine and no keys")
     let dictation_tiles = items(at(at(at(first, "voice"), "engines"), "dictation"))
-    try check(dictation_tiles.len() == 6, "with the six dictation engines' tiles")
+    try check(dictation_tiles.len() == 8, "with the eight dictation engines' tiles")
     var marked = true
     var on_device = 0
+    var models_shown = true
     for t in dictation_tiles {
         if not (str_at(t.copy(), "icon_svg") ?? String()).contains("currentColor") or str_at(t.copy(), "mark") == none { marked = false }
-        // Parakeet and Whisper run on the device: no key, and this core has no folder
-        // to keep them in, so it says they can't run here.
+        // A service's tile has its models, newest first, and the one it uses as its line.
+        if bool_at(t.copy(), "key") == some(true) {
+            let newest = at(t.copy(), "models").at(0) ?? Json.Null
+            if str_at(t.copy(), "picked") != str_at(newest.copy(), "id") or str_at(t.copy(), "line") != str_at(newest, "name") { models_shown = false }
+        }
+        // The Parakeets and Whisper run on the device: no key, and this core has no
+        // folder to keep them in, so it says they can't run here.
         if bool_at(t.copy(), "key") == some(false) and str_at(t.copy(), "icon") == some(String("laptop")) and bool_at(t.copy(), "have") == some(false) and str_at(at(t, "model"), "state") == some(String("unavailable")) { on_device += 1 }
     }
     try check(marked, "each with its maker's mark in currentColor, and the mark's name")
-    try check(on_device == 2, "the two models on the device need no key, and the core says where they can't run")
+    try check(models_shown, "each service with its models, using its newest, whose name is its line")
+    try check(on_device == 4, "the four models on the device need no key, and the core says where they can't run")
     let (none_set, none_sounds) = try app.dictate(1)
     try check(last_state(none_set) == "no_engine" and none_sounds.len() == 0, "with no engine, the mic is told to open Settings › Voice, with no sound")
 
@@ -263,7 +272,7 @@ fn run(i: Instance, fake: String) ! Error {
     // --- Deepgram, streaming ---
     _ = try put(mut app, "v_2a", dictation_engine("deepgram", "no"))
     let (no_key, _) = try app.dictate(1)
-    try check(last_state(no_key.copy()) == "no_engine" and (str_at(no_key[no_key.len() - 1].copy(), "why") ?? String()) == "Add your Deepgram Nova-3 key in Settings › Voice.", "an engine without its key opens the settings too, saying so")
+    try check(last_state(no_key.copy()) == "no_engine" and (str_at(no_key[no_key.len() - 1].copy(), "why") ?? String()) == "Add your Deepgram key in Settings › Voice.", "an engine without its key opens the settings too, saying so")
     try key(mut app, "v_2", "deepgram", "dg-key")
     let mark = app.seen.len()
     let set = try put(mut app, "v_3", dictation_engine("deepgram", "no"))
@@ -278,26 +287,40 @@ fn run(i: Instance, fake: String) ! Error {
     try check(last_state(dg.copy()) == "done" and last_text(dg) == "hello world (no)", "and the last words once the mic is let go")
     try check(dg_sounds == [String("loom-dictation-on"), String("loom-dictation-off")], "Dictation on and off sound at the real start and stop")
     try check(at(try seen_by(fake.copy()), "deepgram_audio") == Json.Int(19200), "the audio went as 24 kHz mono: 400 ms of it")
+    try check(str_at(try seen_by(fake.copy()), "deepgram_model") == some(String("nova-3")), "to Nova-3, Deepgram's newest for dictation")
+
+    // --- Deepgram Flux, a model picked ---
+    let flux = try put(mut app, "v_3b", Obj.new().j("dictation", Obj.new().s("model", String("Flux multilingual")).done()).done())
+    try check(str_at(at(at(at(flux, "settings"), "dictation"), "models"), "deepgram") == some(String("flux-general-multi")), "a model is picked for the engine in use, by its name")
+    let (fx, _) = try app.dictate(3)
+    try check(heard_while_on(fx.copy(), "hello (no)") and last_state(fx.copy()) == "done" and last_text(fx) == "hello world (no)", "Flux streams on /v2/listen, its turn ended once the mic is let go, the language as a hint")
+    try check(str_at(try seen_by(fake.copy()), "deepgram_model") == some(String("flux-general-multi")), "with the model picked")
 
     // --- ElevenLabs Scribe ---
     try key(mut app, "v_4", "elevenlabs", "el-key")
     _ = try put(mut app, "v_5", dictation_engine("elevenlabs", ""))
     let (el, _) = try app.dictate(2)
     try check(heard_while_on(el.copy(), "hei") and last_text(el) == "hei verden", "ElevenLabs Scribe streams, and commits its last words")
+    try check(str_at(try seen_by(fake.copy()), "elevenlabs_model") == some(String("scribe_v3_live")), "with Scribe v3 Live")
 
     // --- OpenAI ---
     try key(mut app, "v_6", "openai", "oa-key")
     _ = try put(mut app, "v_7", dictation_engine("openai", "en"))
     let (oa, _) = try app.dictate(2)
     try check(heard_while_on(oa.copy(), "Hello") and last_text(oa) == "Hello there (en)", "OpenAI's deltas come as they're said, and its completed words last")
-    try check(str_at(try seen_by(fake.copy()), "openai_model") == some(String("gpt-4o-transcribe")), "with gpt-4o-transcribe, set in its session")
+    let oa_seen = try seen_by(fake.copy())
+    try check(str_at(oa_seen.copy(), "openai_model") == some(String("gpt-live-transcribe")) and at(oa_seen, "openai_turns") == Json.Null, "with gpt-live-transcribe, its languages and no turn detection set in its session, the core committing once the mic is let go")
+    _ = try put(mut app, "v_7b", Obj.new().j("dictation", Obj.new().s("model", String("gpt-realtime-whisper")).done()).done())
+    let (wh, _) = try app.dictate(1)
+    try check(last_text(wh) == "Hello there (en)" and str_at(try seen_by(fake.copy()), "openai_model") == some(String("gpt-realtime-whisper")), "and Whisper takes its language as language")
 
     // --- Groq, once the mic is let go ---
     try key(mut app, "v_8", "groq", "gq-key")
     _ = try put(mut app, "v_9", dictation_engine("groq", "no"))
     let (gq, gq_sounds) = try app.dictate(3)
     try check(not heard_while_on(gq.copy(), "groq") and last_text(gq.copy()) == "from groq (no)" and bool_at(gq[0].copy(), "streams") == some(false), "Groq writes the whole recording once the mic is let go")
-    try check(bool_at(try seen_by(fake.copy()), "groq") == some(true) and gq_sounds.len() == 2, "as a WAV, to whisper-large-v3")
+    let gq_seen = try seen_by(fake.copy())
+    try check(bool_at(gq_seen.copy(), "groq") == some(true) and str_at(gq_seen, "groq_model") == some(String("whisper-large-v3-turbo")) and gq_sounds.len() == 2, "as a WAV, to whisper-large-v3-turbo")
 
     // --- A key the service refuses ---
     try key(mut app, "v_10", "deepgram", "not-it")
@@ -311,14 +334,26 @@ fn run(i: Instance, fake: String) ! Error {
     let spoke = try app.until("core.speak", "id", String("p_1"), 15000)
     let wav = try fs.read(str_at(spoke.copy(), "file") ?? String())
     try check(wav.len() == 44 + 9600 and String.from_utf8(wav[0..4].copy()) == some(String("RIFF")) and bytes.u32_le(wav, 24) == 24000, "OpenAI's PCM is written to a 24 kHz WAV for the app to play")
-    let asked = str_at(try seen_by(fake.copy()), "speech") ?? String()
-    try check(asked.contains(#""model":"gpt-4o-mini-tts","voice":"cedar","input":"Hi there, from loom.","response_format":"pcm","speed":1.1"#), "in the voice and at the speed set, the reply said as words")
+    let spoken_seen = try seen_by(fake.copy())
+    let asked = str_at(spoken_seen.copy(), "speech") ?? String()
+    let output = at(at(at(spoken_seen.copy(), "openai_speech_session"), "audio"), "output")
+    try check(asked == #"openai {"input":"Hi there, from loom."}"# and str_at(spoken_seen, "openai_speech_model") == some(String("gpt-realtime-2.1-mini")), "over the Realtime API with gpt-realtime-2.1-mini, the reply said as words")
+    try check(str_at(output.copy(), "voice") == some(String("cedar")) and at(output, "speed") == Json.Float(1.1), "in the voice and at the speed set")
+    app.send(Obj.new().s("t", String("voice.voices")).s("engine", String("openai")).done())
+    let oa_voices = try app.until("core.voices", "engine", String("openai"), 15000)
+    try check("{at(oa_voices, "voices")}".starts_with(#"[{"id":"marin","name":"Marin"},{"id":"cedar","name":"Cedar"}"#) and at(oa_voices.copy(), "voices").len() == 10, "OpenAI's ten Realtime voices, Marin and Cedar first")
     app.send(Obj.new().s("t", String("voice.voices")).s("engine", String("elevenlabs")).done())
     let eleven = try app.until("core.voices", "engine", String("elevenlabs"), 15000)
     try check("{at(eleven, "voices")}" == #"[{"id":"el_rachel","name":"Rachel"},{"id":"el_adam","name":"Adam"}]"#, "ElevenLabs' voices come for the picker")
     app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Preview.")).s("id", String("p_2")).s("engine", String("elevenlabs")).s("voice", String("Adam")).done())
-    _ = try app.until("core.speak", "id", String("p_2"), 15000)
-    try check((str_at(try seen_by(fake.copy()), "speech") ?? String()).starts_with("elevenlabs el_adam "), "a voice's preview speaks with that engine and voice, found by its name")
+    let v4 = try app.until("core.speak", "id", String("p_2"), 15000)
+    let v4_seen = try seen_by(fake.copy())
+    try check((str_at(v4_seen.copy(), "speech") ?? String()) == #"dialogue {"text":"Preview.","voice_id":"el_adam"}"# and "{at(v4_seen.copy(), "dialogue_voices")}" == #"["el_adam"]"#, "a voice's preview speaks with that engine and voice, found by its name")
+    try check(str_at(v4_seen.copy(), "dialogue_model") == some(String("eleven_v4_turbo")) and str_at(v4_seen, "dialogue_format") == some(String("pcm_24000")) and (try fs.read(str_at(v4, "file") ?? String())).len() == 44 + 4800, "with v4 Turbo, over the Text to Dialogue socket, as 24 kHz PCM")
+    _ = try put(mut app, "v_12b", Obj.new().j("speech", Obj.new().s("engine", String("elevenlabs")).s("model", String("eleven_multilingual_v2")).done()).done())
+    app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Steady.")).s("id", String("p_2b")).s("voice", String("Rachel")).done())
+    _ = try app.until("core.speak", "id", String("p_2b"), 15000)
+    try check((str_at(try seen_by(fake.copy()), "speech") ?? String()).starts_with(#"elevenlabs el_rachel {"text":"Steady.","model_id":"eleven_multilingual_v2","voice_settings":{"speed":1.1}}"#), "Multilingual v2 over text-to-speech, at the speed set")
     try key(mut app, "v_13", "fish", "fa-key")
     app.send(Obj.new().s("t", String("voice.voices")).s("engine", String("fish")).done())
     let fish = try app.until("core.voices", "engine", String("fish"), 15000)
@@ -326,7 +361,21 @@ fn run(i: Instance, fake: String) ! Error {
     app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Fish.")).s("id", String("p_3")).s("engine", String("fish")).done())
     _ = try app.until("core.speak", "id", String("p_3"), 15000)
     let fish_asked = str_at(try seen_by(fake.copy()), "speech") ?? String()
-    try check(fish_asked.contains(#""reference_id":"fa_narrator","format":"pcm","sample_rate":24000"#), "Fish Audio speaks in PCM at 24 kHz, with its first voice when none is picked")
+    try check(fish_asked.starts_with("fish drama-3 ") and fish_asked.contains(#""reference_id":"fa_narrator","format":"pcm","sample_rate":24000"#), "Fish Audio speaks with Drama 3, in PCM at 24 kHz, with its first voice when none is picked")
+
+    // --- Deepgram speech ---
+    try key(mut app, "v_13b", "deepgram", "dg-key")
+    app.send(Obj.new().s("t", String("voice.voices")).s("engine", String("deepgram")).done())
+    let dg_voices = try app.until("core.voices", "engine", String("deepgram"), 15000)
+    try check("{at(dg_voices.copy(), "voices")}".starts_with(#"[{"id":"flux-hannah-en","name":"Hannah"}"#) and at(dg_voices, "voices").len() == 36, "Deepgram's Flux voices come for the picker")
+    app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Deep.")).s("id", String("p_4")).s("engine", String("deepgram")).s("voice", String("Kit")).done())
+    let dg_flux = try app.until("core.speak", "id", String("p_4"), 15000)
+    try check((str_at(try seen_by(fake.copy()), "speech") ?? String()) == #"deepgram /v2/speak?model=flux-kit-en&encoding=linear16&sample_rate=24000&speed=1.1 {"text":"Deep."}"# and (try fs.read(str_at(dg_flux, "file") ?? String())).len() == 44 + 7200, "Flux speaks on /v2/speak, the voice as its model, at the speed set, its WAV taken as PCM")
+    _ = try put(mut app, "v_13c", Obj.new().j("speech", Obj.new().s("engine", String("deepgram")).s("model", String("aura-2")).j("speed", Json.Float(1.0)).done()).done())
+    app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Aura.")).s("id", String("p_5")).done())
+    let dg_aura = try app.until("core.speak", "id", String("p_5"), 15000)
+    try check((str_at(try seen_by(fake.copy()), "speech") ?? String()) == #"deepgram /v1/speak?model=aura-2-thalia-en&encoding=linear16&sample_rate=24000&container=none {"text":"Aura."}"# and (try fs.read(str_at(dg_aura, "file") ?? String())).len() == 44 + 4800, "and Aura-2 on /v1/speak, in its first voice, as raw PCM")
+    _ = try put(mut app, "v_13d", Obj.new().j("speech", Obj.new().s("engine", String("openai")).s("voice", String("cedar")).done()).done())
 
     // --- Read aloud ---
     let agent = str_at(at(value_of(try app.cmd("v_14", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).b("code_mode", false).done())), "agent"), "id") ?? String()
@@ -341,13 +390,17 @@ fn run(i: Instance, fake: String) ! Error {
     // --- An agent sets it up ---
     let read = reply_text(try say(mut app, chat.copy(), String("/mcpkeep voice_settings \{\}")))
     try check(read.contains(#""dictation":{"engine":"deepgram""#) and not read.contains("not-it") and not read.contains("oa-key"), "voice_settings reads the settings, never a key")
-    let at_once = try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("speech")).s("engine", String("elevenlabs")).s("voice", String("Rachel")).j("speed", Json.Float(0.9)).done()))
+    let at_once = try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("speech")).s("engine", String("elevenlabs")).s("model", String("v3")).s("voice", String("Rachel")).j("speed", Json.Float(0.9)).done()))
     let set_card = voice_card(at_once.copy())
-    try check(reply_text(at_once).contains("voice_setup: Set: your person's speech is ElevenLabs now") and str_at(set_card.copy(), "state") == some(String("set")) and bool_at(at(set_card.copy(), "engine"), "in_use") == some(true) and str_at(at(set_card.copy(), "settings"), "voice_name") == some(String("Rachel")), "with the key there, it's set at once, and the card shows the tile in use and the rows as set")
+    try check(reply_text(at_once).contains("voice_setup: Set: your person's speech is ElevenLabs (v3) now") and str_at(set_card.copy(), "state") == some(String("set")) and bool_at(at(set_card.copy(), "engine"), "in_use") == some(true) and str_at(at(set_card.copy(), "settings"), "voice_name") == some(String("Rachel")), "with the key there, it's set at once, and the card shows the tile in use and the rows as set")
+    try check(str_at(at(set_card.copy(), "engine"), "line") == some(String("v3")) and str_at(at(set_card, "engine"), "picked") == some(String("eleven_v3")), "with the model the agent picked on the card's tile")
     let now_set = value_of(try app.cmd("v_18", "voice.get", Obj.new().done()))
-    try check(str_at(at(at(at(now_set, "voice"), "settings"), "speech"), "engine") == some(String("elevenlabs")), "and it's the person's setting")
+    let now_speech = at(at(at(now_set, "voice"), "settings"), "speech")
+    try check(str_at(now_speech.copy(), "engine") == some(String("elevenlabs")) and str_at(at(now_speech, "models"), "elevenlabs") == some(String("eleven_v3")), "and it's the person's setting")
+    let wrong_model = reply_text(try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("speech")).s("engine", String("fish")).s("model", String("s9")).done())))
+    try check(wrong_model.contains("Fish Audio has no model s9. Its models are drama-3, s2.1-pro, s2-pro."), "a model that isn't one is refused, saying which are")
     try key(mut app, "v_19", "groq", "")
-    let asking = try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("dictation")).s("engine", String("groq")).s("language", String("de")).done()))
+    let asking = try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("dictation")).s("engine", String("groq")).s("model", String("whisper-large-v3")).s("language", String("de")).done()))
     let card = voice_card(asking.copy())
     let message = str_at(asking.copy(), "id") ?? String()
     try check(str_at(card.copy(), "state") == some(String("asking")) and str_at(card.copy(), "service") == some(String("groq")) and str_at(at(card.copy(), "settings"), "language") == some(String("de")) and reply_text(asking).contains("Nothing is set until they add their Groq key there"), "without the key, the card asks for it, set as the agent chose, and nothing is set")
@@ -367,7 +420,7 @@ fn run(i: Instance, fake: String) ! Error {
     }
     try check(updated, "the card in the reply shows it set")
     let (de, _) = try app.dictate(1)
-    try check(last_text(de) == "from groq (de)", "and dictation uses it")
+    try check(last_text(de) == "from groq (de)" and str_at(try seen_by(fake.copy()), "groq_model") == some(String("whisper-large-v3")), "and dictation uses it, with the card's model")
     app.stop()
 }
 

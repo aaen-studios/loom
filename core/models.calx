@@ -1,7 +1,8 @@
 module core.models
 
 // The voice models this device runs itself (PLAN.md, "Voice", "On the device"):
-// Parakeet v2 and Whisper large v3 turbo for dictation, Kokoro for speech, and what they
+// Parakeet Ultra, v3 and v2 and Whisper large v3 turbo for dictation, Kokoro v1.1 and
+// v1.0, Supertonic 3 and Pocket TTS for speech (shared/voice.calx, ENGINES), and what they
 // all need, sherpa-onnx's C library for this system, and Silero's voice detector, which
 // cuts dictation into the short pieces the models write. Each is downloaded once, into
 // the app's models folder, a piece at a time, each piece checked by its size and its
@@ -21,6 +22,7 @@ import std.net.{Waker}
 import std.tar.{Tar}
 import std.thread.{Task, sleep}
 import shared.obj.{Obj, str_at}
+import shared.voice.{ENGINES}
 import std.json.{Json}
 
 /// The sherpa-onnx release every piece comes from, or goes with.
@@ -40,7 +42,15 @@ pub struct Piece {
 
 /// Every piece, by the model it's part of. `runtime-SYSTEM-ARCH` is sherpa-onnx's
 /// shared library for that system, with ONNX Runtime beside it.
-pub const PIECES: [Piece; 13] = [
+pub const PIECES: [Piece; 24] = [
+    Piece { model: "parakeet-ultra", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra-int8/resolve/402e1190ce85b9793118ee223db21fb0d12f52db/encoder.int8.onnx", file: "encoder.int8.onnx", size: 652282345, sha256: "b43072e1b721f18a3df03fcfeb763ff7c4debdf29843598a3aba2f703e2780a3", unpack: "" },
+    Piece { model: "parakeet-ultra", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra-int8/resolve/402e1190ce85b9793118ee223db21fb0d12f52db/decoder.int8.onnx", file: "decoder.int8.onnx", size: 11845274, sha256: "1fab98fe6c12aded87d2da66272cc9e148d0a0044ce3850a12fe56302ec4a922", unpack: "" },
+    Piece { model: "parakeet-ultra", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra-int8/resolve/402e1190ce85b9793118ee223db21fb0d12f52db/joiner.int8.onnx", file: "joiner.int8.onnx", size: 6355277, sha256: "8a71aaccfdba3d451775507a889afd2257d2e754463fd81095a8c8f290f924c2", unpack: "" },
+    Piece { model: "parakeet-ultra", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-ultra-int8/resolve/402e1190ce85b9793118ee223db21fb0d12f52db/tokens.txt", file: "tokens.txt", size: 93939, sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d", unpack: "" },
+    Piece { model: "parakeet-v3", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/ed5d745623472f97cfc2e6c2916ee248798fc5a8/encoder.int8.onnx", file: "encoder.int8.onnx", size: 652282294, sha256: "1afbe69c1ffdabee94755f42e4daf1d93549131a3da11356bda84fcef0f2c479", unpack: "" },
+    Piece { model: "parakeet-v3", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/ed5d745623472f97cfc2e6c2916ee248798fc5a8/decoder.int8.onnx", file: "decoder.int8.onnx", size: 11845274, sha256: "0222a86147299d4dee90edf95b6d13827edb42ad8b7c9cf0b2582f030937c0b5", unpack: "" },
+    Piece { model: "parakeet-v3", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/ed5d745623472f97cfc2e6c2916ee248798fc5a8/joiner.int8.onnx", file: "joiner.int8.onnx", size: 6355277, sha256: "cbd02f3696e9944970111fb439d9c3fd365a80374565f13f2b9c7007d253fc98", unpack: "" },
+    Piece { model: "parakeet-v3", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8/resolve/ed5d745623472f97cfc2e6c2916ee248798fc5a8/tokens.txt", file: "tokens.txt", size: 93939, sha256: "d58544679ea4bc6ac563d1f545eb7d474bd6cfa467f0a6e2c1dc1c7d37e3c35d", unpack: "" },
     Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/encoder.int8.onnx", file: "encoder.int8.onnx", size: 652282309, sha256: "92a10bd9c23936ea0566c29f963bc57c2a5df4261b6a8921c39abea66557ca8b", unpack: "" },
     Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/decoder.int8.onnx", file: "decoder.int8.onnx", size: 7257753, sha256: "4d097bae3bac5c96018d5293ba39f1b657296102b142affda40378f38b020f41", unpack: "" },
     Piece { model: "parakeet", url: "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/84b478d541cdbf0c296a7ab5f1e20a6f8f998114/joiner.int8.onnx", file: "joiner.int8.onnx", size: 1739080, sha256: "77a29f3e5ac7d37074e0af465391b80f314015d5b97f0f90c6c7767f1d56f428", unpack: "" },
@@ -49,6 +59,9 @@ pub const PIECES: [Piece; 13] = [
     Piece { model: "whisper", url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/2ca6ff69fc878651b770880507669577ac41c2ff/turbo-decoder.int8.onnx", file: "turbo-decoder.int8.onnx", size: 361080764, sha256: "20accd02388482eb3a46bd615631adfdc85e1eb2c7db9ea3f02a40ffe6b81547", unpack: "" },
     Piece { model: "whisper", url: "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-turbo/resolve/2ca6ff69fc878651b770880507669577ac41c2ff/turbo-tokens.txt", file: "turbo-tokens.txt", size: 816730, sha256: "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126", unpack: "" },
     Piece { model: "kokoro", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2", file: "kokoro-multi-lang-v1_0.tar.bz2", size: 349886476, sha256: "60703707bc05ccd48d60e1eb723f38b07d6e474795a0b6a588d7220400e0f7a4", unpack: "kokoro-multi-lang-v1_0" },
+    Piece { model: "kokoro-v1.1", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_1.tar.bz2", file: "kokoro-multi-lang-v1_1.tar.bz2", size: 364855331, sha256: "b78e1ac42b852e839cceaafbe88f66806bf5860992d1d7b9a3f2ad1198427aed", unpack: "kokoro-multi-lang-v1_1" },
+    Piece { model: "supertonic", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11.tar.bz2", file: "supertonic.tar.bz2", size: 128774318, sha256: "82fa96f91c4ef8abaae3a14a3f4153facf88bed821d1f7331cec2700f432c427", unpack: "sherpa-onnx-supertonic-3-tts-int8-2026-05-11" },
+    Piece { model: "pocket", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/sherpa-onnx-pocket-tts-int8-2026-01-26.tar.bz2", file: "pocket.tar.bz2", size: 98337865, sha256: "f4da7c7bd465f7b91e89191487fe90504396a51d6f0bcf94d0787633e2657293", unpack: "sherpa-onnx-pocket-tts-int8-2026-01-26" },
     Piece { model: "vad", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx", file: "silero_vad.onnx", size: 643854, sha256: "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6", unpack: "" },
     Piece { model: "runtime-windows-x86_64", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-v2.0.3-win-x64-shared-MT-Release-lib.tar.bz2", file: "runtime.tar.bz2", size: 8551938, sha256: "61a0b0371b54554c65068f994c83de482e78928fa9d0b7dfb7c35a451595e7fb", unpack: "sherpa-onnx-v2.0.3-win-x64-shared-MT-Release-lib" },
     Piece { model: "runtime-windows-aarch64", url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/v2.0.3/sherpa-onnx-v2.0.3-win-arm64-shared-MT-Release-lib.tar.bz2", file: "runtime.tar.bz2", size: 8128614, sha256: "5c6067347a1e9a48bda537e450f3ea6f7156e6d48b661cae730c4acd912ad09f", unpack: "sherpa-onnx-v2.0.3-win-arm64-shared-MT-Release-lib" },
@@ -347,8 +360,8 @@ impl Models {
             if let err(e) = fs.remove_dir_all(home.copy()) { fail "can't remove {home}: {e}" }
         }
         var left = false
-        for e in ["parakeet", "whisper", "kokoro"] {
-            if ready(root.copy(), String(e), self.pieces.copy()) { left = true }
+        for e in ENGINES {
+            if e.on_device and ready(root.copy(), String(e.id), self.pieces.copy()) { left = true }
         }
         if left { return }
         var shared: List<String> = [String("vad")]
@@ -413,7 +426,10 @@ impl Models {
 
 /// Whether `engine` is one of the models, by its folder's name.
 fn is_model(engine: String) -> bool {
-    return engine == "parakeet" or engine == "whisper" or engine == "kokoro"
+    for e in ENGINES {
+        if e.on_device and e.id == engine { return true }
+    }
+    return false
 }
 
 /// A model's file, in its folder.

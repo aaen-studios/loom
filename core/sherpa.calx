@@ -18,6 +18,7 @@ import std.c.{CLibrary}
 import std.json.{parse}
 import std.net.{Waker}
 import std.thread.{Task}
+import std.wave.{Wave}
 import shared.obj.{str_at}
 import shared.voice as audio
 import core.models
@@ -38,15 +39,17 @@ const VAD_WINDOW: usize = 512
 
 /// What the thread is asked.
 pub enum Job {
-    /// Dictation `n` starts with `engine` (`parakeet` or `whisper`), from the models in
+    /// Dictation `n` starts with `engine` (a Parakeet or `whisper`), from the models in
     /// `root`, hearing `language` ("" to detect it, for Whisper).
     Hear(u64, String, String, String)
     /// More of what dictation `n` heard: 16 kHz samples from -1 to 1.
     Audio(u64, List<f32>)
     /// The person stopped: the last words, then `Done`.
     Stop(u64)
-    /// Speech `n`: `text` in Kokoro's voice number `speaker`, at `speed`, from `root`.
-    Say(u64, String, i32, f32, String)
+    /// Speech `n` with `engine` (a Kokoro, `supertonic` or `pocket`): `text` in its voice
+    /// number `speaker`, or for Pocket TTS, like the recording at `reference` in its folder,
+    /// at `speed`, from `root`.
+    Say(u64, String, String, i32, String, f32, String)
     /// What's loaded goes, as no engine on the device is in use.
     Unload
 }
@@ -191,7 +194,7 @@ fn recognizer_config(engine: String, root: String, language: String) -> Config {
         c.text(104, "{dir}/turbo-tokens.txt")           // model_config.tokens
         c.text(128, String("whisper"))                  // model_config.model_type
     } else {
-        let dir = "{root}/parakeet"
+        let dir = "{root}/{engine}"    // parakeet, parakeet-v3 or parakeet-ultra
         c.text(8, "{dir}/encoder.int8.onnx")            // model_config.transducer.encoder
         c.text(16, "{dir}/decoder.int8.onnx")           // .decoder
         c.text(24, "{dir}/joiner.int8.onnx")            // .joiner
@@ -221,21 +224,58 @@ fn vad_config(root: String) -> Config {
     return c
 }
 
-// Kokoro, English and Chinese.
-fn tts_config(root: String) -> Config {
+// A model that speaks: Kokoro (v1.0 or v1.1), English and Chinese; Supertonic 3; or
+// Pocket TTS.
+fn tts_config(engine: String, root: String) -> Config {
     // SherpaOnnxOfflineTtsConfig: 456 bytes.
     var c = Config.new(456)
-    let dir = "{root}/kokoro"
+    let dir = "{root}/{engine}"
     c.int(56, 4)                                                            // model.num_threads
     c.text(64, String("cpu"))                                               // model.provider
-    c.text(128, "{dir}/model.onnx")                                         // model.kokoro.model
-    c.text(136, "{dir}/voices.bin")                                         // .voices
-    c.text(144, "{dir}/tokens.txt")                                         // .tokens
-    c.float(160, 1.0)                                                       // .length_scale
-    c.text(168, "{dir}/dict")                                               // .dict_dir
-    c.text(176, "{dir}/lexicon-us-en.txt,{dir}/lexicon-zh.txt")             // .lexicon
+    if engine == "supertonic" {
+        c.text(368, "{dir}/duration_predictor.int8.onnx")                   // model.supertonic.duration_predictor
+        c.text(376, "{dir}/text_encoder.int8.onnx")                         // .text_encoder
+        c.text(384, "{dir}/vector_estimator.int8.onnx")                     // .vector_estimator
+        c.text(392, "{dir}/vocoder.int8.onnx")                              // .vocoder
+        c.text(400, "{dir}/tts.json")                                       // .tts_json
+        c.text(408, "{dir}/unicode_indexer.bin")                            // .unicode_indexer
+        c.text(416, "{dir}/voice.bin")                                      // .voice_style
+    } else if engine == "pocket" {
+        c.text(304, "{dir}/lm_flow.int8.onnx")                              // model.pocket.lm_flow
+        c.text(312, "{dir}/lm_main.int8.onnx")                              // .lm_main
+        c.text(320, "{dir}/encoder.onnx")                                   // .encoder
+        c.text(328, "{dir}/decoder.int8.onnx")                              // .decoder
+        c.text(336, "{dir}/text_conditioner.onnx")                          // .text_conditioner
+        c.text(344, "{dir}/vocab.json")                                     // .vocab_json
+        c.text(352, "{dir}/token_scores.json")                              // .token_scores_json
+        c.int(360, 50)                                                      // .voice_embedding_cache_capacity
+    } else {
+        c.text(128, "{dir}/model.onnx")                                     // model.kokoro.model
+        c.text(136, "{dir}/voices.bin")                                     // .voices
+        c.text(144, "{dir}/tokens.txt")                                     // .tokens
+        c.float(160, 1.0)                                                   // .length_scale
+        c.text(168, "{dir}/dict")                                           // .dict_dir
+        c.text(176, "{dir}/lexicon-us-en.txt,{dir}/lexicon-zh.txt")         // .lexicon
+    }
     c.int(432, 1)                                                           // max_num_sentences
     return c
+}
+
+// The recording Pocket TTS speaks like: its first channel, from -1 to 1, and its rate.
+fn reference(path: String) -> (List<f32>, i32) ! String {
+    let w = match Wave.open(path.copy()) {
+        ok(x) => x,
+        err(e) => fail "can't read {path}: {e}",
+    }
+    let all = w.samples_f32()
+    let ch = usize(if w.channels == 0 { 1u32 } else { w.channels })
+    var out = List<f32>()
+    var i: usize = 0
+    while i < all.len() {
+        out.push(all[i])
+        i += ch
+    }
+    return (out, i32.wrap(w.rate))
 }
 
 /// The thread that runs the models: what it's asked comes on `jobs`, and what came of
@@ -260,7 +300,7 @@ impl Made {
 }
 
 // What the thread holds: the library, a recognizer for one engine, the voice detector
-// and the dictation it hears, and Kokoro.
+// and the dictation it hears, and a model that speaks.
 struct Held {
     api: Api?
     lib: CLibrary?           // kept open while the thread runs
@@ -268,6 +308,7 @@ struct Held {
     recognizer: Made?
     vad: Made?
     tts: Made?
+    tts_engine: String       // the speaking model loaded
     n: u64                   // the dictation being heard
     since: List<f32>         // what it heard since the last piece it kept
     since_from: i64          // where `since` starts, in samples from the dictation's start
@@ -278,7 +319,7 @@ struct Held {
 impl Task for Runner {
     fn run(own self) {
         var me = self
-        var h = Held { api: none, lib: none, engine: String(), recognizer: none, vad: none, tts: none, n: 0, since: List<f32>(), since_from: 0, again: 0, window: List<f32>() }
+        var h = Held { api: none, lib: none, engine: String(), recognizer: none, vad: none, tts: none, tts_engine: String(), n: 0, since: List<f32>(), since_from: 0, again: 0, window: List<f32>() }
         var held: Job? = none
         loop {
             let next = if let j = held.take() { some(j) } else { me.jobs.wait() }
@@ -308,8 +349,8 @@ impl Task for Runner {
                     if h.n == n and h.n != 0 { me.finish(mut h) }
                     me.say(Came.Done(n))
                 },
-                Job.Say(n, text, speaker, speed, root) => {
-                    match speak(mut h, text, speaker, speed, root) {
+                Job.Say(n, engine, text, speaker, like, speed, root) => {
+                    match speak(mut h, engine, text, speaker, like, speed, root) {
                         ok(pcm) => me.say(Came.Spoken(n, pcm)),
                         err(why) => me.say(Came.Failed(n, why)),
                     }
@@ -328,6 +369,7 @@ fn unload(h: mut Held) {
     if let r = h.recognizer.take() { unsafe { (api.destroy_recognizer)(r.p) } }
     if let t = h.tts.take() { unsafe { (api.destroy_tts)(t.p) } }
     h.engine = String()
+    h.tts_engine = String()
     h.n = 0
 }
 
@@ -384,37 +426,60 @@ fn written(h: Held, samples: List<f32>) -> String {
     }
 }
 
-// `text` in Kokoro's voice, as 16-bit PCM at 24 kHz.
-fn speak(h: mut Held, text: String, speaker: i32, speed: f32, root: String) -> List<u8> ! String {
+// `text` spoken by `engine` in voice number `speaker`, or Pocket TTS like the recording
+// `like`, as 16-bit PCM at 24 kHz.
+fn speak(h: mut Held, engine: String, text: String, speaker: i32, like: String, speed: f32, root: String) -> List<u8> ! String {
     try opened(mut h, root.copy())
     let api = h.api else fail String("sherpa-onnx isn't open")
-    if match h.tts { some(_) => false, none => true } {
-        let c = tts_config(root)
-        let made = unsafe { Made { p: (api.create_tts)(c.words.as_ptr().cast<u8>()) } }
-        if made.null() { fail String("Kokoro couldn't start: its model didn't load") }
-        h.tts = some(made)
+    // One speaking model is loaded at a time.
+    if h.tts_engine != engine {
+        if let t = h.tts.take() { unsafe { (api.destroy_tts)(t.p) } }
     }
-    let tts = h.tts else fail String("Kokoro isn't loaded")
+    if match h.tts { some(_) => false, none => true } {
+        let c = tts_config(engine.copy(), root.copy())
+        let made = unsafe { Made { p: (api.create_tts)(c.words.as_ptr().cast<u8>()) } }
+        if made.null() { fail "{engine} couldn't start: its model didn't load" }
+        h.tts = some(made)
+        h.tts_engine = engine.copy()
+    }
+    let tts = h.tts else fail "{engine} isn't loaded"
     // SherpaOnnxGenerationConfig: 104 bytes; no progress callback, so its two are null.
     var g = Config.new(104)
     g.float(4, speed)    // speed
     g.int(8, speaker)    // sid
+    // Pocket TTS speaks like a recording, from -1 to 1 at its own rate; Supertonic reads
+    // the text's language from it.
+    var heard = List<f32>()
+    if engine == "pocket" {
+        let (samples, rate) = try reference("{root}/{engine}/{like}")
+        heard = samples
+        g.int(24, i32.wrap(heard.len()))                         // reference_audio_len
+        g.int(28, rate)                                          // reference_sample_rate
+    }
+    if engine == "supertonic" { g.text(48, String(#"{"lang":"na"}"#)) }    // extra
     let words = "{text}\0"
     var nothing = List<u8>()
     var out = List<f32>()
+    var rate: i32 = 0
     let said = unsafe {
+        if heard.len() > 0 { g.words.as_mut_ptr().cast<u8>().add(16).cast<usize>().write(heard.as_ptr().addr()) }    // reference_audio
         let a = (api.generate)(tts.p, words.as_ptr(), g.words.as_ptr().cast<u8>(), nothing.as_mut_ptr(), nothing.as_mut_ptr())
         if not a.is_null() {
             // SherpaOnnxGeneratedAudio: the samples, how many, and their rate.
             let data = a.cast<*const f32>().read()
             let n = a.add(8).cast<i32>().read()
+            rate = a.add(12).cast<i32>().read()
             for i in 0..(usize.try_from(n) ?? 0) { out.push(data.add(i).read()) }
             (api.destroy_audio)(a)
         }
         not a.is_null()
     }
-    if not said { fail String("Kokoro couldn't say it") }
-    return audio.from_floats(out)
+    if not said or out.len() == 0 { fail "{engine} couldn't say it" }
+    let pcm = audio.from_floats(out)
+    // Supertonic speaks at 44.1 kHz; the others at 24.
+    let r = u32.try_from(rate) ?? audio.RATE
+    if r == audio.RATE or r == 0 { return pcm }
+    return audio.le_bytes(audio.to_24k(pcm, r, 1))
 }
 
 impl Runner {

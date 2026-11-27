@@ -1504,13 +1504,21 @@ fn tool_error(text: String) -> Json {
 // is taken off before the agent gets the result.
 // The tile of the `kind` engine `engine` with the keys the person has, as
 // Settings › Voice shows it, and whether it's in use.
-fn voice_tile(kind: String, keys: List<String>, engine: String, in_use: bool) -> Json {
-    if let Json.Array(tiles) = voice_engines.tiles(kind, keys, if in_use { engine.copy() } else { String() }) {
+fn voice_tile(kind: String, keys: List<String>, kept: Json, engine: String, in_use: bool) -> Json {
+    if let Json.Array(tiles) = voice_engines.tiles(kind, keys, kept, if in_use { engine.copy() } else { String() }) {
         for t in tiles {
             if str_at(t.copy(), "id") == some(engine.copy()) { return t.copy() }
         }
     }
     return Json.Null
+}
+
+// The model a voice engine uses, as an agent is told it: " (Flux English)", or "" for a
+// model on the device.
+fn voice_model_words(kept: Json, kind: String, engine: String) -> String {
+    let model = voice_engines.model_of(kept, kind.copy(), engine.copy())
+    if model.len() == 0 { return String() }
+    return " ({voice_engines.model_name(kind, engine, model)})"
 }
 
 // The key of a kind of voice in the settings.
@@ -10936,7 +10944,7 @@ impl Instance {
                 let secret = try i.secret(user.copy(), voice_engines.key_name(engine.copy())) else return Answer.Refused(String("no_key"), "Add your {found.name} key in Settings › Voice.")
                 key = secret
             }
-            var value = Obj.new().s("engine", engine.copy()).s("key", key)
+            var value = Obj.new().s("engine", engine.copy()).s("key", key).s("model", voice_engines.model_of(kept.copy(), kind.copy(), engine.copy()))
             if kind == "dictation" {
                 value = value.s("language", str_at(kept, "language") ?? String())
             } else {
@@ -10961,9 +10969,9 @@ impl Instance {
         let in_use = str_at(at(old.copy(), kind_key(kind.copy())), "engine") ?? String()
         let asked = (str_at(args.copy(), "engine") ?? String()).trim().to_lower_root()
         let engine = if asked.len() > 0 { asked } else { in_use }
-        if engine.len() == 0 { return tool_error(if kind == "dictation" { String("Name an engine: elevenlabs, deepgram, openai, groq, parakeet or whisper.") } else { String("Name an engine: elevenlabs, fish, openai or kokoro.") }) }
+        if engine.len() == 0 { return tool_error("Name an engine: {voice_engines.engine_ids(kind_key(kind.copy()))}.") }
         var change = Obj.new().s("engine", engine.copy())
-        for field in ["language", "voice", "read_aloud"] {
+        for field in ["model", "language", "voice", "read_aloud"] {
             if let v = str_at(args.copy(), field) { change = change.s(field, v.trim().copy()) }
         }
         if let n = args.get(String("speed")) { change = change.j("speed", n) }
@@ -10983,12 +10991,12 @@ impl Instance {
         if have {
             _ = try i.voice_keep(g.user.copy(), next, g.agent.copy())
             i.log(g.user.copy(), g.agent.copy(), "agent", "Set up {kind} with {found.name}", g.agent.copy())
-            let tile = voice_tile(kind.copy(), keys, engine.copy(), true)
+            let tile = voice_tile(kind.copy(), keys, settings.copy(), engine.copy(), true)
             let card = merge(cards.voice_card(call, kind.copy(), tile, settings, engine, String("set"), String()), Obj.new().s("agent", g.agent.copy()).done())
             if not i.put_own_card(run_id, card) { return tool_error(String("The reply ended before the card could go in it.")) }
-            return tool_text("Set: your person's {kind} is {found.name} now, with the settings you gave. They have a card in your reply showing it, with a link to Settings → Voice.")
+            return tool_text("Set: your person's {kind} is {found.name}{voice_model_words(settings.copy(), kind.copy(), engine.copy())} now, with the settings you gave. They have a card in your reply showing it, with a link to Settings → Voice.")
         }
-        let tile = voice_tile(kind.copy(), keys, engine.copy(), false)
+        let tile = voice_tile(kind.copy(), keys, settings.copy(), engine.copy(), false)
         let card = merge(cards.voice_card(call, kind.copy(), tile, settings, engine, String("asking"), String()), Obj.new().s("agent", g.agent.copy()).done())
         if not i.put_own_card(run_id, card) { return tool_error(String("The reply ended before the card could go in it.")) }
         return tool_text("Your person has a card in your reply with {found.name} set up as you chose, and Add key. Nothing is set until they add their {found.name} key there, which you never see. You're woken in this chat once they have.")
@@ -11016,7 +11024,7 @@ impl Instance {
         let listed = try i.voice_keep(user.copy(), next, device.copy())
         let name = str_at(at(card.copy(), "engine"), "name") ?? service.copy()
         i.log(user.copy(), String(), "agent", "Kept a {service} key for voice and set up {kind} with {name}", device.copy())
-        let tile = voice_tile(kind.copy(), try i.voice_keys(user.copy()), service.copy(), true)
+        let tile = voice_tile(kind.copy(), try i.voice_keys(user.copy()), at(at(listed.copy(), "settings"), kind_key(kind.copy())), service.copy(), true)
         try i.spool_card_to(user.copy(), message, card_id, Obj.new().s("state", String("set")).s("said", String()).j("engine", tile).done())
         let agent = str_at(card, "agent") ?? String()
         if agent.len() > 0 and conversation.len() > 0 {

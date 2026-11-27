@@ -1,21 +1,27 @@
 module shared.voice
 
 // loom's voice (PLAN.md, "Voice"): the engines that hear the person and speak replies,
-// the person's voice settings, and each service's wire format, so the instance and the
-// core read and write them the same way. The core runs the engines on the device
-// (core/voice.calx); the instance keeps the settings and the keys (server/instance.calx).
+// each service's models, the person's voice settings, and each service's wire format, so
+// the instance and the core read and write them the same way. The core runs the engines
+// on the device (core/voice.calx); the instance keeps the settings and the keys
+// (server/instance.calx).
 //
 // The settings, as `voice.get` gives them and `voice.put` takes them, all optional:
 //
-//     {"dictation": {"engine": "deepgram", "language": ""},
+//     {"dictation": {"engine": "deepgram", "language": "",
+//                    "models": {"elevenlabs": "scribe_v3_live", "deepgram": "nova-3", ...}},
 //      "speech": {"engine": "openai", "voice": "marin", "voice_name": "Marin",
-//                 "speed": 1.0, "read_aloud": "never"},
+//                 "speed": 1.0, "read_aloud": "never",
+//                 "models": {"elevenlabs": "eleven_v4_turbo", ...}},
 //      "live": {"barge_in": true, "pause": 0.8, "captions": true}}
 //
 // An engine is `""` until one is picked, a language `""` detects it, and `read_aloud` is
-// `never`, `live` or `always`. Live mode (core/live.calx) stops a reply the person talks
-// over (`barge_in`), sends what they said once they've been quiet for `pause` seconds,
-// and shows the words being said (`captions`).
+// `never`, `live` or `always`. `models` has the model each service uses, kept per
+// service so another engine keeps its own, the newest unless the person picked another;
+// one that isn't the service's any more is its newest again. `voice.put` takes `model`
+// for the engine in use, or the engine given with it. Live mode (core/live.calx) stops a
+// reply the person talks over (`barge_in`), sends what they said once they've been quiet
+// for `pause` seconds, and shows the words being said (`captions`).
 //
 // Each service's key is the person's secret `voice.SERVICE` on the instance, which only
 // their devices open (`voice.start`), never an agent.
@@ -28,16 +34,28 @@ import shared.obj.{Obj, at, bool_at, merge, str_at}
 /// A dictation engine, or a speech one. `streams` says whether the words come as
 /// they're said; one that doesn't writes them once the person stops. `on_device` is a
 /// model the device downloads and runs itself (core/models.calx), which needs no key;
-/// one that dictates writes its words in short pieces as they're said. `mark` is its
-/// maker's logo, a file in voice/ without its .svg (mark_svg), or "" for none.
+/// one that dictates writes its words in short pieces as they're said, and its `line`
+/// is its tile's, its languages and size. A service's tile has its model's name as its
+/// line (MODELS). `mark` is its maker's logo, a file in voice/ without its .svg
+/// (mark_svg), or "" for none.
 pub struct Engine {
     pub id: str
     pub kind: str    // dictation or speech
     pub name: str
-    pub line: str    // the tile's one quiet line
+    pub line: str    // a model on the device's one quiet line
     pub streams: bool
     pub on_device: bool
     pub mark: str
+}
+
+/// One of a service's models: its id, as the service's API names it, the name its tile
+/// and menu show, and its one quiet line in the menu.
+pub struct Model {
+    pub kind: str
+    pub engine: str
+    pub id: str
+    pub name: str
+    pub line: str
 }
 
 // The makers' marks (voice/README.md), built into the program as their files are.
@@ -68,23 +86,134 @@ pub fn mark_svg(name: String) -> String? {
     return some((text ?? String()).trim().copy())
 }
 
-/// The engines, in the order their tiles show.
-pub const ENGINES: [Engine; 10] = [
-    Engine { id: "elevenlabs", kind: "dictation", name: "ElevenLabs Scribe", line: "Words as you say them", streams: true, on_device: false, mark: "elevenlabs" },
-    Engine { id: "deepgram", kind: "dictation", name: "Deepgram Nova-3", line: "Words as you say them", streams: true, on_device: false, mark: "deepgram" },
-    Engine { id: "openai", kind: "dictation", name: "OpenAI", line: "gpt-4o-transcribe, words as you say them", streams: true, on_device: false, mark: "openai" },
-    Engine { id: "groq", kind: "dictation", name: "Groq", line: "Whisper large v3, writes once you stop", streams: false, on_device: false, mark: "groq" },
-    Engine { id: "parakeet", kind: "dictation", name: "Parakeet v2", line: "English, 660 MB", streams: true, on_device: true, mark: "nvidia" },
+/// The engines, in the order their tiles show: the services, then the models on the
+/// device, newest first.
+pub const ENGINES: [Engine; 16] = [
+    Engine { id: "elevenlabs", kind: "dictation", name: "ElevenLabs", line: "", streams: true, on_device: false, mark: "elevenlabs" },
+    Engine { id: "deepgram", kind: "dictation", name: "Deepgram", line: "", streams: true, on_device: false, mark: "deepgram" },
+    Engine { id: "openai", kind: "dictation", name: "OpenAI", line: "", streams: true, on_device: false, mark: "openai" },
+    Engine { id: "groq", kind: "dictation", name: "Groq", line: "", streams: false, on_device: false, mark: "groq" },
+    Engine { id: "parakeet-ultra", kind: "dictation", name: "Parakeet Ultra", line: "25 languages, 670 MB", streams: true, on_device: true, mark: "nvidia" },
+    Engine { id: "parakeet-v3", kind: "dictation", name: "Parakeet v3", line: "25 languages, 670 MB", streams: true, on_device: true, mark: "nvidia" },
     Engine { id: "whisper", kind: "dictation", name: "Whisper large v3 turbo", line: "99 languages, 1 GB", streams: true, on_device: true, mark: "openai" },
-    Engine { id: "elevenlabs", kind: "speech", name: "ElevenLabs", line: "Flash v2.5, your voices and the library's", streams: false, on_device: false, mark: "elevenlabs" },
-    Engine { id: "fish", kind: "speech", name: "Fish Audio", line: "S2.1 Pro, the voice library", streams: false, on_device: false, mark: "fish-audio" },
-    Engine { id: "openai", kind: "speech", name: "OpenAI", line: "gpt-4o-mini-tts, 13 voices", streams: false, on_device: false, mark: "openai" },
-    Engine { id: "kokoro", kind: "speech", name: "Kokoro", line: "English and Chinese, 350 MB", streams: false, on_device: true, mark: "" },
+    Engine { id: "parakeet", kind: "dictation", name: "Parakeet v2", line: "English, 660 MB", streams: true, on_device: true, mark: "nvidia" },
+    Engine { id: "elevenlabs", kind: "speech", name: "ElevenLabs", line: "", streams: false, on_device: false, mark: "elevenlabs" },
+    Engine { id: "fish", kind: "speech", name: "Fish Audio", line: "", streams: false, on_device: false, mark: "fish-audio" },
+    Engine { id: "openai", kind: "speech", name: "OpenAI", line: "", streams: false, on_device: false, mark: "openai" },
+    Engine { id: "deepgram", kind: "speech", name: "Deepgram", line: "", streams: false, on_device: false, mark: "deepgram" },
+    Engine { id: "kokoro-v1.1", kind: "speech", name: "Kokoro v1.1", line: "Chinese, 3 English voices, 365 MB", streams: false, on_device: true, mark: "" },
+    Engine { id: "supertonic", kind: "speech", name: "Supertonic 3", line: "31 languages, 10 voices, 130 MB", streams: false, on_device: true, mark: "" },
+    Engine { id: "pocket", kind: "speech", name: "Pocket TTS", line: "English, 2 voices, 100 MB", streams: false, on_device: true, mark: "" },
+    Engine { id: "kokoro", kind: "speech", name: "Kokoro v1.0", line: "English and Chinese, 350 MB", streams: false, on_device: true, mark: "" },
 ]
 
-/// Kokoro's voices that speak English or Chinese, the two its sherpa-onnx model reads:
-/// each id, its speaker number in `voices.bin` and its name. The numbers are sherpa-onnx's
-/// map for kokoro-multi-lang-v1_0 (k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/kokoro.html).
+/// Each service's models, newest first, the first its default. Checked against each
+/// service's docs in November 2026 (PLAN.md, "Voice").
+pub const MODELS: [Model; 20] = [
+    Model { kind: "dictation", engine: "elevenlabs", id: "scribe_v3_live", name: "Scribe v3 Live", line: "Words as you say them" },
+    Model { kind: "dictation", engine: "elevenlabs", id: "scribe_v2_realtime", name: "Scribe v2 Realtime", line: "The model before" },
+    Model { kind: "dictation", engine: "deepgram", id: "nova-3", name: "Nova-3", line: "Words as you say them" },
+    Model { kind: "dictation", engine: "deepgram", id: "flux-general-en", name: "Flux English", line: "English, hears when you're done" },
+    Model { kind: "dictation", engine: "deepgram", id: "flux-general-multi", name: "Flux multilingual", line: "Ten languages, hears when you're done" },
+    Model { kind: "dictation", engine: "openai", id: "gpt-live-transcribe", name: "gpt-live-transcribe", line: "Words as you say them" },
+    Model { kind: "dictation", engine: "openai", id: "gpt-transcribe", name: "gpt-transcribe", line: "Most accurate, writes once you stop" },
+    Model { kind: "dictation", engine: "openai", id: "gpt-realtime-whisper", name: "gpt-realtime-whisper", line: "Whisper, words as you say them" },
+    Model { kind: "dictation", engine: "groq", id: "whisper-large-v3-turbo", name: "Whisper large v3 turbo", line: "Writes once you stop, quicker" },
+    Model { kind: "dictation", engine: "groq", id: "whisper-large-v3", name: "Whisper large v3", line: "Writes once you stop, more accurate" },
+    Model { kind: "speech", engine: "elevenlabs", id: "eleven_v4_turbo", name: "v4 Turbo", line: "Quickest, your voices and the library's" },
+    Model { kind: "speech", engine: "elevenlabs", id: "eleven_v4", name: "v4", line: "Most expressive" },
+    Model { kind: "speech", engine: "elevenlabs", id: "eleven_v3", name: "v3", line: "The model before" },
+    Model { kind: "speech", engine: "elevenlabs", id: "eleven_multilingual_v2", name: "Multilingual v2", line: "Steady, and follows Speed" },
+    Model { kind: "speech", engine: "fish", id: "drama-3", name: "Drama 3", line: "Most expressive, the voice library" },
+    Model { kind: "speech", engine: "fish", id: "s2.1-pro", name: "S2.1 Pro", line: "Natural and quick" },
+    Model { kind: "speech", engine: "fish", id: "s2-pro", name: "S2 Pro", line: "The model before" },
+    Model { kind: "speech", engine: "openai", id: "gpt-realtime-2.1-mini", name: "gpt-realtime-2.1-mini", line: "10 voices" },
+    Model { kind: "speech", engine: "deepgram", id: "flux", name: "Flux", line: "36 English voices" },
+    Model { kind: "speech", engine: "deepgram", id: "aura-2", name: "Aura-2", line: "41 English voices" },
+]
+
+/// The models of engine `id` of `kind`, newest first; none for a model on the device,
+/// which is its own.
+pub fn models_of(kind: String, id: String) -> List<Model> {
+    var out = List<Model>()
+    for m in MODELS {
+        if m.kind == kind and m.engine == id { out.push(m) }
+    }
+    return out
+}
+
+/// The model of `kind`'s engine `id` that `given` names, by its id or its name, or none.
+pub fn model_named(kind: String, id: String, given: String) -> Model? {
+    let w = given.trim().to_lower_root()
+    for m in models_of(kind, id) {
+        if w == m.id or w == String(m.name).to_lower_root() { return some(m) }
+    }
+    return none
+}
+
+// The model kept for engine `id` in a kind's settings, if one is.
+fn kept_model(kept: Json, id: String) -> String? {
+    let models = kept.get(String("models")) ?? Json.Null
+    return match models.get(id) {
+        some(Json.Str(s)) => some(s),
+        _ => none,
+    }
+}
+
+/// The model `kind`'s engine `id` uses with that kind's settings, `kept`: the one kept
+/// for it, or its newest when that isn't one of its; "" for a model on the device.
+pub fn model_of(kept: Json, kind: String, id: String) -> String {
+    let all = models_of(kind, id.copy())
+    if all.len() == 0 { return String() }
+    if let given = kept_model(kept, id) {
+        for m in all.copy() {
+            if m.id == given { return given }
+        }
+    }
+    return String(all[0].id)
+}
+
+/// A model's name, by its id, or the id itself.
+pub fn model_name(kind: String, id: String, model: String) -> String {
+    for m in models_of(kind, id) {
+        if m.id == model { return String(m.name) }
+    }
+    return model.copy()
+}
+
+// Each service of `kind` and its model, as the settings keep them.
+fn models_json(kept: Json, kind: str) -> Json {
+    var o = Obj.new()
+    for e in ENGINES {
+        if e.kind != kind or e.on_device { continue }
+        o = o.s(e.id, model_of(kept.copy(), String(kind), String(e.id)))
+    }
+    return o.done()
+}
+
+// --- Voices ---
+
+/// OpenAI's built-in voices for speech over its Realtime API, Marin and Cedar first, as
+/// it recommends them.
+pub const OPENAI_VOICES: [str; 10] = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "sage", "shimmer", "verse"]
+
+// Deepgram's English voices: Flux's (flux-NAME-en) and Aura-2's (aura-2-NAME-en), each
+// model's featured ones first.
+const FLUX_VOICES: [str; 36] = [
+    "hannah", "kit", "alexis", "cliff", "sienna", "cole", "brooke", "colin", "gemma", "haley", "heather", "miles",
+    "sean", "bree", "brittany", "bruce", "conor", "donovan", "drew", "elise", "jack", "kai", "kelsey", "maeve",
+    "marcelo", "marcus", "meena", "meghan", "naveen", "paige", "priya", "rufus", "sharon", "tanner", "wade", "wes",
+]
+const AURA_VOICES: [str; 41] = [
+    "thalia", "andromeda", "helena", "apollo", "arcas", "aries", "amalthea", "asteria", "athena", "atlas", "aurora",
+    "callista", "cora", "cordelia", "delia", "draco", "electra", "harmonia", "hera", "hermes", "hyperion", "iris",
+    "janus", "juno", "jupiter", "luna", "mars", "minerva", "neptune", "odysseus", "ophelia", "orion", "orpheus",
+    "pandora", "phoebe", "pluto", "saturn", "selene", "theia", "vesta", "zeus",
+]
+
+/// Kokoro v1.0's voices that speak English or Chinese, the two its sherpa-onnx model
+/// reads: each id, its speaker number in `voices.bin` and its name. The numbers are
+/// sherpa-onnx's map for kokoro-multi-lang-v1_0 (k2-fsa.github.io/sherpa/onnx/tts/pretrained_models/kokoro.html).
 pub const KOKORO_VOICES: [(str, i32, str); 36] = [
     ("af_heart", 3, "Heart"), ("af_alloy", 0, "Alloy"), ("af_aoede", 1, "Aoede"), ("af_bella", 2, "Bella"),
     ("af_jessica", 4, "Jessica"), ("af_kore", 5, "Kore"), ("af_nicole", 6, "Nicole"), ("af_nova", 7, "Nova"),
@@ -97,26 +226,122 @@ pub const KOKORO_VOICES: [(str, i32, str); 36] = [
     ("zm_yunjian", 49, "Yunjian, Chinese"), ("zm_yunxi", 50, "Yunxi, Chinese"), ("zm_yunxia", 51, "Yunxia, Chinese"), ("zm_yunyang", 52, "Yunyang, Chinese"),
 ]
 
-/// Kokoro's speaker number for a voice, by its id or its name, or Heart's.
-pub fn kokoro_speaker(voice: String) -> i32 {
-    let w = voice.trim().to_lower_root()
-    for (id, n, name) in KOKORO_VOICES {
-        if w == id or w == String(name).to_lower_root() { return n }
-    }
-    return 3
+// Kokoro v1.1's 103 speakers, in their numbers' order (sherpa-onnx's map for
+// kokoro-multi-lang-v1_1): three English, then its Chinese women (zf_NNN) and men (zm_NNN).
+const KOKORO_11_ENGLISH: [(str, str); 3] = [("af_maple", "Maple"), ("af_sol", "Sol"), ("bf_vale", "Vale, British")]
+const KOKORO_11_WOMEN: [u32; 55] = [
+    1, 2, 3, 4, 5, 6, 7, 8, 17, 18, 19, 21, 22, 23, 24, 26, 27, 28, 32, 36, 38, 39, 40, 42, 43, 44, 46, 47,
+    48, 49, 51, 59, 60, 67, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 83, 84, 85, 86, 87, 88, 90, 92, 93, 94, 99,
+]
+const KOKORO_11_MEN: [u32; 45] = [
+    9, 10, 11, 12, 13, 14, 15, 16, 20, 25, 29, 30, 31, 33, 34, 35, 37, 41, 45, 50, 52, 53, 54, 55, 56, 57, 58,
+    61, 62, 63, 64, 65, 66, 68, 69, 80, 81, 82, 89, 91, 95, 96, 97, 98, 100,
+]
+
+// Supertonic 3's ten voice styles, in voice.bin's order, each speaker's number its place.
+const SUPERTONIC_VOICES: [(str, str); 10] = [
+    ("F1", "Woman 1"), ("F2", "Woman 2"), ("F3", "Woman 3"), ("F4", "Woman 4"), ("F5", "Woman 5"),
+    ("M1", "Man 1"), ("M2", "Man 2"), ("M3", "Man 3"), ("M4", "Man 4"), ("M5", "Man 5"),
+]
+
+/// Pocket TTS's voices: it speaks in the voice of a short recording, and these are the
+/// two English ones its sherpa-onnx package comes with, each id, name and file.
+pub const POCKET_VOICES: [(str, str, str); 2] = [("bria", "Bria", "test_wavs/bria.wav"), ("loona", "Loona", "test_wavs/loona.wav")]
+
+fn three(n: u32) -> String {
+    return if n < 10 { "00{n}" } else if n < 100 { "0{n}" } else { "{n}" }
 }
 
-/// Whether `voice` is one of Kokoro's, by its id or its name.
-fn kokoro_voice(voice: String) -> bool {
-    let w = voice.trim().to_lower_root()
-    for (id, _, name) in KOKORO_VOICES {
-        if w == id or w == String(name).to_lower_root() { return true }
+fn a_voice(id: String, name: String) -> Json {
+    return Obj.new().s("id", id).s("name", name).done()
+}
+
+/// The voices of an engine whose voices are its own, each `id` and `name`, for `model`;
+/// none for one whose voices come from the service (ElevenLabs, Fish Audio). A model on
+/// the device's are in its speakers' order.
+pub fn fixed_voices(which: String, model: String) -> List<Json>? {
+    var out = List<Json>()
+    if which == "openai" {
+        for v in OPENAI_VOICES { out.push(a_voice(String(v), title(String(v)))) }
+    } else if which == "deepgram" {
+        if model == "aura-2" {
+            for v in AURA_VOICES { out.push(a_voice("aura-2-{v}-en", title(String(v)))) }
+        } else {
+            for v in FLUX_VOICES { out.push(a_voice("flux-{v}-en", title(String(v)))) }
+        }
+    } else if which == "kokoro" {
+        for (id, _, name) in KOKORO_VOICES { out.push(a_voice(String(id), String(name))) }
+    } else if which == "kokoro-v1.1" {
+        for (id, name) in KOKORO_11_ENGLISH { out.push(a_voice(String(id), String(name))) }
+        for n in KOKORO_11_WOMEN { out.push(a_voice("zf_{three(n)}", "Woman {n}, Chinese")) }
+        for n in KOKORO_11_MEN { out.push(a_voice("zm_{three(n)}", "Man {n}, Chinese")) }
+    } else if which == "supertonic" {
+        for (id, name) in SUPERTONIC_VOICES { out.push(a_voice(String(id), String(name))) }
+    } else if which == "pocket" {
+        for (id, name, _) in POCKET_VOICES { out.push(a_voice(String(id), String(name))) }
+    } else {
+        return none
     }
-    return false
+    return some(out)
+}
+
+/// The voice in `list` that `wanted` names, by its id or its name, if one does.
+pub fn find_voice(list: List<Json>, wanted: String) -> Json? {
+    let w = wanted.trim().to_lower_root()
+    for v in list {
+        if (str_at(v.copy(), "id") ?? String()).to_lower_root() == w or (str_at(v.copy(), "name") ?? String()).to_lower_root() == w { return some(v.copy()) }
+    }
+    return none
+}
+
+/// The voice in `list` that `wanted` names, by its id or its name, or the first.
+pub fn pick_voice(list: List<Json>, wanted: String) -> Json? {
+    if let v = find_voice(list.copy(), wanted) { return some(v) }
+    if list.len() > 0 { return some(list[0].copy()) }
+    return none
+}
+
+/// What a model on the device speaks `voice` with: its speaker's number, and for Pocket
+/// TTS, the recording it speaks like, in its folder.
+pub fn local_voice(which: String, wanted: String) -> (i32, String) {
+    if which == "kokoro" {
+        let w = wanted.trim().to_lower_root()
+        for (id, n, name) in KOKORO_VOICES {
+            if w == id or w == String(name).to_lower_root() { return (n, String()) }
+        }
+        return (3, String())
+    }
+    let list = fixed_voices(which.copy(), String()) ?? List<Json>()
+    let picked = str_at(pick_voice(list.copy(), wanted) ?? Json.Null, "id") ?? String()
+    var n: i32 = 0
+    for v in list {
+        if str_at(v, "id") == some(picked.copy()) { break }
+        n += 1
+    }
+    if which == "pocket" {
+        for (id, _, file) in POCKET_VOICES {
+            if id == picked { return (0, String(file)) }
+        }
+        return (0, String(POCKET_VOICES[0].2))
+    }
+    return (n, String())
+}
+
+// Voices' names, as an error lists them: all of a few, or the first of many.
+fn voice_names(list: List<Json>) -> String {
+    var names = List<String>()
+    for v in list.copy() {
+        if names.len() == 6 and list.len() > 8 { break }
+        names.push(str_at(v, "name") ?? String())
+    }
+    let more = list.len() > names.len()
+    let last = names.pop() ?? String()
+    let all = if names.len() == 0 { last } else { "{names.join(", ")} and {last}" }
+    return if more { "such as {all}" } else { all }
 }
 
 /// The ids of the engines of `kind`, as an error lists them: "a, b and c".
-fn engine_ids(kind: str) -> String {
+pub fn engine_ids(kind: str) -> String {
     var ids = List<String>()
     for e in ENGINES {
         if e.kind == kind { ids.push(String(e.id)) }
@@ -147,9 +372,6 @@ pub const READ_ALOUD: [str; 3] = ["never", "live", "always"]
 /// How long the person is quiet in live mode before what they said is sent, in
 /// seconds, as the Send when I stop talking row offers it.
 pub const PAUSES: [f64; 3] = [0.5, 0.8, 1.2]
-
-/// OpenAI's built-in voices, as its speech API names them.
-pub const OPENAI_VOICES: [str; 13] = ["marin", "cedar", "alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
 
 /// The rate every engine hears and speaks at: 16-bit mono PCM at 24 kHz.
 pub const RATE: u32 = 24000
@@ -227,28 +449,71 @@ fn bool_of(j: Json) -> bool? {
 }
 
 /// The settings in `j`, whole, with the defaults for what it doesn't have: no engine
-/// picked, the language detected, normal speed, replies never read aloud, and live
-/// mode's own. What isn't one of the choices is the default.
+/// picked, the language detected, each service's newest model, normal speed, replies
+/// never read aloud, and live mode's own. What isn't one of the choices is the default.
 pub fn settings(j: Json) -> Json {
     let d = at(j.copy(), "dictation")
     let live = live_settings(at(j.copy(), "live"))
     let s = at(j, "speech")
     var dictation_engine = str_at(d.copy(), "engine") ?? String()
     if engine(String("dictation"), dictation_engine.copy()) == none { dictation_engine = String() }
-    var language = str_at(d, "language") ?? String()
+    var language = str_at(d.copy(), "language") ?? String()
     if language_name(language.copy()) == none { language = String() }
     var speech_engine = str_at(s.copy(), "engine") ?? String()
     if engine(String("speech"), speech_engine.copy()) == none { speech_engine = String() }
     var read = str_at(s.copy(), "read_aloud") ?? String()
     if not reads(read.copy()) { read = String("never") }
-    let dictation = Obj.new().s("engine", dictation_engine).s("language", language).done()
-    let spoken = Obj.new().s("engine", speech_engine).s("voice", str_at(s.copy(), "voice") ?? String()).s("voice_name", str_at(s.copy(), "voice_name") ?? String()).j("speed", Json.Float(nearest_speed(number(at(s.copy(), "speed")) ?? 1.0))).s("read_aloud", read).done()
+    let dictation = Obj.new().s("engine", dictation_engine).s("language", language).j("models", models_json(d, "dictation")).done()
+    let spoken = Obj.new().s("engine", speech_engine).s("voice", str_at(s.copy(), "voice") ?? String()).s("voice_name", str_at(s.copy(), "voice_name") ?? String()).j("speed", Json.Float(nearest_speed(number(at(s.copy(), "speed")) ?? 1.0))).s("read_aloud", read).j("models", models_json(s, "speech")).done()
     return Obj.new().j("dictation", dictation).j("speech", spoken).j("live", live).done()
+}
+
+// A kind's settings with `given` the model of its engine in use: by its id or its name,
+// or "" for its newest.
+fn set_model(kept: Json, kind: str, given: String) -> Json ! String {
+    let id = str_at(kept.copy(), "engine") ?? String()
+    if id.len() == 0 { fail "Pick a {kind} engine before its model." }
+    return try set_model_of(kept, kind, id, given)
+}
+
+// A kind's settings with each service's model in `given`, `{service: model}`, as the
+// settings keep them.
+fn set_models(kept: Json, kind: str, given: Json) -> Json ! String {
+    var next = kept.copy()
+    if let Json.Object(o) = given {
+        for (id, m) in o {
+            if let Json.Str(model) = m { next = try set_model_of(next, kind, id.copy(), model.copy()) }
+        }
+    }
+    return next
+}
+
+// A kind's settings with `given` the model of its engine `id`.
+fn set_model_of(kept: Json, kind: str, id: String, given: String) -> Json ! String {
+    let e = engine(String(kind), id.copy()) else fail "There's no {kind} engine {id}."
+    let all = models_of(String(kind), id.copy())
+    if all.len() == 0 {
+        if given.len() == 0 or given == id { return kept.copy() }
+        fail "{e.name} runs on the device, and is its own model."
+    }
+    let picked = if given.len() == 0 { all[0] } else {
+        match model_named(String(kind), id, given.copy()) {
+            some(m) => m,
+            none => {
+                var names = List<String>()
+                for m in all { names.push(String(m.id)) }
+                fail "{e.name} has no model {given}. Its models are {names.join(", ")}."
+            },
+        }
+    }
+    let models = merge(at(kept.copy(), "models"), Obj.new().s(e.id, String(picked.id)).done())
+    return merge(kept, Obj.new().j("models", models).done())
 }
 
 /// `old` with the changes in `args` (`dictation` and `speech`, each with what changes),
 /// or why one isn't right. A new speech engine starts with its own default voice
-/// unless a voice comes with it.
+/// unless a voice comes with it, and so does a model of Deepgram's, whose voices are
+/// each model's own.
 pub fn apply(old: Json, args: Json) -> Json ! String {
     var next = settings(old)
     var d = at(next.copy(), "dictation")
@@ -258,6 +523,8 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
         if e.len() > 0 and engine(String("dictation"), e.copy()) == none { fail "There's no dictation engine {e}. Pick one of {engine_ids("dictation")}." }
         d = merge_str(d, "engine", e)
     }
+    d = try set_models(d, "dictation", at(dc.copy(), "models"))
+    if let m = str_at(dc.copy(), "model") { d = try set_model(d, "dictation", m) }
     if let l = str_at(dc, "language") {
         if language_name(l.copy()) == none { fail "There's no language {l} to dictate in. Give an ISO 639-1 code, such as en or no, or \"\" to detect it." }
         d = merge_str(d, "language", l)
@@ -267,30 +534,42 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
         err(why) => fail why,
     }
     let sc = at(args, "speech")
+    let voice_given = str_at(sc.copy(), "voice") != none
     if let e = str_at(sc.copy(), "engine") {
         if e.len() > 0 and engine(String("speech"), e.copy()) == none { fail "There's no speech engine {e}. Pick one of {engine_ids("speech")}." }
-        if some(e.copy()) != str_at(s.copy(), "engine") and str_at(sc.copy(), "voice") == none {
+        if some(e.copy()) != str_at(s.copy(), "engine") and not voice_given {
             s = merge_str(merge_str(s, "voice", String()), "voice_name", String())
         }
         s = merge_str(s, "engine", e)
     }
+    s = try set_models(s, "speech", at(sc.copy(), "models"))
+    if let m = str_at(sc.copy(), "model") {
+        let e = str_at(s.copy(), "engine") ?? String()
+        let was = model_of(s.copy(), String("speech"), e.copy())
+        s = try set_model(s, "speech", m)
+        if e == "deepgram" and model_of(s.copy(), String("speech"), e) != was and not voice_given {
+            s = merge_str(merge_str(s, "voice", String()), "voice_name", String())
+        }
+    }
     if let v = str_at(sc.copy(), "voice") {
         let e = str_at(s.copy(), "engine") ?? String()
-        if e == "openai" and v.len() > 0 and not openai_voice(v.to_lower_root()) { fail "OpenAI has no voice {v}. Its voices are {OPENAI_VOICES.join(", ")}." }
-        if e == "kokoro" and v.len() > 0 and not kokoro_voice(v.copy()) { fail "Kokoro has no voice {v}. Its voices are its English and Chinese ones, such as Heart, Michael, Emma, British, and Xiaoxiao, Chinese." }
-        var id = if e == "openai" { v.to_lower_root() } else { v.copy() }
-        var shown = if e == "openai" { title(id.copy()) } else { v.copy() }
-        if e == "kokoro" and v.len() > 0 {
-            for (k, _, name) in KOKORO_VOICES {
-                if kokoro_speaker(v.copy()) == kokoro_speaker(String(k)) {
-                    id = String(k)
-                    shown = String(name)
-                    break
+        var id = v.copy()
+        var shown = str_at(sc.copy(), "voice_name") ?? v.copy()
+        if v.len() > 0 {
+            if let list = fixed_voices(e.copy(), model_of(s.copy(), String("speech"), e.copy())) {
+                let name = match engine(String("speech"), e.copy()) {
+                    some(x) => String(x.name),
+                    none => e.copy(),
                 }
+                let found = find_voice(list.copy(), v.copy()) else fail "{name} has no voice {v}. Its voices are {voice_names(list)}."
+                id = str_at(found.copy(), "id") ?? String()
+                shown = str_at(found, "name") ?? String()
             }
+        } else {
+            shown = String()
         }
-        s = merge_str(s, "voice", id.copy())
-        s = merge_str(s, "voice_name", str_at(sc.copy(), "voice_name") ?? shown)
+        s = merge_str(s, "voice", id)
+        s = merge_str(s, "voice_name", shown)
     }
     if let given = sc.get(String("speed")) {
         let n = number(given) else fail "speed is a number, from 0.8 to 1.2."
@@ -350,17 +629,28 @@ pub fn openai_voice(name: String) -> bool {
 }
 
 /// The engines of `kind` as their tiles show them, with whether the person has the
-/// key each needs (`have`, by service) and which is in use. One with a mark has its SVG
-/// (`icon_svg`) and its name (`mark`), which the iPhone has its copy by; `icon` is what
-/// one without draws.
-pub fn tiles(kind: String, have: List<String>, in_use: String) -> Json {
+/// key each needs (`have`, by service), which is in use, and with that kind's settings
+/// (`kept`), the model each service uses. A service's tile has its models (`models`,
+/// each `id`, `name` and `line`, newest first) and the one it uses (`picked`), whose
+/// name is its line; a model on the device has its own line. One with a mark has its
+/// SVG (`icon_svg`) and its name (`mark`), which the iPhone has its copy by; `icon` is
+/// what one without draws.
+pub fn tiles(kind: String, have: List<String>, kept: Json, in_use: String) -> Json {
     var out = List<Json>()
     for e in ENGINES {
         if e.kind != kind { continue }
         let keyed = e.on_device or have.contains(String(e.id))
         let svg = mark_svg(String(e.mark))
         let mark = if svg != none { some(String(e.mark)) } else { none }
-        out.push(Obj.new().s("id", String(e.id)).s("name", String(e.name)).s("line", String(e.line)).s("icon", String(if e.on_device { "laptop" } else { "cloud" })).maybe("icon_svg", svg).maybe("mark", mark).b("streams", e.streams).b("key", not e.on_device).b("have", keyed).b("in_use", in_use == e.id).done())
+        let picked = model_of(kept.copy(), kind.copy(), String(e.id))
+        let line = if e.on_device { String(e.line) } else { model_name(kind.copy(), String(e.id), picked.copy()) }
+        var t = Obj.new().s("id", String(e.id)).s("name", String(e.name)).s("line", line).s("icon", String(if e.on_device { "laptop" } else { "cloud" })).maybe("icon_svg", svg).maybe("mark", mark).b("streams", e.streams).b("key", not e.on_device).b("have", keyed).b("in_use", in_use == e.id)
+        if not e.on_device {
+            var models = List<Json>()
+            for m in models_of(kind.copy(), String(e.id)) { models.push(Obj.new().s("id", String(m.id)).s("name", String(m.name)).s("line", String(m.line)).done()) }
+            t = t.j("models", Json.Array(models)).s("picked", picked)
+        }
+        out.push(t.done())
     }
     return Json.Array(out)
 }
@@ -377,8 +667,10 @@ pub fn listed(kept: Json, have: List<String>) -> Json {
     for v in PAUSES { pauses.push(Json.Float(v)) }
     var keys = Obj.new()
     for svc in SERVICES { keys = keys.b(svc, have.contains(String(svc))) }
-    let dictation_tiles = tiles(String("dictation"), have.copy(), str_at(at(s.copy(), "dictation"), "engine") ?? String())
-    let speech_tiles = tiles(String("speech"), have, str_at(at(s.copy(), "speech"), "engine") ?? String())
+    let d = at(s.copy(), "dictation")
+    let sp = at(s.copy(), "speech")
+    let dictation_tiles = tiles(String("dictation"), have.copy(), d.copy(), str_at(d, "engine") ?? String())
+    let speech_tiles = tiles(String("speech"), have, sp.copy(), str_at(sp, "engine") ?? String())
     return Obj.new().j("settings", s).j("engines", Obj.new().j("dictation", dictation_tiles).j("speech", speech_tiles).done()).j("languages", Json.Array(languages)).j("speeds", Json.Array(speeds)).j("pauses", Json.Array(pauses)).j("read_aloud", Json.Array([Json.Str(String("never")), Json.Str(String("live")), Json.Str(String("always"))])).j("keys", keys.done()).done()
 }
 
@@ -416,29 +708,42 @@ pub fn auth(service: String, key: String) -> List<Header> {
     }
 }
 
-/// The WebSocket a streaming dictation engine is heard over, for `language` ("" to
-/// detect it).
-pub fn stream_url(service: String, language: String, place: String?) -> String {
+// Whether a Deepgram model is one of its Flux ones, which listen and speak on /v2.
+fn flux(model: String) -> bool {
+    return model.starts_with("flux")
+}
+
+/// The WebSocket a streaming dictation engine is heard over, with `model`, for
+/// `language` ("" to detect it).
+pub fn stream_url(service: String, model: String, language: String, place: String?) -> String {
     let b = service_at(service.copy(), false, place)
     if service == "deepgram" {
+        if flux(model.copy()) {
+            // Flux English hears English; its multilingual model takes the language as a hint.
+            let hint = if model == "flux-general-multi" and language.len() > 0 { "&language_hint={url.encode_plus(language)}" } else { String() }
+            return "{b}/v2/listen?model={url.encode_plus(model)}&encoding=linear16&sample_rate={RATE}{hint}"
+        }
         let lang = if language.len() == 0 { String("multi") } else { language.copy() }
-        return "{b}/v1/listen?model=nova-3&encoding=linear16&sample_rate={RATE}&channels=1&interim_results=true&smart_format=true&punctuate=true&language={url.encode_plus(lang)}"
+        return "{b}/v1/listen?model={url.encode_plus(model)}&encoding=linear16&sample_rate={RATE}&channels=1&interim_results=true&smart_format=true&punctuate=true&language={url.encode_plus(lang)}"
     }
     if service == "elevenlabs" {
         let lang = if language.len() == 0 { String() } else { "&language_code={url.encode_plus(language)}" }
-        return "{b}/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_{RATE}&commit_strategy=vad{lang}"
+        return "{b}/v1/speech-to-text/realtime?model_id={url.encode_plus(model)}&audio_format=pcm_{RATE}&commit_strategy=vad{lang}"
     }
     return "{b}/v1/realtime?intent=transcription"
 }
 
-/// What's sent first on the stream, once it's open: OpenAI's session, set to
-/// transcribe 24 kHz PCM as words are said. Nothing for the others, whose URL says it.
-pub fn stream_hello(service: String, language: String) -> List<String> {
+/// What's sent first on the stream, once it's open: OpenAI's session, set to transcribe
+/// 24 kHz PCM with `model`, with no turn detection of its own, as the core commits once
+/// the person stops. Its newer models take `languages`, and Whisper `language`. Nothing
+/// for the others, whose URL says it.
+pub fn stream_hello(service: String, model: String, language: String) -> List<String> {
     if service != "openai" { return List<String>() }
-    var transcription = Obj.new().s("model", String("gpt-4o-transcribe"))
-    if language.len() > 0 { transcription = transcription.s("language", language) }
-    let vad = Obj.new().s("type", String("server_vad")).j("silence_duration_ms", Json.Int(500)).done()
-    let input = Obj.new().j("format", Obj.new().s("type", String("audio/pcm")).j("rate", Json.Int(i64(RATE))).done()).j("transcription", transcription.done()).j("turn_detection", vad).done()
+    var transcription = Obj.new().s("model", model.copy())
+    if language.len() > 0 {
+        transcription = if model == "gpt-realtime-whisper" { transcription.s("language", language) } else { transcription.j("languages", Json.Array([Json.Str(language.copy())])) }
+    }
+    let input = Obj.new().j("format", Obj.new().s("type", String("audio/pcm")).j("rate", Json.Int(i64(RATE))).done()).j("transcription", transcription.done()).j("turn_detection", Json.Null).done()
     let session = Obj.new().s("type", String("transcription")).j("audio", Obj.new().j("input", input).done()).done()
     return ["{Obj.new().s("type", String("session.update")).j("session", session).done()}"]
 }
@@ -455,9 +760,12 @@ pub fn stream_audio(service: String, pcm: List<u8>) -> (bool, String) {
 }
 
 /// What ends the stream once the person stops: the last words are written, and
-/// Deepgram closes the stream after them.
-pub fn stream_end(service: String) -> List<String> {
-    if service == "deepgram" { return [String(#"{"type":"Finalize"}"#), String(#"{"type":"CloseStream"}"#)] }
+/// Deepgram closes the stream after them. Flux ends the turn the person was in.
+pub fn stream_end(service: String, model: String) -> List<String> {
+    if service == "deepgram" {
+        if flux(model) { return [String(#"{"type":"ForceEndTurn"}"#), String(#"{"type":"CloseStream"}"#)] }
+        return [String(#"{"type":"Finalize"}"#), String(#"{"type":"CloseStream"}"#)]
+    }
     if service == "elevenlabs" { return ["{Obj.new().s("message_type", String("input_audio_chunk")).s("audio_base_64", String()).b("commit", true).j("sample_rate", Json.Int(i64(RATE))).done()}"] }
     return [String(#"{"type":"input_audio_buffer.commit"}"#)]
 }
@@ -471,8 +779,8 @@ pub enum Heard {
     Nothing
 }
 
-/// One message from a streaming engine.
-pub fn heard(service: String, text: String) -> Heard {
+/// One message from a streaming engine, heard with `model`.
+pub fn heard(service: String, model: String, text: String) -> Heard {
     let m = match parse(text) {
         ok(j) => j,
         err(_) => return Heard.Nothing,
@@ -480,6 +788,15 @@ pub fn heard(service: String, text: String) -> Heard {
     if service == "deepgram" {
         let kind = str_at(m.copy(), "type") ?? String()
         if kind == "Error" { return Heard.Failed(str_at(m.copy(), "description") ?? str_at(m, "message") ?? String("Deepgram stopped.")) }
+        if flux(model) {
+            // Flux tells each turn as it goes, and its words once it ends.
+            if kind != "TurnInfo" { return Heard.Nothing }
+            let event = str_at(m.copy(), "event") ?? String()
+            let words = str_at(m, "transcript") ?? String()
+            if event == "EndOfTurn" { return Heard.Final(words) }
+            if event == "Update" or event == "StartOfTurn" or event == "EagerEndOfTurn" { return Heard.Partial(words) }
+            return Heard.Nothing
+        }
         if kind != "Results" { return Heard.Nothing }
         let alternatives = at(at(m.copy(), "channel"), "alternatives")
         let first = match alternatives {
@@ -505,7 +822,7 @@ pub fn heard(service: String, text: String) -> Heard {
     if kind == "conversation.item.input_audio_transcription.failed" { return Heard.Failed(str_at(at(m, "error"), "message") ?? String("OpenAI couldn't write it.")) }
     if kind == "error" {
         let e = at(m, "error")
-        // Committing a buffer the service's own turn detection took already is no failure.
+        // Committing a buffer with nothing in it is no failure.
         if str_at(e.copy(), "code") == some(String("input_audio_buffer_commit_empty")) { return Heard.Nothing }
         return Heard.Failed(str_at(e, "message") ?? String("OpenAI stopped."))
     }
@@ -521,9 +838,9 @@ pub fn joined(kept: String, more: String) -> String {
 }
 
 /// The request that writes a whole recording at once, for an engine that doesn't
-/// stream (Groq's Whisper large v3): its URL, its headers and the form, a WAV file.
-pub fn batch(service: String, key: String, wav: List<u8>, language: String, place: String?) -> (String, List<Header>, Form) {
-    var form = Form.new().field(String("model"), String("whisper-large-v3")).field(String("response_format"), String("json"))
+/// stream (Groq's Whisper, `model`): its URL, its headers and the form, a WAV file.
+pub fn batch(service: String, key: String, wav: List<u8>, language: String, model: String, place: String?) -> (String, List<Header>, Form) {
+    var form = Form.new().field(String("model"), model).field(String("response_format"), String("json"))
     if language.len() > 0 { form = form.field(String("language"), language) }
     form = form.file(String("file"), String("speech.wav"), wav, String("audio/wav"))
     return ("{service_at(service.copy(), true, place)}/openai/v1/audio/transcriptions", auth(service, key), form)
@@ -543,7 +860,7 @@ pub fn batch_text(status: u32, body: List<u8>) -> String ! String {
 /// Why a service said no, in its words where it gave any.
 pub fn service_error(status: u32, text: String) -> String {
     if let ok(m) = parse(text.copy()) {
-        for k in ["message", "detail", "error", "description"] {
+        for k in ["message", "detail", "error", "description", "err_msg"] {
             if let s = str_at(m.copy(), k) { return "{status}: {s}" }
             let inner = at(m.copy(), k)
             if let s = str_at(inner.copy(), "message") { return "{status}: {s}" }
@@ -554,27 +871,122 @@ pub fn service_error(status: u32, text: String) -> String {
     return "{status}: {text.trim()}"
 }
 
-/// The request that speaks `text` in `voice` (its id) at `speed`, giving 16-bit mono
-/// PCM at 24 kHz: its URL, headers and JSON body.
-pub fn speech(service: String, key: String, text: String, voice: String, pace: f64, place: String?) -> (String, List<Header>, List<u8>) {
+/// The most Deepgram reads aloud at once: Aura-2 takes 2000 letters.
+const DEEPGRAM_MOST: usize = 2000
+
+/// Whether speech with `service`'s `model` streams over a WebSocket (speech_url) rather
+/// than coming as the answer to one request (speech): OpenAI's, over its Realtime API,
+/// and ElevenLabs' v4 models, over its Text to Dialogue socket, which its text-to-speech
+/// requests don't take.
+pub fn speech_socket(service: String, model: String) -> bool {
+    return service == "openai" or (service == "elevenlabs" and model.starts_with("eleven_v4"))
+}
+
+/// The request that speaks `text` in `voice` (its id) at `speed` with `model`, giving
+/// 16-bit mono PCM at 24 kHz: its URL, headers and JSON body. Deepgram's answer may come
+/// as a WAV (pcm_of).
+pub fn speech(service: String, key: String, text: String, voice: String, pace: f64, model: String, place: String?) -> (String, List<Header>, List<u8>) {
     let b = service_at(service.copy(), true, place)
     var headers = auth(service.copy(), key)
     headers.push(header("Content-Type", String("application/json")))
     if service == "elevenlabs" {
+        // v3 doesn't follow speed, and takes it.
         let tuning = Obj.new().j("speed", Json.Float(pace)).done()
-        let body = Obj.new().s("text", text).s("model_id", String("eleven_flash_v2_5")).j("voice_settings", tuning).done()
+        let body = Obj.new().s("text", text).s("model_id", model).j("voice_settings", tuning).done()
         return ("{b}/v1/text-to-speech/{url.encode(voice)}?output_format=pcm_{RATE}", headers, "{body}".to_bytes())
     }
     if service == "fish" {
-        headers.push(header("model", String("s2.1-pro")))
+        headers.push(header("model", model))
         let body = Obj.new().s("text", text).s("reference_id", voice).s("format", String("pcm")).j("sample_rate", Json.Int(i64(RATE))).s("latency", String("normal")).j("prosody", Obj.new().j("speed", Json.Float(pace)).done()).done()
         return ("{b}/v1/tts", headers, "{body}".to_bytes())
     }
-    let body = Obj.new().s("model", String("gpt-4o-mini-tts")).s("voice", if voice.len() > 0 { voice.copy() } else { String("marin") }).s("input", text).s("response_format", String("pcm")).j("speed", Json.Float(pace)).done()
-    return ("{b}/v1/audio/speech", headers, "{body}".to_bytes())
+    // Deepgram: the voice is the model it asks for, Flux's on /v2 and Aura-2's on /v1.
+    let list = fixed_voices(service.copy(), model.copy()) ?? List<Json>()
+    let id = str_at(pick_voice(list, voice) ?? Json.Null, "id") ?? String()
+    let path = if model == "aura-2" { "/v1/speak" } else { "/v2/speak" }
+    let raw = if model == "aura-2" { "&container=none" } else { "" }
+    let pace_arg = if pace == 1.0 { String() } else { "&speed={pace}" }
+    let body = Obj.new().s("text", cut(text, DEEPGRAM_MOST)).done()
+    return ("{b}{path}?model={url.encode_plus(id)}&encoding=linear16&sample_rate={RATE}{raw}{pace_arg}", headers, "{body}".to_bytes())
 }
 
-/// The request for a speech engine's voices, or none for OpenAI, whose are fixed.
+/// The PCM in an answer that may be a WAV file: what follows its `data` header, or the
+/// answer itself.
+pub fn pcm_of(body: List<u8>) -> List<u8> {
+    if body.len() < 44 or String.from_utf8(body[0..4].copy()) != some(String("RIFF")) { return body.copy() }
+    var i: usize = 12
+    while i + 8 <= body.len() {
+        let size = usize(bytes.u32_le(body.copy(), i + 4))
+        if String.from_utf8(body[i..i + 4].copy()) == some(String("data")) {
+            let end = if i + 8 + size <= body.len() { i + 8 + size } else { body.len() }
+            return body[i + 8..end].copy()
+        }
+        i += 8 + size + size % 2
+    }
+    return body.copy()
+}
+
+/// The WebSocket speech that streams comes over (speech_socket), with `model`.
+pub fn speech_url(service: String, model: String, place: String?) -> String {
+    let b = service_at(service.copy(), false, place)
+    if service == "elevenlabs" { return "{b}/v1/text-to-dialogue/stream-input?model_id={url.encode_plus(model)}&output_format=pcm_{RATE}" }
+    return "{b}/v1/realtime?model={url.encode_plus(model)}"
+}
+
+/// What OpenAI is told to do with the text it's given: read it, as written.
+const READ_AS_WRITTEN: str = "Read the user's text aloud exactly as it's written, word for word, in a natural voice. Don't answer it, and don't add, leave out or change anything."
+
+/// What's sent on speech's socket once it's open, to speak `text` in `voice` at `speed`:
+/// ElevenLabs' voice, the text in it, and the end; or OpenAI's session, set to speak
+/// 24 kHz PCM in the voice and read what it's given as written, the text, and the
+/// request for its speech.
+pub fn speech_hello(service: String, model: String, text: String, voice: String, pace: f64) -> List<String> {
+    _ = model
+    if service == "elevenlabs" {
+        let first = Obj.new().j("voices", Json.Array([Json.Str(voice.copy())])).done()
+        let input = Obj.new().j("inputs", Json.Array([Obj.new().s("text", text).s("voice_id", voice).done()])).done()
+        return ["{first}", "{input}", "{Obj.new().b("close_socket", true).done()}"]
+    }
+    let picked = if openai_voice(voice.to_lower_root()) { voice.to_lower_root() } else { String("marin") }
+    let output = Obj.new().j("format", Obj.new().s("type", String("audio/pcm")).j("rate", Json.Int(i64(RATE))).done()).s("voice", picked).j("speed", Json.Float(pace)).done()
+    let session = Obj.new().s("type", String("realtime")).j("output_modalities", Json.Array([Json.Str(String("audio"))])).s("instructions", String(READ_AS_WRITTEN)).j("audio", Obj.new().j("output", output).done()).done()
+    let content = Json.Array([Obj.new().s("type", String("input_text")).s("text", text).done()])
+    let item = Obj.new().s("type", String("message")).s("role", String("user")).j("content", content).done()
+    return ["{Obj.new().s("type", String("session.update")).j("session", session).done()}", "{Obj.new().s("type", String("conversation.item.create")).j("item", item).done()}", String(#"{"type":"response.create"}"#)]
+}
+
+/// What a speech socket said.
+pub enum Said {
+    Audio(List<u8>)    // more 24 kHz PCM
+    Done
+    Failed(String)     // why, in the service's words
+    Nothing
+}
+
+/// One message on a speech socket.
+pub fn speech_heard(service: String, text: String) -> Said {
+    let m = match parse(text) {
+        ok(j) => j,
+        err(_) => return Said.Nothing,
+    }
+    if service == "elevenlabs" {
+        if let a = str_at(m.copy(), "audio") { return Said.Audio(bytes.from_base64(a) ?? List<u8>()) }
+        if bool_at(m.copy(), "is_final") == some(true) { return Said.Done }
+        if let e = str_at(m.copy(), "error") { return Said.Failed(str_at(m, "message") ?? e) }
+        return Said.Nothing
+    }
+    let kind = str_at(m.copy(), "type") ?? String()
+    if kind == "response.output_audio.delta" { return Said.Audio(bytes.from_base64(str_at(m, "delta") ?? String()) ?? List<u8>()) }
+    if kind == "response.done" {
+        let r = at(m, "response")
+        if str_at(r.copy(), "status") == some(String("failed")) { return Said.Failed(str_at(at(at(r, "status_details"), "error"), "message") ?? String("OpenAI couldn't say it.")) }
+        return Said.Done
+    }
+    if kind == "error" { return Said.Failed(str_at(at(m, "error"), "message") ?? String("OpenAI stopped.")) }
+    return Said.Nothing
+}
+
+/// The request for a speech engine's voices, or none for one whose are its own.
 pub fn voices_request(service: String, key: String, place: String?) -> (String, List<Header>)? {
     let b = service_at(service.copy(), true, place)
     if service == "elevenlabs" { return some(("{b}/v2/voices?page_size=100&include_total_count=false", auth(service, key))) }
@@ -582,16 +994,14 @@ pub fn voices_request(service: String, key: String, place: String?) -> (String, 
     return none
 }
 
-/// A speech engine's voices, each `id` and `name`, from its answer, or OpenAI's own.
+/// A speech engine's voices, each `id` and `name`, from its answer, or its own for one
+/// whose voices are, with its newest model.
 pub fn voices(service: String, body: List<u8>) -> List<Json> {
     var out = List<Json>()
-    if service == "openai" {
-        for v in OPENAI_VOICES { out.push(Obj.new().s("id", String(v)).s("name", title(String(v))).done()) }
-        return out
-    }
-    if service == "kokoro" {
-        for (id, _, name) in KOKORO_VOICES { out.push(Obj.new().s("id", String(id)).s("name", String(name)).done()) }
-        return out
+    if service != "elevenlabs" and service != "fish" {
+        let all = models_of(String("speech"), service.copy())
+        let model = if all.len() > 0 { String(all[0].id) } else { String() }
+        return fixed_voices(service, model) ?? out
     }
     let m = match parse(String.from_utf8(body.copy()) ?? String()) {
         ok(j) => j,
@@ -607,18 +1017,22 @@ pub fn voices(service: String, body: List<u8>) -> List<Json> {
     return out
 }
 
-/// The voice in `list` that `wanted` names, by its id or its name, or the first.
-pub fn pick_voice(list: List<Json>, wanted: String) -> Json? {
-    let w = wanted.trim().to_lower_root()
-    for v in list.copy() {
-        if (str_at(v.copy(), "id") ?? String()).to_lower_root() == w or (str_at(v.copy(), "name") ?? String()).to_lower_root() == w { return some(v.copy()) }
-    }
-    if list.len() > 0 { return some(list[0].copy()) }
-    return none
-}
-
-/// The most of a reply read aloud at once, cut at a sentence: OpenAI takes 4096 letters.
+/// The most of a reply read aloud at once, cut at a sentence: Realtime takes more, and
+/// a reply this long is better read in the chat.
 const SPOKEN_MOST: usize = 4000
+
+/// Words cut to at most `most` letters, at the last sentence that fits, or the last
+/// word.
+pub fn cut(all: String, most: usize) -> String {
+    if all.len() <= most { return all.copy() }
+    var head = String()
+    for w in all.split_whitespace() {
+        if head.len() + w.len() + 1 > most { break }
+        head = if head.len() == 0 { w.copy() } else { "{head} {w}" }
+    }
+    let stop = head.find_last(". ") ?? 0
+    return if stop > 0 { head[0..stop + 1].copy() } else { head }
+}
 
 /// A reply's Markdown as words to say: no code, no marks, a link as its words.
 pub fn speakable(markdown: String) -> String {
@@ -646,15 +1060,7 @@ pub fn speakable(markdown: String) -> String {
         for mark in ["**", "__", "`", "*", "_", "~~"] { spoken = spoken.replace(mark, "") }
         out.push(spoken.trim().copy())
     }
-    let all = out.join(" ")
-    if all.len() <= SPOKEN_MOST { return all }
-    var head = String()
-    for w in all.split_whitespace() {
-        if head.len() + w.len() + 1 > SPOKEN_MOST { break }
-        head = if head.len() == 0 { w.copy() } else { "{head} {w}" }
-    }
-    let stop = head.find_last(". ") ?? 0
-    return if stop > 0 { head[0..stop + 1].copy() } else { head }
+    return cut(out.join(" "), SPOKEN_MOST)
 }
 
 // --- Audio ---
@@ -763,20 +1169,23 @@ pub fn to_wav(pcm: List<u8>) -> List<u8> {
 @test
 fn settings_start_with_nothing_picked() {
     let s = settings(Json.Null)
-    assert("{s}" == #"{"dictation":{"engine":"","language":""},"speech":{"engine":"","voice":"","voice_name":"","speed":1.0,"read_aloud":"never"},"live":{"barge_in":true,"pause":0.8,"captions":true}}"#)
-    // What isn't one of the choices is the default.
-    let odd = settings(parse(#"{"dictation":{"engine":"siri","language":"xx"},"speech":{"engine":"openai","speed":1.13,"read_aloud":"sometimes"}}"#)!)
+    assert("{s}" == #"{"dictation":{"engine":"","language":"","models":{"elevenlabs":"scribe_v3_live","deepgram":"nova-3","openai":"gpt-live-transcribe","groq":"whisper-large-v3-turbo"}},"speech":{"engine":"","voice":"","voice_name":"","speed":1.0,"read_aloud":"never","models":{"elevenlabs":"eleven_v4_turbo","fish":"drama-3","openai":"gpt-realtime-2.1-mini","deepgram":"flux"}},"live":{"barge_in":true,"pause":0.8,"captions":true}}"#)
+    // What isn't one of the choices is the default, a model that's gone too.
+    let odd = settings(parse(#"{"dictation":{"engine":"siri","language":"xx","models":{"deepgram":"nova-2","groq":"whisper-large-v3"}},"speech":{"engine":"openai","speed":1.13,"read_aloud":"sometimes"}}"#)!)
     assert(str_at(at(odd.copy(), "dictation"), "engine") == some(String("")) and str_at(at(odd.copy(), "speech"), "read_aloud") == some(String("never")))
+    assert("{at(at(odd.copy(), "dictation"), "models")}" == #"{"elevenlabs":"scribe_v3_live","deepgram":"nova-3","openai":"gpt-live-transcribe","groq":"whisper-large-v3"}"#)
     assert(at(at(odd, "speech"), "speed") == Json.Float(1.1))
 }
 
 @test
 fn changes_are_checked() {
     let s = apply(Json.Null, parse(#"{"dictation":{"engine":"deepgram","language":"no"},"speech":{"engine":"openai","voice":"Cedar","speed":0.9,"read_aloud":"always"}}"#)!)!
-    assert("{s}" == #"{"dictation":{"engine":"deepgram","language":"no"},"speech":{"engine":"openai","voice":"cedar","voice_name":"Cedar","speed":0.9,"read_aloud":"always"},"live":{"barge_in":true,"pause":0.8,"captions":true}}"#)
+    assert("{at(s.copy(), "speech")}".starts_with(#"{"engine":"openai","voice":"cedar","voice_name":"Cedar","speed":0.9,"read_aloud":"always","models":"#))
     assert(match apply(Json.Null, parse(#"{"dictation":{"engine":"siri"}}"#)!) { ok(_) => false, err(_) => true })
     assert(match apply(Json.Null, parse(#"{"dictation":{"language":"klingon"}}"#)!) { ok(_) => false, err(_) => true })
     assert(match apply(s.copy(), parse(#"{"speech":{"voice":"robot"}}"#)!) { ok(_) => false, err(_) => true })
+    // OpenAI's Realtime voices are ten: Fable isn't one.
+    assert(match apply(s.copy(), parse(#"{"speech":{"voice":"fable"}}"#)!) { ok(_) => false, err(e) => e.contains("Marin, Cedar, Alloy") })
     assert(match apply(s.copy(), parse(#"{"speech":{"speed":9}}"#)!) { ok(_) => false, err(_) => true })
     // Another speech engine starts on its own default voice.
     let fish = apply(s, parse(#"{"speech":{"engine":"fish"}}"#)!)!
@@ -784,56 +1193,120 @@ fn changes_are_checked() {
 }
 
 @test
+fn each_service_keeps_its_model() {
+    let s = apply(Json.Null, parse(#"{"dictation":{"engine":"deepgram","model":"Flux English"}}"#)!)!
+    assert(model_of(at(s.copy(), "dictation"), String("dictation"), String("deepgram")) == "flux-general-en")
+    // Another engine, then back: each keeps its own.
+    let groq = apply(s, parse(#"{"dictation":{"engine":"groq","model":"whisper-large-v3"}}"#)!)!
+    let back = apply(groq, parse(#"{"dictation":{"engine":"deepgram"}}"#)!)!
+    let d = at(back.copy(), "dictation")
+    assert(model_of(d.copy(), String("dictation"), String("deepgram")) == "flux-general-en" and model_of(d, String("dictation"), String("groq")) == "whisper-large-v3")
+    // "" is the newest again; a model that isn't one, or one before an engine, is refused.
+    let newest = apply(back.copy(), parse(#"{"dictation":{"model":""}}"#)!)!
+    assert(model_of(at(newest, "dictation"), String("dictation"), String("deepgram")) == "nova-3")
+    assert(match apply(back.copy(), parse(#"{"dictation":{"model":"nova-2"}}"#)!) { ok(_) => false, err(e) => e == "Deepgram has no model nova-2. Its models are nova-3, flux-general-en, flux-general-multi." })
+    assert(match apply(Json.Null, parse(#"{"speech":{"model":"v4"}}"#)!) { ok(_) => false, err(e) => e == "Pick a speech engine before its model." })
+    assert(match apply(Json.Null, parse(#"{"dictation":{"engine":"whisper","model":"tiny"}}"#)!) { ok(_) => false, err(_) => true })
+    // Deepgram's voices are each model's: another model starts on its own first voice.
+    let dg = apply(Json.Null, parse(#"{"speech":{"engine":"deepgram","voice":"kit"}}"#)!)!
+    assert(str_at(at(dg.copy(), "speech"), "voice") == some(String("flux-kit-en")) and str_at(at(dg.copy(), "speech"), "voice_name") == some(String("Kit")))
+    let aura = apply(dg, parse(#"{"speech":{"model":"aura-2"}}"#)!)!
+    assert(str_at(at(aura.copy(), "speech"), "voice") == some(String("")))
+    assert(str_at(at(apply(aura, parse(#"{"speech":{"voice":"Helena"}}"#)!)!, "speech"), "voice") == some(String("aura-2-helena-en")))
+}
+
+@test
 fn tiles_say_what_each_engine_is() {
-    let t = tiles(String("dictation"), [String("groq")], String("groq"))
-    assert("{t}".starts_with(#"[{"id":"elevenlabs","name":"ElevenLabs Scribe","line":"Words as you say them","icon":"cloud","icon_svg":"<svg "#))
-    assert("{t}".contains(#""mark":"elevenlabs","streams":true,"key":true,"have":false,"in_use":false}"#))
-    assert("{t}".contains(#""mark":"groq","streams":false,"key":true,"have":true,"in_use":true}"#))
+    let kept = at(apply(Json.Null, parse(#"{"dictation":{"engine":"groq","model":"whisper-large-v3"}}"#)!)!, "dictation")
+    let t = tiles(String("dictation"), [String("groq")], kept, String("groq"))
+    assert("{t}".starts_with(#"[{"id":"elevenlabs","name":"ElevenLabs","line":"Scribe v3 Live","icon":"cloud","icon_svg":"<svg "#))
+    assert("{t}".contains(#""mark":"elevenlabs","streams":true,"key":true,"have":false,"in_use":false,"models":[{"id":"scribe_v3_live","name":"Scribe v3 Live","line":"Words as you say them"},{"id":"scribe_v2_realtime","name":"Scribe v2 Realtime","line":"The model before"}],"picked":"scribe_v3_live"}"#))
+    assert("{t}".contains(#""line":"Whisper large v3","icon":"cloud""#) and "{t}".contains(#""in_use":true,"models":[{"id":"whisper-large-v3-turbo""#) and "{t}".contains(#""picked":"whisper-large-v3"}"#))
     if let Json.Array(each) = t {
-        assert(str_at(each[3].copy(), "icon_svg") == mark_svg(String("groq")))
+        assert(each.len() == 8 and str_at(each[3].copy(), "icon_svg") == mark_svg(String("groq")))
     }
     let l = listed(Json.Null, [String("openai")])
     assert("{at(l.copy(), "keys")}" == #"{"elevenlabs":false,"deepgram":false,"openai":true,"groq":false,"fish":false}"#)
-    assert("{at(at(l, "engines"), "speech")}".contains(#"{"id":"openai","name":"OpenAI","line":"gpt-4o-mini-tts, 13 voices"#))
+    assert("{at(at(l, "engines"), "speech")}".contains(#"{"id":"openai","name":"OpenAI","line":"gpt-realtime-2.1-mini""#))
 }
 
 @test
 fn each_service_is_asked_its_own_way() {
-    assert(stream_url(String("deepgram"), String(""), none) == "wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=24000&channels=1&interim_results=true&smart_format=true&punctuate=true&language=multi")
-    assert(stream_url(String("elevenlabs"), String("no"), some(String("http://127.0.0.1:9/"))) == "ws://127.0.0.1:9/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&audio_format=pcm_24000&commit_strategy=vad&language_code=no")
-    assert(stream_url(String("openai"), String(""), none) == "wss://api.openai.com/v1/realtime?intent=transcription")
-    assert(stream_hello(String("openai"), String("en"))[0] == #"{"type":"session.update","session":{"type":"transcription","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{"model":"gpt-4o-transcribe","language":"en"},"turn_detection":{"type":"server_vad","silence_duration_ms":500}}}}}"#)
+    assert(stream_url(String("deepgram"), String("nova-3"), String(""), none) == "wss://api.deepgram.com/v1/listen?model=nova-3&encoding=linear16&sample_rate=24000&channels=1&interim_results=true&smart_format=true&punctuate=true&language=multi")
+    assert(stream_url(String("deepgram"), String("flux-general-en"), String("no"), none) == "wss://api.deepgram.com/v2/listen?model=flux-general-en&encoding=linear16&sample_rate=24000")
+    assert(stream_url(String("deepgram"), String("flux-general-multi"), String("de"), none) == "wss://api.deepgram.com/v2/listen?model=flux-general-multi&encoding=linear16&sample_rate=24000&language_hint=de")
+    assert(stream_end(String("deepgram"), String("flux-general-en"))[0] == #"{"type":"ForceEndTurn"}"#)
+    assert(stream_url(String("elevenlabs"), String("scribe_v3_live"), String("no"), some(String("http://127.0.0.1:9/"))) == "ws://127.0.0.1:9/v1/speech-to-text/realtime?model_id=scribe_v3_live&audio_format=pcm_24000&commit_strategy=vad&language_code=no")
+    assert(stream_url(String("openai"), String("gpt-live-transcribe"), String(""), none) == "wss://api.openai.com/v1/realtime?intent=transcription")
+    assert(stream_hello(String("openai"), String("gpt-live-transcribe"), String("en"))[0] == #"{"type":"session.update","session":{"type":"transcription","audio":{"input":{"format":{"type":"audio/pcm","rate":24000},"transcription":{"model":"gpt-live-transcribe","languages":["en"]},"turn_detection":null}}}}"#)
+    assert(stream_hello(String("openai"), String("gpt-realtime-whisper"), String("no"))[0].contains(#""transcription":{"model":"gpt-realtime-whisper","language":"no"}"#))
     assert("{auth(String("deepgram"), String("k"))[0].value}" == "Token k" and auth(String("elevenlabs"), String("k"))[0].name == "xi-api-key" and auth(String("groq"), String("k"))[0].value == "Bearer k")
     let (binary, _) = stream_audio(String("deepgram"), [1u8, 2])
     let (_, eleven) = stream_audio(String("elevenlabs"), [1u8, 2])
     assert(binary and eleven == #"{"message_type":"input_audio_chunk","audio_base_64":"AQI=","commit":false,"sample_rate":24000}"#)
-    let (u, _, body) = speech(String("elevenlabs"), String("k"), String("Hi."), String("v 1"), 1.1, none)
-    assert(u == "https://api.elevenlabs.io/v1/text-to-speech/v%201?output_format=pcm_24000" and String.from_utf8(body) == some(String(#"{"text":"Hi.","model_id":"eleven_flash_v2_5","voice_settings":{"speed":1.1}}"#)))
-    let (fu, fh, _) = speech(String("fish"), String("k"), String("Hi."), String("abc"), 1.0, none)
-    assert(fu == "https://api.fish.audio/v1/tts" and fh[2].name == "model")
+    let (u, _, body) = speech(String("elevenlabs"), String("k"), String("Hi."), String("v 1"), 1.1, String("eleven_multilingual_v2"), none)
+    assert(u == "https://api.elevenlabs.io/v1/text-to-speech/v%201?output_format=pcm_24000" and String.from_utf8(body) == some(String(#"{"text":"Hi.","model_id":"eleven_multilingual_v2","voice_settings":{"speed":1.1}}"#)))
+    let (fu, fh, _) = speech(String("fish"), String("k"), String("Hi."), String("abc"), 1.0, String("drama-3"), none)
+    assert(fu == "https://api.fish.audio/v1/tts" and fh[2].name == "model" and fh[2].value == "drama-3")
+    let (du, _, db) = speech(String("deepgram"), String("k"), String("Hi."), String("Kit"), 1.1, String("flux"), none)
+    assert(du == "https://api.deepgram.com/v2/speak?model=flux-kit-en&encoding=linear16&sample_rate=24000&speed=1.1" and String.from_utf8(db) == some(String(#"{"text":"Hi."}"#)))
+    let (au, _, _) = speech(String("deepgram"), String("k"), String("Hi."), String(""), 1.0, String("aura-2"), none)
+    assert(au == "https://api.deepgram.com/v1/speak?model=aura-2-thalia-en&encoding=linear16&sample_rate=24000&container=none")
+    // ElevenLabs' v4 and OpenAI's speech stream over a socket.
+    assert(speech_socket(String("elevenlabs"), String("eleven_v4_turbo")) and not speech_socket(String("elevenlabs"), String("eleven_v3")) and speech_socket(String("openai"), String("gpt-realtime-2.1-mini")) and not speech_socket(String("deepgram"), String("flux")))
+    assert(speech_url(String("elevenlabs"), String("eleven_v4_turbo"), none) == "wss://api.elevenlabs.io/v1/text-to-dialogue/stream-input?model_id=eleven_v4_turbo&output_format=pcm_24000")
+    assert(speech_url(String("openai"), String("gpt-realtime-2.1-mini"), none) == "wss://api.openai.com/v1/realtime?model=gpt-realtime-2.1-mini")
+    let el = speech_hello(String("elevenlabs"), String("eleven_v4_turbo"), String("Hi."), String("v1"), 1.0)
+    assert(el.len() == 3 and el[0] == #"{"voices":["v1"]}"# and el[1] == #"{"inputs":[{"text":"Hi.","voice_id":"v1"}]}"# and el[2] == #"{"close_socket":true}"#)
+    let oa = speech_hello(String("openai"), String("gpt-realtime-2.1-mini"), String("Hi."), String("Nova"), 1.1)
+    assert(oa.len() == 3 and oa[0].contains(#""output_modalities":["audio"]"#) and oa[0].contains(#""output":{"format":{"type":"audio/pcm","rate":24000},"voice":"marin","speed":1.1}"#) and oa[1].contains(#""content":[{"type":"input_text","text":"Hi."}]"#) and oa[2] == #"{"type":"response.create"}"#)
 }
 
 @test
 fn what_a_stream_says_is_read() {
-    let partial = heard(String("deepgram"), String(#"{"type":"Results","is_final":false,"channel":{"alternatives":[{"transcript":"hello wor"}]}}"#))
-    let done = heard(String("deepgram"), String(#"{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"hello world"}]}}"#))
+    let nova = String("nova-3")
+    let partial = heard(String("deepgram"), nova.copy(), String(#"{"type":"Results","is_final":false,"channel":{"alternatives":[{"transcript":"hello wor"}]}}"#))
+    let done = heard(String("deepgram"), nova, String(#"{"type":"Results","is_final":true,"channel":{"alternatives":[{"transcript":"hello world"}]}}"#))
     if let Heard.Partial(p) = partial { assert(p == "hello wor") } else { panic("not a partial") }
     if let Heard.Final(f) = done { assert(f == "hello world") } else { panic("not final") }
-    if let Heard.Final(f) = heard(String("elevenlabs"), String(#"{"message_type":"committed_transcript","text":"hej"}"#)) { assert(f == "hej") } else { panic("not final") }
-    if let Heard.Delta(d) = heard(String("openai"), String(#"{"type":"conversation.item.input_audio_transcription.delta","item_id":"i","delta":"Hel"}"#)) { assert(d == "Hel") } else { panic("not a delta") }
-    if let Heard.Failed(w) = heard(String("elevenlabs"), String(#"{"message_type":"auth_error","error":"bad key"}"#)) { assert(w == "bad key") } else { panic("not failed") }
-    if let Heard.Nothing = heard(String("openai"), String(#"{"type":"error","error":{"code":"input_audio_buffer_commit_empty","message":"empty"}}"#)) {} else { panic("an empty commit failed") }
+    let flux_model = String("flux-general-en")
+    if let Heard.Partial(p) = heard(String("deepgram"), flux_model.copy(), String(#"{"type":"TurnInfo","event":"Update","turn_index":0,"transcript":"hello"}"#)) { assert(p == "hello") } else { panic("not a partial") }
+    if let Heard.Final(f) = heard(String("deepgram"), flux_model.copy(), String(#"{"type":"TurnInfo","event":"EndOfTurn","turn_index":0,"transcript":"hello there"}"#)) { assert(f == "hello there") } else { panic("not final") }
+    if let Heard.Nothing = heard(String("deepgram"), flux_model.copy(), String(#"{"type":"Connected","request_id":"r"}"#)) {} else { panic("Connected isn't words") }
+    if let Heard.Failed(w) = heard(String("deepgram"), flux_model, String(#"{"type":"Error","code":"BAD","description":"no"}"#)) { assert(w == "no") } else { panic("not failed") }
+    let scribe = String("scribe_v3_live")
+    if let Heard.Final(f) = heard(String("elevenlabs"), scribe.copy(), String(#"{"message_type":"committed_transcript","text":"hej"}"#)) { assert(f == "hej") } else { panic("not final") }
+    if let Heard.Delta(d) = heard(String("openai"), String("gpt-live-transcribe"), String(#"{"type":"conversation.item.input_audio_transcription.delta","item_id":"i","delta":"Hel"}"#)) { assert(d == "Hel") } else { panic("not a delta") }
+    if let Heard.Failed(w) = heard(String("elevenlabs"), scribe, String(#"{"message_type":"auth_error","error":"bad key"}"#)) { assert(w == "bad key") } else { panic("not failed") }
+    if let Heard.Nothing = heard(String("openai"), String("gpt-live-transcribe"), String(#"{"type":"error","error":{"code":"input_audio_buffer_commit_empty","message":"empty"}}"#)) {} else { panic("an empty commit failed") }
     assert(joined(String("Hello"), String(" world ")) == "Hello world" and joined(String(""), String("Hi")) == "Hi" and joined(String("Hi"), String("")) == "Hi")
+}
+
+@test
+fn what_a_speech_socket_says_is_read() {
+    if let Said.Audio(a) = speech_heard(String("elevenlabs"), String(#"{"audio":"AQI=","alignment":null}"#)) { assert(a == [1u8, 2]) } else { panic("no audio") }
+    if let Said.Done = speech_heard(String("elevenlabs"), String(#"{"is_final":true}"#)) {} else { panic("not done") }
+    if let Said.Nothing = speech_heard(String("elevenlabs"), String(#"{"is_final_audio_for_turn":true}"#)) {} else { panic("a turn's end isn't the end") }
+    if let Said.Failed(w) = speech_heard(String("elevenlabs"), String(#"{"message":"Model not supported","error":"invalid_request","code":1008}"#)) { assert(w == "Model not supported") } else { panic("not failed") }
+    if let Said.Audio(a) = speech_heard(String("openai"), String(#"{"type":"response.output_audio.delta","delta":"AwQ="}"#)) { assert(a == [3u8, 4]) } else { panic("no audio") }
+    if let Said.Done = speech_heard(String("openai"), String(#"{"type":"response.done","response":{"status":"completed"}}"#)) {} else { panic("not done") }
+    if let Said.Failed(w) = speech_heard(String("openai"), String(#"{"type":"error","error":{"message":"bad"}}"#)) { assert(w == "bad") } else { panic("not failed") }
+    // Deepgram's WAV comes as its PCM.
+    var wav = to_wav([1u8, 2, 3, 4])
+    assert(pcm_of(wav.copy()) == [1u8, 2, 3, 4] and pcm_of([9u8, 9]) == [9u8, 9])
+    wav.truncate(44)
+    assert(pcm_of(wav).len() == 0)
 }
 
 @test
 fn voices_are_read_from_each_answer() {
     let eleven = voices(String("elevenlabs"), String(#"{"voices":[{"voice_id":"v1","name":"Rachel"},{"voice_id":"v2","name":"Adam"}]}"#).to_bytes())
     let fish = voices(String("fish"), String(#"{"total":1,"items":[{"_id":"f1","title":"Narrator"}]}"#).to_bytes())
-    assert(eleven.len() == 2 and str_at(fish[0].copy(), "name") == some(String("Narrator")) and voices(String("openai"), List<u8>()).len() == 13)
+    assert(eleven.len() == 2 and str_at(fish[0].copy(), "name") == some(String("Narrator")) and voices(String("openai"), List<u8>()).len() == 10)
     assert(str_at(pick_voice(eleven.copy(), String("adam")) ?? Json.Null, "id") == some(String("v2")))
     assert(str_at(pick_voice(eleven, String("")) ?? Json.Null, "id") == some(String("v1")))
     assert(pick_voice(List<Json>(), String("x")) == none)
+    assert((fixed_voices(String("deepgram"), String("flux")) ?? List<Json>()).len() == 36 and (fixed_voices(String("deepgram"), String("aura-2")) ?? List<Json>()).len() == 41 and fixed_voices(String("fish"), String("drama-3")) == none)
     assert(batch_text(200, String(#"{"text":" hello "}"#).to_bytes())! == "hello")
     assert(match batch_text(401, String(#"{"error":{"message":"Invalid API Key"}}"#).to_bytes()) { ok(_) => false, err(_) => true })
 }
@@ -859,17 +1332,25 @@ fn audio_comes_to_24k_mono() {
 
 @test
 fn models_on_the_device_need_no_key() {
-    let t = tiles(String("dictation"), List<String>(), String("parakeet"))
-    assert("{t}".contains(#"{"id":"parakeet","name":"Parakeet v2","line":"English, 660 MB","icon":"laptop","icon_svg":"<svg "#))
+    let t = tiles(String("dictation"), List<String>(), Json.Null, String("parakeet-ultra"))
+    assert("{t}".contains(#"{"id":"parakeet-ultra","name":"Parakeet Ultra","line":"25 languages, 670 MB","icon":"laptop","icon_svg":"<svg "#))
     assert("{t}".contains(#""mark":"nvidia","streams":true,"key":false,"have":true,"in_use":true}"#))
-    // Kokoro's makers have no mark, so its tile has the Laptop.
-    assert("{tiles(String("speech"), List<String>(), String())}".contains(#"{"id":"kokoro","name":"Kokoro","line":"English and Chinese, 350 MB","icon":"laptop","streams":false"#))
-    assert(match apply(Json.Null, parse(#"{"dictation":{"engine":"siri"}}"#)!) { ok(_) => false, err(e) => e.contains("groq, parakeet and whisper") })
+    assert("{t}".contains(#"{"id":"parakeet","name":"Parakeet v2","line":"English, 660 MB""#))
+    // Kokoro's, Supertone's and Kyutai's makers have no mark here, so their tiles have the Laptop.
+    let spoken = "{tiles(String("speech"), List<String>(), Json.Null, String())}"
+    assert(spoken.contains(#"{"id":"kokoro-v1.1","name":"Kokoro v1.1","line":"Chinese, 3 English voices, 365 MB","icon":"laptop","streams":false"#) and spoken.contains(#"{"id":"pocket","name":"Pocket TTS""#))
+    assert(match apply(Json.Null, parse(#"{"dictation":{"engine":"siri"}}"#)!) { ok(_) => false, err(e) => e.contains("groq, parakeet-ultra, parakeet-v3, whisper and parakeet") })
     // Kokoro's voices go by id, its name kept for the picker.
     let k = apply(Json.Null, parse(#"{"speech":{"engine":"kokoro","voice":"emma, british"}}"#)!)!
     assert(str_at(at(k.copy(), "speech"), "voice") == some(String("bf_emma")) and str_at(at(k.copy(), "speech"), "voice_name") == some(String("Emma, British")))
-    assert(kokoro_speaker(String("bf_emma")) == 21 and kokoro_speaker(String("")) == 3)
+    assert(local_voice(String("kokoro"), String("bf_emma")).0 == 21 and local_voice(String("kokoro"), String("")).0 == 3)
     assert(match apply(k, parse(#"{"speech":{"voice":"robot"}}"#)!) { ok(_) => false, err(_) => true })
+    // Kokoro v1.1's speakers in their order; Supertonic's styles; Pocket's recordings.
+    let k11 = fixed_voices(String("kokoro-v1.1"), String()) ?? List<Json>()
+    assert(k11.len() == 103 and str_at(k11[3].copy(), "id") == some(String("zf_001")) and str_at(k11[58].copy(), "id") == some(String("zm_009")) and str_at(k11[102].copy(), "name") == some(String("Man 100, Chinese")))
+    assert(local_voice(String("kokoro-v1.1"), String("bf_vale")).0 == 2 and local_voice(String("kokoro-v1.1"), String("zm_100")).0 == 102 and local_voice(String("kokoro-v1.1"), String("")).0 == 0)
+    assert(local_voice(String("supertonic"), String("Man 1")).0 == 5)
+    assert(local_voice(String("pocket"), String("loona")).1 == "test_wavs/loona.wav" and local_voice(String("pocket"), String("")).1 == "test_wavs/bria.wav")
     assert(voices(String("kokoro"), List<u8>()).len() == 36)
 }
 
@@ -883,6 +1364,7 @@ fn the_models_hear_16k_floats() {
 @test
 fn a_reply_is_said_as_words() {
     assert(speakable(String("# Done\n\nI fixed **the build** in [CI](https://x.y/z).\n```\ncode\n```\n- one\n- two")) == "Done I fixed the build in CI. one two")
+    assert(cut(String("One two. Three four five."), 12) == "One two.")
 }
 
 @test
@@ -893,6 +1375,10 @@ fn each_engine_has_its_makers_mark() {
         assert(svg.starts_with("<svg ") and svg.contains("fill=\"currentColor\"") and not svg.contains("#"))
     }
     assert(mark_svg(String("nvidia")) != none and mark_svg(String("siri")) == none)
+    // Each service has its models, and a model on the device none.
+    for e in ENGINES {
+        assert((models_of(String(e.kind), String(e.id)).len() == 0) == e.on_device)
+    }
 }
 
 @test
@@ -904,4 +1390,13 @@ fn live_settings_are_checked() {
     // A change to speech keeps live as it was.
     let kept = apply(s, parse(#"{"speech":{"read_aloud":"live"}}"#)!)!
     assert(bool_at(at(kept, "live"), "barge_in") == some(false))
+}
+
+@test
+fn a_cards_models_are_kept() {
+    // A voice_setup card's settings have every service's model, which Add sets.
+    let card = at(apply(Json.Null, parse(#"{"dictation":{"engine":"deepgram","model":"flux-general-multi"}}"#)!)!, "dictation")
+    let set = apply(Json.Null, Obj.new().j("dictation", card).done())!
+    assert(model_of(at(set, "dictation"), String("dictation"), String("deepgram")) == "flux-general-multi")
+    assert(match apply(Json.Null, parse(#"{"speech":{"models":{"fish":"s9"}}}"#)!) { ok(_) => false, err(_) => true })
 }
