@@ -1,0 +1,205 @@
+module tests.protocol.sounds
+
+// loom's sounds through the core against a real instance (PLAN.md, "Sounds";
+// shared/sounds.calx): the core says the prefs back whole; a reply while the app is
+// looked at sounds with core.sound, but not while its chat is in front, nor for an
+// agent muted with agent.mute, which every device hears of; a reply while no one looks
+// is a notification that names its sound; Message sent sounds once its switch is on;
+// and a cue's play button sounds whatever the switches say.
+//
+// Run it from the repository's root:
+//
+//     calx tests/protocol/sounds.calx
+import std.env
+import std.fs
+import std.json.{Json, parse}
+import std.net.{Waker}
+import std.process.{Child, Command, Stdio, exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import core.cache.{Cache}
+import core.conn.{Conn, ToApp}
+
+const WAIT: u64 = 120000    // the first start builds the server
+
+fn calx() -> String {
+    return env.variable(String("CALX")) ?? String("calx")
+}
+
+fn serve(data: String) -> Child ! Error {
+    let cmd = Command.new(calx()).arg(String("server/main.calx")).arg(String("serve")).arg(String("--port")).arg(String("0")).arg(String("--data")).arg(data).arg(String("--test-fast-hashes")).arg(String("--allow-root"))
+    return try cmd.stdout(Stdio.Pipe).own_group().spawn()
+}
+
+fn check(passed: bool, what: str) ! Error {
+    if not passed { fail "failed: {what}" }
+    println("ok    {what}")
+}
+
+// The app's side of a running connection, as in tests/protocol/core_conn.calx.
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<ToApp>
+    wakers: Receiver<Waker>
+    waker: Waker?
+    thread: Thread?
+}
+
+impl App {
+    fn start(base: String, service: String, cache: String) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<ToApp>()
+        let wakers = Receiver<Waker>()
+        var conn = Conn.new(some("http://{base}"), none, service.copy(), try Cache.open(cache.copy()), inbox, from_core.sender())
+        conn.wakers_to = some(wakers.sender())
+        conn.tz = some(String("UTC"))
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, wakers: wakers, waker: none, thread: some(t) }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+        while let w = self.wakers.next() { self.waker = some(w) }
+        if let w = self.waker { w.wake() }
+    }
+
+    fn cmd(mut self, id: str, name: str, args: Json) -> Json ! Error {
+        self.send(Obj.new().s("t", String("cmd")).s("id", String(id)).s("name", String(name)).j("args", args).done())
+        return at(try self.until("result", "id", String(id), 10000), "value")
+    }
+
+    // Reads what the core says until a frame whose `t` is `t` and, if `field` isn't
+    // empty, whose `field` is `value`. Fails after `ms`.
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    // Sends `text` to `agent` and reads until its run finishes: the sounds the core
+    // told of meanwhile, by their cue, and each notification's sound.
+    fn reply(mut self, agent: String, text: str) -> (List<String>, List<String>) ! Error {
+        self.send(Obj.new().s("t", String("send")).s("agent", agent).s("text", String(text)).done())
+        var heard = List<String>()
+        var notified = List<String>()
+        loop {
+            let got = unsafe { self.from_core.wait_for(20000 * 1000000) } else { fail "the reply didn't finish" }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            let t = str_at(f.copy(), "t") ?? String()
+            if t == "core.sound" { heard.push(str_at(f.copy(), "cue") ?? String()) }
+            if t == "core.notify" { notified.push(str_at(f.copy(), "sound") ?? String("none")) }
+            if t == "event" and str_at(f, "kind") == some(String("run.finished")) { break }
+        }
+        return (heard, notified)
+    }
+
+    fn stop(mut self) {
+        self.send(Obj.new().s("t", String("core.stop")).done())
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn run(server: Child) ! Error {
+    let serving = server.wait_for_line(String("loom: serving"), WAIT) else {
+        fail "the server didn't start"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    let code_line = server.wait_for_line(String("setup code:"), 10000) else {
+        fail "the server didn't print a setup code"
+    }
+    let code = code_line[12..].trim().copy()
+    var random = Random.system()
+    let service = "loom-test-{random.next_u32()}"
+    var app = try App.start(base, service, "{try fs.temp_dir()}/core.db")
+    _ = try app.until("core.conn", "state", String("signed_out"), 5000)
+    app.send(Obj.new().s("t", String("setup")).s("id", String("l_1")).s("code", code).s("username", String("elliot")).s("password", String("correct horse")).j("device", Obj.new().s("name", String("Desk PC")).s("kind", String("windows")).done()).done())
+    _ = try app.until("core.login", "id", String("l_1"), 10000)
+    _ = try app.until("synced", "", String(), 20000)
+
+    // --- The prefs ---
+    app.send(Obj.new().s("t", String("app.sounds")).j("sounds", Obj.new().s("mode", String("loom")).done()).done())
+    let whole = at(try app.until("core.sounds", "", String(), 5000), "sounds")
+    try check(bool_at(at(whole.copy(), "cues"), "reply") == some(true) and bool_at(at(whole.copy(), "cues"), "sent") == some(false) and str_at(at(whole, "quiet"), "from") == some(String("22:00")), "the core says the prefs back whole, with the defaults")
+
+    let agent = str_at(at(try app.cmd("q_1", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("You are a test.")).done()), "agent"), "id") ?? String()
+
+    // --- While the app is looked at ---
+    let (first, _) = try app.reply(agent.copy(), "hello")
+    try check(first == [String("reply")], "a reply while the app is looked at, its chat not in front, sounds as Reply arrived")
+    app.send(Obj.new().s("t", String("core.get")).s("id", String("g_1")).s("what", String("conversations")).done())
+    let Json.Array(convs) = at(try app.until("core.data", "id", String("g_1"), 5000), "items") else { fail "no conversations" }
+    let chat = str_at(convs[0].copy(), "id") ?? String()
+    app.send(Obj.new().s("t", String("app.front")).s("conversation", chat.copy()).done())
+    let (in_front, _) = try app.reply(agent.copy(), "again")
+    try check(in_front.len() == 0, "and none while its chat is in front")
+    app.send(Obj.new().s("t", String("app.front")).s("conversation", String()).done())
+
+    // --- Muted ---
+    let muted = at(try app.cmd("q_2", "agent.mute", Obj.new().s("agent", agent.copy()).done()), "agent")
+    try check(int_at(muted, "muted") != none, "agent.mute keeps when the agent was muted")
+    // agent.updated told the core, whose cache has it.
+    app.send(Obj.new().s("t", String("core.get")).s("id", String("g_2")).s("what", String("agents")).done())
+    let agents = at(try app.until("core.data", "id", String("g_2"), 5000), "items")
+    try check("{agents}".contains(#""muted":"#), "and every device hears of it")
+    let (quiet, _) = try app.reply(agent.copy(), "muted now")
+    try check(quiet.len() == 0, "a muted agent's reply makes no sound")
+    let unmuted = at(try app.cmd("q_3", "agent.mute", Obj.new().s("agent", agent.copy()).b("muted", false).done()), "agent")
+    try check(at(unmuted, "muted") == Json.Null, "agent.mute with false unmutes it")
+    let (again, _) = try app.reply(agent.copy(), "unmuted")
+    try check(again == [String("reply")], "and its replies sound again")
+
+    // --- While no one looks ---
+    app.send(Obj.new().s("t", String("app.active")).b("active", false).done())
+    let (behind, notified) = try app.reply(agent.copy(), "away")
+    try check(behind.len() == 0 and notified == [String("loom-reply")], "a reply while no one looks is a notification that names its sound, with no sound beside it")
+    app.send(Obj.new().s("t", String("app.sounds")).j("sounds", Obj.new().s("mode", String("system")).done()).done())
+    _ = try app.until("core.sounds", "", String(), 5000)
+    let (_, system) = try app.reply(agent.copy(), "system")
+    try check(system == [String("default")], "with the system's sound, the notification has it")
+    app.send(Obj.new().s("t", String("app.active")).b("active", true).done())
+
+    // --- The person's own ---
+    app.send(Obj.new().s("t", String("app.sounds")).j("sounds", Obj.new().s("mode", String("loom")).j("cues", Obj.new().b("sent", true).done()).done()).done())
+    _ = try app.until("core.sounds", "", String(), 5000)
+    let (sent, _) = try app.reply(agent.copy(), "sent")
+    try check(sent.contains(String("sent")), "Message sent sounds once its switch is on")
+    app.send(Obj.new().s("t", String("sound.try")).s("cue", String("routine")).done())
+    let tried = try app.until("core.sound", "cue", String("routine"), 5000)
+    try check(str_at(tried, "file") == some(String("loom-routine")), "a cue's play button sounds it, though its switch is off")
+    app.send(Obj.new().s("t", String("app.dictation")).b("on", false).done())
+    let dictation = try app.until("core.sound", "cue", String("dictation"), 5000)
+    try check(str_at(dictation, "file") == some(String("loom-dictation-off")), "dictation going off sounds with its own file")
+    app.stop()
+}
+
+fn main() ! Error {
+    let data = try fs.temp_dir()
+    let agent = try fs.absolute(String("tests/fake_agent/main.calx"))
+    let added = try Command.new(calx()).arg(String("server/main.calx")).arg(String("acp")).arg(String("add")).arg(String("fake")).arg(calx()).arg(agent).arg(String("--data")).arg(data.copy()).output()
+    if not added.status.success() { fail "loom acp add failed: {added.error_text()}" }
+    var server = try serve(data)
+    let failure: String? = match run(server) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    server.kill_tree()
+    _ = server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nsounds: all good")
+}

@@ -5,7 +5,7 @@ module server.push
 // phone. It runs on a thread of its own, so a slow APNs never holds up the
 // instance, and tells the instance which tokens APNs says are gone.
 import std.bytes.{base64, base64_url, from_base64, from_base64_url, from_hex}
-import std.crypto.{Ed25519Key, P256Key}
+import std.crypto.{Ed25519Key, P256Key, X25519Key}
 import std.hash.{sha256}
 import std.http.{Header, Version, post}
 import std.json.{Json, parse}
@@ -39,6 +39,7 @@ pub struct Phone {
     pub token: String
     pub env: String    // production or development
     pub box: String    // for a phone that takes push through the relay: its X25519 key, base64, which each notification is sealed for; "" for one that doesn't
+    pub sound: String    // its `aps.sound`, as its sound prefs have it (shared/sounds.calx): a bundled file, `default`, or "" for none
 }
 
 // A phone APNs says doesn't take push with this token any more.
@@ -69,7 +70,8 @@ impl Task for Worker {
 impl Worker {
     fn send(w: mut Worker, job: Job) {
         for phone in job.to {
-            let sent = if phone.box.len() > 0 { relayed(job.relay.copy(), job.body.copy(), job.collapse.copy(), phone.token.copy(), phone.box.copy()) } else if job.config == Json.Null { Sent.Failed(String("there's no APNs key")) } else { w.send_one(job.config.copy(), job.body.copy(), job.collapse.copy(), phone.token.copy(), phone.env.copy(), true) }
+            let body = with_sound(job.body.copy(), phone.sound.copy())
+            let sent = if phone.box.len() > 0 { relayed(job.relay.copy(), body.copy(), job.collapse.copy(), phone.token.copy(), phone.box.copy()) } else if job.config == Json.Null { Sent.Failed(String("there's no APNs key")) } else { w.send_one(job.config.copy(), body, job.collapse.copy(), phone.token.copy(), phone.env.copy(), true) }
             match sent {
                 Sent.Ok => {},
                 Sent.Gone => w.gone.send(Gone { user: phone.user.copy(), device: phone.device.copy(), token: phone.token.copy() }),
@@ -133,7 +135,8 @@ impl Worker {
 pub fn sealed_payload(body: Json, box: List<u8>) -> Json? {
     let sealed = seal.seal(box, "{body}".to_bytes()) else return none
     let aps = obj.at(body, "aps")
-    var outer = Obj.new().j("alert", Obj.new().s("title", String("loom")).s("body", String("Something new")).done()).i("mutable-content", 1).s("sound", String("default"))
+    var outer = Obj.new().j("alert", Obj.new().s("title", String("loom")).s("body", String("Something new")).done()).i("mutable-content", 1)
+    if let sound = str_at(aps.copy(), "sound") { outer = outer.s("sound", sound) }
     if let thread = str_at(aps.copy(), "thread-id") { outer = outer.s("thread-id", thread) }
     if let category = str_at(aps, "category") { outer = outer.s("category", category) }
     return some(Obj.new().j("aps", outer.done()).s("sealed", base64(sealed)).done())
@@ -217,6 +220,13 @@ pub fn jwt(config: Json, now_s: i64) -> String? {
     return some("{signing}.{base64_url(key.sign(signing.to_bytes()))}")
 }
 
+// `body` with the sound one phone gets: `aps.sound` set to it, or taken out for "".
+pub fn with_sound(body: Json, sound: String) -> Json {
+    let aps = obj.without(obj.at(body.copy(), "aps"), "sound")
+    let given = if sound.len() > 0 { obj.merge(aps, Obj.new().s("sound", sound).done()) } else { aps }
+    return obj.merge(body, Obj.new().j("aps", given).done())
+}
+
 // A notification's payload: the alert, grouped by `thread` on the lock
 // screen, with Allow and Deny when `category` is "approval", and what the app
 // needs to open it as `loom`.
@@ -257,4 +267,15 @@ fn makes_an_approval_with_its_buttons() {
     let p = payload(String("Claude asks first"), String(), String("Run ls"), String("c_1"), String("approval"), Obj.new().s("call", String("tc_1")).done())
     let text = "{p}"
     assert(text.contains(#""category":"approval""#) and text.contains(#""thread-id":"c_1""#) and text.contains(#""call":"tc_1""#) and not text.contains("subtitle"))
+}
+
+@test
+fn each_phone_gets_its_own_sound() {
+    let p = payload(String("Juniper"), String(), String("Done"), String("c_1"), String(), Obj.new().done())
+    assert("{with_sound(p.copy(), String("loom-reply.wav"))}".contains(#""sound":"loom-reply.wav""#))
+    assert(not "{with_sound(p.copy(), String())}".contains("sound"))
+    // Through the relay, the outer alert carries the same.
+    let box = X25519Key.generate()
+    let outer = sealed_payload(with_sound(p, String("loom-waiting.wav")), box.public_key().bytes())!
+    assert(str_at(obj.at(outer, "aps"), "sound") == some(String("loom-waiting.wav")))
 }

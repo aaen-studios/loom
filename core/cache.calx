@@ -816,6 +816,11 @@ impl Cache {
         return try self.one("SELECT json FROM runs WHERE id = ?", id.copy())
     }
 
+    /// A conversation the cache has, by its id.
+    pub fn conversation(self, id: String) -> Json? ! Error {
+        return try self.one("SELECT json FROM conversations WHERE id = ?", id.copy())
+    }
+
     pub fn agent(self, id: String) -> Json? ! Error {
         return try self.one("SELECT json FROM agents WHERE id = ?", id.copy())
     }

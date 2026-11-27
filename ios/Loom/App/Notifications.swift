@@ -39,7 +39,7 @@ enum Notifications {
         let content = UNMutableNotificationContent()
         content.title = f["title"].text
         content.body = f["body"].text
-        content.sound = .default
+        content.sound = Sounds.notification(f["sound"].text)
         content.threadIdentifier = f["agent"].text
         var info: [String: String] = ["agent": f["agent"].text, "conversation": f["conversation"].text]
         if f["kind"].text == "approval.needed", let call = f["call"].string {

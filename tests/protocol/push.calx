@@ -6,7 +6,7 @@ module tests.protocol.push
 // Then, to a fake APNs: an agent's reply comes to the phone when the person
 // is on none of their devices, a question with Allow and Deny and a notify
 // come to each phone that isn't connected, each with a provider token
-// signed with the key, and a token APNs says is gone gets no more.
+// signed with the key and the sound its prefs give it, and a token APNs says is gone gets no more.
 //
 //     calx tests/protocol/push.calx
 import std.bytes.{from_base64_url}
@@ -141,6 +141,7 @@ fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
     try check(str_at(reply.copy(), "path") == some("/3/device/{TOKEN}") and (str_at(gone, "path") ?? String()).ends_with(GONE), "a reply comes to each phone when the person is on none of their devices")
     try check(alert(reply.copy(), "title") == "Main" and alert(reply.copy(), "body") == "All done." and loom_at(reply.copy(), "kind") == "reply" and loom_at(reply.copy(), "conversation") == conversation and str_at(at(at(reply.copy(), "body"), "aps"), "thread-id") == some(conversation.copy()), "with the agent's name and its words, and which conversation it's in")
     try check(str_at(reply.copy(), "topic") == some(String("no.aaenz.loom")) and str_at(reply.copy(), "type") == some(String("alert")) and signed_by(str_at(reply, "auth") ?? String(), key), "as an alert for the app, with a provider token signed with the key")
+    try check(str_at(at(at(reply.copy(), "body"), "aps"), "sound") == some(String("loom-reply.wav")), "it sounds with loom's Reply arrived, for a phone that never said its sound prefs")
 
     // At the desk, with the phone away: a question comes to the phone too.
     var desk = try Session.connect(i.base.copy(), i.token.copy(), 0)
@@ -150,6 +151,7 @@ fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
     let asked = try pushed(mut seen)
     try check(str_at(asked.copy(), "path") == some("/3/device/{TOKEN}") and alert(asked.copy(), "title") == "Main asks first" and alert(asked.copy(), "body") == "rm -rf build", "a question comes to the phone that isn't connected, and not to the one APNs called gone")
     try check(str_at(at(at(asked.copy(), "body"), "aps"), "category") == some(String("approval")) and loom_at(asked.copy(), "call") == call and str_at(asked, "collapse") == some(call.copy()), "with Allow and Deny, and the call to answer")
+    try check(str_at(at(at(asked.copy(), "body"), "aps"), "sound") == some(String("loom-waiting.wav")), "and a question with Waiting on you")
     try desk.send(Obj.new().s("t", String("approve")).s("call", call).b("allow", true).b("always", false).done())
     _ = try desk.until("event", "run.finished")
 
@@ -161,12 +163,19 @@ fn sending(i: Instance, seen: mut Receiver<String>) ! Error {
 
     // With the phone open, it gets the notify over its connection, not as push.
     var back = try Session.connect(i.base.copy(), phone_token, 0)
-    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", conversation).s("text", String(#"/mcp notify {"title":"Again","body":"Still failing."}"#)).done())
+    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_4")).s("conversation", conversation.copy()).s("text", String(#"/mcp notify {"title":"Again","body":"Still failing."}"#)).done())
     _ = try back.until("event", "notify")
     _ = try desk.until("event", "run.finished")
     unsafe { sleep(500000000) }
     try check(seen.next() == none, "a phone that's connected gets no push")
+    // Its sounds turned off, its push comes silent.
+    try back.send(Obj.new().s("t", String("device")).j("sounds", Obj.new().s("mode", String("off")).done()).done())
+    unsafe { sleep(300000000) }
     back.close()
+    try desk.send(Obj.new().s("t", String("send")).s("cid", String("m_5")).s("conversation", conversation).s("text", String(#"/mcp notify {"title":"Quiet","body":"Shh."}"#)).done())
+    let silent = try pushed(mut seen)
+    try check(alert(silent.copy(), "title") == "Quiet" and str_at(at(at(silent, "body"), "aps"), "sound") == none, "a phone whose sounds are off gets its push with no sound")
+    _ = try desk.until("event", "run.finished")
     desk.close()
 }
 

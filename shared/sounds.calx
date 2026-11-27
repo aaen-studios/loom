@@ -1,0 +1,309 @@
+module shared.sounds
+
+// loom's sounds (PLAN.md, "Sounds"): which cue an event gets, and whether it plays,
+// given a device's sound prefs, the agent's mute, the chat in front, quiet hours and
+// the time. The core asks it for each live event and each of the app's own actions,
+// and the instance for each push, so every device and push decide the same way. The
+// sounds themselves are design/sounds/.
+//
+// A device's prefs, as the apps keep them and send them (`app.sounds`), all optional:
+//
+//     {"mode": "loom", "volume": 0.8,
+//      "cues": {"reply": true, "waiting": true, "other": true, "routine": false,
+//               "failed": true, "sent": false, "dictation": true},
+//      "in_front": true, "quiet": {"on": false, "from": "22:00", "to": "07:30"}}
+import std.json.{Json, parse}
+import std.time.{TimeZone, Timestamp}
+import shared.obj.{Obj, at, bool_at, str_at}
+
+/// Each cue, as prefs and frames name it: a reply arrived, an agent is waiting on the
+/// person, another agent answered in a group chat, a routine posted, a routine failed,
+/// a message was sent, and dictation went on or off.
+pub const CUES: [str; 7] = ["reply", "waiting", "other", "routine", "failed", "sent", "dictation"]
+
+/// Whether `cue` is one of them.
+pub fn is_cue(cue: String) -> bool {
+    for c in CUES {
+        if cue == c { return true }
+    }
+    return false
+}
+
+/// A device's sound prefs.
+pub struct Prefs {
+    pub mode: String    // loom (its own sounds), system (the system's notification sound) or off
+    pub volume: f64    // 0 to 1, for the sounds loom plays itself
+    pub reply: bool
+    pub waiting: bool
+    pub other: bool
+    pub routine: bool
+    pub failed: bool
+    pub sent: bool
+    pub dictation: bool
+    pub in_front: bool    // silent while the chat it's about is in front
+    pub quiet: bool    // quiet hours, from `from` to `to` on the device's clock
+    pub from: i64    // minutes after midnight
+    pub to: i64
+}
+
+/// What else decides whether a cue plays: whether its agent is muted, whether the chat
+/// it's about is in front of the person, and the time, with the device's time zone.
+pub struct Moment {
+    pub muted: bool
+    pub in_front: bool
+    pub now_ms: i64
+    pub tz: String
+}
+
+const QUIET_FROM: i64 = 1320    // 22:00
+const QUIET_TO: i64 = 450    // 07:30
+
+/// The minutes after midnight of a time written `HH:MM`, or none for one that isn't.
+pub fn minute(text: String) -> i64? {
+    let parts = text.trim().split(":")
+    if parts.len() != 2 or parts[0].len() == 0 or parts[0].len() > 2 or parts[1].len() != 2 { return none }
+    let h = i64.parse(parts[0].copy()) ?? -1
+    let m = i64.parse(parts[1].copy()) ?? -1
+    if h < 0 or h > 23 or m < 0 or m > 59 { return none }
+    return some(h * 60 + m)
+}
+
+/// `HH:MM` for minutes after midnight.
+pub fn clock(minutes: i64) -> String {
+    let h = minutes / 60
+    let m = minutes % 60
+    return "{if h < 10 { "0" } else { "" }}{h}:{if m < 10 { "0" } else { "" }}{m}"
+}
+
+fn number(j: Json) -> f64? {
+    return match j {
+        Json.Float(f) => some(f),
+        Json.Int(n) => some(f64.nearest(n)),
+        _ => none,
+    }
+}
+
+/// The prefs in `j`, with the defaults for any it doesn't have: loom's own sounds at
+/// 80%, every cue on but Routine posted and Message sent, silent while the chat is in
+/// front, and quiet hours from 22:00 to 07:30, off. An older app's `sound: false`
+/// (its "Play a sound") is Off.
+pub fn prefs(j: Json) -> Prefs {
+    let cues = at(j.copy(), "cues")
+    let given = str_at(j.copy(), "mode") ?? String()
+    let mode = if given == "loom" or given == "system" or given == "off" { given } else if bool_at(j.copy(), "sound") == some(false) { String("off") } else { String("loom") }
+    let quiet = at(j.copy(), "quiet")
+    return Prefs {
+        mode: mode,
+        volume: (number(at(j.copy(), "volume")) ?? 0.8).max(0.0).min(1.0),
+        reply: bool_at(cues.copy(), "reply") ?? true,
+        waiting: bool_at(cues.copy(), "waiting") ?? true,
+        other: bool_at(cues.copy(), "other") ?? true,
+        routine: bool_at(cues.copy(), "routine") ?? false,
+        failed: bool_at(cues.copy(), "failed") ?? true,
+        sent: bool_at(cues.copy(), "sent") ?? false,
+        dictation: bool_at(cues.copy(), "dictation") ?? true,
+        in_front: bool_at(j, "in_front") ?? true,
+        quiet: bool_at(quiet.copy(), "on") ?? false,
+        from: minute(str_at(quiet.copy(), "from") ?? String()) ?? QUIET_FROM,
+        to: minute(str_at(quiet, "to") ?? String()) ?? QUIET_TO,
+    }
+}
+
+/// The prefs as JSON, every field there.
+pub fn json(p: Prefs) -> Json {
+    let cues = Obj.new().b("reply", p.reply).b("waiting", p.waiting).b("other", p.other).b("routine", p.routine).b("failed", p.failed).b("sent", p.sent).b("dictation", p.dictation).done()
+    let quiet = Obj.new().b("on", p.quiet).s("from", clock(p.from)).s("to", clock(p.to)).done()
+    return Obj.new().s("mode", p.mode.copy()).j("volume", Json.Float(p.volume)).j("cues", cues).b("in_front", p.in_front).j("quiet", quiet).done()
+}
+
+/// Whether the cue is switched on.
+pub fn cue_on(p: Prefs, cue: String) -> bool {
+    return match cue {
+        "reply" => p.reply,
+        "waiting" => p.waiting,
+        "other" => p.other,
+        "routine" => p.routine,
+        "failed" => p.failed,
+        "sent" => p.sent,
+        "dictation" => p.dictation,
+        _ => false,
+    }
+}
+
+/// Whether it's quiet hours on the device's clock at `now_ms`, in the IANA zone `tz`
+/// (UTC for one it doesn't know). Hours that pass midnight, 22:00 to 07:30, are quiet
+/// from the evening to the morning; the same time twice is never quiet.
+pub fn quiet_now(p: Prefs, now_ms: i64, tz: String) -> bool {
+    if not p.quiet or p.from == p.to { return false }
+    let zone = TimeZone.named(tz) ?? TimeZone.utc()
+    let d = zone.date_time(Timestamp { unix_ms: now_ms })
+    let m = i64(d.hour) * 60 + i64(d.minute)
+    return if p.from < p.to { m >= p.from and m < p.to } else { m >= p.from or m < p.to }
+}
+
+/// The cue for an event from the instance: `kind` the event's kind, `about` a notify's
+/// (`routine.posted`, `routine.failed` or `waiting`), `status` a run's, and `room`
+/// whether its conversation is a group chat. A reply in a group chat is Another agent
+/// answered. None for an event that has no sound.
+pub fn cue_of(kind: String, about: String, status: String, room: bool) -> String? {
+    if kind == "approval.needed" { return some("waiting") }
+    if kind == "run.finished" {
+        if status == "cancelled" { return none }
+        return some(if room { "other" } else { "reply" })
+    }
+    if kind == "notify" {
+        if about == "routine.posted" { return some("routine") }
+        if about == "routine.failed" { return some("failed") }
+        if about == "waiting" { return some("waiting") }
+        return some("reply")
+    }
+    return none
+}
+
+/// The file a cue plays, without its `.wav`: Another agent answered is the Reply cue's,
+/// and dictation's is `on`'s or `off`'s.
+pub fn file(cue: String, on: bool) -> String {
+    if cue == "other" { return String("loom-reply") }
+    if cue == "dictation" { return String(if on { "loom-dictation-on" } else { "loom-dictation-off" }) }
+    return "loom-{cue}"
+}
+
+/// Whether the person's own action makes its sound: Message sent, and dictation going
+/// on and off. Only the mode and its switch count, as the person just did it.
+fn persons(cue: String) -> bool {
+    return cue == "sent" or cue == "dictation"
+}
+
+/// Whether `cue` sounds at all, as the prefs and the moment have it: not while sounds
+/// are off or its switch is, nor for a muted agent, a chat in front while that's
+/// silent, or during quiet hours. The person's own actions sound whenever their switch
+/// is on.
+pub fn sounds(p: Prefs, cue: String, m: Moment) -> bool {
+    if p.mode == "off" or not cue_on(p.copy(), cue) { return false }
+    if persons(cue) { return true }
+    if m.muted { return false }
+    if m.in_front and p.in_front { return false }
+    return not quiet_now(p, m.now_ms, m.tz)
+}
+
+/// What loom plays itself for `cue`, with no notification: its file, or none. Only
+/// with loom's own sounds; with the system's, a sound comes only with a notification.
+pub fn plays(p: Prefs, cue: String, on: bool, m: Moment) -> String? {
+    if p.mode != "loom" or not sounds(p, cue, m) { return none }
+    return some(file(cue, on))
+}
+
+/// The sound a notification for `cue` makes: its file, `default` for the system's
+/// sound, or "" for none.
+pub fn with_notification(p: Prefs, cue: String, m: Moment) -> String {
+    if not sounds(p.copy(), cue, m) { return String() }
+    if p.mode == "system" { return String("default") }
+    return file(cue, true)
+}
+
+/// A push's `aps.sound` for a phone whose prefs are `kept` (Null when it never said
+/// any): `loom-reply.wav`, `default`, or "" for none. A phone isn't in front of the
+/// person while it's pushed to.
+pub fn for_push(kept: Json, cue: String, muted: bool, now_ms: i64, tz: String) -> String {
+    let s = with_notification(prefs(kept), cue, Moment { muted: muted, in_front: false, now_ms: now_ms, tz: tz.copy() })
+    return if s.len() == 0 or s == "default" { s } else { "{s}.wav" }
+}
+
+// --- Tests ---
+
+// 2026-11-27 12:00 UTC, and 23:00 the same day.
+const NOON: i64 = 1795780800000
+const ELEVEN: i64 = 1795820400000
+
+fn moment(muted: bool, in_front: bool, now_ms: i64) -> Moment {
+    return Moment { muted: muted, in_front: in_front, now_ms: now_ms, tz: String("UTC") }
+}
+
+@test
+fn the_defaults_are_the_cards() {
+    let p = prefs(Json.Null)
+    assert(p.mode == "loom" and p.volume == 0.8 and p.in_front and not p.quiet)
+    assert(p.reply and p.waiting and p.other and not p.routine and p.failed and not p.sent and p.dictation)
+    assert(clock(p.from) == "22:00" and clock(p.to) == "07:30")
+    // Kept as JSON, they come back the same.
+    let again = prefs(json(p.copy()))
+    assert("{json(again)}" == "{json(p)}")
+}
+
+@test
+fn prefs_read_what_was_given() {
+    let p = prefs(parse(#"{"mode":"system","volume":1,"cues":{"sent":true,"reply":false},"in_front":false,"quiet":{"on":true,"from":"23:15","to":"6:05"}}"#)!)
+    assert(p.mode == "system" and p.volume == 1.0 and p.sent and not p.reply and not p.in_front)
+    assert(p.quiet and p.from == 23 * 60 + 15 and p.to == 6 * 60 + 5)
+    // An older app's "Play a sound" off is Off, and a mode or a time that isn't one is the default.
+    assert(prefs(parse(#"{"sound":false}"#)!).mode == "off")
+    assert(prefs(parse(#"{"mode":"loud","volume":7,"quiet":{"from":"25:00"}}"#)!).mode == "loom")
+    assert(prefs(parse(#"{"volume":7}"#)!).volume == 1.0)
+    assert(minute(String("25:00")) == none and minute(String("7:3")) == none and minute(String("07:30")) == some(450))
+}
+
+@test
+fn each_event_gets_its_cue() {
+    assert(cue_of("run.finished", "", "done", false) == some("reply"))
+    assert(cue_of("run.finished", "", "failed", false) == some("reply"))
+    assert(cue_of("run.finished", "", "done", true) == some("other"))
+    assert(cue_of("run.finished", "", "cancelled", false) == none)
+    assert(cue_of("approval.needed", "", "", false) == some("waiting"))
+    assert(cue_of("notify", "routine.posted", "", false) == some("routine"))
+    assert(cue_of("notify", "routine.failed", "", false) == some("failed"))
+    assert(cue_of("notify", "waiting", "", false) == some("waiting"))
+    assert(cue_of("notify", "", "", false) == some("reply"))
+    assert(cue_of("message.created", "", "", false) == none)
+    assert(file("other", true) == "loom-reply" and file("dictation", false) == "loom-dictation-off" and file("failed", true) == "loom-failed")
+}
+
+@test
+fn a_cue_plays_only_as_the_prefs_let_it() {
+    let p = prefs(Json.Null)
+    assert(plays(p.copy(), "reply", true, moment(false, false, NOON)) == some(String("loom-reply")))
+    // Off by default, a muted agent, the chat in front.
+    assert(plays(p.copy(), "routine", true, moment(false, false, NOON)) == none)
+    assert(plays(p.copy(), "reply", true, moment(true, false, NOON)) == none)
+    assert(plays(p.copy(), "reply", true, moment(false, true, NOON)) == none)
+    // In front, but the person wants it then too.
+    let loud = prefs(parse(#"{"in_front":false}"#)!)
+    assert(plays(loud, "reply", true, moment(false, true, NOON)) != none)
+    // The person's own: only its switch and the mode count.
+    let own_on = prefs(parse(#"{"cues":{"sent":true},"quiet":{"on":true}}"#)!)
+    assert(plays(own_on.copy(), "sent", true, moment(true, true, ELEVEN)) == some(String("loom-sent")))
+    assert(plays(own_on, "dictation", true, moment(false, true, ELEVEN)) == some(String("loom-dictation-on")))
+    assert(plays(p.copy(), "sent", true, moment(false, false, NOON)) == none)
+    // The system's sound, or none: loom plays nothing itself.
+    let system = prefs(parse(#"{"mode":"system"}"#)!)
+    assert(plays(system.copy(), "reply", true, moment(false, false, NOON)) == none)
+    assert(with_notification(system, "reply", moment(false, false, NOON)) == "default")
+    let off = prefs(parse(#"{"mode":"off"}"#)!)
+    assert(with_notification(off.copy(), "reply", moment(false, false, NOON)) == "")
+    assert(plays(off, "sent", true, moment(false, false, NOON)) == none)
+    assert(with_notification(p, "waiting", moment(false, false, NOON)) == "loom-waiting")
+}
+
+@test
+fn quiet_hours_go_past_midnight() {
+    let p = prefs(parse(#"{"quiet":{"on":true}}"#)!)
+    assert(not quiet_now(p.copy(), NOON, String("UTC")))
+    assert(quiet_now(p.copy(), ELEVEN, String("UTC")))
+    // 23:00 UTC is 00:00 in Oslo, still quiet; noon UTC is 13:00 there, not.
+    assert(quiet_now(p.copy(), ELEVEN, String("Europe/Oslo")))
+    assert(not quiet_now(p.copy(), NOON, String("Europe/Oslo")))
+    // 13:00 to 14:00 in Oslo, a window that doesn't pass midnight.
+    let lunch = prefs(parse(#"{"quiet":{"on":true,"from":"13:00","to":"14:00"}}"#)!)
+    assert(quiet_now(lunch.copy(), NOON, String("Europe/Oslo")) and not quiet_now(lunch, NOON, String("UTC")))
+    // Off, or the same time twice: never quiet.
+    assert(not quiet_now(prefs(Json.Null), ELEVEN, String("UTC")))
+    assert(not quiet_now(prefs(parse(#"{"quiet":{"on":true,"from":"09:00","to":"09:00"}}"#)!), NOON, String("UTC")))
+    assert(plays(p.copy(), "reply", true, moment(false, false, ELEVEN)) == none)
+}
+
+@test
+fn a_push_names_the_bundled_file() {
+    assert(for_push(Json.Null, "reply", false, NOON, String("UTC")) == "loom-reply.wav")
+    assert(for_push(Json.Null, "reply", true, NOON, String("UTC")) == "")
+    assert(for_push(parse(#"{"mode":"system"}"#)!, "waiting", false, NOON, String("UTC")) == "default")
+    assert(for_push(parse(#"{"quiet":{"on":true}}"#)!, "failed", false, ELEVEN, String("UTC")) == "")
+}

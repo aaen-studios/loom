@@ -206,14 +206,36 @@ pub fn clicked() -> Vec<About> {
         .unwrap_or_default()
 }
 
-/// A system notification, with its sound or without. A click on it, while the app
-/// runs, opens what it's about.
+/// What a notification sounds with, as the core said (`core.notify`'s `sound`): none, the
+/// system's notification sound, or one of loom's at a volume.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Sound {
+    None,
+    System,
+    Loom(String, f32),
+}
+
+impl Sound {
+    /// The sound a `core.notify` names: "" for none, `default` for the system's, or the
+    /// file of one of loom's.
+    pub fn of(named: &str, volume: f32) -> Sound {
+        match named {
+            "" => Sound::None,
+            "default" => Sound::System,
+            file => Sound::Loom(file.to_string(), volume),
+        }
+    }
+}
+
+/// A system notification, with its sound or without. One of loom's own the app plays
+/// itself, at its volume and not while Focus Assist or Do Not Disturb is on, so the
+/// toast stays silent. A click on it, while the app runs, opens what it's about.
 #[cfg(windows)]
-pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: Sound) {
     let toast = tauri_winrt_notification::Toast::new(app_id())
         .title(title)
         .text1(body)
-        .sound(sound.then_some(tauri_winrt_notification::Sound::Default))
+        .sound((sound == Sound::System).then_some(tauri_winrt_notification::Sound::Default))
         .on_activated(move |_| {
             if let (Some(a), Ok(mut c)) = (about.clone(), CLICKED.lock()) {
                 c.push(a);
@@ -224,6 +246,9 @@ pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
     if let Err(e) = toast.show() {
         eprintln!("loom: the notification didn't show: {e}");
     }
+    if let Sound::Loom(file, volume) = &sound {
+        crate::sound::play(file, *volume);
+    }
 }
 
 /// The notifications waiting for the window's task to post, which on a Mac goes through
@@ -231,14 +256,15 @@ pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
 #[cfg(target_os = "macos")]
 static TO_POST: std::sync::Mutex<Vec<Note>> = std::sync::Mutex::new(Vec::new());
 
-/// A notification waiting: its title, its body, what it's about and whether it sounds.
+/// A notification waiting: its title, its body, what it's about and what it sounds with.
 #[cfg(target_os = "macos")]
-type Note = (String, String, Option<About>, bool);
+type Note = (String, String, Option<About>, Sound);
 
-/// A system notification, with the person's notification sound or without. A click on it opens
-/// what it's about. It goes out from the window's task (`post_notifications`).
+/// A system notification, with the system's notification sound, one of loom's by name
+/// (so Focus silences it as any app's), or none. A click on it opens what it's about. It
+/// goes out from the window's task (`post_notifications`).
 #[cfg(target_os = "macos")]
-pub fn notify(title: &str, body: &str, about: Option<About>, sound: bool) {
+pub fn notify(title: &str, body: &str, about: Option<About>, sound: Sound) {
     if let Ok(mut n) = TO_POST.lock() {
         n.push((title.to_string(), body.to_string(), about, sound));
     }
@@ -277,7 +303,7 @@ pub fn post_notifications(_cx: &gpui_kit::App) {
     for (title, body, about, sound) in waiting {
         let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tag = tag_of(n, &about.unwrap_or_default());
-        crate::mac::notify(&tag, &title, &body, sound);
+        crate::mac::notify(&tag, &title, &body, &sound);
     }
 }
 
@@ -300,10 +326,10 @@ pub fn hear_notifications(_cx: &gpui_kit::App) {}
 
 /// A system notification.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub fn notify(title: &str, body: &str, _about: Option<About>, sound: bool) {
+pub fn notify(title: &str, body: &str, _about: Option<About>, sound: Sound) {
     let mut n = notify_rust::Notification::new();
     n.summary(title).body(body);
-    if sound {
+    if sound != Sound::None {
         n.sound_name("message-new-instant");
     }
     if let Err(e) = n.show() {

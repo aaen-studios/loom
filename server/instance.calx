@@ -29,6 +29,7 @@ import shared.obj.{Obj, at, bool_at, int_at, merge, without, str_at}
 import shared.protocol
 import shared.pushrelay
 import shared.shape
+import shared.sounds
 import shared.stop.{Stop}
 import server.acp
 import server.acp.{Line, Out}
@@ -3705,7 +3706,7 @@ impl Instance {
             }
             let title = "{i.agent_name(g.user.copy(), g.agent.copy())} needs you in its browser"
             i.log(g.user.copy(), g.agent.copy(), "browser", "Asked you to take over: {cut_short(why.copy(), 200)}", g.agent.copy())
-            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", if why.len() > 0 { why } else { String("Take over its browser, then hand it back.") }).done())
+            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", if why.len() > 0 { why } else { String("Take over its browser, then hand it back.") }).s("about", String("waiting")).done())
             i.browser_state(key)
             return none
         }
@@ -3722,7 +3723,7 @@ impl Instance {
             _ = i.put_own_card(asking_run, card)
             let title = "{i.agent_name(g.user.copy(), g.agent.copy())} needs something from you"
             i.log(g.user.copy(), g.agent.copy(), "browser", "Asked you for a secret: {cut_short(asked.copy(), 200)}", g.agent.copy())
-            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", asked).done())
+            try i.event(g.user.copy(), "notify", Obj.new().s("agent", g.agent.copy()).s("title", title).s("body", asked).s("about", String("waiting")).done())
             i.browser_state(key)
             return none
         }
@@ -4668,8 +4669,9 @@ impl Instance {
         if kind == "notify" {
             let agent = str_at(fields.copy(), "agent") ?? String()
             let conversation = str_at(fields.copy(), "conversation") ?? String()
-            let body = push.payload(str_at(fields.copy(), "title") ?? String(), i.agent_name(user.copy(), agent.copy()), str_at(fields.copy(), "body") ?? String(), conversation.copy(), String(), Obj.new().s("kind", String("notify")).s("agent", agent).maybe("conversation", if conversation.len() > 0 { some(conversation) } else { none }).done())
-            i.send_push(user, body, String())
+            let body = push.payload(str_at(fields.copy(), "title") ?? String(), i.agent_name(user.copy(), agent.copy()), str_at(fields.copy(), "body") ?? String(), conversation.copy(), String(), Obj.new().s("kind", String("notify")).s("agent", agent.copy()).maybe("conversation", if conversation.len() > 0 { some(conversation) } else { none }).done())
+            let cue = sounds.cue_of(String("notify"), str_at(fields, "about") ?? String(), String(), false) ?? String("reply")
+            i.send_push(user, body, String(), cue, agent)
             return
         }
         let run = str_at(fields.copy(), "run") ?? String()
@@ -4682,27 +4684,35 @@ impl Instance {
         }
         let name = if agent.len() > 0 { i.agent_name(user.copy(), agent.copy()) } else { String("An agent") }
         let body = push.payload("{name} asks first", String(), str_at(fields.copy(), "title") ?? String("It wants to use a tool."), conversation.copy(), String("approval"), Obj.new().s("kind", String("approval")).s("run", run).s("call", call.copy()).s("conversation", conversation).b("can_always", bool_at(fields, "can_always") ?? false).done())
-        i.send_push(user, body, call)
+        i.send_push(user, body, call, String("waiting"), agent)
     }
 
     // An agent's reply, pushed when the person is on none of their devices.
     fn push_reply(i: Instance, user: String, agent: String, conversation: String, message: String, text: String) {
         if i.looking(user.copy()) { return }
-        let body = push.payload(i.agent_name(user.copy(), agent.copy()), String(), text, conversation.copy(), String(), Obj.new().s("kind", String("reply")).s("agent", agent).s("conversation", conversation).s("message", message).done())
-        i.send_push(user, body, String())
+        // A reply in a group chat is Another agent answered.
+        let room = match i.store.conversation(user.copy(), conversation.copy()) {
+            ok(some(c)) => at(c, "room") != Json.Null,
+            _ => false,
+        }
+        let body = push.payload(i.agent_name(user.copy(), agent.copy()), String(), text, conversation.copy(), String(), Obj.new().s("kind", String("reply")).s("agent", agent.copy()).s("conversation", conversation.copy()).s("message", message).done())
+        i.send_push(user, body, String(), String(if room { "other" } else { "reply" }), agent)
     }
 
     // Hands `body` to the push thread for each of `user`'s phones that isn't
     // connected, once the owner has set up APNs. A failure is said, not
     // passed up: what was pushed has happened already.
-    fn send_push(i: Instance, user: String, body: own Json, collapse: own String) {
-        match i.try_send_push(user, body, collapse) {
+    fn send_push(i: Instance, user: String, body: own Json, collapse: own String, cue: String, agent: String) {
+        match i.try_send_push(user, body, collapse, cue, agent) {
             ok => {},
             err(e) => eprintln("loom: push: {e}"),
         }
     }
 
-    fn try_send_push(i: Instance, user: String, body: own Json, collapse: own String) ! Error {
+    // Each phone's push sounds as its own prefs say for `cue`, and not for a muted
+    // `agent` (shared/sounds.calx).
+    fn try_send_push(i: Instance, user: String, body: own Json, collapse: own String, cue: String, agent: String) ! Error {
+        let muted = agent.len() > 0 and at(try i.store.agent(user.copy(), agent.copy()) ?? Json.Null, "muted") != Json.Null
         // Each phone through the instance's own APNs key, or through the relay, with
         // its notifications sealed for it, once the owner has set up one or the other.
         let config = try i.store.apns() ?? Json.Null
@@ -4713,7 +4723,9 @@ impl Instance {
             let box = if env.starts_with("relay:") { env[6..].copy() } else { String() }
             if box.len() > 0 and relay_url.len() == 0 { continue }
             if box.len() == 0 and config == Json.Null { continue }
-            phones.push(push.Phone { user: user.copy(), device: device.copy(), token: token.copy(), env: env.copy(), box: box })
+            let (kept, tz) = try i.store.device_sounds(device.copy())
+            let sound = sounds.for_push(kept, cue.copy(), muted, now(), if tz.len() > 0 { tz } else { String("UTC") })
+            phones.push(push.Phone { user: user.copy(), device: device.copy(), token: token.copy(), env: env.copy(), box: box, sound: sound })
         }
         if phones.len() == 0 { return }
         let relay = if relay_url.len() > 0 { Obj.new().s("url", relay_url).s("seed", try i.store.meta("key") ?? String()).done() } else { Json.Null }
@@ -6305,7 +6317,7 @@ impl Instance {
             try i.routine_ran(g.user.copy(), merge(r, Obj.new().b("on", false).i("next", 0).s("off_card", card).done()))
             let aname = str_at(try i.store.agent(g.user.copy(), g.agent.copy()) ?? Json.Null, "name") ?? String("An agent")
             i.log(g.user.copy(), g.agent.copy(), "routine", "Paused the routine {rname}: {why}", g.agent.copy())
-            try i.event(g.user, "notify", Obj.new().s("agent", g.agent).s("conversation", conversation).s("title", "{aname} paused {rname}").s("body", why).done())
+            try i.event(g.user, "notify", Obj.new().s("agent", g.agent).s("conversation", conversation).s("title", "{aname} paused {rname}").s("body", why).s("about", String("routine.failed")).done())
             return some(tool_text("Paused {rname}. Your person was told why, and turns it back on when they want it again."))
         }
         if name == "delete_routine" {
@@ -8894,7 +8906,7 @@ impl Instance {
         try i.store.post_untold(h.user.copy(), h.conversation.copy(), message_id, h.routine.copy(), String())
         if h.notify {
             i.log(h.user.copy(), h.agent.copy(), "notify", "Notified you: {h.name}", h.agent.copy())
-            try i.event(h.user, "notify", Obj.new().s("agent", h.agent).s("conversation", h.conversation).s("title", h.name).s("body", cut_short(h.text, 300)).done())
+            try i.event(h.user, "notify", Obj.new().s("agent", h.agent).s("conversation", h.conversation).s("title", h.name).s("body", cut_short(h.text, 300)).s("about", String("routine.posted")).done())
         }
     }
 
@@ -9104,7 +9116,7 @@ impl Instance {
         try i.routine_ran(rr.user.copy(), merge(r.copy(), changed.done()))
         if off {
             i.log(rr.user.copy(), agent.copy(), "routine", "Turned the routine {name} off after {FAILURES_OFF} failures in a row", String("schedule"))
-            try i.event(rr.user.copy(), "notify", Obj.new().s("agent", agent.copy()).s("conversation", told).s("title", name.copy()).s("body", "It failed {FAILURES_OFF} times in a row, so it's off now. The last time: {error.copy() ?? String("it stopped")}").done())
+            try i.event(rr.user.copy(), "notify", Obj.new().s("agent", agent.copy()).s("conversation", told).s("title", name.copy()).s("body", "It failed {FAILURES_OFF} times in a row, so it's off now. The last time: {error.copy() ?? String("it stopped")}").s("about", String("routine.failed")).done())
         }
         // Nothing new to say: no flow, and no notification.
         if status == "quiet" { return }
@@ -9117,7 +9129,7 @@ impl Instance {
         if off or bool_at(r.copy(), "notify") != some(true) or (status != "failed" and status != "limit") { return }
         let body = "It didn't finish ({status}): {error.copy() ?? String("it stopped")}"
         i.log(rr.user.copy(), agent.copy(), "notify", "Notified you: {name}", agent.copy())
-        try i.event(rr.user, "notify", Obj.new().s("agent", agent).s("conversation", conversation).s("title", name).s("body", body).done())
+        try i.event(rr.user, "notify", Obj.new().s("agent", agent).s("conversation", conversation).s("title", name).s("body", body).s("about", String("routine.failed")).done())
     }
 
     // A step of a routine's flow ended, as its turn did: it goes in the routine's
@@ -12364,7 +12376,9 @@ impl Instance {
         } else if t == "cmd" {
             try i.cmd(s, user, device, f)
         } else if t == "device" {
-            if let tz = str_at(f.copy(), "tz") { try i.store.update_device_tz(device, tz) }
+            if let tz = str_at(f.copy(), "tz") { try i.store.update_device_tz(device.copy(), tz) }
+            // Its sound prefs, which its push sounds by (shared/sounds.calx).
+            if let Json.Object(_) = at(f.copy(), "sounds") { try i.store.set_device_sounds(device, "{sounds.json(sounds.prefs(at(f.copy(), "sounds")))}") }
             if let session = mut i.sessions.find(s.id()) {
                 if let key = str_at(f.copy(), "key") { session.key = key }
                 if let Json.Object(_) = at(f.copy(), "tools") { session.tools = at(f.copy(), "tools") }
@@ -18597,6 +18611,17 @@ impl Instance {
             if pin { o = o.i("pinned", int_at(old, "pinned") ?? now()) }
             // A pinned agent is always in sight: pinning a hidden one shows it again.
             let agent = if pin { without(o.done(), "hidden") } else { o.done() }
+            try i.store.put_agent_json(user.copy(), agent.copy())
+            try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device).done())
+            return Answer.Value(Obj.new().j("agent", agent).done())
+        }
+        if name == "agent.mute" {
+            // Whether the agent's events make sounds, on every device and in push
+            // (PLAN.md, "Sounds"). Like a pin, not a change to the agent: no revision.
+            let id = str_at(args.copy(), "agent") ?? String()
+            let old = try i.store.agent(user.copy(), id.copy()) else return Answer.Refused(String("not_found"), "There's no agent {id}.")
+            let agent = if bool_at(args, "muted") ?? true { merge(old.copy(), Obj.new().i("muted", int_at(old.copy(), "muted") ?? now()).done()) } else { without(old.copy(), "muted") }
+            if agent == old { return Answer.Value(Obj.new().j("agent", agent).done()) }
             try i.store.put_agent_json(user.copy(), agent.copy())
             try i.event(user, "agent.updated", Obj.new().j("agent", agent.copy()).s("by", device).done())
             return Answer.Value(Obj.new().j("agent", agent).done())

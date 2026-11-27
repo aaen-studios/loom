@@ -28,6 +28,7 @@ import core.files.{Transfer, at_path, kept_at, refused}
 import shared.files.{is_sha}
 import shared.reply as replies
 import shared.emoji
+import shared.sounds
 import core.login.{Kind, Outcome, Pending, address, request_body}
 import core.link
 import core.relay
@@ -208,6 +209,8 @@ pub struct Conn {
     restarting: Instant?  // when the instance said it was restarting for an update
     pub hub: Hub?         // what's behind across the app, in the first core (core/updates.calx)
     emojis: emoji.Table   // the built-in emoji, for the composer's shortcodes and the picker
+    sounds: sounds.Prefs  // this device's sound prefs, as the app last gave them (`app.sounds`)
+    front: String         // the conversation the app shows, or "" for none (`app.front`)
 }
 
 impl Conn {
@@ -287,6 +290,8 @@ impl Conn {
             restarting: none,
             hub: none,
             emojis: emoji.load(),
+            sounds: sounds.prefs(Json.Null),
+            front: String(),
         }
     }
 
@@ -660,11 +665,76 @@ impl Conn {
         self.to_app.send(ToApp.Text(text))
     }
 
+    /// The cue a live event gets, with its agent and conversation, read before the cache
+    /// applies it, while the run it ends is there (shared/sounds.calx). None for one
+    /// with no sound, and for a routine's quiet run, whose post or failure comes as its
+    /// own notify.
+    fn cue_of(self, e: Json) -> (String, String, String)? {
+        let kind = str_at(e.copy(), "kind") ?? String()
+        if kind == "notify" {
+            let about = str_at(e.copy(), "about") ?? String()
+            let cue = sounds.cue_of(String("notify"), about, String(), false) else return none
+            return some((cue, str_at(e.copy(), "agent") ?? String(), str_at(e, "conversation") ?? String()))
+        }
+        if kind != "run.finished" and kind != "approval.needed" { return none }
+        let run = match self.cache.run(str_at(e.copy(), "run") ?? String()) {
+            ok(some(r)) => r,
+            _ => return none,
+        }
+        if kind == "run.finished" and str_at(run.copy(), "routine") != none { return none }
+        let conversation = str_at(run.copy(), "conversation") ?? String()
+        let room = match self.cache.conversation(conversation.copy()) {
+            ok(some(c)) => at(c, "room") != Json.Null,
+            _ => false,
+        }
+        let status = str_at(e, "status") ?? String()
+        let cue = sounds.cue_of(kind, String(), status, room) else return none
+        return some((cue, str_at(run, "agent") ?? String(), conversation))
+    }
+
+    /// What decides a sound besides the prefs, now: whether the agent is muted, and
+    /// whether the conversation is the one in front of the person.
+    fn moment(self, agent: String, conversation: String) -> sounds.Moment {
+        let muted = match self.cache.agent(agent) {
+            ok(some(a)) => at(a, "muted") != Json.Null,
+            _ => false,
+        }
+        let in_front = self.active and conversation.len() > 0 and conversation == self.front
+        return sounds.Moment { muted: muted, in_front: in_front, now_ms: now(), tz: self.tz.copy() ?? String("UTC") }
+    }
+
+    /// Tells the app to play `file` at the person's volume (`core.sound`).
+    fn tell_sound(mut self, cue: String, file: String) {
+        let volume = Json.Float(self.sounds.volume)
+        self.tell(Obj.new().s("t", String("core.sound")).s("cue", cue.copy()).s("file", file).j("volume", volume).done())
+    }
+
+    /// The sound for one of the person's own actions, Message sent or dictation going on
+    /// or off, when the prefs have it.
+    fn own_sound(mut self, cue: String, on: bool) {
+        let m = self.moment(String(), String())
+        if let file = sounds.plays(self.sounds.copy(), cue.copy(), on, m) { self.tell_sound(cue, file) }
+    }
+
+    /// The sound for a live event that no notification carries, as the prefs let it.
+    fn event_sound(mut self, cue: (String, String, String)) {
+        let (name, agent, conversation) = cue
+        let m = self.moment(agent, conversation)
+        if let file = sounds.plays(self.sounds.copy(), name.copy(), true, m) { self.tell_sound(name, file) }
+    }
+
     /// Tells the app what's worth a system notification, while no one is looking at it:
     /// a reply that's done or failed, and a question an agent is waiting on, and, looking
-    /// or not, what an agent sends with its notify tool. Only live
-    /// events count, not catch-up, so waking up doesn't bring a flood of old news.
-    fn notify(mut self, e: Json) {
+    /// or not, what an agent sends with its notify tool. Only live events count, not
+    /// catch-up, so waking up doesn't bring a flood of old news. Its `sound` is what it
+    /// sounds with (shared/sounds.calx): a file of loom's, `default` or "". Gives whether
+    /// it told one.
+    fn notify(mut self, e: Json, cue: (String, String, String)?) -> bool {
+        var sound = String()
+        if let (name, agent, conversation) = cue {
+            sound = sounds.with_notification(self.sounds.copy(), name, self.moment(agent, conversation))
+        }
+        let volume = Json.Float(self.sounds.volume)
         let kind = str_at(e.copy(), "kind") ?? String()
         if kind == "notify" {
             let agent_id = str_at(e.copy(), "agent") ?? String()
@@ -675,17 +745,17 @@ impl Conn {
             let title = str_at(e.copy(), "title") ?? String()
             // One from loom itself, with no agent, such as an update it made, is its title alone.
             let shown = if agent_id.len() == 0 and title.len() > 0 { title.copy() } else if title.len() > 0 { "{name}: {title}" } else { name }
-            self.tell(Obj.new().s("t", String("core.notify")).s("title", shown).s("body", emoji.as_names(str_at(e, "body") ?? String())).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).done())
-            return
+            self.tell(Obj.new().s("t", String("core.notify")).s("title", shown).s("body", emoji.as_names(str_at(e.copy(), "body") ?? String())).s("agent", agent_id).s("conversation", str_at(e, "conversation") ?? String()).s("kind", String("notify")).s("sound", sound).j("volume", volume).done())
+            return true
         }
-        if kind != "run.finished" and kind != "approval.needed" { return }
+        if kind != "run.finished" and kind != "approval.needed" { return false }
         let run = match self.cache.run(str_at(e.copy(), "run") ?? String()) {
             ok(some(r)) => r,
-            _ => return,
+            _ => return false,
         }
         // A routine's quiet run is told by the instance, with notify, when its agent
         // posts or it fails (PLAN.md, "Routines"), never as a reply.
-        if kind == "run.finished" and str_at(run.copy(), "routine") != none { return }
+        if kind == "run.finished" and str_at(run.copy(), "routine") != none { return false }
         let agent_id = str_at(run.copy(), "agent") ?? String()
         let conversation = str_at(run, "conversation") ?? String()
         let name = match self.cache.agent(agent_id.copy()) {
@@ -699,7 +769,7 @@ impl Conn {
             body = str_at(e.copy(), "title") ?? String("Can it go ahead?")
         } else {
             let status = str_at(e.copy(), "status") ?? String()
-            if status == "cancelled" { return }
+            if status == "cancelled" { return false }
             if status == "failed" {
                 body = "Couldn't finish: {str_at(e.copy(), "error") ?? String("it stopped")}"
             } else {
@@ -710,7 +780,8 @@ impl Conn {
                 if body.len() == 0 { body = String("Done.") }
             }
         }
-        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", emoji.as_names(body)).s("agent", agent_id).s("conversation", conversation).s("kind", kind).done())
+        self.tell(Obj.new().s("t", String("core.notify")).s("title", title).s("body", emoji.as_names(body)).s("agent", agent_id).s("conversation", conversation).s("kind", kind).s("sound", sound).j("volume", volume).done())
+        return true
     }
 
     /// A frame from the instance. What changes the cache is applied before the app hears
@@ -749,6 +820,8 @@ impl Conn {
             self.me = me.copy()
             self.offer(me)
             self.flush()
+            // The sound prefs, which the instance sounds this device's push by.
+            _ = self.put("{Obj.new().s("t", String("device")).j("sounds", sounds.json(self.sounds.copy())).done()}")
         } else if t == "synced" {
             self.synced = true
             // The runs still going, as the instance has them: a run.started or
@@ -788,9 +861,14 @@ impl Conn {
             self.tell_server()
         } else if t == "event" {
             // Before the cache applies it, while the run it ends is still there to read.
-            // An agent's own notify is for now, looking or not.
-            if self.synced and (not self.active or str_at(f, "kind") == some(String("notify"))) {
-                self.notify(f)
+            // An agent's own notify is for now, looking or not. A live event with a cue
+            // and no notification to carry it sounds by itself, as the prefs let it.
+            if self.synced {
+                let cue = self.cue_of(f.copy())
+                let told = if not self.active or str_at(f, "kind") == some(String("notify")) { self.notify(f, cue.copy()) } else { false }
+                if not told {
+                    if let c = cue { self.event_sound(c) }
+                }
             }
             var ended = String()
             var ended_agent = String()
@@ -1088,6 +1166,35 @@ impl Conn {
             }
             return true
         }
+        if t == "app.sounds" {
+            // This device's sound prefs: the core keeps them while it runs, says them back
+            // whole, and tells the instance, which sounds the phone's push by them.
+            self.sounds = sounds.prefs(at(m, "sounds"))
+            let whole = sounds.json(self.sounds.copy())
+            self.tell(Obj.new().s("t", String("core.sounds")).j("sounds", whole.copy()).done())
+            if self.state == State.Live {
+                _ = self.put("{Obj.new().s("t", String("device")).j("sounds", whole).done()}")
+            }
+            return true
+        }
+        if t == "app.front" {
+            // The conversation the app shows, which is silent while the person looks at it.
+            self.front = str_at(m, "conversation") ?? String()
+            return true
+        }
+        if t == "app.dictation" {
+            self.own_sound("dictation", bool_at(m, "on") ?? true)
+            return true
+        }
+        if t == "sound.try" {
+            // A cue's play button in Settings: its sound, whatever the switches say.
+            let cue = str_at(m.copy(), "cue") ?? String()
+            if sounds.is_cue(cue.copy()) {
+                let file = sounds.file(cue.copy(), bool_at(m, "on") ?? true)
+                self.tell_sound(cue, file)
+            }
+            return true
+        }
         if t == "app.wake" or t == "app.network" {
             // The socket may have died while the system slept or the network changed, with
             // nothing to say so: open a new one now. The cursor makes it lossless.
@@ -1127,6 +1234,7 @@ impl Conn {
         }
         if t == "send" {
             self.send(m)
+            self.own_sound("sent", true)
             return true
         }
         if t == "update.check" {

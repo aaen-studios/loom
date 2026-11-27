@@ -1,6 +1,7 @@
 //! What loom reaches in macOS that GPUI doesn't give it: hiding the window to the menu
 //! bar and bringing it back, where the window was, keeping the Mac awake while an agent
-//! works, dictation, notifications with their sound, and where the app's bundle is.
+//! works, dictation, notifications with their sound, loom's sounds, and where the app's
+//! bundle is.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,10 +11,10 @@ use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
-use objc2_app_kit::{NSApplication, NSScreen, NSView, NSWindow};
+use objc2_app_kit::{NSApplication, NSScreen, NSSound, NSView, NSWindow};
 use objc2_foundation::{
-    NSActivityOptions, NSBundle, NSError, NSObject, NSObjectProtocol, NSPoint, NSProcessInfo,
-    NSRect, NSSize, NSString,
+    NSActivityOptions, NSBundle, NSData, NSError, NSObject, NSObjectProtocol, NSPoint,
+    NSProcessInfo, NSRect, NSSize, NSString,
 };
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
@@ -22,6 +23,7 @@ use objc2_user_notifications::{
 };
 
 use crate::place::{Place, Rect};
+use crate::shell::Sound;
 
 /// The window that holds the view `view`, the pointer GPUI's window handle gives.
 fn window_of(view: isize) -> Option<Retained<NSWindow>> {
@@ -325,21 +327,42 @@ pub fn hear_notifications(clicked: fn(&str)) {
     std::mem::forget(heard);
 }
 
-/// A notification's content: its title, its body and, when it sounds, the person's
-/// notification sound, which macOS plays with it unless they or Focus silenced loom.
-fn content(title: &str, body: &str, sound: bool) -> Retained<UNMutableNotificationContent> {
+/// A notification's content: its title, its body and its sound: the person's
+/// notification sound, or one of loom's by its file in the bundle, which macOS plays with
+/// it unless they or Focus silenced loom.
+fn content(title: &str, body: &str, sound: &Sound) -> Retained<UNMutableNotificationContent> {
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
-    if sound {
-        content.setSound(Some(&UNNotificationSound::defaultSound()));
+    match sound {
+        Sound::None => {}
+        Sound::System => content.setSound(Some(&UNNotificationSound::defaultSound())),
+        Sound::Loom(file, _) => content.setSound(Some(&UNNotificationSound::soundNamed(
+            &NSString::from_str(&format!("{file}.wav")),
+        ))),
     }
     content
 }
 
+thread_local! {
+    /// The sound playing now, kept until the next takes its place.
+    static PLAYING: std::cell::RefCell<Option<Retained<NSSound>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Plays a WAV at `volume`, 0 to 1, for a sound with no notification to carry it.
+pub fn play_sound(wav: &'static [u8], volume: f32) {
+    let data = NSData::with_bytes(wav);
+    let Some(sound) = NSSound::initWithData(NSSound::alloc(), &data) else {
+        return;
+    };
+    sound.setVolume(volume.clamp(0.0, 1.0));
+    sound.play();
+    PLAYING.with(|p| *p.borrow_mut() = Some(sound));
+}
+
 /// Posts a notification, tagged `tag`, which comes back when it's clicked. The first one
 /// asks the person to allow loom's notifications and their sound.
-pub fn notify(tag: &str, title: &str, body: &str, sound: bool) {
+pub fn notify(tag: &str, title: &str, body: &str, sound: &Sound) {
     static ASKED: AtomicBool = AtomicBool::new(false);
     if !bundled() {
         return;
@@ -450,11 +473,16 @@ mod tests {
 
     #[test]
     fn a_notification_carries_its_sound() {
-        let sounds = super::content("Juniper", "Done", true);
+        use crate::shell::Sound;
+        let sounds = super::content("Juniper", "Done", &Sound::System);
         assert!(sounds.sound().is_some());
         assert_eq!(sounds.title().to_string(), "Juniper");
         assert_eq!(sounds.body().to_string(), "Done");
-        assert!(super::content("Juniper", "Done", false).sound().is_none());
+        let own = super::content("Juniper", "Done", &Sound::Loom("loom-reply".into(), 0.8));
+        assert!(own.sound().is_some());
+        assert!(super::content("Juniper", "Done", &Sound::None)
+            .sound()
+            .is_none());
     }
 
     #[test]

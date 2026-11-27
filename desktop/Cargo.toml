@@ -44,7 +44,7 @@ webview2-com = "0.39.1"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_Storage_FileSystem"] }
 windows-core = "0.62"
 tauri-winrt-notification = "0.8.1"
-windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Power", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Registry"] }
+windows-sys = { version = "0.61.2", features = ["Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_Foundation", "Win32_Security", "Win32_System_Threading", "Win32_System_Power", "Win32_System_LibraryLoader", "Win32_Graphics_Gdi", "Win32_System_Registry", "Win32_Media_Audio", "Win32_UI_Shell"] }
 
 [build-dependencies]
 winresource = "0.1.34"
@@ -52,14 +52,15 @@ winresource = "0.1.34"
 [target.'cfg(all(not(windows), not(target_os = "macos")))'.dependencies]
 notify-rust = "4.19.0"
 
-# The window, the Dock, keeping the Mac awake, dictation and notifications with their
-# sound (src/mac.rs), through the same objc2 crates GPUI's macOS platform uses.
+# The window, the Dock, keeping the Mac awake, dictation, notifications with their
+# sound, and loom's sounds through NSSound (src/mac.rs), through the same objc2 crates
+# GPUI's macOS platform uses.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2.191"
 block2 = "0.6.2"
 objc2 = "0.6.5"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSRunningApplication", "NSScreen", "NSView", "NSWindow"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSDate", "NSError", "NSGeometry", "NSObject", "NSProcessInfo", "NSRunLoop", "NSSet", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSResponder", "NSRunningApplication", "NSScreen", "NSSound", "NSView", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "objc2-core-foundation", "NSArray", "NSBundle", "NSData", "NSDate", "NSError", "NSGeometry", "NSObject", "NSProcessInfo", "NSRunLoop", "NSSet", "NSString", "NSURL"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = ["std", "block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 # A panel's web view (src/panel.rs): its content rule list, data store and settings.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "WKContentRuleList", "WKContentRuleListStore", "WKPreferences", "WKUserContentController", "WKWebViewConfiguration", "WKWebsiteDataStore"] }

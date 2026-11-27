@@ -6,6 +6,7 @@ loom looks simple and near-monochrome, like a plain chat app. The only colour co
 - [`generated/`](generated/) is made from it by `calx scripts/tokens.calx`: `tokens.rs` for the GPUI app, `Tokens.swift` for the iPhone app, and `tokens.css` for the site, the docs and plugin panels. The two apps also get the eight thread shapes an agent can take in the sidebar, from [`shared/shape.calx`](../shared/shape.calx), and the site gets them as `shapes.json`. `calx scripts/tokens.calx --check` fails if they're out of date.
 - [`logo/`](logo/) holds the mark (the knot), with PNGs and the Windows icon.
 - [`twemoji/`](twemoji/README.md) holds Twemoji's pictures, which the apps draw built-in emoji with, under their CC-BY 4.0 licence.
+- [`sounds/`](sounds/README.md) holds loom's sounds, one WAV for each cue, and the Calx that makes them.
 - [`explorations/`](explorations/) holds the settled screens and the thread engine:
   - `round-4.html`: chat in dark and light, the thread board, the header menus, building an agent, settings, and the first start.
   - `threads-playground.html`: every thread state, the pluck, the one-time snap when an agent finishes, the handoff between agents, and a streaming reply.

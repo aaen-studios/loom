@@ -1,0 +1,126 @@
+module sounds
+
+// loom's sounds (design/sounds/README.md): a plucked string, made with Karplus–Strong,
+// for each cue. Writes each as a WAV, 22050 Hz mono 16-bit, named loom-CUE.wav.
+//
+//     calx run --release design/sounds/sounds.calx -- design/sounds
+import std.env
+import std.fs
+import std.random.{Random}
+import std.wave.{Wave}
+
+const RATE: f64 = 22050.0
+
+struct Note {
+    f: f64
+    at: f64
+    gain: f64
+}
+
+// How the string is plucked: B1, Even.
+struct Style {
+    soft: usize    // passes of smoothing on the pluck's noise: more is darker
+    damp: f64    // how long it rings: nearer 1 is longer
+    attack: f64    // seconds to swell in
+    tone: f64    // a one-pole low-pass on the result, 0 to 1: lower is smoother
+    detune: f64    // cents of a second string beside it, 0 for none
+}
+
+const EVEN: Style = Style { soft: 6, damp: 0.995, attack: 0.01, tone: 0.22, detune: 5.0 }
+
+fn note(f: f64, at: f64, gain: f64) -> Note {
+    return Note { f: f, at: at, gain: gain }
+}
+
+// Each cue's notes, from D major pentatonic.
+fn cue(name: str) -> List<Note> {
+    if name == "reply" { return [note(440.0, 0.0, 0.8), note(587.33, 0.09, 1.0)] }
+    if name == "waiting" { return [note(880.0, 0.0, 0.9), note(739.99, 0.11, 0.8), note(880.0, 0.22, 0.9)] }
+    if name == "routine" { return [note(659.25, 0.0, 0.9)] }
+    if name == "failed" { return [note(493.88, 0.0, 0.9), note(369.99, 0.13, 0.9)] }
+    if name == "sent" { return [note(1174.66, 0.0, 1.0)] }
+    if name == "dictation-on" { return [note(440.0, 0.0, 0.8), note(659.25, 0.07, 0.8)] }
+    return [note(659.25, 0.0, 0.8), note(440.0, 0.07, 0.8)]
+}
+
+fn string(buf: mut List<f64>, f: f64, at: f64, gain: f64, damp: f64, s: Style, r: mut Random) {
+    let period = usize.wrap(i64.round(RATE / f)).max(2)
+    var table = List<f64>()
+    for _ in 0..period { table.push(r.uniform(-1.0, 1.0)) }
+    for _ in 0..s.soft {
+        var smooth = List<f64>()
+        for k in 0..period { smooth.push(0.5 * (table[k] + table[(k + 1) % period])) }
+        table = smooth
+    }
+    let start = usize.wrap(i64.round(at * RATE))
+    var i: usize = 0
+    for k in 0..usize.wrap(i64.saturate(1.6 * RATE)) {
+        if start + k >= buf.len() { break }
+        let t = f64.nearest(k) / RATE
+        let y = table[i]
+        table[i] = damp * 0.5 * (table[i] + table[(i + 1) % period])
+        i = (i + 1) % period
+        let swell = (t / s.attack).min(1.0)
+        buf[start + k] = buf[start + k] + y * gain * swell
+    }
+}
+
+fn render(s: Style, name: str) -> List<f64> {
+    var buf = List<f64>()
+    for _ in 0..usize.wrap(i64.saturate(2.4 * RATE)) { buf.push(0.0) }
+    var r = Random.new(419)
+    // Failed rings shorter, and Sent shorter still.
+    let extra = if name == "failed" { 0.994 } else if name == "sent" { 0.985 } else { 1.0 }
+    for n in cue(name) {
+        string(mut buf, n.f, n.at, n.gain, s.damp * extra, s, mut r)
+        if s.detune > 0.0 { string(mut buf, n.f * (1.0 + s.detune / 1731.0), n.at + 0.004, n.gain * 0.7, s.damp * extra, s, mut r) }
+    }
+    // The tone: a one-pole low-pass, run twice for a gentler slope.
+    if s.tone < 1.0 {
+        for _ in 0..2 {
+            var lp = 0.0
+            for k in 0..buf.len() {
+                lp = lp + s.tone * (buf[k] - lp)
+                buf[k] = lp
+            }
+        }
+    }
+    return buf
+}
+
+// Each sound at its loudness, trimmed and faded at its tail.
+fn finish(buf: List<f64>, want: f64) -> List<f64> {
+    var peak = 0.0
+    for x in buf { peak = peak.max(x.abs()) }
+    if peak == 0.0 { peak = 1.0 }
+    var end = buf.len()
+    while end > 0 and buf[end - 1].abs() < 0.004 * peak { end -= 1 }
+    let fade = usize.wrap(i64.saturate(0.06 * RATE)).min(end)
+    var out = List<f64>()
+    for k in 0..end {
+        var g = want / peak
+        if k + fade > end { g = g * f64.nearest(end - k) / f64.nearest(fade) }
+        out.push(buf[k] * g)
+    }
+    return out
+}
+
+fn f32s(xs: List<f64>) -> List<f32> {
+    var out = List<f32>()
+    for x in xs { out.push(f32.nearest(x)) }
+    return out
+}
+
+fn main() ! Error {
+    let args = env.args()
+    let dir = if args.len() > 0 { args[0].copy() } else { String("design/sounds") }
+    try fs.make_dir_all(dir.copy())
+    let cues: List<str> = ["reply", "waiting", "routine", "failed", "sent", "dictation-on", "dictation-off"]
+    for c in cues {
+        // Peaks at -6 dB, and Message sent at -12 dB.
+        let want = if c == "sent" { 0.25 } else { 0.5 }
+        let one = finish(render(EVEN, c), want)
+        try Wave.from_f32(1, 22050, f32s(one)).save("{dir}/loom-{c}.wav")
+        println("loom-{c}.wav")
+    }
+}

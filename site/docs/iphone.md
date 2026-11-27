@@ -39,3 +39,5 @@ The simulator has no camera, so **Scan a code** gives you a field to paste the c
 ## Notifications
 
 The app shows notifications while it's open. Notifications on the lock screen, through Apple's push service, aren't in the app yet.
+
+In **Settings → Sounds**, the phone has the same sounds as the desktop's App & notifications ([Settings](settings.md#app--notifications)): loom, System or Off, the volume, each sound with its play button and switch, Silent while the chat is in front, and Quiet hours. A notification sounds with loom's sound, which Focus silences as it does any app's.
