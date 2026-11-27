@@ -264,8 +264,11 @@ impl Voice {
         let id = str_at(f.copy(), "id") ?? String()
         if not id.starts_with(ASKING) { return false }
         let value = at(f.copy(), "value")
-        let refused = if str_at(f.copy(), "t") == some(String("error")) { some(str_at(f.copy(), "message") ?? String("The instance refused.")) } else { none }
-        let code = str_at(f.copy(), "code") ?? String()
+        // A refusal is a result with `ok: false` and its `error`, or the core's own
+        // `error` frame while the connection is down.
+        let error = if str_at(f.copy(), "t") == some(String("error")) { f.copy() } else { at(f.copy(), "error") }
+        let refused = if error != Json.Null or bool_at(f.copy(), "ok") == some(false) { some(str_at(error.copy(), "message") ?? String("The instance refused.")) } else { none }
+        let code = str_at(error, "code") ?? String()
         if id == SETTINGS_ID {
             if refused == none { self.settings = engines.settings(at(at(value, "voice"), "settings")) }
             return true
@@ -652,6 +655,6 @@ fn dictation_asks_for_its_key_and_keeps_what_it_hears() {
     v.audio(engines.le_bytes([1i16, 2, 3, 4]), 24000, 1)
     if let l = v.listening { assert(l.held.len() == 8) } else { panic("not listening") }
     // The instance has no key for it: the app opens the settings.
-    _ = v.answer(parse(#"{"t":"error","id":"core.voice:1","code":"no_key","message":"Add your Groq key in Settings › Voice."}"#)!)
+    _ = v.answer(parse(#"{"t":"result","id":"core.voice:1","ok":false,"error":{"code":"no_key","message":"Add your Groq key in Settings › Voice."}}"#)!)
     assert(v.listening == none and v.cues == [true, false] and str_at(v.to_app[1].copy(), "state") == some(String("no_engine")))
 }

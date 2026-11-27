@@ -68,6 +68,8 @@ fn info_plist(version: String) -> String {
             <string>public.app-category.productivity</string>
             <key>LSMinimumSystemVersion</key>
             <string>11.0</string>
+            <key>NSMicrophoneUsageDescription</key>
+            <string>loom hears you when you dictate a message or talk with an agent.</string>
             <key>NSHighResolutionCapable</key>
             <true/>
             <key>NSSupportsAutomaticGraphicsSwitching</key>

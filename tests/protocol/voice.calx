@@ -242,6 +242,9 @@ fn run(i: Instance, fake: String) ! Error {
     try check(last_state(none_set) == "no_engine" and none_sounds.len() == 0, "with no engine, the mic is told to open Settings › Voice, with no sound")
 
     // --- Deepgram, streaming ---
+    _ = try put(mut app, "v_2a", dictation_engine("deepgram", "no"))
+    let (no_key, _) = try app.dictate(1)
+    try check(last_state(no_key.copy()) == "no_engine" and (str_at(no_key[no_key.len() - 1].copy(), "why") ?? String()) == "Add your Deepgram Nova-3 key in Settings › Voice.", "an engine without its key opens the settings too, saying so")
     try key(mut app, "v_2", "deepgram", "dg-key")
     let mark = app.seen.len()
     let set = try put(mut app, "v_3", dictation_engine("deepgram", "no"))

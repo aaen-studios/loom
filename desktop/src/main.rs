@@ -27,6 +27,7 @@ mod signin;
 mod single;
 mod smooth;
 mod sound;
+mod voice;
 #[cfg(any(target_os = "macos", test))]
 mod swap;
 mod thread;
