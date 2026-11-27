@@ -10183,6 +10183,10 @@ impl Instance {
         let why = drafts.refusal(str_at(card.copy(), "state") ?? String(), answer.copy())
         if why.len() > 0 { return Answer.Refused(String(if why.starts_with("answer is") { "bad_request" } else { "not_now" }), why) }
         let t = now()
+        // Once Undo's seconds are up the tool is being called, and it can't be taken back.
+        if answer == "undo" and str_at(card.copy(), "state") == some(String("sending")) and drafts.ms_at(card.copy(), "until") <= t {
+            return Answer.Refused(String("not_now"), String("That draft can't be taken back now."))
+        }
         var next = Json.Null
         if answer == "send" or answer == "later" {
             let (changed, _, bad) = drafts.edited(card.copy(), at(args.copy(), "edits"))
