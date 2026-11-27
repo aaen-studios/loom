@@ -227,8 +227,12 @@ impl Voice {
         return self.next
     }
 
+    // `text` is every word so far; `kept`, once there is any, is how it starts: the words
+    // the engine won't change again, so the composer draws the rest as still being said
+    // (LOO-445).
     fn tell(mut self, l: Listening, state: str, why: String) {
         var m = Obj.new().s("t", String("core.dictation")).s("state", String(state)).s("engine", l.service.copy()).b("streams", l.streams).s("text", engines.joined(l.kept.copy(), l.saying.copy()))
+        if l.kept.len() > 0 { m = m.s("kept", l.kept.copy()) }
         if why.len() > 0 { m = m.s("why", why) }
         self.to_app.push(m.done())
     }

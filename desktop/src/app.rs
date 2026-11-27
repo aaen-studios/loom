@@ -632,6 +632,9 @@ pub struct Loom {
     mic: Option<crate::voice::Mic>,
     voice_key: Option<Entity<InputState>>,
     dictate_held: bool,
+    /// The words dictation put in the composer while they're drawn coming into focus
+    /// and turning to full ink (LOO-445).
+    heard: Vec<model::voice::Heard>,
     /// Live mode: the mic while it listens, whether the perf build's made-up frames
     /// drive it (`LOOM_LIVE`), and the clock its thread waves by.
     live_mic: Option<crate::voice::Mic>,
@@ -1829,6 +1832,7 @@ ACTA_KEY=secret:ACTA_KEY",
             mic: None,
             voice_key: None,
             dictate_held: false,
+            heard: Vec::new(),
             live_mic: None,
             live_sample: false,
             live_t0: Instant::now(),

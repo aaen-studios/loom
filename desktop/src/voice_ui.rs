@@ -1008,6 +1008,9 @@ impl Loom {
                     c.replace(put, window, cx);
                 });
             }
+            if let Some(d) = self.model.voice.dictated.take() {
+                self.heard = voice_model::heard(&self.heard, &d, Instant::now());
+            }
         }
         if std::mem::take(&mut self.model.voice.open_page) {
             self.mic = None;
