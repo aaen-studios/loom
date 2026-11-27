@@ -510,6 +510,7 @@ struct CardView: View {
         case "mcp_add": McpAddCard(card: card, tint: tint, agent: agent)
         case "secret_ask": SecretAskCard(card: card, tint: tint)
         case "spool_connect": SpoolConnectCard(card: card)
+        case "voice_setup": VoiceSetupCard(card: card)
         case "form": FormCard(card: card, tint: tint)
         case "draft": DraftCard(card: card)
         case "checklist": checklist
@@ -1338,7 +1339,7 @@ private struct Tick: ToggleStyle {
     }
 }
 
-private extension View {
+extension View {
     /// A field on a card, in its box, as the MCP server card's key is.
     func boxed() -> some View {
         self

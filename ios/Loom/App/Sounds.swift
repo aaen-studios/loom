@@ -75,7 +75,8 @@ enum Sounds {
     static func play(_ file: String, volume: Double) {
         guard let url = Bundle.main.url(forResource: file, withExtension: "wav"),
               let player = try? AVAudioPlayer(contentsOf: url) else { return }
-        try? AVAudioSession.sharedInstance().setCategory(.ambient)
+        // While the mic records, the session stays as dictation set it.
+        if !Mic.on { try? AVAudioSession.sharedInstance().setCategory(.ambient) }
         player.volume = Float(volume)
         player.play()
         playing = player

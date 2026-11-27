@@ -35,6 +35,8 @@
 	<true/>
 	<key>NSCameraUsageDescription</key>
 	<string>loom reads the code your desktop app shows under Add a phone.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>loom hears you when you dictate a message or talk with an agent.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>loom sends the photos you pick to your agents.</string>
 	<key>NSLocalNetworkUsageDescription</key>

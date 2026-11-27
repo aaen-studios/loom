@@ -23,6 +23,8 @@ struct SettingsView: View {
     @State private var routinesOpen = ProcessInfo.processInfo.arguments.contains("-routines")
     /// Settings → Sounds, open at launch with `-sounds`, for its screenshots.
     @State private var soundsOpen = ProcessInfo.processInfo.arguments.contains("-sounds")
+    /// Settings → Voice, open at launch with `-voice`, or from the mic with no engine set up.
+    @State private var voiceOpen = ProcessInfo.processInfo.arguments.contains("-voice")
 
     var body: some View {
         let model = session.model
@@ -142,6 +144,13 @@ struct SettingsView: View {
                     Text("The lock screen needs push on your instance")
                         .font(Fonts.caption)
                 }
+                Section {
+                    NavigationLink {
+                        VoiceView()
+                    } label: {
+                        Text("Voice").font(Fonts.body).foregroundStyle(P.ink)
+                    }
+                }
                 Section("Credits") {
                     EmojiCredits()
                 }
@@ -178,6 +187,7 @@ struct SettingsView: View {
             .navigationDestination(isPresented: $spoolsOpen) { SpoolsView() }
             .navigationDestination(isPresented: $routinesOpen) { RoutinesView() }
             .navigationDestination(isPresented: $soundsOpen) { SoundsView() }
+            .navigationDestination(isPresented: $voiceOpen) { VoiceView() }
         }
         .task { notifications = await Notifications.status() }
         .onAppear {

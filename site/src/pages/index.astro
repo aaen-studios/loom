@@ -107,6 +107,48 @@ const tiles = [
 	{ name: 'Composio', mark: composioMark, connected: true },
 ];
 
+// Settings › Voice as the app draws it (PLAN.md, "Voice"): Dictation and Speech beside the title,
+// as Spools has Find and Installed, each its engines as tiles in black and white, an ink tile with
+// Lucide's cloud for a service, its name, one quiet line and Use, Add key or Change key; the one in
+// use outlined in ink with a check in a ring and In use; then its rows. Deepgram Nova-3 dictates and
+// OpenAI speaks, with Marin at 1×, and replies aren't read aloud.
+type Engine = { id: string; name: string; line: string; key: boolean; on: boolean };
+const VOICE: { id: string; name: string; engines: Engine[] }[] = [
+	{
+		id: 'dictation',
+		name: 'Dictation',
+		engines: [
+			{ id: 'elevenlabs-scribe', name: 'ElevenLabs Scribe', line: 'Words as you say them', key: false, on: false },
+			{ id: 'deepgram', name: 'Deepgram Nova-3', line: 'Words as you say them', key: true, on: true },
+			{ id: 'openai-transcribe', name: 'OpenAI', line: 'gpt-4o-transcribe, words as you say them', key: false, on: false },
+			{ id: 'groq', name: 'Groq', line: 'Whisper large v3, writes once you stop', key: false, on: false },
+		],
+	},
+	{
+		id: 'speech',
+		name: 'Speech',
+		engines: [
+			{ id: 'elevenlabs', name: 'ElevenLabs', line: "Flash v2.5, your voices and the library's", key: false, on: false },
+			{ id: 'fish', name: 'Fish Audio', line: 'S2.1 Pro, the voice library', key: false, on: false },
+			{ id: 'openai-tts', name: 'OpenAI', line: 'gpt-4o-mini-tts, 13 voices', key: true, on: true },
+		],
+	},
+];
+const engineButton = (e: Engine) => (e.on ? 'Change key' : e.key ? 'Use' : 'Add key');
+const LANGUAGES = ['Detect', 'English', 'Norwegian', 'Swedish', 'Danish', 'Finnish', 'German', 'Dutch', 'French', 'Spanish', 'Italian', 'Portuguese', 'Polish', 'Ukrainian', 'Turkish', 'Hindi', 'Japanese', 'Korean', 'Chinese', 'Arabic'];
+const VOICES = ['Alloy', 'Ash', 'Ballad', 'Cedar', 'Coral', 'Echo', 'Fable', 'Marin', 'Nova', 'Onyx', 'Sage', 'Shimmer', 'Verse'];
+const SHORTCUTS = ['Ctrl+Shift+Space', 'Off'];
+const SPEEDS = ['0.8×', '0.9×', '1×', '1.1×', '1.2×'];
+const READ_ALOUD = ['Never', 'Only in live', 'Always'];
+// Lucide's icons: cloud, check, chevron-down, play, eye and eye-off.
+const CLOUD = 'M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z';
+const CHECK = 'M20 6 9 17l-5-5';
+const CHEVRON = 'm6 9 6 6 6-6';
+const EYE =
+	'<path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"></path><circle cx="12" cy="12" r="3"></circle>';
+const EYE_OFF =
+	'<path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"></path><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"></path><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"></path><path d="m2 2 20 20"></path>';
+
 // Each with an agent's thread, which works while the item is hovered.
 const more = [
 	{ title: 'Routines and webhooks', color: 'periwinkle', mood: 'thinking', text: 'An agent works on a schedule, or when a webhook comes in, out of the chat, and posts there only when it has something to say.' },
@@ -460,6 +502,186 @@ const faq = {
 							))
 						}
 					</div>
+				</div>
+			</div>
+		</div>
+	</section>
+
+	<section class="feature" aria-labelledby="f-voice">
+		<div class="wrap split">
+			<div class="copy" data-reveal>
+				<h2 id="f-voice">Dictation, and replies read aloud</h2>
+				<p>
+					The composer's mic writes your words as you say them, with ElevenLabs Scribe, Deepgram, OpenAI or Groq, and replies can be read aloud with ElevenLabs, Fish Audio or OpenAI. A service's key is kept sealed on your instance, so one key works on every device of yours, and an agent can set it up for you.
+				</p>
+			</div>
+			<div class="visual" data-reveal>
+				<div class="page voice" aria-label="Voice in loom's settings">
+					<div class="spools-head">
+						<span class="page-title">Voice</span>
+						<span class="tabs" role="tablist">
+							{
+								VOICE.map((t, i) => (
+									<button type="button" role="tab" class:list={['tab', { on: i === 0 }]} data-voice-tab={t.id} aria-selected={i === 0 ? 'true' : 'false'}>
+										{t.name}
+									</button>
+								))
+							}
+						</span>
+					</div>
+					{
+						VOICE.map((t, i) => (
+							<div class="voice-pane" data-voice-pane={t.id} role="tabpanel" aria-label={t.name} hidden={i !== 0}>
+								<div class="voice-tiles">
+									{t.engines.map((e) => (
+										<div class:list={['voice-tile', { on: e.on }]} data-engine={e.id} data-key={e.key ? '' : undefined}>
+											<span class="voice-mark">
+												<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+													<path d={CLOUD} />
+												</svg>
+											</span>
+											<span class="voice-text">
+												<span class="voice-name">{e.name}</span>
+												<span class="voice-line">{e.line}</span>
+											</span>
+											<div class="spool-foot" data-engine-foot>
+												<span class="spool-state" hidden={!e.on}>
+													<span class="tile-check">
+														<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+															<path d={CHECK} />
+														</svg>
+													</span>
+													In use
+												</span>
+												<span class="spool-actions">
+													<button type="button" class="btn-small" data-engine-btn>
+														{engineButton(e)}
+													</button>
+												</span>
+											</div>
+											<div class="voice-key" data-key-form hidden>
+												<span class="input key-input">
+													<input type="password" placeholder={`${e.name} key`} aria-label={`${e.name} key`} autocomplete="off" spellcheck="false" data-key-input />
+													<button type="button" class="eye" aria-label="Show the key" aria-pressed="false" data-key-eye>
+														<svg class="i eye-on" viewBox="0 0 24 24" aria-hidden="true" set:html={EYE} />
+														<svg class="i eye-off" viewBox="0 0 24 24" aria-hidden="true" set:html={EYE_OFF} />
+													</button>
+												</span>
+												<span class="spool-actions">
+													<button type="button" class="btn-small" data-key-cancel>
+														Cancel
+													</button>
+													<button type="button" class="btn-small primary" data-key-save>
+														Save
+													</button>
+												</span>
+											</div>
+										</div>
+									))}
+								</div>
+								<div class="box voice-rows">
+									{t.id === 'dictation' ? (
+										<>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Language</span>
+												</span>
+												<span class="menu-at">
+													<button type="button" class="pick" data-pick aria-haspopup="menu" aria-expanded="false">
+														<span data-pick-value>Detect</span>
+														<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+															<path d={CHEVRON} />
+														</svg>
+													</button>
+													<span class="voice-menu" role="menu" data-pick-menu hidden>
+														{LANGUAGES.map((l, j) => (
+															<button type="button" role="menuitemradio" class:list={{ on: j === 0 }} aria-checked={j === 0 ? 'true' : 'false'} data-value={l}>
+																{l}
+															</button>
+														))}
+													</span>
+												</span>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Shortcut</span>
+												</span>
+												<span class="segments" data-choice>
+													{SHORTCUTS.map((s, j) => (
+														<button type="button" class:list={['segment', { on: j === 0 }]}>
+															{s}
+														</button>
+													))}
+												</span>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Hold to talk</span>
+												</span>
+												<button type="button" class="switch" role="switch" aria-checked="false" aria-label="Hold to talk" data-switch>
+													<span class="knob" />
+												</button>
+											</div>
+										</>
+									) : (
+										<>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Voice</span>
+												</span>
+												<span class="voice-pick">
+													<span class="menu-at">
+														<button type="button" class="pick" data-pick aria-haspopup="menu" aria-expanded="false">
+															<span data-pick-value>Marin</span>
+															<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+																<path d={CHEVRON} />
+															</svg>
+														</button>
+														<span class="voice-menu" role="menu" data-pick-menu hidden>
+															{VOICES.map((v) => (
+																<button type="button" role="menuitemradio" class:list={{ on: v === 'Marin' }} aria-checked={v === 'Marin' ? 'true' : 'false'} data-value={v}>
+																	{v}
+																</button>
+															))}
+														</span>
+													</span>
+													<button type="button" class="play" aria-label="Play" data-play>
+														<svg class="i" viewBox="0 0 24 24" aria-hidden="true">
+															<polygon points="6 3 20 12 6 21 6 3" />
+														</svg>
+													</button>
+												</span>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Speed</span>
+												</span>
+												<span class="segments" data-choice>
+													{SPEEDS.map((s) => (
+														<button type="button" class:list={['segment', { on: s === '1×' }]}>
+															{s}
+														</button>
+													))}
+												</span>
+											</div>
+											<div class="row">
+												<span class="row-text">
+													<span class="row-title">Read replies aloud</span>
+												</span>
+												<span class="segments" data-choice>
+													{READ_ALOUD.map((s, j) => (
+														<button type="button" class:list={['segment', { on: j === 0 }]}>
+															{s}
+														</button>
+													))}
+												</span>
+											</div>
+										</>
+									)}
+								</div>
+							</div>
+						))
+					}
 				</div>
 			</div>
 		</div>
@@ -1404,6 +1626,284 @@ const faq = {
 		}
 	}
 
+	/* Settings › Voice, as the app draws it (PLAN.md, "Voice"): Dictation and Speech beside the
+	   title, the engines as tiles in black and white, as Spools' Find draws its tiles, and the
+	   tab's rows under them. */
+	.voice {
+		gap: var(--space-l);
+	}
+	:where(.voice) button {
+		font: inherit;
+		color: inherit;
+		background: none;
+		border: 0;
+		padding: 0;
+		cursor: pointer;
+	}
+	.voice .tab {
+		transition:
+			background-color 0.15s,
+			color 0.15s;
+	}
+	.voice .tab:not(.on):hover {
+		background: var(--hover);
+	}
+	.voice-pane {
+		display: grid;
+		gap: var(--space-l);
+	}
+	.voice-pane[hidden] {
+		display: none;
+	}
+	.voice .i {
+		width: 14px;
+		height: 14px;
+		flex: none;
+		fill: none;
+		stroke: currentColor;
+		stroke-width: 2;
+		stroke-linecap: round;
+		stroke-linejoin: round;
+	}
+	.voice-tiles {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: var(--space-s);
+	}
+	.voice-tile {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-s);
+		padding: var(--space-m);
+		border: 1px solid var(--line);
+		border-radius: var(--radius-card);
+		background: var(--bg);
+		color: var(--ink);
+		transition: border-color 0.2s;
+	}
+	/* The engine in use, outlined in ink. */
+	.voice-tile.on {
+		border-color: var(--ink);
+	}
+	/* Its service on a small tile in ink, black in light and white in dark. */
+	.voice-mark {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--control-icon);
+		height: var(--control-icon);
+		border-radius: var(--radius-row);
+		background: var(--button);
+		color: var(--button-ink);
+	}
+	.voice-mark .i {
+		width: 16px;
+		height: 16px;
+	}
+	.voice-text {
+		min-width: 0;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.voice-name,
+	.voice-line {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.voice-name {
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+	}
+	.voice-line {
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.voice .spool-foot {
+		flex-wrap: nowrap;
+	}
+	.voice .spool-foot[hidden],
+	.voice-key[hidden] {
+		display: none;
+	}
+	.voice .tile-check .i {
+		width: 10px;
+		height: 10px;
+	}
+	.voice .btn-small:hover {
+		background: var(--hover);
+	}
+	.voice .btn-small.primary:hover {
+		background: color-mix(in srgb, var(--button) 86%, var(--bg));
+	}
+	/* Add key: the key, masked, with an eye to show it, then Cancel and Save. */
+	.voice-key {
+		display: grid;
+		gap: var(--space-s);
+	}
+	.key-input {
+		gap: var(--space-xs);
+		padding-right: 4px;
+	}
+	.key-input input {
+		flex: 1;
+		min-width: 0;
+		height: 100%;
+		border: 0;
+		outline: none;
+		background: none;
+		font: inherit;
+		color: var(--ink);
+	}
+	.key-input input::placeholder {
+		color: var(--ink-3);
+	}
+	.key-input:focus-within {
+		border-color: var(--ink-3);
+	}
+	.eye,
+	.play {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: var(--control-icon-small);
+		height: var(--control-icon-small);
+		border-radius: var(--radius-row);
+		color: var(--ink-2);
+		transition:
+			background-color 0.12s,
+			transform 0.15s;
+	}
+	.eye {
+		width: 22px;
+		height: 22px;
+	}
+	.eye:hover,
+	.play:hover {
+		background: var(--hover);
+	}
+	.play.pressed {
+		transform: scale(0.92);
+	}
+	.eye .eye-off,
+	.eye[aria-pressed='true'] .eye-on {
+		display: none;
+	}
+	.eye[aria-pressed='true'] .eye-off {
+		display: block;
+	}
+	/* Its rows: a menu for the language or the voice, a few choices side by side, and a switch. */
+	.voice-rows {
+		overflow: visible;
+	}
+	.voice-pick {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+	}
+	.menu-at {
+		position: relative;
+		display: flex;
+	}
+	.pick {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		height: var(--control-button-small);
+		padding: 0 var(--space-s) 0 var(--space-m);
+		border-radius: var(--radius-button);
+		font-size: var(--size-small);
+		color: var(--ink);
+		transition: background-color 0.12s;
+	}
+	.pick:hover,
+	.pick[aria-expanded='true'] {
+		background: var(--hover);
+	}
+	.pick .i {
+		color: var(--ink-3);
+	}
+	.voice-menu {
+		position: absolute;
+		right: 0;
+		top: calc(100% + 4px);
+		z-index: 5;
+		display: flex;
+		flex-direction: column;
+		width: 160px;
+		max-height: 220px;
+		overflow-y: auto;
+		padding: var(--space-xs);
+		background: var(--raised);
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius-card);
+		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.25);
+		scrollbar-width: thin;
+	}
+	.voice-menu[hidden] {
+		display: none;
+	}
+	.voice-menu button {
+		display: flex;
+		align-items: center;
+		padding: 6px var(--space-m);
+		border-radius: var(--radius-row);
+		font-size: var(--size-small);
+		text-align: left;
+		color: var(--ink);
+	}
+	.voice-menu button:hover {
+		background: var(--hover);
+	}
+	.voice-menu .on::after {
+		content: '✓';
+		margin-left: auto;
+		color: var(--ink-2);
+	}
+	/* A switch as the app draws it (app.rs, switch): 38 by 22, its knob 16, in ink when it's on. */
+	.switch {
+		position: relative;
+		flex: none;
+		width: 38px;
+		height: 22px;
+		border-radius: var(--radius-row);
+		background: var(--line-strong);
+		transition: background-color 0.2s;
+	}
+	.switch[aria-checked='true'] {
+		background: var(--button);
+	}
+	.knob {
+		position: absolute;
+		top: 3px;
+		left: 3px;
+		width: 16px;
+		height: 16px;
+		border-radius: 4px;
+		background: var(--bg);
+		box-shadow: 0 1px 2px rgb(0 0 0 / 0.15);
+		transition:
+			transform 0.2s cubic-bezier(0.2, 0.7, 0.3, 1),
+			background-color 0.2s;
+	}
+	.switch[aria-checked='true'] .knob {
+		transform: translateX(16px);
+		background: var(--button-ink);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.knob,
+		.voice-tile {
+			transition: none;
+		}
+	}
+	@media (max-width: 560px) {
+		.voice-tiles {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+
 	.more {
 		margin-top: 140px;
 	}
@@ -1738,6 +2238,134 @@ const faq = {
 			installed.textContent = `Installed · ${n}`;
 		}
 	});
+
+	// Voice: the tabs switch between Dictation and Speech; Use moves In use to its tile; Add key
+	// and Change key open the masked key field, whose eye shows it and whose Save keeps it, so the
+	// tile offers Use; the menus pick a language or a voice; the choices and the switch set
+	// themselves.
+	const voice = document.querySelector<HTMLElement>('.voice');
+	if (voice) {
+		const tabs = [...voice.querySelectorAll<HTMLElement>('[data-voice-tab]')];
+		for (const tab of tabs) {
+			tab.addEventListener('click', () => {
+				for (const t of tabs) {
+					const on = t === tab;
+					t.classList.toggle('on', on);
+					t.setAttribute('aria-selected', String(on));
+				}
+				voice.querySelectorAll<HTMLElement>('[data-voice-pane]').forEach((p) => (p.hidden = p.dataset.voicePane !== tab.dataset.voiceTab));
+				closeMenus();
+			});
+		}
+
+		const label = (tile: HTMLElement) => (tile.classList.contains('on') ? 'Change key' : tile.hasAttribute('data-key') ? 'Use' : 'Add key');
+		const draw = (tile: HTMLElement) => {
+			const button = tile.querySelector<HTMLElement>('[data-engine-btn]');
+			const state = tile.querySelector<HTMLElement>('.spool-state');
+			if (button) button.textContent = label(tile);
+			if (state) state.hidden = !tile.classList.contains('on');
+		};
+		const keyForm = (tile: HTMLElement, open: boolean) => {
+			const foot = tile.querySelector<HTMLElement>('[data-engine-foot]');
+			const form = tile.querySelector<HTMLElement>('[data-key-form]');
+			const input = tile.querySelector<HTMLInputElement>('[data-key-input]');
+			const eye = tile.querySelector<HTMLElement>('[data-key-eye]');
+			if (!foot || !form || !input) return;
+			foot.hidden = open;
+			form.hidden = !open;
+			input.value = '';
+			input.type = 'password';
+			eye?.setAttribute('aria-pressed', 'false');
+			eye?.setAttribute('aria-label', 'Show the key');
+			if (open) input.focus({ preventScroll: true });
+		};
+		for (const pane of voice.querySelectorAll<HTMLElement>('[data-voice-pane]')) {
+			const tiles = [...pane.querySelectorAll<HTMLElement>('.voice-tile')];
+			for (const tile of tiles) {
+				tile.querySelector('[data-engine-btn]')?.addEventListener('click', () => {
+					if (label(tile) !== 'Use') return keyForm(tile, true);
+					for (const t of tiles) {
+						t.classList.toggle('on', t === tile);
+						draw(t);
+					}
+				});
+				tile.querySelector('[data-key-cancel]')?.addEventListener('click', () => keyForm(tile, false));
+				const input = tile.querySelector<HTMLInputElement>('[data-key-input]');
+				const save = () => {
+					if (!input?.value.trim()) return input?.focus({ preventScroll: true });
+					tile.setAttribute('data-key', '');
+					keyForm(tile, false);
+					draw(tile);
+				};
+				tile.querySelector('[data-key-save]')?.addEventListener('click', save);
+				input?.addEventListener('keydown', (e) => {
+					if (e.key === 'Enter') save();
+					if (e.key === 'Escape') keyForm(tile, false);
+				});
+				const eye = tile.querySelector<HTMLElement>('[data-key-eye]');
+				eye?.addEventListener('click', () => {
+					if (!input) return;
+					const shown = input.type === 'password';
+					input.type = shown ? 'text' : 'password';
+					eye.setAttribute('aria-pressed', String(shown));
+					eye.setAttribute('aria-label', shown ? 'Hide the key' : 'Show the key');
+				});
+			}
+		}
+
+		// The language's and the voice's menus: one open at a time, closed by a pick, Esc or a click
+		// outside.
+		const picks = [...voice.querySelectorAll<HTMLElement>('.menu-at')];
+		function closeMenus(but?: HTMLElement) {
+			for (const at of picks) {
+				if (at === but) continue;
+				at.querySelector<HTMLElement>('[data-pick-menu]')!.hidden = true;
+				at.querySelector('[data-pick]')?.setAttribute('aria-expanded', 'false');
+			}
+		}
+		for (const at of picks) {
+			const pick = at.querySelector<HTMLElement>('[data-pick]');
+			const menu = at.querySelector<HTMLElement>('[data-pick-menu]');
+			const value = at.querySelector<HTMLElement>('[data-pick-value]');
+			if (!pick || !menu || !value) continue;
+			pick.addEventListener('click', () => {
+				closeMenus(at);
+				const open = menu.hidden;
+				menu.hidden = !open;
+				pick.setAttribute('aria-expanded', String(open));
+				if (open) menu.querySelector<HTMLElement>('.on')?.scrollIntoView({ block: 'nearest' });
+			});
+			for (const item of menu.querySelectorAll<HTMLElement>('[data-value]')) {
+				item.addEventListener('click', () => {
+					menu.querySelectorAll('[data-value]').forEach((i) => {
+						i.classList.toggle('on', i === item);
+						i.setAttribute('aria-checked', String(i === item));
+					});
+					value.textContent = item.dataset.value ?? '';
+					closeMenus();
+				});
+			}
+		}
+		document.addEventListener('pointerdown', (e) => {
+			if (!picks.some((at) => at.contains(e.target as Node))) closeMenus();
+		});
+		document.addEventListener('keydown', (e) => {
+			if (e.key === 'Escape') closeMenus();
+		});
+
+		for (const choice of voice.querySelectorAll<HTMLElement>('[data-choice]')) {
+			const segments = [...choice.querySelectorAll<HTMLElement>('.segment')];
+			for (const s of segments) s.addEventListener('click', () => segments.forEach((o) => o.classList.toggle('on', o === s)));
+		}
+		voice.querySelectorAll<HTMLElement>('[data-switch]').forEach((sw) =>
+			sw.addEventListener('click', () => sw.setAttribute('aria-checked', String(sw.getAttribute('aria-checked') !== 'true'))),
+		);
+		const play = voice.querySelector<HTMLElement>('[data-play]');
+		play?.addEventListener('click', () => {
+			play.classList.add('pressed');
+			setTimeout(() => play.classList.remove('pressed'), 160);
+		});
+	}
 
 	// The grid: each item's thread works while it's hovered, and they all twang as the grid arrives.
 	const items = [...document.querySelectorAll<HTMLElement>('.grid li')];

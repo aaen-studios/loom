@@ -337,6 +337,9 @@ struct Card: Equatable, Sendable {
     var address = ""
     var agentNames: [String] = []
     var keys: [SpoolKey] = []
+    /// For `voice_setup` (Voice.swift): its kind, its engine's tile, its settings and whose
+    /// key it needs; `message`, `sending` and `error` are its Add's.
+    var voice: VoiceCard?
     /// For choices, the answer the person sent once the chat went on.
     var chosen: Int?
     /// For a form: its fields, the reply it's in (for Send), what's picked on each
@@ -376,8 +379,9 @@ struct Card: Equatable, Sendable {
 
     init?(_ c: JSON) {
         type = c["type"].text
-        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "draft", "spool_connect"].contains(type) else { return nil }
+        guard ["choices", "form", "checklist", "table", "progress", "facts", "sign_in", "mcp_add", "secret_ask", "routine_off", "draft", "spool_connect", "voice_setup"].contains(type) else { return nil }
         draft = type == "draft" ? Draft(c) : nil
+        voice = type == "voice_setup" ? VoiceCard(c) : nil
         entry = c["entry"].text
         name = c["name"].text
         address = c["address"].text
@@ -1806,6 +1810,11 @@ final class Model {
     var spoolSending: Set<String> = []
     var spoolErrors: [String: String] = [:]
     var spoolWaiting: [String: String] = [:]
+    /// Settings › Voice and dictation (Voice.swift), and Add on voice_setup cards: the ones on
+    /// their way and what the instance said to ones it refused, by card.
+    var voice = VoiceState()
+    var voiceCardSending: Set<String> = []
+    var voiceCardErrors: [String: String] = [:]
     /// What's picked on the choices and toggles of forms not sent yet, by
     /// `message/card/field`; the forms whose answers went and haven't come back, by their
     /// send's cid, with their `message/card`; and what the instance said to ones it
@@ -2028,6 +2037,11 @@ final class Model {
                     c.sending = spoolSending.contains(c.id)
                     c.error = spoolErrors[c.id] ?? ""
                 }
+                if c.type == "voice_setup" {
+                    c.message = out[i].id
+                    c.sending = voiceCardSending.contains(c.id)
+                    c.error = voiceCardErrors[c.id] ?? ""
+                }
                 if c.type == "routine_off" {
                     c.sending = routineOnSending.contains(c.routine)
                     c.error = routineOnErrors[c.routine] ?? ""
@@ -2157,7 +2171,7 @@ final class Model {
 
     /// Takes a frame from the core.
     func take(_ f: JSON) {
-        if emoji.take(f) { return }
+        if emoji.take(f) || voiceFrame(f) { return }
         switch f["t"].text {
         case "core.conn":
             let state = f["state"].text
@@ -2355,6 +2369,9 @@ final class Model {
         case "routine":
             // A routine made, changed or deleted, here or elsewhere.
             routinesStale = true
+        case "voice":
+            // The person's voice settings, changed here or on another device.
+            if kind == "voice.updated" { voice.take(f["voice"]) }
         case "defaults":
             if !f["defaults"].isNull { defaultPicks = f["defaults"]["config"] }
         default:
@@ -2394,7 +2411,7 @@ final class Model {
     }
 
     private func result(_ f: JSON) {
-        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) || routineResult(f) { return }
+        if mcpResult(f) || actaResult(f) || t3Result(f) || spoolsResult(f) || routineResult(f) || voiceResult(f) { return }
         // What's marked read: quietly, as an instance from before it kept reads refuses it.
         if f["id"].text.hasPrefix("app.read_") { return }
         if f["id"].text == "app.acp" {

@@ -109,14 +109,14 @@ impl Mic {
                     ),
                     cpal::SampleFormat::F32 => device.build_input_stream(
                         config.into(),
-                        move |data: &[f32], _: &_| {
-                            gather.take(data.iter().map(|&s| f32_to_i16(s)))
-                        },
+                        move |data: &[f32], _: &_| gather.take(data.iter().map(|&s| f32_to_i16(s))),
                         on_error,
                         None,
                     ),
                     other => {
-                        let _ = said.send(Err(format!("The mic gives {other} samples, which loom can't read.")));
+                        let _ = said.send(Err(format!(
+                            "The mic gives {other} samples, which loom can't read."
+                        )));
                         return;
                     }
                 };
@@ -169,7 +169,10 @@ impl Mic {
         let _ = self.stop.send(());
         // The stream's thread drops its gatherer, which sends the rest, once it ends.
         let mut out = Vec::new();
-        while let Ok(pcm) = self.chunks.recv_timeout(std::time::Duration::from_millis(300)) {
+        while let Ok(pcm) = self
+            .chunks
+            .recv_timeout(std::time::Duration::from_millis(300))
+        {
             use base64::Engine;
             out.push(serde_json::json!({
                 "t": "voice.audio",

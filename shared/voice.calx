@@ -178,7 +178,6 @@ pub fn apply(old: Json, args: Json) -> Json ! String {
     return settings(next)
 }
 
-
 /// A word with its first letter in capitals: OpenAI's `marin` is shown as Marin.
 pub fn title(word: String) -> String {
     if word.len() == 0 { return String() }

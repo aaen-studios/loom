@@ -26,6 +26,13 @@ struct Composer: View {
     @AppStorage(Prefs.emojiButton) private var emojiButton = true
     @AppStorage(Prefs.emoticons) private var emoticons = false
     @AppStorage(Prefs.skinTone) private var skinTone = 0
+    @AppStorage(Prefs.holdToTalk) private var holdToTalk = false
+    /// loom's dictation (PLAN.md, "Voice"): which one puts its words here, where they are
+    /// in the field, what they took the place of, and whether the mic is held.
+    @State private var dictating = 0
+    @State private var dictated: NSRange?
+    @State private var dictReplaced = NSAttributedString()
+    @State private var holding = false
 
     var body: some View {
         let model = session.model
@@ -82,6 +89,11 @@ struct Composer: View {
         }
         .onChange(of: model.emoji.replace) { _, now in
             if let now { replaceEmoji(now) }
+        }
+        .onChange(of: model.voice.heard) { _, now in dictation(now) }
+        // The mic with no engine set up opens Settings › Voice.
+        .sheet(isPresented: Binding(get: { session.model.voice.open }, set: { session.model.voice.open = $0 })) {
+            NavigationStack { VoiceView() }
         }
         .onChange(of: box.attached) { _, ids in model.syncAttachments(ids) }
         // Starting a reply puts the cursor in the composer.
@@ -220,6 +232,8 @@ struct Composer: View {
                     }
                 }
 
+                mic
+
                 Button {
                     if busy && idle {
                         session.send(model.cancel())
@@ -265,6 +279,83 @@ struct Composer: View {
         // `-plus` at launch opens the sheet, for screenshots (ios/README.md).
         .onAppear {
             if ProcessInfo.processInfo.arguments.contains("-plus") { plusOpen = true }
+        }
+    }
+
+    // MARK: Dictation
+
+    /// The mic: a tap starts loom's dictation and another stops it, or with Hold to talk,
+    /// it records while it's held. Filled in ink while it hears.
+    private var mic: some View {
+        let on = session.listening
+        let glyph = Image(systemName: on ? "mic.fill" : "mic")
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(on ? P.buttonInk : P.ink2)
+            .frame(width: Tokens.Control.iconComposer, height: Tokens.Control.iconComposer)
+            .background(on ? P.button : Color.clear, in: Circle())
+            .contentShape(Circle())
+            .accessibilityLabel(on ? "Stop dictating" : "Dictate")
+            .accessibilityAddTraits(.isButton)
+        return Group {
+            if holdToTalk {
+                glyph.gesture(DragGesture(minimumDistance: 0)
+                    .onChanged { _ in
+                        guard !holding else { return }
+                        holding = true
+                        startDictating()
+                    }
+                    .onEnded { _ in
+                        holding = false
+                        session.stopDictation()
+                    })
+            } else {
+                Button {
+                    if session.listening { session.stopDictation() } else { startDictating() }
+                } label: {
+                    glyph
+                }
+            }
+        }
+    }
+
+    /// Its words go in at the caret, in place of what's selected.
+    private func startDictating() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if let v = box.view {
+            let range = v.selectedRange
+            dictated = range
+            dictReplaced = v.textStorage.attributedSubstring(from: range)
+        } else {
+            dictated = nil
+        }
+        dictating = session.model.voice.heard.n + 1
+        session.startDictation()
+    }
+
+    /// The words the core has heard so far, in place of what this dictation put in before.
+    /// Once it's over, one undo takes them all out.
+    private func dictation(_ d: Dictation) {
+        guard d.n == dictating, let range = dictated, let v = box.view else { return }
+        let have = v.textStorage.length
+        let at = min(range.location, have)
+        let count = min(range.length, have - at)
+        let (put, _) = dictationSplice(v.textStorage.string, at: at, count: count, words: d.text)
+        if v.textStorage.attributedSubstring(from: NSRange(location: at, length: count)).string != put {
+            v.textStorage.replaceCharacters(in: NSRange(location: at, length: count), with: NSAttributedString(string: put, attributes: v.typingAttributes))
+            v.selectedRange = NSRange(location: at + (put as NSString).length, length: 0)
+            v.delegate?.textViewDidChange?(v)
+        }
+        let now = NSRange(location: at, length: (put as NSString).length)
+        dictated = now
+        if d.over {
+            let before = dictReplaced
+            if now.length > 0 || before.length > 0 {
+                v.undoManager?.registerUndo(withTarget: v) { v in
+                    if now.upperBound <= v.textStorage.length { v.edit(now, before) }
+                }
+            }
+            dictated = nil
+            dictating = 0
         }
     }
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Network
 import Observation
@@ -99,6 +100,17 @@ final class Session {
                 model.take(f)
             case "core.sound":
                 Sounds.play(f["file"].text, volume: f["volume"].double ?? 1)
+            case "core.speak":
+                if f["stop"].bool == true {
+                    Speaker.stop()
+                } else if let file = f["file"].string {
+                    Speaker.play(file)
+                }
+                model.take(f)
+            case "core.dictation":
+                model.take(f)
+                // Failed, or no engine to hear it: the mic stops, as the core already has.
+                if ["failed", "no_engine"].contains(f["state"].text) { endMic() }
             case "welcome":
                 model.take(f)
                 registerPush()
@@ -204,6 +216,8 @@ final class Session {
     /// Someone started or stopped looking at the app. Coming back from the background,
     /// the socket has likely gone, so the core connects again at once.
     func active(_ active: Bool, returning: Bool) {
+        // The mic doesn't hear in the background.
+        if !active { stopDictation() }
         send(["t": "app.active", "active": JSON(active)])
         if active && returning {
             send(["t": "app.wake"])
@@ -294,5 +308,70 @@ final class Session {
 
     func signOut() {
         send(["t": "logout"])
+    }
+
+    // MARK: Voice
+
+    @ObservationIgnored private var mic: Mic?
+    /// Whether the composer's mic is wanted on: pressed and not let go yet, while the
+    /// system asks whether loom may hear it.
+    @ObservationIgnored private var micWanted = false
+    /// Whether the mic records for a dictation now.
+    private(set) var listening = false
+
+    /// The composer's mic: loom's dictation starts (`voice.listen`) and the mic's PCM goes
+    /// to the core. The first time, the system asks whether loom may hear the mic.
+    func startDictation() {
+        guard mic == nil else { return }
+        micWanted = true
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            beginDictation()
+        case .undetermined:
+            AVAudioApplication.requestRecordPermission { [weak self] ok in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if ok {
+                        if self.micWanted { self.beginDictation() }
+                    } else {
+                        self.micWanted = false
+                        self.model.notice = "loom can't hear the mic. Turn it on in Settings › Apps › loom."
+                    }
+                }
+            }
+        default:
+            micWanted = false
+            model.notice = "loom can't hear the mic. Turn it on in Settings › Apps › loom."
+        }
+    }
+
+    /// The mic let go, or tapped again: the last words come, and the dictation is done.
+    func stopDictation() {
+        micWanted = false
+        guard mic != nil else { return }
+        endMic()
+        send(["t": "voice.stop"])
+    }
+
+    private func beginDictation() {
+        micWanted = false
+        Speaker.stop()
+        model.dictationStarted()
+        send(["t": "voice.listen"])
+        let core = self.core
+        let m = Mic { frame in core?.send(frame) }
+        guard m.start() else {
+            send(["t": "voice.stop"])
+            model.notice = "The mic didn't start."
+            return
+        }
+        mic = m
+        listening = true
+    }
+
+    private func endMic() {
+        mic?.stop()
+        mic = nil
+        listening = false
     }
 }

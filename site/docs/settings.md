@@ -2,7 +2,7 @@
 
 The gear at the bottom of the sidebar opens Settings, as a popup over the chat. Its pages are down the left, under three headings:
 
-- **You**: About you, Appearance, Chat, Emoji, and App & notifications.
+- **You**: About you, Appearance, Chat, Emoji, App & notifications, and Voice.
 - **Agents**: Defaults, Rules, Brains, Skills, Proposals, Spools, MCP servers, Secrets and Plugins.
 - **Work**: Routines and Tasks.
 
@@ -16,7 +16,7 @@ What's about the server rather than you (Add a device, People, Move, Add a serve
 
 ## This device's settings
 
-Appearance, Chat, App & notifications, and the options under your emoji in Emoji belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
+Appearance, Chat, App & notifications, the options under your emoji in Emoji, and Voice's Shortcut and Hold to talk belong to the device you set them on, not to your account. They're kept in `prefs.json` in the app's data folder, so your laptop and your desktop can each be set their own way.
 
 Everything else in Settings is kept on the instance, so every device you sign in on has it.
 
@@ -81,7 +81,7 @@ Under **Sounds**:
   - **Routine posted**: a routine posted in its chat. Off.
   - **Routine failed**: a routine failed, or turned itself off. On.
   - **Message sent**. Off.
-  - **Dictation on and off**: as you start dictating from the composer's mic. On.
+  - **Dictation on and off**: as dictation from the composer's mic starts and stops ([Voice](#voice)). On.
 - **Silent while the chat is in front**: no sound for the chat you're looking at. On.
 - **Quiet hours**: from and to, 22:00 to 07:30 to start with, and their switch. In quiet hours only your own Message sent and dictation sound. Off.
 
@@ -93,6 +93,26 @@ Under **Updates**:
 - **Update on its own**: a new version goes in by itself, while loom is in the tray and no agent is working. Otherwise the sidebar offers it, to restart into. A version that didn't start when it went in isn't put in again by itself: the update icon still offers it, saying why it didn't start, and a newer version goes in by itself as usual.
 
 Under **Credits**: the emoji are [Twemoji](https://github.com/jdecked/twemoji), © Twitter, Jason Sofonia and Justine De Caires, under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+## Voice
+
+The composer's mic is loom's own dictation: click it and your words come into the message box as you say them, and click it again to stop. Replies can be read aloud too. Both use a service you have a key for, and **Dictation** and **Speech**, beside the page's title, each list theirs as tiles. The one in use is outlined, with a check and **In use**. **Use** picks another, and **Add key** asks for its key, masked, with an eye to show it; **Change key** replaces it. A key is kept with your secrets on the instance, sealed, so it works on every device of yours. With no service set up, the mic opens this page.
+
+Under **Dictation**:
+
+- **ElevenLabs Scribe**, **Deepgram Nova-3** and **OpenAI** (gpt-4o-transcribe) write the words as you say them. **Groq** (Whisper large v3) writes them once you stop.
+- **Language**: Detect, or one of twenty.
+- **Shortcut**: Ctrl+Shift+Space starts and stops dictation, or Off.
+- **Hold to talk**: the mic records while you hold it, and stops when you let go. Off.
+
+Under **Speech**:
+
+- **ElevenLabs** (Flash v2.5, your own voices and the library's), **Fish Audio** (S2.1 Pro, the voice library) and **OpenAI** (gpt-4o-mini-tts, 13 voices).
+- **Voice**: one of the service's voices, and its play button to hear it.
+- **Speed**: 0.8× to 1.2×. 1× to start with.
+- **Read replies aloud**: Never, Only in live, or Always, which reads a reply aloud as it comes in the chat in front of you. Never to start with.
+
+An agent can set these up for you: its card in the reply has the same tile and rows, and asks for a key there when the service needs one it doesn't have. Agents never see a key.
 
 ## Routines
 

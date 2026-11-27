@@ -38,6 +38,7 @@ pub(super) fn settings_groups() -> Vec<(Option<&'static str>, Vec<Page>)> {
                     "App & notifications",
                     Screen::AppPrefs,
                 ),
+                ("pop-voice", Ico::Mic, "Voice", Screen::Voice),
             ],
         ),
         (
@@ -119,6 +120,9 @@ fn page_words(screen: Screen) -> &'static str {
         Screen::Secrets => "secrets keys passwords sites bank sealed",
         Screen::Plugins => "plugins panels",
         Screen::Emoji => "emoji emojis custom upload skin tone animated gif emoticons smiley twemoji",
+        Screen::Voice => {
+            "voice dictation dictate mic microphone speech speak read aloud talk transcribe elevenlabs deepgram openai groq fish whisper scribe language shortcut hold voices speed key"
+        }
         Screen::Routines => "routines schedule every day hours times weekdays cron webhook history runs calendar week",
         Screen::Tasks => "tasks jobs long work",
         Screen::Import => "import openbot grok bring over",
