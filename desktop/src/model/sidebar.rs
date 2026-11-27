@@ -161,10 +161,8 @@ impl Model {
             let mut pinned = Section::empty(SidePart::Pinned);
             let mut list = Section::empty(SidePart::List);
             let mut hidden = Section::empty(SidePart::Hidden);
-            let mut rooms: Vec<&super::Room> = self.rooms.iter().collect();
-            rooms.sort_by_key(|r| !r.everyone);
             list.items
-                .extend(rooms.iter().map(|r| SideItem::Room(r.id.clone())));
+                .extend(self.rooms.iter().map(|r| SideItem::Room(r.id.clone())));
             for a in self.agents.iter() {
                 let it = SideItem::Agent(a.id.clone());
                 if a.hidden {
@@ -423,16 +421,16 @@ mod tests {
             {"id": "a_5", "name": "Nook", "group": "g_1"},
             {"id": "a_6", "name": "Old", "hidden": 3}
         ]}));
-        let room = |id: &str, name: &str, everyone: bool| json!({"id": id, "agent": "", "title": name, "room": {"name": name, "members": ["a_2", "a_3"], "everyone": everyone}});
+        let room = |id: &str, name: &str| json!({"id": id, "agent": "", "title": name, "room": {"name": name, "members": ["a_2", "a_3"]}});
         m.take(
             &json!({"t": "core.data", "what": "conversations", "items": [
-                room("c_1", "Everyone", true), room("c_2", "House", false)
+                room("c_1", "Money"), room("c_2", "House")
             ]}),
         );
         m.take(&json!({"t": "core.data", "what": "sidebar", "items": [
             {"kind": "pinned", "agents": ["a_1"]},
             {"kind": "waiting", "agents": ["a_2"]},
-            {"kind": "list", "items": [{"kind": "room", "id": "c_1", "name": "Everyone", "everyone": true}, {"kind": "agent", "id": "a_3"}, {"kind": "agent", "id": "a_4"}]},
+            {"kind": "list", "items": [{"kind": "room", "id": "c_1", "name": "Money"}, {"kind": "agent", "id": "a_3"}, {"kind": "agent", "id": "a_4"}]},
             {"kind": "group", "id": "g_1", "name": "Home", "collapsed": false, "items": [{"kind": "agent", "id": "a_5"}, {"kind": "room", "id": "c_2"}]},
             {"kind": "hidden", "agents": ["a_6"]},
             {"kind": "order", "items": ["a_1", "c_1", "a_2", "a_3", "a_4", "a_5", "c_2", "a_6"]}
@@ -508,10 +506,10 @@ mod tests {
         ]}));
         m.take(&json!({"t": "core.data", "what": "conversations", "items": [
             {"id": "c_2", "agent": "", "title": "Money", "room": {"name": "Money", "members": ["a_1", "a_2"]}},
-            {"id": "c_1", "agent": "", "title": "Everyone", "room": {"name": "Everyone", "members": ["a_1", "a_2"], "everyone": true}}
+            {"id": "c_1", "agent": "", "title": "Code", "room": {"name": "Code", "members": ["a_1", "a_2"]}}
         ]}));
         assert_eq!(ids(&m, SidePart::Pinned), ["a_2"]);
-        assert_eq!(ids(&m, SidePart::List), ["c_1", "c_2", "a_1"]);
+        assert_eq!(ids(&m, SidePart::List), ["c_2", "c_1", "a_1"]);
         assert_eq!(ids(&m, SidePart::Hidden), ["a_3"]);
     }
 
@@ -519,7 +517,7 @@ mod tests {
     fn a_row_dropped_under_another_takes_its_place_in_the_whole_order() {
         let mut m = Model::new();
         with_sidebar(&mut m);
-        // Shop over Everyone, at the top of the list.
+        // Shop over Money, at the top of the list.
         let f = m.drop_item("a_4", &Drop::Before("c_1".into()));
         assert_eq!(f.len(), 1);
         assert_eq!(
@@ -527,7 +525,7 @@ mod tests {
             ["a_1", "a_4", "c_1", "a_2", "a_3", "a_5", "c_2", "a_6"]
         );
         assert_eq!(ids(&m, SidePart::List), ["a_4", "c_1", "a_3"]);
-        // Everyone under Juniper. Hermes, waiting, keeps its place to go back to.
+        // Money under Juniper. Hermes, waiting, keeps its place to go back to.
         let f = m.drop_item("c_1", &Drop::After("a_3".into()));
         assert_eq!(
             order_sent(&f),
@@ -543,7 +541,7 @@ mod tests {
     fn a_row_dropped_beside_one_in_a_folder_goes_in_and_out_again() {
         let mut m = Model::new();
         with_sidebar(&mut m);
-        // Everyone between Nook and House, in Home.
+        // Money between Nook and House, in Home.
         let f = m.drop_item("c_1", &Drop::After("a_5".into()));
         assert_eq!(f[0]["name"], "room.update");
         assert_eq!(f[0]["args"], json!({"conversation": "c_1", "group": "g_1"}));

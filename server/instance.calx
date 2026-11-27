@@ -49,6 +49,7 @@ import server.hashing.{Done, Job}
 import server.installer
 import server.icons
 import server.mcpregistry
+import server.pools
 import server.mcptest
 import server.mcpcall
 import server.acta
@@ -231,6 +232,17 @@ impl Connect {
 // What the MCP Registry answered (server/mcpregistry.calx), kept for
 // mcpregistry.FRESH_MS so a search typed again, or a connect right after it,
 // doesn't ask it again.
+// The newest reading of a program's usage pool (server/pools.calx): when, what it
+// said or why it couldn't, whether a read is under way, and whether it refused the
+// key, so it isn't read again by itself.
+struct PoolRead {
+    at: i64
+    reading: Json
+    error: String
+    asking: bool
+    stopped: bool
+}
+
 struct RegistryAnswer {
     at: i64
     status: u32
@@ -545,6 +557,9 @@ pub struct Instance {
     mcp_adds: LinkedMap<String, McpAdd>    // tc_ id -> an MCP server an agent proposed, while its turn goes on
     connects: LinkedMap<String, Connect>    // user/server -> a server being connected from the catalog
     mcp_registry_at: String    // the MCP Registry's address
+    pool_to: Sender<pools.Job>    // the thread that reads usage pools
+    pool_done: Receiver<pools.Done>
+    pool_reads: Map<String, PoolRead>    // program -> its pool's newest reading
     mcp_registry_to: Sender<mcpregistry.Job>    // the thread that asks it
     mcp_registry_done: Receiver<mcpregistry.Done>
     mcp_registry_kept: Map<String, RegistryAnswer>    // what it answered lately, by what was asked
@@ -2419,6 +2434,7 @@ impl Instance {
         let (call_to, call_done) = mcpcall.start()
         let (oauth_to, oauth_done) = oauth.start()
         let (mcp_registry_to, mcp_registry_done) = mcpregistry.start()
+        let (pool_to, pool_done) = pools.start()
         let (push_to, push_gone) = push.start(config.apns.copy())
         let (move_to, move_done) = move.start()
         let (update_to, update_back) = update.start()
@@ -2432,7 +2448,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), connects: LinkedMap<String, Connect>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2443,6 +2459,7 @@ impl Instance {
         browser.stop_leftovers("{i.data}/browsers")
         try i.give_imported_servers()
         try i.drop_mcp_browser()
+        try i.drop_everyone()
         try i.keep_waiting_notes()
         i.pick_up_registry()
         // What waited behind a turn the restart cut short goes once the loop
@@ -2787,6 +2804,66 @@ impl Instance {
         if let (left, _) = try i.budget_left(user, name) { share = share.i("left", if left < 0 { 0 } else { left }) }
         if let Json.Object(m) = mut out { m.insert(String("share"), share.done()) }
         return out
+    }
+
+    // --- Usage pools (server/pools.calx) ---
+
+    // The usage pool `program` is linked to, as acp.list gives it to the owner:
+    // its kind, address and the name of the secret with its key, and the
+    // newest reading, or why there's none. Reading it again once that's older
+    // than pools.FRESH_MS. None for anyone but the owner, whose accounts they are.
+    fn program_pool(i: mut Instance, user: String, program: String) -> Json? ! Error {
+        if i.sandboxed(user) { return none }
+        let (pool, _) = try i.store.pool(program.copy()) else return none
+        var out = Obj.new().s("kind", str_at(pool.copy(), "kind") ?? String()).s("address", str_at(pool.copy(), "address") ?? String()).s("secret", str_at(pool.copy(), "secret") ?? String())
+        var stale = true
+        var stopped = false
+        if let r = i.pool_reads.find(program.copy()) {
+            if r.reading != Json.Null { out = out.j("reading", r.reading.copy()) }
+            if r.error.len() > 0 { out = out.s("error", r.error.copy()) }
+            stale = now() - r.at >= pools.FRESH_MS and not r.asking
+            stopped = r.stopped
+        }
+        if stale and not stopped { try i.read_pool(program.copy()) }
+        return some(out.done())
+    }
+
+    // Asks the pool `program` is linked to for its accounts, on the pool's thread.
+    fn read_pool(i: mut Instance, program: String) ! Error {
+        let (pool, by) = try i.store.pool(program.copy()) else return
+        let kind = str_at(pool.copy(), "kind") ?? String()
+        let secret = str_at(pool.copy(), "secret") ?? String()
+        var read = i.pool_reads.remove(program.copy()) ?? PoolRead { at: 0, reading: Json.Null, error: String(), asking: false, stopped: false }
+        let key = try i.secret(by, secret.copy()) else {
+            read.error = "There's no secret {secret} with the pool's management key."
+            read.at = now()
+            i.pool_reads.insert(program.copy(), read)
+            return
+        }
+        let (address, headers) = pools.request(kind, str_at(pool, "address") ?? String(), key)
+        read.asking = true
+        i.pool_reads.insert(program.copy(), read)
+        i.pool_to.send(pools.Job { program: program.copy(), url: address, headers: headers })
+    }
+
+    // What a pool answered: its reading, or why there's none, kept and told to
+    // the owner's devices (`pool.updated`). A pool that refused the key isn't
+    // read again until it's linked again, so loom never earns a ban by retrying.
+    fn pool_answered(i: mut Instance, d: pools.Done) ! Error {
+        let (pool, by) = try i.store.pool(d.program.copy()) else return
+        var read = i.pool_reads.remove(d.program.copy()) ?? PoolRead { at: 0, reading: Json.Null, error: String(), asking: false, stopped: false }
+        read.asking = false
+        read.at = now()
+        if d.status == 200 and d.error.len() == 0 {
+            read.reading = pools.reading(str_at(pool.copy(), "kind") ?? String(), d.value.copy(), now())
+            read.error = String()
+        } else {
+            read.error = pools.refused(d.status, d.error.copy())
+            read.stopped = not pools.read_again(d.status)
+        }
+        i.pool_reads.insert(d.program.copy(), read)
+        let shown = try i.program_pool(by.copy(), d.program.copy()) ?? Json.Null
+        try i.event(by, "pool.updated", Obj.new().s("program", d.program.copy()).j("pool", shown).done())
     }
 
     // Whether `user` may run agents on `program`: the owner always, and anyone
@@ -3215,6 +3292,12 @@ impl Instance {
                 match i.mcp_tested(d) {
                     ok => {},
                     err(e) => eprintln("loom: testing an MCP server: {e}"),
+                }
+            }
+            while let d = i.pool_done.next() {
+                match i.pool_answered(d) {
+                    ok => {},
+                    err(e) => eprintln("loom: a usage pool's answer: {e}"),
                 }
             }
             while let d = i.mcp_registry_done.next() {
@@ -5195,6 +5278,26 @@ impl Instance {
             i.log(u.id.copy(), String(), "agent", String("Removed the MCP server browser, which Add a browser set up: your agents use loom's own browser"), String())
         }
         try i.store.set_meta(String("mcp_browser_dropped"), String("1"))
+    }
+
+    // Everyone, the group chat loom once made for each person with two agents,
+    // goes once, as loom makes no group chat of its own now (PLAN.md, "Group
+    // chats"). Its conversation is put away as a deleted one is: its messages,
+    // pins and room stay in the data, out of every list, and each device is told
+    // it's gone. One the person renamed goes too, since it was still Everyone.
+    fn drop_everyone(i: Instance) ! Error {
+        if try i.store.meta(String("everyone_dropped")) != none { return }
+        for u in try i.store.users() {
+            loop {
+                let id = try i.store.everyone_room(u.id.copy()) else break
+                let talked = try i.store.message_count(u.id.copy(), id.copy())
+                try i.store.put_away_room(u.id.copy(), id.copy())
+                try i.event(u.id.copy(), "conversation.deleted", Obj.new().s("conversation", id.copy()).done())
+                let what = if talked > 0 { "Put away the group chat Everyone, which loom made, with its {talked} messages kept: loom makes no group chat of its own now" } else { String("Removed the group chat Everyone, which loom made: loom makes no group chat of its own now") }
+                i.log(u.id.copy(), String(), "message", what, String())
+            }
+        }
+        try i.store.set_meta(String("everyone_dropped"), String("1"))
     }
 
     // The person's MCP servers the agent has, as ACP's session/new takes them,
@@ -11511,7 +11614,7 @@ impl Instance {
         }
         if let tz = str_at(at(f.copy(), "device"), "tz") { try i.store.update_device_tz(device.id.copy(), tz) }
         let user = device.user.copy()
-        // Everyone, and the group chats' members as the agents are now, before catching up.
+        // The group chats' members as the agents are now, before catching up.
         try i.keep_rooms(user.copy())
         let after = int_at(f, "after") ?? 0
         let last = try i.store.last_seq(user.copy())
@@ -11870,20 +11973,11 @@ impl Instance {
         return merge(made, Obj.new().i("order", last + 1).done())
     }
 
-    // Keeps `user`'s group chats' members as their agents are now: Everyone,
-    // made once they have two agents, has every one of them, and the others
-    // lose the ones that were deleted. Each change is a conversation.created
-    // or conversation.updated.
+    // Keeps `user`'s group chats' members as their agents are now: each loses
+    // the ones that were deleted, with conversation.updated. loom makes no group
+    // chat of its own; the person makes each.
     fn keep_rooms(i: Instance, user: String) ! Error {
         let all = try i.agent_ids(user.copy())
-        if try i.store.everyone_room(user.copy()) == none and all.len() >= 2 {
-            let made = try i.store.add_conversation(user.copy(), String(), String(rooms.EVERYONE))
-            let id = str_at(made, "id") ?? String()
-            let room = try i.at_the_end(user.copy(), Obj.new().s("name", String(rooms.EVERYONE)).b("everyone", true).j("members", rooms.ids_json(all.copy())).s("color", String()).s("default", String()).j("corrections", Json.Array(List<Json>())).done())
-            try i.store.put_room(user.copy(), id.copy(), room)
-            let c = try i.store.conversation(user.copy(), id) else return
-            try i.event(user.copy(), "conversation.created", Obj.new().j("conversation", c).done())
-        }
         for (id, room) in try i.store.rooms(user.copy()) {
             let members = rooms.members_of(room.copy(), all.copy())
             if rooms.ids_in(at(room.copy(), "members")) == members { continue }
@@ -16843,7 +16937,6 @@ impl Instance {
             let had = try i.store.conversation(user.copy(), id.copy()) ?? Json.Null
             if had == Json.Null { return Answer.Refused(String("not_found"), "There's no conversation {id}.") }
             let room = at(had, "room")
-            if name == "conversation.delete" and (bool_at(room.copy(), "everyone") ?? false) { return Answer.Refused(String("not_allowed"), String("Everyone is always there. Rename it if you like.")) }
             if name == "conversation.rename" {
                 let title = str_at(args, "title") ?? String()
                 try i.store.rename_conversation(user.copy(), id.copy(), title.copy())
@@ -17832,10 +17925,38 @@ impl Instance {
                 if let l = limits {
                     if let Json.Object(m) = mut program { m.insert(String("limits"), l) }
                 }
+                // The usage pool it draws from, for the owner.
+                if let pool = try i.program_pool(user.copy(), a.name.copy()) {
+                    if let Json.Object(m) = mut program { m.insert(String("pool"), pool) }
+                }
                 programs.push(program)
             }
             // Whether they're the owner, who gives programs and their settings to people.
             return Answer.Value(Obj.new().j("programs", Json.Array(programs)).b("owner", not i.sandboxed(user)).b("sandboxes", i.boxes != none).done())
+        }
+        if name == "acp.pool" {
+            // Links an agent program to the usage pool it draws from, or unlinks it
+            // (`kind` ""). Only read, never changed (server/pools.calx).
+            if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner links an agent program to a usage pool.")) }
+            let program_name = str_at(args.copy(), "name") ?? String()
+            let a = try i.store.acp_agent(program_name.copy()) else return Answer.Refused(String("not_found"), "There's no ACP agent {program_name}.")
+            let kind = (str_at(args.copy(), "kind") ?? String()).trim().copy()
+            _ = i.pool_reads.remove(program_name.copy())
+            if kind.len() == 0 {
+                try i.store.set_pool(program_name.copy(), user.copy(), Json.Null)
+                try i.event(user, "pool.updated", Obj.new().s("program", program_name).j("pool", Json.Null).done())
+                return Answer.Value(empty)
+            }
+            var address = (str_at(args.copy(), "address") ?? String()).trim().copy()
+            if address.len() == 0 { address = pools.address_of(a.env.copy()) }
+            let secret = str_at(args, "secret") ?? String()
+            let (pool, why) = pools.checked(kind, address, secret.copy())
+            if why.len() > 0 { return Answer.Refused(String("bad_request"), why) }
+            if try i.store.sealed_secret(user.copy(), secret.trim().copy()) == none { return Answer.Refused(String("not_found"), "There's no secret {secret.trim()}: save the pool's management key as one first.") }
+            try i.store.set_pool(program_name.copy(), user.copy(), pool)
+            let shown = try i.program_pool(user.copy(), program_name.copy()) ?? Json.Null
+            try i.event(user, "pool.updated", Obj.new().s("program", program_name).j("pool", shown.copy()).done())
+            return Answer.Value(Obj.new().j("pool", shown).done())
         }
         if name == "acp.share" or name == "acp.members" {
             if try i.store.role(user.copy()) != some(String("owner")) { return Answer.Refused(String("not_allowed"), String("Only the instance's owner shares an agent program or its settings.")) }

@@ -1,0 +1,386 @@
+module server.pools
+
+// Usage pools (PLAN.md, "Usage pools"): an agent program whose settings point
+// it at a proxy that spreads its turns over several accounts, such as
+// CLIProxyAPI (router-for-me/CLIProxyAPI) round-robin over several Claude
+// logins, draws from all of them. The owner links the program to its pool
+// (`acp.pool`), and the instance reads the pool's own management API, only
+// ever reading, on a thread of its own, at most once a minute while someone
+// looks (`acp.list`), and gives each person the reading as `pool` on the
+// program: each account with the limits it reports and how it stands, and the
+// pool's total.
+//
+// Each kind of pool is a few functions here: the request that reads it
+// (`request`) and the reading made of its answer (`reading`), always in the
+// same shape, so another can be added without the apps changing:
+//
+//     {kind, at (ms), error?, accounts: [{name, state, why, until (ms, or 0),
+//      ok, failed, limits: [{window, label, used (0-100), resets (ms, or 0)}]}],
+//      total: {accounts, ready, ok, failed, limits: [...]}}
+//
+// `state` is ready, cooling (a short wait, and `until`), over (out of its
+// quota, until `until`), signed_out, off (turned off at the proxy) or error.
+// The management key is one of the owner's secrets, sent only to the pool's
+// own address and never kept, logged or given to an app.
+
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.thread.{Task}
+import shared.obj.{Obj, at, bool_at, int_at, str_at}
+
+// The kinds of pool loom reads.
+pub const KINDS: [str; 1] = ["cliproxyapi"]
+// How long a reading is kept before the next look reads the pool again.
+pub const FRESH_MS: i64 = 60000
+// How long a pool has to answer, and the most of an answer that's read.
+const WAIT_MS: u32 = 10000
+const MOST: usize = 4 * 1024 * 1024
+
+pub struct Job {
+    pub program: String
+    pub url: String
+    pub headers: List<Header>
+}
+
+pub struct Done {
+    pub program: String
+    pub status: u32    // the pool's, or 0 when it didn't answer
+    pub value: Json    // its answer, when it was JSON
+    pub error: String    // why there's no answer, or ""
+}
+
+struct Worker {
+    jobs: Receiver<Job>
+    done: Sender<Done>
+}
+
+impl Task for Worker {
+    fn run(own self) {
+        var w = self
+        while let job = w.jobs.wait() {
+            w.done.send(read(job))
+        }
+    }
+}
+
+pub fn start() -> (Sender<Job>, Receiver<Done>) {
+    let jobs = Receiver<Job>()
+    let to = jobs.sender()
+    let done = Receiver<Done>()
+    _ = unsafe { Thread.spawn(Worker { jobs: jobs, done: done.sender() }) }
+    return (to, done)
+}
+
+fn read(job: Job) -> Done {
+    let program = job.program.copy()
+    var req = get(job.url, job.headers, WAIT_MS, MOST)
+    let r = match req.wait() {
+        // Its error names the address at most, never the key, which is a header.
+        ok(got) => got,
+        err(e) => return Done { program: program, status: 0, value: Json.Null, error: "it didn't answer: {e}" },
+    }
+    if r.status != 200 { return Done { program: program, status: r.status, value: Json.Null, error: String() } }
+    return match parse(String.from_utf8(r.body) ?? String()) {
+        ok(j) => Done { program: program, status: 200, value: j, error: String() },
+        err(_) => Done { program: program, status: 200, value: Json.Null, error: String("its answer wasn't JSON") },
+    }
+}
+
+// A pool as `acp.pool` keeps it, checked: its kind, the address it's read at
+// (an http(s) address, without a / at its end), and the name of the owner's
+// secret that holds its management key. The why, when it can't be.
+pub fn checked(kind: String, address: String, secret: String) -> (Json, String) {
+    if kind != KINDS[0] { return (Json.Null, "kind is one of: {KINDS[0]}.") }
+    let a = address.trim().trim_suffix("/").copy()
+    if not a.starts_with("http://") and not a.starts_with("https://") { return (Json.Null, String("address is the pool's http(s) address, such as http://127.0.0.1:8317.")) }
+    if secret.trim().len() == 0 { return (Json.Null, String("secret is the name of the secret that holds the pool's management key.")) }
+    return (Obj.new().s("kind", kind).s("address", a).s("secret", secret.trim().copy()).done(), String())
+}
+
+// The address a program's settings send it to, as a pool's address: its
+// ANTHROPIC_BASE_URL's scheme, host and port, where it has one.
+pub fn address_of(env: Json) -> String {
+    let base = (str_at(env, "ANTHROPIC_BASE_URL") ?? String()).trim().copy()
+    let scheme_end = base.find("://") else return String()
+    let rest = base[scheme_end + 3..].copy()
+    let host = match rest.find("/") {
+        some(n) => rest[..n].copy(),
+        none => rest,
+    }
+    if host.len() == 0 { return String() }
+    return "{base[..scheme_end]}://{host}"
+}
+
+// What reads `kind`'s pool at `address` with `key`: the address and the headers.
+// Only ever a GET of a list that changes nothing (CLIProxyAPI's usage queue,
+// which hands each record out once, is never asked for).
+pub fn request(kind: String, address: String, key: String) -> (String, List<Header>) {
+    _ = kind
+    return ("{address}/v0/management/auth-files", [Header { name: String("X-Management-Key"), value: key.copy() }, Header { name: String("Accept"), value: String("application/json") }])
+}
+
+// What the pool's `status` says when it isn't a reading: the key it refused,
+// and anything else, in the words the apps show.
+pub fn refused(status: u32, error: String) -> String {
+    if status == 0 { return error.copy() }
+    if status == 401 { return String("The pool didn't take the management key.") }
+    if status == 403 { return String("The pool doesn't let loom in from here: turn on its remote management, or read it on its own machine.") }
+    if status == 404 { return String("The pool has no management API here: set its management key in its config.") }
+    if error.len() > 0 { return error.copy() }
+    return "The pool answered {status}."
+}
+
+// Whether a pool that answered `status` is read again by itself: not one that
+// refused the key, which would only count towards a ban, until it's linked
+// again.
+pub fn read_again(status: u32) -> bool {
+    return status != 401 and status != 403
+}
+
+// A reading made of `kind`'s answer at `at` (ms).
+pub fn reading(kind: String, answer: Json, at_ms: i64) -> Json {
+    var accounts = List<Json>()
+    var ready: i64 = 0
+    var good: i64 = 0
+    var failed: i64 = 0
+    // Each window's used, summed, and how many accounts report it, in the order first seen.
+    var windows = List<(String, String, i64, i64)>()
+    if let Json.Array(files) = at(answer, "files") {
+        for f in files {
+            let a = account(f.copy(), at_ms)
+            if str_at(a.copy(), "state") == some(String("ready")) { ready += 1 }
+            good += int_at(a.copy(), "ok") ?? 0
+            failed += int_at(a.copy(), "failed") ?? 0
+            if let Json.Array(limits) = at(a.copy(), "limits") {
+                for l in limits {
+                    let w = str_at(l.copy(), "window") ?? String()
+                    let used = int_at(l.copy(), "used") ?? 0
+                    var found = false
+                    var n: usize = 0
+                    while n < windows.len() {
+                        if windows[n].0 == w {
+                            windows[n] = (w.copy(), windows[n].1.copy(), windows[n].2 + used, windows[n].3 + 1)
+                            found = true
+                        }
+                        n += 1
+                    }
+                    if not found { windows.push((w.copy(), str_at(l, "label") ?? String(), used, 1)) }
+                }
+            }
+            accounts.push(a)
+        }
+    }
+    var total_limits = List<Json>()
+    for (w, label, sum, count) in windows {
+        total_limits.push(Obj.new().s("window", w).s("label", label).i("used", sum / count).i("resets", 0).done())
+    }
+    let total = Obj.new().i("accounts", i64.try_from(accounts.len()) ?? 0).i("ready", ready).i("ok", good).i("failed", failed).j("limits", Json.Array(total_limits)).done()
+    return Obj.new().s("kind", kind).i("at", at_ms).j("accounts", Json.Array(accounts)).j("total", total).done()
+}
+
+// One of CLIProxyAPI's auth files as an account of the reading.
+fn account(f: Json, at_ms: i64) -> Json {
+    var name = str_at(f.copy(), "email") ?? String()
+    if name.len() == 0 { name = str_at(f.copy(), "label") ?? String() }
+    if name.len() == 0 { name = str_at(f.copy(), "name") ?? String() }
+    // The limits it reports, from the newest response headers the proxy saw for it,
+    // then any of a model's of its own (such as a week's for one model).
+    var limits = List<Json>()
+    var status = String()
+    let (main, main_status) = limits_in(at(at(f.copy(), "quota"), "signals"), String())
+    for l in main { limits.push(l.copy()) }
+    status = main_status
+    if let Json.Object(models) = at(f.copy(), "model_quotas") {
+        for (model, q) in models {
+            let (more, s) = limits_in(at(q.copy(), "signals"), model.copy())
+            for l in more {
+                let label = str_at(l.copy(), "label") ?? String()
+                var seen = false
+                for have in limits.copy() {
+                    if str_at(have, "label") == some(label.copy()) { seen = true }
+                }
+                if not seen { limits.push(l.copy()) }
+            }
+            if status.len() == 0 { status = s }
+        }
+    }
+    // How it stands: turned off, signed out, waiting out a quota or a short
+    // cooldown, or ready.
+    var state = String("ready")
+    var why = String()
+    var until: i64 = 0
+    let file_status = str_at(f.copy(), "status") ?? String()
+    if bool_at(f.copy(), "disabled") == some(true) or file_status == "disabled" {
+        state = String("off")
+        why = String("Turned off at the pool")
+    } else if bool_at(f.copy(), "requires_sign_in") == some(true) or str_at(f.copy(), "next_action") == some(String("sign_in")) {
+        state = String("signed_out")
+        why = String("Signed out at the pool")
+    } else {
+        if let Json.Array(cooldowns) = at(f.copy(), "cooldowns") {
+            for c in cooldowns {
+                let left = int_at(c.copy(), "remaining_seconds") ?? 0
+                if left <= 0 { continue }
+                let reason = str_at(c.copy(), "reason") ?? String()
+                let ends = at_ms + left * 1000
+                let over = reason == "quota" or reason == "credential_quota" or reason == "payment_required"
+                if over {
+                    if state != "over" or ends > until { until = ends }
+                    state = String("over")
+                    why = String("Over its quota")
+                } else if state != "over" and ends > until {
+                    state = String("cooling")
+                    why = String("Cooling down")
+                    until = ends
+                }
+            }
+        }
+        if state == "ready" and status == "rejected" {
+            state = String("over")
+            why = String("Over its quota")
+            for l in limits.copy() {
+                if (int_at(l.copy(), "used") ?? 0) >= 100 {
+                    let r = int_at(l, "resets") ?? 0
+                    if r > until { until = r }
+                }
+            }
+        } else if state == "ready" and (bool_at(f.copy(), "unavailable") == some(true) or file_status == "error") {
+            state = String("error")
+            why = str_at(f.copy(), "status_message") ?? String("Not answering at the pool")
+            if why.len() == 0 { why = String("Not answering at the pool") }
+        }
+    }
+    return Obj.new().s("name", name).s("state", state).s("why", why).i("until", until).i("ok", int_at(f.copy(), "success") ?? 0).i("failed", int_at(f, "failed") ?? 0).j("limits", Json.Array(limits)).done()
+}
+
+// The limits in a response's headers, as Claude's are: for each window,
+// `Anthropic-Ratelimit-Unified-<window>-Utilization` (a fraction) and its
+// `-Reset` (Unix seconds), and the account's overall `-Status`. Each window
+// is named for what it is ("5 hours", "Week", "Week · Opus"), with `model`
+// after it for a model's own.
+fn limits_in(signals: Json, model: String) -> (List<Json>, String) {
+    var out = List<Json>()
+    var status = String()
+    let Json.Object(m) = signals else return (out, status)
+    let prefix = "anthropic-ratelimit-unified-"
+    for (k, v) in m.copy() {
+        let key = k.to_lower_root()
+        if not key.starts_with(prefix) { continue }
+        let rest = key[prefix.len()..].copy()
+        if rest == "status" { status = text_of(v.copy()) }
+        if not rest.ends_with("-utilization") { continue }
+        let window = rest.trim_suffix("-utilization").copy()
+        let fraction = f64.parse(text_of(v.copy()).trim()) ?? -1.0
+        if fraction < 0.0 { continue }
+        let used = if fraction > 1.5 { i64.round(fraction) } else { i64.round(fraction * 100.0) }
+        var resets: i64 = 0
+        for (k2, v2) in m.copy() {
+            if k2.to_lower_root() == "{prefix}{window}-reset" { resets = (i64.parse(text_of(v2.copy()).trim()) ?? 0) * 1000 }
+        }
+        var label = window_label(window.copy())
+        if model.len() > 0 { label = "{label} · {model_label(model.copy())}" }
+        out.push(Obj.new().s("window", if model.len() > 0 { "{window}:{model}" } else { window.copy() }).s("label", label).i("used", if used > 100 { 100 } else { used }).i("resets", resets).done())
+    }
+    return (out, status)
+}
+
+// A model's name as a limit says it: claude-fable-5-2 is "Fable", opus "Opus".
+pub fn model_label(model: String) -> String {
+    let bare = model.trim_prefix("claude-").copy()
+    let word = match bare.find("-") {
+        some(n) => bare[..n].copy(),
+        none => bare.copy(),
+    }
+    if word.len() == 0 { return model.copy() }
+    return "{word[..1].to_upper_root()}{word[1..]}"
+}
+
+// A header's value as text, whether the proxy gave it as text or a list of them.
+fn text_of(v: Json) -> String {
+    if let s = v.as_str() { return s.copy() }
+    if let Json.Array(items) = v {
+        if items.len() > 0 { return items[0].as_str() ?? String() }
+    }
+    return String()
+}
+
+// A window's name as the apps show it: 5h is "5 hours", 7d "Week", and 7d_opus
+// "Week · Opus".
+pub fn window_label(window: String) -> String {
+    let (span, rest) = match window.find("_") {
+        some(n) => (window[..n].copy(), window[n + 1..].copy()),
+        none => (window.copy(), String()),
+    }
+    var label = if span == "5h" {
+        String("5 hours")
+    } else if span == "7d" {
+        String("Week")
+    } else if span.ends_with("h") {
+        "{span.trim_suffix("h")} hours"
+    } else if span.ends_with("d") {
+        "{span.trim_suffix("d")} days"
+    } else {
+        span.copy()
+    }
+    if rest.len() > 0 { label = "{label} · {rest[..1].to_upper_root()}{rest[1..]}" }
+    return label
+}
+
+@test
+fn windows_are_named_for_what_they_are() {
+    assert(window_label(String("5h")) == "5 hours")
+    assert(window_label(String("7d")) == "Week")
+    assert(window_label(String("7d_opus")) == "Week · Opus")
+    assert(window_label(String("12h")) == "12 hours")
+    assert(model_label(String("claude-fable-5-2")) == "Fable" and model_label(String("opus")) == "Opus")
+}
+
+@test
+fn a_pool_s_address_comes_from_the_program_s_base_url() {
+    assert(address_of(Obj.new().s("ANTHROPIC_BASE_URL", String("http://127.0.0.1:8317/v1")).done()) == "http://127.0.0.1:8317")
+    assert(address_of(Obj.new().done()) == "")
+    let (p, why) = checked(String("cliproxyapi"), String("https://proxy.example/ "), String("pool-key"))
+    assert(why.len() == 0 and str_at(p, "address") == some(String("https://proxy.example")))
+    let (_, bad) = checked(String("other"), String("https://x"), String("k"))
+    assert(bad.len() > 0)
+}
+
+@test
+fn a_cliproxyapi_answer_is_read_into_accounts_and_a_total() {
+    let answer = parse(#"
+        {"files": [
+        {"email": "a@example.com", "status": "active", "disabled": false, "unavailable": false, "success": 10, "failed": 1,
+         "quota": {"signals": {"Anthropic-Ratelimit-Unified-5h-Utilization": "0.4", "Anthropic-Ratelimit-Unified-5h-Reset": "1800000000",
+                               "Anthropic-Ratelimit-Unified-7d-Utilization": "0.2", "Anthropic-Ratelimit-Unified-Status": "allowed"}},
+         "cooldowns": []},
+        {"email": "b@example.com", "status": "active", "success": 5, "failed": 0,
+         "quota": {"signals": {"Anthropic-Ratelimit-Unified-7d-Utilization": "0.9"}},
+         "model_quotas": {"fable": {"signals": {"Anthropic-Ratelimit-Unified-7d-Utilization": "1.0"}}},
+         "cooldowns": [{"scope": "model", "reason": "quota", "remaining_seconds": 600}]},
+        {"email": "c@example.com", "status": "active", "success": 0, "failed": 0, "quota": {"signals": {}},
+         "cooldowns": [{"scope": "credential", "reason": "transient_rate_limit", "remaining_seconds": 30}]},
+        {"email": "d@example.com", "status": "disabled", "disabled": true, "success": 0, "failed": 0}
+    ]}
+    "#)!
+    let r = reading(String("cliproxyapi"), answer, 1000)
+    let accounts = at(r.copy(), "accounts")
+    let Json.Array(list) = accounts else { panic("not a list") }
+    assert(list.len() == 4)
+    assert(str_at(list[0].copy(), "state") == some(String("ready")))
+    let Json.Array(a_limits) = at(list[0].copy(), "limits") else { panic("not a list") }
+    assert(a_limits.len() == 2)
+    // b has no 5-hour window, a week's, and a week's of its own for Fable.
+    let Json.Array(b_limits) = at(list[1].copy(), "limits") else { panic("not a list") }
+    assert(b_limits.len() == 2)
+    assert(str_at(list[1].copy(), "state") == some(String("over")) and int_at(list[1].copy(), "until") == some(601000))
+    assert(str_at(list[2].copy(), "state") == some(String("cooling")))
+    assert(str_at(list[3].copy(), "state") == some(String("off")))
+    let total = at(r, "total")
+    assert(int_at(total.copy(), "accounts") == some(4) and int_at(total.copy(), "ready") == some(1) and int_at(total.copy(), "ok") == some(15))
+}
+
+@test
+fn a_refused_key_isn_t_tried_again() {
+    assert(not read_again(401) and not read_again(403) and read_again(0) and read_again(500))
+    assert(refused(401, String()).len() > 0)
+}

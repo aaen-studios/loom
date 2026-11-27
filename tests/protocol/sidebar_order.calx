@@ -11,7 +11,7 @@ module tests.protocol.sidebar_order
 //     calx tests/protocol/sidebar_order.calx
 import std.json.{Json}
 import std.process.{exit}
-import shared.obj.{Obj, at, bool_at, int_at, str_at}
+import shared.obj.{Obj, at, int_at, str_at}
 import shared.client.{Session}
 import tests.kit.{Instance, check}
 
@@ -48,20 +48,16 @@ fn run(i: Instance) ! Error {
     let hermes = try agent(mut app, "q_2", "Hermes")
     let (l, h) = (str_at(ledger.copy(), "id") ?? String(), str_at(hermes.copy(), "id") ?? String())
     try check(int_at(ledger, "order") == none and int_at(hermes, "order") == none, "before anything is placed, a new agent has no place: it's listed as it was made")
-    var everyone = String()
-    for f in app.frames {
-        if str_at(f.copy(), "kind") == some(String("conversation.created")) and bool_at(at(at(f.copy(), "conversation"), "room"), "everyone") == some(true) { everyone = str_at(at(f, "conversation"), "id") ?? String() }
-    }
     let made = try app.cmd("q_3", "room.create", Obj.new().s("name", String("Money")).j("members", strs([l.copy(), h.copy()])).done())
     let money = str_at(at(at(made.copy(), "value"), "conversation"), "id") ?? String()
-    try check(everyone.len() > 0 and int_at(room_of(made), "order") == none, "nor does a new group chat")
+    try check(int_at(room_of(made), "order") == none, "nor does a new group chat")
 
     // --- One order for agents and group chats ---
-    let ordered = try app.cmd("q_4", "sidebar.order", Obj.new().j("items", strs([money.copy(), h.copy(), everyone.copy(), l.copy()])).done())
+    let ordered = try app.cmd("q_4", "sidebar.order", Obj.new().j("items", strs([money.copy(), h.copy(), l.copy()])).done())
     let told_room = at(last_about(app, "conversation.updated", money.copy()), "room")
     let told_agent = last_about(app, "agent.updated", h.copy())
-    try check(int_at(at(ordered, "value"), "moved") == some(4) and int_at(told_room.copy(), "order") == some(0) and str_at(told_room, "name") == some(String("Money")) and int_at(told_agent.copy(), "order") == some(1) and int_at(told_agent, "revision") == some(1), "sidebar.order keeps each one's place, an agent's on itself and a group chat's on its room, tells every device, and isn't a revision")
-    let again = try app.cmd("q_5", "sidebar.order", Obj.new().j("items", strs([money.copy(), h.copy(), everyone.copy(), l.copy()])).done())
+    try check(int_at(at(ordered, "value"), "moved") == some(3) and int_at(told_room.copy(), "order") == some(0) and str_at(told_room, "name") == some(String("Money")) and int_at(told_agent.copy(), "order") == some(1) and int_at(told_agent, "revision") == some(1), "sidebar.order keeps each one's place, an agent's on itself and a group chat's on its room, tells every device, and isn't a revision")
+    let again = try app.cmd("q_5", "sidebar.order", Obj.new().j("items", strs([money.copy(), h.copy(), l.copy()])).done())
     try check(int_at(at(again, "value"), "moved") == some(0), "the same order again moves nothing")
     let unknown = try app.cmd("q_6", "sidebar.order", Obj.new().j("items", strs([String("a_nothing")])).done())
     let not_list = try app.cmd("q_7", "sidebar.order", Obj.new().s("items", money.copy()).done())
@@ -74,7 +70,7 @@ fn run(i: Instance) ! Error {
     // --- What's new goes at the end ---
     let casper = try agent(mut app, "q_10", "Casper")
     let later = try app.cmd("q_11", "room.create", Obj.new().s("name", String("Code")).j("members", strs([l.copy(), str_at(casper.copy(), "id") ?? String()])).done())
-    try check(int_at(casper, "order") == some(4) and int_at(room_of(later), "order") == some(5), "once anything is placed, a new agent or group chat goes at the end")
+    try check(int_at(casper, "order") == some(3) and int_at(room_of(later), "order") == some(4), "once anything is placed, a new agent or group chat goes at the end")
 
     // --- A group chat in a folder ---
     let folder = try app.cmd("q_12", "group.create", Obj.new().s("name", String("Work")).done())
@@ -95,7 +91,7 @@ fn run(i: Instance) ! Error {
     let phone = try Session.connect(i.base.copy(), i.token.copy(), 0)
     let there = int_at(last_about(phone, "agent.updated", l), "order")
     let room_there = int_at(at(last_about(phone, "conversation.updated", money), "room"), "order")
-    try check(there == some(3) and room_there == some(0), "another device catching up has each one's place")
+    try check(there == some(2) and room_there == some(0), "another device catching up has each one's place")
     phone.close()
     app.close()
 }

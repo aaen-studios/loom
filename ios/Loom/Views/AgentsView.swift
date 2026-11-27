@@ -198,7 +198,7 @@ struct AgentsView: View {
     }
 
     /// A group chat's row, which opens it, with a long press for its folder, and to delete
-    /// one the person made.
+    /// it.
     private func roomLink(_ room: Room) -> some View {
         let model = session.model
         return NavigationLink(value: "room:" + room.id) {
@@ -209,10 +209,8 @@ struct AgentsView: View {
         .listRowInsets(Self.insets)
         .contextMenu {
             folderMenu(room.id)
-            if !room.everyone {
-                Button("Delete group chat", systemImage: "trash", role: .destructive) {
-                    session.send(model.deleteRoom(room.id))
-                }
+            Button("Delete group chat", systemImage: "trash", role: .destructive) {
+                session.send(model.deleteRoom(room.id))
             }
         }
     }

@@ -10,12 +10,13 @@
 // control open what they open in the app.
 import { brains } from '../lib/registry.mjs';
 import shapes from '../../../design/generated/shapes.json';
+import actaMark from '../../../server/catalog/acta.svg?raw';
 
 const agents = [
 	{ name: 'Biscuit', color: 'apricot', shape: 'star', pinned: true },
 	{ name: 'Pip', color: 'lavender', pinned: true },
-	// Open, with Biscuit's thread with it (message_agent) under it, as the app lists it.
-	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true, asks: [{ from: 'Biscuit', color: 'apricot', shape: 'star' }] },
+	// Open.
+	{ name: 'Juniper', color: 'sky', shape: 'yarn', on: true },
 	{ name: 'Moss', color: 'mint', shape: 'heart' },
 	{ name: 'Otto', color: 'coral', shape: 'snail', folder: 'Home' },
 ];
@@ -51,14 +52,13 @@ const BISCUIT = mentionThread('star');
 // The group chats (PLAN.md, "Group chats"), each with its members' threads woven together,
 // four at most, as desktop/src/room_view.rs draws them with thread::weave.
 const rooms = [
-	{ name: 'Everyone', colors: ['apricot', 'lavender', 'sky', 'mint'] },
 	{ name: 'Shop', colors: ['sky', 'apricot'] },
 ];
 // The group chat the demo opens and writes in.
-const shop = rooms[1];
+const shop = rooms[0];
 // The one list under the tiles: agents and group chats in the person's order, as they dragged
 // them (PLAN.md, "The sidebar").
-const listed = ['Everyone', 'Juniper', 'Shop', 'Moss'].map((name) => ({
+const listed = ['Juniper', 'Shop', 'Moss'].map((name) => ({
 	room: rooms.find((r) => r.name === name),
 	agent: rest.find((a) => a.name === name),
 }));
@@ -108,13 +108,9 @@ const ICON: Record<string, string> = {
 // GitHub's mark, as its site icon on the reply's link.
 const GITHUB =
 	'M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z';
-// The layers glyph on a board's tile, before an Acta card's id (app.rs, board_tile), in a
-// 24-unit box.
-const BOARD_LAYERS = [
-	'M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z',
-	'M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12',
-	'M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17',
-];
+// Acta's own mark before a card's id, in one colour, the chat's ink, with no tile (app.rs,
+// board_icon; server/catalog/acta.svg).
+const ACTA = actaMark.replace('role="img"', 'aria-hidden="true"');
 ---
 
 <div class="app" data-demo role="region" aria-label="loom's desktop app, with an agent at work">
@@ -166,22 +162,13 @@ const BOARD_LAYERS = [
 						</div>
 					) : (
 						a && (
-							<>
-								<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
-									<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
-									<span class="agent-text">
-										<span class="agent-name">{a.name}</span>
-										<span class="agent-preview" />
-									</span>
-								</div>
-								{a.on &&
-									a.asks?.map((k) => (
-										<div class="ask" data-ask>
-											<svg data-thread data-color={k.color} data-shape={k.shape} width="18" height={k.shape ? 22 : 8} />
-											<span class="ask-name">From {k.from}</span>
-										</div>
-									))}
-							</>
+							<div class:list={['agent', { on: a.on }]} data-agent={a.name}>
+								<svg data-thread data-color={a.color} data-shape={a.shape} width="26" height={a.shape ? 22 : 10} />
+								<span class="agent-text">
+									<span class="agent-name">{a.name}</span>
+									<span class="agent-preview" />
+								</span>
+							</div>
 						)
 					),
 				)
@@ -338,32 +325,7 @@ const BOARD_LAYERS = [
 			</div>
 		</div>
 
-		<!-- Another agent's thread with Juniper, opened from its row in the sidebar in the chat's
-		     place, under a strip that says whose it is, with the way back (app.rs, branch_strip). -->
-		<div class="strip-wrap">
-			<div class="strip">
-				<button type="button" class="strip-back" data-back aria-label="Back to the chat"
-					><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7M19 12H5"></path></svg></button
-				>
-				<svg data-thread data-color="apricot" data-shape="star" width="18" height="22" class="strip-mark" aria-hidden="true"></svg>
-				<span class="strip-title">From Biscuit</span>
-			</div>
-		</div>
 		<div class="chat">
-			<div class="msgs asked" aria-live="off">
-				<div class="time-line">Today 08:47</div>
-				<div class="row from-agent" style="--from: var(--thread-apricot)">
-					<div class="from-who"><svg class="mention-thread" viewBox="0 0 14 14" aria-hidden="true"><path d={BISCUIT}></path></svg>Biscuit</div>
-					<div class="from-bubble">The billing fix is ready. It needs a review before 2.4 goes out.</div>
-				</div>
-				<div class="row reply">
-					<svg data-thread data-color="sky" width="14" height="10" class="reply-thread head"></svg>
-					<div class="body">
-						<div class="who">Juniper</div>
-						<div class="said"><p>Got it. I'll put it at the top of today's list.</p></div>
-					</div>
-				</div>
-			</div>
 			<!-- Each chat's scene: the person's message, and the reply that comes (demo.ts). Until it
 			     plays, neither is there. -->
 			<div class="msgs mine" aria-live="off">
@@ -387,14 +349,12 @@ const BOARD_LAYERS = [
 							<p>
 								Two things. <span class="acta-pill" tabindex="0" data-card="SHOP-31" style="--status: var(--thread-sky)"
 									><span class="acta-face"
-										><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-											><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-										><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
+										><span class="acta-tile" set:html={ACTA}
+										/><span class="acta-id">SHOP-31</span><span class="acta-title">Write the release notes for 2.4</span><span class="acta-dot"></span></span
 									><span class="acta-preview" role="tooltip"
 										><span class="cp-place"
-											><svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-												><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-											>shop · SHOP-31</span
+											><span class="acta-tile" set:html={ACTA}
+											/>shop · SHOP-31</span
 										><span class="cp-title">Write the release notes for 2.4</span><span class="cp-chips"
 											><span class="cp-chip cp-status">In progress</span><span class="cp-chip">Sam</span><span class="cp-chip">S</span><span class="cp-chip">release</span></span
 										><span class="cp-text">What changed since 2.3, for the changelog and the store listing. The billing fix goes in once it's merged.</span><span class="cp-subtasks"
@@ -552,20 +512,13 @@ const BOARD_LAYERS = [
 				</div>
 			</div>
 		</div>
-		<!-- In Biscuit's thread, read only: the way to the person's own chat with Juniper, in
-		     the composer's place (app.rs, continue_button). -->
-		<div class="continue-wrap">
-			<button type="button" class="continue" data-continue>Continue in your own chat</button>
-		</div>
 	</div>
 	<!-- A card's side preview beside the chat, from its pill or Open in its preview (PLAN.md,
 	     "Acta beside the chat"; acta_ui.rs, card_side): the status chip's menu moves it, and a
 	     tick ticks a subtask. -->
 	<aside class="acta-side" data-acta-side aria-label="SHOP-31" hidden>
 		<div class="as-head">
-			<svg class="acta-tile" viewBox="0 0 14 14" aria-hidden="true"
-				><rect width="14" height="14" rx="3"></rect><g transform="translate(2 2) scale(0.4167)">{BOARD_LAYERS.map((d) => <path d={d}></path>)}</g></svg
-			>
+			<span class="acta-tile" set:html={ACTA} />
 			<span class="as-place">shop · SHOP-31</span>
 			<button type="button" class="icon-btn as-close" data-acta-close aria-label="Close" title="Close"
 				><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"></path></svg></button
@@ -941,9 +894,6 @@ const BOARD_LAYERS = [
 	.app.in-moss .agent[data-agent='Moss'] {
 		background: var(--active);
 	}
-	.app:is(.in-room, .in-moss) .ask {
-		display: none;
-	}
 	.pins-at[hidden] {
 		display: none;
 	}
@@ -995,34 +945,6 @@ const BOARD_LAYERS = [
 	}
 	.routed-who .mention-thread {
 		margin-right: 4px;
-	}
-	/* Another agent's thread with the open one, under its row (app.rs, ask_row): the
-	   asker's thread, small, and "From NAME". */
-	.ask {
-		display: flex;
-		align-items: center;
-		min-width: 0;
-		gap: 12px;
-		padding: 4px 12px 4px 20px;
-		border-radius: var(--radius-row);
-		font-size: var(--size-caption);
-		color: var(--ink-2);
-		transition: background-color 0.12s;
-	}
-	.ask:hover {
-		background: var(--hover);
-	}
-	.ask svg {
-		width: 18px;
-		height: 22px;
-		flex: none;
-	}
-	.ask-name {
-		flex: 1;
-		min-width: 0;
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
 	}
 	/* The pinned agents over the rest: tiles three across, the row centred and a fourth on a
 	   centred row of its own, each with its thread drawn large in its shape and its name under it. */
@@ -1131,10 +1053,6 @@ const BOARD_LAYERS = [
 	.app.railed .side-top {
 		justify-content: center;
 		padding: 0;
-	}
-	/* The rail lists the agents and group chats alone, as the app's does. */
-	.app.railed .ask {
-		display: none;
 	}
 	.app.railed :is(.brand, .new-row, .side-line, .agent-text, .tile-name, .server-text) {
 		display: none;
@@ -1526,33 +1444,6 @@ const BOARD_LAYERS = [
 		stroke-linejoin: round;
 		vertical-align: -2px;
 	}
-	/* A message another agent sent (app.rs, person): on the person's side, a breath of the
-	   sender's colour, with its thread and name over it. */
-	.from-agent {
-		display: flex;
-		flex-direction: column;
-		align-items: flex-end;
-		gap: 4px;
-	}
-	.from-who {
-		display: flex;
-		align-items: center;
-		gap: 4px;
-		font-size: var(--size-caption);
-		font-weight: var(--weight-medium);
-		color: color-mix(in srgb, var(--from) 70%, var(--ink-3));
-	}
-	.from-who .mention-thread {
-		margin: 0;
-		stroke: currentColor;
-	}
-	.from-bubble {
-		max-width: 520px;
-		padding: 10px 16px;
-		border-radius: var(--radius-bubble);
-		background: color-mix(in srgb, var(--from) 10%, var(--bubble));
-		overflow-wrap: anywhere;
-	}
 	.link {
 		text-decoration: underline;
 		text-underline-offset: 2px;
@@ -1573,8 +1464,8 @@ const BOARD_LAYERS = [
 		vertical-align: -2px;
 		margin-right: 4px;
 	}
-	/* An Acta card a message names (PLAN.md, "Cards in messages"; app.rs, card_pill): its
-	   board's tile, its id in mono, its title cut to fit and a dot in its status's colour, on
+	/* An Acta card a message names (PLAN.md, "Cards in messages"; app.rs, card_pill): Acta's
+	   mark in ink, its id in mono, its title cut to fit and a dot in its status's colour, on
 	   the bubble's fill with a line around it. Under the pointer, or focused by a tap, its
 	   preview opens under it (app.rs, card_preview), and stays while the pointer is on it. */
 	.acta-pill {
@@ -1602,14 +1493,12 @@ const BOARD_LAYERS = [
 		height: 14px;
 		margin-right: 5px;
 		vertical-align: -2px;
-		fill: var(--board);
+		color: var(--ink);
 	}
-	.acta-tile g {
-		fill: none;
-		stroke: #f4f1fc;
-		stroke-width: 2.4;
-		stroke-linecap: round;
-		stroke-linejoin: round;
+	.acta-tile :global(svg) {
+		display: block;
+		width: 100%;
+		height: 100%;
 	}
 	.acta-id {
 		margin-right: 5px;
@@ -1761,8 +1650,8 @@ const BOARD_LAYERS = [
 	.cp-button:hover {
 		background: var(--hover);
 	}
-	/* A card's side preview beside the chat (acta_ui.rs, card_side): the head with the
-	   board's tile, board · id in mono and close; the title as a heading, the chips, the
+	/* A card's side preview beside the chat (acta_ui.rs, card_side): the head with
+	   Acta's mark, board · id in mono and close; the title as a heading, the chips, the
 	   description, the subtasks with their ticks and the last comments; Open in Acta and
 	   Follow at the foot. 36% of the window, as the app's panel beside the chat. */
 	.acta-side {
@@ -2005,114 +1894,6 @@ const BOARD_LAYERS = [
 	}
 	:root[data-theme='dark'] .acta-preview {
 		box-shadow: 0 10px 28px -16px rgba(0, 0, 0, 0.55);
-	}
-
-	/* Another agent's thread with the open one (app.rs, branch_strip): in the chat's place,
-	   with a strip over it that says whose it is, the asker's thread beside its name, and the
-	   arrow back to the person's own chat. */
-	.strip-wrap {
-		display: none;
-		padding: 8px 24px 0;
-		flex: none;
-	}
-	.app.in-thread .strip-wrap {
-		display: block;
-	}
-	.strip {
-		display: flex;
-		align-items: center;
-		gap: 12px;
-		max-width: var(--space-column);
-		margin: 0 auto;
-		padding: 8px 12px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-button);
-	}
-	.strip-back {
-		display: grid;
-		place-items: center;
-		width: var(--control-icon);
-		height: var(--control-icon);
-		flex: none;
-		border-radius: var(--radius-row);
-		color: var(--ink-2);
-		cursor: pointer;
-		transition:
-			background-color 0.12s,
-			color 0.12s;
-	}
-	.strip-back:hover {
-		background: var(--hover);
-		color: var(--ink);
-	}
-	.strip-mark {
-		width: 18px;
-		height: 22px;
-		flex: none;
-	}
-	.strip-title {
-		min-width: 0;
-		font-size: var(--size-small);
-		font-weight: var(--weight-medium);
-		white-space: nowrap;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-	.msgs.asked,
-	.app.in-thread .msgs.mine {
-		display: none;
-	}
-	.app.in-thread .msgs.asked {
-		display: block;
-	}
-	/* While the thread is open, its row is the one lit, and the agent's own row takes you back. */
-	.app.in-thread .agent.on {
-		background: none;
-		cursor: pointer;
-	}
-	.app.in-thread .agent.on:hover {
-		background: var(--hover);
-	}
-	.ask {
-		cursor: pointer;
-	}
-	.app.in-thread .ask {
-		background: var(--active);
-		color: var(--ink);
-	}
-	/* The thread is read only: in the composer's place, the way to the person's own chat
-	   (app.rs, continue_button), as tall as the composer. */
-	.continue-wrap {
-		display: none;
-		padding: 4px 24px 16px;
-		flex: none;
-	}
-	.app.in-thread .composer-wrap {
-		display: none;
-	}
-	.app.in-thread .continue-wrap {
-		display: block;
-	}
-	.continue {
-		display: grid;
-		place-items: center;
-		width: 100%;
-		max-width: var(--space-column);
-		height: calc(var(--control-icon-composer) + 18px);
-		margin: 0 auto;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-composer);
-		font-size: var(--size-small);
-		font-weight: var(--weight-medium);
-		color: var(--ink-2);
-		cursor: pointer;
-		transition:
-			background-color 0.12s,
-			color 0.12s;
-	}
-	.continue:hover {
-		background: var(--hover);
-		color: var(--ink);
 	}
 
 	/* Replying (PLAN.md, "Replying to a message"). By a message's corner, just outside the
@@ -3335,8 +3116,7 @@ const BOARD_LAYERS = [
 			border-radius: 12px;
 		}
 		.chat,
-		.composer-wrap,
-		.continue-wrap {
+		.composer-wrap {
 			padding-left: 14px;
 			padding-right: 14px;
 		}

@@ -115,7 +115,7 @@ extension Model {
         let rooms = conversations.compactMap(\.room)
         if sidebar.isEmpty {
             var pinned = SideSection(part: .pinned), list = SideSection(part: .list), hidden = SideSection(part: .hidden)
-            list.items = (rooms.filter(\.everyone) + rooms.filter { !$0.everyone }).map { .room($0.id) }
+            list.items = rooms.map { .room($0.id) }
             for a in agents {
                 if a.hidden { hidden.items.append(.agent(a.id)) }
                 else if a.pinned != nil { pinned.items.append(.agent(a.id)) }

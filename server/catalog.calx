@@ -41,13 +41,14 @@ import shared.obj.{Obj, at, bool_at, str_at}
 pub const CATEGORIES: [str; 7] = ["Work", "Code", "Mail & calendar", "Files", "Money", "Home", "Fun"]
 
 // The entries' marks (catalog/README.md), built into the program as their files are.
-const ACTA: [u8; 455] = embed("catalog/acta.svg")
+const ACTA: [u8; 532] = embed("catalog/acta.svg")
 const GITHUB: [u8; 811] = embed("catalog/github.svg")
 const NOTION: [u8; 967] = embed("catalog/notion.svg")
 const LINEAR: [u8; 442] = embed("catalog/linear.svg")
 const VERCEL: [u8; 121] = embed("catalog/vercel.svg")
 const CLOUDFLARE: [u8; 1163] = embed("catalog/cloudflare.svg")
 const HOME_ASSISTANT: [u8; 662] = embed("catalog/home-assistant.svg")
+const T3: [u8; 869] = embed("catalog/t3.svg")
 
 // The SVG of the mark an entry's `logo` names, or none.
 pub fn logo_svg(name: String) -> String? {
@@ -65,6 +66,8 @@ pub fn logo_svg(name: String) -> String? {
         String.from_utf8(CLOUDFLARE[..])
     } else if name == "home-assistant.svg" {
         String.from_utf8(HOME_ASSISTANT[..])
+    } else if name == "t3.svg" {
+        String.from_utf8(T3[..])
     } else {
         return none
     }
@@ -96,6 +99,7 @@ const DATA: str = #"
         "description": "Projects and coding threads in T3 Code.",
         "maker": "T3 Tools",
         "website": "https://github.com/pingdotgg/t3code",
+        "logo": "t3.svg",
         "server": "t3",
         "url": "{address}/mcp",
         "fields": [{"name": "address", "label": "Address", "placeholder": "https://host.tailnet.ts.net", "kind": "address"}],

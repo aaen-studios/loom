@@ -12,10 +12,9 @@
 // with the plan's limits under it (app.rs, context_ring); the header's pin opens the chat's pins
 // (pins_pop); a message's Reply and ⋯ by its corner, or words selected in it, put a reply bar
 // over the composer or open its menu (reply_bar, ctx_menu); the + opens its menu (plus_menu,
-// plus_sub); "From Biscuit" under Juniper opens Biscuit's thread with it (open_thread); a row
-// drags to a new place (droppable); and the sidebar collapses to the rail, as it is anyway in a
-// narrow window (rail.rs), or with no room for the rail, as on a phone, opens over the chat from
-// the header. The header gives way in a narrow window as the app's does (model/header.rs).
+// plus_sub); a row drags to a new place (droppable); and the sidebar collapses to the rail, as
+// it is anyway in a narrow window (rail.rs), or with no room for the rail, as on a phone, opens
+// over the chat from the header. The header gives way in a narrow window as the app's does (model/header.rs).
 //
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
 import { threadOf, threadsIn, yarnsIn, type Mood, type Thread } from './thread';
@@ -82,12 +81,9 @@ export function play(app: HTMLElement) {
 		shop: app.querySelector<HTMLElement>('.msgs.room')!,
 		moss: app.querySelector<HTMLElement>('.msgs.moss')!,
 	};
-	const asked = app.querySelector<HTMLElement>('.msgs.asked')!;
 	const tpl = (id: string) => (document.getElementById(id) as HTMLTemplateElement).content.firstElementChild!.cloneNode(true) as HTMLElement;
 	const chatOf = (row: HTMLElement): Chat => (row.closest('.msgs.room') ? 'shop' : row.closest('.msgs.moss') ? 'moss' : 'juniper');
 	let chat: Chat = 'juniper';
-	/** The open chat's messages: its own, or Biscuit's thread with Juniper while it's open. */
-	const chatMsgs = () => (app.classList.contains('in-thread') ? asked : lists[chat]);
 
 	// An Acta card's preview, which the page's CSS opens under its pill, goes over it when
 	// there's no room under it in the chat, as the app keeps a popover in the window.
@@ -253,7 +249,7 @@ export function play(app: HTMLElement) {
 			line.querySelector('span')!.textContent = compact
 				? `${who ? `${who}'s context` : 'Context'} compacted · ${before}k → ${after}k`
 				: `${who ? `${who}'s fresh session` : 'A fresh session'} starts here`;
-			chatMsgs().append(line);
+			lists[chat].append(line);
 			showCard(false);
 		});
 	}
@@ -464,10 +460,7 @@ export function play(app: HTMLElement) {
 
 	// Each chat opens from its row in the chat's place, as the app's does (room_view.rs,
 	// open_room): Juniper's, the Shop group chat and Moss's. Each has its own head, pins and
-	// session, and leaving one closes what's open over it. Biscuit's thread with Juniper opens
-	// from its row under Juniper, in the chat's place, read only; the strip's arrow, Continue in
-	// your own chat in the composer's place, or Juniper's own row, goes back to the person's chat
-	// (app.rs, open_thread, branch_strip, continue_button).
+	// session, and leaving one closes what's open over it.
 	const headName = header.querySelector<HTMLElement>('.agent-btn .head-name')!;
 	const phName = app.querySelector<HTMLElement>('[data-ph-name]')!;
 	const openChat = (to: Chat) => {
@@ -475,7 +468,6 @@ export function play(app: HTMLElement) {
 		if (!pop.hidden) showPins(false);
 		showCard(false);
 		openPlus(false);
-		if (to !== 'juniper') app.classList.remove('in-thread');
 		unreply();
 		chat = to;
 		app.classList.toggle('in-room', to === 'shop');
@@ -489,19 +481,9 @@ export function play(app: HTMLElement) {
 		drawContext();
 		fitHeader();
 	};
-	const inThread = (on: boolean) => {
-		if (on) openChat('juniper');
-		app.classList.toggle('in-thread', on);
-	};
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => openChat('shop'));
 	app.querySelector('.agent[data-agent="Moss"]')?.addEventListener('click', () => openChat('moss'));
-	app.querySelector('.agent[data-agent="Juniper"]')?.addEventListener('click', () => {
-		inThread(false);
-		openChat('juniper');
-	});
-	app.querySelector('[data-ask]')?.addEventListener('click', () => inThread(true));
-	app.querySelector('[data-back]')?.addEventListener('click', () => inThread(false));
-	app.querySelector('[data-continue]')?.addEventListener('click', () => inThread(false));
+	app.querySelector('.agent[data-agent="Juniper"]')?.addEventListener('click', () => openChat('juniper'));
 
 	// The chat's pins (PLAN.md, "Pinned messages"): the header's pin opens them in a popover under
 	// it, the newest first, each drawn as the chat draws its message under who said it and when,
@@ -776,13 +758,7 @@ export function play(app: HTMLElement) {
 
 	// A row drags to a new place in the list, or into the folder over its name, as in the app
 	// (app.rs, droppable): it fades where it was, and a line in the accent shows where it lands.
-	// Other agents' threads with it go along under it.
 	const sideList = app.querySelector<HTMLElement>('.side .list')!;
-	const withAsks = (row: Element) => {
-		const rows: Element[] = [row];
-		for (let n = row.nextElementSibling; n?.classList.contains('ask'); n = n.nextElementSibling) rows.push(n);
-		return rows;
-	};
 	let dragged: HTMLElement | null = null;
 	let target: { el: HTMLElement; where: 'before' | 'after' | 'in' } | null = null;
 	const untarget = () => {
@@ -829,12 +805,11 @@ export function play(app: HTMLElement) {
 	sideList.addEventListener('drop', (e) => {
 		if (!dragged || !target) return;
 		e.preventDefault();
-		const rows = withAsks(dragged);
 		const { el, where } = target;
 		// In the folder, last; the folder is the list's last part, so that's over + New.
-		if (where === 'in') sideList.querySelector('.new-row')!.before(...rows);
-		else if (where === 'before') el.before(...rows);
-		else withAsks(el).at(-1)!.after(...rows);
+		if (where === 'in') sideList.querySelector('.new-row')!.before(dragged);
+		else if (where === 'before') el.before(dragged);
+		else el.after(dragged);
 		untarget();
 	});
 
@@ -860,7 +835,7 @@ export function play(app: HTMLElement) {
 	};
 	headBar.addEventListener('click', () => drawer(true));
 	app.querySelector('[data-shade]')!.addEventListener('click', () => drawer(false));
-	for (const row of app.querySelectorAll('[data-room="Shop"], .agent[data-agent="Juniper"], .agent[data-agent="Moss"], [data-ask]')) {
+	for (const row of app.querySelectorAll('[data-room="Shop"], .agent[data-agent="Juniper"], .agent[data-agent="Moss"]')) {
 		row.addEventListener('click', () => drawer(false));
 	}
 	document.addEventListener('keydown', (e) => {

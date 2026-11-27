@@ -144,9 +144,8 @@ struct NewRoomSheet: View {
     }
 }
 
-/// A group chat's settings: its name, members (not Everyone's, which are all the
-/// person's agents), who a message goes to when the router can't pick, its colour, the
-/// corrections the router follows, each one swiped away to forget it, and what it follows.
+/// A group chat's settings: its name, members, who a message goes to when the router
+/// can't pick, its colour, the corrections the router follows, each one swiped away to forget it, and what it follows.
 struct RoomSettingsSheet: View {
     @Environment(Session.self) private var session
     @Environment(\.dismiss) private var dismiss
@@ -162,10 +161,8 @@ struct RoomSettingsSheet: View {
                         TextField(r.name, text: $name)
                             .onSubmit { rename(r) }
                     }
-                    if !r.everyone {
-                        Section("Members") {
-                            MemberToggles(members: r.members) { session.send(model.toggleMember($0, in: r)) }
-                        }
+                    Section("Members") {
+                        MemberToggles(members: r.members) { session.send(model.toggleMember($0, in: r)) }
                     }
                     Section("When it can't pick") {
                         Picker("Answers", selection: Binding(get: { r.defaultAgent }, set: { session.send(model.updateRoom(r.id, ["default": JSON($0)])) })) {

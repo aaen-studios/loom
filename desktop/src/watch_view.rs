@@ -126,7 +126,7 @@ pub(super) fn update_line(
 ) -> Stateful<Div> {
     let key = SharedString::from(format!("line-{}", m.id));
     let mark = match line.mark() {
-        LineMark::Board => board_icon(MARK_W),
+        LineMark::Board => board_icon(p, MARK_W),
         LineMark::Strand(lie) => strand(p, lie, key.clone()),
         LineMark::None => div().w(px(MARK_W)).flex_none().into_any_element(),
     };
@@ -287,7 +287,7 @@ impl Loom {
                 card_pill(p, key, id, card.as_ref(), None)
             }
             FollowPill::Board(name) => pill_frame(p)
-                .child(board_icon(14.0))
+                .child(board_icon(p, 14.0))
                 .child(pill_words(p, name.clone()))
                 .into_any_element(),
             // Its strand quiet: a watch doesn't know how the thread is going.

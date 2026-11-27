@@ -7,31 +7,73 @@ import Command from '../components/Command.astro';
 import Get from '../components/Get.astro';
 import Knot from '../components/Knot.astro';
 import { INSTALL } from '../lib/site.mjs';
-import { brains, count } from '../lib/registry.mjs';
+import { brains } from '../lib/registry.mjs';
 import actaMark from '../../../server/catalog/acta.svg?raw';
 import githubMark from '../../../server/catalog/github.svg?raw';
 import notionMark from '../../../server/catalog/notion.svg?raw';
 import linearMark from '../../../server/catalog/linear.svg?raw';
 import vercelMark from '../../../server/catalog/vercel.svg?raw';
+import t3Mark from '../../../server/catalog/t3.svg?raw';
 
-// The Brains page as the app draws it (desktop/src/app.rs, programs_page, and list_page.rs): the
-// brains down the left and the ACP Registry, picked, beside them, with the registry's own names,
-// versions, descriptions and icons. When the panel comes into view, the first card installs and
-// joins the brains, and the next card in the registry takes its place.
+// The Brains page as the app draws it (desktop/src/app.rs, programs_page): one column, Your brains
+// with a row for each brain, its tile, name, version and settings, and Claude Agent open in place
+// under its row (program_open_rows); then the ACP Registry's programs as cards, two across, with the
+// registry's own names, versions, descriptions and icons. When the panel comes into view, the first
+// card installs and joins the brains, and the next card in the registry takes its place.
 const MINE = ['claude-acp', 'codex-acp'];
 const CARDS = ['opencode', 'gemini', 'github-copilot-cli', 'goose', 'cursor'];
 const listed = await brains([...MINE, ...CARDS]);
-const toInstall = Math.max(0, (await count()) - MINE.length);
 const mine = listed.filter((b) => MINE.includes(b.id)).map((b) => ({ ...b, settings: b.id === 'claude-acp' ? '1 setting' : 'No settings' }));
 const cards = listed.filter((b) => CARDS.includes(b.id));
-// Claude Agent's page, which its row opens (desktop/src/app.rs, program_pane): its head, then
-// who it's signed in as and the plan's limits as bars, orange from 75% and red from 90%
-// (desktop/src/meter.rs, Level::of).
 const claude = mine.find((b) => b.id === 'claude-acp');
+const closed = mine.filter((b) => b !== claude);
+// Claude Agent's plan (app.rs, program_plan): who it's signed in as and the plan's limits as bars,
+// orange from 75% and red from 90% (desktop/src/meter.rs, Level::of).
 const LIMITS = [
 	{ name: 'Session', used: 42, resets: '15:30' },
 	{ name: 'This week', used: 78, resets: 'Mon' },
 ];
+const level = (used: number) => ({ warn: used >= 75 && used < 90, bad: used >= 90 });
+type Limit = { label: string; used: number; resets: string };
+// The usage pool it draws from (app.rs, program_pool; server/pools.calx): the whole pool's windows,
+// then each account with how it stands, in its state's colour, and the windows it reports, which
+// differ between accounts.
+const POOL: { total: Limit[]; accounts: { name: string; state: string; ink?: 'warn' | 'bad'; limits: Limit[] }[] } = {
+	total: [
+		{ label: '5 hours', used: 61, resets: '16:12' },
+		{ label: 'Week', used: 47, resets: 'Mon' },
+	],
+	accounts: [
+		{
+			name: 'you@example.com',
+			state: 'Ready',
+			limits: [
+				{ label: '5 hours', used: 22, resets: '17:40' },
+				{ label: 'Week', used: 41, resets: 'Mon' },
+			],
+		},
+		{
+			name: 'work@example.com',
+			state: 'Over its quota · 42 min',
+			ink: 'bad',
+			limits: [
+				{ label: '5 hours', used: 100, resets: '16:12' },
+				{ label: 'Week', used: 64, resets: 'Tue' },
+			],
+		},
+		{
+			name: 'team@example.com',
+			state: 'Cooling down · 1 min',
+			ink: 'warn',
+			limits: [
+				{ label: 'Week', used: 30, resets: 'Thu' },
+				{ label: 'Week · Fable', used: 81, resets: 'Thu' },
+			],
+		},
+		{ name: 'old@example.com', state: 'Signed out at the pool', ink: 'warn', limits: [] },
+	],
+};
+const ready = POOL.accounts.filter((a) => a.state === 'Ready').length;
 
 // The Rules page as the app draws it (desktop/src/rules.rs), each rule in the server's own words
 // (server/rules.calx, said).
@@ -46,14 +88,14 @@ const STARTERS = ['You', 'An agent', 'Routine', 'Webhook', 'Script'];
 // Each server's yarn is drawn from its name, as the app draws it.
 const servers = ['This computer', 'loom.example.com', 'loom.acme.dev'];
 
-// Spools' Find tab as the app draws it (desktop/src/spools.rs): Acta and T3 Code as wide cards,
-// each with loom's knot tied to its logo, the category pills, and the rest as tiles four to a row,
-// in the catalog's own words, each with its badge's colour and its mark, or its initial where it has
-// none (server/catalog.calx, server/catalog/, shared/badge.calx). When the panel comes into view,
-// T3 Code connects: its tie pulls taut and Installed counts it.
+// Spools' Find tab as the app draws it (desktop/src/spools.rs): Acta and T3 Code as wide cards in
+// black and white, each with loom's knot tied to its own logo on a tile in ink, the category pills,
+// and the rest as tiles four to a row, in the catalog's own words, each with its badge's colour and
+// its mark (server/catalog.calx, server/catalog/, shared/badge.calx). When the panel comes into
+// view, T3 Code connects: its tie pulls taut and Installed counts it.
 const featured = [
-	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', color: 'mint', mark: actaMark, connected: true },
-	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', color: 'mint', mark: '', connected: false },
+	{ id: 'acta', name: 'Acta', text: 'Boards, tasks and comments in Acta.', mark: actaMark, connected: true },
+	{ id: 't3', name: 'T3 Code', text: 'Projects and coding threads in T3 Code.', mark: t3Mark, connected: false },
 ];
 const PILLS = ['All', 'Work', 'Code', 'Mail & calendar', 'Files', 'Home', 'Fun'];
 const tiles = [
@@ -142,83 +184,36 @@ const faq = {
 			<div class="copy" data-reveal>
 				<h2 id="f-programs">Every agent runs on an agent program</h2>
 				<p>
-					Claude Agent, Codex, OpenCode, goose, Gemini CLI, or any other program that speaks the Agent Client Protocol. loom installs them from the ACP Registry, and gives each agent a name, a colour, its instructions and a folder to work in.
+					Claude Agent, Codex, OpenCode, goose, Gemini CLI, or any other program that speaks the Agent Client Protocol. loom installs them from the ACP Registry, and gives each agent a name, a colour, its instructions and a folder to work in. A brain can draw from a usage pool of several accounts, and its page shows how each one stands.
 				</p>
 			</div>
 			<div class="visual" data-reveal>
 				<div class="page brains" aria-label="The Brains page in loom's settings">
 					<div class="page-head"><span class="page-title">Brains</span></div>
-					<div class="find">
-						<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="8"></circle><path d="m21 21-4.3-4.3"></path></svg>
-						<span>Find a brain</span>
-					</div>
-					<div class="split-box">
-						<div class="list">
-							<div class="list-rows mine">
-								{
-									mine.map((b) => (
-										<div class="list-row" data-program={b.id === claude?.id ? b.id : undefined}>
-											<span class="tile" style={`--icon: url(${b.icon})`} />
-											<span class="row-text">
-												<span class="row-title">{b.name}</span>
-												<span class="row-sub">Version {b.version} · {b.settings}</span>
-											</span>
-										</div>
-									))
-								}
-							</div>
-							<div class="list-foot">
-								<div class="list-row picked" data-registry>
-									<span class="tile glyph">
-										<svg class="i" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"></path><path d="M12 22V12"></path><path d="m3.3 7 8.7 5 8.7-5"></path><path d="m7.5 4.27 9 5.15"></path></svg>
-									</span>
-									<span class="row-text">
-										<span class="row-title">ACP Registry</span>
-										<span class="row-sub" data-more={toInstall}>{toInstall} to install</span>
-									</span>
-								</div>
-							</div>
-						</div>
-						<div class="pane" data-registry-page>
-							<div class="pane-head">
-								<button type="button" class="back" data-list-back aria-label="Back to the brains"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></button>
-								<span class="pane-title">ACP Registry</span>
-							</div>
-							<div class="cards">
-								{
-									cards.map((b, i) => (
-										<div class="card" data-brain={b.id} data-name={b.name} data-version={b.version} data-icon={b.icon} hidden={i >= 3}>
-											<div class="card-top">
-												<span class="tile big" style={`--icon: url(${b.icon})`} />
-												<span class="btn-small">Install</span>
-											</div>
-											<span class="card-text">
-												<span class="row-title">{b.name}</span>
-												<span class="card-sub">{b.description}</span>
-											</span>
-										</div>
-									))
-								}
-							</div>
-						</div>
-						{
-							claude && (
-								<div class="pane" data-program-page hidden>
-									<button type="button" class="back" data-list-back aria-label="Back to the brains"><svg class="i" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7"></path><path d="M19 12H5"></path></svg></button>
-									<div class="program-head">
-										<span class="tile big" style={`--icon: url(${claude.icon})`} />
+					<div class="group">
+						<div class="group-label">Your brains</div>
+						<div class="box mine">
+							{
+								claude && (
+									<div class="row brain-row" data-program role="button" tabindex="0" aria-expanded="true">
+										<span class="tile" style={`--icon: url(${claude.icon})`} />
 										<span class="row-text">
-											<span class="pane-title">{claude.name}</span>
+											<span class="row-title">{claude.name}</span>
 											<span class="row-sub">{`Version ${claude.version} · ${claude.settings}`}</span>
 										</span>
+										<svg class="i chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"></path></svg>
 									</div>
-									<div class="box">
-										<div class="field-row">
+								)
+							}
+							{
+								claude && (
+									<div class="open-rows" data-open-rows>
+										<div class="field-row inset">
 											<span class="field-name">Signed in</span>
 											<span class="plan-name">Claude Max</span>
 										</div>
 										{LIMITS.map((l) => (
-											<div class:list={['field-row', 'limit', { warn: l.used >= 75 && l.used < 90, bad: l.used >= 90 }]}>
+											<div class:list={['field-row', 'limit', 'inset', level(l.used)]}>
 												<span class="field-name">{l.name}</span>
 												<span class="limit-bar">
 													<span style={`width: ${l.used}%`} />
@@ -226,10 +221,86 @@ const faq = {
 												<span class="limit-words">{`${l.used}% · ${l.resets}`}</span>
 											</div>
 										))}
+										<div class="row inset">
+											<span class="row-text">
+												<span class="row-title">Usage pool · CLIProxyAPI</span>
+												<span class="row-sub">Read just now</span>
+											</span>
+											<span class="btn-small">Unlink</span>
+										</div>
+										{[{ name: 'All accounts', state: `${ready} of ${POOL.accounts.length} ready`, ink: 'total', limits: POOL.total, whole: true }, ...POOL.accounts].map((a) => (
+											<div class="pool-line inset">
+												<div class="pool-head">
+													<span class:list={['pool-name', { account: !('whole' in a) }]}>{a.name}</span>
+													<span class:list={['pool-state', a.ink]}>{a.state}</span>
+												</div>
+												{a.limits.map((l) => (
+													<div class:list={['pool-limit', 'limit', level(l.used)]}>
+														<span class="pool-label">{l.label}</span>
+														<span class="limit-bar">
+															<span style={`width: ${l.used}%`} />
+														</span>
+														<span class="limit-words">{`${l.used}% · ${l.resets}`}</span>
+													</div>
+												))}
+											</div>
+										))}
+										<div class="row inset">
+											<span class="row-text">
+												<span class="row-title">CLAUDE_CODE_OAUTH_TOKEN</span>
+												<span class="row-sub">••••••••</span>
+											</span>
+											<span class="btn-small">Remove</span>
+										</div>
+										<div class="add-setting inset">
+											<span class="input"><span class="placeholder">ANTHROPIC_API_KEY</span></span>
+											<span class="input"><span class="placeholder">Its value</span></span>
+											<span class="btn-small">Add setting</span>
+										</div>
+										<div class="wrap-row inset">
+											<span class="row-title">Share it</span>
+											<span class="share">
+												<span class="input"><span class="placeholder">Tokens</span></span>
+												<span class="segments"><span class="segment on">a day</span><span class="segment">a month</span></span>
+												<span class="btn-small">Share</span>
+											</span>
+										</div>
+										<div class="brain-actions"><span class="btn-small danger">Remove</span></div>
 									</div>
-								</div>
-							)
-						}
+								)
+							}
+							{
+								closed.map((b) => (
+									<div class="row brain-row" data-closed>
+										<span class="tile" style={`--icon: url(${b.icon})`} />
+										<span class="row-text">
+											<span class="row-title">{b.name}</span>
+											<span class="row-sub">{`Version ${b.version} · ${b.settings}`}</span>
+										</span>
+										<svg class="i chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"></path></svg>
+									</div>
+								))
+							}
+						</div>
+					</div>
+					<div class="group">
+						<div class="registry-label">ACP Registry</div>
+						<div class="cards">
+							{
+								cards.map((b, i) => (
+									<div class="card" data-brain={b.id} data-name={b.name} data-version={b.version} data-icon={b.icon} hidden={i >= 4}>
+										<div class="card-top">
+											<span class="tile big" style={`--icon: url(${b.icon})`} />
+											<span class="btn-small">Install</span>
+										</div>
+										<span class="card-text">
+											<span class="row-title">{b.name}</span>
+											<span class="card-sub">{b.description}</span>
+										</span>
+									</div>
+								))
+							}
+						</div>
 					</div>
 				</div>
 			</div>
@@ -346,13 +417,13 @@ const faq = {
 					<div class="spool-cards">
 						{
 							featured.map((e) => (
-								<div class="spool-card" data-spool={e.id} style={`--tint: var(--thread-${e.color})`}>
+								<div class="spool-card" data-spool={e.id}>
 									<div class="tie">
 										<span class="knot-box">
 											<Knot size={20} />
 										</span>
-										<svg data-tie data-color={e.color} data-taut={e.connected ? '' : undefined} height="28" aria-hidden="true" />
-										{e.mark ? <span class="badge" set:html={e.mark} /> : <span class="badge">{e.name[0]}</span>}
+										<svg data-tie data-taut={e.connected ? '' : undefined} height="28" aria-hidden="true" />
+										<span class="badge ink" set:html={e.mark} />
 									</div>
 									<span class="card-text">
 										<span class="spool-name">{e.name}</span>
@@ -691,11 +762,12 @@ const faq = {
 		color: var(--ink-3);
 		white-space: nowrap;
 	}
-	/* Brains as the app lays out a list page (desktop/src/list_page.rs): the find field, then a box with
-	   the brains down its left and the ACP Registry, picked, beside them; one at a time where it's
-	   narrow, as in a small window. */
+	/* Brains as the app draws it (desktop/src/app.rs, programs_page): one column, Your brains with a
+	   row for each brain, the open one's rows set in under its tile (brain_inset), then the ACP
+	   Registry's cards under its small heading. */
 	.brains {
-		gap: var(--space-m);
+		--brain-tile: calc(var(--control-lead) + 4px);
+		--inset: calc(var(--brain-tile) + var(--space-m));
 	}
 	.find {
 		display: flex;
@@ -722,128 +794,47 @@ const faq = {
 		width: 14px;
 		height: 14px;
 	}
-	.split-box {
-		display: grid;
-		grid-template-columns: minmax(0, 38%) minmax(0, 1fr);
-		border: 1px solid var(--line);
-		border-radius: var(--radius-card);
-		overflow: hidden;
+	.brain-row .tile {
+		--size: var(--brain-tile);
 	}
-	.list {
-		min-width: 0;
-		display: flex;
-		flex-direction: column;
-		border-right: 1px solid var(--line);
-	}
-	.list-rows {
-		flex: 1;
-		display: grid;
-		grid-template-columns: minmax(0, 1fr);
-		align-content: start;
-		padding: var(--space-xs);
-	}
-	.list-foot {
-		padding: var(--space-xs);
-		border-top: 1px solid var(--line);
-	}
-	.list-row {
-		height: var(--control-list-row);
-		display: flex;
-		align-items: center;
-		gap: var(--space-m);
-		padding: 0 var(--space-s);
-		border-radius: var(--radius-row);
-	}
-	.list-row.picked {
-		background: var(--active);
-	}
-	.list-row .tile {
-		--size: var(--control-lead);
-	}
-	.list-row .row-title {
-		font-size: 13.5px;
-	}
-	.list-row .row-title,
-	.list-row .row-sub {
+	.brain-row .row-title,
+	.brain-row .row-sub {
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.tile.glyph {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		color: var(--ink-2);
+	.brains .chevron {
+		color: var(--ink-3);
 	}
-	.tile.glyph::after {
-		display: none;
-	}
-	.pane {
-		min-width: 0;
-		display: grid;
-		align-content: start;
-		gap: var(--space-l);
-		padding: var(--space-l);
-	}
-	.pane-head {
-		display: flex;
-		align-items: center;
-		gap: var(--space-s);
-		min-height: var(--control-icon);
-	}
-	.pane-title {
-		font-size: calc(var(--size-body) + 2px);
-		font-weight: var(--weight-semibold);
-	}
-	/* The way back to the list, where only one fits (list_page.rs, list-back). */
-	.back {
-		display: none;
-		place-items: center;
-		width: var(--control-icon);
-		height: var(--control-icon);
-		flex: none;
-		padding: 0;
-		border: 0;
-		border-radius: var(--radius-row);
-		background: none;
-		color: var(--ink-2);
+	/* A brain's row opens it in place, and closes it again. */
+	.brain-row[data-program] {
 		cursor: pointer;
-		transition:
-			background-color 0.12s,
-			color 0.12s;
-	}
-	.back:hover {
-		background: var(--hover);
-		color: var(--ink);
-	}
-	[data-program-page] .back {
-		margin-bottom: calc(-1 * var(--space-s));
-	}
-	.brains .cards {
-		grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--layout-card-least)), 1fr));
-	}
-	.pane[hidden] {
-		display: none;
-	}
-	/* A brain's row opens its page beside the list, and the ACP Registry's row the registry. */
-	.list-row[data-program],
-	.list-row[data-registry] {
-		cursor: pointer;
+		outline: none;
 		transition: background-color 0.12s;
 	}
-	.list-row[data-program]:not(.picked):hover,
-	.list-row[data-registry]:not(.picked):hover {
+	.brain-row[data-program]:hover,
+	.brain-row[data-program]:focus-visible {
 		background: var(--hover);
 	}
-	/* A brain's page (desktop/src/app.rs, program_pane): its head, then the plan it's signed in
-	   to, its session and its week, each a bar 6 tall with how much is used and when it resets
-	   after it: quiet, orange from 75% and red from 90% (program_plan, limit_inks). */
-	.program-head {
+	.open-rows {
 		display: flex;
-		align-items: center;
-		gap: var(--space-m);
-		min-width: 0;
+		flex-direction: column;
 	}
+	.open-rows[hidden] {
+		display: none;
+	}
+	.open-rows > * + * {
+		border-top: 1px solid var(--line);
+	}
+	.registry-label {
+		padding: 0 var(--space-xs);
+		font-size: var(--size-small);
+		font-weight: var(--weight-medium);
+		color: var(--ink-2);
+	}
+	/* The plan it's signed in to, its session and its week, each a bar 6 tall with how much is used
+	   and when it resets after it: quiet, orange from 75% and red from 90% (program_plan,
+	   limit_inks). */
 	.field-row {
 		display: flex;
 		align-items: center;
@@ -898,26 +889,127 @@ const faq = {
 	.limit.bad .limit-words {
 		color: var(--bad);
 	}
+	/* The pool: a line for the whole of it and one for each account, its name and how it stands,
+	   then a bar for each window it reports (pool_line). */
+	.pool-line {
+		display: flex;
+		flex-direction: column;
+		gap: calc(var(--space-xs) + 2px);
+		padding: calc(var(--space-s) + 2px) var(--space-l);
+	}
+	.pool-head,
+	.pool-limit {
+		min-width: 0;
+		display: flex;
+		align-items: center;
+		gap: var(--space-m);
+	}
+	.pool-head {
+		font-size: var(--size-small);
+	}
+	.pool-name,
+	.pool-label {
+		flex: none;
+		width: min(150px, 34%);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.pool-name {
+		font-weight: var(--weight-medium);
+		color: var(--ink);
+	}
+	/* An account's name is hidden until the pointer is over it (hidden_name). */
+	.pool-name.account {
+		filter: blur(5px);
+		transition: filter 0.15s;
+	}
+	.pool-name.account:hover {
+		filter: none;
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.pool-name.account {
+			transition: none;
+		}
+	}
+	.pool-label {
+		font-size: var(--size-caption);
+		color: var(--ink-3);
+	}
+	.pool-state {
+		min-width: 0;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		color: var(--ink-3);
+	}
+	.pool-state.total {
+		color: var(--ink-2);
+	}
+	.pool-state.warn {
+		color: var(--warn);
+	}
+	.pool-state.bad {
+		color: var(--bad);
+	}
+	/* Its settings: one there, the form that adds one, sharing it, and removing it. */
+	.add-setting {
+		display: flex;
+		align-items: center;
+		gap: var(--space-s);
+		padding: var(--space-m) var(--space-l);
+	}
+	.placeholder {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		color: var(--ink-3);
+	}
+	.wrap-row {
+		min-height: var(--control-row);
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-m);
+		padding: calc(var(--space-s) + 2px) var(--space-l);
+	}
+	.wrap-row > .row-title {
+		flex: 1 0 auto;
+		white-space: nowrap;
+	}
+	.share {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--space-s);
+	}
+	.share .input {
+		flex: none;
+		width: 96px;
+	}
+	.brain-actions {
+		display: flex;
+		justify-content: flex-end;
+		padding: var(--space-m) var(--space-l);
+	}
+	.btn-small.danger {
+		color: var(--bad);
+	}
+	/* Set in under the brain's tile. */
+	.brains .inset {
+		padding-left: calc(var(--space-l) + var(--inset));
+	}
+	/* On a phone the rows keep the room the bars need. */
 	@media (max-width: 560px) {
-		.split-box {
-			grid-template-columns: minmax(0, 1fr);
+		.brains {
+			--inset: 0px;
 		}
-		.list {
-			display: none;
-		}
-		.back {
-			display: grid;
-		}
-		.brains.listing .list {
-			display: flex;
-			border-right: 0;
-		}
-		.brains.listing .pane {
-			display: none;
+		.brains .limit-words {
+			width: 80px;
 		}
 	}
 	/* The brain that installed comes into the list, and the cards move up into its place. */
-	.list-row.arrived {
+	.brain-row.arrived {
 		animation: arrive 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
 	}
 	@keyframes arrive {
@@ -1065,8 +1157,8 @@ const faq = {
 	}
 
 	/* Spools' Find tab, as the app draws it (desktop/src/spools.rs): Find and Installed beside the
-	   title, the search, Acta and T3 Code as wide cards in a soft tint of their colour, the pills, and
-	   the rest as tiles four to a row. */
+	   title, the search, Acta and T3 Code as wide cards in black and white, the pills, and the rest
+	   as tiles four to a row. */
 	.spools {
 		gap: var(--space-l);
 	}
@@ -1106,9 +1198,9 @@ const faq = {
 		flex-direction: column;
 		gap: var(--space-m);
 		padding: var(--space-l);
-		border: 1px solid color-mix(in srgb, var(--tint) 30%, var(--line));
+		border: 1px solid var(--line);
 		border-radius: var(--radius-card);
-		background: color-mix(in srgb, var(--tint) 7%, var(--card));
+		background: var(--card);
 	}
 	/* loom's knot, the tie, and the logo. */
 	.tie {
@@ -1156,6 +1248,12 @@ const faq = {
 		border-radius: var(--radius-row);
 		font-size: 11px;
 	}
+	/* One of loom's own, Acta or T3 Code: its logo on a tile in ink, black in light and white in
+	   dark (spools.rs, spool_mark_ink). */
+	.badge.ink {
+		background: var(--button);
+		color: var(--button-ink);
+	}
 	/* Its mark, in the initial's place and ink. */
 	.badge :global(svg) {
 		width: 56%;
@@ -1193,7 +1291,7 @@ const faq = {
 		gap: 6px;
 		font-size: var(--size-small);
 		font-weight: var(--weight-medium);
-		color: var(--ok);
+		color: var(--ink);
 	}
 	.spool-state[hidden] {
 		display: none;
@@ -1437,39 +1535,34 @@ const faq = {
 
 	const ease = 'cubic-bezier(0.2, 0.7, 0.3, 1)';
 
-	// Brains: Claude Agent's row opens its page beside the list, with the plan it's signed in to and
-	// its limits, and the ACP Registry's row the registry again (desktop/src/app.rs, program_pane).
-	const brainsPage = document.querySelector<HTMLElement>('.brains');
-	const programPage = brainsPage?.querySelector<HTMLElement>('[data-program-page]');
-	const registryPage = brainsPage?.querySelector<HTMLElement>('[data-registry-page]');
-	// Where only one fits, as on a phone, the page picked shows with the way back, which shows the
-	// list until a row is picked again (list_page.rs, list_back).
-	const pickBrain = (row: Element, program: boolean) => {
-		if (!brainsPage || !programPage || !registryPage) return;
-		programPage.hidden = !program;
-		registryPage.hidden = program;
-		brainsPage.classList.remove('listing');
-		for (const r of brainsPage.querySelectorAll('.list-row')) r.classList.toggle('picked', r === row);
-	};
-	for (const row of brainsPage?.querySelectorAll('[data-program], [data-registry]') ?? []) {
-		row.addEventListener('click', () => pickBrain(row, row.hasAttribute('data-program')));
-	}
-	for (const back of brainsPage?.querySelectorAll('[data-list-back]') ?? []) {
-		back.addEventListener('click', () => brainsPage?.classList.add('listing'));
-	}
-
-	// Brains: the first card installs and joins the brains down the left, as the app lists it once it's
-	// in, one fewer to install, and the cards move up into its place, the next in the registry coming
-	// in last.
+	// Brains: Claude Agent's row closes it, and opens it again in place, the chevron turning with it
+	// (desktop/src/app.rs, programs_page).
 	const brains = document.querySelector<HTMLElement>('.brains');
+	const opener = brains?.querySelector<HTMLElement>('[data-program]');
+	const openRows = brains?.querySelector<HTMLElement>('[data-open-rows]');
+	const toggle = () => {
+		if (!opener || !openRows) return;
+		const open = openRows.hidden;
+		openRows.hidden = !open;
+		opener.setAttribute('aria-expanded', String(open));
+		opener.querySelector('.chevron path')?.setAttribute('d', open ? 'm6 9 6 6 6-6' : 'm9 18 6-6-6-6');
+	};
+	opener?.addEventListener('click', toggle);
+	opener?.addEventListener('keydown', (e) => {
+		if (e.key !== 'Enter' && e.key !== ' ') return;
+		e.preventDefault();
+		toggle();
+	});
+
+	// Brains: the first card installs and joins Your brains, as the app lists it once it's in, and
+	// the cards move up into its place, the next in the registry coming in last.
 	whenShown(brains?.closest('[data-reveal]') ?? null, async () => {
 		const mine = brains?.querySelector('.mine');
-		const more = brains?.querySelector<HTMLElement>('[data-more]');
 		const all = [...(brains?.querySelectorAll<HTMLElement>('.card') ?? [])];
 		const card = all[0];
 		const next = all.find((c) => c.hidden);
 		const button = card?.querySelector('.btn-small');
-		const model = mine?.firstElementChild;
+		const model = brains?.querySelector('[data-closed]');
 		if (!mine || !card || !button || !model || still) return;
 		await pause(1100);
 		button.classList.add('pressed');
@@ -1480,8 +1573,6 @@ const faq = {
 		button.replaceWith(busy);
 		await pause(2400);
 		const row = model.cloneNode(true) as HTMLElement;
-		row.removeAttribute('data-program');
-		row.classList.remove('picked');
 		row.querySelector('.tile')?.setAttribute('style', `--icon: url(${card.dataset.icon})`);
 		const title = row.querySelector('.row-title');
 		const sub = row.querySelector('.row-sub');
@@ -1494,11 +1585,6 @@ const faq = {
 		const before = new Map(others.map((c) => [c, c.getBoundingClientRect()]));
 		card.remove();
 		mine.append(row);
-		if (more) {
-			const left = Math.max(0, Number(more.dataset.more) - 1);
-			more.dataset.more = String(left);
-			more.textContent = `${left} to install`;
-		}
 		if (next) next.hidden = false;
 		for (const c of others) {
 			const a = before.get(c);

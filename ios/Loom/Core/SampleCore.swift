@@ -409,15 +409,16 @@ final class SampleCore: CoreLink, @unchecked Sendable {
 
     /// The agent list's sections as the core gives them (core/sidebar.calx), for the
     /// sample's agents and group chats: pinned agents first, then group chats never
-    /// placed (Everyone first), then the rest by `order`, then agents never placed.
+    /// placed, as they were made, then the rest by `order`, then agents never placed.
     private func sidebar() -> [JSON] {
         let waiting = Set(approvals.compactMap { a in runs.first { $0["run"] == a["run"] }?["agent"].string })
-        let rooms = conversations.filter { !$0["room"].isNull }
+        // Oldest first, as they were made: the sample puts a new one at the top.
+        let rooms = Array(conversations.filter { !$0["room"].isNull }.reversed())
         var keyed: [(key: [Int], item: JSON, of: JSON, room: Bool)] = []
         for (n, c) in rooms.enumerated() {
             let r = c["room"]
-            let key = r["order"].int.map { [2, $0, 0, n] } ?? [1, r["everyone"].bool == true ? 0 : 1, 0, n]
-            keyed.append((key, ["kind": "room", "id": c["id"], "name": r["name"], "color": r["color"], "everyone": JSON(r["everyone"].bool ?? false)], r, true))
+            let key = r["order"].int.map { [2, $0, 0, n] } ?? [1, 0, 0, n]
+            keyed.append((key, ["kind": "room", "id": c["id"], "name": r["name"], "color": r["color"]], r, true))
         }
         for (n, a) in agents.enumerated() {
             let m = rooms.count + n
@@ -825,9 +826,9 @@ enum Sample {
     ]
 
     static let conversations: [JSON] = [
-        // Everyone, the group chat with all the person's agents (PLAN.md, "Group chats").
-        ["id": "c_6", "agent": "", "title": "Everyone", "at": 1795187400000, "last": 1795187400000, "replied": 1795187400000, "read": 1795187000000,
-         "room": ["name": "Everyone", "everyone": true, "members": ["a_1", "a_2", "a_3", "a_4"], "color": "", "default": "", "corrections": [["id": "k_1", "text": "Anything from the landlord?", "to": "a_3", "from": "a_2", "at": 1795187390000]]]],
+        // Daily, a group chat the person made with all four agents (PLAN.md, "Group chats").
+        ["id": "c_6", "agent": "", "title": "Daily", "at": 1795187400000, "last": 1795187400000, "replied": 1795187400000, "read": 1795187000000,
+         "room": ["name": "Daily", "members": ["a_1", "a_2", "a_3", "a_4"], "color": "", "default": "", "corrections": [["id": "k_1", "text": "Anything from the landlord?", "to": "a_3", "from": "a_2", "at": 1795187390000]]]],
         // Builder's thread with Gardener (`message_agent`), newer than the person's chat
         // with Gardener and never in its place.
         ["id": "c_5", "agent": "a_4", "title": "From Builder", "asked_by": "a_1", "at": 1795187300000, "last": 1795187300000, "replied": 1795187300000],

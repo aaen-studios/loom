@@ -294,7 +294,7 @@ impl Loom {
             .flex()
             .items_center()
             .gap(px(space::S))
-            .child(board_icon(16.0))
+            .child(board_icon(p, 16.0))
             .child(
                 div()
                     .min_w_0()
@@ -650,7 +650,7 @@ impl Loom {
             .text_color(p.ink)
             .font_weight(FontWeight::MEDIUM)
             .soft_hover(transparent_black(), p.hover, None)
-            .child(board_icon(16.0))
+            .child(board_icon(p, 16.0))
             .child(self.model.board_name(board))
             .child(
                 div()

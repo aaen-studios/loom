@@ -1,0 +1,209 @@
+module tests.protocol.everyone_old
+
+// Everyone goes once (PLAN.md, "Group chats"): an instance from before made a
+// group chat called Everyone, marked `everyone`, for each person with two agents.
+// Started again, it puts it away as a deleted chat: the devices hear
+// conversation.deleted, a new device's list hasn't it, the activity says so, and
+// its messages, pins and room stay in the database. A group chat the person made
+// stays, and it goes once.
+//
+//     calx tests/protocol/everyone_old.calx
+import std.json.{Json, parse}
+import std.process.{Stdio, exit}
+import std.sqlite.{Database, Value}
+import std.time.{Instant}
+import shared.obj.{Obj, at, str_at}
+import shared.client.{Session}
+import core.cache.{Cache}
+import core.conn.{Conn, ToApp}
+import tests.kit.{Instance, check, loom}
+
+fn agent(app: mut Session, id: str, name: str) -> String ! Error {
+    let made = try app.cmd(id, "agent.create", Obj.new().s("name", String(name)).s("acp_agent", String("fake")).s("instructions", String("Test.")).done())
+    return str_at(at(at(made, "value"), "agent"), "id") ?? String()
+}
+
+fn room(app: mut Session, id: str, name: str, members: List<String>) -> String ! Error {
+    var list = List<Json>()
+    for m in members { list.push(Json.Str(m.copy())) }
+    let made = try app.cmd(id, "room.create", Obj.new().s("name", String(name)).j("members", Json.Array(list)).done())
+    return str_at(at(at(made, "value"), "conversation"), "id") ?? String()
+}
+
+// The agent's next reply in `conversation`.
+fn reply_in(app: mut Session, conversation: String) -> Json ! Error {
+    loop {
+        let created = try app.until("event", "message.created")
+        let m = at(created, "message")
+        if str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+    }
+}
+
+// What `sql` counts in the instance's database, with `value` for its one parameter.
+fn count(data: String, sql: str, value: String) -> i64 ! Error {
+    let db = try Database.open("{data}/loom.db")
+    let row = try db.query_one(String(sql), [Value.Text(value.copy())]) else return 0
+    return match row[0].copy() {
+        Value.Int(n) => n,
+        _ => 0,
+    }
+}
+
+// The app's side of a real core, for the conversations a new device lists.
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<ToApp>
+    thread: Thread?
+}
+
+impl App {
+    fn start(base: String, token: String) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<ToApp>()
+        let conn = Conn.new(some("http://{base}"), some(token.copy()), String("loom-test-everyone-old"), try Cache.open(String(":memory:")), inbox, from_core.sender())
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, thread: some(t) }
+    }
+
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    // The ids of the conversations the core lists.
+    fn conversations(mut self, id: str) -> List<String> ! Error {
+        self.to_core.send("{Obj.new().s("t", String("core.get")).s("id", String(id)).s("what", String("conversations")).done()}")
+        let got = try self.until("core.data", "id", String(id), 5000)
+        var out = List<String>()
+        if let Json.Array(items) = at(got, "items") {
+            for c in items { out.push(str_at(c, "id") ?? String()) }
+        }
+        return out
+    }
+
+    fn stop(mut self) {
+        self.to_core.send(String(#"{"t":"core.stop"}"#))
+        if let t = self.thread.take() { t.join() }
+    }
+}
+
+// Kills the instance, as an update's restart would leave it, and starts it
+// again on the same data, with `first` done to its database before.
+fn restart(i: own Instance, first: String) -> Instance ! Error {
+    var old = i.server
+    old.kill_tree()
+    _ = old.wait()
+    if first.len() > 0 {
+        let db = try Database.open("{i.data}/loom.db")
+        try db.execute_script(first)
+    }
+    let server = try loom(i.data.copy(), [String("serve"), String("--port"), String("0"), String("--allow-root")]).own_group().stdout(Stdio.Pipe).spawn()
+    let serving = server.wait_for_line(String("loom: serving"), 120000) else {
+        server.kill_tree()
+        fail "the server didn't start again"
+    }
+    let address = serving[serving.find("http://") ?? 0..].trim().copy()
+    let base = if address.ends_with("/") { address[7..address.len() - 1].copy() } else { address[7..].copy() }
+    return Instance { server: server, data: i.data, base: base, token: i.token }
+}
+
+// Before the update: a person with two agents, a group chat called Everyone
+// with both and a message pinned there, and a group chat of their own. Gives the
+// event to pick up from, Everyone and the other.
+fn before(inst: Instance) -> (i64, String, String) ! Error {
+    var app = try Session.connect(inst.base.copy(), inst.token.copy(), 0)
+    let ledger = try agent(mut app, "q_1", "Ledger")
+    let hermes = try agent(mut app, "q_2", "Hermes")
+    let everyone = try room(mut app, "q_3", "Everyone", [ledger.copy(), hermes.copy()])
+    let money = try room(mut app, "q_4", "Money", [ledger.copy(), hermes.copy()])
+    try check(everyone.len() > 0 and money.len() > 0, "two group chats are made")
+    try app.send(Obj.new().s("t", String("send")).s("cid", String("m_1")).s("conversation", everyone.copy()).s("text", "[@Ledger](loom:agent/{ledger}) the rent").done())
+    let reply = try reply_in(mut app, everyone.copy())
+    _ = try app.cmd("q_5", "message.pin", Obj.new().s("message", str_at(reply, "id") ?? String()).done())
+    let seq = app.seq
+    app.close()
+    return (seq, everyone, money)
+}
+
+fn after(back: Instance, seq: i64, everyone: String, money: String) ! Error {
+    var app = try Session.connect(back.base.copy(), back.token.copy(), seq)
+    // The devices hear it's gone with the events they missed, which may have come already.
+    var told = false
+    var waited = 0
+    while not told and waited < 3 {
+        for f in app.frames {
+            if str_at(f.copy(), "kind") == some(String("conversation.deleted")) and str_at(f, "conversation") == some(everyone.copy()) { told = true }
+        }
+        if not told { _ = try app.until("event", "conversation.deleted") }
+        waited += 1
+    }
+    try check(told, "Everyone is put away, and the devices hear conversation.deleted")
+    let log = try app.cmd("q_6", "activity.list", Obj.new().done())
+    try check("{at(log, "value")}".contains("Put away the group chat Everyone"), "the activity says so")
+    app.close()
+
+    var core = try App.start(back.base.copy(), back.token.copy())
+    _ = try core.until("synced", "", String(), 30000)
+    let listed = try core.conversations("g_1")
+    core.stop()
+    try check(not listed.contains(everyone.copy()) and listed.contains(money.copy()), "a new device lists the person's own group chat, not Everyone")
+
+    let data = back.data.copy()
+    try check(try count(data.copy(), "SELECT COUNT(*) FROM conversations WHERE id = ? AND deleted = 1", everyone.copy()) == 1, "its conversation is deleted as a deleted chat is")
+    try check(try count(data.copy(), "SELECT COUNT(*) FROM messages WHERE conversation = ?", everyone.copy()) >= 2, "its messages are kept")
+    try check(try count(data.copy(), "SELECT COUNT(*) FROM messages WHERE conversation = ? AND json_extract(json, '$.pinned') IS NOT NULL", everyone.copy()) == 1, "and its pin")
+    try check(try count(data.copy(), "SELECT COUNT(*) FROM rooms WHERE conversation = ? AND everyone = 1", everyone.copy()) == 1, "and its room")
+    try check(try count(data, "SELECT COUNT(*) FROM conversations WHERE id = ? AND deleted = 0", money) == 1, "the group chat the person made stays")
+}
+
+// Started again, Everyone isn't put away a second time.
+fn once(again: Instance, everyone: String) ! Error {
+    var app = try Session.connect(again.base.copy(), again.token.copy(), 0)
+    var deleted = 0
+    for f in app.frames {
+        if str_at(f.copy(), "kind") == some(String("conversation.deleted")) and str_at(f, "conversation") == some(everyone.copy()) { deleted += 1 }
+    }
+    let log = try app.cmd("q_7", "activity.list", Obj.new().done())
+    app.close()
+    let said = "{at(log, "value")}"
+    let first = said.find("Put away the group chat Everyone") ?? 0
+    try check(deleted == 1 and not said[first + 1..].contains("Put away the group chat Everyone"), "it goes once")
+}
+
+fn main() ! Error {
+    let inst = try Instance.start()
+    let (seq, everyone, money) = match before(inst.copy()) {
+        ok(got) => got,
+        err(e) => {
+            inst.copy().stop()
+            eprintln("\n{e}")
+            exit(1)
+        },
+    }
+    // The update: this instance's Everyone is as an older instance made it, and
+    // its database from before this release.
+    let older = "UPDATE rooms SET everyone = 1, json = json_set(json, '$.everyone', json('true')) WHERE conversation = '{everyone}'; DELETE FROM meta WHERE key = 'everyone_dropped';"
+    let back = try restart(inst, older)
+    if let err(e) = after(back.copy(), seq, everyone.copy(), money) {
+        back.copy().stop()
+        eprintln("\n{e}")
+        exit(1)
+    }
+    let again = try restart(back, String())
+    if let err(e) = once(again.copy(), everyone) {
+        again.copy().stop()
+        eprintln("\n{e}")
+        exit(1)
+    }
+    again.stop()
+    println("\neveryone_old: all good")
+}

@@ -66,6 +66,10 @@ CREATE TABLE IF NOT EXISTS acp_settings (
     name TEXT PRIMARY KEY, source TEXT NOT NULL, version TEXT NOT NULL, env TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS acp_shares (
     name TEXT PRIMARY KEY, tokens INTEGER NOT NULL, per TEXT NOT NULL);
+-- The usage pool an agent program draws from (server/pools.calx): its kind, address and the
+-- name of the owner's secret with its management key, as JSON, and who linked it.
+CREATE TABLE IF NOT EXISTS acp_pools (
+    name TEXT PRIMARY KEY, user TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS acp_people (
     name TEXT NOT NULL, kind TEXT NOT NULL, users TEXT NOT NULL, PRIMARY KEY (name, kind));
 CREATE TABLE IF NOT EXISTS usage (
@@ -161,7 +165,8 @@ CREATE INDEX IF NOT EXISTS main_chats_by_conversation ON main_chats (conversatio
 CREATE TABLE IF NOT EXISTS made_threads (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), by TEXT NOT NULL);
 -- A group chat (PLAN.md, "Group chats"): the conversation, and its room as JSON: name,
--- members, colour, default agent and corrections. Everyone is marked.
+-- members, colour, default agent and corrections. `everyone` marks Everyone, the one loom
+-- once made itself, which it puts away (`drop_everyone` in instance.calx).
 CREATE TABLE IF NOT EXISTS rooms (
     conversation TEXT PRIMARY KEY, user TEXT NOT NULL REFERENCES users(id), json TEXT NOT NULL,
     everyone INTEGER NOT NULL DEFAULT 0);
@@ -1011,6 +1016,7 @@ impl Store {
     pub fn delete_acp_agent(self, name: String) ! Error {
         _ = try self.db.execute(String("DELETE FROM acp_agents WHERE name = ?"), [t(name.copy())])
         _ = try self.db.execute(String("DELETE FROM acp_shares WHERE name = ?"), [t(name.copy())])
+        _ = try self.db.execute(String("DELETE FROM acp_pools WHERE name = ?"), [t(name.copy())])
         _ = try self.db.execute(String("DELETE FROM acp_people WHERE name = ?"), [t(name.copy())])
         _ = try self.db.execute(String("DELETE FROM acp_settings WHERE name = ?"), [t(name)])
     }
@@ -1059,6 +1065,22 @@ impl Store {
             return
         }
         _ = try self.db.execute(String("INSERT INTO acp_shares (name, tokens, per) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET tokens = excluded.tokens, per = excluded.per"), [t(name), Value.Int(tokens), t(per)])
+    }
+
+    // Links an agent program to a usage pool (`pool`, as pools.checked makes it), by
+    // `user`; Json.Null unlinks it.
+    pub fn set_pool(self, name: String, user: String, pool: Json) ! Error {
+        if pool == Json.Null {
+            _ = try self.db.execute(String("DELETE FROM acp_pools WHERE name = ?"), [t(name)])
+            return
+        }
+        _ = try self.db.execute(String("INSERT INTO acp_pools (name, user, json) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET user = excluded.user, json = excluded.json"), [t(name), t(user), t("{pool}")])
+    }
+
+    // The pool an agent program is linked to, and who linked it.
+    pub fn pool(self, name: String) -> (Json, String)? ! Error {
+        let r = try self.db.query_one(String("SELECT json, user FROM acp_pools WHERE name = ?"), [t(name)]) else return none
+        return some((try parse(text(r[0].copy())), text(r[1].copy())))
     }
 
     pub fn share(self, name: String) -> (i64, String)? ! Error {
@@ -1306,15 +1328,33 @@ impl Store {
         _ = try self.db.execute(String("UPDATE conversations SET deleted = 1 WHERE id = ? AND user = ?"), [t(id), t(user)])
     }
 
+    // Puts a group chat away as a deleted conversation, but keeps its room's
+    // row with its messages, so nothing it held is lost: what's waiting in it
+    // goes, and it's out of every list (`deleted`).
+    pub fn put_away_room(self, user: String, id: String) ! Error {
+        let kept = try self.db.query_one(String("SELECT json, everyone FROM rooms WHERE conversation = ? AND user = ?"), [t(id.copy()), t(user.copy())])
+        try self.delete_conversation(user.copy(), id.copy())
+        let r = kept else return
+        _ = try self.db.execute(String("INSERT INTO rooms (conversation, user, json, everyone) VALUES (?, ?, ?, ?)"), [t(id), t(user), r[0].copy(), r[1].copy()])
+    }
+
+    // How many messages a conversation has.
+    pub fn message_count(self, user: String, conversation: String) -> i64 ! Error {
+        let row = try self.db.query_one(String("SELECT COUNT(*) FROM messages WHERE user = ? AND conversation = ?"), [t(user), t(conversation)]) else return 0
+        if let Value.Int(n) = row[0] { return n }
+        return 0
+    }
+
     // --- Group chats (PLAN.md, "Group chats") ---
 
-    // Keeps `conversation`'s room as `room`; Everyone is marked `everyone`.
+    // Keeps `conversation`'s room as `room`.
     pub fn put_room(self, user: String, conversation: String, room: Json) ! Error {
         let everyone: i64 = if (room.get(String("everyone")) ?? Json.Null).as_bool() ?? false { 1 } else { 0 }
         _ = try self.db.execute(String("INSERT INTO rooms (conversation, user, json, everyone) VALUES (?, ?, ?, ?) ON CONFLICT (conversation) DO UPDATE SET json = excluded.json"), [t(conversation), t(user), t("{room}"), Value.Int(everyone)])
     }
 
-    // The conversation of `user`'s Everyone chat, if they have one.
+    // The conversation of `user`'s Everyone chat, the one loom made, if it's still
+    // there.
     pub fn everyone_room(self, user: String) -> String? ! Error {
         let r = try self.db.query_one(String("SELECT rm.conversation FROM rooms rm JOIN conversations c ON c.id = rm.conversation WHERE rm.user = ? AND rm.everyone = 1 AND c.deleted = 0 ORDER BY c.rowid LIMIT 1"), [t(user)]) else return none
         return some(text(r[0].copy()))

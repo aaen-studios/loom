@@ -25,7 +25,7 @@ struct Command {
     does: str
 }
 
-const COMMANDS: [Command; 103] = [
+const COMMANDS: [Command; 104] = [
     Command { name: "conversation.create", args: "agent, title?", does: "Makes a conversation with an agent." },
     Command { name: "conversation.rename", args: "conversation, title", does: "Renames a conversation." },
     Command { name: "conversation.branch", args: "message, title?", does: "Branches a chat at a message: a new conversation that goes on from there, apart from the chat." },
@@ -107,6 +107,7 @@ const COMMANDS: [Command; 103] = [
     Command { name: "acp.install", args: #"id, env? ({NAME: value})"#, does: "Installs an agent program from the ACP Registry." },
     Command { name: "acp.settings", args: #"name, env ({NAME: value}, or null to remove one)"#, does: "Changes an agent program's settings." },
     Command { name: "acp.share", args: "name, tokens, per? (day or month), members? (ids, or null for everyone)", does: "Shares an agent program's settings with everyone or some people, with a budget each." },
+    Command { name: "acp.pool", args: "name, kind (cliproxyapi, or \"\" to unlink), address? (the program's ANTHROPIC_BASE_URL if left out), secret (the name of the secret with the management key)", does: "Links an agent program to the usage pool it draws from, which loom only reads." },
     Command { name: "acp.members", args: "name, members (ids, or null for everyone)", does: "Gives an agent program to everyone or only some people." },
     Command { name: "acp.remove", args: "name", does: "Removes an agent program." },
     Command { name: "user.list", args: "", does: "Everyone with an account here." },
@@ -194,7 +195,7 @@ fn reading_runs_and_harm_asks() {
     for c in COMMANDS {
         if let Access.Never(_) = access(String(c.name)) { panic("{c.name} is listed but never runs") }
     }
-    assert(catalog().len() == 103 and access(String("routine.runs")) == Access.Runs)
+    assert(catalog().len() == 104 and access(String("routine.runs")) == Access.Runs)
     assert(access(String("watch.put")) == Access.Runs and access(String("watch.remove")) == Access.Asks(String("delete")))
     assert(access(String("message.delete")) == Access.Asks(String("delete")))
     assert(access(String("device.list")) == Access.Runs)
