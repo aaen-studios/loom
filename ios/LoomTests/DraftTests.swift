@@ -38,12 +38,12 @@ import Testing
     }
 
     @Test func saysHowItWent() {
-        let going = Draft(reply("sending", extra: ["at": 1000, "until": 6000])["blocks"][0]["card"])
+        let going = Draft(reply("sending", extra: ["at": 1000, "until": 6000])["blocks"].array[0]["card"])
         #expect(going.shown(now: 1500) == .going(what: "Re: Partnership", to: "hello@example.com", at: 1000, left: 5))
         #expect(going.shown(now: 6000) == .sending(what: "Re: Partnership", to: "hello@example.com"))
-        let failed = Draft(reply("failed", extra: ["why": "Bad address"])["blocks"][0]["card"])
+        let failed = Draft(reply("failed", extra: ["why": "Bad address"])["blocks"].array[0]["card"])
         #expect(failed.shown(now: 0) == .failed(what: "Re: Partnership", to: "hello@example.com", why: "Bad address"))
-        #expect(Draft(reply("rejected")["blocks"][0]["card"]).shown(now: 0) == .rejected(what: "Re: Partnership"))
+        #expect(Draft(reply("rejected")["blocks"].array[0]["card"]).shown(now: 0) == .rejected(what: "Re: Partnership"))
     }
 
     @Test func answersGoAsDraftAnswerAndARefusalShows() throws {
