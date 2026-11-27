@@ -233,6 +233,10 @@ pub struct Prefs {
     /// The Acta boards cards were made on here, the last first, for Make a card's
     /// picker (`crate::model::acta`).
     pub card_boards: Vec<String>,
+    /// Settings › Voice: whether Ctrl+Shift+Space starts and stops dictation in the
+    /// window, and whether the mic records only while it's held.
+    pub dictation_shortcut: bool,
+    pub hold_to_talk: bool,
 }
 
 impl Default for Prefs {
@@ -263,6 +267,8 @@ impl Default for Prefs {
             server_names: BTreeMap::new(),
             popup_size: None,
             card_boards: Vec::new(),
+            dictation_shortcut: true,
+            hold_to_talk: false,
         }
     }
 }
@@ -387,6 +393,8 @@ impl Prefs {
                         .collect()
                 })
                 .unwrap_or_default(),
+            dictation_shortcut: b("dictation_shortcut", d.dictation_shortcut),
+            hold_to_talk: b("hold_to_talk", d.hold_to_talk),
         }
     }
 
@@ -464,6 +472,8 @@ impl Prefs {
         if !self.card_boards.is_empty() {
             m.insert("card_boards".into(), json!(self.card_boards));
         }
+        m.insert("dictation_shortcut".into(), json!(self.dictation_shortcut));
+        m.insert("hold_to_talk".into(), json!(self.hold_to_talk));
         Value::Object(m)
     }
 

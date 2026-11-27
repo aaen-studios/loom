@@ -88,6 +88,7 @@ import shared.addcode
 import server.searcher
 import server.store.{AcpAgent, Device, Store, User, now, secret_key, site_of}
 import shared.tools
+import shared.voice as voice_engines
 
 pub struct Config {
     pub data: String
@@ -233,6 +234,9 @@ struct SpoolAsk {
 
 // What a turn spool_connect's card wakes its agent for says it comes from.
 const SPOOL_WOKEN_FROM: str = "the card you put in this chat with spool_connect, once its connect was done or failed; your person isn't writing this"
+
+// What a turn voice_setup's card wakes its agent for says it comes from.
+const VOICE_WOKEN_FROM: str = "the card you put in this chat with voice_setup, once your person added their key on it; your person isn't writing this"
 
 // A server the person is connecting from the catalog (PLAN.md, "The
 // integrations catalog"), from catalog.connect until they've picked its agents:
@@ -1494,6 +1498,22 @@ fn tool_error(text: String) -> Json {
 // A tool's result when a rule refused it. `rule` names the rule for the
 // activity log (PLAN.md, "Every action is recorded before it happens"), and
 // is taken off before the agent gets the result.
+// The tile of the `kind` engine `engine` with the keys the person has, as
+// Settings › Voice shows it, and whether it's in use.
+fn voice_tile(kind: String, keys: List<String>, engine: String, in_use: bool) -> Json {
+    if let Json.Array(tiles) = voice_engines.tiles(kind, keys, if in_use { engine.copy() } else { String() }) {
+        for t in tiles {
+            if str_at(t.copy(), "id") == some(engine.copy()) { return t.copy() }
+        }
+    }
+    return Json.Null
+}
+
+// The key of a kind of voice in the settings.
+fn kind_key(kind: String) -> str {
+    return if kind == "speech" { "speech" } else { "dictation" }
+}
+
 fn rule_refusal(rule: str, text: String) -> Json {
     return merge(tool_error(text), Obj.new().s("loom_rule", String(rule)).done())
 }
@@ -1575,7 +1595,7 @@ fn tool_reads(name: String, args: Json) -> bool {
         let command = str_at(args, "name") ?? String()
         return command.ends_with(".list") or command.ends_with(".get") or command.ends_with(".search") or command.ends_with(".revisions") or command == "routine.runs" or command == "routine.next" or command == "routine.calendar"
     }
-    let reads = ["list_agents", "list_acp_agents", "search_messages", "list_skills", "read_skill", "list_devices", "recall", "list_routines", "status_since", "list_plugins", "read_plugin", "browser_snapshot", "browser_screenshot", "html_preview", "list_tables", "query_rows", "list_commands"]
+    let reads = ["list_agents", "list_acp_agents", "voice_settings", "search_messages", "list_skills", "read_skill", "list_devices", "recall", "list_routines", "status_since", "list_plugins", "read_plugin", "browser_snapshot", "browser_screenshot", "html_preview", "list_tables", "query_rows", "list_commands"]
     for r in reads {
         if name == r { return true }
     }
@@ -6166,6 +6186,12 @@ impl Instance {
         }
         if name == "spool_connect" {
             return some(try i.propose_spool(g, args))
+        }
+        if name == "voice_settings" {
+            return some(tool_text("{try i.voice_listed(g.user.copy())}"))
+        }
+        if name == "voice_setup" {
+            return some(try i.voice_setup(g, args))
         }
         if name == "install_server" {
             let domain = (str_at(args.copy(), "domain") ?? String()).trim().copy()
@@ -10808,6 +10834,171 @@ impl Instance {
             }
             _ = i.mcp_adds.remove(call)
         }
+    }
+
+    // --- Voice (PLAN.md, "Voice") ---
+
+    // The person's voice settings, as kept, whole.
+    fn voice_kept(i: Instance, user: String) -> Json ! Error {
+        let text = try i.store.meta("voice/{user}") ?? String()
+        if text.len() == 0 { return voice_engines.settings(Json.Null) }
+        return match parse(text) {
+            ok(j) => voice_engines.settings(j),
+            err(_) => voice_engines.settings(Json.Null),
+        }
+    }
+
+    // The services the person has a voice key for.
+    fn voice_keys(i: Instance, user: String) -> List<String> ! Error {
+        let names = try i.secret_names_of(user)
+        var out = List<String>()
+        for s in voice_engines.SERVICES {
+            if names.contains(voice_engines.key_name(String(s))) { out.push(String(s)) }
+        }
+        return out
+    }
+
+    // What voice.get gives: the settings, the tiles and which keys the person has.
+    fn voice_listed(i: Instance, user: String) -> Json ! Error {
+        return voice_engines.listed(try i.voice_kept(user.copy()), try i.voice_keys(user))
+    }
+
+    // Keeps the settings, and tells every device of the person's, with the keys
+    // they have now.
+    fn voice_keep(i: Instance, user: String, next: Json, by: String) -> Json ! Error {
+        try i.store.set_meta("voice/{user}", "{voice_engines.settings(next)}")
+        let listed = try i.voice_listed(user.copy())
+        try i.event(user, "voice.updated", Obj.new().j("voice", listed.copy()).s("by", by).done())
+        return listed
+    }
+
+    // voice.get, voice.put, voice.key, voice.start and voice.card (protocol.md,
+    // "Voice"). The last three are only from one of the person's devices, as a
+    // key goes in or out with them.
+    fn voice_command(i: mut Instance, user: String, device: String, name: String, args: Json) -> Answer ! Error {
+        if name == "voice.get" { return Answer.Value(Obj.new().j("voice", try i.voice_listed(user)).done()) }
+        if name == "voice.put" {
+            let old = try i.voice_kept(user.copy())
+            let next = match voice_engines.apply(old, args) {
+                ok(n) => n,
+                err(e) => return Answer.Refused(String("bad_request"), e),
+            }
+            i.log(user.copy(), String(), "agent", String("Changed the voice settings"), device.copy())
+            return Answer.Value(Obj.new().j("voice", try i.voice_keep(user, next, device)).done())
+        }
+        if not device.starts_with("d_") { return Answer.Refused(String("forbidden"), String("Only the person, on one of their devices, does that.")) }
+        if name == "voice.key" {
+            let service = str_at(args.copy(), "service") ?? String()
+            if not voice_engines.is_service(service.copy()) { return Answer.Refused(String("bad_request"), "There's no voice service {service}.") }
+            let key = (str_at(args, "key") ?? String()).trim().copy()
+            let secret_name = voice_engines.key_name(service.copy())
+            if key.len() == 0 {
+                _ = try i.store.delete_secret(user.copy(), secret_name)
+                i.reopen_secrets(user.copy())
+                i.log(user.copy(), String(), "agent", "Removed the {service} key for voice", device.copy())
+            } else {
+                try i.keep_secret(user.copy(), secret_name, key)
+                i.log(user.copy(), String(), "agent", "Kept a {service} key for voice", device.copy())
+            }
+            let kept = try i.voice_kept(user.copy())
+            return Answer.Value(Obj.new().j("voice", try i.voice_keep(user, kept, device)).done())
+        }
+        if name == "voice.start" {
+            let kind = str_at(args.copy(), "kind") ?? String()
+            if kind != "dictation" and kind != "speech" { return Answer.Refused(String("bad_request"), String("kind is dictation or speech.")) }
+            let kept = at(try i.voice_kept(user.copy()), kind_key(kind.copy()))
+            let in_use = str_at(kept.copy(), "engine") ?? String()
+            let asked = str_at(args, "engine") ?? String()
+            let engine = if asked.len() > 0 { asked.copy() } else { in_use.copy() }
+            let found = voice_engines.engine(kind.copy(), engine.copy()) else return Answer.Refused(String("no_engine"), if kind == "dictation" { String("Set up dictation in Settings › Voice first.") } else { String("Set up speech in Settings › Voice first.") })
+            let key = try i.secret(user.copy(), voice_engines.key_name(engine.copy())) else return Answer.Refused(String("no_key"), "Add your {found.name} key in Settings › Voice.")
+            var value = Obj.new().s("engine", engine.copy()).s("key", key)
+            if kind == "dictation" {
+                value = value.s("language", str_at(kept, "language") ?? String())
+            } else {
+                // Another engine's preview starts from its own voices.
+                let same = engine == in_use
+                value = value.s("voice", if same { str_at(kept.copy(), "voice") ?? String() } else { String() }).j("speed", at(kept, "speed"))
+            }
+            return Answer.Value(value.done())
+        }
+        if name == "voice.card" { return try i.voice_card_answer(user, device, args) }
+        return Answer.Refused(String("not_found"), "There's no command {name}.")
+    }
+
+    // voice_setup: the engine and settings the agent chose, on a card in its
+    // reply that shows them as Settings › Voice does. What needs no key is set
+    // at once; an engine whose key the person doesn't have is set once they add
+    // it on the card (voice.card), and the agent is woken then.
+    fn voice_setup(i: mut Instance, g: Grant, args: Json) -> Json ! Error {
+        let kind = (str_at(args.copy(), "kind") ?? String()).trim().to_lower_root()
+        if kind != "dictation" and kind != "speech" { return tool_error(String("kind is dictation or speech.")) }
+        let old = try i.voice_kept(g.user.copy())
+        let in_use = str_at(at(old.copy(), kind_key(kind.copy())), "engine") ?? String()
+        let asked = (str_at(args.copy(), "engine") ?? String()).trim().to_lower_root()
+        let engine = if asked.len() > 0 { asked } else { in_use }
+        if engine.len() == 0 { return tool_error(if kind == "dictation" { String("Name an engine: elevenlabs, deepgram, openai or groq.") } else { String("Name an engine: elevenlabs, fish or openai.") }) }
+        var change = Obj.new().s("engine", engine.copy())
+        for field in ["language", "voice", "read_aloud"] {
+            if let v = str_at(args.copy(), field) { change = change.s(field, v.trim().copy()) }
+        }
+        if let n = args.get(String("speed")) { change = change.j("speed", n) }
+        let next = match voice_engines.apply(old.copy(), Obj.new().j(kind_key(kind.copy()), change.done()).done()) {
+            ok(n) => n,
+            err(why) => return tool_error(why),
+        }
+        let run_id = i.calling_run(g.copy())
+        if run_id.len() == 0 { return rule_refusal("needs-a-chat", String("That needs your person to see a card, which they only see in a chat with you.")) }
+        let keys = try i.voice_keys(g.user.copy())
+        let have = keys.contains(engine.copy())
+        let found = voice_engines.engine(kind.copy(), engine.copy()) else return tool_error("There's no {kind} engine {engine}.")
+        let settings = at(next.copy(), kind_key(kind.copy()))
+        let call = try i.store.new_id("tc")
+        if have {
+            _ = try i.voice_keep(g.user.copy(), next, g.agent.copy())
+            i.log(g.user.copy(), g.agent.copy(), "agent", "Set up {kind} with {found.name}", g.agent.copy())
+            let tile = voice_tile(kind.copy(), keys, engine.copy(), true)
+            let card = merge(cards.voice_card(call, kind.copy(), tile, settings, engine, String("set"), String()), Obj.new().s("agent", g.agent.copy()).done())
+            if not i.put_own_card(run_id, card) { return tool_error(String("The reply ended before the card could go in it.")) }
+            return tool_text("Set: your person's {kind} is {found.name} now, with the settings you gave. They have a card in your reply showing it, with a link to Settings → Voice.")
+        }
+        let tile = voice_tile(kind.copy(), keys, engine.copy(), false)
+        let card = merge(cards.voice_card(call, kind.copy(), tile, settings, engine, String("asking"), String()), Obj.new().s("agent", g.agent.copy()).done())
+        if not i.put_own_card(run_id, card) { return tool_error(String("The reply ended before the card could go in it.")) }
+        return tool_text("Your person has a card in your reply with {found.name} set up as you chose, and Add key. Nothing is set until they add their {found.name} key there, which you never see. You're woken in this chat once they have.")
+    }
+
+    // voice.card, from one of the person's devices: the key added on a
+    // voice_setup card. It's kept as the person's, the card's settings are set,
+    // and the agent that asked is woken.
+    fn voice_card_answer(i: mut Instance, user: String, device: String, args: Json) -> Answer ! Error {
+        let message = str_at(args.copy(), "message") ?? String()
+        let card_id = str_at(args.copy(), "card") ?? String()
+        let (card, conversation) = try i.spool_card_of(user.copy(), message.copy(), card_id.copy())
+        if str_at(card.copy(), "type") != some(String("voice_setup")) { return Answer.Refused(String("not_found"), String("There's no such card.")) }
+        if str_at(card.copy(), "state") == some(String("set")) { return Answer.Refused(String("not_now"), String("It's set up already.")) }
+        let key = (str_at(args, "key") ?? String()).trim().copy()
+        if key.len() == 0 { return Answer.Refused(String("bad_request"), String("Fill in the key first.")) }
+        let kind = str_at(card.copy(), "kind") ?? String()
+        let service = str_at(card.copy(), "service") ?? String()
+        if not voice_engines.is_service(service.copy()) { return Answer.Refused(String("not_found"), String("There's no such card.")) }
+        try i.keep_secret(user.copy(), voice_engines.key_name(service.copy()), key)
+        let next = match voice_engines.apply(try i.voice_kept(user.copy()), Obj.new().j(kind_key(kind.copy()), at(card.copy(), "settings")).done()) {
+            ok(n) => n,
+            err(e) => return Answer.Refused(String("bad_request"), e),
+        }
+        let listed = try i.voice_keep(user.copy(), next, device.copy())
+        let name = str_at(at(card.copy(), "engine"), "name") ?? service.copy()
+        i.log(user.copy(), String(), "agent", "Kept a {service} key for voice and set up {kind} with {name}", device.copy())
+        let tile = voice_tile(kind.copy(), try i.voice_keys(user.copy()), service.copy(), true)
+        try i.spool_card_to(user.copy(), message, card_id, Obj.new().s("state", String("set")).s("said", String()).j("engine", tile).done())
+        let agent = str_at(card, "agent") ?? String()
+        if agent.len() > 0 and conversation.len() > 0 {
+            let came = "Your person added their {name} key on your card, and their {kind} is {name} now."
+            i.watch.wakes.push(Wake { user: user.copy(), agent: agent, conversation: conversation, came: came, until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String(VOICE_WOKEN_FROM), told: String() })
+            try i.wakes_waited()
+        }
+        return Answer.Value(Obj.new().j("voice", listed).done())
     }
 
     // --- A spool an agent connects (PLAN.md, "An agent connects a spool") ---
@@ -17611,6 +17802,7 @@ impl Instance {
             try i.event(user, "server.offered", offered.done())
             return Answer.Value(empty)
         }
+        if name.starts_with("voice.") { return try i.voice_command(user, device, name, args) }
         if name == "room.resend" { return try i.resend(user, device, args) }
         if name.starts_with("room.") {
             let answer = try i.room_cmd(user.copy(), device, name.copy(), args)

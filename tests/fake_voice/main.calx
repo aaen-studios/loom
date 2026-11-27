@@ -1,0 +1,244 @@
+module tests.fake_voice.main
+
+// Fake voice services, for testing loom's dictation and speech (PLAN.md, "Voice";
+// shared/voice.calx) without the real ones, each at the path and with the key header
+// the real one has, and answering as its docs say it answers:
+//
+//     WS   /v1/listen                          Deepgram Nova-3, `Authorization: Token dg-key`:
+//                                              a partial "hello" after the first audio, and
+//                                              on Finalize "hello world" final, then closes
+//                                              on CloseStream
+//     WS   /v1/speech-to-text/realtime         ElevenLabs Scribe, `xi-api-key: el-key`:
+//                                              session_started, a partial "hei" after the
+//                                              first chunk, and on commit "hei verden"
+//     WS   /v1/realtime?intent=transcription   OpenAI, `Authorization: Bearer oa-key`: after
+//                                              session.update, a delta "Hel" and "lo" after
+//                                              audio, and on commit "Hello there" completed
+//     POST /openai/v1/audio/transcriptions     Groq, `Bearer gq-key`: "from groq" for a WAV
+//     POST /v1/text-to-speech/VOICE            ElevenLabs speech, PCM
+//     GET  /v2/voices                          ElevenLabs' voices: Rachel and Adam
+//     POST /v1/tts                             Fish Audio, `Bearer fa-key` and a `model` header
+//     GET  /model                              Fish Audio's voices: Narrator
+//     POST /v1/audio/speech                    OpenAI speech, PCM
+//
+// A wrong key gets 401, or for a WebSocket, a refused handshake. Each WebSocket says the
+// language the URL or session asked for in its words, so a test can see it: "(no)".
+// GET /test/seen gives what each service was sent, as JSON: the audio bytes each stream
+// got, and the last speech request's body.
+//
+//     calx tests/fake_voice/main.calx
+import std.http.server.{Response, Server, ServerSocket}
+import std.http.websocket.{Message}
+import std.io
+import std.json.{Json, parse}
+import shared.obj.{Obj, at, str_at}
+
+struct Stream {
+    socket: ServerSocket
+    service: String
+    language: String
+    audio: usize
+    spoke: bool
+}
+
+// The body as text, each byte past ASCII as a ?, for a form with a WAV in it.
+fn ascii(b: List<u8>) -> String {
+    var out = List<u8>()
+    for x in b { out.push(if x < 128 { x } else { 63 }) }
+    return String.from_utf8(out) ?? String()
+}
+
+fn pcm(n: usize) -> List<u8> {
+    var out = List<u8>()
+    for i in 0..n { out.push(u8.wrap(i)) }
+    return out
+}
+
+fn query_value(query: String, name: str) -> String {
+    for part in query.split("&") {
+        if let (k, v) = part.split_once("=") {
+            if k == name { return v }
+        }
+    }
+    return String()
+}
+
+fn words(base: str, language: String) -> String {
+    return if language.len() > 0 and language != "multi" { "{base} ({language})" } else { String(base) }
+}
+
+fn main() ! Error {
+    var server = try Server.listen(0)
+    server.log = false
+    println("fake voice: http://127.0.0.1:{server.port}")
+    io.flush()
+    var streams = List<Stream>()
+    var seen = Obj.new()
+    var last_speech = String()
+    loop {
+        let e = server.next_event() else continue
+        match e {
+            Request(req) => {
+                let path = req.path.copy()
+                if path == "/test/seen" {
+                    server.respond(req, Response.json("{seen.copy().j("speech", Json.Str(last_speech.copy())).done()}"))
+                    continue
+                }
+                let auth = req.header(String("Authorization")) ?? String()
+                if path == "/v1/listen" or path == "/v1/speech-to-text/realtime" or path == "/v1/realtime" {
+                    let (service, good) = if path == "/v1/listen" { ("deepgram", auth == "Token dg-key") } else if path == "/v1/realtime" { ("openai", auth == "Bearer oa-key") } else { ("elevenlabs", req.header(String("xi-api-key")) == some(String("el-key"))) }
+                    if not good {
+                        server.respond(req, Response.error(401, String("bad key")))
+                        continue
+                    }
+                    let language = if service == "deepgram" { query_value(req.query.copy(), "language") } else { query_value(req.query.copy(), "language_code") }
+                    match server.upgrade(req) {
+                        ok(s) => {
+                            if service == "elevenlabs" { _ = server.send_text(s, String(#"{"message_type":"session_started","session_id":"s1"}"#)) }
+                            streams.push(Stream { socket: s, service: String(service), language: language, audio: 0, spoke: false })
+                        },
+                        err(why) => eprintln("fake voice: {why}"),
+                    }
+                    continue
+                }
+                if path == "/openai/v1/audio/transcriptions" {
+                    if auth != "Bearer gq-key" {
+                        server.respond(req, Response.new(401, String("application/json"), String(#"{"error":{"message":"Invalid API Key"}}"#).to_bytes()))
+                        continue
+                    }
+                    let body = ascii(req.body.copy())
+                    let whole = body.contains("whisper-large-v3") and body.contains("RIFF")
+                    seen = seen.b("groq", whole)
+                    let marker = "name=\"language\"\r\n\r\n"
+                    var lang = String()
+                    if let at_lang = body.find(marker) {
+                        let rest = body[at_lang + marker.len()..].copy()
+                        lang = " ({rest[0..rest.find("\r") ?? rest.len()]})"
+                    }
+                    server.respond(req, Response.json("{Obj.new().s("text", " from groq{lang} ").done()}"))
+                    continue
+                }
+                if path.starts_with("/v1/text-to-speech/") and req.method == "POST" {
+                    if req.header(String("xi-api-key")) != some(String("el-key")) or not req.query.contains("output_format=pcm_24000") {
+                        server.respond(req, Response.error(401, String("bad key")))
+                        continue
+                    }
+                    last_speech = "elevenlabs {path[19..]} {ascii(req.body.copy())}"
+                    server.respond(req, Response.new(200, String("audio/pcm"), pcm(4800)))
+                    continue
+                }
+                if path == "/v2/voices" {
+                    if req.header(String("xi-api-key")) != some(String("el-key")) {
+                        server.respond(req, Response.error(401, String("bad key")))
+                        continue
+                    }
+                    server.respond(req, Response.json(String(#"{"voices":[{"voice_id":"el_rachel","name":"Rachel","category":"premade"},{"voice_id":"el_adam","name":"Adam","category":"premade"}],"has_more":false}"#)))
+                    continue
+                }
+                if path == "/v1/tts" {
+                    if auth != "Bearer fa-key" or req.header(String("model")) == none {
+                        server.respond(req, Response.error(401, String("bad key")))
+                        continue
+                    }
+                    last_speech = "fish {ascii(req.body.copy())}"
+                    server.respond(req, Response.new(200, String("audio/pcm"), pcm(2400)))
+                    continue
+                }
+                if path == "/model" {
+                    if auth != "Bearer fa-key" {
+                        server.respond(req, Response.error(401, String("bad key")))
+                        continue
+                    }
+                    server.respond(req, Response.json(String(#"{"total":1,"items":[{"_id":"fa_narrator","title":"Narrator","type":"tts"}]}"#)))
+                    continue
+                }
+                if path == "/v1/audio/speech" {
+                    if auth != "Bearer oa-key" {
+                        server.respond(req, Response.new(401, String("application/json"), String(#"{"error":{"message":"Incorrect API key provided"}}"#).to_bytes()))
+                        continue
+                    }
+                    last_speech = "openai {ascii(req.body.copy())}"
+                    server.respond(req, Response.new(200, String("application/octet-stream"), pcm(9600)))
+                    continue
+                }
+                server.respond(req, Response.error(404))
+            },
+            Message(s, m) => {
+                var at_stream: usize = 0
+                var found = false
+                for k in 0..streams.len() {
+                    if streams[k].socket == s {
+                        at_stream = k
+                        found = true
+                    }
+                }
+                if not found { continue }
+                let service = streams[at_stream].service.copy()
+                let language = streams[at_stream].language.copy()
+                match m {
+                    Message.Binary(b) => {
+                        streams[at_stream].audio += b.len()
+                        seen = seen.j("deepgram_audio", Json.Int(i64.wrap(streams[at_stream].audio)))
+                        if not streams[at_stream].spoke {
+                            streams[at_stream].spoke = true
+                            _ = server.send_text(s, "{Obj.new().s("type", String("Results")).b("is_final", false).j("channel", Obj.new().j("alternatives", Json.Array([Obj.new().s("transcript", words("hello", language.copy())).done()])).done()).done()}")
+                        }
+                    },
+                    Message.Text(t) => {
+                        let j = match parse(t.copy()) {
+                            ok(x) => x,
+                            err(_) => Json.Null,
+                        }
+                        if service == "deepgram" {
+                            let kind = str_at(j, "type") ?? String()
+                            if kind == "Finalize" {
+                                _ = server.send_text(s, "{Obj.new().s("type", String("Results")).b("is_final", true).b("from_finalize", true).j("channel", Obj.new().j("alternatives", Json.Array([Obj.new().s("transcript", words("hello world", language.copy())).done()])).done()).done()}")
+                            } else if kind == "CloseStream" {
+                                _ = server.send_text(s, String(#"{"type":"Metadata","request_id":"r1"}"#))
+                                server.close_socket(s)
+                            }
+                        } else if service == "elevenlabs" {
+                            let chunk = str_at(j.copy(), "audio_base_64") ?? String()
+                            streams[at_stream].audio += chunk.len()
+                            seen = seen.j("elevenlabs_audio", Json.Int(i64.wrap(streams[at_stream].audio)))
+                            if at(j.copy(), "commit") == Json.Bool(true) {
+                                _ = server.send_text(s, "{Obj.new().s("message_type", String("committed_transcript")).s("text", words("hei verden", language.copy())).done()}")
+                            } else if not streams[at_stream].spoke and chunk.len() > 0 {
+                                streams[at_stream].spoke = true
+                                _ = server.send_text(s, "{Obj.new().s("message_type", String("partial_transcript")).s("text", words("hei", language.copy())).done()}")
+                            }
+                        } else {
+                            let kind = str_at(j.copy(), "type") ?? String()
+                            if kind == "session.update" {
+                                let lang = str_at(at(at(at(at(j.copy(), "session"), "audio"), "input"), "transcription"), "language") ?? String()
+                                streams[at_stream].language = lang
+                                let model = str_at(at(at(at(at(j, "session"), "audio"), "input"), "transcription"), "model") ?? String()
+                                seen = seen.s("openai_model", model)
+                                _ = server.send_text(s, String(#"{"type":"session.updated"}"#))
+                            } else if kind == "input_audio_buffer.append" {
+                                streams[at_stream].audio += (str_at(j, "audio") ?? String()).len()
+                                seen = seen.j("openai_audio", Json.Int(i64.wrap(streams[at_stream].audio)))
+                                if not streams[at_stream].spoke {
+                                    streams[at_stream].spoke = true
+                                    _ = server.send_text(s, String(#"{"type":"conversation.item.input_audio_transcription.delta","item_id":"i1","content_index":0,"delta":"Hel"}"#))
+                                    _ = server.send_text(s, String(#"{"type":"conversation.item.input_audio_transcription.delta","item_id":"i1","content_index":0,"delta":"lo"}"#))
+                                }
+                            } else if kind == "input_audio_buffer.commit" {
+                                _ = server.send_text(s, String(#"{"type":"input_audio_buffer.committed","item_id":"i1"}"#))
+                                _ = server.send_text(s, "{Obj.new().s("type", String("conversation.item.input_audio_transcription.completed")).s("item_id", String("i1")).j("content_index", Json.Int(0)).s("transcript", words("Hello there", streams[at_stream].language.copy())).done()}")
+                            }
+                        }
+                    },
+                }
+            },
+            Closed(s, _, _) => {
+                var kept = List<Stream>()
+                while let x = streams.pop() {
+                    if x.socket != s { kept.push(x) }
+                }
+                streams = kept
+            },
+            _ => {},
+        }
+    }
+}

@@ -1,0 +1,394 @@
+module tests.protocol.voice
+
+// loom's voice through the core against a real instance and the fake services
+// (tests/fake_voice; PLAN.md, "Voice"): with no engine the mic opens the settings;
+// a key kept with voice.key and an engine picked with voice.put reach every device
+// as voice.updated, and never a key; dictation streams to Deepgram, ElevenLabs
+// Scribe and OpenAI, the words coming as they're said, with Dictation on and off at
+// the real start and stop, and Groq writes the recording once the mic is let go; a
+// key the service refuses fails, saying why; speech asks OpenAI, ElevenLabs and Fish
+// Audio for PCM, written to a WAV for the app, in the voice and at the speed set,
+// with each engine's voices for the picker; a reply in the chat in front is read
+// aloud when that's set; and an agent sets voice up with voice_setup: at once, on a
+// card that shows it, when the person has the key, and once they add it on the
+// card (voice.card) when they don't, which wakes the agent. An agent never sees a
+// key, and can't keep or open one.
+//
+// Run it from the repository's root:
+//
+//     calx tests/protocol/voice.calx
+import std.bytes
+import std.fs
+import std.http.{Header, get}
+import std.json.{Json, parse}
+import std.net.{Waker}
+import std.process.{Child, Command, Stdio, exit}
+import std.random.{Random}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.client.{reply_text}
+import core.cache.{Cache}
+import core.conn.{Conn, ToApp}
+import tests.kit.{Instance, calx, check}
+
+fn items(j: Json) -> List<Json> {
+    if let Json.Array(xs) = j { return xs.copy() }
+    return List<Json>()
+}
+
+// The app's side of a running connection, as in tests/protocol/sounds.calx.
+struct App {
+    to_core: Sender<String>
+    from_core: Receiver<ToApp>
+    wakers: Receiver<Waker>
+    waker: Waker?
+    thread: Thread?
+    seen: List<Json>    // every frame read, for what came while waiting on another
+}
+
+impl App {
+    fn start(base: String, token: String, cache: String, fake: String, files: String) -> App ! Error {
+        let inbox = Receiver<String>()
+        let to_core = inbox.sender()
+        let from_core = Receiver<ToApp>()
+        let wakers = Receiver<Waker>()
+        var random = Random.system()
+        var conn = Conn.new(some("http://{base}"), some(token.copy()), "loom-test-{random.next_u32()}", try Cache.open(cache), inbox, from_core.sender())
+        conn.wakers_to = some(wakers.sender())
+        conn.tz = some(String("UTC"))
+        conn.voice.at = some(fake.copy())
+        conn.voice.files = some(files.copy())
+        let t = unsafe { Thread.spawn(conn) }
+        return App { to_core: to_core, from_core: from_core, wakers: wakers, waker: none, thread: some(t), seen: List<Json>() }
+    }
+
+    fn send(mut self, frame: Json) {
+        self.to_core.send("{frame}")
+        while let w = self.wakers.next() { self.waker = some(w) }
+        if let w = self.waker { w.wake() }
+    }
+
+    fn next(mut self, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "nothing came in {ms} ms" }
+            let got = unsafe { self.from_core.wait_for((ms - waited) * 1000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            self.seen.push(f.copy())
+            return f
+        }
+    }
+
+    // Reads until a frame whose `t` is `t` and, if `field` isn't empty, whose `field`
+    // is `value`.
+    fn until(mut self, t: str, field: str, value: String, ms: u64) -> Json ! Error {
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= ms { fail "no {t} {field}={value} came in {ms} ms" }
+            let f = try self.next(ms - waited)
+            if (str_at(f.copy(), "t") ?? String()) != t { continue }
+            if field.len() == 0 or (str_at(f.copy(), field) ?? String()) == value { return f }
+        }
+    }
+
+    fn cmd(mut self, id: str, name: str, args: Json) -> Json ! Error {
+        self.send(Obj.new().s("t", String("cmd")).s("id", String(id)).s("name", String(name)).j("args", args).done())
+        let start = unsafe { Instant.now() }
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 15000 { fail "{name} wasn't answered" }
+            let f = try self.next(15000 - waited)
+            let t = str_at(f.copy(), "t") ?? String()
+            if (t == "result" or t == "error") and str_at(f.copy(), "id") == some(String(id)) { return f }
+        }
+    }
+
+    // Dictation from the mic's press to its end: `chunks` pieces of 100 ms of 48 kHz
+    // stereo, then the mic let go. Gives each core.dictation, and the dictation sounds.
+    fn dictate(mut self, chunks: usize) -> (List<Json>, List<String>) ! Error {
+        var said = List<Json>()
+        var sounds = List<String>()
+        self.send(Obj.new().s("t", String("voice.listen")).done())
+        var piece = List<u8>()
+        for i in 0..4800 {
+            bytes.put_u16_le(mut piece, u16.wrap(i * 7))
+            bytes.put_u16_le(mut piece, u16.wrap(i * 7))
+        }
+        for _ in 0..chunks {
+            self.send(Obj.new().s("t", String("voice.audio")).s("pcm", bytes.base64(piece.copy())).i("rate", 48000).i("channels", 2).done())
+        }
+        // Words while the mic is on, from an engine that streams.
+        let start = unsafe { Instant.now() }
+        var stopped = false
+        loop {
+            let waited = unsafe { Instant.now() }.nanos_since(start) / 1000000
+            if waited >= 20000 { fail "dictation didn't end" }
+            if not stopped and waited >= 1200 {
+                self.send(Obj.new().s("t", String("voice.stop")).done())
+                stopped = true
+            }
+            let got = unsafe { self.from_core.wait_for(100000000) } else { continue }
+            let m = got.text() else { continue }
+            let f = try parse(m)
+            let t = str_at(f.copy(), "t") ?? String()
+            if t == "core.sound" and str_at(f.copy(), "cue") == some(String("dictation")) { sounds.push(str_at(f.copy(), "file") ?? String()) }
+            if t != "core.dictation" { continue }
+            said.push(f.copy())
+            let state = str_at(f, "state") ?? String()
+            if state == "done" or state == "failed" or state == "no_engine" {
+                if not stopped { self.send(Obj.new().s("t", String("voice.stop")).done()) }
+                return (said, sounds)
+            }
+        }
+    }
+
+    fn stop(mut self) {
+        self.send(Obj.new().s("t", String("core.stop")).done())
+        if let t = self.thread.take() {
+            t.join()
+        }
+    }
+}
+
+fn last_text(said: List<Json>) -> String {
+    if said.len() == 0 { return String() }
+    return str_at(said[said.len() - 1].copy(), "text") ?? String()
+}
+
+fn last_state(said: List<Json>) -> String {
+    if said.len() == 0 { return String() }
+    return str_at(said[said.len() - 1].copy(), "state") ?? String()
+}
+
+// Whether any frame while listening had `words`.
+fn heard_while_on(said: List<Json>, words: str) -> bool {
+    for f in said {
+        if str_at(f.copy(), "state") == some(String("listening")) and (str_at(f, "text") ?? String()).contains(words) { return true }
+    }
+    return false
+}
+
+fn value_of(f: Json) -> Json {
+    return at(f, "value")
+}
+
+fn seen_by(fake: String) -> Json ! Error {
+    var r = get("{fake}/test/seen", List<Header>(), 5000, 1048576)
+    let resp = try r.wait()
+    return try parse(String.from_utf8(resp.body) ?? String())
+}
+
+fn key(app: mut App, id: str, service: str, value: str) ! Error {
+    let r = try app.cmd(id, "voice.key", Obj.new().s("service", String(service)).s("key", String(value)).done())
+    if str_at(r.copy(), "t") != some(String("result")) { fail "voice.key {service}: {r}" }
+}
+
+fn put(app: mut App, id: str, args: Json) -> Json ! Error {
+    let r = try app.cmd(id, "voice.put", args)
+    if str_at(r.copy(), "t") != some(String("result")) { fail "voice.put: {r}" }
+    return at(value_of(r), "voice")
+}
+
+fn dictation_engine(engine: str, language: str) -> Json {
+    return Obj.new().j("dictation", Obj.new().s("engine", String(engine)).s("language", String(language)).done()).done()
+}
+
+// The agent's next reply in `conversation`, among what the app has read from `mark`
+// on, or what's still to come.
+fn reply_in(app: mut App, mark: usize, conversation: String) -> Json ! Error {
+    var k = mark
+    loop {
+        while k < app.seen.len() {
+            let f = app.seen[k].copy()
+            k += 1
+            let m = at(f.copy(), "message")
+            if str_at(f, "kind") == some(String("message.created")) and str_at(m.copy(), "role") == some(String("agent")) and str_at(m.copy(), "conversation") == some(conversation.copy()) { return m }
+        }
+        _ = try app.next(120000)
+    }
+}
+
+fn say(app: mut App, conversation: String, text: String) -> Json ! Error {
+    let mark = app.seen.len()
+    app.send(Obj.new().s("t", String("send")).s("conversation", conversation.copy()).s("text", text).done())
+    return try reply_in(mut app, mark, conversation)
+}
+
+fn voice_card(message: Json) -> Json {
+    for b in items(at(message, "blocks")) {
+        let c = at(b, "card")
+        if str_at(c.copy(), "type") == some(String("voice_setup")) { return c }
+    }
+    return Json.Null
+}
+
+fn setup(args: Json) -> String {
+    return "/mcpkeep voice_setup {args}"
+}
+
+fn run(i: Instance, fake: String) ! Error {
+    let files = "{try fs.temp_dir()}/voice-files"
+    var app = try App.start(i.base.copy(), i.token.copy(), "{try fs.temp_dir()}/core.db", fake.copy(), files)
+    _ = try app.until("synced", "", String(), 30000)
+
+    // --- Nothing set up ---
+    let first = value_of(try app.cmd("v_1", "voice.get", Obj.new().done()))
+    try check(str_at(at(at(at(first.copy(), "voice"), "settings"), "dictation"), "engine") == some(String("")) and "{at(at(first.copy(), "voice"), "keys")}" == #"{"elevenlabs":false,"deepgram":false,"openai":false,"groq":false,"fish":false}"#, "voice.get starts with no engine and no keys")
+    let dictation_tiles = items(at(at(at(first, "voice"), "engines"), "dictation"))
+    try check(dictation_tiles.len() == 4, "with the four dictation engines' tiles")
+    var marked = true
+    for t in dictation_tiles {
+        if not (str_at(t.copy(), "icon_svg") ?? String()).contains("currentColor") or str_at(t, "mark") == none { marked = false }
+    }
+    try check(marked, "each with its maker's mark in currentColor, and the mark's name")
+    let (none_set, none_sounds) = try app.dictate(1)
+    try check(last_state(none_set) == "no_engine" and none_sounds.len() == 0, "with no engine, the mic is told to open Settings › Voice, with no sound")
+
+    // --- Deepgram, streaming ---
+    _ = try put(mut app, "v_2a", dictation_engine("deepgram", "no"))
+    let (no_key, _) = try app.dictate(1)
+    try check(last_state(no_key.copy()) == "no_engine" and (str_at(no_key[no_key.len() - 1].copy(), "why") ?? String()) == "Add your Deepgram Nova-3 key in Settings › Voice.", "an engine without its key opens the settings too, saying so")
+    try key(mut app, "v_2", "deepgram", "dg-key")
+    let mark = app.seen.len()
+    let set = try put(mut app, "v_3", dictation_engine("deepgram", "no"))
+    try check(str_at(at(at(set.copy(), "settings"), "dictation"), "engine") == some(String("deepgram")) and bool_at(at(set.copy(), "keys"), "deepgram") == some(true), "a key and an engine are kept")
+    var told = false
+    for f in app.seen[mark..].copy() {
+        if str_at(f.copy(), "kind") == some(String("voice.updated")) { told = not "{f}".contains("dg-key") }
+    }
+    try check(told, "every device hears of it, and never the key")
+    let (dg, dg_sounds) = try app.dictate(4)
+    try check(heard_while_on(dg.copy(), "hello (no)"), "Deepgram's words come as they're said, in the language set")
+    try check(last_state(dg.copy()) == "done" and last_text(dg) == "hello world (no)", "and the last words once the mic is let go")
+    try check(dg_sounds == [String("loom-dictation-on"), String("loom-dictation-off")], "Dictation on and off sound at the real start and stop")
+    try check(at(try seen_by(fake.copy()), "deepgram_audio") == Json.Int(19200), "the audio went as 24 kHz mono: 400 ms of it")
+
+    // --- ElevenLabs Scribe ---
+    try key(mut app, "v_4", "elevenlabs", "el-key")
+    _ = try put(mut app, "v_5", dictation_engine("elevenlabs", ""))
+    let (el, _) = try app.dictate(2)
+    try check(heard_while_on(el.copy(), "hei") and last_text(el) == "hei verden", "ElevenLabs Scribe streams, and commits its last words")
+
+    // --- OpenAI ---
+    try key(mut app, "v_6", "openai", "oa-key")
+    _ = try put(mut app, "v_7", dictation_engine("openai", "en"))
+    let (oa, _) = try app.dictate(2)
+    try check(heard_while_on(oa.copy(), "Hello") and last_text(oa) == "Hello there (en)", "OpenAI's deltas come as they're said, and its completed words last")
+    try check(str_at(try seen_by(fake.copy()), "openai_model") == some(String("gpt-4o-transcribe")), "with gpt-4o-transcribe, set in its session")
+
+    // --- Groq, once the mic is let go ---
+    try key(mut app, "v_8", "groq", "gq-key")
+    _ = try put(mut app, "v_9", dictation_engine("groq", "no"))
+    let (gq, gq_sounds) = try app.dictate(3)
+    try check(not heard_while_on(gq.copy(), "groq") and last_text(gq.copy()) == "from groq (no)" and bool_at(gq[0].copy(), "streams") == some(false), "Groq writes the whole recording once the mic is let go")
+    try check(bool_at(try seen_by(fake.copy()), "groq") == some(true) and gq_sounds.len() == 2, "as a WAV, to whisper-large-v3")
+
+    // --- A key the service refuses ---
+    try key(mut app, "v_10", "deepgram", "not-it")
+    _ = try put(mut app, "v_11", dictation_engine("deepgram", ""))
+    let (bad, _) = try app.dictate(1)
+    try check(last_state(bad.copy()) == "failed" and (str_at(bad[bad.len() - 1].copy(), "why") ?? String()).len() > 0, "a key the service refuses fails, saying why")
+
+    // --- Speech ---
+    _ = try put(mut app, "v_12", Obj.new().j("speech", Obj.new().s("engine", String("openai")).s("voice", String("cedar")).j("speed", Json.Float(1.1)).done()).done())
+    app.send(Obj.new().s("t", String("voice.speak")).s("text", String("**Hi** there, from [loom](https://loom.rip).")).s("id", String("p_1")).done())
+    let spoke = try app.until("core.speak", "id", String("p_1"), 15000)
+    let wav = try fs.read(str_at(spoke.copy(), "file") ?? String())
+    try check(wav.len() == 44 + 9600 and String.from_utf8(wav[0..4].copy()) == some(String("RIFF")) and bytes.u32_le(wav, 24) == 24000, "OpenAI's PCM is written to a 24 kHz WAV for the app to play")
+    let asked = str_at(try seen_by(fake.copy()), "speech") ?? String()
+    try check(asked.contains(#""model":"gpt-4o-mini-tts","voice":"cedar","input":"Hi there, from loom.","response_format":"pcm","speed":1.1"#), "in the voice and at the speed set, the reply said as words")
+    app.send(Obj.new().s("t", String("voice.voices")).s("engine", String("elevenlabs")).done())
+    let eleven = try app.until("core.voices", "engine", String("elevenlabs"), 15000)
+    try check("{at(eleven, "voices")}" == #"[{"id":"el_rachel","name":"Rachel"},{"id":"el_adam","name":"Adam"}]"#, "ElevenLabs' voices come for the picker")
+    app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Preview.")).s("id", String("p_2")).s("engine", String("elevenlabs")).s("voice", String("Adam")).done())
+    _ = try app.until("core.speak", "id", String("p_2"), 15000)
+    try check((str_at(try seen_by(fake.copy()), "speech") ?? String()).starts_with("elevenlabs el_adam "), "a voice's preview speaks with that engine and voice, found by its name")
+    try key(mut app, "v_13", "fish", "fa-key")
+    app.send(Obj.new().s("t", String("voice.voices")).s("engine", String("fish")).done())
+    let fish = try app.until("core.voices", "engine", String("fish"), 15000)
+    try check("{at(fish, "voices")}" == #"[{"id":"fa_narrator","name":"Narrator"}]"#, "and Fish Audio's")
+    app.send(Obj.new().s("t", String("voice.speak")).s("text", String("Fish.")).s("id", String("p_3")).s("engine", String("fish")).done())
+    _ = try app.until("core.speak", "id", String("p_3"), 15000)
+    let fish_asked = str_at(try seen_by(fake.copy()), "speech") ?? String()
+    try check(fish_asked.contains(#""reference_id":"fa_narrator","format":"pcm","sample_rate":24000"#), "Fish Audio speaks in PCM at 24 kHz, with its first voice when none is picked")
+
+    // --- Read aloud ---
+    let agent = str_at(at(value_of(try app.cmd("v_14", "agent.create", Obj.new().s("name", String("Juniper")).s("acp_agent", String("fake")).s("instructions", String("Test.")).s("permission", String("auto")).b("code_mode", false).done())), "agent"), "id") ?? String()
+    let chat = str_at(value_of(try app.cmd("v_15", "conversation.create", Obj.new().s("agent", agent.copy()).done())), "conversation") ?? String()
+    _ = try put(mut app, "v_16", Obj.new().j("speech", Obj.new().s("read_aloud", String("always")).done()).done())
+    app.send(Obj.new().s("t", String("app.front")).s("conversation", chat.copy()).done())
+    let reply = try say(mut app, chat.copy(), String("hello"))
+    _ = try app.until("core.speak", "id", str_at(reply, "id") ?? String(), 15000)
+    try check(true, "a reply in the chat in front is read aloud, with Read replies aloud on Always")
+    _ = try put(mut app, "v_17", Obj.new().j("speech", Obj.new().s("read_aloud", String("never")).done()).done())
+
+    // --- An agent sets it up ---
+    let read = reply_text(try say(mut app, chat.copy(), String("/mcpkeep voice_settings \{\}")))
+    try check(read.contains(#""dictation":{"engine":"deepgram""#) and not read.contains("not-it") and not read.contains("oa-key"), "voice_settings reads the settings, never a key")
+    let at_once = try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("speech")).s("engine", String("elevenlabs")).s("voice", String("Rachel")).j("speed", Json.Float(0.9)).done()))
+    let set_card = voice_card(at_once.copy())
+    try check(reply_text(at_once).contains("voice_setup: Set: your person's speech is ElevenLabs now") and str_at(set_card.copy(), "state") == some(String("set")) and bool_at(at(set_card.copy(), "engine"), "in_use") == some(true) and str_at(at(set_card.copy(), "settings"), "voice_name") == some(String("Rachel")), "with the key there, it's set at once, and the card shows the tile in use and the rows as set")
+    let now_set = value_of(try app.cmd("v_18", "voice.get", Obj.new().done()))
+    try check(str_at(at(at(at(now_set, "voice"), "settings"), "speech"), "engine") == some(String("elevenlabs")), "and it's the person's setting")
+    try key(mut app, "v_19", "groq", "")
+    let asking = try say(mut app, chat.copy(), setup(Obj.new().s("kind", String("dictation")).s("engine", String("groq")).s("language", String("de")).done()))
+    let card = voice_card(asking.copy())
+    let message = str_at(asking.copy(), "id") ?? String()
+    try check(str_at(card.copy(), "state") == some(String("asking")) and str_at(card.copy(), "service") == some(String("groq")) and str_at(at(card.copy(), "settings"), "language") == some(String("de")) and reply_text(asking).contains("Nothing is set until they add their Groq key there"), "without the key, the card asks for it, set as the agent chose, and nothing is set")
+    let before = value_of(try app.cmd("v_20", "voice.get", Obj.new().done()))
+    try check(str_at(at(at(at(before, "voice"), "settings"), "dictation"), "engine") == some(String("deepgram")), "the settings stay as they were meanwhile")
+    let refused = reply_text(try say(mut app, chat.copy(), "/mcpkeep run_command {Obj.new().s("name", String("voice.card")).j("args", Obj.new().s("message", message.copy()).s("card", str_at(card.copy(), "id") ?? String()).s("key", String("x")).done()).done()}"))
+    let opened = reply_text(try say(mut app, chat.copy(), "/mcpkeep run_command {Obj.new().s("name", String("voice.start")).j("args", Obj.new().s("kind", String("dictation")).done()).done()}"))
+    try check(refused.contains("run_command failed") and opened.contains("run_command failed") and not opened.contains("not-it"), "an agent can't add a key on its card, nor open one")
+    let mark2 = app.seen.len()
+    let answered = try app.cmd("v_21", "voice.card", Obj.new().s("message", message.copy()).s("card", str_at(card.copy(), "id") ?? String()).s("key", String("gq-key")).done())
+    try check(str_at(at(at(at(value_of(answered), "voice"), "settings"), "dictation"), "engine") == some(String("groq")), "the person's click saves the key and sets the card's settings")
+    let woken = reply_text(try reply_in(mut app, mark2, chat.copy()))
+    try check(woken.contains("Your person added their Groq key on your card"), "and wakes the agent")
+    var updated = false
+    for f in app.seen[mark2..].copy() {
+        if str_at(f.copy(), "kind") == some(String("message.updated")) and str_at(voice_card(at(f, "message")), "state") == some(String("set")) { updated = true }
+    }
+    try check(updated, "the card in the reply shows it set")
+    let (de, _) = try app.dictate(1)
+    try check(last_text(de) == "from groq (de)", "and dictation uses it")
+    app.stop()
+}
+
+fn start_fake() -> (Child, String) ! Error {
+    let path = try fs.absolute(String("tests/fake_voice/main.calx"))
+    let child = try Command.new(calx()).arg(path).stdout(Stdio.Pipe).spawn()
+    let line = child.wait_for_line(String("fake voice: "), 120000) else {
+        child.kill()
+        fail "the fake voice services didn't start"
+    }
+    return (child, line[line.find("http://") ?? 0..].trim().copy())
+}
+
+fn main() ! Error {
+    let (fake_child, fake) = try start_fake()
+    var fake_server = fake_child
+    let inst = match Instance.start() {
+        ok(x) => x,
+        err(e) => {
+            fake_server.kill()
+            _ = fake_server.wait()
+            fail "{e}"
+        },
+    }
+    let failure: String? = match run(inst.copy(), fake) {
+        ok => none,
+        err(e) => some("{e}"),
+    }
+    inst.stop()
+    fake_server.kill()
+    _ = fake_server.wait()
+    if let f = failure {
+        eprintln("\n{f}")
+        exit(1)
+    }
+    println("\nvoice: all good")
+}

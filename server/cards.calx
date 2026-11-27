@@ -397,6 +397,27 @@ pub fn spool_card(call: String, entry: Json, spec: Json, fields: Json, agents: L
     return card.j("secrets", Json.Array(secrets)).s("state", state).s("said", tidy(said, CELL_MOST)).j("tools", Json.Array(named)).done()
 }
 
+// How a voice engine an agent set up stands (PLAN.md, "Agents set up voice"):
+// `asking` (the person adds its key on the card) or `set`.
+pub const VOICE_STATES: str = "asking set"
+
+// The card loom puts in a reply for voice_setup: the engine's tile and the
+// rows of its kind, as Settings › Voice shows them (`tile` as
+// shared/voice.calx's tiles give one, `settings` that kind's settings as they
+// are once it's set), the service whose key it needs (`service`, or "" for
+// none), and how it stands. Never a key.
+pub fn voice_card(call: String, kind: String, tile: Json, settings: Json, service: String, state: String, said: String) -> Json {
+    let title = if kind == "speech" { "Set up speech" } else { "Set up dictation" }
+    return Obj.new().s("id", "voice_{call}").s("type", String("voice_setup")).s("title", String(title)).s("call", call).s("kind", kind).j("engine", tile).j("settings", settings).s("service", service).s("state", state).s("said", tidy(said, CELL_MOST)).done()
+}
+
+@test
+fn makes_the_voice_card() {
+    let tile = Obj.new().s("id", String("deepgram")).s("name", String("Deepgram Nova-3")).done()
+    let card = voice_card(String("tc_4"), String("dictation"), tile, Obj.new().s("engine", String("deepgram")).s("language", String("no")).done(), String("deepgram"), String("asking"), String())
+    assert("{card}" == #"{"id":"voice_tc_4","type":"voice_setup","title":"Set up dictation","call":"tc_4","kind":"dictation","engine":{"id":"deepgram","name":"Deepgram Nova-3"},"settings":{"engine":"deepgram","language":"no"},"service":"deepgram","state":"asking","said":""}"#)
+}
+
 @test
 fn makes_the_spool_card() {
     let entry = Obj.new().s("id", String("t3")).s("name", String("T3 Code")).j("badge", Json.Null).j("secrets", Json.Array(List<Json>())).done()

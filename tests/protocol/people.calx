@@ -244,7 +244,7 @@ fn run() ! Error {
 fn cores(owners: mut Core, newcomer: mut Core, base: String) ! Error {
     try owners.until_state("live")
     owners.send(Obj.new().s("t", String("cmd")).s("id", String("q_1")).s("name", String("invite.create")).j("args", Obj.new().done()).done())
-    let made = try owners.until("result")
+    let made = try owners.until_result("q_1")
     let link = str_at(at(made, "value"), "link") ?? String()
     try check(link.starts_with("http://{base}/join/"), "the owner's core gives the invite's link")
     newcomer.send(Obj.new().s("t", String("invite.join")).s("id", String("l_1")).s("link", link).s("username", String("cora")).s("password", String("cora's password")).j("device", device("Laptop")).done())
@@ -259,7 +259,7 @@ fn cores(owners: mut Core, newcomer: mut Core, base: String) ! Error {
     // A forgotten password: the owner makes a reset link, and cora sets a new one with it.
     let cora = str_at(joined, "user") ?? String()
     owners.send(Obj.new().s("t", String("cmd")).s("id", String("q_2")).s("name", String("password.reset")).j("args", Obj.new().s("user", cora).done()).done())
-    let reset = str_at(at(try owners.until("result"), "value"), "link") ?? String()
+    let reset = str_at(at(try owners.until_result("q_2"), "value"), "link") ?? String()
     try check(reset.starts_with("http://{base}/reset/"), "the owner's core gives a reset link")
     newcomer.send(Obj.new().s("t", String("reset.use")).s("id", String("l_3")).s("link", reset.copy()).s("password", String("cora's new password")).j("device", device("Phone")).done())
     let again = try newcomer.until("core.login")
@@ -303,6 +303,15 @@ impl Core {
             let m = got.text() else { continue }
             let f = try parse(m)
             if str_at(f.copy(), "t") == some(String(t)) { return f }
+        }
+    }
+
+    // The result of the command sent as `id`: the core passes on results of its own too,
+    // such as the voice settings it asks for as it connects.
+    fn until_result(mut self, id: str) -> Json ! Error {
+        loop {
+            let f = try self.until("result")
+            if str_at(f.copy(), "id") == some(String(id)) { return f }
         }
     }
 

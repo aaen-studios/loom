@@ -1,0 +1,660 @@
+module core.voice
+
+// loom's voice on this device (PLAN.md, "Voice"): dictation and speech, run in the
+// core so the apps only record the mic, play audio and draw. The app sends the mic's
+// PCM (`voice.audio`); the core brings it to 24 kHz mono and hears it with the engine
+// the person picked, streaming it over a WebSocket to a service that writes words as
+// they're said, or sending the whole recording to one that writes them once the person
+// stops, and tells the app the words (`core.dictation`). Speech asks the engine for a
+// reply's words, writes them to a WAV and tells the app to play it (`core.speak`).
+//
+// Keys and settings are the instance's: before an engine starts, the core asks for the
+// one in use and its key (`voice.start`, only from a device), so a key set up anywhere
+// works on every device, and an agent never sees one.
+//
+// Where an engine runs is a `Hearing` and a `Saying`: today a service, by its wire
+// format in shared/voice.calx. A model on the device (LOO-439) is one more of each,
+// fed the same 24 kHz samples and giving the same words and PCM, and live mode
+// (LOO-440) drives the same two.
+import std.fs
+import std.http.{Request, get, post, post_form}
+import std.http.websocket.{Message, WebSocket, open}
+import std.json.{Json, parse}
+import std.net.{Waker}
+import std.time.{Instant}
+import shared.obj.{Obj, at, bool_at, str_at}
+import shared.voice as engines
+
+/// The id the core's own `voice.start` and `voice.get` go with, which their answers
+/// come back with.
+pub const ASKING: str = "core.voice:"
+
+/// The settings, asked for as the connection is welcomed.
+pub const SETTINGS_ID: str = "core.voice:settings"
+
+const STREAM_PIECE: usize = 4800        // bytes of 24 kHz PCM sent at once: 100 ms
+const FINISH_NS: u64 = 6000000000       // the longest a stream may take to write its last words
+const SETTLE_NS: u64 = 1500000000       // and how long after the person stops with nothing left being said
+const SPEECH_MS: u32 = 60000
+const SPEECH_MOST: usize = 33554432     // 32 MiB of PCM, 11 minutes
+const BATCH_MS: u32 = 120000
+const RECORDING_MOST: usize = 57600000  // 20 minutes of 24 kHz PCM, past which a recording stops growing
+
+/// A dictation under way, from the mic until its last words. Its engine waits for its
+/// key, then streams (`ws`), or keeps the whole recording and sends it once the person
+/// stops (`sending`).
+struct Listening {
+    n: u64
+    service: String
+    language: String
+    streams: bool
+    keyed: bool             // its key came
+    ws: WebSocket?          // the service writes words as they're said
+    sending: Request?       // the recording, gone to be written
+    held: List<u8>          // 24 kHz PCM not sent yet: while the key comes, and a batch's whole recording
+    kept: String            // the words kept
+    saying: String          // the words being said now
+    stopped: Instant?       // when the person stopped
+    heard_since: bool       // whether words were kept since they stopped
+    ended: bool             // the stream's end was sent
+    key: String
+}
+
+/// A reply to read aloud, a voice's preview, or an engine's voices for the picker. It
+/// waits for its key, then for the engine's voices (`listing`), then for its speech
+/// (`saying`).
+struct Job {
+    n: u64
+    list: bool              // the voices, for the picker, rather than speaking
+    service: String
+    text: String
+    id: String              // the app's, given back with core.speak
+    voice: String           // the voice wanted, by id or name
+    speed: f64
+    key: String
+    listing: Request?
+    saying: Request?
+}
+
+pub struct Voice {
+    pub at: String?         // a fake service in place of each real one, for tests
+    pub waker: Waker?       // the core's loop, which streams and requests wake
+    pub files: String?      // where speech is written
+    pub settings: Json      // the person's voice settings, as the instance last said them
+    listening: Listening?
+    jobs: List<Job>
+    voices: Map<String, List<Json>>    // each speech engine's voices, once asked for
+    next: u64
+    spoken: List<String>    // the WAVs written, the newest last, of which only the last few are kept
+    pub to_instance: List<Json>    // commands for the instance
+    pub to_app: List<Json>         // what the app is told
+    pub cues: List<bool>           // dictation's sound, on or off, for the core to play
+}
+
+// Sends what's held on the stream, a tenth of a second at a time, or all of it once
+// the person has stopped. Gives why it failed, or "".
+fn send_held(l: mut Listening) -> String {
+    let service = l.service.copy()
+    var pieces = List<List<u8>>()
+    var from: usize = 0
+    let n = l.held.len()
+    while n - from >= STREAM_PIECE or (l.stopped != none and from < n) {
+        let end = if n - from >= STREAM_PIECE { from + STREAM_PIECE } else { n }
+        var piece = List<u8>()
+        for i in from..end { piece.push(l.held[i]) }
+        pieces.push(piece)
+        from = end
+    }
+    if from == 0 { return String() }
+    var rest = List<u8>()
+    for i in from..n { rest.push(l.held[i]) }
+    l.held = rest
+    let ws = l.ws else return String()
+    for piece in pieces {
+        let (binary, text) = engines.stream_audio(service.copy(), piece.copy())
+        if binary {
+            if let err(e) = ws.send_binary(piece.copy()) { return "{e}" }
+        } else {
+            if let err(e) = ws.send_text(text) { return "{e}" }
+        }
+    }
+    return String()
+}
+
+// The stream's end, once the person has stopped and everything held has gone.
+fn send_end(l: mut Listening) {
+    if l.ended or l.stopped == none { return }
+    if l.ws == none { return }
+    l.ended = true
+    let service = l.service.copy()
+    let ws = l.ws else return
+    for m in engines.stream_end(service) {
+        if let err(_) = ws.send_text(m) { break }
+    }
+}
+
+// What came on the stream since it was last read, and how it ended, if it has.
+fn received(l: Listening) -> (List<String>, String?) {
+    var texts = List<String>()
+    let ws = l.ws else return (texts, none)
+    loop {
+        match ws.receive(0) {
+            ok(some(Message.Text(t))) => texts.push(t),
+            ok(some(Message.Binary(_))) => {},
+            ok(none) => return (texts, none),
+            err(e) => return (texts, some("{e}")),
+        }
+    }
+}
+
+impl Voice {
+    pub fn new() -> Voice {
+        return Voice { at: none, waker: none, files: none, settings: engines.settings(Json.Null), listening: none, jobs: List<Job>(), voices: Map<String, List<Json>>(), next: 0, spoken: List<String>(), to_instance: List<Json>(), to_app: List<Json>(), cues: List<bool>() }
+    }
+
+    fn ask(mut self, kind: str, engine: String) -> u64 {
+        self.next += 1
+        var args = Obj.new().s("kind", String(kind))
+        if engine.len() > 0 { args = args.s("engine", engine) }
+        self.to_instance.push(Obj.new().s("t", String("cmd")).s("id", "{ASKING}{self.next}").s("name", String("voice.start")).j("args", args.done()).done())
+        return self.next
+    }
+
+    fn tell(mut self, l: Listening, state: str, why: String) {
+        var m = Obj.new().s("t", String("core.dictation")).s("state", String(state)).s("engine", l.service.copy()).b("streams", l.streams).s("text", engines.joined(l.kept.copy(), l.saying.copy()))
+        if why.len() > 0 { m = m.s("why", why) }
+        self.to_app.push(m.done())
+    }
+
+    /// The person pressed the mic: dictation starts with the engine in use, once its key
+    /// comes; until then what the mic hears is kept. With no engine set up, the app is
+    /// told so, and opens Settings › Voice.
+    pub fn listen(mut self) {
+        if self.listening != none { return }
+        let service = str_at(at(self.settings.copy(), "dictation"), "engine") ?? String()
+        if service.len() == 0 {
+            self.to_app.push(Obj.new().s("t", String("core.dictation")).s("state", String("no_engine")).done())
+            return
+        }
+        let streams = match engines.engine(String("dictation"), service.copy()) {
+            some(e) => e.streams,
+            none => false,
+        }
+        let n = self.ask("dictation", String())
+        let l = Listening { n: n, service: service, language: str_at(at(self.settings.copy(), "dictation"), "language") ?? String(), streams: streams, keyed: false, ws: none, sending: none, held: List<u8>(), kept: String(), saying: String(), stopped: none, heard_since: false, ended: false, key: String() }
+        self.cues.push(true)
+        self.tell(l, "listening", String())
+        self.listening = some(l)
+    }
+
+    /// A piece of what the mic heard: 16-bit PCM, `channels` interleaved at `rate`.
+    pub fn audio(mut self, pcm: List<u8>, rate: u32, channels: u32) {
+        let taken = self.listening.take() else return
+        var l = taken
+        if l.stopped == none {
+            let piece = engines.le_bytes(engines.to_24k(pcm, rate, channels))
+            if l.held.len() + piece.len() <= RECORDING_MOST {
+                for b in piece { l.held.push(b) }
+            }
+            if l.ws != none {
+                let why = send_held(mut l)
+                if why.len() > 0 {
+                    self.give_up(l, why)
+                    return
+                }
+            }
+        }
+        self.listening = some(l)
+    }
+
+    /// The person stopped: the mic is off, and the last words come.
+    pub fn stop(mut self) {
+        let taken = self.listening.take() else return
+        var l = taken
+        if l.stopped != none {
+            self.listening = some(l)
+            return
+        }
+        l.stopped = some(unsafe { Instant.now() })
+        self.cues.push(false)
+        if l.keyed and not l.streams {
+            self.write_recording(l)
+            return
+        }
+        if l.ws != none {
+            let why = send_held(mut l)
+            if why.len() > 0 {
+                self.give_up(l, why)
+                return
+            }
+            send_end(mut l)
+        }
+        self.tell(l, "finishing", String())
+        self.listening = some(l)
+    }
+
+    // The whole recording, gone to be written, for an engine that doesn't stream.
+    fn write_recording(mut self, l: own Listening) {
+        var m = l
+        let (u, headers, form) = engines.batch(m.service.copy(), m.key.copy(), engines.to_wav(m.held.copy()), m.language.copy(), self.at.copy())
+        let r = post_form(u, headers, form, BATCH_MS, 1048576)
+        if let w = self.waker { r.wake_on(w) }
+        m.held = List<u8>()
+        m.sending = some(r)
+        self.tell(m, "finishing", String())
+        self.listening = some(m)
+    }
+
+    fn give_up(mut self, l: own Listening, why: String) {
+        var m = l
+        if m.stopped == none { self.cues.push(false) }
+        if let ws = m.ws.take() { ws.close() }
+        self.tell(m, "failed", why)
+    }
+
+    fn finish(mut self, l: own Listening) {
+        var m = l
+        if let ws = m.ws.take() { ws.close() }
+        self.tell(m, "done", String())
+    }
+
+    /// The instance's answer to one of the core's voice commands: `f` a `result` or an
+    /// `error` frame. Gives whether it was one.
+    pub fn answer(mut self, f: Json) -> bool {
+        let id = str_at(f.copy(), "id") ?? String()
+        if not id.starts_with(ASKING) { return false }
+        let value = at(f.copy(), "value")
+        // A refusal is a result with `ok: false` and its `error`, or the core's own
+        // `error` frame while the connection is down.
+        let error = if str_at(f.copy(), "t") == some(String("error")) { f.copy() } else { at(f.copy(), "error") }
+        let refused = if error != Json.Null or bool_at(f.copy(), "ok") == some(false) { some(str_at(error.copy(), "message") ?? String("The instance refused.")) } else { none }
+        let code = str_at(error, "code") ?? String()
+        if id == SETTINGS_ID {
+            if refused == none { self.settings = engines.settings(at(at(value, "voice"), "settings")) }
+            return true
+        }
+        let n = u64.parse(id[ASKING.len()..].copy()) ?? 0
+        var mine = false
+        if let l = self.listening { mine = l.n == n }
+        if mine {
+            let taken = self.listening.take() else return true
+            var l = taken
+            if let why = refused {
+                if code == "no_engine" or code == "no_key" {
+                    if l.stopped == none { self.cues.push(false) }
+                    self.to_app.push(Obj.new().s("t", String("core.dictation")).s("state", String("no_engine")).s("why", why).done())
+                    return true
+                }
+                self.give_up(l, why)
+                return true
+            }
+            l.key = str_at(value.copy(), "key") ?? String()
+            l.service = str_at(value.copy(), "engine") ?? l.service.copy()
+            l.language = str_at(value.copy(), "language") ?? l.language.copy()
+            l.keyed = true
+            self.hear(l)
+            return true
+        }
+        var i: usize = 0
+        while i < self.jobs.len() {
+            if self.jobs[i].n == n {
+                var job = self.jobs.remove(i)
+                if let why = refused {
+                    self.job_failed(job, why)
+                    return true
+                }
+                job.key = str_at(value.copy(), "key") ?? String()
+                job.service = str_at(value.copy(), "engine") ?? job.service.copy()
+                if job.voice.len() == 0 { job.voice = str_at(value.copy(), "voice") ?? String() }
+                if job.speed <= 0.0 {
+                    job.speed = match value.get(String("speed")) {
+                        some(Json.Float(s)) => s,
+                        _ => 1.0,
+                    }
+                }
+                self.go_on(job)
+                return true
+            }
+            i += 1
+        }
+        return true
+    }
+
+    // The key came: the engine starts hearing, with what was kept meanwhile.
+    fn hear(mut self, l: own Listening) {
+        var m = l
+        if not m.streams {
+            if m.stopped != none {
+                self.write_recording(m)
+                return
+            }
+            self.listening = some(m)
+            return
+        }
+        let ws = open(engines.stream_url(m.service.copy(), m.language.copy(), self.at.copy()), engines.auth(m.service.copy(), m.key.copy()), ping_interval_ms: 15000, ping_timeout_ms: 15000)
+        if let w = self.waker { ws.wake_on(w) }
+        var failed = String()
+        for hello in engines.stream_hello(m.service.copy(), m.language.copy()) {
+            if let err(e) = ws.send_text(hello) { failed = "{e}" }
+        }
+        m.ws = some(ws)
+        if failed.len() == 0 { failed = send_held(mut m) }
+        if failed.len() > 0 {
+            self.give_up(m, failed)
+            return
+        }
+        send_end(mut m)
+        self.listening = some(m)
+    }
+
+    /// What's come from the engines: words, ends, and speech to play.
+    pub fn poll(mut self) {
+        self.poll_listening()
+        self.poll_jobs()
+    }
+
+    fn poll_listening(mut self) {
+        let taken = self.listening.take() else return
+        var l = taken
+        if let r = l.sending {
+            if not r.done() {
+                self.listening = some(l)
+                return
+            }
+            var req = l.sending.take() ?? r
+            match req.wait() {
+                ok(resp) => match engines.batch_text(resp.status, resp.body) {
+                    ok(words) => {
+                        l.kept = engines.joined(l.kept.copy(), words)
+                        self.finish(l)
+                    },
+                    err(why) => self.give_up(l, why),
+                },
+                err(e) => self.give_up(l, "{e}"),
+            }
+            return
+        }
+        if l.ws == none {
+            self.listening = some(l)
+            return
+        }
+        let (texts, ended) = received(l)
+        var changed = false
+        for t in texts {
+            match engines.heard(l.service.copy(), t) {
+                engines.Heard.Partial(p) => {
+                    l.saying = p.trim().copy()
+                    changed = true
+                },
+                engines.Heard.Delta(d) => {
+                    l.saying = "{l.saying}{d}"
+                    changed = true
+                },
+                engines.Heard.Final(words) => {
+                    l.kept = engines.joined(l.kept.copy(), words)
+                    l.saying = String()
+                    if l.stopped != none { l.heard_since = true }
+                    changed = true
+                },
+                engines.Heard.Failed(why) => {
+                    self.give_up(l, why)
+                    return
+                },
+                engines.Heard.Nothing => {},
+            }
+        }
+        if let e = ended {
+            // The service closed the stream: after the person stopped, that's its end;
+            // before, it failed.
+            if l.stopped != none {
+                self.finish(l)
+            } else {
+                self.give_up(l, e)
+            }
+            return
+        }
+        if let since = l.stopped {
+            let gone = unsafe { Instant.now() }.nanos_since(since)
+            if gone >= FINISH_NS or (l.saying.len() == 0 and (l.heard_since or gone >= SETTLE_NS)) {
+                self.finish(l)
+                return
+            }
+        }
+        if changed { self.tell(l, if l.stopped != none { "finishing" } else { "listening" }, String()) }
+        self.listening = some(l)
+    }
+
+    /// How long the loop may wait before a dictation that was stopped must end.
+    pub fn due_ms(self) -> i64? {
+        let l = self.listening else return none
+        if l.ws == none { return none }
+        let since = l.stopped else return none
+        let gone = unsafe { Instant.now() }.nanos_since(since)
+        let wait = if gone >= SETTLE_NS { if gone >= FINISH_NS { 0u64 } else { FINISH_NS - gone } } else { SETTLE_NS - gone }
+        return some(i64.wrap(wait / 1000000 + 1))
+    }
+
+    /// Reads `text` aloud with the engine in use, or with `service` and `voice` for a
+    /// voice's preview. `id` comes back on core.speak. A new one takes the place of
+    /// one waiting.
+    pub fn speak(mut self, text: String, id: String, service: String, voice: String) {
+        let words = engines.speakable(text)
+        if words.len() == 0 { return }
+        self.drop_speech()
+        let n = self.ask("speech", service.copy())
+        self.jobs.push(Job { n: n, list: false, service: service.copy(), text: words, id: id.copy(), voice: voice.copy(), speed: 0.0, key: String(), listing: none, saying: none })
+    }
+
+    fn drop_speech(mut self) {
+        var kept = List<Job>()
+        while let j = self.jobs.pop() {
+            if j.list { kept.push(j) }
+        }
+        self.jobs = kept
+    }
+
+    /// An engine's voices, for the Voice row's picker: OpenAI's at once, the others'
+    /// from the service, once its key comes.
+    pub fn list_voices(mut self, service: String) {
+        if service == "openai" {
+            self.to_app.push(Obj.new().s("t", String("core.voices")).s("engine", service.copy()).j("voices", Json.Array(engines.voices(service, List<u8>()))).done())
+            return
+        }
+        let had = if let v = self.voices.find(service.copy()) { some(v.copy()) } else { none }
+        if let kept = had {
+            self.to_app.push(Obj.new().s("t", String("core.voices")).s("engine", service.copy()).j("voices", Json.Array(kept.copy())).done())
+            return
+        }
+        let n = self.ask("speech", service.copy())
+        self.jobs.push(Job { n: n, list: true, service: service.copy(), text: String(), id: String(), voice: String(), speed: 1.0, key: String(), listing: none, saying: none })
+    }
+
+    /// Stops speaking: what's waiting is dropped, and the app stops what it plays.
+    pub fn hush(mut self) {
+        self.drop_speech()
+        self.to_app.push(Obj.new().s("t", String("core.speak")).b("stop", true).done())
+    }
+
+    fn job_failed(mut self, job: Job, why: String) {
+        if job.list {
+            self.to_app.push(Obj.new().s("t", String("core.voices")).s("engine", job.service.copy()).j("voices", Json.Array(List<Json>())).s("error", why).done())
+        } else {
+            self.to_app.push(Obj.new().s("t", String("core.speak")).s("id", job.id.copy()).s("error", why).done())
+        }
+    }
+
+    // The key came: the voices, then the speech.
+    fn go_on(mut self, job: own Job) {
+        var j = job
+        let needs_id = j.service != "openai"
+        if j.list or (needs_id and not self.voices.contains(j.service.copy())) {
+            if let (u, headers) = engines.voices_request(j.service.copy(), j.key.copy(), self.at.copy()) {
+                let r = get(u, headers, SPEECH_MS, 4194304)
+                if let w = self.waker { r.wake_on(w) }
+                j.listing = some(r)
+                self.jobs.push(j)
+                return
+            }
+        }
+        self.say(j)
+    }
+
+    fn say(mut self, job: own Job) {
+        var j = job
+        if j.list {
+            let kept = if let v = self.voices.find(j.service.copy()) { v.copy() } else { engines.voices(j.service.copy(), List<u8>()) }
+            self.to_app.push(Obj.new().s("t", String("core.voices")).s("engine", j.service.copy()).j("voices", Json.Array(kept.copy())).done())
+            return
+        }
+        var voice = j.voice.copy()
+        if j.service != "openai" {
+            let list = if let v = self.voices.find(j.service.copy()) { v.copy() } else { List<Json>() }
+            voice = match engines.pick_voice(list.copy(), voice) {
+                some(v) => str_at(v, "id") ?? String(),
+                none => String(),
+            }
+            if voice.len() == 0 {
+                self.job_failed(j, String("There's no voice to speak with yet. Pick one in Settings › Voice."))
+                return
+            }
+        }
+        let (u, headers, body) = engines.speech(j.service.copy(), j.key.copy(), j.text.copy(), voice, j.speed, self.at.copy())
+        let r = post(u, headers, body, SPEECH_MS, SPEECH_MOST)
+        if let w = self.waker { r.wake_on(w) }
+        j.saying = some(r)
+        self.jobs.push(j)
+    }
+
+    fn poll_jobs(mut self) {
+        var waiting = List<Job>()
+        var ready = List<Job>()
+        while let j = self.jobs.pop() {
+            var done = false
+            if let r = j.listing { done = r.done() }
+            if let r = j.saying { done = r.done() }
+            if done { ready.push(j) } else { waiting.push(j) }
+        }
+        while let j = waiting.pop() { self.jobs.push(j) }
+        while let taken = ready.pop() {
+            var job = taken
+            if let r = job.listing.take() {
+                var req = r
+                match req.wait() {
+                    ok(resp) => {
+                        if resp.status != 200 {
+                            self.job_failed(job, engines.service_error(resp.status, String.from_utf8(resp.body) ?? String()))
+                        } else {
+                            self.voices.insert(job.service.copy(), engines.voices(job.service.copy(), resp.body))
+                            self.say(job)
+                        }
+                    },
+                    err(e) => self.job_failed(job, "{e}"),
+                }
+                continue
+            }
+            if let r = job.saying.take() {
+                var req = r
+                match req.wait() {
+                    ok(resp) => {
+                        if resp.status != 200 {
+                            self.job_failed(job, engines.service_error(resp.status, String.from_utf8(resp.body.copy()) ?? String()))
+                        } else {
+                            self.play(job, resp.body)
+                        }
+                    },
+                    err(e) => self.job_failed(job, "{e}"),
+                }
+            }
+        }
+    }
+
+    // Speech written to a WAV for the app to play. The last few are kept, so one
+    // playing isn't taken from under it.
+    fn play(mut self, job: Job, pcm: List<u8>) {
+        var dir = self.files.copy() ?? String()
+        if dir.len() == 0 {
+            dir = match fs.temp_dir() {
+                ok(d) => d,
+                err(e) => {
+                    self.job_failed(job, "{e}")
+                    return
+                },
+            }
+        }
+        let folder = "{dir}/voice"
+        if let err(e) = fs.make_dir_all(folder.copy()) {
+            self.job_failed(job, "can't make {folder}: {e}")
+            return
+        }
+        self.next += 1
+        let path = "{folder}/speech-{self.next}.wav"
+        if let err(e) = fs.write(path.copy(), engines.to_wav(pcm)) {
+            self.job_failed(job, "can't write {path}: {e}")
+            return
+        }
+        self.spoken.push(path.copy())
+        while self.spoken.len() > 3 {
+            let old = self.spoken.remove(0)
+            if let err(_) = fs.remove_file(old) {}
+        }
+        self.to_app.push(Obj.new().s("t", String("core.speak")).s("id", job.id.copy()).s("file", path).s("engine", job.service.copy()).done())
+    }
+}
+
+/// The words of an agent's reply to read aloud: its answer, the last of its own text,
+/// as the apps show it (PLAN.md, "It's a chat: one answer at the end").
+pub fn answer_of(message: Json) -> String {
+    var last = String()
+    if let Json.Array(blocks) = at(message, "blocks") {
+        for b in blocks {
+            if (str_at(b.copy(), "kind") ?? String()) == "text" and str_at(b.copy(), "parent") == none {
+                let t = str_at(b, "text") ?? String()
+                if t.trim().len() > 0 { last = t }
+            }
+        }
+    }
+    return last
+}
+
+/// Whether the reply in a live `message.created` event is read aloud on this device:
+/// replies are read aloud always, someone is looking, and it's in the chat in front.
+pub fn reads_aloud(settings: Json, message: Json, active: bool, front: String) -> bool {
+    if str_at(at(settings.copy(), "speech"), "read_aloud") != some(String("always")) { return false }
+    if str_at(at(settings, "speech"), "engine") == some(String("")) { return false }
+    if not active or front.len() == 0 { return false }
+    if str_at(message.copy(), "role") != some(String("agent")) { return false }
+    if bool_at(message.copy(), "quiet") == some(true) { return false }
+    return str_at(message, "conversation") == some(front.copy())
+}
+
+@test
+fn a_reply_is_read_by_its_answer() {
+    let m = parse(#"{"role":"agent","conversation":"c_1","blocks":[{"kind":"text","text":"Looking."},{"kind":"tool","call":"x"},{"kind":"text","text":"Done: **it builds**."},{"kind":"text","text":"sub","parent":"x"}]}"#)!
+    assert(answer_of(m.copy()) == "Done: **it builds**.")
+    let always = engines.apply(Json.Null, parse(#"{"speech":{"engine":"openai","read_aloud":"always"}}"#)!)!
+    assert(reads_aloud(always.copy(), m.copy(), true, String("c_1")))
+    assert(not reads_aloud(always.copy(), m.copy(), false, String("c_1")))
+    assert(not reads_aloud(always, m.copy(), true, String("c_2")))
+    assert(not reads_aloud(engines.settings(Json.Null), m, true, String("c_1")))
+}
+
+@test
+fn no_engine_opens_the_settings() {
+    var v = Voice.new()
+    v.listen()
+    assert("{v.to_app[0]}" == #"{"t":"core.dictation","state":"no_engine"}"# and v.to_instance.len() == 0 and v.cues.len() == 0)
+}
+
+@test
+fn dictation_asks_for_its_key_and_keeps_what_it_hears() {
+    var v = Voice.new()
+    v.settings = engines.apply(Json.Null, parse(#"{"dictation":{"engine":"groq","language":"no"}}"#)!)!
+    v.listen()
+    assert(str_at(v.to_instance[0].copy(), "id") == some(String("core.voice:1")) and "{at(v.to_instance[0].copy(), "args")}" == #"{"kind":"dictation"}"#)
+    assert("{v.to_app[0]}" == #"{"t":"core.dictation","state":"listening","engine":"groq","streams":false,"text":""}"# and v.cues == [true])
+    v.audio(engines.le_bytes([1i16, 2, 3, 4]), 24000, 1)
+    if let l = v.listening { assert(l.held.len() == 8) } else { panic("not listening") }
+    // The instance has no key for it: the app opens the settings.
+    _ = v.answer(parse(#"{"t":"result","id":"core.voice:1","ok":false,"error":{"code":"no_key","message":"Add your Groq key in Settings › Voice."}}"#)!)
+    assert(v.listening == none and v.cues == [true, false] and str_at(v.to_app[1].copy(), "state") == some(String("no_engine")))
+}

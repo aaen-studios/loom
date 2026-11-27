@@ -1,6 +1,6 @@
 //! What loom reaches in macOS that GPUI doesn't give it: hiding the window to the menu
 //! bar and bringing it back, where the window was, keeping the Mac awake while an agent
-//! works, dictation, notifications with their sound, loom's sounds, and where the app's
+//! works, notifications with their sound, loom's sounds and speech, and where the app's
 //! bundle is.
 
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::sync::Mutex;
 use block2::{DynBlock, RcBlock};
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
-use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadMarker};
+use objc2::{define_class, msg_send, AnyThread, DefinedClass, MainThreadMarker};
 use objc2_app_kit::{NSApplication, NSScreen, NSSound, NSView, NSWindow};
 use objc2_foundation::{
     NSActivityOptions, NSBundle, NSData, NSError, NSObject, NSObjectProtocol, NSPoint,
@@ -254,19 +254,6 @@ pub fn take_login_path() {
     }
 }
 
-/// Starts macOS's own dictation in the field that has the focus, as Edit → Start
-/// Dictation does: the system listens and types, so no audio goes through loom. False
-/// when nothing along the responder chain took it.
-pub fn dictate() -> bool {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return false;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    // SAFETY: `startDictation:` takes a sender, which may be nil, and a nil target sends
-    // it along the key window's responder chain to the application.
-    unsafe { app.sendAction_to_from(sel!(startDictation:), None, None) }
-}
-
 /// Whether this program may post notifications: macOS gives them only to an app with a
 /// bundle, and aborts one without that tries.
 fn bundled() -> bool {
@@ -358,6 +345,29 @@ pub fn play_sound(wav: &'static [u8], volume: f32) {
     sound.setVolume(volume.clamp(0.0, 1.0));
     sound.play();
     PLAYING.with(|p| *p.borrow_mut() = Some(sound));
+}
+
+/// Plays a whole WAV the core wrote, speech, in place of what's playing.
+pub fn play_owned(wav: Vec<u8>) {
+    let data = NSData::with_bytes(&wav);
+    let Some(sound) = NSSound::initWithData(NSSound::alloc(), &data) else {
+        return;
+    };
+    sound.play();
+    PLAYING.with(|p| {
+        if let Some(old) = p.borrow_mut().replace(sound) {
+            old.stop();
+        }
+    });
+}
+
+/// Stops what's playing.
+pub fn stop_sound() {
+    PLAYING.with(|p| {
+        if let Some(old) = p.borrow_mut().take() {
+            old.stop();
+        }
+    });
 }
 
 /// Posts a notification, tagged `tag`, which comes back when it's clicked. The first one
@@ -463,12 +473,6 @@ mod tests {
             ),
             "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
         );
-    }
-
-    #[test]
-    fn app_kit_takes_start_dictation() {
-        let app = objc2::runtime::AnyClass::get(c"NSApplication").unwrap();
-        assert!(app.responds_to(objc2::sel!(startDictation:)));
     }
 
     #[test]

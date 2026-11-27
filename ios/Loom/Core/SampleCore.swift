@@ -17,6 +17,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
     var messages: [String: [JSON]]
     /// What Acta, T3 and Spools keep as the person uses them (SampleIntegrations.swift).
     var kept = SampleKept()
+    /// Settings › Voice and the mic's dictation (SampleVoice.swift).
+    var voice = SampleVoice()
     private var runs: [JSON] = []
     private var tools: [JSON] = []
     private var approvals: [JSON] = []
@@ -38,6 +40,7 @@ final class SampleCore: CoreLink, @unchecked Sendable {
         conversations = s.conversations
         messages = s.messages
         messages["c_2", default: []] += s.integrationMessages
+        messages["c_2", default: []] += s.voiceMessages
         // A few of the Gardener's messages are pinned, as they would be on an instance.
         for (n, id) in ["msg_42", "msg_43", "msg_40", "msg_44"].enumerated() {
             guard let i = messages["c_4"]?.firstIndex(where: { $0["id"].text == id }), case .object(var m) = messages["c_4"]![i] else { continue }
@@ -287,6 +290,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["messages": .array(page), "count": JSON(all.count), "more": JSON(from + page.count < all.count)]])
             case "routine.run":
                 tell(["t": "result", "id": f["id"], "ok": true, "value": ["run": ["id": "rr_1"]]])
+            case "voice.get", "voice.put", "voice.key", "voice.card":
+                voiceCmd(f)
             case "emoji.add", "emoji.rename", "emoji.delete", "emoji.restore":
                 ownEmoji(f)
             case "agent.file":
@@ -298,6 +303,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
                 // Acta, T3 and Spools, and the person's MCP servers.
                 _ = integrations(f)
             }
+        case "voice.listen", "voice.stop", "voice.voices", "voice.speak":
+            voiceFrame(f)
         case "emoji.typed", "emoji.find", "emoji.picker":
             tell(emoji(f))
         case "emoji.used":

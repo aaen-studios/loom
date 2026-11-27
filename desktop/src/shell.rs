@@ -137,55 +137,6 @@ impl Tray {
     }
 }
 
-/// Starts the system's own dictation, which types what's said into the field that has
-/// the focus: Windows voice typing, which Win+H opens, or a Mac's dictation. False where
-/// there's none to start.
-#[cfg(windows)]
-pub fn dictate() -> bool {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_LWIN,
-    };
-    let key = |vk: u16, up: bool| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: vk,
-                wScan: 0,
-                dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
-                time: 0,
-                dwExtraInfo: 0,
-            },
-        },
-    };
-    let h = u16::from(b'H');
-    let keys = [
-        key(VK_LWIN, false),
-        key(h, false),
-        key(h, true),
-        key(VK_LWIN, true),
-    ];
-    // SAFETY: `keys` is an array of initialised INPUTs that outlives the call, and its
-    // length and element size are passed as SendInput expects.
-    let sent = unsafe {
-        SendInput(
-            keys.len() as u32,
-            keys.as_ptr(),
-            std::mem::size_of::<INPUT>() as i32,
-        )
-    };
-    sent == keys.len() as u32
-}
-
-#[cfg(target_os = "macos")]
-pub fn dictate() -> bool {
-    crate::mac::dictate()
-}
-
-#[cfg(all(not(windows), not(target_os = "macos")))]
-pub fn dictate() -> bool {
-    false
-}
-
 /// What a notification is about: the server's folder ("" for the one on screen first),
 /// the agent and the conversation, which a click on it opens.
 #[derive(Clone, Debug, Default, PartialEq)]

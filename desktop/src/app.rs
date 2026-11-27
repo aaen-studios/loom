@@ -66,6 +66,8 @@ mod routine_off_view;
 mod routines;
 #[path = "spools.rs"]
 mod spools;
+#[path = "voice_ui.rs"]
+mod voice_ui;
 #[path = "watch_view.rs"]
 mod watch_view;
 use crate::model::drafts::Page as DraftPage;
@@ -312,6 +314,8 @@ enum Screen {
     /// Spools, the integrations catalog: its Find tab, and its Installed tab.
     Spools,
     Installed,
+    /// Settings › Voice: dictation and speech.
+    Voice,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -616,6 +620,11 @@ pub struct Loom {
     /// and for each field of a card asking for a secret, by its call and the field's
     /// place, with its Save as name beside it ("bc_7/0" and "bc_7/0/save").
     card_secrets: Rc<HashMap<String, Entity<InputState>>>,
+    /// The mic while loom dictates, the key field open on a Voice tile, and whether
+    /// the dictation shortcut is held down.
+    mic: Option<crate::voice::Mic>,
+    voice_key: Option<Entity<InputState>>,
+    dictate_held: bool,
     /// Whether the chat is drawn again each second while a draft's Undo counts down.
     draft_ticking: bool,
     queue_in: Entity<InputState>,
@@ -1520,6 +1529,7 @@ ACTA_KEY=secret:ACTA_KEY",
                     while let Ok(answer) = loom.device_rx.try_recv() {
                         loom.send(answer);
                     }
+                    loom.pump_mic();
                     loom.pump_door();
                     if loom.pump_away() {
                         cx.notify();
@@ -1573,6 +1583,7 @@ ACTA_KEY=secret:ACTA_KEY",
                             }
                             Some("core.sound") => settings::play(&v),
                             Some("core.sounds") => loom.took_sounds(&v),
+                            Some("core.speak") => voice_ui::play(&v),
                             _ => {}
                         }
                         changed |= crate::perf::step("take", || loom.model.take(&v));
@@ -1801,6 +1812,9 @@ ACTA_KEY=secret:ACTA_KEY",
             asks_hidden: HashSet::new(),
             links_looked: false,
             card_secrets: Rc::default(),
+            mic: None,
+            voice_key: None,
+            dictate_held: false,
             draft_ticking: false,
             queue_in,
             aside_in,
@@ -2363,6 +2377,10 @@ ACTA_KEY=secret:ACTA_KEY",
                 }
                 self.mcp_open = None;
             }
+            Screen::Voice => {
+                let f = self.model.voice.load();
+                self.send(f);
+            }
             Screen::Spools | Screen::Installed => {
                 for f in self.model.open_spools(None) {
                     self.send(f);
@@ -2553,6 +2571,7 @@ ACTA_KEY=secret:ACTA_KEY",
                         settings::notify_as(&prefs, &v, about);
                     }
                     Some("core.sound") => settings::play(&v),
+                    Some("core.speak") => voice_ui::play(&v),
                     _ => {}
                 }
                 changed |= a.model.take(&v);
@@ -4040,6 +4059,9 @@ ACTA_KEY=secret:ACTA_KEY",
         if open == Screen::Spools {
             self.ready_spools(window, cx);
         }
+        if open == Screen::Voice {
+            self.ready_voice(window, cx);
+        }
         let mut nav = div()
             .w(px(layout::NAV))
             .flex_none()
@@ -4223,6 +4245,7 @@ ACTA_KEY=secret:ACTA_KEY",
             Screen::Emoji => self.emoji_page(cx),
             Screen::Spools => self.spools_page(cx),
             Screen::Installed => self.installed_page(cx),
+            Screen::Voice => self.voice_page(cx),
             Screen::AddServer => self.add_server_page(cx),
             _ => div(),
         };
@@ -4244,7 +4267,7 @@ ACTA_KEY=secret:ACTA_KEY",
             .shadow_lg()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 // A menu of the page's own (a dropdown) closes first.
-                if this.menu.is_none() {
+                if this.menu.is_none() && this.model.voice.menu.is_none() {
                     this.popup = None;
                     cx.notify();
                 }
@@ -6254,6 +6277,15 @@ ACTA_KEY=secret:ACTA_KEY",
                             String::new(),
                         ));
                     }
+                }
+                // A voice_setup card's key, while it waits for it.
+                model::CardBody::VoiceSetup(c) if c.asking => {
+                    wanted.push((
+                        voice_ui::voice_key_name(&c.id),
+                        "Key".into(),
+                        true,
+                        String::new(),
+                    ));
                 }
                 // A form not sent: a box for each text and number field, with what it
                 // starts as.
@@ -11590,26 +11622,38 @@ ACTA_KEY=secret:ACTA_KEY",
                         },
                         |_, _, _, _| {},
                     )
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .size_full(),
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full(),
                 )
                 .when_some(plus_menu, |d, menu| {
-                    d.child(div().absolute().top_0().left_0().child(deferred(
-                        anchored().anchor(Anchor::BottomLeft).child(menu),
-                    )))
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .child(deferred(anchored().anchor(Anchor::BottomLeft).child(menu))),
+                    )
                 })
                 // And the @ picker, the same, and the emoji row.
                 .when_some(mention_menu, |d, menu| {
-                    d.child(div().absolute().top_0().left_0().child(deferred(
-                        anchored().anchor(Anchor::BottomLeft).child(menu),
-                    )))
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .child(deferred(anchored().anchor(Anchor::BottomLeft).child(menu))),
+                    )
                 })
                 .when_some(emoji_row, |d, row| {
-                    d.child(div().absolute().top_0().left_0().child(deferred(
-                        anchored().anchor(Anchor::BottomLeft).child(row),
-                    )))
+                    d.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .child(deferred(anchored().anchor(Anchor::BottomLeft).child(row))),
+                    )
                 })
                 // The emoji picker opens above it or below it from its right edge.
                 .when_some(emoji_picker, |d, picker| d.child(picker))
@@ -11622,39 +11666,37 @@ ACTA_KEY=secret:ACTA_KEY",
                         .items_end()
                         .gap(px(space::S))
                         .child(
-                            div()
-                                .flex_none()
-                                .child(
-                                    div()
-                                        .id("plus")
-                                        .role(Role::Button)
-                                        .aria_label("Attach, skills and routines")
-                                        .size(px(control::ICON_COMPOSER))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .rounded(px(radius::BUTTON))
-                                        .text_color(p.ink_2)
-                                        .cursor_pointer()
-                                        .soft_hover(transparent_black(), p.hover, None)
-                                        .when(plus_open, |d| d.bg(p.hover))
-                                        .when(!plus_open, |d| {
-                                            d.tooltip(tip("Attach, skills and routines"))
-                                        })
-                                        .child(Icon::new(Ico::Plus).small())
-                                        // A click on it shuts the menu, which the click
-                                        // outside it did a moment before.
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            let just_shut = this
-                                                .plus_closed_at
-                                                .is_some_and(|t| t.elapsed() < Duration::from_millis(300));
-                                            if this.plus.is_some() {
-                                                this.shut_plus(window, cx);
-                                            } else if !just_shut {
-                                                this.open_plus(window, cx);
-                                            }
-                                        })),
-                                ),
+                            div().flex_none().child(
+                                div()
+                                    .id("plus")
+                                    .role(Role::Button)
+                                    .aria_label("Attach, skills and routines")
+                                    .size(px(control::ICON_COMPOSER))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(radius::BUTTON))
+                                    .text_color(p.ink_2)
+                                    .cursor_pointer()
+                                    .soft_hover(transparent_black(), p.hover, None)
+                                    .when(plus_open, |d| d.bg(p.hover))
+                                    .when(!plus_open, |d| {
+                                        d.tooltip(tip("Attach, skills and routines"))
+                                    })
+                                    .child(Icon::new(Ico::Plus).small())
+                                    // A click on it shuts the menu, which the click
+                                    // outside it did a moment before.
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        let just_shut = this.plus_closed_at.is_some_and(|t| {
+                                            t.elapsed() < Duration::from_millis(300)
+                                        });
+                                        if this.plus.is_some() {
+                                            this.shut_plus(window, cx);
+                                        } else if !just_shut {
+                                            this.open_plus(window, cx);
+                                        }
+                                    })),
+                            ),
                         )
                         .child(
                             div()
@@ -11743,11 +11785,13 @@ ACTA_KEY=secret:ACTA_KEY",
                                         this.mention_key(MentionKey::Take, window, cx)
                                     }
                                 }))
-                                .capture_action(cx.listener(|this, _: &IndentInline, window, cx| {
-                                    if !this.emoji_row_key(RowKey::Take, window, cx) {
-                                        this.mention_key(MentionKey::Take, window, cx)
-                                    }
-                                }))
+                                .capture_action(cx.listener(
+                                    |this, _: &IndentInline, window, cx| {
+                                        if !this.emoji_row_key(RowKey::Take, window, cx) {
+                                            this.mention_key(MentionKey::Take, window, cx)
+                                        }
+                                    },
+                                ))
                                 .capture_action(cx.listener(|this, _: &MoveLeft, window, cx| {
                                     this.emoji_row_key(RowKey::Back, window, cx);
                                 }))
@@ -11779,46 +11823,8 @@ ACTA_KEY=secret:ACTA_KEY",
                                 .child(self.composer_textarea(cx)),
                         )
                         .when_some(emoji_button, |d, b| d.child(b))
-                        // Dictation: the system's own voice typing, into the composer.
-                        .when(cfg!(any(windows, target_os = "macos")), |d| {
-                            let (name, didnt) = if cfg!(target_os = "macos") {
-                                (
-                                    "Dictation",
-                                    "Dictation didn't start. Turn it on in System Settings → Keyboard.",
-                                )
-                            } else {
-                                (
-                                    "Voice typing",
-                                    "Voice typing didn't start. Press Windows+H in the message box.",
-                                )
-                            };
-                            d.child(
-                                div()
-                                    .id("dictate")
-                                    .role(Role::Button)
-                                    .aria_label(name)
-                                    .size(px(control::ICON_COMPOSER))
-                                    .flex_none()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .rounded(px(radius::BUTTON))
-                                    .text_color(p.ink_2)
-                                    .cursor_pointer()
-                                    .soft_hover(transparent_black(), p.hover, None)
-                                    .tooltip(tip(name))
-                                    .child(Icon::new(Ico::Mic).small())
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.composer.update(cx, |c, cx| c.focus(window, cx));
-                                        if shell::dictate() {
-                                            this.send(serde_json::json!({"t": "app.dictation", "on": true}));
-                                        } else {
-                                            this.model.notices.push(didnt.into());
-                                            this.take_notice(cx);
-                                        }
-                                    })),
-                            )
-                        })
+                        // Dictation: loom's own, into the composer at the caret.
+                        .child(self.composer_mic(cx))
                         .child(
                             div()
                                 .id("send")
@@ -22249,6 +22255,7 @@ fn card_view(
         CardBody::SpoolConnect { .. } => spool_connect_card(p, card, key, scale, secrets, this),
         CardBody::Form { .. } => form_card(p, card, key, tint, show, secrets, this),
         CardBody::Draft(_) => draft_view::card(p, card, key, scale, this),
+        CardBody::VoiceSetup(c) => voice_ui::setup_card(p, c, key, tint, scale, secrets, this),
         _ => shown_card(p, card, tint, scale),
     }
 }
@@ -23372,6 +23379,7 @@ fn shown_card(p: Palette, card: &model::Card, tint: Hsla, scale: f32) -> Div {
         | CardBody::RoutineOff { .. }
         | CardBody::Draft(_)
         | CardBody::SpoolConnect { .. }
+        | CardBody::VoiceSetup(_)
         | CardBody::Form { .. } => {}
     }
     // A table has columns to fit, and takes the reply's room.
@@ -27025,6 +27033,8 @@ impl Render for Loom {
         if let Some(folder) = self.model.made_folder.take() {
             self.start_renaming(folder, window, cx);
         }
+        // Dictation's words, and what else voice asked for.
+        self.take_voice(window, cx);
         let signed_out = self.model.conn == Some(Conn::SignedOut);
         // The opening weave plays once the app knows it's signed in. Signed out, the
         // welcome comes in on its own instead.
@@ -27193,11 +27203,34 @@ impl Render for Loom {
                     cx.stop_propagation();
                 }
             }))
+            // Ctrl+Shift+Space dictates, wherever the focus is, as Settings › Voice has it:
+            // it starts and stops, or with Hold to talk, records while it's held.
+            .capture_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {
+                if !this.prefs.dictation_shortcut || !voice_ui::is_shortcut(&e.keystroke) {
+                    return;
+                }
+                cx.stop_propagation();
+                if e.is_held || this.dictate_held {
+                    return;
+                }
+                this.dictate_held = true;
+                if this.prefs.hold_to_talk {
+                    this.start_dictation(window, cx);
+                } else {
+                    this.toggle_dictation(window, cx);
+                }
+            }))
             // A risky Allow held by a key lets go when the key does, wherever the focus
-            // went meanwhile.
+            // went meanwhile, and so does the dictation shortcut.
             .on_key_up(cx.listener(|this, e: &KeyUpEvent, _, cx| {
                 if this.hold_by_key && holds_allow(&e.keystroke) {
                     this.release_allow(cx);
+                }
+                if this.dictate_held && e.keystroke.key == "space" {
+                    this.dictate_held = false;
+                    if this.prefs.hold_to_talk {
+                        this.stop_dictation(cx);
+                    }
                 }
             }))
             .on_key_down(cx.listener(|this, e: &KeyDownEvent, window, cx| {

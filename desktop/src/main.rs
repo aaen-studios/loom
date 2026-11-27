@@ -33,6 +33,7 @@ mod thread;
 #[path = "../../design/generated/tokens.rs"]
 #[allow(dead_code)]
 mod tokens;
+mod voice;
 mod wake;
 mod zoom;
 
@@ -382,7 +383,9 @@ gpui_kit::assets::icon_assets!(
         ImagePlus,
         // Acta beside the chat: Boards in the + menu and its board picker, and Make a card.
         Layers,
-        LayersPlus
+        LayersPlus,
+        // Settings › Voice: a service's tile.
+        Cloud
     ]
 );
 

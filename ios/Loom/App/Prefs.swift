@@ -18,4 +18,7 @@ enum Prefs {
     static let skinTone = "loom.skin_tone"
     /// Settings → Chat → Show context: the chat header's ring and its card (off).
     static let showContext = "loom.show_context"
+    /// Settings › Voice → Hold to talk: the composer's mic records while it's held (off),
+    /// kept on the phone as a keyboard's shortcut is.
+    static let holdToTalk = "loom.hold_to_talk"
 }

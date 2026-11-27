@@ -19,7 +19,8 @@
 //
 // loom's sounds play where the app plays them, once the visitor has clicked on the page (sounds.ts):
 // Message sent as the person's message goes, Reply arrived as a reply is done, Another agent
-// answered in the group chat, and the mic's Dictation on and off.
+// answered in the group chat, and the mic's Dictation on and off, around loom's own dictation
+// writing the words into the composer as they're said.
 //
 // It plays only while it's on screen, and with reduced motion it shows each chat's end instead.
 import { draft, type Draft } from './draft';
@@ -535,13 +536,59 @@ export function play(app: HTMLElement) {
 		drawContext();
 		fitHeader();
 	};
-	// The mic: dictation on, and off again, each with its sound.
+	// The mic: loom's own dictation (PLAN.md, "Voice"), on Deepgram Nova-3, which streams. A click
+	// starts it with Dictation on's sound, and the words come into the composer as they're said,
+	// the last ones still faint until the engine keeps them; another click stops it with Dictation
+	// off's, and the words stay, all kept. With reduced motion they come all at once.
 	const mic = app.querySelector<HTMLElement>('[data-mic]');
-	let dictating = false;
+	const HEARD = 'Remind me to send the October invoice';
+	let dictation = 0;
+	/** What this dictation has put in: the words kept, and the ones still being heard. */
+	let kept: Text | null = null;
+	let hearing: HTMLElement | null = null;
+	let lead = '';
+	const keepAll = () => {
+		if (kept && hearing) kept.data += hearing.textContent ?? '';
+		hearing?.remove();
+		kept = null;
+		hearing = null;
+	};
+	/** The words said so far, the last `faint` of them still being heard. */
+	const hear = (said: string[], faint: number) => {
+		if (!kept || !hearing) return;
+		const sure = Math.max(0, said.length - faint);
+		kept.data = lead + said.slice(0, sure).join(' ') + (sure > 0 && sure < said.length ? ' ' : '');
+		hearing.textContent = said.slice(sure).join(' ');
+	};
 	mic?.addEventListener('click', () => {
-		dictating = !dictating;
-		mic.classList.toggle('on', dictating);
-		cue(dictating ? 'dictation-on' : 'dictation-off');
+		const on = !mic.classList.contains('on');
+		mic.classList.toggle('on', on);
+		mic.setAttribute('aria-pressed', String(on));
+		cue(on ? 'dictation-on' : 'dictation-off');
+		const id = ++dictation;
+		if (!on) return keepAll();
+		const words = HEARD.split(' ');
+		const before = typed.textContent ?? '';
+		lead = before && !/\s$/.test(before) ? ' ' : '';
+		kept = document.createTextNode('');
+		hearing = document.createElement('span');
+		hearing.className = 'hearing';
+		if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+			typed.append(kept, hearing);
+			hear(words, 0);
+			return;
+		}
+		void (async () => {
+			for (let i = 1; i <= words.length; i++) {
+				await new Promise((done) => setTimeout(done, i === 1 ? 300 : 170 + Math.random() * 90));
+				if (id !== dictation || !kept || !hearing) return;
+				if (i === 1) typed.append(kept, hearing);
+				hear(words.slice(0, i), 2);
+			}
+			await new Promise((done) => setTimeout(done, 500));
+			if (id !== dictation) return;
+			hear(words, 0);
+		})();
 	});
 	app.querySelector('[data-room="Shop"]')?.addEventListener('click', () => openChat('shop'));
 	app.querySelector('.agent[data-agent="Moss"]')?.addEventListener('click', () => openChat('moss'));

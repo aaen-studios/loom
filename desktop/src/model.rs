@@ -21,6 +21,7 @@ mod rooms;
 pub mod routine_off;
 pub mod spool_card;
 pub mod t3;
+pub mod voice;
 pub mod watch;
 pub use popover::pop_under;
 pub mod spools;
@@ -2404,6 +2405,9 @@ pub enum CardBody {
         sending: bool,
         error: String,
     },
+    /// The engine an agent set up with voice_setup (loom's own card; `model/voice.rs`):
+    /// its tile, its rows as set, and whether it waits for the person's key.
+    VoiceSetup(Box<voice::Card>),
 }
 
 /// A field the person fills in on a card: what it's for, whether it's hidden as it's
@@ -2583,6 +2587,7 @@ impl Card {
             "routine_off" => routine_off::body_of(v),
             "draft" => draft_card::body_of(v),
             "spool_connect" => spool_card::body_of(v),
+            "voice_setup" => CardBody::VoiceSetup(Box::new(voice::card_of(v, ""))),
             "secret_ask" => CardBody::SecretAsk {
                 call: s(v, "call"),
                 agent: s(v, "agent"),
@@ -3415,6 +3420,7 @@ impl Message {
                         answers.is_none() && self.takes_answers(newest)
                     }
                     Some(CardBody::SignIn { signed, passed, .. }) => signed.is_none() && !passed,
+                    Some(CardBody::VoiceSetup(c)) => c.asking,
                     Some(CardBody::McpAdd { state, .. })
                     | Some(CardBody::SpoolConnect { state, .. }) => {
                         matches!(
@@ -6597,6 +6603,8 @@ pub struct Model {
     mcp_stale: bool,
     /// Spools, the integrations catalog, and connecting from it.
     pub spools: spools::Spools,
+    /// Voice: the settings and tiles, the page's state, and dictation on screen.
+    pub voice: voice::Voice,
     /// The settings list pages' forms, each item's as the person left it, changed and
     /// not saved (`drafts`).
     pub drafts: drafts::Drafts,
@@ -7616,6 +7624,10 @@ impl Model {
     /// Takes a frame from the core. Gives whether the screen should redraw.
     pub fn take(&mut self, f: &Value) -> bool {
         let t = s(f, "t");
+        // Voice's frames, from the core and the instance, are the voice module's.
+        if self.voice.take(f) {
+            return true;
+        }
         // The emoji frames are the emoji module's alone; `synced` is everyone's.
         if self.emoji.take(f) {
             return true;
@@ -9919,6 +9931,8 @@ impl Model {
                         *sending = self.form_sending.values().any(|v| *v == key);
                         *error = self.form_errors.get(&key).cloned().unwrap_or_default();
                     }
+                    // A voice card's Add goes with the reply it's in.
+                    Some(CardBody::VoiceSetup(c)) => c.message = reply.clone(),
                     // A spool card's Sign in goes with the reply it's in.
                     Some(CardBody::SpoolConnect {
                         message,

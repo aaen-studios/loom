@@ -31,6 +31,9 @@ xcap = "0.9.10"
 wry = "0.57.3"
 async-channel = "2.5.0"
 futures-lite = "2.6.1"
+# The mic, for loom's own dictation (src/voice.rs): WASAPI on Windows, Core Audio on a
+# Mac. The core does the rest with what it records.
+cpal = "0.18.2"
 
 [features]
 # Frame timing in perf.log in the data folder (src/perf.rs), for measuring the app.

@@ -93,6 +93,51 @@ pub fn play(file: &str, volume: f32) {
 #[cfg(all(not(windows), not(target_os = "macos")))]
 pub fn play(_file: &str, _volume: f32) {}
 
+/// Plays speech the core wrote, a whole WAV, in place of what's playing. Focus Assist
+/// doesn't hush it, as the person asked for it.
+#[cfg(windows)]
+pub fn play_speech(wav: Vec<u8>) {
+    use windows_sys::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT};
+    let Ok(mut playing) = PLAYING.lock() else {
+        return;
+    };
+    // SAFETY: as in `play`, the WAV stays alive in PLAYING until another takes its place.
+    unsafe {
+        PlaySoundW(
+            wav.as_ptr() as *const u16,
+            std::ptr::null_mut(),
+            SND_MEMORY | SND_ASYNC | SND_NODEFAULT,
+        );
+    }
+    *playing = wav;
+}
+
+/// Stops what's playing.
+#[cfg(windows)]
+pub fn stop_speech() {
+    use windows_sys::Win32::Media::Audio::PlaySoundW;
+    // SAFETY: a null sound stops the one playing.
+    unsafe {
+        PlaySoundW(std::ptr::null(), std::ptr::null_mut(), 0);
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn play_speech(wav: Vec<u8>) {
+    crate::mac::play_owned(wav);
+}
+
+#[cfg(target_os = "macos")]
+pub fn stop_speech() {
+    crate::mac::stop_sound();
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn play_speech(_wav: Vec<u8>) {}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+pub fn stop_speech() {}
+
 #[cfg(test)]
 mod tests {
     use super::{at_volume, bytes};
