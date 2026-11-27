@@ -373,29 +373,99 @@ struct Subtask: Equatable, Sendable, Identifiable {
 }
 
 /// One of a card's comments.
-struct CardComment: Equatable, Sendable {
+struct CardComment: Equatable, Sendable, Identifiable {
+    var id = ""
     var by: String
     /// When, as Acta gives it (RFC 3339).
     var at: String
     /// Markdown.
     var body: String
+
+    /// Its writer's initial, for its avatar: "E".
+    var initial: String { initialOf(by) }
 }
 
+/// A name's initial, for an avatar: "E", or "?" for none.
+func initialOf(_ name: String) -> String {
+    name.trimmingCharacters(in: .whitespaces).first.map { String($0).uppercased() } ?? "?"
+}
+
+/// One line of a card's activity: who did what, and when.
+struct CardActivity: Equatable, Sendable {
+    var by: String
+    var at: String
+    /// In Acta's words: "moved it to Done".
+    var text: String
+}
+
+/// How a pull request's checks show.
+enum ChecksTone: Equatable, Sendable { case ok, bad, quiet }
+
+/// A card's pull request, as Acta has it from GitHub.
+struct PullRequest: Equatable, Sendable {
+    var number = ""
+    var title = ""
+    /// open, draft, merged or closed.
+    var state = ""
+    /// GitHub's: success, failure, pending and the rest, or "" for none.
+    var checks = ""
+    var url = ""
+
+    /// Its checks in words: "✓ checks", "✕ checks", "checks" while they run, or with
+    /// none how it stands ("Merged").
+    var checksWords: (String, ChecksTone) {
+        switch checks {
+        case "success", "neutral", "skipped": return ("✓ checks", .ok)
+        case "failure", "timed_out", "cancelled", "action_required", "error": return ("✕ checks", .bad)
+        case "":
+            let states = ["open": "Open", "draft": "Draft", "merged": "Merged", "closed": "Closed"]
+            return (states[state] ?? "", .quiet)
+        default: return ("checks", .quiet)
+        }
+    }
+}
+
+/// How many of a priority's three bars are filled: none without one.
+func priorityBars(_ priority: String) -> Int {
+    switch priority {
+    case "low": return 1
+    case "medium": return 2
+    case "high", "urgent": return 3
+    default: return 0
+    }
+}
+
+/// The sheet's tabs.
+enum CardTab: String, CaseIterable, Sendable { case details, comments, activity }
+
 /// A card as its preview shows it (`card.get`): as a pill has it, with its whole
-/// description, its priority, its subtasks and its last three comments.
+/// description, its priority, its subtasks, its comments, its activity, its pull
+/// request and branch, and whether the person may comment.
 struct CardDetail: Equatable, Sendable {
     var card: ActaCard
     var description = ""
     var priority = ""
     var checklist: [Subtask] = []
     var comments: [CardComment] = []
+    var activity: [CardActivity] = []
+    var pullRequest: PullRequest?
+    /// The branch to work in, on a board linked to GitHub.
+    var branch = ""
+    var canComment = false
 
     init(_ v: JSON) {
         card = ActaCard(v)
         description = v["description"].text
         priority = v["priority"].text
         checklist = v["checklist"].array.map { Subtask(id: $0["id"].text, title: $0["title"].text, done: $0["done"].bool ?? false) }
-        comments = v["comments"].array.map { CardComment(by: $0["by"].text, at: $0["at"].text, body: $0["body"].text) }
+        comments = v["comments"].array.map { CardComment(id: $0["id"].text, by: $0["by"].text, at: $0["at"].text, body: $0["body"].text) }
+        activity = v["activity"].array.map { CardActivity(by: $0["by"].text, at: $0["at"].text, text: $0["text"].text) }
+        let pr = v["pull_request"]
+        if !pr.isNull {
+            pullRequest = PullRequest(number: pr["number"].text, title: pr["title"].text, state: pr["state"].text, checks: pr["checks"].text, url: pr["url"].text)
+        }
+        branch = v["branch"].text
+        canComment = v["can_comment"].bool ?? false
     }
 
     /// While it's looked up: what a pill knew of it.
@@ -404,12 +474,11 @@ struct CardDetail: Equatable, Sendable {
         description = card.text
     }
 
-    /// The chips after its status: its assignee, its size, its labels and its priority.
-    var chips: [String] {
-        var out = card.chips
-        if !priority.isEmpty && priority != "none" { out.append(priorityName(priority)) }
-        return out
-    }
+    /// The Comments tab's name: "Comments · 4", or "Comments" with none.
+    var commentsTab: String { comments.isEmpty ? "Comments" : "Comments · \(comments.count)" }
+
+    /// "Subtasks · 1 of 3".
+    var subtasksLine: String { "Subtasks · \(checklist.filter(\.done).count) of \(checklist.count)" }
 }
 
 /// When a comment was written, as its line shows it: "25 Nov".
@@ -509,6 +578,11 @@ struct CardSheet: Equatable, Sendable, Identifiable {
     /// Being looked up, or changed.
     var loading = true
     var error: String?
+    var tab: CardTab = .details
+    /// A comment is on its way: Comment does nothing until it's answered.
+    var commenting = false
+    /// Comments that went through, so its box empties each time one does.
+    var commented = 0
     /// What it was before a change on its way, to go back to if Acta refuses it.
     fileprivate var before: CardDetail?
 }
@@ -557,6 +631,7 @@ struct BoardScreen: Equatable, Sendable {
 private enum ActaAsk {
     case card(board: String, id: String)
     case move(board: String, id: String)
+    case comment(board: String, id: String)
     case create
     case board
     case tasks(board: String, done: Bool)
@@ -715,6 +790,18 @@ extension Model {
         s.loading = true
         acta.sheet = s
         return actaCmd("card.update", ["board": JSON(s.board), "id": JSON(s.id), "subtask": JSON(subtask), "done": JSON(done)], .move(board: s.board, id: s.id))
+    }
+
+    /// Comments on the card in the sheet, with `body` as typed, as the person
+    /// (`card.comment`). Nil with no words, where they can't comment, or while one is on
+    /// its way.
+    func commentCard(_ body: String) -> JSON? {
+        let body = body.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var s = acta.sheet, s.detail?.canComment == true, !body.isEmpty, !s.commenting else { return nil }
+        s.commenting = true
+        s.error = nil
+        acta.sheet = s
+        return actaCmd("card.comment", ["board": JSON(s.board), "id": JSON(s.id), "body": JSON(body)], .comment(board: s.board, id: s.id))
     }
 
     /// The pills of the messages shown that are this card, as it is now.
@@ -961,6 +1048,20 @@ extension Model {
             b.tasks.removeAll { ($0.status == "done") == done }
             b.tasks = done ? b.tasks + tasks : tasks + b.tasks
             acta.screen = b
+        case .comment(let board, let id):
+            let detail = error == nil && !value["card"].isNull ? CardDetail(value["card"]) : nil
+            if let detail { patchPills(detail.card) }
+            if var s = acta.sheet, s.board == board, s.id == id {
+                s.commenting = false
+                if let detail {
+                    s.detail = detail
+                    s.commented += 1
+                    s.error = nil
+                } else {
+                    s.error = error ?? "Acta didn't answer."
+                }
+                acta.sheet = s
+            }
         case .card(let board, let id), .move(let board, let id):
             let detail = error == nil && !value["card"].isNull ? CardDetail(value["card"]) : nil
             if let detail { patchPills(detail.card) }
