@@ -692,6 +692,14 @@ fn tool_call_of(id: String, kind: String, title: String) -> LinkedMap<String, Js
     u.insert("sessionUpdate", js(String("tool_call")))
     u.insert("toolCallId", js(id))
     u.insert("title", js(title))
+    // A command names its tool as Claude's adapter does, which the step beside it shows.
+    if kind == "execute" {
+        var claude = LinkedMap<String, Json>()
+        claude.insert("toolName", js(String("Bash")))
+        var meta = LinkedMap<String, Json>()
+        meta.insert("claudeCode", Json.Object(claude))
+        u.insert("_meta", Json.Object(meta))
+    }
     u.insert("kind", js(kind))
     u.insert("status", js(String("pending")))
     return u

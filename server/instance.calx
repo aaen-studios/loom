@@ -67,6 +67,7 @@ import server.routine_gate
 import server.gate
 import server.tables
 import server.flows
+import server.steps as plain_words
 import server.defaults
 import server.rules
 import server.rooms
@@ -320,7 +321,55 @@ fn acp_started(run: String, call: String, blocks: List<Block>, u: Json) -> Json 
         if b.kind == "tool" and b.call == call { parent = b.parent.copy() }
     }
     let inside = if parent.len() > 0 { some(parent) } else { none }
-    return Obj.new().s("run", run).s("call", call.copy()).i("block", tool_place(blocks, call)).maybe("parent", inside).s("tool", acp.tool_kind(str_at(u.copy(), "kind") ?? String())).s("title", acp.tool_title(u.copy())).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u, "locations")).done()
+    let title = acp.tool_title(u.copy())
+    let kind = acp.tool_kind(str_at(u.copy(), "kind") ?? String())
+    let named = plain_words.name_of(str_at(u.copy(), "title") ?? String(), acp.tool_name(u.copy()))
+    let started = Obj.new().s("run", run).s("call", call.copy()).i("block", tool_place(blocks, call.copy())).maybe("parent", inside).s("tool", kind.copy()).s("title", title.copy()).j("input", cut_input(at(u.copy(), "rawInput"))).j("locations", at(u.copy(), "locations"))
+    return step_words(started, said_before(blocks, call), title, named, kind, at(u, "rawInput")).done()
+}
+
+// What the agent said just before the call `call` in its reply, for the call's
+// words (server/steps.calx): the words of the text block before it, past any
+// thoughts, among the blocks of the same subagent call, or "" where another
+// call or nothing comes before it.
+fn said_before(blocks: List<Block>, call: String) -> String {
+    var parent = String()
+    var place: usize = blocks.len()
+    var n: usize = 0
+    for b in blocks {
+        if b.kind == "tool" and b.call == call {
+            parent = b.parent.copy()
+            place = n
+        }
+        n += 1
+    }
+    var k = place
+    while k > 0 {
+        k -= 1
+        let b = blocks[k].copy()
+        if b.parent != parent { continue }
+        if b.kind == "thought" { continue }
+        if b.kind == "text" { return b.text }
+        return String()
+    }
+    return String()
+}
+
+// A tool event with the call's step in plain words (protocol.md, "Events"):
+// `name`, the tool's name, `doing`, what it's doing, `did`, what it did, and
+// `said`, whether the agent's sentence before it said it, all it said there.
+fn step_words(o: own Obj, said: String, title: String, name: String, kind: String, input: Json) -> Obj {
+    let w = plain_words.words(said, title, name.copy(), kind, input)
+    return o.s("name", name).s("doing", w.doing).s("did", w.did).b("said", w.said)
+}
+
+// A tool.updated or tool.finished from an ACP update that names the call
+// again: its new title, and its words made again from it.
+fn named_again(o: own Obj, blocks: List<Block>, call: String, u: Json) -> Obj {
+    let title = acp.tool_title(u.copy())
+    let named = plain_words.name_of(str_at(u.copy(), "title") ?? String(), acp.tool_name(u.copy()))
+    let kind = acp.tool_kind(str_at(u.copy(), "kind") ?? String())
+    return step_words(o.s("title", title.copy()), said_before(blocks, call), title, named, kind, at(u, "rawInput"))
 }
 
 struct Run {
@@ -14329,7 +14378,7 @@ impl Instance {
             i.record_tool(r.user.copy(), r.agent.copy(), call.copy(), u.copy())
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
-                try i.tool_finished(r, call, status, at(u, "content"), none)
+                try i.tool_finished(r, call, status, at(u, "content"), Json.Null)
             }
         } else if kind == "tool_call_update" {
             let call = if let c = r.tools.find(str_at(u.copy(), "toolCallId") ?? String()) { c.copy() } else { String() }
@@ -14337,11 +14386,11 @@ impl Instance {
             let status = str_at(u.copy(), "status") ?? String()
             if status == "completed" or status == "failed" {
                 // An update that names the call as it finishes it keeps the name.
-                let title = if acp.names_tool(u.copy()) { some(acp.tool_title(u.copy())) } else { none }
-                try i.tool_finished(r, call, status, at(u, "content"), title)
+                let named = if acp.names_tool(u.copy()) { u.copy() } else { Json.Null }
+                try i.tool_finished(r, call, status, at(u, "content"), named)
             } else {
-                var fields = Obj.new().s("call", call)
-                if acp.names_tool(u.copy()) { fields = fields.s("title", acp.tool_title(u.copy())) }
+                var fields = Obj.new().s("call", call.copy())
+                if acp.names_tool(u.copy()) { fields = named_again(fields, r.blocks, call.copy(), u.copy()) }
                 if let Json.Array(_) = at(u.copy(), "content") { fields = fields.j("output", output_blocks(at(u.copy(), "content"))) }
                 try i.event(r.user.copy(), "tool.updated", fields.done())
             }
@@ -14419,7 +14468,7 @@ impl Instance {
         if act > 0 { i.tool_actions.insert(call.copy(), act) }
     }
 
-    fn tool_finished(i: Instance, r: Run, call: String, status: String, content: Json, title: String?) ! Error {
+    fn tool_finished(i: Instance, r: Run, call: String, status: String, content: Json, named: Json) ! Error {
         var s = if status == "completed" { String("done") } else { String("failed") }
         if r.denied.contains(call.copy()) { s = String("denied") }
         if let act = i.tool_actions.find(call.copy()) {
@@ -14434,7 +14483,9 @@ impl Instance {
             }
             if s == "denied" { i.settle(act, String("refused"), String("person-said-no: Your person said no.")) } else { i.settle(act, s.copy(), if s == "done" { String() } else { said }) }
         }
-        try i.event(r.user.copy(), "tool.finished", Obj.new().s("call", call).s("status", s).maybe("title", title).j("output", output_blocks(content)).done())
+        var fields = Obj.new().s("call", call.copy()).s("status", s)
+        if named != Json.Null { fields = named_again(fields, r.blocks, call, named) }
+        try i.event(r.user.copy(), "tool.finished", fields.j("output", output_blocks(content)).done())
     }
 
     // A request for permission: answered by the agent's permission mode, or
@@ -14629,13 +14680,18 @@ impl Instance {
         }
         if run_id.len() > 0 {
             var place: i64 = 0
+            var said = String()
             if let r = mut i.runs.find(run_id.copy()) {
                 var b = new_block("tool")
                 b.call = call.copy()
                 r.blocks.push(b)
                 place = tool_place(r.blocks, call.copy())
+                said = said_before(r.blocks, call.copy())
             }
-            try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", cut_input(at(args, "args"))).done()).j("locations", Json.Null).done())
+            // Its step in plain words: what it does on the device, without the command.
+            let plain = if tool_name == "run_command" { "Run a command on {device_name}" } else if tool_name == "open" { "Open something on {device_name}" } else if tool_name == "screenshot" { "Take a screenshot of {device_name}" } else if tool_name == "read_clipboard" { "Read the clipboard on {device_name}" } else if tool_name == "write_clipboard" { "Copy to the clipboard on {device_name}" } else { "Read a file on {device_name}" }
+            let started = Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", kind.copy()).s("title", title.copy()).j("input", Obj.new().s("device", device_name.copy()).s("tool", tool_name.copy()).j("args", cut_input(at(args.copy(), "args"))).done()).j("locations", Json.Null)
+            try i.event(g.user.copy(), "tool.started", step_words(started, said, plain, tool_name.copy(), kind.copy(), Json.Null).done())
         }
         i.hold_call(call.copy(), req.copy())
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
@@ -14694,13 +14750,16 @@ impl Instance {
         if importing.len() > 0 { runs_there.push(Json.Str(importing)) }
         let detail = Obj.new().s("host", host.copy()).s("through", through).j("plan", plan).j("commands", Json.Array(runs_there)).done()
         var place: i64 = 0
+        var said = String()
         if let r = mut i.runs.find(run_id.copy()) {
             var b = new_block("tool")
             b.call = call.copy()
             r.blocks.push(b)
             place = tool_place(r.blocks, call.copy())
+            said = said_before(r.blocks, call.copy())
         }
-        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String("execute")).s("title", title.copy()).j("input", detail.copy()).j("locations", Json.Null).done())
+        let started = Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String("execute")).s("title", title.copy()).j("input", detail.copy()).j("locations", Json.Null)
+        try i.event(g.user.copy(), "tool.started", step_words(started, said, "Install loom on {host}", String("install_loom"), String("execute"), Json.Null).done())
         i.hold_call(call.copy(), req.copy())
         i.device_calls.insert(call.copy(), DeviceCall { user: g.user.copy(), device: device.copy(), agent: g.agent.copy(), title: title.copy() })
         i.setups.insert(call.copy(), Setup { run: run_id.copy(), card: card, host: host.copy(), steps: steps })
@@ -15168,13 +15227,16 @@ impl Instance {
         if run_id.len() == 0 { return some(rule_refusal("needs-a-chat", String("That needs your person's yes, and they can only give it during a chat with you."))) }
         let call = try i.store.new_id("tc")
         var place: i64 = 0
+        var said = String()
         if let r = mut i.runs.find(run_id.copy()) {
             var b = new_block("tool")
             b.call = call.copy()
             r.blocks.push(b)
             place = tool_place(r.blocks, call.copy())
+            said = said_before(r.blocks, call.copy())
         }
-        try i.event(g.user.copy(), "tool.started", Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null).done())
+        let started = Obj.new().s("run", run_id.copy()).s("call", call.copy()).i("block", place).s("tool", String(kind)).s("title", title.copy()).j("input", cut_input(at(action.copy(), "args"))).j("locations", Json.Null)
+        try i.event(g.user.copy(), "tool.started", step_words(started, said, title.copy(), str_at(at(action.copy(), "args"), "tool") ?? tool.copy(), String(kind), Json.Null).done())
         i.approvals.insert(call.copy(), Approval { call: call.copy(), run: run_id.copy(), agent: g.agent.copy(), rpc: Json.Null, options: Json.Null, title: title.copy(), action: action.copy(), proc: String(), always: tool.copy() })
         i.hold_call(call.copy(), req.copy())
         // A risky one is allowed by holding Allow, not a click (PLAN.md, "Permissions").

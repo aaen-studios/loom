@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation, at);
 CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, conversation TEXT NOT NULL, json TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER, parent TEXT, at INTEGER);
+CREATE TABLE IF NOT EXISTS calls (call TEXT PRIMARY KEY, run TEXT NOT NULL, title TEXT, status TEXT, block INTEGER, parent TEXT, at INTEGER, name TEXT, doing TEXT, did TEXT, said INTEGER);
 CREATE INDEX IF NOT EXISTS calls_by_run ON calls (run);
 CREATE TABLE IF NOT EXISTS approvals (call TEXT PRIMARY KEY, run TEXT NOT NULL, json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, json TEXT NOT NULL);
@@ -50,13 +50,14 @@ const CONVERSATIONS: str = "SELECT json_set(json, '$.last', last, '$.replied', r
 const DEVICES: str = "SELECT json FROM devices ORDER BY rowid"
 const RUNS: str = "SELECT json FROM runs ORDER BY rowid"
 // What a tool block shows of each call: its call, run, title and status, its block in
-// a reply still being written, and the subagent call it sits inside, which is all the
-// cache keeps of it. A call's input and output can be many KB, no app reads them from
-// here, and the apps ask again at every tool event. A call with no block (from an
-// instance before tool.started gave one) or no parent (the agent's own) has none in
-// its JSON.
-const TOOLS_FOR: str = "SELECT json_patch(json_object('call', call, 'run', run, 'title', title, 'status', status), json_object('block', block, 'parent', parent)) FROM calls WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
-const TOOLS: str = "SELECT json_patch(json_object('call', call, 'run', run, 'title', title, 'status', status), json_object('block', block, 'parent', parent)) FROM calls ORDER BY rowid"
+// a reply still being written, the subagent call it sits inside, and its step in plain
+// words (its tool's name, what it's doing and what it did), which is all the cache keeps
+// of it. A call's input and output can be many KB, no app reads them from here, and the
+// apps ask again at every tool event. A call with no block (from an instance before
+// tool.started gave one), no parent (the agent's own) or no words (from an instance
+// before it gave them) has none in its JSON.
+const TOOLS_FOR: str = "SELECT json_patch(json_object('call', call, 'run', run, 'title', title, 'status', status), json_object('block', block, 'parent', parent, 'name', name, 'doing', doing, 'did', did, 'said', json(CASE said WHEN 1 THEN 'true' END))) FROM calls WHERE call IN (SELECT value FROM json_each(?)) OR run IN (SELECT value FROM json_each(?)) ORDER BY rowid"
+const TOOLS: str = "SELECT json_patch(json_object('call', call, 'run', run, 'title', title, 'status', status), json_object('block', block, 'parent', parent, 'name', name, 'doing', doing, 'did', did, 'said', json(CASE said WHEN 1 THEN 'true' END))) FROM calls ORDER BY rowid"
 
 // A cache from before calls and the conversations' agent column: what it had is moved over.
 const FROM_TOOLS: str = #"
@@ -78,6 +79,8 @@ COMMIT;
 const BLOCK_COLUMN: str = "ALTER TABLE calls ADD COLUMN block INTEGER;"
 // A cache from before calls kept the subagent call they sit inside.
 const PARENT_COLUMN: str = "ALTER TABLE calls ADD COLUMN parent TEXT;"
+// A cache from before calls kept their steps in plain words.
+const WORDS_COLUMNS: str = "ALTER TABLE calls ADD COLUMN name TEXT; ALTER TABLE calls ADD COLUMN doing TEXT; ALTER TABLE calls ADD COLUMN did TEXT; ALTER TABLE calls ADD COLUMN said INTEGER;"
 // A cache from before calls kept when they started: what's there counts from now, so
 // it goes CALLS_KEPT_MS after the update, not at once.
 const CALLS_AT_COLUMN: str = #"
@@ -153,6 +156,12 @@ fn maybe(s: own String?) -> Value {
     return Value.Null
 }
 
+// A tool event's `said`, as the calls table keeps it: 1 or 0, or null where it has none.
+fn said_of(e: Json) -> Value {
+    if let b = bool_at(e, "said") { return Value.Int(if b { 1 } else { 0 }) }
+    return Value.Null
+}
+
 // Whether a conversation may be its agent's chat, rather than a task's, a side
 // question's, a branch's, a routine's, another agent's (`asked_by`) or a thread an
 // agent made (`made_by`): 1 or 0. Of those, the chat is the one marked `main`.
@@ -215,6 +224,9 @@ impl Cache {
         }
         if try db.query_one(String("SELECT 1 FROM pragma_table_info('calls') WHERE name = 'at'"), List<Value>()) == none {
             try db.execute_script(String(CALLS_AT_COLUMN))
+        }
+        if try db.query_one(String("SELECT 1 FROM pragma_table_info('calls') WHERE name = 'doing'"), List<Value>()) == none {
+            try db.execute_script(String(WORDS_COLUMNS))
         }
         if try db.query_one(String("SELECT 1 FROM pragma_table_info('conversations') WHERE name = 'partial'"), List<Value>()) == none {
             try db.execute_script(String(PARTIAL_COLUMN))
@@ -448,11 +460,11 @@ impl Cache {
             let call = str_at(e, "call") ?? String()
             let run = str_at(e, "run") ?? String()
             let block = if let b = int_at(e, "block") { Value.Int(b) } else { Value.Null }
-            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status, block, parent, at) VALUES (?, ?, ?, ?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status")), block, maybe(str_at(e, "parent")), Value.Int(int_at(e, "at") ?? now())])
+            _ = try self.db.execute(String("INSERT OR REPLACE INTO calls (call, run, title, status, block, parent, at, name, doing, did, said) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"), [t(call), t(run), maybe(str_at(e, "title")), maybe(str_at(e, "status")), block, maybe(str_at(e, "parent")), Value.Int(int_at(e, "at") ?? now()), maybe(str_at(e, "name")), maybe(str_at(e, "doing")), maybe(str_at(e, "did")), said_of(e)])
         } else if kind == "tool.updated" or kind == "tool.finished" {
             // Only what changed, set in place: no stored JSON read, merged and written back.
             let call = str_at(e, "call") ?? String()
-            _ = try self.db.execute(String("UPDATE calls SET title = coalesce(?, title), status = coalesce(?, status) WHERE call = ?"), [maybe(str_at(e, "title")), maybe(str_at(e, "status")), t(call)])
+            _ = try self.db.execute(String("UPDATE calls SET title = coalesce(?, title), status = coalesce(?, status), name = coalesce(?, name), doing = coalesce(?, doing), did = coalesce(?, did), said = coalesce(?, said) WHERE call = ?"), [maybe(str_at(e, "title")), maybe(str_at(e, "status")), maybe(str_at(e, "name")), maybe(str_at(e, "doing")), maybe(str_at(e, "did")), said_of(e), t(call)])
         } else if kind == "approval.needed" {
             let call = str_at(e, "call") ?? String()
             let run = str_at(e, "run") ?? String()
@@ -1224,6 +1236,16 @@ fn a_tool_keeps_its_place_in_the_reply() ! Error {
     _ = try c.apply(ev(2, "tool.updated", Obj.new().s("call", String("tc_1")).s("title", String("List the folder")).done()))
     _ = try c.apply(ev(3, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_2")).s("title", String("cat")).done()))
     assert(try c.tools_text(String("[]"), String(#"["run_1"]"#)) == #"[{"call":"tc_1","run":"run_1","title":"List the folder","status":null,"block":1},{"call":"tc_2","run":"run_1","title":"cat","status":null}]"#)
+}
+
+@test
+fn a_call_keeps_its_step_in_plain_words() ! Error {
+    // So a turn shows what it's doing, and its folded steps what they did.
+    let c = try Cache.open(String(":memory:"))
+    _ = try c.apply(ev(1, "tool.started", Obj.new().s("run", String("run_1")).s("call", String("tc_1")).s("title", String("ls")).s("name", String("Bash")).s("doing", String("Running a command")).s("did", String("Ran a command")).b("said", true).done()))
+    // An update that names it again words it again.
+    _ = try c.apply(ev(2, "tool.finished", Obj.new().s("call", String("tc_1")).s("status", String("done")).s("title", String("List the folder")).s("doing", String("Listing the folder")).s("did", String("Listed the folder")).done()))
+    assert(try c.tools_text(String("[]"), String(#"["run_1"]"#)) == #"[{"call":"tc_1","run":"run_1","title":"List the folder","status":"done","name":"Bash","doing":"Listing the folder","did":"Listed the folder","said":true}]"#)
 }
 
 @test
