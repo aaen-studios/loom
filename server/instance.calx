@@ -10493,8 +10493,9 @@ impl Instance {
         try i.spool_card_to(user.copy(), message, card_id, changes)
         if agent.len() == 0 or conversation.len() == 0 { return }
         if step == "done" { i.log(user.copy(), agent.copy(), "approval", "Connected {name} as {server}, as {i.agent_name(user.copy(), agent.copy())} asked", device) }
-        let offered = if offers.len() > 0 { ", with {offers.len()} tools: {offers.join(", ")}" } else { String() }
-        let came = if step == "done" { "Your person signed in on your card, and {name} is connected as {server}{offered}." } else { "Connecting {name} as {server} failed: {said} Your person can try again on your card." }
+        let offered = if offers.len() == 1 { ", with 1 tool: {offers[0]}" } else if offers.len() > 1 { ", with {offers.len()} tools: {offers.join(", ")}" } else { String() }
+        let why = if said.ends_with(".") { said.copy() } else { "{said}." }
+        let came = if step == "done" { "Your person signed in on your card, and {name} is connected as {server}{offered}." } else { "Connecting {name} as {server} failed: {why} Your person can try again on your card." }
         i.watch.wakes.push(Wake { user: user, agent: agent, conversation: conversation, came: came, until: now() + ROUTINE_WAIT_MINUTES * i.minute_ms, from: String(SPOOL_WOKEN_FROM) })
         try i.wakes_waited()
     }
