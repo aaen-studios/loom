@@ -305,6 +305,8 @@ final class SampleCore: CoreLink, @unchecked Sendable {
             }
         case "voice.listen", "voice.stop", "voice.voices", "voice.speak":
             voiceFrame(f)
+        case "live.start", "live.mute", "live.end":
+            liveFrame(f, name: agents.first { $0["id"] == f["agent"] }?["name"].text ?? "")
         case "emoji.typed", "emoji.find", "emoji.picker":
             tell(emoji(f))
         case "emoji.used":

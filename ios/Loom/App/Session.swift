@@ -111,6 +111,11 @@ final class Session {
                 model.take(f)
                 // Failed, or no engine to hear it: the mic stops, as the core already has.
                 if ["failed", "no_engine"].contains(f["state"].text) { endMic() }
+            case "core.live":
+                model.take(f)
+                if f["stop"].bool == true { Speaker.stop() }
+                if let file = f["play"]["file"].string { Speaker.play(file) }
+                liveMic()
             case "welcome":
                 model.take(f)
                 registerPush()
@@ -147,9 +152,19 @@ final class Session {
         if model.conn == .signedOut, let qr = value("-link"), launchDone.insert("-link").inserted {
             send(model.link(qr: qr, device: Session.device))
         }
-        guard model.synced, let agent = value("-open"), model.selected == agent else { return }
+        // `-live` without `-open` opens the first agent's chat.
+        if model.synced, value("-open") == nil, value("-live") != nil, let first = model.agents.first, launchDone.insert("-live open").inserted {
+            model.openAgent = first.id
+        }
+        let open = value("-open") ?? (value("-live") != nil ? model.agents.first?.id : nil)
+        guard model.synced, let agent = open, model.selected == agent else { return }
         if let text = value("-say"), launchDone.insert("-say").inserted {
             send(model.send(text))
+        }
+        // `-live speaking` or `-live listening` taps Live in that chat, and the sample core
+        // holds live mode in that state, for screenshots of it.
+        if value("-live") != nil, launchDone.insert("-live").inserted {
+            startLive()
         }
         if args.contains("-allow") {
             for a in model.shownApprovals where launchDone.insert(a.call).inserted {
@@ -216,8 +231,11 @@ final class Session {
     /// Someone started or stopped looking at the app. Coming back from the background,
     /// the socket has likely gone, so the core connects again at once.
     func active(_ active: Bool, returning: Bool) {
-        // The mic doesn't hear in the background.
-        if !active { stopDictation() }
+        // The mic doesn't hear in the background, so dictation and live mode end.
+        if !active {
+            stopDictation()
+            endLive()
+        }
         send(["t": "app.active", "active": JSON(active)])
         if active && returning {
             send(["t": "app.wake"])
@@ -322,17 +340,26 @@ final class Session {
     /// The composer's mic: loom's dictation starts (`voice.listen`) and the mic's PCM goes
     /// to the core. The first time, the system asks whether loom may hear the mic.
     func startDictation() {
-        guard mic == nil else { return }
+        guard mic == nil, liveMicOn == nil else { return }
         micWanted = true
+        mayHear { [weak self] in
+            guard let self, self.micWanted else { return }
+            self.beginDictation()
+        }
+    }
+
+    /// Whether loom may hear the mic: `then` once it may, the first time once the system
+    /// has asked, or why it can't.
+    private func mayHear(_ then: @escaping @MainActor () -> Void) {
         switch AVAudioApplication.shared.recordPermission {
         case .granted:
-            beginDictation()
+            then()
         case .undetermined:
             AVAudioApplication.requestRecordPermission { [weak self] ok in
                 Task { @MainActor in
                     guard let self else { return }
                     if ok {
-                        if self.micWanted { self.beginDictation() }
+                        then()
                     } else {
                         self.micWanted = false
                         self.model.notice = "loom can't hear the mic. Turn it on in Settings › Apps › loom."
@@ -373,5 +400,58 @@ final class Session {
         mic?.stop()
         mic = nil
         listening = false
+    }
+
+    // MARK: Live mode
+
+    /// The mic while live mode hears it.
+    @ObservationIgnored private var liveMicOn: Mic?
+
+    /// Live in the composer: live mode starts with the chat open's agent (`live.start`),
+    /// and once the core says it's on, the mic records for it.
+    func startLive() {
+        stopDictation()
+        mayHear { [weak self] in
+            guard let self else { return }
+            Speaker.stop()
+            self.send(self.model.liveStart())
+        }
+    }
+
+    /// Mute in live mode: the mic stops recording until it's let go.
+    func muteLive() {
+        send(model.liveMute())
+    }
+
+    /// End in live mode: the chat comes back, speech stops and the mic lets go.
+    func endLive() {
+        guard model.liveMode.on else { return }
+        send(model.liveEnd())
+        Speaker.stop()
+        liveMic()
+    }
+
+    /// The mic records while live mode is on and not muted, as the core last said.
+    private func liveMic() {
+        let live = model.liveMode
+        if live.on && !live.muted {
+            // Live asked whether loom may hear the mic before it started. The sample core
+            // hears nothing, so it isn't recorded for, and a simulator with no mic to hear
+            // draws live mode all the same.
+            guard liveMicOn == nil, !sample, AVAudioApplication.shared.recordPermission == .granted else { return }
+            let core = self.core
+            let m = Mic { frame in core?.send(frame) }
+            guard m.start() else {
+                model.notice = "The mic didn't start."
+                send(model.liveEnd())
+                Speaker.stop()
+                return
+            }
+            liveMicOn = m
+        } else {
+            liveMicOn?.stop(keep: live.on)
+            liveMicOn = nil
+            if !live.on && mic == nil { Mic.release() }
+        }
     }
 }

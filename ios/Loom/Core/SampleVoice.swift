@@ -1,14 +1,20 @@
 import Foundation
 
 /// What the sample keeps of Settings › Voice: the settings and the services with a key, as
-/// the instance would (shared/voice.calx), and the dictation the mic is on for.
+/// the instance would (shared/voice.calx), the dictation the mic is on for, and live mode.
 struct SampleVoice {
     var settings: JSON = [
         "dictation": ["engine": "deepgram", "language": ""],
         "speech": ["engine": "openai", "voice": "marin", "voice_name": "Marin", "speed": 1, "read_aloud": "never"],
+        "live": ["barge_in": true, "pause": .number(0.8), "captions": true],
     ]
     var keys: Set<String> = ["deepgram", "openai"]
     var listening = 0
+    /// Live mode: each start, mute and end is the next, which stops what the last one had
+    /// waiting.
+    var live = 0
+    var liveOn: JSON = .null
+    var liveMuted = false
 
     static let engines: [(kind: String, id: String, name: String, line: String, streams: Bool)] = [
         ("dictation", "elevenlabs", "ElevenLabs Scribe", "Words as you say them", true),
@@ -63,13 +69,13 @@ struct SampleVoice {
         return ["settings": settings, "engines": ["dictation": tiles("dictation"), "speech": tiles("speech")],
                 "languages": .array(Self.languages.map { ["code": JSON($0.0), "name": JSON($0.1)] }),
                 "speeds": [.number(0.8), .number(0.9), .number(1), .number(1.1), .number(1.2)],
-                "read_aloud": ["never", "live", "always"], "keys": .object(have)]
+                "read_aloud": ["never", "live", "always"], "pauses": [.number(0.5), .number(0.8), .number(1.2)], "keys": .object(have)]
     }
 
     /// The settings with `args`' changes.
     mutating func put(_ args: JSON) {
         guard case .object(var all) = settings else { return }
-        for kind in ["dictation", "speech"] {
+        for kind in ["dictation", "speech", "live"] {
             guard case .object(let change) = args[kind], case .object(var now) = all[kind] ?? [:] else { continue }
             if kind == "speech", let engine = change["engine"], engine != now["engine"], change["voice"] == nil {
                 now["voice"] = ""
@@ -169,7 +175,150 @@ extension SampleCore {
     }
 }
 
+extension SampleCore {
+    /// Live mode, as core/live.calx says it, with a turn the sample makes up: the person
+    /// talking for 2 s, the agent thinking for 1 s, then speaking its reply in two pieces
+    /// with their words, when each starts and their levels, but no file to play, then
+    /// listening again. `-live speaking` or `-live listening` at launch holds it in that
+    /// state, for screenshots of it.
+    func liveFrame(_ f: JSON, name: String) {
+        switch f["t"].text {
+        case "live.start":
+            voice.live += 1
+            let n = voice.live
+            voice.liveMuted = false
+            voice.liveOn = ["t": "core.live", "agent": f["agent"], "name": JSON(name), "conversation": f["conversation"],
+                            "started": JSON(Sample.now()), "captions": voice.settings["live"]["captions"], "state": "listening", "words": ""]
+            let args = ProcessInfo.processInfo.arguments
+            let hold = args.firstIndex(of: "-live").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+            switch hold {
+            case "speaking":
+                liveTell("thinking", words: Sample.liveAsked)
+                liveSay(n, [Sample.liveHeld], then: nil)
+            case "listening":
+                liveTell("listening", words: "Which plants need")
+                liveHear(n, loud: true)
+            default:
+                liveTurn(n)
+            }
+        case "live.mute":
+            guard !voice.liveOn.isNull else { return }
+            voice.liveMuted = f["on"].bool ?? true
+            liveTell(voice.liveOn["state"].text, words: voice.liveOn["words"].text)
+        case "live.end":
+            guard !voice.liveOn.isNull else { return }
+            voice.live += 1
+            let conversation = voice.liveOn["conversation"]
+            voice.liveOn = .null
+            tell(["t": "core.live", "state": "ended", "conversation": conversation, "stop": true])
+        default:
+            break
+        }
+    }
+
+    /// Tells the app how live mode stands, with `extra` (level, play).
+    private func liveTell(_ state: String, words: String, _ extra: [String: JSON] = [:]) {
+        guard case .object(var f) = voice.liveOn else { return }
+        f["state"] = JSON(state)
+        f["words"] = JSON(words)
+        f["muted"] = JSON(voice.liveMuted)
+        voice.liveOn = .object(f)
+        for (k, v) in extra { f[k] = v }
+        tell(.object(f))
+    }
+
+    /// The person's turn: their words as they're heard, then the agent thinks, and speaks.
+    private func liveTurn(_ n: Int) {
+        liveTell("listening", words: "")
+        liveHear(n, loud: true)
+        for (k, words) in ["Which plants", "Which plants need water", Sample.liveAsked].enumerated() {
+            later(0.6 * Double(k + 1)) { [self] in
+                guard voice.live == n else { return }
+                liveTell("listening", words: words)
+            }
+        }
+        later(2) { [self] in
+            guard voice.live == n, case .object = voice.liveOn else { return }
+            let c = voice.liveOn["conversation"]
+            event("message.created", ["conversation": c, "message": ["id": JSON("msg_live\(n)a"), "conversation": c, "role": "person", "from": "d_4", "at": JSON(Sample.now()),
+                                                                     "blocks": [["kind": "text", "text": JSON(Sample.liveAsked)]]]])
+            liveTell("thinking", words: Sample.liveAsked)
+            later(1) { [self] in
+                guard voice.live == n else { return }
+                liveSay(n, Sample.liveReply) { [self] in
+                    let c = voice.liveOn["conversation"]
+                    event("message.created", ["conversation": c, "message": ["id": JSON("msg_live\(n)b"), "conversation": c, "role": "agent", "agent": voice.liveOn["agent"],
+                                                                             "run": JSON("run_live\(n)"), "at": JSON(Sample.now()),
+                                                                             "blocks": [["kind": "text", "text": JSON(Sample.liveReply.joined(separator: " "))]]]])
+                    liveTell("listening", words: Sample.liveAsked)
+                    liveHear(n, loud: false)
+                }
+            }
+        }
+    }
+
+    /// The mic's level about every 100 ms while it listens and isn't muted: someone
+    /// talking, or the room.
+    private func liveHear(_ n: Int, loud: Bool, k: Int = 0) {
+        later(0.1) { [self] in
+            guard voice.live == n, voice.liveOn["state"].text == "listening" else { return }
+            if !voice.liveMuted {
+                let x = Double(k)
+                let level = loud ? 0.3 + 0.45 * abs(sin(x * 0.55)) * (0.7 + 0.3 * sin(x * 1.7)) : 0.04 + 0.03 * abs(sin(x * 0.8))
+                liveTell("listening", words: voice.liveOn["words"].text, ["level": .number((level * 100).rounded() / 100)])
+            }
+            liveHear(n, loud: loud, k: k + 1)
+        }
+    }
+
+    /// Speaks `pieces` one after another, each when the one before has played, and then
+    /// does `then`; or with none, says the first again and again.
+    private func liveSay(_ n: Int, _ pieces: [String], then: (@Sendable () -> Void)?) {
+        guard let first = pieces.first else {
+            then?()
+            return
+        }
+        let p = Sample.livePiece(first)
+        liveTell("speaking", words: voice.liveOn["words"].text, ["play": p])
+        later(Double(p["ms"].int ?? 0) / 1000) { [self] in
+            guard voice.live == n else { return }
+            liveSay(n, then == nil ? pieces : Array(pieces.dropFirst()), then: then)
+        }
+    }
+}
+
 extension Sample {
+    static let liveAsked = "Which plants need water today?"
+    static let liveReply = ["The tomatoes on the balcony need water today, about a litre each.", "The basil is fine until tomorrow."]
+    static let liveHeld = "The tomatoes on the balcony need water today, about a litre each, and the basil on the kitchen window is fine until tomorrow morning."
+
+    /// A piece of speech as core/live.calx gives it, for `text`: each word's start, by its
+    /// length, and a level each 20 ms that rises and falls with each word. It has no file.
+    static func livePiece(_ text: String) -> JSON {
+        let words = text.split(separator: " ").map(String.init)
+        var at: [Int] = []
+        var spans: [(Int, Int)] = []
+        var t = 120
+        for w in words {
+            let ms = 140 + 42 * w.count
+            at.append(t)
+            spans.append((t, t + ms))
+            t += ms + (w.hasSuffix(",") || w.hasSuffix(".") ? 220 : 40)
+        }
+        let ms = t + 160
+        var levels: [JSON] = []
+        for i in 0..<(ms / 20) {
+            let now = i * 20
+            var l = 0.02
+            if let span = spans.first(where: { now >= $0.0 && now < $0.1 }) {
+                let u = Double(now - span.0) / Double(span.1 - span.0)
+                l = sin(.pi * u) * (0.55 + 0.35 * sin(Double(i) * 0.9))
+            }
+            levels.append(.number((max(l, 0) * 100).rounded() / 100))
+        }
+        return ["file": "", "words": JSON(words), "at": .array(at.map { JSON($0) }), "levels": .array(levels), "step": 20, "ms": JSON(ms)]
+    }
+
     /// Scribe's chat: an agent's voice_setup, waiting on the person's Fish Audio key.
     static let voiceMessages: [JSON] = [
         ["id": "msg_18", "conversation": "c_2", "role": "person", "from": "d_4", "at": 1795187200000,

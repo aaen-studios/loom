@@ -79,19 +79,27 @@ struct VoiceSettings: Equatable, Sendable {
     var speed = 1.0
     /// never, live or always.
     var readAloud = "never"
+    /// Live mode's: Talk over a reply to stop it, Send when I stop talking (seconds) and
+    /// Show what's said.
+    var bargeIn = true
+    var pause = 0.8
+    var captions = true
 
     init() {}
 
     init(_ j: JSON) {
-        self.init(dictation: j["dictation"], speech: j["speech"])
+        self.init(dictation: j["dictation"], speech: j["speech"], live: j["live"])
     }
 
     /// One kind's settings alone, as a voice_setup card has them.
     init(kind: String, _ j: JSON) {
-        self.init(dictation: kind == "dictation" ? j : .null, speech: kind == "speech" ? j : .null)
+        self.init(dictation: kind == "dictation" ? j : .null, speech: kind == "speech" ? j : .null, live: .null)
     }
 
-    private init(dictation d: JSON, speech s: JSON) {
+    private init(dictation d: JSON, speech s: JSON, live l: JSON) {
+        bargeIn = l["barge_in"].bool ?? true
+        pause = l["pause"].double ?? 0.8
+        captions = l["captions"].bool ?? true
         dictationEngine = d["engine"].text
         language = d["language"].text
         speechEngine = s["engine"].text
@@ -136,6 +144,7 @@ struct VoiceState {
     var languages: [VoiceLanguage] = [VoiceLanguage(code: "", name: "Detect")]
     var speeds: [Double] = [0.8, 0.9, 1.0, 1.1, 1.2]
     var readAloud: [String] = ["never", "live", "always"]
+    var pauses: [Double] = [0.5, 0.8, 1.2]
     /// Which services have a key, never a key.
     var keys: [String: Bool] = [:]
     /// Each speech engine's voices once the core has them, or why there are none.
@@ -146,8 +155,10 @@ struct VoiceState {
     var useOnceKept: [String: String] = [:]
     /// The dictation now, or the last.
     var heard = Dictation()
-    /// Settings › Voice, asked for by the mic with no engine set up.
+    /// Settings › Voice, asked for by the mic or live mode with no engine set up, on the
+    /// tab of the one missing.
     var open = false
+    var openKind = "dictation"
 
     /// Takes `voice.get`'s `voice`, or `voice.updated`'s.
     mutating func take(_ v: JSON) {
@@ -162,11 +173,18 @@ struct VoiceState {
         if !sp.isEmpty { speeds = sp }
         let ra = v["read_aloud"].array.compactMap(\.string)
         if !ra.isEmpty { readAloud = ra }
+        let ps = v["pauses"].array.compactMap(\.double)
+        if !ps.isEmpty { pauses = ps }
         if case .object(let o) = v["keys"] { keys = o.compactMapValues(\.bool) }
     }
 
+    /// A tab's engines: Live has none of its own.
     func tiles(_ kind: String) -> [VoiceTile] {
-        kind == "speech" ? speech : dictation
+        switch kind {
+        case "speech": speech
+        case "dictation": dictation
+        default: []
+        }
     }
 
     /// A language's name, by its code.
@@ -237,7 +255,7 @@ extension Model {
         ["t": "cmd", "id": JSON("\(voiceAnswer)_get"), "name": "voice.get", "args": [:]]
     }
 
-    /// A change to the settings, `voice.put` with `dictation` or `speech`.
+    /// A change to the settings, `voice.put` with `dictation`, `speech` or `live`.
     func voicePut(_ kind: String, _ change: [String: JSON]) -> JSON {
         ["t": "cmd", "id": JSON("\(voiceAnswer)_put"), "name": "voice.put", "args": [kind: .object(change)]]
     }
@@ -282,7 +300,9 @@ extension Model {
             voice.heard.state = f["state"].text
             if let text = f["text"].string { voice.heard.text = text }
             switch voice.heard.state {
-            case "no_engine": voice.open = true
+            case "no_engine":
+                voice.openKind = "dictation"
+                voice.open = true
             case "failed":
                 let why = f["why"].text
                 notice = why.isEmpty ? "Dictation stopped." : why

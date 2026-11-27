@@ -1,11 +1,13 @@
 import AVFoundation
 import Foundation
 
-/// The mic, for loom's dictation (PLAN.md, "Voice"): what it hears goes to the core as
-/// 16-bit little-endian PCM at the mic's own rate and channels, in base64, about every
-/// 100 ms (`voice.audio`), straight from the mic's thread, and the core does the rest.
+/// The mic, for loom's dictation and live mode (PLAN.md, "Voice", "Live mode"): what it
+/// hears goes to the core as 16-bit little-endian PCM at the mic's own rate and channels,
+/// in base64, about every 100 ms (`voice.audio`), straight from the mic's thread, and the
+/// core does the rest.
 final class Mic: @unchecked Sendable {
-    /// Whether a mic is recording, so loom's own sounds leave the audio session as it is.
+    /// Whether the audio session plays and records, for a mic recording or live mode
+    /// muted, so loom's own sounds and speech leave it as it is.
     @MainActor static var on = false
 
     private let engine = AVAudioEngine()
@@ -26,7 +28,7 @@ final class Mic: @unchecked Sendable {
     func start() -> Bool {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker])
+            try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothHFP])
             try session.setActive(true)
         } catch {
             return false
@@ -55,15 +57,23 @@ final class Mic: @unchecked Sendable {
         return true
     }
 
-    /// Stops recording, once what it heard last has gone to the core.
+    /// Stops recording, once what it heard last has gone to the core. With `keep`, the
+    /// audio session stays as it is, to play and record, as live mode muted plays on.
     @MainActor
-    func stop() {
+    func stop(keep: Bool = false) {
         timer?.cancel()
         timer = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         queue.sync { flush() }
-        Mic.on = false
+        if !keep { Mic.release() }
+    }
+
+    /// Lets the audio session go.
+    @MainActor
+    static func release() {
+        guard on else { return }
+        on = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -112,7 +122,8 @@ final class Mic: @unchecked Sendable {
 }
 
 /// Speech the core wrote (`core.speak`): a reply read aloud or a voice's preview, each in
-/// place of what was playing.
+/// place of what was playing; and in live mode, each piece of the reply as `core.live`
+/// says to play it.
 enum Speaker {
     @MainActor private static var playing: AVAudioPlayer?
 
