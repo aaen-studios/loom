@@ -496,7 +496,8 @@ pub fn found(
 
 /// How an entry's card stands: none until the person has a server from it, then the
 /// worst of how its servers stand, in Installed's words: failing, needing a sign-in,
-/// not tried yet, or else connected. Its thread is taut only while it's connected.
+/// not tried yet, or else connected, with how many when there are several. Its thread
+/// is taut only while it's connected.
 pub fn card_status(entry: &Entry, servers: &[McpServer]) -> Option<(String, Dot)> {
     let mine: Vec<&McpServer> = servers
         .iter()
@@ -509,6 +510,10 @@ pub fn card_status(entry: &Entry, servers: &[McpServer]) -> Option<(String, Dot)
         if let Some(m) = mine.iter().find(|m| m.status == worst) {
             return Some((status_words(m), status_dot(m)));
         }
+    }
+    // One there can be several of says how many, such as two T3s.
+    if mine.len() > 1 {
+        return Some((format!("{} connected", mine.len()), Dot::Ok));
     }
     Some(("Connected".into(), Dot::Ok))
 }
@@ -1725,7 +1730,7 @@ mod tests {
         ];
         assert_eq!(
             card_status(&t3, &servers),
-            Some(("Connected".into(), Dot::Ok))
+            Some(("2 connected".into(), Dot::Ok))
         );
         // One not tried yet says so, as Installed does, and isn't taut.
         servers[1].status = McpStatus::Untested;

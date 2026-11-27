@@ -432,6 +432,72 @@ pub fn matches(entry: Json, server: Json) -> bool {
     return why.len() == 0 and same_server(server, spec)
 }
 
+// The `{field}` values that would make `entry`'s address `url`, for an entry
+// whose address is made of its fields, such as T3 Code's `{address}/mcp`: an
+// object by field name, or none when `url` hasn't that shape.
+pub fn fields_of(entry: Json, url: String) -> Json? {
+    let template = str_at(entry.copy(), "url") else return none
+    if list(at(entry.copy(), "fields")).is_empty() { return none }
+    let wanted = url.trim().trim_suffix("/").copy()
+    var rest = template.copy()
+    var left = wanted.copy()
+    var given = Obj.new()
+    while let open = rest.find("\{") {
+        let before = rest[..open].copy()
+        if not left.starts_with(before[..]) { return none }
+        left = left[before.len()..].copy()
+        let close = rest.find("\}") else return none
+        let name = rest[open + 1..close].copy()
+        rest = rest[close + 1..].copy()
+        // What follows the field, up to the next: the field's value ends where it starts.
+        let next = match rest.find("\{") {
+            some(k) => rest[..k].copy(),
+            none => rest.copy(),
+        }
+        var value = String()
+        if rest.find("\{") == none {
+            if not left.ends_with(next[..]) { return none }
+            value = left[..left.len() - next.len()].copy()
+        } else {
+            if next.len() == 0 { return none }
+            let at_next = left.find(next[..]) else return none
+            value = left[..at_next].copy()
+        }
+        if value.len() == 0 { return none }
+        left = left[value.len()..].copy()
+        given.m.insert(name, Json.Str(value))
+    }
+    let values = given.done()
+    let (spec, why) = spec_of(entry, values.copy(), String())
+    if why.len() > 0 or (str_at(spec, "url") ?? String()).trim_suffix("/") != wanted[..] { return none }
+    return some(values)
+}
+
+// Whether a server reached at an address of `entry`'s shape (fields_of) is
+// one of `entry`'s, as what loom knows of it says: the name the metadata of its
+// sign-in gives it (`resource_name`, RFC 9728) is the entry's, or the tools its
+// last test found are at least half of the entry's, and two or more.
+pub fn recognised(entry: Json, resource_name: String, tools: List<String>) -> bool {
+    let name = (str_at(entry.copy(), "name") ?? String()).to_lower_root()
+    if resource_name.trim().len() > 0 and resource_name.trim().to_lower_root() == name { return true }
+    var known = names(at(entry.copy(), "reads"))
+    known.extend(names(at(entry, "changes")))
+    var found: usize = 0
+    for t in known.copy() {
+        if tools.contains(t) { found += 1 }
+    }
+    return found >= 2 and found * 2 >= known.len()
+}
+
+// Whether the person's server `server`, added by hand or by an agent, is one of
+// `entry`'s with fields, by its shape: its address fits the entry's, and
+// recognised says so of it.
+pub fn matches_by_shape(entry: Json, server: Json, resource_name: String, tools: List<String>) -> bool {
+    let address = str_at(server, "url") else return false
+    if fields_of(entry.copy(), address) == none { return false }
+    return recognised(entry, resource_name, tools)
+}
+
 // An entry as catalog.list gives it, with `have`, the names of the person's
 // secrets, `servers`, the names of their servers made from it, `icons`, the
 // icon and the dark one that one of those servers gave of its own (each a
@@ -484,8 +550,11 @@ pub fn listed(entry: Json, have: List<String>, servers: List<String>, icons: (St
     for s in servers {
         on.push(Json.Str(s.copy()))
     }
-    o = o.j("fields", Json.Array(fields)).s("sign_in", str_at(e.copy(), "sign_in") ?? String()).j("secrets", Json.Array(secrets)).maybe("note", str_at(e.copy(), "note")).j("tools", Json.Array(tools)).s("tools_from", str_at(e.copy(), "tools_from") ?? String()).b("tools_checked", bool_at(e, "tools_checked") ?? false)
+    o = o.j("fields", Json.Array(fields)).s("sign_in", str_at(e.copy(), "sign_in") ?? String()).j("secrets", Json.Array(secrets)).maybe("note", str_at(e.copy(), "note")).j("tools", Json.Array(tools)).s("tools_from", str_at(e.copy(), "tools_from") ?? String()).b("tools_checked", bool_at(e.copy(), "tools_checked") ?? false)
     o = o.j("servers", Json.Array(on)).b("connected", not servers.is_empty())
+    // One whose fields make its address, such as T3 Code's, can be connected
+    // once for each: the person's T3 on each of their computers.
+    if not list(at(e, "fields")).is_empty() { o = o.b("several", true) }
     if connecting != Json.Null { o = o.j("connecting", connecting) }
     return o.done()
 }
@@ -591,6 +660,32 @@ fn turns_an_entry_into_a_server() {
 }
 
 @test
+fn knows_an_entry_with_fields_by_its_shape() {
+    let t3 = find(String("t3"))!
+    // The address fits T3's, and gives its field back.
+    assert("{fields_of(t3.copy(), String("https://aaen-vps.tailb27d4f.ts.net:8444/mcp")) ?? Json.Null}" == #"{"address":"https://aaen-vps.tailb27d4f.ts.net:8444"}"#)
+    assert(fields_of(t3.copy(), String("https://pc.tail1234.ts.net/mcp/")) != none)
+    for bad in ["https://pc.tail1234.ts.net/api/mcp", "https://pc.tail1234.ts.net/sse", "pc.local/mcp", "/mcp"] {
+        assert(fields_of(t3.copy(), String(bad)) == none)
+    }
+    assert(fields_of(find(String("acta"))!, String("https://acta.aaenz.no/api/mcp")) == none)
+    let ha = find(String("home-assistant"))!
+    assert("{fields_of(ha.copy(), String("http://homeassistant.local:8123/api/mcp")) ?? Json.Null}" == #"{"address":"http://homeassistant.local:8123"}"#)
+    assert(fields_of(ha, String("http://homeassistant.local:8123/mcp")) == none)
+    // A server of that shape is T3's by its sign-in's metadata, or by its tools.
+    let server = Obj.new().s("name", String("t3-vps")).s("url", String("https://aaen-vps.tailb27d4f.ts.net:8444/mcp")).j("headers", Obj.new().done()).done()
+    assert(matches_by_shape(t3.copy(), server.copy(), String("T3 Code"), List<String>()))
+    let tools: List<String> = [String("t3_project_list"), String("t3_thread_list"), String("t3_thread_read"), String("t3_thread_search"), String("t3_thread_launch"), String("t3_thread_send"), String("other")]
+    assert(matches_by_shape(t3.copy(), server.copy(), String(), tools))
+    // Not by its shape alone, nor with another's tools or name.
+    assert(not matches_by_shape(t3.copy(), server.copy(), String(), List<String>()))
+    assert(not matches_by_shape(t3.copy(), server.copy(), String("Acta"), [String("list_boards"), String("t3_thread_list")]))
+    let elsewhere = Obj.new().s("name", String("x")).s("url", String("https://mcp.example.com/api/mcp")).done()
+    assert(not matches_by_shape(t3.copy(), elsewhere, String("T3 Code"), List<String>()))
+    assert(not matches(t3, server))
+}
+
+@test
 fn lists_an_entry() {
     let github = find(String("github"))!
     let l = listed(github.copy(), [String("GITHUB_TOKEN")], [String("github")], (String(), String()), Json.Null)
@@ -606,5 +701,8 @@ fn lists_an_entry() {
     assert("{at(iconed, "badge")}" == "{badge.badge(String("github"), String("ab12"), String("cd34"))}")
     // One without a mark has its initial.
     let p = listed(find(String("playwright"))!, List<String>(), List<String>(), (String(), String()), Json.Null)
-    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p.copy(), "connected") == some(false) and str_at(p, "icon_svg") == none)
+    assert(str_at(p.copy(), "command") == some(String("npx")) and str_at(p.copy(), "url") == none and bool_at(p.copy(), "connected") == some(false) and str_at(p.copy(), "icon_svg") == none and bool_at(p, "several") == none)
+    // One with fields can be connected once for each of them.
+    let t = listed(find(String("t3"))!, List<String>(), [String("t3-vps"), String("t3-pc")], (String(), String()), Json.Null)
+    assert(bool_at(t.copy(), "several") == some(true) and "{at(t, "servers")}" == #"["t3-vps","t3-pc"]"#)
 }

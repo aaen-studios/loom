@@ -206,6 +206,17 @@ const MCP_SETTINGS_MOST: usize = 20
 const MCP_ADD_TEST: str = "mcp_add:"
 // The waiter a test of a server being connected from the catalog answers.
 const CONNECT_TEST: str = "connect:"
+// The waiter of a test nothing else asked for: one right after a sign-in, which
+// the device that signed in waits on (SignedWait), or one as the instance starts,
+// of a server that may be one of the catalog's by its shape (catalog_by_shape).
+const TRIED_TEST: str = "tried:"
+
+// A device's mcp.signed_in, answered once the server is tried with its new
+// sign-in, so Installed says Connected with its tools, or Failing with why.
+struct SignedWait {
+    waiter: Waiter
+    who: String    // whom the person signed in as, or ""
+}
 
 // A spool an agent asked to connect with spool_connect (PLAN.md, "An agent
 // connects a spool"), from the person's Sign in on its card until the connect
@@ -623,6 +634,7 @@ pub struct Instance {
     drafts_due: List<DraftDue>    // drafts the person sent, or set to send later, waiting for their time (PLAN.md, "Drafts")
     connects: LinkedMap<String, Connect>    // user/server -> a server being connected from the catalog
     spool_asks: Map<String, SpoolAsk>    // user/server -> the spool_connect card a connect under way follows
+    signed_waits: Map<String, SignedWait>    // user/server -> the mcp.signed_in waiting on its test
     mcp_registry_at: String    // the MCP Registry's address
     pool_to: Sender<pools.Job>    // the thread that reads usage pools
     pool_done: Receiver<pools.Done>
@@ -2176,6 +2188,17 @@ fn mcp_spec(args: Json) -> (Json, String) {
     return (server.s("url", address).j("headers", headers).done(), String())
 }
 
+// The catalog's entries with fields whose address `server`'s fits
+// (catalog.fields_of).
+fn shaped_entries(server: Json) -> List<Json> {
+    var out = List<Json>()
+    let address = str_at(server, "url") else return out
+    for e in catalog.entries() {
+        if catalog.fields_of(e.copy(), address.copy()) != none { out.push(e.copy()) }
+    }
+    return out
+}
+
 // Whether the agent `agent` has the MCP server `server`.
 fn has_server(agent: Json, server: String) -> bool {
     if let Json.Array(names) = at(agent, "mcp") { return names.contains(Json.Str(server.copy())) }
@@ -2531,7 +2554,7 @@ impl Instance {
         let browser_done = Receiver<browser.Back>()
         let browser_to = browser_done.sender()
         let (picture_to, picture_done) = files.start_pictures(waker)
-        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
+        var i = Instance { release: config.release.copy(), host: update.host(config.in_app), exe: current_exe(), mcp_exe: config.mcp.copy(), update_to: update_to, update_back: update_back, updating: no_update(), next_update_check: 0, last_busy: now(), restart_stops: List<String>(), restart: false, told_update: Json.Null, told_update_at: 0, picks: LinkedMap<String, Pick>(), route_counts: Map<String, i64>(), handoffs: Map<String, (String, String)>(), browsers: LinkedMap<String, Browser>(), watchers: Map<u32, String>(), followers: List<u32>(), browser_pages: Map<String, String>(), browsers_to_check: List<String>(), browser_done: browser_done, browser_to: browser_to, stopped_browsers: Map<u64, Thread>(), closing_browsers: Map<String, u64>(), next_browser: 0, fills: Map<String, Fill>(), turns_ended: List<(String, String, String)>(), next_browser_sweep: 0, task_stops: Map<String, String>(), resumes: List<(String, String)>(), push_to: push_to, push_gone: push_gone, move_to: move_to, move_done: move_done, lan: config.lan, bridge: none, stop_bridge: none, lan_port: 0, announcer: none, stop_announcer: none, to_close: List<ServerSocket>(), boxes: none, boxes_pulled: Receiver<String>(), stale_boxes: List<String>(), gate: none, stop_gate: none, checkpointer: some(checkpointer), stop_checkpoints: stop_checkpoints, wal_big: wal_big, search_to: search_to, search_done: search_done, searches: Map<String, Waiter>(), next_search: 0, disk_used: Map<String, (i64, i64)>(), doors: LinkedMap<String, egress.Door>(), moving: String(), move_waiters: List<Waiter>(), moved: moved, version: config.version.copy(), store: store, server: server, waker: waker, data: config.data.copy(), sessions: Map<u32, Session>(), runs: LinkedMap<String, Run>(), procs: LinkedMap<String, Proc>(), approvals: LinkedMap<String, Approval>(), lines: lines, lines_to: to, stopped_to: stopped_to, stopped: stopped, stopping: 0, hash_to: hash_to, hash_done: hash_done, next_job: 0, auths: Map<i64, Auth>(), dummy_hash: dummy, ready_now: String(), open_secrets: Map<String, List<(String, String)>>(), failures: LinkedMap<String, List<i64>>(), link_asks: LinkedMap<String, LinkAsk>(), thumbs: files.start(), picture_to: picture_to, picture_done: picture_done, picture_thumbs: Map<String, String>(), shots: Map<String, List<Shot>>(), next_shot: 0, events: config.events, next_prune: 0, next_proc_sweep: 0, grants: Map<String, Grant>(), calls: Map<String, Request>(), context: Map<String, (i64, i64)>(), registry_at: config.registry.copy(), registry: Json.Null, registry_time: 0, registry_fetching: false, install_to: install_to, install_done: install_done, mcp_test_to: mcp_test_to, mcp_test_done: mcp_test_done, mcp_tests: Map<i64, McpTest>(), link_to: link_to, link_done: link_done, link_pages: Map<String, Json>(), site_icons: Map<String, List<u8>>(), link_waiting: Map<String, List<(String, String)>>(), link_pictures: Map<String, List<u8>>(), link_previews: Map<String, List<(String, Waiter)>>(), acta_at: config.acta.copy(), call_to: call_to, call_done: call_done, calls_out: Map<i64, OutCall>(), acta_boards: Map<String, ActaBoards>(), acta_cards: Map<String, Json>(), card_asks: Map<String, CardAsk>(), acta_waits: Map<i64, ActaWait>(), watch: new_watches(), t3: t3_state(), oauth_to: oauth_to, oauth_done: oauth_done, oauth_jobs: Map<i64, OauthJob>(), sign_ins: Map<String, SignIn>(), renewing: Map<String, i64>(), next_renewal: 0, fetching: List<Waiter>(), installs: Map<i64, Install>(), deno_job: 0, deno_waiters: List<Request>(), tools_body: String(), follows: Map<i64, (String, String)>(), next_follow: 0, code_acts: Map<i64, String>(), leftovers: List<String>(), next_sweep: 0, device_calls: Map<String, DeviceCall>(), setups: Map<String, Setup>(), mcp_adds: LinkedMap<String, McpAdd>(), drafts_due: List<DraftDue>(), connects: LinkedMap<String, Connect>(), spool_asks: Map<String, SpoolAsk>(), signed_waits: Map<String, SignedWait>(), mcp_registry_at: config.mcp_registry.copy(), mcp_registry_to: mcp_registry_to, mcp_registry_done: mcp_registry_done, pool_to: pool_to, pool_done: pool_done, pool_reads: Map<String, PoolRead>(), mcp_registry_kept: Map<String, RegistryAnswer>(), mcp_registry_asks: Map<String, List<RegistryAsk>>(), minute_ms: config.minute_ms, next_due: 0, routine_runs: Map<String, RoutineRun>(), routine_work: RoutineWork { gates: Map<String, GateWait>(), done: Receiver<routine_gate.Done>(), closing: List<(String, String)>(), closed: List<String>(), held: List<HeldPost>() }, routine_marks: Map<String, (String, String)>(), quiet_turns: Map<String, QuietTurn>(), looking_back: Map<String, String>(), pause_turns: Map<String, (String, bool, bool)>(), compacting: List<String>(), paused: LinkedMap<String, Paused>(), run_chains: Map<String, List<String>>(), panel_calls: Map<String, Waiter>(), script_calls: Map<String, Request>(), running_flows: LinkedMap<String, flows.Flow>(), flow_steps: Map<String, (String, usize)>(), advancing: List<String>(), flow_results: List<(String, usize, bool, String)>(), flows_due: List<String>(), slow_calls: Map<String, String>(), acting: 0, call_actions: Map<String, i64>(), tool_actions: Map<String, i64>(), emojis: emoji.load(), sealer: try secret_key(config.data.copy()) }
         if config.sandboxes.len() > 0 and not i.lan { try i.sandboxes_on(config.sandboxes.copy(), config.sandbox_image.copy()) }
         // An action the last run of the instance left started, it never finished.
         try i.store.settle_cut_short()
@@ -2578,6 +2601,8 @@ impl Instance {
         // Each agent picks from what its program offers, though only some have
         // started a session on it yet.
         try i.share_all_options()
+        // Servers that may be one of the catalog's by their shape are tried, to tell.
+        try i.try_shaped()
         // With self-updates on, it looks a minute after it starts, then every half hour.
         if try i.store.meta("auto_update") == some(String("on")) and update.refusal(i.host) == none {
             i.next_update_check = now() + i.minute_ms
@@ -4950,6 +4975,8 @@ impl Instance {
             return
         }
         try i.keep_tested(t.user.copy(), t.server.copy(), d.tools.copy(), String(), false)
+        // Its tools may say which of the catalog's entries it is.
+        try i.note_catalog(t.user.copy(), t.server.copy())
         // Its icons first, so a card that shows it ready has them.
         try i.took_icons(t.user.copy(), t.server.copy(), d.icon)
         var names = List<Json>()
@@ -5248,11 +5275,24 @@ impl Instance {
                 return
             }
             try i.keep_grant(job.user.copy(), job.server.copy(), d.grant.copy())
+            // Its metadata's name may say which of the catalog's entries it is.
+            try i.note_catalog(job.user.copy(), job.server.copy())
             // Agents that aren't answering start again with it at their next message.
             i.stop_idle_of(job.user.copy())
             // A card that waited for it goes on: the server is tried with it.
+            let waited = i.waits_for_sign_in(job.user.copy(), job.server.copy())
             try i.mcp_add_signed(job.user.copy(), job.server.copy(), String())
-            i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).maybe("signed_in_as", str_at(d.grant, "who")).done()))
+            let who = str_at(d.grant, "who") ?? String()
+            if waited or i.sandboxed(job.user.copy()) {
+                i.answer_cmd(w, Answer.Value(Obj.new().s("server", job.server).maybe("signed_in_as", if who.len() > 0 { some(who) } else { none }).done()))
+                return
+            }
+            // With no card to try it, it's tried here, and the device hears once
+            // it has been: Installed says Connected with its tools, or Failing
+            // with why, and never that it wasn't tried.
+            let key = "{job.user}/{job.server}"
+            i.signed_waits.insert(key.copy(), SignedWait { waiter: w.copy(), who: who })
+            try i.test_mcp(Waiter { socket: none, id: "{TRIED_TEST}{key}" }, job.user.copy(), Obj.new().s("name", job.server.copy()).done())
             return
         }
         if job.kind != "renew" { return }
@@ -10859,14 +10899,60 @@ impl Instance {
     // --- The integrations catalog (PLAN.md, "The integrations catalog") ---
 
     // The catalog entry `user`'s server `server` came from: the one it was
-    // connected from, or the one whose fixed address or program it has, or "".
+    // connected from, or the one whose fixed address or program it has, or the
+    // one with fields it has the shape of (catalog_by_shape), or "". So a
+    // server added by hand or with add_mcp_server shows as its entry, as one
+    // connected from Spools does.
     fn catalog_of(i: Instance, user: String, server: Json) -> String ! Error {
         let name = str_at(server.copy(), "name") ?? String()
         if let id = try i.store.meta("mcp_catalog/{user}/{name}") { return id }
         for e in catalog.entries() {
             if catalog.matches(e.copy(), server.copy()) { return str_at(e, "id") ?? String() }
         }
+        return try i.catalog_by_shape(user, server)
+    }
+
+    // The entry with fields `user`'s server `server` is one of, by its shape:
+    // its address fits the entry's, and the name its sign-in's metadata gives
+    // it, or the tools its last test found, say it's that one; or "".
+    fn catalog_by_shape(i: Instance, user: String, server: Json) -> String ! Error {
+        let shaped = shaped_entries(server.copy())
+        if shaped.is_empty() { return String() }
+        let name = str_at(server.copy(), "name") ?? String()
+        let resource_name = str_at(i.grant_of(user.copy(), name.copy()), "resource_name") ?? String()
+        var found = List<String>()
+        for t in catalog.list(at(try i.tested_of(user, name), "tools")) { found.push(t.as_str() ?? String()) }
+        for e in shaped {
+            if catalog.matches_by_shape(e.copy(), server.copy(), resource_name.copy(), found.copy()) { return str_at(e, "id") ?? String() }
+        }
         return String()
+    }
+
+    // Keeps the entry `user`'s server `name` is one of by its shape, once a
+    // test or a sign-in has told, as connecting it from Spools keeps it.
+    fn note_catalog(i: Instance, user: String, name: String) ! Error {
+        if try i.store.meta("mcp_catalog/{user}/{name}") != none { return }
+        let server = try i.store.mcp_server(user.copy(), name.copy()) else return
+        let id = try i.catalog_by_shape(user.copy(), server)
+        if id.len() > 0 { try i.store.set_meta("mcp_catalog/{user}/{name}", id) }
+    }
+
+    // As the instance starts: each server of the person's that has the shape
+    // of an entry with fields, but isn't known to be one, and that has never
+    // listed its tools, is tried, so one added by hand or by an agent before
+    // loom knew it by its shape, such as a T3 Code, shows as its entry.
+    fn try_shaped(i: mut Instance) ! Error {
+        for u in try i.store.users() {
+            if i.sandboxed(u.id.copy()) { continue }
+            for s in try i.store.mcp_servers(u.id.copy()) {
+                let name = str_at(s.copy(), "name") ?? String()
+                if shaped_entries(s.copy()).is_empty() or try i.catalog_of(u.id.copy(), s.copy()) != "" { continue }
+                if bool_at(try i.tested_of(u.id.copy(), name.copy()), "ok") == some(true) { continue }
+                // One that waits for a sign-in waits for it; trying it wouldn't tell.
+                if not own_auth(s.copy()) and not oauth.signed_in(i.grant_of(u.id.copy(), name.copy())) { continue }
+                try i.test_mcp(Waiter { socket: none, id: "{TRIED_TEST}{u.id}/{name}" }, u.id.copy(), Obj.new().s("name", name).done())
+            }
+        }
     }
 
     // Entries as catalog.list and catalog.search give them, each as
@@ -11164,6 +11250,29 @@ impl Instance {
         }
         i.connect_to(key.copy(), "adding", String())
         try i.test_mcp(Waiter { socket: none, id: "{CONNECT_TEST}{key}" }, user, Obj.new().s("name", server).done())
+    }
+
+    // Whether a card or a connect waits for `user` to sign in to `server`, and
+    // tries it once they have.
+    fn waits_for_sign_in(i: Instance, user: String, server: String) -> bool {
+        for (_, a) in i.mcp_adds {
+            if a.user == user and str_at(a.spec.copy(), "name") == some(server.copy()) and (a.state == "sign_in" or a.state == "later") { return true }
+        }
+        if let c = i.connects.find("{user}/{server}") { return c.step == "sign_in" }
+        return false
+    }
+
+    // What a test nothing else asked for found (TRIED_TEST), kept as every
+    // test is: a device's mcp.signed_in that waited on it is answered now.
+    fn tried(i: mut Instance, key: String, result: Answer) {
+        let wait = i.signed_waits.remove(key.copy()) else return
+        let server = match key.find_last("/") {
+            some(k) => key[k + 1..].copy(),
+            none => key.copy(),
+        }
+        var value = Obj.new().s("server", server).maybe("signed_in_as", if wait.who.len() > 0 { some(wait.who.copy()) } else { none })
+        if let Answer.Value(v) = result { value = value.j("tools", at(v, "tools")) }
+        i.answer_cmd(wait.waiter, Answer.Value(value.done()))
     }
 
     // mcp.agents: the person's agents that have the server `name` are
@@ -16911,6 +17020,12 @@ impl Instance {
             // The test of a server being connected from the catalog: the connect goes on.
             if w.id.starts_with(CONNECT_TEST) {
                 i.connect_tested(w.id[CONNECT_TEST.len()..].copy(), result)
+                return
+            }
+            // A test after a sign-in, or as the instance starts: kept, and a
+            // device's mcp.signed_in that waits on it hears.
+            if w.id.starts_with(TRIED_TEST) {
+                i.tried(w.id[TRIED_TEST.len()..].copy(), result)
                 return
             }
             // An agent's run_command: its tool call gets the answer, and

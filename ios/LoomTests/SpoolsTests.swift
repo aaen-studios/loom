@@ -327,7 +327,11 @@ import Testing
         var mine = t3
         mine.servers = ["t3", "t3-vps"]
         var servers = [server("t3", "t3", .connected), server("t3-vps", "t3", .connected), server("other", "", .failing)]
-        #expect(cardStatus(mine, servers)?.words == "Connected")
+        // Two T3s say how many.
+        #expect(cardStatus(mine, servers)?.words == "2 connected")
+        var one = mine
+        one.servers = ["t3"]
+        #expect(cardStatus(one, servers)?.words == "Connected")
         #expect(cardStatus(mine, servers)?.dot == .ok)
         servers[1].status = .untested
         #expect(cardStatus(mine, servers)?.words == "Not tried yet")

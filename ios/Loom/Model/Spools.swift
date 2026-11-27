@@ -432,13 +432,16 @@ func statusDot(_ m: McpServer) -> StandingDot {
 
 /// How an entry's card stands: none until the person has a server from it, then the
 /// worst of how its servers stand: failing, needing a sign-in, not tried yet, or else
-/// connected. Its thread is taut only while it's connected.
+/// connected, with how many when there are several. Its thread is taut only while
+/// it's connected.
 func cardStatus(_ entry: Entry, _ servers: [McpServer]) -> (words: String, dot: StandingDot)? {
     let mine = servers.filter { entry.servers.contains($0.name) }
     guard !mine.isEmpty else { return nil }
     for worst in [McpStatus.failing, .signIn, .untested] {
         if let m = mine.first(where: { $0.status == worst }) { return (statusWords(m), statusDot(m)) }
     }
+    // One there can be several of says how many, such as two T3s.
+    if mine.count > 1 { return ("\(mine.count) connected", .ok) }
     return ("Connected", .ok)
 }
 

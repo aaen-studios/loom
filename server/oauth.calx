@@ -199,7 +199,8 @@ fn resource_for(address: String, named: String) -> bool {
 // beginnings of its grant, with `resource`, `issuer`, `authorize`, `token`,
 // `register` and `revoke` (the last two empty when there's none), `scope`,
 // `methods`, the ways its token endpoint takes a client's secret, and
-// `documents`, whether it takes a Client ID Metadata Document as a client.
+// `documents`, whether it takes a Client ID Metadata Document as a client, and
+// `resource_name`, what its metadata calls it, or "".
 pub fn discover(address: String, https_only: bool) -> Json ! Error {
     let (status, asked) = try probe(address.copy(), https_only)
     let said = challenge_params(asked)
@@ -219,6 +220,8 @@ pub fn discover(address: String, https_only: bool) -> Json ! Error {
     var resource = address.copy()
     var issuer = String()
     var scope = String()
+    // What the server calls itself, which tells the catalog's entries with fields apart (catalog.recognised).
+    var resource_name = String()
     if let s = said.find(String("scope")) { scope = s.copy() }
     if meta != Json.Null {
         let named = str_at(meta.copy(), "resource") ?? String()
@@ -227,6 +230,7 @@ pub fn discover(address: String, https_only: bool) -> Json ! Error {
         let servers = strings(at(meta.copy(), "authorization_servers"))
         if servers.len() == 0 { fail "Its metadata names no place to sign in." }
         issuer = servers[0].copy()
+        resource_name = str_at(meta.copy(), "resource_name") ?? String()
         if scope.len() == 0 { scope = strings(at(meta, "scopes_supported")).join(" ") }
     } else {
         // Before Protected Resource Metadata, the server's own origin signed in.
@@ -254,7 +258,7 @@ pub fn discover(address: String, https_only: bool) -> Json ! Error {
     let methods = strings(at(server.copy(), "token_endpoint_auth_methods_supported")).join(" ")
     let grants = strings(at(server.copy(), "grant_types_supported")).join(" ")
     let documents = bool_at(server.copy(), "client_id_metadata_document_supported") == some(true)
-    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).s("grants", grants).b("documents", documents).b("https_only", https_only).done()
+    return Obj.new().s("resource", resource).s("issuer", str_at(server.copy(), "issuer") ?? issuer).s("authorize", authorize).s("token", token).s("register", str_at(server.copy(), "registration_endpoint") ?? String()).s("revoke", str_at(server, "revocation_endpoint") ?? String()).s("scope", scope).s("methods", methods).s("grants", grants).b("documents", documents).b("https_only", https_only).s("resource_name", resource_name).done()
 }
 
 // Whether the browser coming back to `redirect` lets loom be its Client ID

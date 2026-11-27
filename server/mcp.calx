@@ -41,6 +41,9 @@ import server.t3
 const CALL_WAIT: u32 = 3600000    // message_agent waits on a whole reply
 const DENO_WAIT: u32 = 900000     // the first script waits while Deno is fetched
 const MAX_ANSWER: usize = 16777216
+// loom's own tools are asked for again once they're a minute old, so a session
+// that began before an update has the tools it brought.
+const OWN_TOOLS_FRESH_MS: u64 = 60000
 
 fn reply(id: Json, result: Json) {
     println("{Obj.new().s("jsonrpc", String("2.0")).j("id", id).j("result", result).done()}")
@@ -131,6 +134,21 @@ fn own_tools(link: Link, c: mut Code) -> Json ! Error {
     return try answer_of(mut req)
 }
 
+// The names of the tools in a tools/list answer, on one line.
+fn names_of(listed: Json) -> String {
+    var out = List<String>()
+    if let Json.Array(l) = at(listed, "tools") {
+        for t in l { out.push(str_at(t, "name") ?? String()) }
+    }
+    return out.join(" ")
+}
+
+// Whether loom's own tools, asked for `when`, are fresh still.
+fn fresh_enough(when: Instant?) -> bool {
+    let a = when else return false
+    return unsafe { Instant.now() }.nanos_since(a) / 1000000 < OWN_TOOLS_FRESH_MS
+}
+
 impl Link {
     // A POST to the instance, whose answer is a tool result.
     fn send(self, path: str, body: Json) -> Json {
@@ -200,6 +218,8 @@ struct Code {
     spare_at: Instant?    // when it started
     done: Child?    // the last script's Deno, ended once its result has gone
     known_icons: Json    // what the icons the instance keeps of each server are known by (icons.key)
+    own_at: Instant?    // when loom's own tools were last asked for
+    own_names: String    // their names then, as tools/list gave them
 }
 
 // Starts one of the person's MCP servers and lists its tools.
@@ -288,9 +308,11 @@ impl Code {
                 }
             }
             self.relist(link)
+            self.refresh_own(link)
             return
         }
         self.loaded = true
+        self.own_at = some(unsafe { Instant.now() })
         match own_tools(link, mut self) {
             ok(t) => {
                 var listed = List<Json>()
@@ -474,6 +496,43 @@ impl Code {
         }
         self.signing = waiting
         for w in removed { self.drop_tools(w) }
+    }
+
+    // In Code Mode: loom's own tools, once they're a minute old, are asked for
+    // again, so search_tools finds one an update brought since the session began.
+    fn refresh_own(self: mut Code, link: Link) {
+        if fresh_enough(self.own_at) { return }
+        self.own_at = some(unsafe { Instant.now() })
+        var req = link.ask_tools()
+        let t = match answer_of(mut req) {
+            ok(t) => t,
+            err(_) => return,
+        }
+        var listed = List<Json>()
+        if let Json.Array(l) = at(t, "tools") { listed = l.copy() }
+        var kept = codemode.tools_of(String("loom"), listed)
+        for tool in self.tools {
+            if tool.server != "loom" { kept.push(tool.copy()) }
+        }
+        self.tools = kept
+    }
+
+    // Without Code Mode: once loom's own tools are a minute old, they're asked
+    // for again after a call, and when they aren't the ones tools/list gave,
+    // the agent program is told (notifications/tools/list_changed), so it
+    // lists them again and has one an update brought since the session began.
+    fn tell_new_tools(self: mut Code, link: Link) {
+        if self.own_names.len() == 0 or fresh_enough(self.own_at) { return }
+        self.own_at = some(unsafe { Instant.now() })
+        var req = link.ask_tools()
+        let t = match answer_of(mut req) {
+            ok(t) => t,
+            err(_) => return,
+        }
+        let now_names = names_of(t)
+        if now_names == self.own_names { return }
+        self.own_names = now_names
+        println(#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#)
     }
 
     fn drop_tools(self: mut Code, name: String) {
@@ -903,7 +962,7 @@ fn handle_legacy(link: Link, c: mut Code, id: Json, method: String, params: Json
     if method == "initialize" {
         let asked = str_at(params, "protocolVersion") ?? String()
         let version = if mcpclient.legacy(asked.copy()) { asked } else { String(mcpclient.LEGACY[0]) }
-        reply(id, Obj.new().s("protocolVersion", version).j("capabilities", Obj.new().j("tools", Obj.new().done()).done()).j("serverInfo", server_info()).done())
+        reply(id, Obj.new().s("protocolVersion", version).j("capabilities", Obj.new().j("tools", Obj.new().b("listChanged", true).done()).done()).j("serverInfo", server_info()).done())
     } else if method == "ping" {
         reply(id, Obj.new().done())
     } else if method == "tools/list" or method == "tools/call" {
@@ -931,7 +990,11 @@ fn tools_request(link: Link, c: mut Code, id: Json, method: String, params: Json
             return
         }
         match own_tools(link, mut c) {
-            ok(t) => reply_as(id, t, modern, true),
+            ok(t) => {
+                c.own_names = names_of(t.copy())
+                c.own_at = some(unsafe { Instant.now() })
+                reply_as(id, t, modern, true)
+            },
             err(e) => reply_error(id, -32603, "loom's instance didn't answer: {e}"),
         }
         return
@@ -951,6 +1014,8 @@ fn tools_request(link: Link, c: mut Code, id: Json, method: String, params: Json
         if name == "add_mcp_server" { c.added = true }
         let text = link.call_text(name, arguments)
         reply_text(id, if modern { final_text(text) } else { text })
+        // A modern client lists them again each time (ttlMs 0).
+        if not c.on and not modern { c.tell_new_tools(link) }
     }
 }
 
@@ -959,7 +1024,7 @@ pub fn serve() ! Error {
     let base = env.variable(String("LOOM_URL")) else { fail "LOOM_URL isn't set: loom mcp is started by loom's instance" }
     let token = env.variable(String("LOOM_MCP_TOKEN")) else { fail "LOOM_MCP_TOKEN isn't set: loom mcp is started by loom's instance" }
     let link = Link { base: base, token: token }
-    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), said_trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null }
+    var c = Code { on: env.variable(String("LOOM_CODE_MODE")) == some(String("1")), deno: String(), loaded: false, tools: List<Tool>(), servers: Map<String, Server>(), trouble: List<String>(), said_trouble: List<String>(), signing: List<String>(), added: false, runs: 0, folder: String(), warm: some(link.ask_tools()), spare: none, spare_at: none, done: none, known_icons: Json.Null, own_at: none, own_names: String() }
     var input = io.Lines()
     while let line = input.next() {
         if line.trim().len() == 0 { continue }
